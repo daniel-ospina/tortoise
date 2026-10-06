@@ -320,6 +320,71 @@ class TestRegisteredExecutor:
     def test_registry_contains_the_tortoise_lane(self):
         assert "memoryagentbench_tortoise" in EXECUTORS
 
+    def test_lane_is_pinned_and_dispatchable(self):
+        """#3005 P1 — a registered executor is only reachable if the CLI
+        loop (which iterates PINNED_VERSIONS) can dispatch it. Registration
+        alone was inert: the lane was only ever reached by tests that
+        monkeypatched EXECUTORS."""
+        from battery.parity.executors import memoryagentbench_tortoise_executor
+        from battery.parity.runner import (
+            PINNED_VERSIONS,
+            check_pinned_version,
+        )
+
+        assert "memoryagentbench_tortoise" in PINNED_VERSIONS
+        # Same pinned dataset/version as the full-context cell — the lane is
+        # the SAME benchmark measured on the retrieved-context arm.
+        assert (PINNED_VERSIONS["memoryagentbench_tortoise"]
+                == PINNED_VERSIONS["memoryagentbench"])
+        assert EXECUTORS.get("memoryagentbench_tortoise") is \
+            memoryagentbench_tortoise_executor
+        # run_parity calls this; a mismatch would record no cell at all.
+        check_pinned_version("memoryagentbench_tortoise",
+                             PINNED_VERSIONS["memoryagentbench_tortoise"])
+
+    def test_every_registered_executor_is_reachable(self):
+        """The CLI can only dispatch a benchmark present in
+        PINNED_VERSIONS — an executor registered under any other key is DEAD
+        (exactly the #3005 P1 bug). Fails if the lane is not dispatchable."""
+        from battery.parity.runner import PINNED_VERSIONS
+
+        unreachable = set(EXECUTORS) - set(PINNED_VERSIONS)
+        assert not unreachable, (
+            f"executors registered but unreachable by the parity CLI "
+            f"(absent from PINNED_VERSIONS): {sorted(unreachable)}")
+
+    def test_cli_records_the_tortoise_cell_without_monkeypatch(self,
+                                                               tmp_path):
+        """No monkeypatch: the shipped CLI loop must record a cell for the
+        Tortoise lane. Two cells share the memoryagentbench dataset, so the
+        record is keyed by the pinned id (never collapsed by
+        ``ParityRun.benchmark``)."""
+        import json
+        import shutil
+
+        import battery.cli as cli
+        from battery.parity.runner import methodology_hashes
+
+        cfg = Path(__file__).resolve().parent.parent / "battery" / "config"
+        tmp_cfg = tmp_path / "cfg"
+        tmp_cfg.mkdir()
+        shutil.copy(cfg / "arms.yaml", tmp_cfg / "arms.yaml")
+        rp, jr, _ = methodology_hashes("default-reader",
+                                       "longmemeval-official")
+        (tmp_cfg / "parity_baseline.json").write_text(json.dumps(
+            {"reader_prompt_hash": rp, "judge_rubric_id_hash": jr}))
+        # No --execute: hermetic (no executor is called) but the loop still
+        # dispatches every pinned benchmark and records a cell for each.
+        rc = cli.main(["parity", "--config", str(tmp_cfg),
+                       "--out", str(tmp_path)])
+        assert rc == 0
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        assert "memoryagentbench_tortoise" in record["benchmarks"]
+        assert "memoryagentbench" in record["benchmarks"]
+        tortoise = record["benchmarks"]["memoryagentbench_tortoise"]
+        assert tortoise["measured"] is False
+        assert tortoise["lane"] is None
+
     def test_mock_executor_is_hermetic_and_labelled(self, monkeypatch,
                                                      tmp_path):
         import battery.parity.mabench as mabench_mod

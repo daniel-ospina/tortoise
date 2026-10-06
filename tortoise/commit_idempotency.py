@@ -63,7 +63,7 @@ class CommitRecordStore:
     """Graph-backed :CommitRecord store (tenant graph via the SDK).
 
     Args:
-        sdk: a tenant ``TortoiseSDK`` (the endpoint passes the team-scoped
+        sdk: a tenant ``TortoiseSDK`` (the endpoint passes the org-scoped
             SDK — the record lives in the existing tenant graph, §5.3).
     """
 

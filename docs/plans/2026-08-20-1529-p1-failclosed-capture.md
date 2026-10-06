@@ -20,7 +20,7 @@
 | Surface (#1515) | Data Flow | Contract | Test Layer |
 |---|---|---|---|
 | 18 — capture events (SDK `capture_session`) | `conversation` → transcript gate → Session/turn loop → extractor dispatch (`TORTOISE_SESSION_EXTRACTOR`: v2 default / `=m2`) → assembly → response | `ok`/`errors`/`warnings` fields; `extraction_mode ∈ {llm, v2, empty, error}` (truthful per branch); empty/blank → `ok=False`, `mode="empty"`, `turns=0`, **pre-mutation** (no Session stub); extraction failure → `ok=False`, `mode="error"`, errors carry `TypeName: message`, turn points + Event + Source still land; never `ok=True` on failure | Integration (embedded FalkorDBLite + `TORTOISE_SESSION_LLM_MOCK=1`; failure injection per branch: v2 → monkeypatch `tortoise.extractor_v2.extract_session_v2`, M2 → duck-typed extractor + `TORTOISE_SESSION_EXTRACTOR=m2`) |
-| 18 — capture events (hosted POST /v1/sessions) | HTTP → provider gate (503) → turn cap (400) → **transcript gate (422)** → quota (402) → turn loop (**content coercion**) → dispatch → body | empty/blank → 422 pre-write; extraction failure → **200 + additive `errors`/`warnings`** + `mode="error"` (turns landed — documented partial capture); non-string turn content coerced (never a mid-loop 500/partial write); success body gains `errors`/`warnings` (additive); `ok` signal = HTTP status (no body `ok` field — hosted convention, see D2) | Integration (FastAPI TestClient + temp DB, `_patch_tortoise_sdk_init` fixture; graph assertions via `ha_mod._make_sdk(namespace=TEST_TEAM_ID)` — the fixture team, NOT `"test-team-722"`) |
+| 18 — capture events (hosted POST /v1/sessions) | HTTP → provider gate (503) → turn cap (400) → **transcript gate (422)** → quota (402) → turn loop (**content coercion**) → dispatch → body | empty/blank → 422 pre-write; extraction failure → **200 + additive `errors`/`warnings`** + `mode="error"` (turns landed — documented partial capture); non-string turn content coerced (never a mid-loop 500/partial write); success body gains `errors`/`warnings` (additive); `ok` signal = HTTP status (no body `ok` field — hosted convention, see D2) | Integration (FastAPI TestClient + temp DB, `_patch_tortoise_sdk_init` fixture; graph assertions via `ha_mod._make_sdk(namespace=TEST_ORG_ID)` — the fixture team, NOT `"test-team-722"`) |
 | 26 — `extraction_mode` + error/warnings contract | extractor structured result → both surfaces | mode never claims success on failure/empty — `"empty"` **always** co-occurs with `ok=False` + an error entry (self-consistent on every path incl. both internal guards); warnings additive (never clobber); zero-extraction on non-empty transcript → additive warning, `ok=True` (nothing extractable ≠ failure) | Unit (per-branch failure seams) + integration |
 | 26 — v2 COMMIT path (`_commit_session_v2` / `extractor_v2.extract_session_v2`) | `out["errors"]` → `ok`/`errors` → POST gate | **Already fail-closed** — `ok=False` + errors on extraction failure (`test_v2_error_path_reports_errors`), empty → `ok=False` + "no payload" (`test_v2_empty_conversation_not_ok`), Layer-1-rejected payload never POSTed (`test_v2_layer1_rejected_payload_not_posted`). This issue only VERIFIES the lock (Task 2 checklist note) — no production change | Existing tests |
 | E3 passthrough (internal seam, both carriers) | v2 payload point dicts / M2 folded statement dicts → extracted dicts → response `points` | `source_turn_id` (and any future E3 prop) flows through capture **unchanged** — extracted dicts carry a WHITELISTED `props` (`_CAPTURE_PASSTHROUGH_PROPS`), never a rebuilt `{id, kind, text}`-only shape and never internal projection state; re-capture turn-point MERGE SET list must not include/overwrite `source_turn_id`; idempotency scoped to turn points (extraction points/Event fresh per capture BY DESIGN) | Unit passthrough + integration no-clobber guards (Task 1) |
@@ -845,14 +845,14 @@ Expected: all PASS (new + updated + pre-existing, including the v2-default lock 
 ### Task 3: Hosted POST /v1/sessions fail-closed (422 empty gate + additive errors/warnings + input coercion + CLI consumer)
 
 **Intent:** The hosted surface fails closed with the same contract as the SDK: empty/blank conversation → 422 before any write; extraction failure → 200 with additive `errors`/`warnings` and `mode="error"` (turns landed); non-string turn content coerced (no raw 500 / partial write); the CLI consumer stops reporting success on `mode="error"`.
-**Acceptance:** `POST /v1/sessions` with `[]` or all-blank conversations → 422 with no Session node written; failing extraction (v2 seam or M2 duck-type) → 200 body with `errors`, `mode="error"`, `warnings == []`, turn points + Event + agentSession Source in the graph (asserted via `TEST_TEAM_ID` namespace); completed-but-empty → 200 + additive warning + truthful mode; dict/int/bool content → coerced (never 500); `create_event` failure → 200 + additive warning; stamping-query failure → 200 + warning (hosted's duplicated Event block); `_materialize_session_source` failure → 200 + additive warning; `_async_audit` failure → 200 (log-only wrap); a blank conversation on an over-quota team → 422 (not 402); `_cmd_session_capture` returns exit 1 on `mode="error"`; the 503 no-key gate and 400 turn-cap gate are unchanged and still ordered first.
+**Acceptance:** `POST /v1/sessions` with `[]` or all-blank conversations → 422 with no Session node written; failing extraction (v2 seam or M2 duck-type) → 200 body with `errors`, `mode="error"`, `warnings == []`, turn points + Event + agentSession Source in the graph (asserted via `TEST_ORG_ID` namespace); completed-but-empty → 200 + additive warning + truthful mode; dict/int/bool content → coerced (never 500); `create_event` failure → 200 + additive warning; stamping-query failure → 200 + warning (hosted's duplicated Event block); `_materialize_session_source` failure → 200 + additive warning; `_async_audit` failure → 200 (log-only wrap); a blank conversation on an over-quota team → 422 (not 402); `_cmd_session_capture` returns exit 1 on `mode="error"`; the 503 no-key gate and 400 turn-cap gate are unchanged and still ordered first.
 
 **Files:**
 - Modify: `tortoise/hosted_api.py` (`capture_session` handler, ~L3369+; `SessionRequest.valid_conversation`, ~L3315; import line 41)
 - Modify: `tortoise/__main__.py` (`_cmd_session_capture`, ~L1394)
 - Test: `tests/test_hosted_api.py` (TestSessionCapture) + `tests/test_session_extraction_modes.py`
 
-**Step 1: Write the failing tests** (all graph assertions use `namespace=TEST_TEAM_ID` — the fixture's team, matching the handler's `_make_sdk(namespace=team["team_id"])`):
+**Step 1: Write the failing tests** (all graph assertions use `namespace=TEST_ORG_ID` — the fixture's team, matching the handler's `_make_sdk(namespace=team["org_id"])`):
 
 ```python
 # tests/test_hosted_api.py — TestSessionCapture
@@ -864,7 +864,7 @@ def test_capture_session_empty_conversation_rejected(self, client):
     assert r.status_code == 422, r.text
     assert "extractable content" in r.json()["detail"]
     import tortoise.hosted_api as ha_mod
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     sessions = sdk._get_proj().g.query("MATCH (s:Session) RETURN count(s)").result_set
     assert sessions[0][0] == 0, "no Session node may be written for an empty capture"
 
@@ -896,7 +896,7 @@ def test_capture_session_llm_failure_surfaces_errors(self, client, monkeypatch):
     assert any("provider returned 500" in e for e in body["errors"])
     assert body["warnings"] == [], "failure carries errors, never warnings"
     import tortoise.hosted_api as ha_mod
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     proj = sdk._get_proj()
     turns = proj.g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN count(t)").result_set
@@ -929,7 +929,7 @@ def test_capture_session_partial_emission_surfaces_points(self, client, monkeypa
     assert any("RuntimeError" in e for e in body["errors"])
     assert body["warnings"] == [], "failure carries errors, never warnings"
     import tortoise.hosted_api as ha_mod
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     proj = sdk._get_proj()
     wired = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
@@ -980,7 +980,7 @@ def test_capture_session_non_string_content_coerced(self, client):
         assert r.status_code == 200, (content, r.text)
         assert r.json()["turns"] == 1
     import tortoise.hosted_api as ha_mod
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     expected = {"coerce-s1": "[user] {'text': 'we decided to ship v2'}",
                 "coerce-s2": "[user] 12345",
                 "coerce-s4": "[user] False",
@@ -1008,7 +1008,7 @@ def test_capture_session_stamping_failure_warns(self, client, monkeypatch):
     """P1 (D4): the HOSTED duplicated stamping block failing (Event created,
     points unstamped) surfaces an additive warning under 200."""
     import tortoise.hosted_api as ha_mod
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     proj = sdk._get_proj()
     _real_query = proj.g.query
 
@@ -1145,11 +1145,11 @@ def test_capture_session_blank_over_quota_is_422_not_402(self, client, monkeypat
     est=0 → 2+0 > 1 → gate-after-quota yields 402 while gate-first yields
     422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
     order (control)."""
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
     import tortoise.hosted_api as ha_mod
-    app.dependency_overrides[get_current_team] = lambda: {
+    app.dependency_overrides[get_current_org] = lambda: {
         **TEST_TEAM, "max_points": 1}   # TEST_TEAM is the fixture's auth dict
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
     sdk.create_point(kind="statement", content="pre-existing non-episodic point 2")
     r = client.post("/v1/sessions", json={"conversation": []})
@@ -1211,7 +1211,7 @@ Expected: all PASS (including the pre-existing 503/400/402/422 order tests, `tes
 | `test_capture_session_two_warnings_sources_no_clobber` | integration (D7) | zero-extraction + Event failure → BOTH warnings present (no clobber) |
 | `test_capture_session_recapture_never_clobbers_source_turn_id` | integration guard (E3) | turn-point source_turn_id survives re-capture; **per-capture Event provenance** (set-identity) |
 | `test_capture_session_recapture_shorter_conversation_pins_state` | integration guard (D3) | shorter re-capture stale-turn residue pinned |
-| Hosted `test_capture_session_empty_conversation_rejected` / `blank_conversation_rejected` | integration (HTTP) | 422 + detail; no Session written (`TEST_TEAM_ID` namespace); validator-guard dependent |
+| Hosted `test_capture_session_empty_conversation_rejected` / `blank_conversation_rejected` | integration (HTTP) | 422 + detail; no Session written (`TEST_ORG_ID` namespace); validator-guard dependent |
 | Hosted `test_capture_session_llm_failure_surfaces_errors` | integration (HTTP) | 200 + additive errors + warnings==[] + mode="error"; turn + Event + agentSession Source land |
 | Hosted `test_capture_session_partial_emission_surfaces_points` | integration (HTTP) | 200 + mode="error" + extracted>0; partial points wired; Event recorded |
 | Hosted `test_capture_session_zero_extraction_warns` | integration (HTTP) | 200 + warning; truthful mode |
@@ -1227,7 +1227,7 @@ Expected: all PASS (including the pre-existing 503/400/402/422 order tests, `tes
 | Existing v2-default tests (`test_capture_session_v2_default_routes_and_writes`, `test_capture_session_v2_mock_seam_satisfies_provider_gate`, adapter tests; hosted v2-default tests) | regression | **must stay green** — the P1 change must not disturb the default v2 capture path |
 | Existing commit-path tests (test_value_extractor.py, test_extractor_v2.py) | regression | unchanged — already lock `out["errors"]` consultation, Layer-1 gate, empty-not-ok |
 
-**Fixture policy:** existing fixtures untouched. `TORTOISE_SESSION_LLM_MOCK=1` stays the offline seam. **Failure injection per branch:** v2 (DEFAULT) → monkeypatch `tortoise.extractor_v2.extract_session_v2` with `_v2_out(...)` (deterministic, no model needed); M2 → duck-typed extractors via `monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor", ...)` + `TORTOISE_SESSION_EXTRACTOR=m2` (the same seam both surfaces resolve through, so one patch covers SDK + hosted). Hosted graph assertions ALWAYS use `ha_mod._make_sdk(namespace=TEST_TEAM_ID)` — the fixture team the handler writes under (the `"test-team-722"` value is only correct in `tests/test_session_extraction_modes.py`).
+**Fixture policy:** existing fixtures untouched. `TORTOISE_SESSION_LLM_MOCK=1` stays the offline seam. **Failure injection per branch:** v2 (DEFAULT) → monkeypatch `tortoise.extractor_v2.extract_session_v2` with `_v2_out(...)` (deterministic, no model needed); M2 → duck-typed extractors via `monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor", ...)` + `TORTOISE_SESSION_EXTRACTOR=m2` (the same seam both surfaces resolve through, so one patch covers SDK + hosted). Hosted graph assertions ALWAYS use `ha_mod._make_sdk(namespace=TEST_ORG_ID)` — the fixture team the handler writes under (the `"test-team-722"` value is only correct in `tests/test_session_extraction_modes.py`).
 
 ## Verification Plan (test-routing)
 

@@ -53,7 +53,7 @@ def test_auth_matrix_401(api):
 
 def test_internal_provision_wrong_key_401(api):
     """The internal surface rejects unknown keys (and missing ones)."""
-    body = {"team_id": "e2e7d-x", "team_name": "x", "api_key_hash": "h",
+    body = {"org_id": "e2e7d-x", "org_name": "x", "api_key_hash": "h",
             "created_by": "u"}
     r = api.post("/internal/provision", data=body)
     assert r.status == 401, f"missing internal key must 401, got {r.status}"

@@ -1,5 +1,11 @@
 """Battery domain exceptions (contract surface for the CLI exit-code
-mapping; #1410/#1413 raise/import the shipped classes).
+mapping; the CLI imports and catches these classes).
+
+Note (#3327, 2026-09-12): #1410/#1413 do NOT all raise the classes here.
+InconclusiveRun in particular has ZERO raise sites -- the matched-recall
+pre-pass returns a result object and expresses INCONCLUSIVE as the
+persisted outcome value plus exit code 3, not as an exception. Treat this
+module as the exit-code CONTRACT, not as an inventory of live producers.
 
 EmptyCorpus is deliberately NOT a ConfigError subclass and the CLI
 dispatcher catches it BEFORE ConfigError so exit 5 is never masked into
@@ -29,7 +35,18 @@ class JudgeGateBlocked(BatteryError):
 
 
 class InconclusiveRun(BatteryError):
-    """Matched-recall regime INCONCLUSIVE (exit 3; trigger wired by #1413)."""
+    """Matched-recall regime INCONCLUSIVE (exit 3).
+
+    **Currently unused — reserved. There are ZERO ``raise`` sites.** The
+    pre-pass (#1413 indicator 1) returns a *result object*
+    (``{f1_by_arm, trigger_fired, subset_pct}``) rather than raising, so
+    INCONCLUSIVE is expressed as the persisted outcome value plus CLI
+    exit code 3 — not as an exception. ``battery/cli.py`` still *catches*
+    this class to map it to exit 3 (the contract mapping), but since
+    nothing raises it that branch is currently dead. Reserved for a
+    future caller that genuinely needs the hard-fail form; do not cite
+    this class as a producer that exists. Decision: #3327 (2026-09-12).
+    """
 
 
 class ScoreUnavailable(BatteryError):

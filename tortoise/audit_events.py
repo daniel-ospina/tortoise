@@ -9,6 +9,7 @@ installed, audit operates in JSONL-only mode (Tier 2).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -48,7 +49,7 @@ def _now_iso() -> str:
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
-    team_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
     actor_user_id TEXT,
     operation TEXT NOT NULL,
     resource_type TEXT,
@@ -86,7 +87,7 @@ class AuditLogger:
 
     def append(
         self,
-        team_id: str,
+        org_id: str,
         actor_user_id: str | None,
         operation: str,
         *,
@@ -99,7 +100,7 @@ class AuditLogger:
         """Append an audit event.
 
         ``detail`` is a free-form JSONB payload (20260813000004 added the
-        column; team_claim stores provider/email/user_id — 0002 has no
+        column; org_claim stores provider/email/user_id — 0002 has no
         provider/email columns).
 
         Tries Postgres first. On failure, writes to JSONL fallback.
@@ -109,7 +110,7 @@ class AuditLogger:
 
         event = {
             "id": ulid(),
-            "team_id": team_id,
+            "org_id": org_id,
             "actor_user_id": actor_user_id,
             "operation": operation,
             "resource_type": resource_type,
@@ -147,8 +148,16 @@ class AuditLogger:
         if not self._dsn:
             return False
         if not self._dsn.startswith(("postgresql://", "postgres://")):
+            # #2903 (same leak class as #2796): a malformed DSN is still secret
+            # material — this error is rendered into logs and telemetry (the
+            # unhandled-exception handler, the purge sweep's exc_info warning),
+            # and a raw prefix can carry a password head. Report a
+            # non-reversible 8-hex identity instead (secret_store contract:
+            # fingerprints are the ONLY key identity that may reach logs).
+            got = hashlib.sha256(self._dsn.strip().encode()).hexdigest()[:8]
             raise ValueError(
-                f"TORTOISE_AUDIT_DSN must start with postgresql:// or postgres://, got: {self._dsn[:20]}..."
+                "TORTOISE_AUDIT_DSN must start with postgresql:// or "
+                f"postgres:// (got <{got}>...)"
             )
         if not _HAS_PSYCOPG2:
             _logger.debug("psycopg2 not installed — audit in JSONL-only mode")
@@ -190,10 +199,10 @@ class AuditLogger:
             with self._conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO audit_events
-                       (id, team_id, actor_user_id, operation,
+                       (id, org_id, actor_user_id, operation,
                         resource_type, resource_id, ip_address,
                         user_agent, detail, created_at)
-                       VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
+                       VALUES (%(id)s, %(org_id)s, %(actor_user_id)s,
                                %(operation)s, %(resource_type)s,
                                %(resource_id)s, %(ip_address)s,
                                %(user_agent)s, %(detail)s::jsonb, %(created_at)s)
@@ -278,10 +287,10 @@ class AuditLogger:
                     with self._conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO audit_events
-                               (id, team_id, actor_user_id, operation,
+                               (id, org_id, actor_user_id, operation,
                                 resource_type, resource_id, ip_address,
                                 user_agent, created_at)
-                               VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
+                               VALUES (%(id)s, %(org_id)s, %(actor_user_id)s,
                                        %(operation)s, %(resource_type)s,
                                        %(resource_id)s, %(ip_address)s,
                                        %(user_agent)s, %(created_at)s)

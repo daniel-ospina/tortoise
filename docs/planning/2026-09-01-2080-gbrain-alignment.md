@@ -40,7 +40,7 @@ The resolution is that they are complements, not substitutes, and the leverage i
 | | Urgent | Not Urgent |
 |---|---|---|
 | **Important** | — (nothing is operationally on fire; the memory write path degrades silently but has never been measured — a latent risk, not an outage) | **W2/W3/W7 measurement discipline → W4 why-layer + W5 ingestion quality** (this epic) — **SCHEDULE**, in parallel with **#2083 multi-graph pro-tier**, sequenced contract-first |
-| **Not Important** | — | Perfect retrieval-lever tuning (deferred by scope: adaptive return-sizing, source-boost map — cf. #1657); ask-surface exposure decision (#2013, governs W4's ask lane) |
+| **Not Important** | — | Perfect retrieval-lever tuning (deferred by scope: adaptive return-sizing, source-boost map — cf. #1657); ask-surface exposure decision (closed by #3849 — the ask lane is EVAL-ONLY; was #2013) |
 
 **Placement: Important / Not-Urgent → SCHEDULE.** Justification: no user-facing pain is urgent today (ingestion is default-ON with opt-out; nothing is failing loudly). What has time-sensitivity is **urgency-of-opportunity, not urgency-of-pain**: (a) the why-aware-recall category frame is unclaimed and gbrain's velocity threatens it; (b) the uncontrolled-eval risk grows the longer we ship memory without published write-path numbers. Both argue for keeping W4/W5/W2/W3 in THIS epic (scheduling, not deferring) and running the fix-wave at speed. Within the quadrant, the honest priority ordering is **W2/W3 first (measure), then W4/W5 (feature + fix), W7 capstone last** — with W4's in-place enrichment parallel-tracked so the user-visible half doesn't wait for the full eval build. #2083 sits in the same quadrant and interleaves (see routing).
 
@@ -92,7 +92,7 @@ This is NOT a convenience classification: the counter-case (Important/Urgent —
 - A1 — gbrain's write-path measurement pattern transfers to Tortoise's session→graph pipeline (point-level survival, REPHRASE-linked dedup) — confidence: **MEDIUM** (W2 pilot is the validation)
 - A3 — EP support+contentiousness can score the "when to volunteer" reflex at least as well as gbrain's arm table (0.000 kta baseline) — confidence: **MEDIUM** (unverified)
 - A11 — why-context assembly is gradeable from surfaced context alone (no full-graph access) — confidence: **MEDIUM** (if false, W4 assembly changes first — a mid-epic correction, not a claim failure)
-- A2 + fit audit — W4's four context types fillable in-place across ask/analyze/search/MCP, no new tool — confidence: **MEDIUM-HIGH** (fit audit completed 2026-09-01; ask lane gated on #2013)
+- A2 + fit audit — W4's four context types fillable in-place across ask/analyze/search/MCP, no new tool — confidence: **MEDIUM-HIGH** (fit audit completed 2026-09-01; ask lane EVAL-ONLY since #3849, was gated on #2013)
 - A5 — official recall_all@5 500-Q LongMemEval run achievable at acceptable cost (embeddings cache; gbrain ~$2 re-run) — confidence: **HIGH** (runner exists as a 9-step resumable state machine)
 - gbrain won't close the epistemic gap before the why-layer ships (monitor confidence/contradiction-edge language in releases) — confidence: **MEDIUM** (their velocity is extreme; this is a watch-item, not a bet)
 - Published evals + why-recall convert the #2083 developer-customer path — confidence: **LOW-MEDIUM** (no revenue data; plausible; falsifiable post-ship)
@@ -114,7 +114,7 @@ This is NOT a convenience classification: the counter-case (Important/Urgent —
 3. **W4 user-exposure gate:** why-context on production surfaces ships behind an opt-in/experimental flag until the W2 baseline + first fix-wave are published and the write-path gate (survival target on frozen corpus after ≤2 fix-waves) passes; if the pipeline can't be fixed, cut the why-layer to an internal research finding and re-scope. (Reviewer P1-3.)
 4. ~~**Post-ship conversion checkpoint:** within 6 months of #2083 GA — ≥30% of pro-trial/`/v1/context` evaluation conversations cite receipts or the why-layer, OR measurable trial→paid lift vs pre-#2080 baseline; else Daniel convenes a kill/cut review of W4's public claims.~~ **REMOVED 2026-09-01 (Daniel: pointless).** (Reviewer P1-2 → removed; internal falsification indicators retained.)
 3. **Remaining research agenda for epic-research (the brief + scope already closed most of it):** W3 why-layer suite fixture generator + planted-conflict gold conventions (Tortoise-original, the novel part); W7 comparison-systems.md mechanism rows incl. the gbrain-evals adapter scorecard feasibility; A11 pilot (does surfaced context contain enough for the three why-questions? — run before W4 assembly is locked).
-4. **Carried flags (not decided here):** ingestion default-ON vs default-OFF (scope approval-gate item 4 — product decision for Daniel; does not block write-path QUALITY); W2 "zero leakage" vs ≤1/run tolerance (research-recommended, sign-off item 3); ask-surface lane gated on #2013.
+4. **Carried flags (not decided here):** ingestion default-ON vs default-OFF (scope approval-gate item 4 — product decision for Daniel; does not block write-path QUALITY); W2 "zero leakage" vs ≤1/run tolerance (research-recommended, sign-off item 3); ask-surface lane closed by #3849 (EVAL-ONLY; was gated on #2013).
 
 ---
 

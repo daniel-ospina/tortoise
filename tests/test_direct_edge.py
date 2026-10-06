@@ -6,6 +6,7 @@ CYCLE-25 NAND direction default, JSONL descriptor emission, supersede 2a
 direct-edge repoint both directions with REPOINT descriptor (E2E-11.6).
 """
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -19,6 +20,7 @@ def sdk():
     s = TortoiseSDK(db)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db), ignore_errors=True)
 
 
 def _two_points(sdk):

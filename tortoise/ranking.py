@@ -34,6 +34,7 @@ from .search_engine import (  # noqa: E402, RUF100
     _beta_variance,
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
+    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
 from .live import is_terminal_status  # #2490: terminal rows are never contested
 
@@ -133,6 +134,9 @@ def resolve_contested_relevance(
         rows = projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator = false OR n.is_operator IS NULL) "
+            # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the
+            # id predicate at the re-binding MATCH below (foreign rows).
+            "WITH n "
             "MATCH (c:Point)-[r:NAND]->(n) "
             "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
             "WITH n, c, r, src, ri "
@@ -233,6 +237,7 @@ class GraphRanker:
         recency_weight: float = DEFAULT_RECENCY_WEIGHT,
         recency_half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         use_degree: bool = True,
+        now=None,
     ):
         total = similarity_weight + graph_boost_weight + recency_weight
         if abs(total - 1.0) > 1e-6:
@@ -248,6 +253,15 @@ class GraphRanker:
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
         self.use_degree = use_degree
+        # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
+        # 30-day half-life), so the fix is not to delete it but to make the
+        # reference time it measures against EXPLICIT and injectable. A caller
+        # replaying a fixed store (eval lane, reproducibility audit) passes a
+        # pinned ``now`` and gets a ranking that is byte-identical across a
+        # wall-clock jump; the default stays the live UTC clock (unchanged
+        # behaviour for every existing caller).
+        self._now = now if now is not None else (
+            lambda: datetime.now(timezone.utc))  # noqa: UP017
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -364,12 +378,16 @@ class GraphRanker:
         return 0.0
 
     def recency_boost(self, result: dict, signals: dict) -> float:
-        """Exponential recency decay from createdAt/startedAt; missing → 1.0."""
+        """Exponential recency decay from createdAt/startedAt; missing → 1.0.
+
+        The reference time is ``self._now`` (#2952) — the live UTC clock by
+        default, or the caller's pinned anchor for a reproducible replay.
+        """
         ts = signals.get("created") or result.get("createdAt") or result.get("startedAt")
         dt = _parse_iso(ts)
         if dt is None:
             return 1.0  # unknown age — neutral, no demotion
-        age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)  # noqa: UP017
+        age_days = max(0.0, (self._now() - dt).total_seconds() / 86400.0)
         return round(recency_decay(age_days, self.recency_half_life_days), 4)
 
     # ── Graph queries ─────────────────────────────────────────────────────
@@ -410,10 +428,11 @@ class GraphRanker:
             "  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0)), "
             "  0.5) AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            # #2490: aligned with StateRanker/GapsRanker — has_ep is the
-            # posterior-OR-prior expression (was ep_alpha-only here), plus
-            # the status/outdated columns for the Python-side terminal gate.
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
+            # status/outdated columns for the Python-side terminal gate.
+            # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
+            # baseline prior alone is prior-only, NOT measured.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
@@ -701,7 +720,7 @@ class StateRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false)"
         )
@@ -1004,7 +1023,7 @@ class GapsRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)",
             params={"ids": ids},
         ).result_set
@@ -1066,8 +1085,10 @@ class GapsRanker:
 # whether the cap was hit.
 
 # Node labels that participate in the knowledge subgraph.
+# D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a :Source,
+# so the Source label already covers it.
 SUBNODE_LABELS = (
-    "Point", "Object", "Subject", "Event", "Source", "Document",
+    "Point", "Object", "Subject", "Event", "Source",
 )
 _SUBNODE_LABEL_WHERE = " OR ".join(f"m:{lab}" for lab in SUBNODE_LABELS)
 
@@ -1177,6 +1198,7 @@ class SubgraphExpander:
         # out: edges FROM frontier nodes (n)-[r]->(m) → record n→m, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "
             f"MATCH (n)-{edge_decl}->(m) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN n.id, type(r), m.id",
             params={"frontier": frontier},
@@ -1188,6 +1210,7 @@ class SubgraphExpander:
         # in: edges INTO frontier nodes (m)-[r]->(n) → record m→n, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "
             f"MATCH (m)-{edge_decl}->(n) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN m.id, type(r), n.id",
             params={"frontier": frontier},

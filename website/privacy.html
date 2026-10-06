@@ -119,6 +119,7 @@
   <div class="wrap">
     <nav class="topbar">
       <a href="/">← Back to product</a>
+      <a href="/blog">Blog</a>
       <span class="host">tortoise.premiselabs.co</span>
     </nav>
 
@@ -129,7 +130,7 @@
       <div class="meta">
         <div>
           <span class="label">Last updated</span>
-          <span class="value">2026-08-08</span>
+          <span class="value">2026-09-30</span>
         </div>
         <div>
           <span class="label">Effective date</span>
@@ -137,7 +138,7 @@
         </div>
         <div>
           <span class="label">Version</span>
-          <span class="value">1.0</span>
+          <span class="value">1.1</span>
         </div>
       </div>
     </header>
@@ -206,8 +207,9 @@
       <ul>
         <li><strong>Billing and transactional records</strong> are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).</li>
         <li><strong>Analytics data</strong> is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.</li>
-        <li><strong>Knowledge graphs.</strong> Deleting a knowledge graph in the product starts a disclosed 7-day recovery window (the organization's "Trash"): during that window the graph can be restored, and its API keys are revoked immediately. After the window ends, the graph is permanently erased — including any stored backup copies of it. Deleted graph data is not retained beyond that recovery window except where required by law or for fraud/security investigations.</li>
-        <li><strong>Backups</strong> may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose. Backup copies of a deleted knowledge graph are erased with the graph after its recovery window, and are refused for restoration once the window has passed.</li>
+        <li><strong>Memory graphs.</strong> Deleting a memory graph removes it from your view immediately and revokes its API keys. It stays restorable from the organization's "Trash" for 7 days. After that it is permanently erased, together with its backup copies.</li>
+        <li><strong>Accounts.</strong> Deleting a team account removes it from your view immediately, revoking its API keys and ending its members' access. It stays restorable for 7 days. After that the team account's live data is permanently erased. Deleting your personal account also deletes every team for which you are the only owner: those teams are removed from your view immediately, with their API keys revoked and their members' access ended. The account's live data is permanently erased after the same 7-day window, during which the deletion can be reversed by contacting the email channel in §16.</li>
+        <li><strong>Backups.</strong> Our backups cover the last four weeks. A backup taken while your data was live can therefore still contain it for up to four weeks. The two deletion paths differ in how their own backup copies end: a deleted memory graph's own backups are erased when its 7-day window ends, while deleting an account does not actively purge its copies in our backups — those age out on the same four-week cycle.</li>
       </ul>
 
       <h2>7. Security</h2>
@@ -283,16 +285,16 @@
       <p>Reserved — see §12.</p>
 
       <h2>15. Version, effective date, and document history</h2>
-      <p><strong>Current version:</strong> 1.0</p>
+      <p><strong>Current version:</strong> 1.1</p>
       <p>This policy is versioned. When this policy changes, the version number and effective date are updated, and a new entry is added to the document history below. Material changes are posted before they take effect.</p>
 
       <h2>16. Exercising your rights — deletion and other requests</h2>
-      <p><strong>Primary mechanism: email.</strong> To request deletion of your account and associated data, or to make any other privacy request (access, correction, export, restriction, objection), email your request to <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
+      <p><strong>Primary mechanism: email.</strong> To make a privacy request other than the in-product account deletion described below (access, correction, export, restriction, objection) — or to request deletion of your account when you cannot sign in — email your request to <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
       <p><strong>Response commitment.</strong> Requests are answered within <strong>one month</strong> of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.</p>
       <p><strong>Identity verification.</strong> we may request identity verification before acting on any request (GDPR Art. 12(6)). Where a request cannot be verified or is manifestly unfounded or excessive, the request may be refused or a reasonable fee may be charged, as permitted by law.</p>
       <p><strong>What this channel covers.</strong> The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.</p>
-      <p><strong>Deletion scope.</strong> When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A knowledge graph deleted in the product follows its 7-day recovery window before permanent erasure, as described in §6.</p>
-      <p><strong>Self-service deletion (future).</strong> An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.</p>
+      <p><strong>Deletion scope.</strong> When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A deleted memory graph, user account, or team account remains restorable for 7 days. After that, the deleted item's live data is permanently erased; for a deleted account, copies in our backups are not actively deleted and age out on the four-week cycle described in §6. §6 covers how a deleted memory graph and a deleted account are erased, and the <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md">retention and deletion policy</a> is the single source of truth for these windows.</p>
+      <p><strong>Self-service account deletion.</strong> You can delete your personal account yourself from the dashboard's Profile tab. Every team for which you are the only owner is deleted with your account, and those teams are removed from your view immediately with their API keys revoked and their members' access ended. During the recovery window described in §6, a deletion can be reversed by contacting us through the email channel above; after that window the account's live data is permanently erased and — as stated in §6 — its copies in our backups are not actively deleted but age out on the four-week cycle. No in-product restore control is offered: a deleted account is restored only through the channel above, and we do not promise a self-service restore.</p>
     </main>
 
     <footer>
@@ -307,6 +309,11 @@
         </thead>
         <tbody>
           <tr>
+            <td>1.1</td>
+            <td>2026-09-30</td>
+            <td>Added self-service account deletion and the account-deletion retention windows to §6 and §16.</td>
+          </tr>
+          <tr>
             <td>1.0</td>
             <td>2026-08-08</td>
             <td>Initial publication of the Privacy Policy for the hosted Tortoise service.</td>
@@ -316,7 +323,7 @@
 
       <p>Based on the Common Paper Cloud Service Agreement v2.1, CC BY 4.0. The original template is available at <a href="https://commonpaper.com">https://commonpaper.com</a>.</p>
       <p><em>Questions about this policy may be submitted through the contact channel in §1.</em></p>
-      <p>Premise Labs · Tortoise · <a href="/">Back to product</a></p>
+      <p>Premise Labs · Tortoise · <a href="/faq">FAQ</a> · <a href="/">Back to product</a></p>
     </footer>
   </div>
 </body></html>

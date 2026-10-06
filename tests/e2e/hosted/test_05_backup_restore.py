@@ -41,7 +41,7 @@ def test_backup_restore_round_trip(api, tenant_factory):
     post-mutation content is gone (graph swap actually happened)."""
     t = tenant_factory("backup")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
 
     original = [f"backup-seed-{i}-{uuid.uuid4().hex[:4]}" for i in range(3)]
     _seed_points(api, h, original)
@@ -86,7 +86,7 @@ def test_backup_free_tier_402(api, tenant_factory):
 def test_restore_requires_confirm_400(api, tenant_factory):
     t = tenant_factory("backup-confirm")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
     r = api.post("/backups/restore", headers=h,
                  data={"backup_key": "backups/x/dump.enc"})  # confirm defaults False
     assert r.status == 400, f"restore without confirm must 400, got {r.status}"
@@ -96,8 +96,8 @@ def test_restore_requires_confirm_400(api, tenant_factory):
 def test_restore_unknown_key_400(api, tenant_factory):
     t = tenant_factory("backup-unknown")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
     r = api.post("/backups/restore", headers=h,
-                 data={"backup_key": f"backups/{t['team_id']}/nope/dump.enc",
+                 data={"backup_key": f"backups/{t['org_id']}/nope/dump.enc",
                        "confirm": True})
     assert r.status == 400, f"unknown backup key must 400, got {r.status}: {r.text()}"

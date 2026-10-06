@@ -45,6 +45,11 @@ from battery.config import (
 )
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
 from battery.exceptions import ConfigError, IsolationBreach  # noqa: F401
+from battery.recall.matcher import TRIGGER_POPULATION, scenario_probes
+from battery.recall.prepass import (
+    build_matched_recall_block,
+    capture_factual_recall,
+)
 from battery.report.assemble import (
     write_family_files,
     write_recall_file,
@@ -62,6 +67,9 @@ from battery.runner.artifacts import (
 from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.executor import (
+    SURFACING_INTENTS,
+    control_verdict_event,
+    control_verdict_from_events,
     envelope_events,
     execute_tvde_episode,
     state_events,
@@ -71,6 +79,10 @@ from battery.runner.model_calls import (
     RealModelCaller,
     UsageRecordingCaller,
     aggregate_cost_basis,
+)
+from battery.runner.retrieval_preflight import (
+    HybridRetrievalUnavailable,
+    require_hybrid_retrieval,
 )
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
@@ -101,6 +113,7 @@ class RunConfig:
                  db_path: str | None = None, executor: str = "mock",
                  caller_factory: Callable | None = None,
                  emission_seam: Callable | None = None,
+                 truth_judge: Callable | None = None,
                  sessions: int = 1):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
@@ -140,6 +153,15 @@ class RunConfig:
         #: (real mode only) stamp ``provenance.emission_seam = "hermetic"``
         #: so a fabricated log is never confusable with a live-spend one.
         self.emission_seam = emission_seam
+        #: #2740 truth-judge seam: the semantic comparator that turns the
+        #: arm's DECLARED envelope position into R3 `outcomes` / R5
+        #: `update_correct_direction` / R2 `coverage_subscore`. Injectable
+        #: for hermetic tests; ``None`` (default) keeps those fields gapped
+        #: so an unconfigured run honestly reports `insufficient_n` rather
+        #: than fabricating correctness. Production must pass a validated,
+        #: metered judge (battery/judge/) — never the mock judge, whose
+        #: verdicts are for validation only.
+        self.truth_judge = truth_judge
         #: Task 10 stream-mode: sessions > 1 runs each scenario across that
         #: many sequential sessions over the SAME per-scenario graph (no
         #: reset mid-stream; setup happens once per arm at arm-init). Each
@@ -399,7 +421,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     write_failed = False
     for idx, env in enumerate(ep.envelopes):
         for intent in env.intents:
-            if intent not in ("register_conflict", "file_nand"):
+            if intent not in SURFACING_INTENTS:
                 # Schema-bounded verbs the executor does not route to a
                 # product write this round: declared, so traced as unfiled
                 # (never silently dropped, never a fake ref).
@@ -463,6 +485,25 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                                  "reason": "no-op"}})
         if write_failed:
             break
+
+    # #2702: R1 FP-control verdict for a benign-control episode (bct-*).
+    # The control verdict is DERIVED here because the executor is the only
+    # component that knows its OWN tool channel ran: every declare-write
+    # loop iteration above either filed a surfacing (emission-loss-proof
+    # tool_event with a real product ref) or recorded why it did not
+    # (intent_unfiled). For a valid, non-excluded control episode the loop
+    # completed, so a missing surfacing is PROVABLY the arm not surfacing —
+    # never a lost emission and never a fabricated 0.0. A scenario with a
+    # planted ¬A pair (ct-*) is NEVER control-population and never gets a
+    # verdict. The probe's reader (`_control_verdict`) accepts only an
+    # explicit bool, and the expected-set gate only demands the field when
+    # this entry exists, so a verdict-less control keeps the no-data
+    # sentinel (insufficient_n).
+    if not write_failed:
+        from battery.runner.probe_scorer import episode_population
+        if episode_population(scenario) == "control":
+            events.append(control_verdict_event(
+                false_positive=control_verdict_from_events(events)))
 
     # state-terminal: decide_cycles harness-side; ep_outcome + contested
     # from the product terminal table where the arm exposes it (a4), else
@@ -734,6 +775,26 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     run_real_spend = 0.0
     budget_stop = False
     budget_skipped: list[str] = []
+    # #2985: the retrieval conditions of this run — the union of legs the
+    # retrieval-reading arms OBSERVED (their own ``leg_trace``) and whether
+    # any real retrieval arm was refused by the preflight or degraded
+    # mid-run. Persisted at run level in summary.json; an availability
+    # guess is never used when an observed trace exists.
+    run_retrieval_legs: list[str] = []
+    run_retrieval_degraded = False
+
+    # ── matched-recall pre-pass inputs (#3327.3) ───────────────────────
+    #    Probes are SOURCED FROM THE RUN'S SCENARIO CORPUS — never
+    #    ``default_probes()``' generic world facts (no arm's memory contains
+    #    them, so such a trigger could never legitimately fire; decision
+    #    .3). ``scenario_probes`` skips scenarios with no authored question
+    #    or no gold. Each trigger-population arm's factual F1 is captured
+    #    right after its setup — before its own episodes, and since arm
+    #    namespaces are isolated, no arm's episodes can move another arm's
+    #    reading. That is the pre-registered "measured before the battery".
+    recall_probes = scenario_probes(scenarios)
+    recall_capture: dict[str, dict[str, list[str]]] = {}
+    recall_unavailable: dict[str, str] = {}
 
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
@@ -761,8 +822,36 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                      "model_id": arm.model_id,
                      "temperature": float(getattr(arm, "temperature", 0.0))}
         # ── arm-init (setup_scenarios) — failure → skip arm, summary-only ──
+        # #2985: an arm that reads through the product's HYBRID retrieval
+        # (a4's recall_state) declares ``requires_hybrid_retrieval``. In a
+        # real run, preflight the embedder BEFORE setup/ingest so a
+        # keyword-only environment (plain ``uv sync``) fails closed — the arm
+        # is skipped with a recorded ``init_failure`` naming the preflight,
+        # never an FTS-only number under the a4 label. Mock/hermetic lanes
+        # and arms without retrieval are untouched, and the arm itself stays
+        # callable for equivalence tests (the gate lives here, not in the arm).
+        retrieval_required = bool(
+            getattr(arm, "requires_hybrid_retrieval", False))
         try:
+            if retrieval_required and run_mode == "real":
+                require_hybrid_retrieval()
+                # #3005 P1: the availability preflight cannot see a
+                # query-time leg failure (``encode_failed`` / ``breaker_open``)
+                # — it only proves the embedder CAN load. Arm the arm's
+                # observed-leg refusal so a read whose VECTOR leg never ran
+                # refuses (ArmUnavailable -> excluded episode -> exit 4)
+                # instead of publishing an FTS-only a4 number. Set only for
+                # the real lane, so hermetic/equivalence tests keep driving
+                # the arm in a degraded environment.
+                arm.require_observed_hybrid = True
             arm.setup_scenarios(scenarios)
+        except HybridRetrievalUnavailable as e:
+            run_retrieval_degraded = True
+            arms_out.append(_arm_summary_block(
+                arm_id, arm_present=False, run_mode=run_mode,
+                reason=f"retrieval preflight: {e}"))
+            any_arm_failed = True
+            continue
         except ArmUnavailable:
             arms_out.append(_arm_summary_block(
                 arm_id, arm_present=False, run_mode=run_mode))
@@ -774,6 +863,20 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 reason=f"init: {e!r}"))
             any_arm_failed = True
             continue
+
+        # ── matched-recall capture (#3327.2) ───────────────────────────
+        #    The arm's factual retrieval over the corpus probes, taken now
+        #    (setup done, no episodes yet). An ``ArmUnavailable`` arm is
+        #    recorded unavailable — NEVER coerced to an empty F1, which
+        #    would read as divergent and fire the trigger by fabrication.
+        #    a0 is not in the trigger population: its row is measured via
+        #    the no-memory stub at block-assembly time instead.
+        if recall_probes and arm_id in TRIGGER_POPULATION:
+            try:
+                recall_capture[arm_id] = capture_factual_recall(
+                    arm, recall_probes, scenarios, run_mode=run_mode)
+            except ArmUnavailable as e:
+                recall_unavailable[arm_id] = f"recall pre-pass: {e}"
 
         arm_episodes: list[EpisodeResult] = []
         arm_artifacts: list[str] = []
@@ -935,6 +1038,23 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             })
 
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
+        # #2985: fold this arm's OBSERVED retrieval legs into the run record
+        # (union across arms). An arm with no retrieval reports nothing.
+        observed_legs = list(
+            getattr(arm, "observed_retrieval_legs", ()) or ())
+        for _leg in observed_legs:
+            if _leg not in run_retrieval_legs:
+                run_retrieval_legs.append(_leg)
+        if getattr(arm, "observed_retrieval_degraded", False):
+            run_retrieval_degraded = True
+        # #3005 P2: a REAL arm that requires hybrid retrieval but OBSERVED
+        # no legs cannot attest it ran hybrid — fail CLOSED (mirrors the
+        # parity lane's ``if lane == LANE_REAL and not retrieval_legs:
+        # retrieval_degraded = True``). Without this, ``retrieval_legs: []``
+        # + ``retrieval_degraded: false`` is indistinguishable from a run
+        # with no retrieval arm at all.
+        if retrieval_required and run_mode == "real" and not observed_legs:
+            run_retrieval_degraded = True
         arms_out.append(_arm_summary_block(
             arm_id, arm_present=True, run_mode=run_mode,
             scenarios=len(scenarios), valid_episodes=agg.valid_episodes,
@@ -947,6 +1067,17 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
     exit_code = ExitCode.ARM_FAILED if any_arm_failed else ExitCode.OK
+    # ── matched-recall outcome (#3327): the pre-pass returns a RESULT
+    #    OBJECT (#1413 indicator 1 — never an exception). INCONCLUSIVE is
+    #    expressed as the persisted outcome + this exit code (3); an arm
+    #    failure (exit 4) outranks it as the more severe operational state.
+    recall_block = build_matched_recall_block(
+        recall_probes, recall_capture,
+        include_a0=("a0" in config.arms),
+        unavailable_arms=recall_unavailable)
+    if (exit_code is ExitCode.OK and recall_block
+            and recall_block.get("outcome") == "inconclusive"):
+        exit_code = ExitCode.INCONCLUSIVE
 
     # ── run-end LIVE writers (family_*.json + recall.json) — the dead
     #    aggregation path dies here: per-scored-family JSONs + the recall
@@ -954,7 +1085,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     family_payloads = _family_payloads(scorer)
     if family_payloads:
         write_family_files(attempt_dir, family_payloads)
-    write_recall_file(attempt_dir, {"episodes": recall_rows})
+    write_recall_file(attempt_dir, {
+        "episodes": recall_rows,
+        # The §3.2.1 control block; {} when no corpus-sourced probe set or
+        # no trigger-population arm was measured (never a vacuous outcome).
+        "matched_recall": recall_block or {},
+    })
 
     # summary.json written LAST (the completion marker). The run-level
     # run_mode is recorded here (mock iff every arm resolved mock) so the
@@ -977,6 +1113,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                                   for s in scenarios)),
         budget_stopped=bool(budget_skipped),
         budget_skipped=budget_skipped,
+        # #2985: the retrieval conditions behind every number in this run.
+        retrieval_legs=run_retrieval_legs,
+        retrieval_degraded=run_retrieval_degraded,
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)
@@ -1009,7 +1148,9 @@ def _build_scorer(config: RunConfig, thresholds: ThresholdsConfig) -> Scorer:
             scorers.append(resolve_scorer(spec))
         except ConfigError:
             from battery.runner.probe_scorer import resolve_probe_scorer
-            scorers.append(resolve_probe_scorer(spec, thresholds))
+            scorers.append(resolve_probe_scorer(
+                spec, thresholds, truth_judge=getattr(
+                    config, "truth_judge", None)))
     return _CompositeScorer(scorers)
 
 

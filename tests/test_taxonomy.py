@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -24,6 +25,7 @@ def sdk():
     sdk.create_point("goal", "G1")  # no context
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── taxonomy ────────────────────────────────────────────────────────
@@ -31,7 +33,9 @@ def sdk():
 class TestTaxonomy:
     def test_keys(self, sdk):
         result = sdk.taxonomy()
-        for label in ("Point", "Event", "Subject", "Object", "Document"):
+        # D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a
+        # :Source, so the label set carries ``Source``, not ``Document``.
+        for label in ("Point", "Event", "Subject", "Object", "Source"):
             assert label in result
 
     def test_counts_points(self, sdk):
@@ -40,11 +44,11 @@ class TestTaxonomy:
 
     def test_empty_labels_return_zero(self, sdk):
         result = sdk.taxonomy()
-        # No events/subjects/objects/documents in test data
+        # No events/subjects/objects/sources in test data
         assert result["Event"] == 0
         assert result["Subject"] == 0
         assert result["Object"] == 0
-        assert result["Document"] == 0
+        assert result["Source"] == 0
 
 
 # ── list_pointkinds (replaces list_domains, #49) ─────────────────────────

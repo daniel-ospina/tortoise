@@ -48,7 +48,7 @@ your organization"). The `after_user_created` auth-hook path is INERT
 (AUTH_HOOK_SECRET removed, #832). The FastAPI data plane is invoked exactly
 once right after provisioning — the demo seed (`POST /internal/demo`,
 hosted_api.py:4994). The `provision_team` RPC writes the teams row with
-`p_email` (user email) + `p_team_name` (wizard-typed org name) and its
+`p_email` (user email) + `p_org_name` (wizard-typed org name) and its
 `ON CONFLICT (id)` refresh preserves `created_at` (idempotent replays). Note
 (scope precision): the RPC also serves the Q5 paid sub-org lane
 (`POST /v1/onboarding/team`) and the agent-identity lane with `p_email`
@@ -73,7 +73,7 @@ and unreachable by this email by construction.
 
 Data sources at trigger time (scope-verify cycle 1+2 — org-name primacy was
 wrong): `teams.name` is the wizard-typed ORGANIZATION name, forced to a
-whitespace-free slug by both the wizard and the edge fn (`TEAM_NAME_RE`
+whitespace-free slug by both the wizard and the edge fn (`ORG_NAME_RE`
 `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`) — it is NOT a person's first name and
 must not drive the greeting. Person-ish sources: `display_name` (OAuth
 `user_metadata.display_name`, threaded from the edge fn) and the user's
@@ -121,8 +121,8 @@ as the primary guard:
   `teams.onboarding_email_sent_at` in the SAME request, before returning.
   A crash between provider-accept and the stamp is a ~100ms window (same
   residual as the invites `email_sent_at` pattern); the provider
-  Idempotency-Key `onboarding:{team_id}` collapses any retry inside 24h.
-- **In-process in-flight gate** (set of team_ids currently sending): a
+  Idempotency-Key `onboarding:{org_id}` collapses any retry inside 24h.
+- **In-process in-flight gate** (set of org_ids currently sending): a
   concurrent/second POST for the same team skips while the first is in
   flight — closes the TOCTOU where the marker read passes twice and two
   send tasks start (edge-fn +2s retry after a lost response, double wizard
@@ -133,7 +133,7 @@ as the primary guard:
   exhausted / provider 4xx/5xx/timeout) returns a synchronous
   `{"status": "failed"|"skipped"}` with the marker UNSET, so the edge-fn
   retry (+2s) or any later trigger retries. Skips/failures are WARN-logged
-  with team_id (ops-visible).
+  with org_id (ops-visible).
 - **No freshness guard** (cycle-2 controller fix): the marker + provider key
   carry dedupe; a guard would turn incident-recovery retries (edge fn
   crashed between the RPC and the POST; user retries the org-create next
@@ -172,22 +172,22 @@ semantics; A would have needed equivalent Deno machinery with no test infra.
 ```
 fresh hosted signup (wizard org-create, name-first)
   └─► tenant-provision edge fn ── provision_team RPC (teams row: email+name)
-        └─► POST /internal/demo  {team_id}          (existing, demo seed)
-        └─► POST /internal/onboarding-email {team_id, display_name?}  (NEW)
+        └─► POST /internal/demo  {org_id}          (existing, demo seed)
+        └─► POST /internal/onboarding-email {org_id, display_name?}  (NEW)
               │  [FastAPI, internal-key auth — mirror of /internal/demo]
               │  1. registry/selfhost mode            → skipped (no emails)
               │  2. unknown team / no email           → skipped
               │  3. marker read: onboarding_email_sent_at set → already_sent
               │  4. in-flight gate: team currently sending → in_flight skip
-              │  5. send_onboarding_offer_email(email, display_name, team_name,
-              │        team_id) AWAITED  (bounded ~3s; budget reserve/refund;
+              │  5. send_onboarding_offer_email(email, display_name, org_name,
+              │        org_id) AWAITED  (bounded ~3s; budget reserve/refund;
               │        one 0.5s transient retry; provider Idempotency-Key
-              │        "onboarding:{team_id}"; from daniel@premiselabs.co
+              │        "onboarding:{org_id}"; from daniel@premiselabs.co
               │        env-tunable; verbatim copy; exact URL) — NEVER raises
               │  6. provider accepted → STAMP teams.onboarding_email_sent_at
               │        (rowcount-gated, same request) → {status: sent}
               │     provider failed/skipped → marker UNSET, WARN log w/
-              │        team_id → {status: failed|skipped} (retryable)
+              │        org_id → {status: failed|skipped} (retryable)
               └─► edge fn: onboarding POST independent of the demo seed
                    (fires even if demo throws), 2 attempts 0s/+2s, bound +
                    log non-ok, NEVER fails provisioning
@@ -208,7 +208,7 @@ non-provisioning human cohorts and their verdicts:
 | Anon/CLI-first user who later CLAIMS their anon team (`/v1/claim*`) | No — org already exists | ❌ excluded: minted anonymously with no email at signup (claim_membership no longer writes teams.email — migration 20260827000002); follow-up if ops wants claim-time outreach |
 | Fresh user whose first act is ACCEPTING an invite (no own org) | No | ❌ excluded in v1: joined through a human inviter; emailing needs auth.users.email + membership trigger → follow-up issue (not absorbed) |
 | Account creator who abandons before org-create | No (never provisioned) | ❌ excluded: no org, nothing to onboard onto yet |
-| Paid sub-org via `POST /v1/onboarding/team` / `POST /v1/teams` (Q5) | No (server lane, p_email NULL) | ❌ excluded: second-org doors, not signups; teams.email NULL by construction (documented invariant above) |
+| Paid sub-org via `POST /v1/onboarding/team` / `POST /v1/organizations` (Q5) | No (server lane, p_email NULL) | ❌ excluded: second-org doors, not signups; teams.email NULL by construction (documented invariant above) |
 | Selfhost/registry + `/v1/agent/signup` | n/a | ❌ no email exists |
 
 **Email-abuse posture (scope-verify cycle 1 decision, accepted):**
@@ -225,11 +225,11 @@ gate is a candidate follow-up.
 
 | File | Change |
 |---|---|
-| `tortoise/email_notify.py` | + onboarding send profile: copy constants (verbatim, exact URL), **awaited** `send_onboarding_offer_email(email, display_name, team_name, team_id) -> dict` ({status: sent\|skipped\|failed, message_id}); budget reserve/refund around the awaited call; provider `Idempotency-Key: onboarding:{team_id}`; from `RESEND_ONBOARDING_FROM_EMAIL` default `daniel@premiselabs.co`; `_send_resend` gains optional `from_addr` param (default `_from_address()` — invite/OTP untouched); greeting-name helper `_onboarding_greeting_name` (display_name → email local-part w/ role-mailbox denylist → org token → "there"); html/text templates (html.escape, paragraph-faithful copy). |
-| `tortoise/supabase_control.py` | + `set_team_onboarding_email_sent(cp, team_id) -> bool` (rowcount-gated PATCH `onboarding_email_sent_at=now()` WHERE id AND IS NULL, return=representation), + `team_onboarding_email_sent(cp, team_id) -> bool` (marker read), + add column to `team_by_id` select / additive select tier. |
-| `tortoise/hosted_api.py` | + `POST /internal/onboarding-email` (internal-key `_check_internal`), body `{team_id, display_name?}`; skip matrix (mode/team/email/marker/in-flight); awaits the send; stamps marker on accept; in-flight set; catches everything → structured `{status}` response, never a surprise 500 to the edge fn. |
+| `tortoise/email_notify.py` | + onboarding send profile: copy constants (verbatim, exact URL), **awaited** `send_onboarding_offer_email(email, display_name, org_name, org_id) -> dict` ({status: sent\|skipped\|failed, message_id}); budget reserve/refund around the awaited call; provider `Idempotency-Key: onboarding:{org_id}`; from `RESEND_ONBOARDING_FROM_EMAIL` default `daniel@premiselabs.co`; `_send_resend` gains optional `from_addr` param (default `_from_address()` — invite/OTP untouched); greeting-name helper `_onboarding_greeting_name` (display_name → email local-part w/ role-mailbox denylist → org token → "there"); html/text templates (html.escape, paragraph-faithful copy). |
+| `tortoise/supabase_control.py` | + `set_org_onboarding_email_sent(cp, org_id) -> bool` (rowcount-gated PATCH `onboarding_email_sent_at=now()` WHERE id AND IS NULL, return=representation), + `org_onboarding_email_sent(cp, org_id) -> bool` (marker read), + add column to `org_by_id` select / additive select tier. |
+| `tortoise/hosted_api.py` | + `POST /internal/onboarding-email` (internal-key `_check_internal`), body `{org_id, display_name?}`; skip matrix (mode/team/email/marker/in-flight); awaits the send; stamps marker on accept; in-flight set; catches everything → structured `{status}` response, never a surprise 500 to the edge fn. |
 | `supabase/migrations/20260907000001_onboarding_email_sent.sql` | + `ALTER TABLE teams ADD COLUMN IF NOT EXISTS onboarding_email_sent_at timestamptz;` (additive; no RLS/column-grant change — not sensitive). ⚠️ Deploy ORDER: this migration must apply BEFORE the FastAPI + edge-fn code ships (a PGRST204 missing-column error degrades fail-soft to a logged miss). |
-| `supabase/functions/tenant-provision/index.ts` | + fire `POST /internal/onboarding-email` body `{team_id, display_name}` where display_name = the edge fn's person display_name (caller/body, index.ts:~312) — NEVER `safeName`; fires independently of the demo seed (separate try/catch), 2 attempts 0s/+2s, bound + log non-ok, never fails provisioning. |
+| `supabase/functions/tenant-provision/index.ts` | + fire `POST /internal/onboarding-email` body `{org_id, display_name}` where display_name = the edge fn's person display_name (caller/body, index.ts:~312) — NEVER `safeName`; fires independently of the demo seed (separate try/catch), 2 attempts 0s/+2s, bound + log non-ok, never fails provisioning. |
 | `tests/test_provisioning_edge_function.py` | + source guards: calls `/internal/onboarding-email`; retries it; passes person display_name not safeName; fires even when the demo fetch throws. |
 | `tests/fake_control_plane.py` | + teams fixtures/columns support if needed by the marker/dedupe assertions. |
 | New `tests/test_onboarding_email_http.py` | Endpoint tests (see Verification). |
@@ -239,7 +239,7 @@ gate is a candidate follow-up.
 
 | Touch point | Type | Covered by |
 |---|---|---|
-| Supabase teams row (email, name, marker column) | data | migration + supabase_control helpers + team_by_id select |
+| Supabase teams row (email, name, marker column) | data | migration + supabase_control helpers + org_by_id select |
 | tenant-provision edge fn | external trigger | index.ts + source-guard tests |
 | FastAPI internal surface | API | new `/internal/onboarding-email` + `_check_internal` |
 | Resend outbound | external service | email_notify (existing client/budget/redaction + from_addr param) |
@@ -251,7 +251,7 @@ gate is a candidate follow-up.
 
 1. New hosted signup (provisioned team) → edge fn fires `/internal/onboarding-email` → one email to teams.email within the request; from `daniel@premiselabs.co`; body copy verbatim incl. exact `https://cal.com/danielospina/tortoise-onboarding-call` (no `onbaording` typo); greeting personalised per the display_name → email → org-token heuristic.
 2. Replay / re-provision / repeat POST for the same team → no second send or email: second POST sees the marker set (`already_sent`) or the in-flight gate; delivery at most once. HTTP tests: sequential replay → skip; concurrent replay while first send in flight → in_flight skip, sender invoked once per process.
-3. Provider failure / Resend unconfigured / budget exhausted → endpoint returns `{status: failed|skipped}` (never 5xx to the edge fn), marker NOT stamped, WARN logged with team_id; a subsequent POST retries and succeeds → marker stamped.
+3. Provider failure / Resend unconfigured / budget exhausted → endpoint returns `{status: failed|skipped}` (never 5xx to the edge fn), marker NOT stamped, WARN logged with org_id; a subsequent POST retries and succeeds → marker stamped.
 4. Registry/selfhost mode, unknown team, null email → skipped no-op. Marker already set → already_sent no-op.
 5. Unit tests assert exact URL + copy + paragraph fidelity + from + personalization with REAL funnel vocabulary (OAuth full names, email local-parts, role mailboxes, org slugs, numeric GitHub relays, hyphenated handles) + env-tunable from + Idempotency-Key header present; edge-fn source guards as listed.
 6. Full docker-lane pytest green (`TORTOISE_DB_URI=docker://...`).
@@ -265,7 +265,7 @@ endpoint would therefore no-op for exactly the cohort that opted into the
 fork. The #2407 scoping (out of scope here) must decide: (a) does the fork
 choice SUPPRESS the signup auto-email (needs a provision-time branch this
 design does not have), or (b) is the fork email ADDITIVE later (needs its
-own Idempotency-Key namespace, e.g. `onboarding-fork:{team_id}`, and its
+own Idempotency-Key namespace, e.g. `onboarding-fork:{org_id}`, and its
 own marker column, since suppress semantics would be wrong once the signup
 email already went out)? This doc only pins the shared invariants: the
 send function is reusable; `onboarding_email_sent_at` = "signup email

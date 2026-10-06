@@ -11,7 +11,37 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tortoise.config import is_db_uri
+from tortoise.cypher_guard import tolerates_altered_numbers
+
 logger = logging.getLogger(__name__)
+
+
+def _count_journal_events(events_file: Path) -> int:
+    """Count the journal's events the way the READER counts them, unparsed.
+
+    ``len(read_all()) + torn_trailing_count`` — records PLUS the torn
+    fragments the reader tolerates, minus the seal annotations ``append``
+    writes, complete or TORN (#5917) — without json-parsing every record.
+    Parsing to produce a REPORTED number measured 20 s on a 300,000-record
+    journal against 0.07 s for this pass; both are pinned to agree in
+    ``tests/test_5917_torn_tail_seal.py``.
+
+    Byte-safe by construction (``errors="replace"``) and universal-newline
+    aware (the text mode's default), so a multi-byte tear or a bare-CR journal
+    counts without raising.
+    """
+    from tortoise.log import SEAL_SENTINEL, is_seal_annotation
+    count = 0
+    with open(events_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            text = line.strip()
+            if not text or is_seal_annotation(text):
+                continue
+            if SEAL_SENTINEL.startswith(text):
+                continue          # a TORN annotation is not an event
+            count += 1
+    return count
 
 
 def _timestamp() -> str:
@@ -40,8 +70,12 @@ def backup(db_path: str, events_path: str = "events.jsonl",
     if ev.exists():
         shutil.copy2(ev, target / ev.name)
 
-    # Trigger FalkorDB BGSAVE if available
-    _bgsave()
+    # Trigger FalkorDB BGSAVE if available. Best-effort — a snapshot failure
+    # never aborts the file backup — but the outcome is logged AND recorded in
+    # the manifest so a silent no-op is impossible (#2974). If the CLI target
+    # is itself a URI, snapshot THAT instance; otherwise the configured
+    # TORTOISE_DB_URI is used (never a hardcoded localhost).
+    bgsave = _bgsave(db_path if is_db_uri(db_path) else None)
 
     # Write manifest
     manifest = target / "manifest.json"
@@ -50,16 +84,25 @@ def backup(db_path: str, events_path: str = "events.jsonl",
         "backed_up_at": _timestamp(),
         "db": db.name,
         "events": ev.name,
+        "bgsave": bgsave,
     }, indent=2))
 
     return target
 
 
+@tolerates_altered_numbers
 def restore(backup_dir: str, db_path: str,
             events_path: str = "events.jsonl", into_falkor: bool = False) -> dict:
     """Restore from backup directory. Replays events into a fresh projection.
 
     Returns {events, status}.
+
+    #7174/#5011: this is a whole-journal REPLAY engine (the fourth, beside
+    ``rebuild``/``rebuild_all``/``recover_from_log``), and its JSONL fallback
+    calls ``proj.apply_journal_point_restamp`` — which writes the journaled
+    ``valid_to`` VERBATIM as a param. A record whose number the store cannot hold
+    must DIVERGE for ``check_consistency``, never crash the restore, so the
+    numeric-domain refusal is suspended here like the other three engines.
 
     Event-sourcing contract (#114): when the backup contains a FalkorDB
     snapshot (tortoise.db — BGSAVE RDB), into_falkor mode opens that
@@ -109,6 +152,37 @@ def restore(backup_dir: str, db_path: str,
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
 
+    # #3316: the refusal guards the REPLAY, so it applies ONLY to an
+    # invocation that can replay (``into_falkor=True``). The default
+    # ``into_falkor=False`` path replays NOTHING — it only copies the backup
+    # files — so it cannot resurrect removed state and must still copy a
+    # crash-backup. (The CLI's ``tortoise restore`` uses that default; see the
+    # matching note at ``tortoise/__main__.py``.)
+    #
+    # It is taken HERE rather than inside the JSONL fallback below because the
+    # fallback runs AFTER the block that REPLACES the destination store: a
+    # refusal there would leave the caller's DB emptied and its AOF removed
+    # (``remove_stale_aof`` rmtree's it) while claiming the graph was left
+    # alone. So the verdict is bound to the replay-capable invocation, before
+    # the destructive copy. The RDB path is deliberately NOT consulted first —
+    # consulting it needs the snapshot copied over the destination, which is
+    # the very mutation being guarded. The cost is bounded: a torn DESTRUCTIVE
+    # tail also refuses a ``into_falkor=True`` restore whose snapshot could
+    # have carried the graph, and the remedy (repair or truncate the journal in
+    # the backup) is the one every other engine names.
+    _source_records: list[dict] | None = None
+    if into_falkor:
+        from tortoise.log import EventLog, refuse_torn_tail_revival
+        _source_log = EventLog(events_file)
+        try:
+            _source_records = _source_log.read_all()
+            refuse_torn_tail_revival(_source_log.torn_tail_revival_records())
+        except ValueError:
+            # Mid-file corruption is NOT this refusal (it is a parse error, not
+            # a torn tail) and the RDB path does not read the journal at all:
+            # let the JSONL fallback below raise it, as it did before #3316.
+            _source_records = None
+
     # Copy files to target
     shutil.copy2(events_file, events_path)
     if db_file.exists():
@@ -120,13 +194,23 @@ def restore(backup_dir: str, db_path: str,
         remove_stale_aof(db_path)
         shutil.copy2(db_file, db_path)
 
-    # Count events
-    with open(events_file) as f:
-        count = sum(1 for _ in f)
+    # Count events: records AND torn fragments, which is the number this
+    # surface has always reported (`test_backup_restore_default_copies_a_torn_
+    # tail_backup` pins a torn journal at 2) — minus the seal annotations
+    # `append` writes, which annotate a fragment rather than being one (#5917).
+    # Counted WITHOUT parsing: the reader-derived count parsed every record a
+    # second time (twice on the ``into_falkor`` path, which already parsed the
+    # journal above) to produce a number this surface only reports — measured
+    # 20.4 s vs 0.07 s on a 300,000-record journal.
+    count = _count_journal_events(events_file)
 
     # Restore into FalkorDB if requested
     if into_falkor:
-        from tortoise.projection import FalkorProjection  # noqa: I001
+        from tortoise.projection import (  # noqa: I001
+            FalkorProjection,
+            journal_hard_delete_seqs,
+            plan_point_restamp_folds,
+        )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.
@@ -143,19 +227,139 @@ def restore(backup_dir: str, db_path: str,
         # JSONL replay fallback (no RDB, or RDB was empty)
         proj = FalkorProjection(db_path)
         try:
-            for ev in EventLog(events_path).read_all():
+            # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
+            # whose endpoint is created LATER in the journal folds to nothing
+            # inline. This engine buffers the records and folds them AFTER the
+            # pass, the same trailing sweep ``rebuild`` / ``rebuild_all`` /
+            # ``recover_from_log`` give the type. The records carry their
+            # journal seq so the sweep can suppress a link whose endpoint was
+            # HARD-DELETED afterwards (#3722 review P2). A fold failure is
+            # logged, never raised: restore must not abort on one unreplayable
+            # link.
+            # #3316: the torn-tail verdict was already taken on the SOURCE
+            # journal above, BEFORE this engine replaced the destination store
+            # — the refusal cannot be re-taken here, after the mutation, and
+            # the copy made above is byte-identical to the source. ``None``
+            # means the source parse hit mid-file corruption; re-reading the
+            # copy raises the same actionable error from the same reader.
+            log = EventLog(events_path)
+            records = (_source_records if _source_records is not None
+                       else log.read_all())
+            hard_delete_seqs = journal_hard_delete_seqs(records)
+            deferred_links: list[tuple[int, dict]] = []
+            # #3305: the Point lifecycle terminalizers fold through the SHARED
+            # whole-journal plan (the same selection ``rebuild_all`` uses),
+            # not through ``apply()``'s inline branch — that branch folds every
+            # terminalizer, including the pre-recreation ones ``rebuild_all``
+            # drops and the non-canonical supersedes it collapses.
+            restamp_plan, _ = plan_point_restamp_folds(records)
+            # #3305: their CORRECTS edges name a SUCCESSOR this pass may create
+            # later, so defer the edges and re-apply them after the pass (the
+            # inline MERGE no-ops for a forward reference, while
+            # ``rebuild_all``'s after-creations sweep resolves it).
+            deferred_corrects: list[tuple[int, str, str]] = []
+            for seq, ev in enumerate(records):
+                if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                    deferred_links.append((seq, ev))
+                    continue
+                # Keyed on the PLAN, not the raw envelope type — the plan
+                # selects by the NORMALIZED type (``_norm`` splices a nested
+                # payload), so a raw-type guard would let a ``type``-in-``point``
+                # terminalizer fall through to ``apply()``'s inline branch and
+                # its unshared selection (#325/#3722's raw-vs-normalized class).
+                if seq in restamp_plan:
+                    edge = proj.apply_journal_point_restamp(
+                        ev, seq, restamp_plan)
+                    if edge is not None:
+                        deferred_corrects.append(edge)
+                    continue
                 proj.apply(ev)
+            if deferred_corrects:
+                try:
+                    proj.fold_deferred_corrects_edges(
+                        deferred_corrects, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred CORRECTS fold failed; %d "
+                        "edge(s) not replayed", len(deferred_corrects))
+            if deferred_links:
+                try:
+                    proj.fold_deferred_entity_links(
+                        deferred_links, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred EntityLinked fold failed; %d "
+                        "link(s) not replayed", len(deferred_links))
         finally:
             proj.close()
 
     return {"events": count, "status": "ok"}
 
 
-def _bgsave() -> None:
-    """Trigger FalkorDB BGSAVE if connected."""
+def _bgsave(uri: str | None = None) -> str:
+    """Trigger a FalkorDB BGSAVE on the CONFIGURED database (#2974).
+
+    The endpoint is resolved through the same canonical resolver the product
+    uses — ``TORTOISE_DB_URI`` parsed by ``tortoise.projection.
+    resolve_db_endpoint`` (the derivation ``FalkorProjection.from_uri`` also
+    uses). The previous implementation dialed a hardcoded
+    ``localhost:16379`` from the embedded-mode ``FALKORDB_HOST``/``FALKORDB_
+    PORT`` defaults, which hosted production never sets, so the BGSAVE never
+    reached the real instance and the swallowed exception hid it.
+
+    Best-effort semantics are preserved — a snapshot failure must NOT abort
+    the file backup — but it is never silent (#2820): every failure is logged
+    at ERROR and returned so ``backup()`` records it in the manifest.
+
+    Args:
+        uri: explicit database URI (the CLI ``--db`` target when it is a
+            ``docker://``/``redis://``/``rediss://`` URI). When None, the
+            configured ``TORTOISE_DB_URI`` is used.
+
+    Returns:
+        ``"ok"``, ``"skipped: <why>"`` (embedded — no server endpoint to
+        snapshot), or ``"failed: <why>"``.
+    """
+    target = (uri or os.environ.get("TORTOISE_DB_URI", "") or "").strip()
+    if not target:
+        # Embedded mode: redislite owns the on-disk RDB and the file copy in
+        # backup() is the durable artifact — nothing to BGSAVE. Not an error.
+        logger.info(
+            "BGSAVE skipped — no server URI configured (embedded mode); "
+            "the copied DB file is the durable artifact")
+        return "skipped: no server URI configured (embedded mode)"
+    if "://" in target and not is_db_uri(target):
+        # A URI was configured but its scheme is unsupported — the endpoint is
+        # UNRESOLVABLE. This is a misconfiguration, never a silent skip.
+        scheme = target.split("://", 1)[0]
+        reason = (
+            f"unsupported DB URI scheme {scheme!r} (expected docker://, "
+            f"redis://, or rediss://) — snapshot endpoint unresolvable")
+        logger.error("BGSAVE failed — %s", reason)
+        return f"failed: {reason}"
+    if not is_db_uri(target):
+        # TORTOISE_DB_URI is a file path (backward-compat embedded mode).
+        logger.info("BGSAVE skipped — configured DB is an embedded file path")
+        return "skipped: embedded DB path"
+    try:
+        from tortoise.projection import resolve_db_endpoint
+        endpoint = resolve_db_endpoint(target)
+    except Exception as e:
+        reason = f"could not resolve the DB endpoint: {e}"
+        logger.error("BGSAVE failed — %s", reason, exc_info=True)
+        return f"failed: {reason}"
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=os.environ.get("FALKORDB_HOST", "localhost"), port=int(os.environ.get("FALKORDB_PORT", "16379")))
+
+        from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+        db = guarded_client(FalkorDB, host=endpoint.host, port=endpoint.port,
+                            username=endpoint.username, password=endpoint.password,
+                            ssl=endpoint.ssl,
+                            socket_connect_timeout=5, socket_timeout=10)
         db.connection.execute_command("BGSAVE")
-    except Exception:
-        pass  # ponytail: embedded/redislite doesn't support BGSAVE, skip
+    except Exception as e:
+        reason = f"BGSAVE against {endpoint.host}:{endpoint.port} failed: {e}"
+        logger.error("%s", reason, exc_info=True)
+        return f"failed: {reason}"
+    logger.info("BGSAVE triggered at %s:%s", endpoint.host, endpoint.port)
+    return "ok"

@@ -17,6 +17,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 EDGE_FN = _REPO_ROOT / "supabase" / "functions" / "tenant-provision" / "index.ts"
 SHARED_LOOKUP = _REPO_ROOT / "supabase" / "functions" / "_shared" / "lookup.ts"
@@ -27,13 +29,14 @@ def test_edge_function_parses():
     would make every signup 500 at deploy time. Regression guard for the
     duplicate-`const pepper` P0 caught in review (PR #847): string-assertion
     tests above cannot see redeclarations, and CI has no deno/tsc step, so
-    node's type-stripping parser is the cheapest gate (node >= 22.18).
-    Skips when node is absent."""
+    node's type-stripping parser is the cheapest gate (node >= 22.7 for
+    `--experimental-strip-types`; #4916 — a present-but-too-old host SKIPs,
+    it does not RED). Skips when node is absent."""
+    require_node_floor(
+        NODE_FLOOR_STRIP_TYPES,
+        what="the tenant-provision edge-function parse check",
+    )
     node = shutil.which("node")
-    if node is None:
-        import pytest
-
-        pytest.skip("node not available — edge-function parse check skipped")
     result = subprocess.run(
         [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
         capture_output=True,
@@ -155,11 +158,11 @@ def test_edge_function_fires_onboarding_email_after_provision():
     )
     # Fires after the starter-seed block, still inside the handler (provision
     # RPC already committed).
-    assert "await fireOnboardingEmail(teamId, display_name);" in src, (
+    assert "await fireOnboardingEmail(orgId, display_name);" in src, (
         "onboarding email must be fired after provisioning, passing the "
         "PERSON display_name"
     )
-    assert src.index("fireOnboardingEmail(teamId, display_name)") > src.index(
+    assert src.index("fireOnboardingEmail(orgId, display_name)") > src.index(
         "Starter seed failed"), (
         "onboarding email must fire after the starter seed (independent of it)"
     )
@@ -171,7 +174,7 @@ def test_edge_function_onboarding_email_passes_person_name_not_safe_name():
     whitespace-free; it is not a person's name (scope-doc §Personalization)."""
     src = EDGE_FN.read_text()
     # Scope the check to the onboarding POST body itself (safeName legitimately
-    # appears elsewhere — e.g. the provision_team RPC body p_team_name).
+    # appears elsewhere — e.g. the provision_team RPC body p_org_name).
     body_start = src.index("const body = JSON.stringify(")
     body_chunk = src[body_start:body_start + 400]
     assert "display_name: personDisplayName ?? undefined" in body_chunk, (
@@ -180,12 +183,12 @@ def test_edge_function_onboarding_email_passes_person_name_not_safe_name():
     assert "safeName" not in body_chunk, (
         "the org slug must never be passed as the email greeting source"
     )
-    assert "team_name" not in body_chunk, (
-        "the onboarding body must carry team_id + display_name only"
+    assert "org_name" not in body_chunk, (
+        "the onboarding body must carry org_id + display_name only"
     )
     # The call site passes the PERSON display_name — not safeName.
-    assert "await fireOnboardingEmail(teamId, display_name);" in src
-    assert "fireOnboardingEmail(teamId, safeName)" not in src
+    assert "await fireOnboardingEmail(orgId, display_name);" in src
+    assert "fireOnboardingEmail(orgId, safeName)" not in src
 
 
 def test_edge_function_onboarding_email_retries_and_never_fails_provisioning():

@@ -105,10 +105,26 @@ class _PropagationMixin:
         A point's neighbors are the other endpoints of any operator it participates in,
         regardless of source/target role — this is what makes EP affected-set expansion
         work for directional IMPL and bidirectional hasPart/NAND alike (#86).
+
+        ⛔ THE QUERY WAS UNFILTERED AND CONTRADICTED THIS DOCSTRING (#5566). It matched
+        `-[r]-(op)-[r2]-(m)` with no type constraint at all, so a structural edge
+        (`related`, `aboutSubject`, `memberOf`, …) or a reverse-only `IMPL` (the
+        mitigation back-link `(m)-[:IMPL]->(op)`) was returned as a neighbour — while the
+        line above promises IMPL/NAND. `TortoiseEP._live_neighbors` was narrowed to
+        `-(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`; this copy was left behind with the
+        type filter added but BOTH LEGS STILL UNDIRECTED, so it kept returning the far
+        endpoint of a reverse-only `IMPL` (the `(mit)-[:IMPL]->(op)` mitigation
+        back-link) — the same #5566 shape — and kept `{is_operator:true}` only, dropping
+        the legacy `op_type`-only operators that `_live_neighbors` deliberately admits.
+        It is reachable only through the deprecated shock-propagation path (no
+        production callers, pinned by `tests/test_bfs_audit.py`), so it did not keep
+        #5566 alive, but it was the same defect one refactor from being live. Now directed on both legs and using the same operator predicate, so
+        the code matches its contract.
         """
         rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
-            "WHERE m.id <> $id RETURN DISTINCT m.id",
+            "MATCH (n:Point {id:$id})<-[:IMPL|NAND]-(op:Point)-[:IMPL|NAND]->(m:Point) "
+            "WHERE m.id <> $id AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+            "RETURN DISTINCT m.id",
             params={"id": node_id},
         ).result_set
         return [r[0] for r in rows]

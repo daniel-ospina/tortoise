@@ -120,7 +120,21 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   // #2735: rotate's reveal moved to its OWN `rotatedKey` state (so the create
   // modal's dismiss cannot destroy an unread replacement) — the expiry echo
   // must ride it, or a rotated key silently reads 'never expires'.
-  assert.match(mainJsx, /setRotatedKey\(\{ plaintext: \(mk && \(mk\.key \|\| mk\.api_key\)\) \|\| '', expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
+  // #4342: the plaintext is derived ONCE and a plaintext-less mint is REFUSED
+  // before the latch (the pre-fix `|| ''` expression latched an empty reveal).
+  // Scoped to regenerateKey's body — createKey derives the same local name.
+  // Both pins are kept so neither the refusal NOR the expiry echo can be
+  // dropped silently.
+  const rotStart = mainJsx.indexOf('async function regenerateKey(')
+  assert.notEqual(rotStart, -1, 'regenerateKey must exist')
+  const rotBody = mainJsx.slice(rotStart, mainJsx.indexOf('\n  async function ', rotStart + 1))
+  assert.match(rotBody, /const plaintext = revealableMintPlaintext\(mk\)/,
+    'rotate derives the replacement plaintext through the shareable non-blank-string predicate')
+  assert.match(rotBody, /if \(!plaintext\) \{/, 'rotate must refuse a plaintext-less mint')
+  assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('setRotatedKey({ plaintext: plaintext'),
+    'the refusal must come BEFORE the reveal latch — no empty reveal can be set (#4342)')
+  assert.match(rotBody, /has already been revoked/, 'the refusal must state the OLD key is already revoked')
+  assert.match(rotBody, /setRotatedKey\(\{ plaintext: plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
     'rotate captures the server expiry echo into rotatedKey')
   assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'modal card shows the create expiry date')
   assert.match(mainJsx, /expires \{fmtExpiryDate\(rotatedKey\.expiresAt\)\}/, 'rotate reveal shows the replacement expiry date')

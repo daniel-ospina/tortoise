@@ -1,0 +1,28 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/.venv/bin/python3
+rootdir: /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 15 items
+
+tests/test_rebuild_recreate_content_parity.py::test_issue_repro_delete_recreate_content_parity PASSED [  6%]
+tests/test_rebuild_recreate_content_parity.py::test_operator_id_delete_recreate_parity PASSED [ 13%]
+tests/test_rebuild_recreate_content_parity.py::test_recreate_with_falsy_content_clears_derived PASSED [ 20%]
+tests/test_rebuild_recreate_content_parity.py::test_two_delete_recreate_generations PASSED [ 26%]
+tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_supersedes_revision PASSED [ 33%]
+tests/test_rebuild_recreate_content_parity.py::test_falsy_bare_reemit_keeps_revision_derived PASSED [ 40%]
+tests/test_rebuild_recreate_content_parity.py::test_intermediate_derived_write_wins PASSED [ 46%]
+tests/test_rebuild_recreate_content_parity.py::test_hash_flag_is_independent_of_embedding PASSED [ 53%]
+tests/test_rebuild_recreate_content_parity.py::test_props_only_superseded_revision_is_noop PASSED [ 60%]
+tests/test_rebuild_recreate_content_parity.py::test_post_recreation_revision_still_applies PASSED [ 66%]
+tests/test_rebuild_recreate_content_parity.py::test_cross_file_revision_before_creation_still_folds PASSED [ 73%]
+tests/test_rebuild_recreate_content_parity.py::test_cross_file_delete_recreate_shape_unchanged PASSED [ 80%]
+tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_still_folds_annotator_dim PASSED [ 86%]
+tests/test_rebuild_recreate_content_parity.py::test_delete_recreate_still_drops_annotator_dim PASSED [ 93%]
+tests/test_rebuild_recreate_content_parity.py::test_pre_first_creation_derived_half_open XFAIL [100%]
+
+======================== 14 passed, 1 xfailed in 15.55s ========================

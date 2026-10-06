@@ -14,7 +14,7 @@ Implement the approved Approach A from the scoping: shared pack catalog + per-te
 | D2 | "Copies starter packs" | Activation records, not file copies (industry pattern: shared catalog + per-tenant install-state; shared resources read-only for tenants) |
 | D3 | Enterprise governance | Defer until `tier: enterprise` exists (today a validation error) |
 | D4 | Introspection surface | Minimal read-only REST `GET /v1/packs` + MCP `packs_list` - in scope |
-| D5 | Existing-tenant backfill | Idempotent operator script re-runs activation per existing team; handles `team_{name}` vs `team_{id}` naming via recorded `graph_name` |
+| D5 | Existing-tenant backfill | Idempotent operator script re-runs activation per existing team; handles `org_{name}` vs `org_{id}` naming via recorded `graph_name` |
 | D6 | Existence masking | Empty result (no error) when nothing to see; errors only for auth failures - matches #969 masking pattern |
 
 Note (owner 2026-08-15): no legacy customers pre-launch (0 customers), so backfill is belt-and-suspenders - still included for correctness. Builders' own packs belong to #557 (sub-tenancy), sequenced after this.

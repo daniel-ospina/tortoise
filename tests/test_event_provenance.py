@@ -3,6 +3,7 @@ recency modulation, compute_reputation."""
 from __future__ import annotations  # noqa: I001
 
 import os
+import shutil
 import sys
 import tempfile
 import time  # noqa: F401
@@ -11,6 +12,7 @@ from datetime import datetime, timezone, timedelta  # noqa: F401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -25,6 +27,7 @@ def sdk():
     s.test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Part 1: uses/produces edges ──────────────────────────────────────────
@@ -1015,31 +1018,29 @@ class TestStubEntityULID:
 # ── #212: participatesIn edges ────────────────────────────────────────
 
 
-def _docker_falkor_reachable(port: int = 16379) -> bool:
-    """True when a live FalkorDB (Docker) answers on localhost:port.
+def _docker_falkor_reachable(port: int | None = None) -> bool:
+    """True when a live FalkorDB (Docker) answers on the PROVISIONED port.
 
-    #212 live-DB tests probe the provisioned falkordb-legacy service (16379)
-    — on the P3 docker lane (test-slow) the service is up so these RUN; the
-    skip is VISIBLE (never a vacuous return) and the reason is intentionally
-    NOT guard-exempt: a downed provisioned service must flip the guard red
+    #212 live-DB tests probe the provisioned falkordb-legacy service — on the
+    P3 docker lane (test-slow) the service is up so these RUN; the skip is
+    VISIBLE (never a vacuous return) and the reason is intentionally NOT
+    guard-exempt: a downed provisioned service must flip the guard red
     (fail-closed, epic #1647 D-4), not green-skip.
+
+    #6673: the legacy service is published on an EPHEMERAL host port (docker
+    `-p 0:6379`), read from tests/_live_utils.py — not the 16379 literal.
     """
-    import socket
-    try:
-        with socket.create_connection(("localhost", port), timeout=1.5):
-            return True
-    except OSError:
-        return False
+    return _live_utils.tcp_reachable(port or _live_utils.legacy_port(), timeout=1.5)
 
 
 @pytest.fixture
 def live_sdk_212():
     """Live FalkorProjection on a test-prefixed graph with test_guard."""
     if not _docker_falkor_reachable():
-        pytest.skip("live FalkorDB (docker://localhost:16379) not reachable — embedded-only run")
+        pytest.skip(f"live FalkorDB (docker://localhost:{_live_utils.legacy_port()}) not reachable — embedded-only run")
     old_uri = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = (
-        "docker://:@localhost:16379/tortoise_test_212_participates"
+        _live_utils.legacy_uri("tortoise_test_212_participates")
     )
     try:
         s = TortoiseSDK()

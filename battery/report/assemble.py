@@ -118,6 +118,12 @@ def assemble(run_artifacts: dict[str, dict[str, float | None]],
 
     matrix: dict[str, dict[str, dict[str, Any]]] = {}
     classifications: list[CellClassification] = []
+    # #3327: arms excluded from the matched-recall trigger (a0, the no-memory
+    # control) are annotated on their published rows — their retrieval recall
+    # is 0.0 by construction, so a delta vs them is recall-confounded. The
+    # annotation comes from the persisted block, so it never depends on a
+    # hardcoded arm list here.
+    excluded_controls = (matched_recall or {}).get("excluded_controls") or {}
     for fam in sorted(run_artifacts):
         arms = run_artifacts[fam]
         matrix[fam] = {}
@@ -130,19 +136,22 @@ def assemble(run_artifacts: dict[str, dict[str, float | None]],
                 # An insufficient_n cell is reported but never scored — it
                 # can not influence the verdict (no vacuous pass).
                 classifications.append(cell)
-                matrix[fam][arm] = {
+                row: dict[str, Any] = {
                     "value": value,
                     "delta": value - best_comparator,
                     "classification": cell.classification,
                     "load_bearing": cell.load_bearing,
                 }
             else:
-                matrix[fam][arm] = {
+                row = {
                     "value": None,
                     "delta": None,
                     "classification": cell.classification,
                     "load_bearing": False,
                 }
+            if arm in excluded_controls:
+                row["annotation"] = "recall-confounded"
+            matrix[fam][arm] = row
 
     verdict = decide_verdict(classifications, mitigation_paths,
                              matched_recall)

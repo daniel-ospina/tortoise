@@ -1,4 +1,4 @@
-"""#2165 Task 6 — ask() connected-assembly branch + ask_assembled (docker-lane).
+"""#2165 Task 6 — run_ask_lane() connected-assembly branch + run_ask_assembled (docker-lane).
 
 Golden-evidence record (R17): the EVIDENCE STRINGS below were CAPTURED from
 the deterministic flag-OFF legacy lane and the flag-ON fired lane on the
@@ -16,12 +16,58 @@ via the docker lane on tests/_assembly_graph.build_base_graph fixtures with
 question_date="2026-09-10" + a FakeReader (deterministic; no LLM in the
 evidence path).
 
+#3095: the goldens were RE-CAPTURED under this policy after #3018
+(`fix(retrieval): deterministic ranking order for a static store`) changed
+the engine's opaque fulltext scan order. The row SET is unchanged for every
+golden — only the order of the same rows moved. That claim is mechanically
+guarded, not just recorded: ``_FROZEN_CHUNKS`` holds the PRE-#3018 chunk
+multisets as an independent content record for the five re-captured legacy
+goldens (never regenerated from the goldens; its one documented content
+update is the #3804 note below), and ``_assert_golden`` checks content first
+and order second so the two failure modes stay distinguishable.
+
+#3804: the five flag-OFF legacy goldens were RE-CAPTURED again — this time
+for a DOCUMENTED CONTENT change (identity decoration), not an order drift.
+The point fetch now names a Point's own snake ``session_id`` prop (the
+identity ``create_point(session_id=…)`` and the LongMemEval ingest write),
+so the legacy lane's ``[session ?]`` placeholder became the real session id
+(``[session sess-2026-08-10]``). The change is DECORATION ONLY — row set,
+row order and row text are unchanged — and that claim is guarded
+mechanically, not narrated: ``_PRE_3804_CHUNKS`` preserves the pre-change
+row multisets (the ``[session ?]`` literals, transcribed independently) and
+``_assert_golden`` normalizes the live session tag back to ``[session ?]``
+for a second content comparison, so a "re-capture" that also dropped,
+duplicated or re-worded a row still fails. ``_FROZEN_CHUNKS`` was updated to
+the new content under its own "documented, reviewed content change" clause;
+#3804 is that record. The FIRED/HOSTED goldens are byte-unchanged: their
+spine carries ``lme_session_index``, whose index tag still wins in
+``_render_block``.
+
+#4593 A4-DEFAULT EXEMPTION from the R17 policy above (deliberate, narrow, and
+recorded here because R17 is the statement a lane reads FIRST). R17 names
+"the #2070 knob series (A1-A7)" as an invalidating surface. #4593 turned the
+ask lane's A4 ``search_keys`` PRF DEFAULT off (graph decision
+``2026-09-30-a4-query-expansion-default``: opt:1, EP 0.691), which does shrink
+the legacy evidence — but it is a DEFAULT change, and the two guards R17
+relies on collide for it: ``_assert_golden`` layer 1b requires the live
+multiset to recover ``_PRE_3804_CHUNKS`` and instructs the reader "Do NOT
+re-capture ``_PRE_3804_CHUNKS``", so re-capturing a row-DROPPING change would
+mean restructuring the #3804 guard to pin a default. Instead: the R17 goldens
+BELOW are PINNED to their capture-time A4=1 posture (``_ask_env_clean``), and
+the SHIPPED A4=0 evidence is pinned separately and literally
+(``_A4_OFF_ROWS`` / ``_A4_OFF_ORDERED`` +
+``test_product_default_a4_off_evidence_is_pinned``). A
+change to A4's IMPLEMENTATION — as opposed to its default — still invalidates
+these goldens under R17, unchanged.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
 import os
+import re
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,12 +75,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tests import _live_utils
+from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability (same gate as test_assembly_fixtures) ──
 _URI = os.environ.get(
     "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
@@ -102,9 +150,20 @@ def sdk(monkeypatch):
 @pytest.fixture(autouse=True)
 def _ask_env_clean(monkeypatch):
     """Hermetic env: the assembly + W4 flags start CLEAN (unset) for every
-    test; tests opt in explicitly."""
+    test; tests opt in explicitly.
+
+    The A4 ``search_keys`` PRF retrieval lever is PINNED to its capture-time
+    value (ON), not left floating on the lane's default: the R17 goldens below
+    were captured under ON, and #4593 turned that default OFF. The module
+    docstring's "#4593 A4-DEFAULT EXEMPTION" note records why this default
+    change is an exemption from R17 rather than a re-capture, and where the
+    SHIPPED A4=0 evidence is pinned instead. Scope: the pin is file-wide
+    (harmless today — no test here depends on A4's default); a future test that
+    wants the product default must ``delenv`` it, as
+    ``test_product_default_a4_off_evidence_is_pinned`` does."""
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
     monkeypatch.delenv("TORTOISE_W4_ENRICHMENT", raising=False)
+    monkeypatch.setenv("TORTOISE_ASK_SEARCH_KEYS_PRF", "1")
     yield
 
 
@@ -113,67 +172,261 @@ from tests.test_ask_sdk import FakeReader, _install_fake  # noqa: E402
 Q_DATE = "2026-09-10"
 
 # ── Golden evidence records (captured Task-6 Step 1, deterministic) ──────
+# #3095 RE-CAPTURE (R17 invalidation policy): commit #3018
+# (`fix(retrieval): deterministic ranking order for a static store`) removed
+# the post-CREATE write whose fulltext index-statistic skew had produced the
+# engine's old opaque scan order, so the legacy lane's row ORDER moved. The
+# ROW SET is byte-for-byte unchanged for every golden (verified by diff on
+# tests/_assembly_graph.build_base_graph / build_out_of_subgraph_gold,
+# question_date="2026-09-10", FakeReader, embedder pinned off) — only the
+# order of the same rows changed. Re-captured from the docker lane per the
+# policy above; the golden assertions in
+# ``test_flag_off_golden_byte_identity`` etc. now pin the invariant
+# explicitly via ``_assert_golden`` — a CONTENT chunk-multiset check
+# (``_FROZEN_CHUNKS``, header + rows, order-insensitive, duplicate-aware)
+# followed by the ORDER byte check — so a future order drift is diagnosed as
+# a re-capture, not a content regression.
+# #3804 RE-CAPTURE (R17, documented CONTENT change — identity decoration):
+# the point fetch now names a Point's own snake ``session_id`` prop, so the
+# legacy lane's ``[session ?]`` placeholder became the real session id. Row
+# set / order / text are unchanged; ``_assert_golden``'s tag-only layer
+# proves it against ``_PRE_3804_CHUNKS``. The FIRED/HOSTED goldens below are
+# untouched (their spine's ``lme_session_index`` tag still wins).
 GOLD_LEGACY_CURRENT = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] the new sofa was delivered on the first of september"""
+[session sess-distract-8] talked about phone battery replacement shop with a friend"""
 GOLD_LEGACY_MISFIRE = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] took the dog to the vet for the chewed cushion
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] the new sofa was delivered on the first of september"""
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_AGO = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] the new sofa was delivered on the first of september"""
+[session sess-distract-8] talked about phone battery replacement shop with a friend"""
 GOLD_LEGACY_COMPARE = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] took the dog to the vet for the chewed cushion"""
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_CANARY = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] took the dog to the vet for the chewed cushion
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion
 
-[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month"""
+[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month"""
 CANARY_QUESTION = ("which came first - buying the couch or the "
                   "dog bed getting chewed?")
+
+# ── FROZEN row sets — the INDEPENDENT content record (#3095, #3804) ─────
+# The byte-goldens above are re-captured whenever the engine's opaque
+# fulltext ORDER moves (R17). That makes them useless as a content guard: a
+# reflexive regeneration (the exact thing R17 forbids) satisfies them by
+# construction. These frozensets are the independent record that makes
+# "order drift" mechanically distinguishable from "content loss". Update
+# ONLY with a documented, reviewed content change (never as a re-capture).
+# Scope: the flag-OFF legacy lane's five goldens.
+#
+# #3804 (documented, reviewed CONTENT change): the rows below now carry the
+# REAL session id instead of the ``[session ?]`` placeholder. ``_PRE_3804_*``
+# preserves the pre-change literals verbatim and ``_assert_golden``
+# normalizes the live tag back to ``[session ?]`` to re-check the pre-change
+# multiset, so the "decoration only" claim is enforced, not asserted.
+_ROW_COUCH_STATUS = frozenset({
+    "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+    "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+    "[session sess-distract-8] talked about phone battery replacement shop with a friend",
+})
+_ROW_COUCH_DOGBED = _ROW_COUCH_STATUS | frozenset({
+    "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+    "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+})
+_ROW_CANARY = _ROW_COUCH_DOGBED | frozenset({
+    "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+})
+_FROZEN_ROWS = {
+    "what is the current status of the couch?": _ROW_COUCH_STATUS,
+    "compare the couch and the dog bed, which should i keep?": _ROW_COUCH_DOGBED,
+    "what was the couch status two weeks ago?": _ROW_COUCH_STATUS,
+    "which came first - the couch or the dog bed?": _ROW_COUCH_DOGBED,
+    CANARY_QUESTION: _ROW_CANARY,
+}
+# PRE-#3804 literals, transcribed independently (NOT derived from the new
+# rows) so they remain a second, non-tautological content record: the same
+# five questions with the ``[session ?]`` placeholder the legacy lane used
+# before identity decoration.
+_PRE_3804_ROW_COUCH_STATUS = frozenset({
+    "[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+    "[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    "[session ?] the new sofa was delivered on the first of september",
+    "[session ?] talked about phone battery replacement shop with a friend",
+})
+_PRE_3804_ROW_COUCH_DOGBED = _PRE_3804_ROW_COUCH_STATUS | frozenset({
+    "[session ?] the dog chewed the corner of the dog bed cushion",
+    "[session ?] took the dog to the vet for the chewed cushion",
+})
+_PRE_3804_ROW_CANARY = _PRE_3804_ROW_COUCH_DOGBED | frozenset({
+    "[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+})
+_PRE_3804_ROWS = {
+    "what is the current status of the couch?": _PRE_3804_ROW_COUCH_STATUS,
+    "compare the couch and the dog bed, which should i keep?": _PRE_3804_ROW_COUCH_DOGBED,
+    "what was the couch status two weeks ago?": _PRE_3804_ROW_COUCH_STATUS,
+    "which came first - the couch or the dog bed?": _PRE_3804_ROW_COUCH_DOGBED,
+    CANARY_QUESTION: _PRE_3804_ROW_CANARY,
+}
+# The full frozen CHUNK multiset per question: the literal row sets above plus
+# the rendered header chunk. Built from the literals (never from the
+# goldens), so it stays an independent record of the PRE-#3018 output.
+_HEADER_CHUNK = "Current Date: 2026-09-10"
+_FROZEN_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _FROZEN_ROWS.items()
+}
+_PRE_3804_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _PRE_3804_ROWS.items()
+}
+
+# ── A4-PRF-OFF evidence record (#4593) ──────────────────────────────────
+# The COMMITTED goldens above were captured with the ask lane's A4
+# ``search_keys`` PRF lever ON. #4593 turned that DEFAULT off (graph
+# decision ``2026-09-30-a4-query-expansion-default``: opt:1, EP 0.691), so
+# the SHIPPED flag-OFF lane now returns a SMALLER multiset for some of these
+# questions — A4's additive expansion is what pulled the extra rows in. The
+# drop is intended, so it is recorded here as its own literal (transcribed
+# from the lane, never derived by subtracting one record from another) and
+# pinned by ``test_product_default_a4_off_evidence_is_pinned``. The R17
+# goldens above keep pinning the capture-time A4=1 posture; see the
+# #4593 note in the module docstring for why the default change is an
+# exemption to R17 rather than a re-capture.
+_A4_OFF_ROWS = {
+    "what is the current status of the couch?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "compare the couch and the dog bed, which should i keep?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "what was the couch status two weeks ago?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "which came first - the couch or the dog bed?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+    }),
+    CANARY_QUESTION: frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+    }),
+}
+_A4_OFF_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _A4_OFF_ROWS.items()
+}
+#: The shipped A4=0 posture's chunk ORDER (the rendered sequence, header
+#: included) — the byte-identity half, mirroring what the R17 goldens pin for
+#: the A4=1 posture. Transcribed from the lane in render order, not sorted. An
+#: order drift here is the engine's opaque fulltext sequence moving (see
+#: ``_assert_golden`` layer 2), i.e. re-capture territory rather than a content
+#: regression — the multiset check in the tests keeps the two distinguishable.
+_A4_OFF_ORDERED = {
+    "what is the current status of the couch?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    ),
+    "compare the couch and the dog bed, which should i keep?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+    ),
+    "what was the couch status two weeks ago?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    ),
+    "which came first - the couch or the dog bed?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+    ),
+    CANARY_QUESTION: (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+    ),
+}
+
+#: A rendered row's leading session annotation, ``[session <id>]`` — the ONLY
+#: part #3804 changed.
+_SESSION_TAG_HEAD_RE = re.compile(r"^\[session [^\]]*\]")
+
+
+def _strip_session_tag(chunk: str) -> str:
+    """Normalize a row's leading ``[session <id>]`` annotation back to the
+    ``[session ?]`` placeholder (#3804), every other byte untouched — so the
+    pre-change content record can be re-checked against post-change
+    evidence and the "identity decoration only" claim is mechanically
+    enforced."""
+    return _SESSION_TAG_HEAD_RE.sub("[session ?]", chunk, count=1)
 
 
 GOLD_FIRED_CURRENT = """Current Date: 2026-09-10
@@ -236,11 +489,80 @@ def _ask(sdk, monkeypatch, q, *, flag_on=False, question_type=None,
     else:
         monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    return sdk.ask(q, question_date=question_date,
+    return run_ask_lane(sdk, q, question_date=question_date,
                    question_type=question_type)
 
 
 # ── Step 1/2: flag-OFF byte-identity + unrouted flag-ON byte-identity ─────
+def _evidence_chunks(evidence: str) -> tuple[str, ...]:
+    """Order-insensitive MULTISET of an evidence block's chunks (the
+    ``Current Date:`` header included) — the content half of the golden
+    contract.
+
+    A tuple of the chunk-sorted chunks, NOT a set: a set erases multiplicity,
+    so a DUPLICATED row would compare equal and the byte assertion below
+    would then report it as an order drift — pointing the reader at a
+    re-capture (which would launder the regression permanently)."""
+    return tuple(sorted(ag.evidence_chunks(evidence)))
+
+
+def _assert_golden(evidence: str, question: str, gold: str) -> None:
+    """Three-layer golden gate (#3095, #3804): CONTENT, TAG-ONLY, ORDER.
+
+    Layer 1 (content) compares the full chunk multiset — header and rows,
+    order-insensitively — against ``_FROZEN_CHUNKS``, the never-reflexively-
+    regenerated record. A dropped, duplicated, or re-rendered chunk reports
+    as a *content regression*.
+
+    Layer 1b (tag-only, #3804) normalizes the live session tag back to the
+    ``[session ?]`` placeholder and compares against ``_PRE_3804_CHUNKS``,
+    the pre-#3804 literals transcribed independently. So the "#3804 changed
+    only the session tag" claim is enforced rather than narrated: a
+    re-capture that ALSO dropped, duplicated or re-worded a row fails here
+    even after ``_FROZEN_CHUNKS`` was updated.
+
+    Layer 2 (order) compares the re-captured byte-golden; when the engine's
+    opaque fulltext sequence moves it reports as an *order drift*, which is
+    R17 re-capture territory rather than a bug.
+
+    Content is asserted FIRST on purpose: a byte assert first would abort
+    before the content comparison, making the two failure modes
+    indistinguishable (the trap the first cut of this fix fell into).
+
+    Scope: the five flag-OFF legacy goldens. The FIRED/hosted goldens were
+    not invalidated by #3018 (and not by #3804 — their ``lme_session_index``
+    tag wins in ``_render_block``) and remain bare byte-equality."""
+    live = _evidence_chunks(evidence)
+    frozen = _FROZEN_CHUNKS[question]
+    assert live == frozen, (
+        f"CONTENT regression on {question!r}: the evidence chunk multiset "
+        "(header + rows, order-insensitive) moved. This is NOT an order "
+        "drift — do NOT re-capture the golden, that would launder it; "
+        "investigate the pipeline. "
+        # multiset diagnostics on purpose: a set difference reports a pure
+        # DUPLICATE as "Missing: []; unexpected: []" — the regression the
+        # multiset comparison exists to catch.
+        f"Missing: {sorted((Counter(frozen) - Counter(live)).elements())}; "
+        f"unexpected: {sorted((Counter(live) - Counter(frozen)).elements())}")
+    normalized = tuple(sorted(_strip_session_tag(c)
+                              for c in ag.evidence_chunks(evidence)))
+    pre = _PRE_3804_CHUNKS[question]
+    assert normalized == pre, (
+        f"CONTENT regression BENEATH the #3804 session-tag decoration on "
+        f"{question!r}: normalizing the live ``[session <id>]`` tags back to "
+        "``[session ?]`` no longer recovers the pre-#3804 row multiset, so "
+        "the change was NOT tag-only — a row was dropped, duplicated, "
+        "re-worded or re-bounded. Do NOT re-capture ``_PRE_3804_CHUNKS``; "
+        "investigate the pipeline. "
+        f"Missing: {sorted((Counter(pre) - Counter(normalized)).elements())}; "
+        f"unexpected: {sorted((Counter(normalized) - Counter(pre)).elements())}")
+    assert evidence == gold, (
+        f"ROW ORDER drifted on {question!r}: the chunk multiset is intact, "
+        "so this is the engine's opaque fulltext sequence moving, not a "
+        "content change — verify the set then RE-CAPTURE + RE-REVIEW per "
+        "the R17 policy at the top of this module.")
+
+
 def test_flag_off_golden_byte_identity(sdk, monkeypatch):
     """Flag OFF == the committed legacy golden (capture-time record)."""
     ag.build_base_graph(sdk)
@@ -249,9 +571,13 @@ def test_flag_off_golden_byte_identity(sdk, monkeypatch):
         ("compare the couch and the dog bed, which should i keep?",
          GOLD_LEGACY_MISFIRE),
         ("what was the couch status two weeks ago?", GOLD_LEGACY_AGO),
+        # #3095: GOLD_LEGACY_COMPARE was re-captured but never asserted by
+        # any test (dead since its introduction) — its byte-identity
+        # contract is now actually enforced.
+        ("which came first - the couch or the dog bed?", GOLD_LEGACY_COMPARE),
     ]:
         res = _ask(sdk, monkeypatch, q, flag_on=False)
-        assert res["evidence"] == gold, q
+        _assert_golden(res["evidence"], q, gold)
         # NOTE: the legacy lane's retrieval_degraded is the AMBIENT
         # no-embedder signal (vector leg ran:False) — NOT part of this
         # golden contract; only EVIDENCE equality is pinned here.
@@ -267,7 +593,58 @@ def test_flag_on_unrouted_byte_identity(sdk, monkeypatch):
         ("what was the couch status two weeks ago?", GOLD_LEGACY_AGO),
     ]:
         res = _ask(sdk, monkeypatch, q, flag_on=True)
-        assert res["evidence"] == gold, q
+        _assert_golden(res["evidence"], q, gold)
+
+
+def test_product_default_a4_off_evidence_is_pinned(sdk, monkeypatch):
+    """#4593: the SHIPPED flag-OFF lane (A4 PRF default OFF) returns a SMALLER
+    multiset than the capture-time R17 goldens above. Those goldens pin the
+    A4=1 capture posture (``_ask_env_clean``) and must keep doing so, so the
+    shipped A4=0 multiset is pinned HERE — otherwise an evidence-level
+    regression on the product default would pass this module silently.
+
+    The expectation is a literal record (``_A4_OFF_ROWS``), not a subtraction
+    of the two postures: derived expectations cannot fail when the thing they
+    are derived from moves."""
+    monkeypatch.delenv("TORTOISE_ASK_SEARCH_KEYS_PRF", raising=False)
+    ag.build_base_graph(sdk)
+    for q in [
+        "what is the current status of the couch?",
+        "compare the couch and the dog bed, which should i keep?",
+        "what was the couch status two weeks ago?",
+        "which came first - the couch or the dog bed?",
+    ]:
+        res = _ask(sdk, monkeypatch, q, flag_on=False)
+        live = _evidence_chunks(res["evidence"])
+        frozen = _A4_OFF_CHUNKS[q]
+        assert live == frozen, (
+            f"A4-OFF evidence moved on {q!r} — the shipped default's evidence "
+            "changed. "
+            f"Missing: {sorted((Counter(frozen) - Counter(live)).elements())}; "
+            f"unexpected: {sorted((Counter(live) - Counter(frozen)).elements())}")
+        assert tuple(ag.evidence_chunks(res["evidence"])) == _A4_OFF_ORDERED[q], (
+            f"A4-OFF chunk ORDER drifted on {q!r}: the multiset above is "
+            "intact, so this is the engine's opaque fulltext sequence moving — "
+            "verify the set, then RE-CAPTURE + RE-REVIEW ``_A4_OFF_ORDERED``.")
+
+
+def test_product_default_a4_off_keeps_the_out_of_subgraph_canary(
+        sdk, monkeypatch):
+    """#4593 side-effect check, and the reason this file could not be left as
+    it was: A4's additive expansion is what pulled several rows in, so turning
+    its default OFF shrinks the evidence. This pins that the one row the
+    R16(b) canary depends on — the out-of-subgraph gold carrying "reading
+    lamp" — STILL reaches the legacy lane under the shipped default."""
+    monkeypatch.delenv("TORTOISE_ASK_SEARCH_KEYS_PRF", raising=False)
+    ag.build_base_graph(sdk)
+    o = ag.build_out_of_subgraph_gold(sdk)
+    legacy = _ask(sdk, monkeypatch, o["question"], flag_on=False)
+    assert o["question"] == CANARY_QUESTION, o["question"]
+    assert _evidence_chunks(legacy["evidence"]) == _A4_OFF_CHUNKS[o["question"]]
+    assert tuple(ag.evidence_chunks(legacy["evidence"])) == _A4_OFF_ORDERED[o["question"]]
+    assert "reading lamp" in legacy["evidence"], (
+        "A>=1 (R16(b)) must survive the A4 default turning OFF — the "
+        "out-of-subgraph gold no longer reaches the legacy lane")
 
 
 def test_fired_routing_exact_goldens(sdk, monkeypatch):
@@ -315,7 +692,7 @@ def test_positive_fts_paraphrase_fires(sdk, monkeypatch):
     """Docker positive: 'the couch I bought in March' resolves via name-token
     FTS (source=fts) AND the fired path assembles the state-header block."""
     ag.build_base_graph(sdk)
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "what is the current status of the couch I bought in March?",
         question_date=Q_DATE)
     assert aa.fired is True, "paraphrase subject must route via FTS"
@@ -331,11 +708,10 @@ def test_out_of_subgraph_gold_a1_b0(sdk, monkeypatch):
     o = ag.build_out_of_subgraph_gold(sdk)
     legacy = _ask(sdk, monkeypatch, o["question"], flag_on=False)
     assert o["question"] == CANARY_QUESTION, o["question"]
-    assert legacy["evidence"] == GOLD_LEGACY_CANARY, \
-        "Step-1 capture: legacy canary output must match the golden"
+    _assert_golden(legacy["evidence"], o["question"], GOLD_LEGACY_CANARY)
     assert "reading lamp" in legacy["evidence"], \
         "A≥1: legacy must admit the out-of-subgraph gold"
-    aa = sdk.ask_assembled(o["question"], question_date=Q_DATE)
+    aa = run_ask_assembled(sdk, o["question"], question_date=Q_DATE)
     assert aa.fired is True, "the canary compare must fire"
     assert "reading lamp" not in aa.evidence,         "B=0: assembled walks only the resolved subjects' subgraphs"
     assert all("bookshelf" not in (h.get("content") or "")
@@ -365,9 +741,9 @@ def test_validation_precedes_fired_branch(sdk, monkeypatch):
         "x" * 2001,
     ]:
         with pytest.raises(AskValidationError):
-            sdk.ask(bad, question_date=Q_DATE)
+            run_ask_lane(sdk, bad, question_date=Q_DATE)
     with pytest.raises(AskValidationError):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date="not-a-date")
 
 
@@ -375,7 +751,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
     """Fired path: EXACTLY ONE model call. A reader raise maps to
     AskReaderUnavailable with ZERO legacy re-run (retrieval must never fire
     again on the fired path)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     from tortoise.exceptions import AskReaderUnavailable
     calls = {"n": 0}
     raise_on = {"n": 0}
@@ -392,7 +768,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
                             AssertionError("legacy retrieval must NOT run")))
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     ag.build_base_graph(sdk)
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert calls["n"] == 1
     assert res["evidence"] == GOLD_FIRED_CURRENT
@@ -403,7 +779,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
     cache.pop(f"ask:{getattr(sdk, '_namespace', 'default')}", None)
     raise_on["n"] = 1
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date=Q_DATE)
     assert calls["n"] == 2  # no second reader attempt, no legacy re-run
 
@@ -433,7 +809,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
         return out
 
     monkeypatch.setattr(why_mod, "enrich_items", _attach)
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert res["evidence"] == GOLD_FIRED_CURRENT  # why keys never alter text
     why = res.get("why", [])
@@ -441,7 +817,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
     # every entry's point_id belongs to a REAL evidence row (pure assembly
     # read of the same fired block — no reader); synthesized no-id lines
     # never produced an entry
-    aa = sdk.ask_assembled("what is the current status of the couch?",
+    aa = run_ask_assembled(sdk, "what is the current status of the couch?",
                            question_date=Q_DATE)
     ev_ids = {h.get("id") for h in aa.post_cap_lines if h.get("id")}
     assert all(e.get("point_id") in ev_ids for e in why), why
@@ -453,7 +829,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
         raise RuntimeError("w4 exploded")
 
     monkeypatch.setattr(why_mod, "enrich_items", _boom_enrich)
-    res2 = sdk.ask("what is the current status of the couch?",
+    res2 = run_ask_lane(sdk, "what is the current status of the couch?",
                    question_date=Q_DATE)
     assert res2["evidence"] == GOLD_FIRED_CURRENT
     assert res2.get("why") == []
@@ -481,17 +857,91 @@ def test_no_successor_record_name_only_and_degraded_false(sdk, monkeypatch):
     ag.build_supersession_chain_variants(sdk)
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    res = sdk.ask("what is the current status of the orphan-src?",
+    res = run_ask_lane(sdk, "what is the current status of the orphan-src?",
                   question_date=Q_DATE)
     assert "STATE (orphan-src): superseded by successor-never-created" in \
         res["evidence"]
     assert "no successor record found" in res["evidence"]
     assert res["retrieval_degraded"] is False, res["evidence"]
-    res2 = sdk.ask("what is the current status of the torn-row?",
+    res2 = run_ask_lane(sdk, "what is the current status of the torn-row?",
                    question_date=Q_DATE)
     assert "STATE (torn-row): superseded (successor unknown)" in \
         res2["evidence"]
     assert res2["retrieval_degraded"] is False
+
+
+def test_long_successor_fold_stored_full_and_verified(sdk, monkeypatch):
+    """#5370: a >200-char successor is stored VERBATIM by the supersession
+    fold, VERIFIED by the ask-path successor probe (name-keyed on the stored
+    value), and rendered as a full supersession clause — never the false
+    "no successor record found" name-only annotation.
+
+    Pre-fix the fold stored ``supersededBy = str(successor)[:200]`` — a
+    200-char prefix that names NO Object — so ``_probe_visible_successors``
+    (``MATCH (o:Object) WHERE o.name IN $names``) matched nothing and the
+    renderer reported the successor missing while it existed and was live.
+    """
+    from tortoise.assembly import (
+        AssemblyShape,
+        AssemblySlices,
+        _probe_visible_successors,
+        docker_walker_port,
+        synthesize_hits,
+    )
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "long-src", "supersedes_by": long_name,
+          "evidence": "#5370 regression"}],
+        session_id="s5370", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # (a) stored VERBATIM — the full successor name, not a 200-char prefix.
+    oid, status, stored = proj.g.query(
+        "MATCH (o:Object {name:'long-src'}) "
+        "RETURN o.id, o.status, o.supersededBy").result_set[0]
+    assert status == "superseded", (status, stored)
+    assert stored == long_name, (
+        f"stored supersededBy is {len(stored)} chars, expected the full "
+        f"{len(long_name)}-char successor name")
+
+    # (b) the ask-path probe verifies it and the renderer emits the verified
+    #     clause — never the false "no successor record found".
+    slices = AssemblySlices(
+        state_rows=tuple(docker_walker_port(sdk).state_rows([oid])),
+        timeline_rows=(), evidence_rows=(), admission={})
+    verified = _probe_visible_successors(sdk, slices)
+    assert long_name in verified, sorted(verified)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           successors_verified=verified)
+    content = hits[0]["content"]
+    assert "no successor record found" not in content, content
+    assert content.startswith("STATE (long-src): superseded by "), content
+
+    # (c) the same holds on the fired ask path (the probe is WIRED in, not
+    #     merely callable) — evidence carries the verified clause. Pin
+    #     supersededAt BEFORE the question date: the live fold stamps it with
+    #     the current time, and the renderer's as-of rule would otherwise
+    #     (correctly) render the pre-supersession state.
+    proj.g.query("MATCH (o:Object {name:'long-src'}) "
+                 "SET o.supersededAt='2026-09-01T00:00:00Z'")
+    # The fleet shell carries TORTOISE_API_URL; the eval lane needs a LOCAL
+    # graph (same hermetic step as tests/test_ask_sdk.py).
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+    _install_fake(sdk, monkeypatch, reply="GOLD")
+    res = run_ask_lane(sdk, "what is the current status of long-src?",
+                       question_date=Q_DATE)
+    assert "STATE (long-src): superseded by " in res["evidence"]
+    assert "no successor record found" not in res["evidence"], res["evidence"]
 
 
 def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
@@ -508,7 +958,7 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
     ag._link_point_about(proj, "pMalformed", ["couch"])
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert "unparseable date" in res["evidence"]
     assert res["retrieval_degraded"] is False
@@ -517,10 +967,27 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
 def test_caps_bind_and_no_starvation(sdk, monkeypatch):
     """Fired caps: assemble_context item cap (40) + 8000-token + 32 KiB byte
     caps bind post-CAP lines; slice-level truncation is authoritative BEFORE
-    the item cap (admission.truncated on the hub)."""
+    the item cap (admission.truncated on the hub).
+
+    The caps are SET here to a known small shape rather than read from the
+    product defaults (#4105 raised the ask-lane defaults to 200/400/200/
+    16000/128000 bytes) - this test pins the cap-BINDING mechanism, and a
+    default change must not silently un-bind it."""
+    from tortoise.retrieval import (
+        ASK_CONTEXT_BYTE_CAP_ENV,
+        ASK_CONTEXT_ITEM_CAP_ENV,
+        ASK_CONTEXT_TOKEN_CAP_ENV,
+        ASK_POOL_SIZE_ENV,
+        ASK_RETRIEVAL_LIMIT_ENV,
+    )
+    monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, "40")
+    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "40")
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "120")
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "8000")
+    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "32768")
     ag.build_base_graph(sdk)
     ag.build_hub_graph(sdk, n_points=60)
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "which came first - the hub-subject or the dog bed?",
         question_date=Q_DATE)
     assert aa.fired is True
@@ -545,7 +1012,7 @@ def test_no_starvation_whole_hit_skip_survivor(sdk, monkeypatch):
         id="pGiant", session_id="sess-giant", is_episodic=True,
         status="draft", createdAt="2026-08-11")
     ag._link_point_about(proj, "pGiant", ["couch"])
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "which came first - the couch or the dog bed?", question_date=Q_DATE)
     assert aa.fired is True
     texts = [h.get("content") or "" for h in aa.post_cap_lines]
@@ -566,7 +1033,7 @@ def test_assembly_answer_contract_shape(sdk, monkeypatch):
 
     from tortoise.assembly import AssemblyAnswer
     ag.build_base_graph(sdk)
-    aa = sdk.ask_assembled("what is the current status of the couch?",
+    aa = run_ask_assembled(sdk, "what is the current status of the couch?",
                            question_date=Q_DATE)
     fields = {f.name for f in dataclasses.fields(AssemblyAnswer)}
     assert fields == {"fired", "shape", "question_type", "subjects",
@@ -581,12 +1048,12 @@ def test_assembly_answer_contract_shape(sdk, monkeypatch):
     # per-namespace reader cache makes the FIRST reader the model for the
     # namespace, so pin the answer against the installed fake's reply.
     _install_fake(sdk, monkeypatch, reply="READER ANSWER")
-    aa2 = sdk.ask_assembled("what is the current status of the couch?",
+    aa2 = run_ask_assembled(sdk, "what is the current status of the couch?",
                             question_date=Q_DATE,
                             _reader_factory=lambda: FakeReader(
                                 reply="READER ANSWER", tokens_out=6))
     assert aa2.answer == "READER ANSWER"
-    aa3 = sdk.ask_assembled("compare the couch and the dog bed, which "
+    aa3 = run_ask_assembled(sdk, "compare the couch and the dog bed, which "
                             "should i keep?", question_date=Q_DATE)
     assert aa3.fired is False and aa3.answer is None and aa3.evidence == ""
 
@@ -597,7 +1064,7 @@ def test_hosted_delegated_client_raises(sdk, monkeypatch):
     from tortoise.exceptions import AskRetrievalUnavailable
     monkeypatch.setenv("TORTOISE_API_URL", "https://example.test")
     with pytest.raises(AskRetrievalUnavailable):
-        sdk.ask_assembled("what is the current status of the couch?")
+        run_ask_assembled(sdk, "what is the current status of the couch?")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
 
 
@@ -614,7 +1081,7 @@ def test_contentless_resolved_subjects_legacy_fallback(sdk, monkeypatch):
     on = _ask(sdk, monkeypatch, q, flag_on=True)
     # fired-but-empty must fall through to legacy (no empty-block reader call)
     assert on["evidence"] == off["evidence"]
-    aa = sdk.ask_assembled(q, question_date=Q_DATE)
+    aa = run_ask_assembled(sdk, q, question_date=Q_DATE)
     assert aa.fired is False
 
 
@@ -638,14 +1105,82 @@ def test_raw_object_hit_flat_superseded_by_guard(sdk, monkeypatch):
     monkeypatch.setattr(amod, "synthesize_hits", _poison)
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     with pytest.raises(AskRetrievalUnavailable):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date=Q_DATE)
 
 
 def test_r14_drift_guard(sdk, monkeypatch):
-    """R14: _assemble_connected is referenced ONLY by ask()'s branch and
-    ask_assembled (exactly two CALL sites in sdk.py)."""
-    src = Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py"
-    text = src.read_text()
-    assert text.count("_assemble_connected(") == 2, \
-        text.count("_assemble_connected(")
+    """R14 (#3849): the connected-assembly branch is reachable from BOTH
+    eval-lane entry points. A BEHAVIOURAL guard, not a source-text grep (the
+    grep the #3849 move invalidated): with the flag ON both entry points fire
+    the assembled render, and a poisoned synthesizer raises
+    AskRetrievalUnavailable from both."""
+    import tortoise.assembly as amod
+    from tortoise.exceptions import AskRetrievalUnavailable
+    ag.build_base_graph(sdk)
+
+    # 1. both entry points reach _assemble_connected and fire the render
+    legacy = _ask(sdk, monkeypatch, "what is the current status of the couch?",
+                  flag_on=True)
+    assert legacy["evidence"] == GOLD_FIRED_CURRENT, legacy["evidence"]
+    aa = run_ask_assembled(
+        sdk, "what is the current status of the couch?", question_date=Q_DATE)
+    assert aa.fired is True, "ask_assembled must reach _assemble_connected"
+    assert aa.shape == "current-state"
+
+    # 2. an assembler-stage raise surfaces from BOTH — the drift this guards
+    # is a refactor leaving only ONE entry point wired to the branch
+    def _poison(*args, **kwargs):
+        raise RuntimeError("poisoned synthesize")
+
+    monkeypatch.setattr(amod, "synthesize_hits", _poison)
+    with pytest.raises(AskRetrievalUnavailable):
+        _ask(sdk, monkeypatch, "what is the current status of the couch?",
+             flag_on=True)
+    with pytest.raises(AskRetrievalUnavailable):
+        run_ask_assembled(
+            sdk, "what is the current status of the couch?",
+            question_date=Q_DATE)
+
+
+def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
+    """#5370 review round 3 (P2): the issue's verification table names the
+    SDK OBJECT READ (``tortoise_fts_query(entity_type='object')``) as a
+    surface where ``superseded_by`` must equal the stored FULL successor
+    name. Every other #5370 test reads the property through Cypher directly,
+    so that agent-facing contract was left unpinned.
+
+    The read path is ``sdk.py``'s ``entity_type == "object"`` branch, which
+    echoes ``n.supersededBy`` unchanged — this test exists so a future
+    truncation introduced THERE (rather than in the fold) cannot land
+    silently, which the Cypher-level tests could not catch.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("r" * 240)
+    assert len(long_name) > 200
+    sdk.create_entity("object", "read-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        sdk._get_proj(), sdk,
+        [{"superseded": "read-src", "supersedes_by": long_name,
+          "evidence": "#5370 sdk object read"}],
+        session_id="s5370_read", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # #3301: the folded Object is SUPERSEDED, and the search lane's default
+    # Object view now excludes the canonical terminal vocabulary — so read it
+    # through the terminal-inclusive view (the documented audit/history
+    # opt-in). This test pins #5370's TRUNCATION contract, not visibility.
+    hits = sdk.tortoise_fts_query("read-src", entity_type="object",
+                                  limit=25, include_terminal=True)
+    hit = next((h for h in hits if h.get("content") == "read-src"), None)
+    assert hit is not None, (
+        "the SDK object read returned no hit for the folded Object: "
+        f"{[h.get('content') for h in hits]!r}")
+    got = hit.get("superseded_by", "")
+    assert got == long_name, (
+        f"the SDK object read returned {len(got)} chars, expected the full "
+        f"{len(long_name)}-char successor name")

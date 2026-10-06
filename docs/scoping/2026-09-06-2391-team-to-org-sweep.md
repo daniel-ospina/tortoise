@@ -38,12 +38,12 @@ Coordinated sweep required: `tests/e2e/test_dashboard_identity.py` pins old stri
 
 | # | Endpoint | Copy now → new | Loc |
 |---|---|---|---|
-| S1 | POST /v1/teams (create-org, supabase lane) | `Team name required` → `Organization name required` | :8401 |
-| S2 | POST /v1/teams | `Team name must be ≤ 64 characters` → `Organization name must be ≤ 64 characters` | :8403 |
-| S3 | POST /v1/teams | `Invalid team name` → `Invalid organization name` | :8408 |
-| S4 | POST /v1/teams | `Team name already exists` (409) → `Organization name already exists` | :8456 :8525 :8565 :8582 (registry except-map) |
-| S5 | POST /v1/teams | `Too many teams created — try again later` (429) → `Too many organizations created — try again later` | :8451 :8554 |
-| S6 | POST /v1/teams | `Create another team requires a paid plan — upgrade an existing team first` (402) → `Create another organization requires a paid plan — upgrade an existing organization first` | :8466 :8571 |
+| S1 | POST /v1/organizations (create-org, supabase lane) | `Team name required` → `Organization name required` | :8401 |
+| S2 | POST /v1/organizations | `Team name must be ≤ 64 characters` → `Organization name must be ≤ 64 characters` | :8403 |
+| S3 | POST /v1/organizations | `Invalid team name` → `Invalid organization name` | :8408 |
+| S4 | POST /v1/organizations | `Team name already exists` (409) → `Organization name already exists` | :8456 :8525 :8565 :8582 (registry except-map) |
+| S5 | POST /v1/organizations | `Too many teams created — try again later` (429) → `Too many organizations created — try again later` | :8451 :8554 |
+| S6 | POST /v1/organizations | `Create another team requires a paid plan — upgrade an existing team first` (402) → `Create another organization requires a paid plan — upgrade an existing organization first` | :8466 :8571 |
 | S7 | POST /v1/invites (tier-gate 402) | `Invites require the Pro or Team tier — upgrade to invite teammates` → `…upgrade to invite members` (KEEP `Pro or Team tier` — plan name, pinned by test_invites_http.py:159/:167) | :9566 :9638 |
 | S8 | POST /v1/onboarding/team (legacy second-org lane; org-create name validation mirrors this endpoint per wizardFlow.js:17) | `Invalid team name` → `Invalid organization name` (its sibling 402 :15982 already org-cased) | :15947 |
 | S9 | POST /v1/onboarding/team registry | `Team name already exists` → `Organization name already exists` | :16048 |
@@ -73,9 +73,9 @@ Dashboard render change ⇒ rebuild + commit `website/apps/dashboard/dist/` in t
 
 | Surface | Where | Why kept |
 |---|---|---|
-| API/wire identifiers `team_id`, `team_name`, `/v1/teams`, `/v1/team/keys`, `?team_id=`, `switchTeam`, `loadTeams`, state names | routes/pins/functions | Wire/API contract, guarded by `keyTeamPinsTripwire.test.js`/`mintTripwire.test.js`; renaming = breaking change, zero user-copy value |
+| API/wire identifiers `org_id`, `org_name`, `/v1/organizations`, `/v1/team/keys`, `?org_id=`, `switchTeam`, `loadTeams`, state names | routes/pins/functions | Wire/API contract, guarded by `keyTeamPinsTripwire.test.js`/`mintTripwire.test.js`; renaming = breaking change, zero user-copy value |
 | **Plan tier literally named `Team`** | `PLAN_TIERS=['free','solo','pro','team']` pricing.js; tier-badge raw render main.jsx:5825 (`{team.tier}`, e2e pins 'free' :262); `Team tier` badge :5969; `Pro or Team tier` in S7/notice | It is the marketed plan name (`product/pricing.json` $149/mo team plan; product.html mirrors). Renaming a priced plan = pricing decision. Visible word "Team" in the free/solo members-tab notice + tier badge is a **plan-name reference**, not residual chrome copy |
-| Billing surface | main.jsx:6693-6699 `Billing — {currentTeamName \|\| 'this team'}`, `aria-label="Billing team"` | Deliberate per-team-billing surface (#1876 test docstring "Billing names its team"); W1/W4 plans list it as not-swept; e2e pins (`get_by_label("Billing team")` :330/:350, `.account-menu .tier-badge`→`free` :254) |
+| Billing surface | main.jsx:6693-6699 `Billing — {currentOrgName \|\| 'this team'}`, `aria-label="Billing team"` | Deliberate per-team-billing surface (#1876 test docstring "Billing names its team"); W1/W4 plans list it as not-swept; e2e pins (`get_by_label("Billing team")` :330/:350, `.account-menu .tier-badge`→`free` :254) |
 | Team-missing/denied guards | `Unknown team` 404s (:8941/:8953/:8999/:9067/:9070/:9155/:9158/:9254/:9557/:9627), `Team not found` :1964, `No membership in team` (:1875/:4251/:8996/:9251) | Same status-code-contract class as the `No team membership` row — programmatic, not chrome copy |
 | Invite-accept endpoint detail strings | `Already a member of this team` :9904, `this team requires a paid plan to join` ~:9945, seat-cap 402 :9952 (covered by S13) | Owned by the invite funnel follow-up (§9) — the server strings behind legacy invite-accept.html; the accept surface is being reworked separately |
 | CLI claim instructions | __main__.py:1541 `🔐 Claim your team…`, :1548-1549 `attaches to THIS team — same key, same graph, memories intact.`, :5843 `--claim` help `…the anonymous team` | CLI `tortoise signup --claim` surface — PINNED by tests/test_cli_claim.py:62/:80. Distinct from the dashboard org-create claim-guard the issue enumerates; keep + sweep would double blast radius into CLI + its test for no dashboard-chrome value |
@@ -89,7 +89,7 @@ Dashboard render change ⇒ rebuild + commit `website/apps/dashboard/dist/` in t
 
 ## 4. Source-of-truth finding (issue scope bullet: verify server or client)
 
-The create-org dialog's `Invalid team name` is **client-generated**: main.jsx:3366-3369 runs the charset regex inline before POST ("inline error, no POST" per e2e comment at :533). The server's parallel 422 (:8403/:8408) on the same POST /v1/teams endpoint is swept too (S2/S3) because the dialog renders server `detail` verbatim on bypass/non-validation failures. The wizard's org-create step validates with `orgNameError` (wizardFlow.js:141-148, already org-cased) — no wizard change needed.
+The create-org dialog's `Invalid team name` is **client-generated**: main.jsx:3366-3369 runs the charset regex inline before POST ("inline error, no POST" per e2e comment at :533). The server's parallel 422 (:8403/:8408) on the same POST /v1/organizations endpoint is swept too (S2/S3) because the dialog renders server `detail` verbatim on bypass/non-validation failures. The wizard's org-create step validates with `orgNameError` (wizardFlow.js:141-148, already org-cased) — no wizard change needed.
 
 ## 5. Why not `orgNameError` reuse (approach dropped after scope-verify)
 
@@ -103,7 +103,7 @@ Not a functional bug — a vocabulary-migration gap (DE2E-2 rename not propagate
 
 1. Node unit tests (the runner is `node --test src/*.test.js` — the dashboard has NO npm test script; CI runs it via agent-infra node-ci): `cd website/apps/dashboard && node --test src/wizardFlow.test.js src/wizardArchived.test.js` (DE2E-2/DE2E-1 sweeps must stay green) then full `node --test src/*.test.js`.
 2. Repo pytest for touched server surfaces:
-   `export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'` (falkordb running locally), run `tests/test_free_team_entitlement.py tests/test_invites_http.py tests/test_control_plane.py` + targeted `/v1/teams` validation/claim/abuse tests.
+   `export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'` (falkordb running locally), run `tests/test_free_team_entitlement.py tests/test_invites_http.py tests/test_control_plane.py` + targeted `/v1/organizations` validation/claim/abuse tests.
 3. Dashboard e2e (`tests/e2e/test_dashboard_identity.py`) is opt-in (`RUN_DASHBOARD_E2E=1`) and needs wrangler dev servers — update pin strings regardless; note in the PR that actually running it was not feasible in this env.
 4. Rebuild + commit `website/apps/dashboard/dist/` (deliverable §2e) and sanity-grep the rebuilt bundle for residual old copy.
 5. Residual audit: grep repo for every pre-change string (the §2 tables + `No team`/`anonymous team`/`Welcome to the team`/`teammates`/`Invalid team name`/`Team members`/`Switch team`/`Create new team`/`Team name required`/`Team name must be`/`Team name already exists`/`Too many teams`/`Create another team`/`Could not create the team`/`Could not load your teams`/`has been suspended due to unusual activity`/`also used by another team`/`Remove this member from the team`/`cannot claim an anonymous team`). Remaining hits must all be in the §3 boundary table (plan names, wire ids, SDK, 403 contracts, onboarding sub-team mechanics, legacy pages, comments/history/fixtures).

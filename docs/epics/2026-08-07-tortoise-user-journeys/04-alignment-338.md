@@ -36,7 +36,7 @@ No scope conflicts. Both epics are complementary halves of the same product dire
 
 ### CP-1: Shared auth stack — hosted_api.py (ours) vs mcp_server.py/mcp_auth.py (#338 T1.1)
 - #338 T1.1 adds `auth_mode` param to `create_http_app()` (default "tenant" = byte-identical hosted); our epic adds tier-driven limits + session-held-key auth to `hosted_api.py`.
-- **No file conflict** (different files), but both touch the hosted auth boundary. **Sequence:** #338's `auth_mode` is purely additive with a byte-identical default — it can land independently. Our decoupling work touches `get_current_team`/`team_create` (registry + limits) — also independent. **Risk is low; keep both PRs reviewable in isolation; if they touch the same test files, rebase order matters.**
+- **No file conflict** (different files), but both touch the hosted auth boundary. **Sequence:** #338's `auth_mode` is purely additive with a byte-identical default — it can land independently. Our decoupling work touches `get_current_org`/`team_create` (registry + limits) — also independent. **Risk is low; keep both PRs reviewable in isolation; if they touch the same test files, rebase order matters.**
 - **Note:** #338's selfhost daemon uses `auth_mode="static"/"none"` — the SAME `TeamResolutionMiddleware` we extend for session-held keys. When session-held-key auth lands in our epic, the `"tenant"` mode carries it; selfhost modes are unaffected (they omit the middleware).
 
 ### CP-2: Landing/docs narrative — our pricing page + self-host section vs #338 T5.1/T5.2 (README, index.md)

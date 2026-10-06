@@ -22,8 +22,9 @@ E2E-6 assertion groups:
      structural leg filters on the stored field, verified in search_engine).
      s2.md forces disambiguation WITHIN the kind: the result must be exactly
      {s1, s2} urls, never the meeting/doc Sources. True-FTS text
-     disambiguation is SERVER-MODE-ONLY (bolt://, skip-if-unavailable marker,
-     creates the Source FTS index on _searchText in setup).
+     disambiguation is SERVER-MODE-ONLY (bolt://, skip-if-unavailable marker;
+     the Source FTS index on _searchText is part of the projection's index set
+     since #3518).
   3. recall_subgraph seeded by Source url: meeting Source → its Event with
      the references edge; doc Source → its Document.
   4. UC1 negative regression (OQ-2 lock): recall_state rows all have
@@ -51,10 +52,19 @@ def _sdk(db: str | None = None) -> TortoiseSDK:
 
 
 def _required_sweep(g) -> int:
-    """§7 harness pin: no ontology-REQUIRED violation on any Source."""
+    """§7 harness pin: no ontology-REQUIRED violation on any Source.
+
+    D10 (#5026): a run-endpoint document Source carries ``documentKind`` +
+    ``url`` + ``ingestedAt`` but NO ``sourceKind``/``contentHash`` (its
+    version anchor lives on the corpus Source). The contentHash half is
+    therefore scoped to provenance Sources; ``url`` + ``ingestedAt`` hold for
+    EVERY Source. Whether a document Source should also carry sourceKind is
+    open in #5082 (plan-faithful today).
+    """
     return g.query(
-        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
-        "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
+        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
+        "s.ingestedAt IS NULL OR (s.sourceKind IS NOT NULL AND "
+        "(s.contentHash IS NULL OR s.contentHash='')) "
         "RETURN count(s)").result_set[0][0]
 
 
@@ -220,12 +230,18 @@ def _server_uri_or_skip():
 
 def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
     """E2E-6.2 server-mode leg (bolt:// only — skip-if-unavailable marker).
-    CREATES the Source FTS index on _searchText in setup (no Source FTS index
-    exists anywhere in non-test code), then asserts the TRUE FTS leg:
+    The Source FTS index on `_searchText` is created by projection boot
+    (`_ensure_indexes`); this leg asserts the TRUE FTS leg:
     tortoise_fts_query("Auth refactor", entity_type="source") returns s1 —
     and NOT s2 — by title match (_searchText=title write-path pin, T3). With
     the second same-kind file (s2.md) this leg is the text-disambiguation
-    authority."""
+    authority.
+
+    #3518: this test used to CREATE the index itself because none existed in
+    non-test code. The index is now part of the projection's index set, so
+    the explicit creation is a no-op ("already indexed") and only a genuine
+    engine incapability skips the leg.
+    """
     _server_uri_or_skip()
     c = tmp_path / "corpus"
     c.mkdir()
@@ -237,10 +253,28 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
         # namespace "test_index_surfacing" — no other test uses it; the
         # _assert_test_graph guard passes; index dropped in teardown).
         g.query("MATCH (n) DETACH DELETE n")
-        try:
-            g.query("CALL db.idx.fulltext.createNodeIndex('Source', '_searchText')")
-        except Exception as e:
-            pytest.skip(f"Source FTS index creation unsupported: {e}")
+        # #3518: the index is already created at boot. Tolerate that (the
+        # pre-#3518 shape) and only skip when the engine cannot hold a
+        # fulltext index at all. #H05: probe the SAME two forms PRODUCTION
+        # uses -- probing one alone skips engines that register only the
+        # other, which is exactly the class the production fallback exists
+        # for. Skip only when BOTH are genuinely unsupported.
+        unsupported = None
+        for probe in (
+            "CREATE FULLTEXT INDEX FOR (n:Source) ON (n._searchText)",
+            "CALL db.idx.fulltext.createNodeIndex('Source', '_searchText')",
+        ):
+            try:
+                g.query(probe)
+                unsupported = None
+                break
+            except Exception as e:
+                if "already" in str(e).lower():
+                    unsupported = None
+                    break
+                unsupported = e
+        if unsupported is not None:
+            pytest.skip(f"Source FTS index creation unsupported: {unsupported}")
 
         r = sdk.index_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 4
@@ -261,10 +295,15 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
     finally:
-        try:  # noqa: SIM105
-            sdk._get_proj().g.query("CALL db.idx.fulltext.dropIndex('Source')")
-        except Exception:
-            pass
+        # #5440: drop via BOTH names -- `dropIndex` is unregistered on some
+        # builds (4.20.4, 6.x), so the single hardcoded name left the index
+        # in place and the comment above it was false there.
+        for _drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                sdk._get_proj().g.query(f"CALL {_drop}('Source')")
+                break
+            except Exception:
+                continue
         sdk.close()
 
 
@@ -295,12 +334,14 @@ def test_e2e6_recall_subgraph_seed_by_url(corpus):
             and e.get("target") == "meeting_2026-08-05-team-sync"
             for e in sub.get("edges", []))
 
-        # Doc Source seed → Source + its Document.
+        # Doc Source seed → its document :Source. D10 (#5026): a document is
+        # a :Source, so the node's `type` is "source" (the lowercased graph
+        # label) — its genre rides the `kind` field (documentKind).
         sub2 = sdk.recall_subgraph(seed=doc, completeness="full")
         nodes2 = sub2.get("nodes", [])
         assert any(n.get("id") == doc and n.get("type") == "source"
                    for n in nodes2)
-        assert any(n.get("type") == "document"
+        assert any(n.get("type") == "source"
                    and n.get("id") == "doc_strategy.md" for n in nodes2)
 
         # The seed-by-url resolution is exact: a Source url never resolves to

@@ -30,7 +30,7 @@ Result: every CLI signup run/retry creates a permanent new key+team; 14 keys acc
 9. Revoke the 14 incident keys (per `api_keys.revoked_at` / dashboard). Offered to the user; manual ops action.
 
 ### Explicitly OUT of scope (follow-ups filed)
-- **#1709** — server-side identity dedupe + keyless recovery model (reverses #741(a); needs: oracle-free `existing` response [no team_id/name echo], one-team-per-identity unique constraint + insert-or-fetch (TOCTOU), concurrency E2E, identity-format validation vs `reg-{sha256(email)[:12]}` collision, recovery channel for config-loss).
+- **#1709** — server-side identity dedupe + keyless recovery model (reverses #741(a); needs: oracle-free `existing` response [no org_id/name echo], one-team-per-identity unique constraint + insert-or-fetch (TOCTOU), concurrency E2E, identity-format validation vs `reg-{sha256(email)[:12]}` collision, recovery channel for config-loss).
 - **#1710** — `team_create` `idempotency_key` phantom-key bug (`sdk.py:10792` returns a freshly-minted key that was never persisted on the `existing:true` path — dead key handed to callers).
 
 ## Acceptance Criteria (E2E)

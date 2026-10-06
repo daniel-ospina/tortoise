@@ -8,7 +8,7 @@ set -euo pipefail
 API="${INTERNAL_API_URL:-}"
 KEY="${FASTAPI_INTERNAL_KEY:-}"
 REPO="${GH_REPO:-daniel-ospina/tortoise}"
-TEAM_ID="${DRILL_TEAM_ID:-}"
+ORG_ID="${DRILL_ORG_ID:-}"
 BACKUP_KEY="${DRILL_BACKUP_KEY:-}"
 
 if [ -z "$API" ] || [ -z "$KEY" ]; then
@@ -19,8 +19,8 @@ fi
 # Default: newest non-empty archive across teams (from /status per-team view is
 # not archive-keyed — list R2 directly via the status/sweep metadata; the
 # simplest robust default: require explicit selection for the rollout drill).
-if [ -z "$TEAM_ID" ] || [ -z "$BACKUP_KEY" ]; then
-  echo "[drill] ERROR: team_id and backup_key are required for the drill" >&2
+if [ -z "$ORG_ID" ] || [ -z "$BACKUP_KEY" ]; then
+  echo "[drill] ERROR: org_id and backup_key are required for the drill" >&2
   echo "[drill]   (default newest-archive selection is an operator decision; see runbook)" >&2
   exit 2
 fi
@@ -28,7 +28,7 @@ fi
 START=$(date +%s)
 RESP="$(curl -sS -m 900 -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d "$(jq -nc --arg t "$TEAM_ID" --arg k "$BACKUP_KEY" '{team_id:$t, backup_key:$k}')" \
+  -d "$(jq -nc --arg t "$ORG_ID" --arg k "$BACKUP_KEY" '{org_id:$t, backup_key:$k}')" \
   "${API}/v1/internal/backups/drill" 2>/dev/null || true)"
 DUR=$(( $(date +%s) - START ))
 

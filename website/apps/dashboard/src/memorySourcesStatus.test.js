@@ -5,8 +5,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   docsIndexedLabel,
+  docsSourceOn,
   fmtElapsed,
   formatRelativeTime,
+  issuesSourceOn,
   jobElapsedSecs,
   jobStatusLine,
 } from './memorySourcesStatus.js'
@@ -191,12 +193,69 @@ test('extrapolated ETA at exactly 5s still renders (>= 5 gate)', () => {
     '45s · 9/10 repos · ~5s left')
 })
 
+// ── #1924: source-switch derivations ─────────────────────────────
+// The bug: the Issues off-toggle was a FULL GitHub disconnect (it wrote
+// github_connected=false), which also killed the docs source and forced a
+// fresh OAuth to re-enable. The switch must follow a per-source ENABLE flag.
+
+test('#1924 issues: connected + enabled → ON', () => {
+  assert.equal(issuesSourceOn({ github_connected: true, issues_enabled: true }, false), true)
+})
+test('#1924 issues: connected + DISABLED → OFF (connection survives, source is off)', () => {
+  // the load-bearing case: github_connected stays true, issues_enabled=false
+  assert.equal(issuesSourceOn({ github_connected: true, issues_enabled: false }, false), false)
+})
+test('#1924 issues: not connected + want-on → ON (the row reveals the Connect CTA)', () => {
+  assert.equal(issuesSourceOn({ github_connected: false, issues_enabled: true }, true), true)
+})
+test('#1924 issues: not connected + no want-on → OFF', () => {
+  assert.equal(issuesSourceOn({ github_connected: false, issues_enabled: true }, false), false)
+})
+test('#1924 issues: a disabled source wins over want-on (switch never lies about the flag)', () => {
+  assert.equal(issuesSourceOn({ github_connected: true, issues_enabled: false }, true), false)
+})
+test('#1924 issues: legacy state without the key keeps the pre-#1924 behavior (default ON)', () => {
+  assert.equal(issuesSourceOn({ github_connected: true }, false), true)
+})
+test('#1924 issues: null state → OFF', () => {
+  assert.equal(issuesSourceOn(null, false), false)
+})
+test('#1924 issues: off does NOT depend on the connection flag being cleared', () => {
+  // the regression pin: with github_connected TRUE the switch is still OFF,
+  // i.e. the fix never rewrites the connection to disable the source
+  const off = issuesSourceOn({ github_connected: true, issues_enabled: false }, false)
+  assert.equal(off, false)
+})
+test('#1924 docs: indexed + enabled → ON', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: true, docs_enabled: true }, false), true)
+})
+test('#1924 docs: indexed + DISABLED → OFF (the off path that did not exist before)', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: true, docs_enabled: false }, false), false)
+})
+test('#1924 docs: not indexed + want-on → ON (reveals the Index action)', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: false, docs_enabled: true }, true), true)
+})
+test('#1924 docs: disabled wins over want-on and over the indexed fact', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: true, docs_enabled: false }, true), false)
+})
+test('#1924 docs: legacy indexed state without the key stays ON across reloads (default ON)', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: true }, false), true)
+})
+test('#1924 docs: un-indexed, un-wanted → OFF', () => {
+  assert.equal(docsSourceOn({ github_docs_indexed: false }, false), false)
+})
+
 // ── CSS-rule assertion (#1894 render-layer gate — the rule lives in
 // index.css; a regression to the dimmed disabled-switch would fail here) ──
 test('index.css keeps the disabled-but-on switch full-opacity', () => {
   const css = readFileSync(new URL('./index.css', import.meta.url), 'utf8')
-  const ruleIdx = css.indexOf(".switch[disabled][data-on='true'][data-locked-on]")
-  assert.ok(ruleIdx !== -1, '.switch[disabled][data-on=\'true\'][data-locked-on] rule must exist in index.css')
+  // #1924: the selector is state-scoped (any disabled-but-on switch), not
+  // component-scoped — the docs switch is no longer terminal, so the old
+  // data-locked-on opt-in is gone.
+  const ruleIdx = css.indexOf(".switch[disabled][data-on='true'] {")
+  assert.ok(ruleIdx !== -1, '.switch[disabled][data-on=\'true\'] rule must exist in index.css')
+  assert.ok(!css.includes('data-locked-on]'),
+            'the retired data-locked-on SELECTOR must not linger in index.css')
   // POSITIVE pin: the terminal docs switch must render at full opacity — any
   // dim value (0.4/0.5/0.6/shorthand .6) fails the test. A negative probe on
   // one literal (0.6) would let every other dim regression pass while the

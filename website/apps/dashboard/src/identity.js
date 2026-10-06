@@ -33,11 +33,17 @@ export function bannerCopy(inv) {
 // Reauth staleness for the client ReauthDialog gate (change-email + unlink):
 // server sends last_sign_in_at + reauth_required; this is the pure predicate
 // used when the server payload is unavailable (offline defensive path).
-export function reauthStale(lastSignInAt, windowS = 900) {
+// NOTE: currently UNREFERENCED — the offline defensive path does not exist
+// today and the live flow is the server-driven 403 REAUTH_REQUIRED handler in
+// main.jsx, so this predicate is not yet an ATO gate. The claim above and the
+// wiring-or-correct decision are tracked by issue #3105.
+export function reauthStale(lastSignInAt, windowS = 900, nowMs = Date.now()) {
   if (!lastSignInAt) return true // fail-closed: unknown = stale
   const t = Date.parse(lastSignInAt)
-  if (Number.isNaN(t)) return true
-  return (Date.now() - t) / 1000 > windowS
+  // fail-closed: unknown/degenerate clock OR window, or a clock that predates the event
+  if (Number.isNaN(t) || !Number.isFinite(nowMs) || nowMs <= 0 || nowMs < t
+    || !Number.isFinite(windowS) || windowS <= 0) return true
+  return (nowMs - t) / 1000 > windowS
 }
 
 // created_by namespace classifier for the keys tier display (server already

@@ -127,7 +127,7 @@ def test_team_sweep_enabled_flag_default_false(monkeypatch):
     env = _good_env()
     monkeypatch.setattr(os, "environ", env)
     cfg = load_config()
-    assert cfg.team_sweep_enabled is False
+    assert cfg.org_sweep_enabled is False
 
 
 def test_team_sweep_enabled_flag_true(monkeypatch):
@@ -136,7 +136,7 @@ def test_team_sweep_enabled_flag_true(monkeypatch):
     env["BACKUP_TEAM_SWEEP_ENABLED"] = "true"
     monkeypatch.setattr(os, "environ", env)
     cfg = load_config()
-    assert cfg.team_sweep_enabled is True
+    assert cfg.org_sweep_enabled is True
 
 
 def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
@@ -145,7 +145,7 @@ def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
     monkeypatch.setenv("BACKUP_TEAM_SWEEP_ENABLED", "true")
     cfg = load_config()
     assert cfg.enabled is False  # main sweep disabled
-    assert cfg.team_sweep_enabled is True  # team-sweep flag still read
+    assert cfg.org_sweep_enabled is True  # team-sweep flag still read
 
 
 def test_dead_skip_fresh_knob_removed(monkeypatch):

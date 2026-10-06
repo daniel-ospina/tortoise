@@ -14,18 +14,39 @@ measurement artifact (docs/ci-timing.md + docs/ci-timing.json):
     (the retry-protocol prerequisite; documented as a proxy until the
     rerun-based protocol lands)
 
-Measurement only — never gates CI. Stdlib only (Python 3.12). Deterministic
-output (sorted, stable JSON) so the refresh job's no-diff check works.
+Measurement only — this workflow never gates CI directly. But since #5215
+Task 4b it is also the SOLE WRITER of `config/ci-surfaces.yml:durations` — the
+weights `ci_selection.split_fast_gate` packs the push halves by — so a stale or
+wrong weight can red `python-ci-gate` with zero test failures (#3395). The gate
+is still `ci_selection.py --integrity`; this tool only writes the map it reads.
+Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYAML
+(the manifest-side checks load the refreshed text through `yaml.safe_load`) —
+`ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
+does — outside that pin the import is unguarded, so a missing/broken PyYAML
+surfaces as an `ImportError` traceback with exit 1, which is a DEPENDENCY
+failure, not the exit-1 manifest-gate meaning below. Deterministic output
+(sorted, stable JSON) so the refresh job's no-diff check works.
 """
 from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_timing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_timing.py`"
+    )
 
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +87,51 @@ def fetch_jobs(repo: str, run_id: str) -> list[dict]:
     return jobs
 
 
+# --- eligible-run selection (ci-timing.yml `find` step) ---------------------
+
+PYTHON_CI_WORKFLOW = "python-ci.yml"
+PICK_RUN_PER_PAGE = 10
+ELIGIBLE_CONCLUSIONS = ("success", "failure")
+
+
+def pick_run_query(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str:
+    """Single source of truth for the candidate-run query (shared with the tests).
+
+    event=push + branch=main excludes PR smoke runs and nightlies (comparable
+    data requires the FULL matrix); status=completed + exclude_pull_requests
+    keeps only real push-to-main runs.
+    """
+    return (f"repos/{repo}/actions/workflows/{PYTHON_CI_WORKFLOW}/runs"
+            f"?event=push&branch=main&status=completed"
+            f"&exclude_pull_requests=true&per_page={per_page}")
+
+
+def pick_run(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str | None:
+    """Latest completed push-to-main, non-PR python-ci run id whose conclusion is
+    success/failure (cancelled/skipped runs are not comparable). None when the
+    last `per_page` completed runs contain no eligible one.
+
+    This lives here rather than as an inline `python3 -c` inside the workflow's
+    YAML block scalar: the inline form was indented against the block's dedent,
+    so python received a module whose first statement was indented and died with
+    `IndentationError: unexpected indent` on every weekly run — the find step
+    failed, the dependent artifact steps were skipped, and the measurement loop
+    never ran green (#3400 / audit F8). A function under unit test cannot be
+    broken by YAML indentation.
+    """
+    try:
+        data = gh_api(repo, pick_run_query(repo, per_page))
+    except subprocess.CalledProcessError as exc:
+        # Behaviour parity with the old inline shell: an API failure is not fatal
+        # (measurement-only workflow) — warn and let the step report "none found".
+        print(f"::warning::gh api run-list failed: {exc}", file=sys.stderr)
+        return None
+    for run in data.get("workflow_runs", []):
+        if run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
+            return str(run["id"])
+    return None
+
+
 def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
     """Per-job per-step durations from started_at/completed_at (second granularity)."""
     result: dict[str, list[dict]] = {}
@@ -89,6 +155,197 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
             })
         result[job.get("name") or str(job.get("id", "?"))] = steps
     return result
+
+
+# --- paid vs selected + queue wait (#7532) ---------------------------------
+#
+# Until now this tool measured STEPS INSIDE jobs, which answers "what did the
+# gate spend" but never "was that spend proportional to what the diff
+# SELECTED" — and never separated EXECUTION from QUEUE RESIDENCY. Those are the
+# two numbers that decide where a slow gate gets fixed, and without them the
+# first wrong explanation (queue latency, or a heavy corpus file) cannot be
+# refuted. Measured 2026-10-06 on a real push run (37468261628): ratio 1.177
+# against the run-leg pool below, while queue wait was 0.2-1.5 min on EVERY job
+# — i.e. slowdown AFTER start, not queueing. The residual ~18% is job WALL time
+# (checkout/install/collect) that the per-file denominator does not represent,
+# so "calibrates at 1.0" was never a property of this arithmetic.
+# ⛔ Do NOT restate a PR-run band here. The earlier 2.96-4.35 figures were
+# computed with a numerator that counted every `test*` job — a different basis
+# from this tool's — and are NOT comparable to its output.
+
+TEST_JOB_PREFIX = "test"
+
+# The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
+# `test-slow (a)`, or a bare `test`/`test-slow`. Jobs that start with `test` but
+# do not match are reported in `excluded_jobs`, and a matched shard that never
+# completed is reported in `incomplete_shard_jobs`; neither contributes to
+# `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total gate
+# execution. WHY any particular leg is excluded differs per leg and is defined by
+# `.github/workflows/python-ci.yml` — read that file; do not assert a summary
+# mechanism here.
+SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
+
+
+def job_execution_s(job: dict) -> float | None:
+    """A job's EXECUTION seconds (started_at -> completed_at), or None.
+
+    None means the job never completed (queued/cancelled). It has no execution
+    cost to attribute, and treating it as 0 would silently deflate the ratio.
+    """
+    start, end = job.get("started_at"), job.get("completed_at")
+    if not start or not end:
+        return None
+    try:
+        t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def queue_wait_s(job: dict, run_created_at: str | None) -> float | None:
+    """Seconds a job sat resident before it STARTED (run created -> job start).
+
+    Deliberately measured from the RUN's created_at, not the job's: the Jobs
+    API exposes no job-created_at. This is the run's queue residency attributed
+    to the job — which is what the "is it queue latency?" question asks.
+    """
+    if not run_created_at or not job.get("started_at"):
+        return None
+    try:
+        t0 = datetime.fromisoformat(run_created_at.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping (#3407 c4 shape)."""
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
+
+
+def selected_weight_s(selection: dict, durations: dict,
+                      default_weight: float = 0.0,
+                      full_pool: set[str] | None = None) -> float:
+    """The weight of what the gate will actually RUN, in measured seconds.
+
+    Sums every selected leg's `durations` weight. A file with no measured
+    duration contributes `default_weight` — the same "absent = not adopted"
+    collapse `ci_selection` uses — so a partially-populated map under-counts
+    instead of crashing.
+
+    ⛔ `ci_selection.select()` returns the STRING sentinel ``"ALL"`` for a full
+    selection (push/schedule, a shared-module change, or an unclaimed path —
+    produced by `_full_selection`), NOT a list. Iterating it yields the three
+    characters ``A``, ``L``, ``L``, whose keys are never in `durations`, so the
+    whole fast pool silently contributes `default_weight` — measured as a 4.5x
+    deflation of the denominator (a 4.5x INFLATION of `ratio`) on the real
+    manifest. The sentinel is handled explicitly below.
+    """
+    raw = selection.get("test_files")
+
+    def _finite(v) -> float | None:
+        # `bool` is an int subclass and a NaN weight would silently make `ratio`
+        # None via `selected > 0` — both are malformed, not weights.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if math.isfinite(f) else None
+
+    if raw == "ALL":
+        # ⛔ The map is NOT the pool the gate runs. `durations` also carries
+        # `on_demand` entries — eval/retrieval/test_integration.py alone is
+        # 1523.4 s of the 7398.2 s map — which python-ci never runs (they live
+        # in evals-on-demand.yml). Summing the whole map inflates the
+        # denominator, so a true 1.0 reads ~0.79 and the calibration inverts in
+        # the other direction. `full_pool` (the run legs) restricts it to what
+        # the numerator can cover; None keeps the whole map for callers that
+        # have no manifest.
+        if full_pool is None:
+            values = [v for _, v in durations.items()]
+        else:
+            # Iterate the POOL, not the map, so a pool file ABSENT from
+            # `durations` falls back to `default_weight` exactly as the list-leg
+            # branch below does. Filtering the map instead made the two branches
+            # disagree: the same absence was 0 here and `default_weight` there.
+            # A SET, not a list: two pool members that normalise to the same key
+            # ("tests/a" and "tests/a.py") must not be summed twice.
+            norm = {k if k.endswith(".py") else f"{k}.py" for k in full_pool}
+            values = [durations.get(k) for k in sorted(norm)]
+        total = 0.0
+        for value in values:
+            w = _finite(value)
+            total += w if w is not None else default_weight
+        return total
+    legs: list[str] = list(raw or [])
+    if selection.get("slow_run"):
+        legs += list(selection.get("slow_selected") or [])
+    total = 0.0
+    for name in legs:
+        key = name if name.endswith(".py") else f"{name}.py"
+        value = durations.get(key)
+        w = _finite(value)
+        total += w if w is not None else default_weight
+    return total
+
+
+def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
+                     run_created_at: str | None = None,
+                     full_pool: set[str] | None = None) -> dict:
+    """What the gate PAID against what the diff SELECTED (#7532).
+
+    `ratio` is the diagnostic: a push run selects the FULL pool (measured 1.177
+    on run 37468261628, the residual being job wall time the per-file
+    denominator cannot see), while a PR run that selects a small surface but
+    pays a large one is execution inflation, not selection weight. `queue_s` is
+    reported alongside so queue latency cannot be mistaken for execution cost.
+
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the counted
+    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed. A `test*` job
+    that does not match `SHARD_JOB_RE` is returned in `excluded_jobs`, and a
+    matched shard that never completed is returned in `incomplete_shard_jobs`
+    (which also sets `complete=False`); neither contributes to `paid_s`.
+    **`paid_s` is therefore the COUNTED SHARDS' execution time, not total gate
+    execution — say so whenever it is quoted.**
+    """
+    paid = 0.0
+    queue = 0.0
+    counted: list[str] = []
+    excluded: list[str] = []
+    incomplete: list[str] = []
+    for job in jobs:
+        name = job.get("name") or ""
+        if not name.startswith(TEST_JOB_PREFIX):
+            continue
+        if not SHARD_JOB_RE.match(name):
+            excluded.append(name)
+            continue
+        secs = job_execution_s(job)
+        if secs is None:
+            incomplete.append(name)
+            continue
+        paid += secs
+        counted.append(name)
+        q = queue_wait_s(job, run_created_at)
+        if q is not None:
+            queue += q
+    selected = selected_weight_s(selection, durations, full_pool=full_pool)
+    return {
+        "paid_s": round(paid, 1),
+        "selected_s": round(selected, 1),
+        "ratio": round(paid / selected, 3) if selected > 0 else None,
+        "queue_s": round(queue, 1),
+        # ⛔ A matched shard that never completed keeps its files' FULL weight in
+        # the denominator while contributing 0 to paid_s — which LOWERS ratio,
+        # i.e. a stalled shard reads as cheaper. The flag makes such a run
+        # non-comparable instead of silently flattering it.
+        "complete": not incomplete,
+        "incomplete_shard_jobs": sorted(incomplete),
+        "jobs_counted": sorted(counted),
+        "excluded_jobs": sorted(excluded),
+    }
 
 
 # --- pytest log parsing -----------------------------------------------------
@@ -117,10 +374,37 @@ def parse_log(path: Path) -> dict:
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
-        # stdout AFTER pytest's output is redirected, so the artifact never
-        # contains it. pytest's own interrupt summary (KeyboardInterrupt) is
-        # the reliable in-log signal for a watchdog-killed run.
-        if "KeyboardInterrupt" in line or "WATCHDOG:" in line:
+        # stdout AFTER pytest's output is redirected, so the ARTIFACT this
+        # function reads can never contain it — every pytest-log-* upload in
+        # python-ci.yml ships pytest's output files (or the junitxml/nodeids/
+        # step_wall beside them), never a job log.
+        #
+        # #6145: matching the banner string has no GENUINE true positive — the
+        # real banner is never in this artifact — so it is deleted rather than
+        # narrowed. What it can match is a QUOTED copy: any assertion that prints
+        # or diffs the workflow text containing it, which would report a kill
+        # that did not happen. That is reachable by construction, not an observed
+        # misfire (no test currently emits the banner on stdout).
+        #
+        # What survives covers the SIGINT path only. `timeout -s INT -k 10
+        # <budget>` sends INT first, and pytest's interrupt summary carries
+        # "KeyboardInterrupt", which IS in the artifact. KNOWN BLIND SPOT: the
+        # `-k 10` SIGKILL half (rc=137, documented reachable in the workflow)
+        # writes no interrupt summary — pytest emits it during unconfigure,
+        # after session teardown — so on that path this flag stays False. The
+        # deleted clause could not see that path either, so it is a pre-existing
+        # gap, recorded here rather than papered over.
+        #
+        # Residual, stated rather than smoothed: this is still a substring test,
+        # so it is quotable the same way the deleted clause was (an assertion
+        # source line containing the token). It is kept because the signal
+        # genuinely occurs in this input, which the banner does not.
+        #
+        # The wall evidence a kill leaves (/tmp/step_wall.txt) is consumed by
+        # testdb_canary_classify.py's step-wall gate — but only the `test`
+        # matrix uploads that file, so the side lanes leave no wall evidence and
+        # no classifier consumes one for them.
+        if "KeyboardInterrupt" in line:
             killed = True
         if "slowest" in line and "durations" in line:
             in_durations = True
@@ -151,6 +435,342 @@ def parse_log(path: Path) -> dict:
                     counts[key] = int(n)
     return {"files": files, "counts": counts, "outcomes": outcomes, "killed": killed,
             "error": error}
+
+
+# --- durations bridge (#5215 Task 4b / T-B): collector → the map the ---------
+# balancer packs by ----------------------------------------------------------
+#
+# `config/ci-surfaces.yml:durations` is the one artifact
+# `ci_selection.split_fast_gate` packs by, and until now nothing moved the
+# collector's measurements into it: the map was a one-off 2026-09-22 sweep.
+# `--refresh-durations` is now the ONLY path that may emit into that key. It is
+# text-preserving (line edits, never a whole-file `yaml.safe_dump` —
+# `ci_selection.register_tests` set exactly that discipline at its two
+# `manifest_path.write_text` sites, and a safe_dump would strip the
+# hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
+#
+#   * a collector key not already classified in the manifest is refused (exit
+#     2) — the bridge never invents a key, so a new test file is registered
+#     first;
+#   * a ZERO-key projection is UNKNOWN (exit 2), never a silent no-op that
+#     writes nothing and reports success;
+#   * un-sampled manifest keys are CARRIED FORWARD (merge, not replace), so
+#     coverage cannot fall — and if the refreshed manifest would still fail
+#     `ci_selection.duration_coverage_issues` (DURATION_COVERAGE_MIN = 0.90) or
+#     `duration_issues`, nothing is written (exit 1).
+#
+# The 0.90 floor is applied to the resulting MANIFEST, never to the collector's
+# `--durations=15` projection: that projection can never enumerate the whole
+# fast pool (#5215 plan, cycle 10), so applying it there would make every
+# legitimate refresh exit non-zero. The manifest-side floor is what
+# `ci_selection.py --integrity` already enforces.
+
+DURATIONS_CAPTURED_AT = "durations_captured_at"
+DURATIONS_VALUE_FLOOR_S = 0.1
+
+# `  <tests-relative key>: <seconds>[  # comment]` — the map's one line shape.
+# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`).
+_DURATION_LINE_RE = re.compile(
+    r"^(?P<indent>\s{2})(?P<key>[^\s:]+):[ \t]+"
+    r"(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<tail>[ \t]*(?:#.*)?)$"
+)
+
+
+class DurationsBridgeError(Exception):
+    """The bridge refused to render the map (fail-closed)."""
+
+
+def collector_file_weights(logs_dir: Path) -> dict[str, float]:
+    """Per-file seconds from the collector's OWN parser, taking the LARGER
+    value across the sampled jobs (the leg that CARRIES the file spends that
+    time). Basenames, exactly as `parse_log` emits them; the manifest key is
+    resolved by :func:`_resolve_to_manifest_keys`.
+    """
+    weights: dict[str, float] = {}
+    for log_path in sorted(Path(logs_dir).rglob("*.log")):
+        parsed = parse_log(log_path)
+        for fname, entry in parsed["files"].items():
+            seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
+            if seconds > weights.get(fname, 0.0):
+                weights[fname] = seconds
+    return weights
+
+
+def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int]]:
+    """(index of the top-level `durations:` line, {key: physical line index})."""
+    key_line = next((i for i, ln in enumerate(lines) if ln.startswith("durations:")), None)
+    if key_line is None:
+        return None, {}
+    entries: dict[str, int] = {}
+    for j in range(key_line + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        match = _DURATION_LINE_RE.match(ln)
+        if match:
+            entries[match.group("key")] = j
+            continue
+        if not ln[:1].isspace():
+            break  # the next top-level key ends the block
+        raise DurationsBridgeError(f"malformed line inside the durations block: {ln!r}")
+    return key_line, entries
+
+
+def _resolve_to_manifest_keys(weights: dict[str, float],
+                              manifest_keys: set[str]) -> dict[str, float]:
+    """Map the collector's basenames onto manifest keys, fail-closed.
+
+    The collector keys on the file's basename; the manifest keys on the file's
+    tests/-relative path. An unresolvable key (not classified) or an ambiguous
+    one (two manifest keys sharing a basename) is a refusal, never a guess.
+    """
+    by_basename: dict[str, list[str]] = {}
+    for key in manifest_keys:
+        by_basename.setdefault(Path(key).name, []).append(key)
+    resolved: dict[str, float] = {}
+    for basename, seconds in weights.items():
+        candidates = by_basename.get(basename, [])
+        if not candidates:
+            raise DurationsBridgeError(
+                f"collector key {basename!r} is not classified in the manifest — "
+                f"register the test file before refreshing the durations map"
+            )
+        if len(candidates) > 1:
+            raise DurationsBridgeError(
+                f"collector key {basename!r} matches multiple manifest keys "
+                f"{sorted(candidates)} — refusing to guess"
+            )
+        resolved[candidates[0]] = seconds
+    return resolved
+
+
+def _set_captured_at(lines: list[str], captured_at: str) -> None:
+    """Set the machine-readable capture-age key. Its ABSENCE is UNKNOWN, so it
+    is never inferred from the file's git commit date — any unrelated edit
+    would reset that (cycle 7)."""
+    line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
+    for i, ln in enumerate(lines):
+        if ln.startswith(f"{DURATIONS_CAPTURED_AT}:"):
+            lines[i] = line
+            return
+    for i, ln in enumerate(lines):
+        if ln.startswith("durations:"):
+            lines.insert(i, line)
+            return
+    raise DurationsBridgeError("manifest has no top-level `durations:` key")
+
+
+def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
+                              captured_at: str) -> tuple[str, dict]:
+    """Return (new manifest text, stats). Pure: callers own the write."""
+    lines = manifest_text.split("\n")
+    _, entries = _locate_durations_block(lines)
+    if not entries:
+        raise DurationsBridgeError("manifest has no top-level `durations:` key")
+    if not weights:
+        raise DurationsBridgeError(
+            "collector produced ZERO measured file durations — UNKNOWN, never 0"
+        )
+    resolved = _resolve_to_manifest_keys(weights, set(entries))
+    for key in sorted(resolved):
+        seconds = resolved[key]
+        index = entries[key]
+        match = _DURATION_LINE_RE.match(lines[index])
+        assert match is not None  # located by the same regex
+        tail = match.group("tail")
+        # A stale `# unmeasured` marker stops being true once measured. Any
+        # other trailing comment is preserved verbatim.
+        if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
+            tail = ""
+        lines[index] = (
+            f"{match.group('indent')}{key}: "
+            f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
+        )
+    _set_captured_at(lines, captured_at)
+    stats = {
+        "sampled_keys": len(resolved),
+        "manifest_keys": len(entries),
+        "carried_forward": len(entries) - len(resolved),
+        "captured_at": captured_at,
+    }
+    return "\n".join(lines), stats
+
+
+def _manifest_of(manifest_text: str) -> dict:
+    """Parse refreshed text for the checks. Import is local so the module
+    stays stdlib-only until the bridge actually runs (see the docstring)."""
+    import yaml
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection as cs
+
+    return cs._normalize_surfaces(yaml.safe_load(manifest_text))
+
+
+def validate_refreshed_manifest(manifest_text: str) -> list[str]:
+    """The DURATION subset of `--integrity`'s checks over the NEW text.
+
+    Runs `cs.duration_issues` + `cs.duration_coverage_issues` — this is where
+    the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
+    partial collector projection. PURE and repo-independent, so a synthetic
+    fixture manifest can use it; it is deliberately NOT the whole gate, and a
+    caller that trusts it alone would accept a refresh that tilts the pack
+    (see :func:`integrity_problems`, which `refresh_durations` also runs).
+    """
+    import ci_selection as cs
+
+    manifest = _manifest_of(manifest_text)
+    return cs.duration_issues(manifest) + cs.duration_coverage_issues(manifest)
+
+
+def integrity_problems(manifest_text: str) -> list[str]:
+    """The FULL problem list `ci_selection.py --integrity` composes.
+
+    Composed by CALLING the same functions as the `--integrity` entry point —
+    never a re-derived subset, so the two cannot disagree about what a valid
+    manifest is. As of #5050 the durations-map half IS the entry point's own
+    contract: `ci_manifest.check` owns the map's checks (dead keys, malformed
+    values, coverage, the leg partition, any weight the writer could not have
+    rendered — sub-floor, finer precision, or negative — a non-empty map whose
+    every weight is the `0.0` sentinel, and a stale capture date) and both
+    callers compose it, so the invariant is structural rather
+    than a convention each caller has to re-implement. `check` reaches those
+    checks through `ci_manifest.map_issues`, which ALSO carries main's two
+    newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
+    declaration and `duplicate_entries` for the same-surface `merge=union`
+    gate) — so when main added them beside this change they were folded into
+    the same one place instead of being re-added at this call site. The one
+    UNKNOWN class the
+    enforcing gate promotes to RED — a capture stamp that is PRESENT but
+    unparseable — is likewise one shared decision,
+    `ci_manifest.unparseable_stamp_issue`, composed by BOTH callers (see the
+    note in the body for why a refreshed manifest can carry one at all). The
+    rest of the list is
+    composed here because `ci_manifest` does not own it — most importantly
+    `workflow_halves_issues`: a refresh that skews a weight hard enough to tilt
+    the push halves (the #3395 starved-shard shape) would otherwise be accepted
+    here and surface later, with no diagnosis, as a red `python-ci-gate` with
+    zero test failures.
+
+    ⛔ The list is HAND-MAINTAINED, so it can drift out of that parity
+    silently, and the drift is directional: this is the PRE-WRITE gate of
+    `refresh_durations`, the sole writer of `config/ci-surfaces.yml:durations`,
+    so a term omitted here lets the weekly refresh open a PR carrying a
+    manifest the REQUIRED `manifest-integrity` check immediately reds. #6145
+    caught exactly that for `watchdog_headroom_issues` and
+    `duplicate_entries`. `tests/test_ci_timing.py` pins the headroom term by
+    name and the CLI's rc on the clean and skewed manifests, and
+    `test_integrity_problems_mirrors_the_listed_integrity_composition` pins
+    the composition parity over the validators in its hand-maintained
+    allow-list — both compositions must call the same validators (the SET, not
+    the order: #5050 moved five of them behind the shared `ci_manifest`
+    composition, which the two entry points reach at different points, and the
+    test's own note says why that is not a contract), and a listed validator
+    that the gate of record no longer calls reds. The list itself is the
+    caveat: a validator absent from it is never
+    wrapped, so a drift touching only unlisted terms is still a review duty at
+    the two call sites.
+
+    Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
+    checks read `python-ci.yml`, so this is defined only over this repo's own
+    manifest — the refresh's only production target.
+    """
+    import ci_selection as cs
+
+    # The validator is reached through the selector's own accessor, never a bare
+    # `import ci_manifest`: when this module runs as `__main__` a bare import
+    # loaded a SECOND copy of the same file, so the "composed, not duplicated"
+    # invariant was only true on one of the two call paths.
+    ci_manifest = cs._ci_manifest_module()
+
+    manifest = _manifest_of(manifest_text)
+    # `red` PLUS the ONE UNKNOWN class the enforcing gate promotes. Parity with
+    # `--integrity` is on the SERVED verdict, and `--integrity` promotes a
+    # PRESENT-but-unparseable stamp to RED; gating on `check`'s `red` alone
+    # would accept exactly that stamp here while the gate rejects it. This is a
+    # REAL gap, not a hypothetical one: `render_refreshed_manifest` writes the
+    # caller's `captured_at` verbatim via `_set_captured_at` (it OVERWRITES any
+    # stamp the input carried, so nothing validates it), the `CI_TIMING_NOW`
+    # override sets it to anything, and this file's own tests render with `"T"`.
+    # Both entry points call the same `ci_manifest.unparseable_stamp_issue`, so
+    # the parity is structural rather than a claim each side re-implements.
+    red, _unknown = ci_manifest.check(manifest)
+    stamp_issue = ci_manifest.unparseable_stamp_issue(manifest)
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
+    problems = (cs.integrity(manifest)
+                + cs.slow_file_issues(manifest)
+                + red
+                + cs.carve_shard_issues(manifest)
+                + cs.watchdog_headroom_issues(manifest))
+    wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
+    problems += wf_issues
+    if not wf_issues:
+        legs = cs.push_legs(manifest)
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
+        problems += cs.workflow_halves_issues(manifest, halves)
+    else:
+        problems += cs.workflow_halves_issues(
+            manifest, cs.parse_matrix_halves(cs.WORKFLOW.read_text()))
+    return problems
+
+
+def _is_the_repo_manifest(manifest_path: Path) -> bool:
+    """True when `manifest_path` IS this repo's `config/ci-surfaces.yml`.
+
+    The `--integrity` composition is repo-scoped, so it is only defined for
+    this repo's own manifest (a synthetic fixture would read every real test
+    file as unclassified). Guarding on the identity of the path — not on a
+    caller-supplied flag — means the full gate cannot be forgotten by a future
+    refresh caller: the production target always gets it.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection as cs
+
+    try:
+        return Path(manifest_path).resolve() == Path(cs.MANIFEST).resolve()
+    except OSError:
+        return False
+
+
+def refresh_durations(manifest_path: Path, weights: dict[str, float],
+                      captured_at: str, *, dry_run: bool = False) -> int:
+    """Render + validate + (unless dry-run) write the refreshed map.
+
+    Exit: 0 written/validated · 1 a manifest-side gate would fail · 2 UNKNOWN
+    (no keys, key agreement, unreadable manifest) — never 0 on an unobserved
+    read.
+    """
+    if not manifest_path.exists():
+        print(f"2: manifest not found: {manifest_path}", file=sys.stderr)
+        return 2
+    try:
+        new_text, stats = render_refreshed_manifest(
+            manifest_path.read_text(), weights, captured_at)
+    except DurationsBridgeError as exc:
+        print(f"2: {exc}", file=sys.stderr)
+        return 2
+    issues = validate_refreshed_manifest(new_text)
+    if not issues and _is_the_repo_manifest(manifest_path):
+        # The repo's own manifest is held to the WHOLE `--integrity` gate —
+        # most importantly its halves-duration balance, which the per-key
+        # duration checks cannot see (#3395).
+        issues = integrity_problems(new_text)
+    if issues:
+        print("1: refusing to write — the refreshed manifest would fail the "
+              "integrity gate:", file=sys.stderr)
+        for issue in issues:
+            print(f"   - {issue}", file=sys.stderr)
+        return 1
+    if dry_run:
+        print(f"dry-run: {stats['sampled_keys']} sampled, "
+              f"{stats['carried_forward']} carried forward — no write")
+        return 0
+    manifest_path.write_text(new_text)
+    print(f"refreshed {manifest_path}: {stats['sampled_keys']} sampled, "
+          f"{stats['carried_forward']} carried forward "
+          f"(captured_at {captured_at})")
+    return 0
 
 
 # --- history / flakes -------------------------------------------------------
@@ -277,14 +897,102 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     return "\n".join(lines)
 
 
+def paid_vs_selected_cli(args) -> int:
+    """#7532: the --paid-vs-selected entry point.
+
+    PyYAML and `ci_selection` are imported HERE, not at module scope, so the
+    module keeps its stdlib-at-import contract (see the module docstring).
+    """
+    if not args.run_id or not args.changed_files:
+        print("--paid-vs-selected needs both --run-id and --changed-files",
+              file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection  # lazy by design
+
+    # `_manifest_of` is this module's existing seam for exactly this — it wraps
+    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
+    # `load_manifest()` does for every other consumer. Feeding the raw YAML
+    # straight to `fast_pool` would iterate a scalar surface
+    # character-by-character and raise on a None one.
+    manifest = _manifest_of(Path(args.manifest).read_text())
+    changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
+    selection = ci_selection.select(changed, args.event, manifest)
+    # On a full selection the denominator is the set of files the gate actually
+    # runs, not the whole `durations` map: the map also carries `on_demand`
+    # entries python-ci never runs (eval/retrieval/test_integration.py alone is
+    # 1523.4 s of 7398.2 s), so summing the whole map would understate the ratio
+    # on the calibration path. The carve-out runs as its own job whose weight is
+    # not in the numerator either — see `.github/workflows/python-ci.yml` for
+    # which job runs what.
+    full_pool = None
+    if selection.get("test_files") == "ALL":
+        full_pool = set(ci_selection.fast_pool(manifest))
+        # `push_legs` spreads `push_extra` into the counted `test` shards, but
+        # `fast_pool` does NOT include it. Omitting it here would put files in
+        # the counted jobs with no weight on the other side. It is `[]` today,
+        # and that is exactly why the guard belongs here rather than a comment:
+        # the day it is populated is the day the ratio silently inflates.
+        full_pool |= set(manifest.get("push_extra") or [])
+        full_pool |= (set(manifest.get("slow_files") or [])
+                      - ci_selection.carve_out_files(manifest))
+    run = fetch_run(args.repo, args.run_id)
+    result = paid_vs_selected(
+        fetch_jobs(args.repo, args.run_id), selection,
+        durations_map(manifest), run.get("created_at"), full_pool=full_pool)
+    result["event"] = args.event
+    result["full"] = bool(selection.get("full"))
+    result["changed_files"] = len(changed)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the CI timing measurement artifact (#1477)")
     ap.add_argument("--repo", required=True, help="owner/repo (used for gh api calls)")
+    ap.add_argument("--pick-run", action="store_true",
+                    help="print the latest eligible completed push-to-main python-ci run id "
+                         "and exit (ci-timing.yml's find step; writes no artifact)")
     ap.add_argument("--run-id", default="", help="python-ci run id to sample (empty = no network data)")
     ap.add_argument("--logs-dir", default="logs", help="directory of downloaded pytest log artifacts")
     ap.add_argument("--out-dir", default=".", help="where to write ci-timing.md + ci-timing.json")
     ap.add_argument("--max-history", type=int, default=MAX_HISTORY_DEFAULT)
+    ap.add_argument("--refresh-durations", action="store_true",
+                    help="#5215 Task 4b — write the collector's per-file durations into "
+                         "config/ci-surfaces.yml:durations (text-preserving, fail-closed). "
+                         "This is ci-timing.yml's only emit path into that map.")
+    ap.add_argument("--manifest", default="config/ci-surfaces.yml",
+                    help="the selection manifest whose `durations:` map is refreshed")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --refresh-durations, render + validate but do not write")
+    ap.add_argument("--paid-vs-selected", action="store_true",
+                    help="#7532 — print what the gate PAID (test* job execution) against what "
+                         "the diff SELECTED (ci_selection weight), plus the queue-wait split; "
+                         "measurement only, writes no artifact")
+    ap.add_argument("--changed-files", default="",
+                    help="comma-separated changed paths, for --paid-vs-selected")
+    ap.add_argument("--event", default="pull_request",
+                    help="selection event for --paid-vs-selected: pull_request (default) or push")
     args = ap.parse_args()
+
+    if args.paid_vs_selected:
+        return paid_vs_selected_cli(args)
+
+    if args.pick_run:
+        picked = pick_run(args.repo)
+        if picked:
+            print(picked)
+        return 0
+
+    if args.refresh_durations:
+        captured_at = (os.environ.get("CI_TIMING_NOW")
+                       or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
+        return refresh_durations(
+            Path(args.manifest),
+            collector_file_weights(Path(args.logs_dir)),
+            captured_at,
+            dry_run=args.dry_run,
+        )
 
     run_id = args.run_id.strip()
     out_dir = Path(args.out_dir)

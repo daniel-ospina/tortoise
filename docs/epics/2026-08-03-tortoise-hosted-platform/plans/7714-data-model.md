@@ -32,7 +32,7 @@
 - FalkorDB has no UNIQUE constraints — idempotency keys for team_create
 - Postgres connection failure must not fail registry operations — JSONL fallback
 - Migration is idempotent but best-effort — idempotency via name-based dedup
-- Cross-graph referential integrity is application-level — validate team_id exists before creating memberships
+- Cross-graph referential integrity is application-level — validate org_id exists before creating memberships
 
 ### Verification Plan
 
@@ -105,7 +105,7 @@ class AuditLogger:
         self._replay_lock = threading.Lock()
         self._replay_backoff = 1.0
 
-    def append(self, team_id, actor_user_id, operation,
+    def append(self, org_id, actor_user_id, operation,
                resource_type=None, resource_id=None,
                ip_address=None, user_agent=None) -> None:
         # Lazy connect on first write
@@ -154,11 +154,11 @@ def _ensure_registry_indexes(self):
     g = self._get_registry()
     indexes = [
         ("Team", "name"),
-        ("Membership", "team_id"),
+        ("Membership", "org_id"),
         ("Membership", "user_id"),
-        ("APIKey", "team_id"),
+        ("APIKey", "org_id"),
         ("APIKey", "key_hash"),
-        ("Invitation", "team_id"),
+        ("Invitation", "org_id"),
         ("Invitation", "token_hash"),
     ]
     for label, prop in indexes:
@@ -196,22 +196,22 @@ def close(self):
 - Remove direct Team node creation in tortoise graph (current lines 1263-1286)
 - Instead: write `:Team` node to control_plane graph via `_get_registry()`
 - Add `idempotency_key` param — if provided, check for existing Team with matching `idempotency_key` property before creating
-- Still create the team's graph (`team_{name}`) in FalkorDB for tenant data — the graph creation is unchanged
+- Still create the team's graph (`org_{name}`) in FalkorDB for tenant data — the graph creation is unchanged
 - Return shape unchanged: `{name, graph_name, api_key, id}`
-- Audit: call `self._audit_logger.append(team_id=tid, operation="team_create")`
+- Audit: call `self._audit_logger.append(org_id=tid, operation="team_create")`
 
-**Step 2: Add `team_get(team_id)`** — `MATCH (t:Team {id:$id}) RETURN t` via registry graph; returns dict or None
+**Step 2: Add `team_get(org_id)`** — `MATCH (t:Team {id:$id}) RETURN t` via registry graph; returns dict or None
 
 **Step 3: Add `team_list()`** — `MATCH (t:Team) RETURN t ORDER BY t.createdAt` via registry graph
 
-**Step 4: Add `team_update(team_id, **fields)`** — `MATCH (t:Team {id:$id}) SET t += $fields`; validates allowed fields (name, tier, stripe_customer_id, subscription_id, backup_enabled, max_users, max_teams, max_graphs)
+**Step 4: Add `team_update(org_id, **fields)`** — `MATCH (t:Team {id:$id}) SET t += $fields`; validates allowed fields (name, tier, stripe_customer_id, subscription_id, backup_enabled, max_users, max_teams, max_graphs)
 
-**Step 5: Add `team_delete(team_id)`** — requires `confirmation` kwarg matching team name. Cascading cleanup:
+**Step 5: Add `team_delete(org_id)`** — requires `confirmation` kwarg matching team name. Cascading cleanup:
 1. MATCH/DELETE all Membership nodes with BELONGS_TO edge to Team
 2. MATCH/DELETE all APIKey nodes with BELONGS_TO edge to Team
 3. MATCH/DELETE all Invitation nodes with FOR_TEAM edge to Team
 4. DELETE the Team node
-5. Drop tenant graphs (`team_{name}`): use `proj.db.delete_graph(graph_name)` (Docker FalkorDB only). For FalkorDBLite (embedded mode), `delete_graph` is unavailable — log a warning and skip. The deletion is best-effort for the graph data; the control-plane metadata deletion is authoritative.
+5. Drop tenant graphs (`org_{name}`): use `proj.db.delete_graph(graph_name)` (Docker FalkorDB only). For FalkorDBLite (embedded mode), `delete_graph` is unavailable — log a warning and skip. The deletion is best-effort for the graph data; the control-plane metadata deletion is authoritative.
 6. Audit the delete event (Postgres audit_events preserved — immutable)
 Raises `ControlPlaneError` if confirmation doesn't match team name.
 
@@ -240,7 +240,7 @@ def migrate_teams_to_registry(self) -> dict:
             "graph_name:$gn, createdAt:$now})",
             params={"id": team.get("id"), "name": team.get("name"),
                     "key": team.get("api_key", ""),
-                    "gn": team.get("graph_name", f"team_{team.get('name')}"),
+                    "gn": team.get("graph_name", f"org_{team.get('name')}"),
                     "now": team.get("createdAt", now_iso())},
         )
         migrated += 1
@@ -271,17 +271,17 @@ def migrate_teams_to_registry(self) -> dict:
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
-**Step 1: Add `membership_create(team_id, user_id, role)`**
+**Step 1: Add `membership_create(org_id, user_id, role)`**
 - Validate `role ∈ {owner, admin}` → raise `ControlPlaneError` if not
-- Validate `team_id` exists in registry → raise `ControlPlaneError` if not
+- Validate `org_id` exists in registry → raise `ControlPlaneError` if not
 - Check `max_users` constraint on team (COUNT memberships for team vs team.max_users)
-- `CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, role:$role, joinedAt:$now})`
+- `CREATE (m:Membership {id:$id, user_id:$uid, org_id:$tid, role:$role, joinedAt:$now})`
 - `MATCH (m:Membership {id:$id}), (t:Team {id:$tid}) CREATE (m)-[:BELONGS_TO]->(t)`
 - Audit
 
 **Step 2: Add `membership_get(membership_id)`** → dict or None
 
-**Step 3: Add `membership_list(team_id)`** → list of memberships for team
+**Step 3: Add `membership_list(org_id)`** → list of memberships for team
 
 **Step 4: Add `membership_update_role(membership_id, new_role)`**
 - Validate `new_role ∈ {owner, admin}`
@@ -308,16 +308,16 @@ def migrate_teams_to_registry(self) -> dict:
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
-**Step 1: Add `apikey_create(team_id, created_by)`**
+**Step 1: Add `apikey_create(org_id, created_by)`**
 - Generate: `api_key = f"tt_{uuid.uuid4().hex}"`
 - Hash: `key_hash = hash_api_key(api_key)`
 - Prefix: `key_prefix = api_key[:10]` (e.g., `tt_a1b2c3d4`)
-- `CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})`
+- `CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})`
 - `MATCH (k:APIKey {id:$id}), (t:Team {id:$tid}) CREATE (k)-[:BELONGS_TO]->(t)`
 - Return: `{id, key_prefix, api_key, created_at}` — plaintext in THIS response only
 - Audit
 
-**Step 2: Add `apikey_list(team_id)`** → list of `{id, key_prefix, created_by, created_at, last_used_at, revoked_at}` — no plaintext, no hash
+**Step 2: Add `apikey_list(org_id)`** → list of `{id, key_prefix, created_by, created_at, last_used_at, revoked_at}` — no plaintext, no hash
 
 **Step 3: Add `apikey_revoke(key_id)`**
 - `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` — soft delete for audit trail
@@ -326,8 +326,8 @@ def migrate_teams_to_registry(self) -> dict:
 
 **Step 4: Add `apikey_verify(key_plaintext)`**
 - Hash input: `key_hash = hash_api_key(key_plaintext)`
-- `MATCH (k:APIKey {key_hash:$kh}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id`
-- Returns `{team_id, key_id}` or None
+- `MATCH (k:APIKey {key_hash:$kh}) WHERE k.revoked_at IS NULL RETURN k.org_id, k.id`
+- Returns `{org_id, key_id}` or None
 - (Consumed by API auth middleware — separate issue)
 
 **Step 5: Write tests:**
@@ -348,17 +348,17 @@ def migrate_teams_to_registry(self) -> dict:
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
-**Step 1: Add `invitation_create(team_id, email, role, created_by)`**
+**Step 1: Add `invitation_create(org_id, email, role, created_by)`**
 - Generate: `token = str(uuid.uuid4())`
 - Hash: `token_hash = hash_api_key(token)`
 - `expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()`
 - Reject if pending invitation for same email+team exists → `ControlPlaneError`
-- `CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, accepted_at:null})`
+- `CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role, token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, accepted_at:null})`
 - `MATCH (i:Invitation {id:$id}), (t:Team {id:$tid}) CREATE (i)-[:FOR_TEAM]->(t)`
 - Return: `{id, email, role, expires_at, token}` — plaintext token in THIS response only
 - Audit
 
-**Step 2: Add `invitation_list(team_id)`** → list of `{id, email, role, created_at, expires_at, accepted_at}` — no token hashes
+**Step 2: Add `invitation_list(org_id)`** → list of `{id, email, role, created_at, expires_at, accepted_at}` — no token hashes
 
 **Step 3: Add `invitation_get_by_token(token_plaintext)`**
 - Hash: `token_hash = hash_api_key(token_plaintext)`
@@ -370,9 +370,9 @@ def migrate_teams_to_registry(self) -> dict:
 - Check `expires_at > now()` → reject expired with `ControlPlaneError("Invitation expired")`
 - Check `accepted_at IS NULL` → reject if already accepted
 - `SET i.accepted_at = $now`
-- Call `membership_create(team_id=invite.team_id, user_id=user_id, role=invite.role)`
+- Call `membership_create(org_id=invite.org_id, user_id=user_id, role=invite.role)`
 - Audit
-- Returns `{membership_id, team_id}`
+- Returns `{membership_id, org_id}`
 
 **Step 5: Add `invitation_revoke(invitation_id)`** — soft-delete (SET status = 'revoked'). Audit.
 
@@ -399,17 +399,17 @@ def migrate_teams_to_registry(self) -> dict:
 
 **Step 1: Add read-only tools** (readOnlyHint=true):
 - `tortoise_team_list` → `_safe(sdk.team_list)`
-- `tortoise_team_get(team_id)` → `_safe(sdk.team_get, team_id)`
-- `tortoise_membership_list(team_id)` → `_safe(sdk.membership_list, team_id)`
-- `tortoise_apikey_list(team_id)` → `_safe(sdk.apikey_list, team_id)`
-- `tortoise_invitation_list(team_id)` → `_safe(sdk.invitation_list, team_id)`
+- `tortoise_team_get(org_id)` → `_safe(sdk.team_get, org_id)`
+- `tortoise_membership_list(org_id)` → `_safe(sdk.membership_list, org_id)`
+- `tortoise_apikey_list(org_id)` → `_safe(sdk.apikey_list, org_id)`
+- `tortoise_invitation_list(org_id)` → `_safe(sdk.invitation_list, org_id)`
 
 **Step 2: Modify existing tool** `tortoise_team_create` (already at line 506): update docstring to note `idempotency_key` param and control_plane storage. The wrapper `_safe(sdk.team_create, name)` transparently picks up the refactored SDK method.
 
 **Step 3: Add new mutation tools** (destructiveHint=true via `annotations=ToolAnnotations(destructiveHint=True)`):
-- `tortoise_apikey_create(team_id, created_by)` → `_safe(sdk.apikey_create, team_id, created_by)`
+- `tortoise_apikey_create(org_id, created_by)` → `_safe(sdk.apikey_create, org_id, created_by)`
 - `tortoise_apikey_revoke(key_id)` → `_safe(sdk.apikey_revoke, key_id)`
-- `tortoise_invitation_create(team_id, email, role, created_by)` → `_safe(sdk.invitation_create, team_id, email, role, created_by)`
+- `tortoise_invitation_create(org_id, email, role, created_by)` → `_safe(sdk.invitation_create, org_id, email, role, created_by)`
 - `tortoise_invitation_revoke(invitation_id)` → `_safe(sdk.invitation_revoke, invitation_id)`
 
 **Step 4:** `tortoise_team_delete` is NOT exposed via MCP — too dangerous for agent automation. Team deletion requires dashboard confirmation flow.
@@ -431,7 +431,7 @@ def migrate_teams_to_registry(self) -> dict:
 self._audit_logger = AuditLogger()
 
 # In each CRUD method:
-self._audit_logger.append(team_id=..., actor_user_id=..., operation=...)
+self._audit_logger.append(org_id=..., actor_user_id=..., operation=...)
 ```
 
 **Step 2:** Run existing tests to verify backward compatibility:

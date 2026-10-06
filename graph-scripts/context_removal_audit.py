@@ -7,7 +7,7 @@ carried which context values — the ONLY way to answer "what was in the X subgr
 after Phase 2 removes n.context.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/context_removal_audit.py
 
   # Dry-run (print what would be written):
@@ -18,10 +18,20 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/context_removal_audit.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/context_removal_audit.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -34,11 +44,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _parse_uri(uri: str) -> dict:
     """Parse docker:// URI into components."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule.
+    username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
-        "password": parsed.password or "",
+        # #3081: the username MUST travel with the password — see audit_graph.py.
+        "username": username or "",
+        "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
 
@@ -94,6 +110,22 @@ def collect_context_details(g) -> dict:
 
 # ── Main ────────────────────────────────────────────────────────────────
 
+def _build_client(cfg: dict):
+    """Connect directly (avoids the heavy index creation of FalkorProjection).
+
+    Split out of ``main`` as the seam a behavioural test can observe: the
+    decoded username must reach ``FalkorDB``, and watching the real call is the
+    only check that cannot miss a spelling (#3081).
+    """
+    from falkordb import FalkorDB as _FalkorDB
+    return _FalkorDB(
+        host=cfg["host"], port=cfg["port"],
+        username=cfg["username"] or None,
+        password=cfg["password"] or None,
+        socket_connect_timeout=5, socket_timeout=120,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Context removal audit sidecar — #49 Phase 2 Task 2.0"
@@ -109,7 +141,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 
@@ -132,13 +164,7 @@ def main() -> int:
     if args.dry_run:
         print("DRY RUN — will not write file.\n")
 
-    # Use direct FalkorDB connection (avoids heavy index creation of FalkorProjection)
-    from falkordb import FalkorDB as _FalkorDB
-    db = _FalkorDB(
-        host=cfg["host"], port=cfg["port"],
-        password=cfg["password"] or None,
-        socket_connect_timeout=5, socket_timeout=120,
-    )
+    db = _build_client(cfg)
     g = db.select_graph(cfg["graph"])
 
     try:

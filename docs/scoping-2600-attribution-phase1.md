@@ -75,9 +75,9 @@ create_point props passthrough (persisted verbatim, sdk.py:2461-2465).
 |---|---|---|---|
 | OAuth `oat_` (MCP only) | `resolve_oauth_access_token` oauth.py:722 | selects user_id/client_id, returns `_quota_fields` only | return dict gains `actor_user_id` (= row `user_id` — only when UUID-shaped) + `client_id` |
 | Supabase key | `resolve_api_key` supabase_control.py:503 | returns `created_by` | ADDITIVE `actor_user_id = created_by` when UUID-shaped; keep `created_by` untouched |
-| Registry key (REST) | `get_current_team` hosted_api.py:1656 | returns `created_by` | ADDITIVE `actor_user_id = created_by` when UUID-shaped |
-| Registry key (MCP) | `sdk.apikey_verify` sdk.py:14766 | returns team_id/key_id/delegation_depth/scopes/legacy_full_access — **NO created_by** | extend to select + return `created_by` from the APIKey node (`_verify_hashed_lookup` already returns full props — `m.get("created_by")`). Raw return; the UUID gate + `actor_user_id` alias happen at the §2.1 normalization seam, NOT in sdk.py (sdk cannot import supabase_control) |
-| Session JWT | `get_current_team_session` hosted_api.py:2372 | sets `team[session_user_id]` | also set `team[actor_user_id] = user["user_id"]` (already UUID) |
+| Registry key (REST) | `get_current_org` hosted_api.py:1656 | returns `created_by` | ADDITIVE `actor_user_id = created_by` when UUID-shaped |
+| Registry key (MCP) | `sdk.apikey_verify` sdk.py:14766 | returns org_id/key_id/delegation_depth/scopes/legacy_full_access — **NO created_by** | extend to select + return `created_by` from the APIKey node (`_verify_hashed_lookup` already returns full props — `m.get("created_by")`). Raw return; the UUID gate + `actor_user_id` alias happen at the §2.1 normalization seam, NOT in sdk.py (sdk cannot import supabase_control) |
+| Session JWT | `get_current_org_session` hosted_api.py:2372 | sets `team[session_user_id]` | also set `team[actor_user_id] = user["user_id"]` (already UUID) |
 
 **Human-shape gate (P1 fix):** `created_by` is NOT always a human identifier —
 production mints produce UUID (UI/session-minted), literal `"api"` (API-minted,
@@ -108,8 +108,8 @@ planes:
    _is_uuid(created_by) else None)`. mcp_auth already function-imports
    supabase_control (get_control_plane/is_supabase_enabled/resolve_api_key) —
    `_is_uuid` joins the same lazy import; no sdk↔supabase_control cycle.
-2. **hosted REST DI chain** (`get_current_team` registry branch,
-   `_get_current_team_supabase`, `_session_user_team`/session branch): same
+2. **hosted REST DI chain** (`get_current_org` registry branch,
+   `_get_current_team_supabase`, `_session_user_org`/session branch): same
    normalization before the dict returns — one helper, four terminal returns
    (SKIP_AUTH and /internal/* emit no GraphEvents; /v1/session/login is
    SKIP_AUTH — no live surface missed).
@@ -134,7 +134,7 @@ Instead:
 2. Set sites (each in the request/DI context where the actor is known):
    - `TeamResolutionMiddleware` (mcp_auth.py, after resolution ~:355) — from
      the resolved team dict `actor_user_id` (all lanes incl oat_).
-   - hosted `get_current_team*` dependency chain (registry REST lane, supabase
+   - hosted `get_current_org*` dependency chain (registry REST lane, supabase
      lane, session lane) — set from the resolved dict before returning.
    - `_capture_session_impl` caller context (REST + MCP tool paths) — capture
      may run where the DI dependency chain is overridden (tests).
@@ -328,7 +328,7 @@ sessionless dedup-hit.
 |---|---|---|---|
 | oauth.py resolver | auth | Task 1 (unit) | ✅ |
 | supabase_control.resolve_api_key | auth | Task 1 (unit) | ✅ |
-| hosted_api get_current_team* (reg/supabase/session) | auth | Task 1 (unit) | ✅ |
+| hosted_api get_current_org* (reg/supabase/session) | auth | Task 1 (unit) | ✅ |
 | sdk.apikey_verify (registry MCP lane) | auth | Task 1 (unit) | ✅ |
 | mcp_auth middleware ContextVar | auth/MCP | Task 2 (unit) | ✅ |
 | Session MERGE (hosted + SDK mirror) | graph write | Task 3 (integration) | ✅ |

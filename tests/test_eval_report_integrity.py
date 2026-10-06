@@ -74,7 +74,8 @@ def _outcome(qid: str, *, valid: bool = True,
 
 
 def _report(outcomes: list[dict], *, threshold: float = 0.0,
-            failures: list[dict] | None = None) -> dict:
+            failures: list[dict] | None = None,
+            retrieval_only: bool = False) -> dict:
     return build_report(
         outcomes,
         dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
@@ -83,6 +84,7 @@ def _report(outcomes: list[dict], *, threshold: float = 0.0,
         ingest_mode="deterministic", ks=(5,), top_k=5,
         dataset_semantics_audit=_audit(),
         integrity_threshold=threshold, failures=failures,
+        retrieval_only=retrieval_only,
     )
 
 
@@ -136,6 +138,112 @@ def test_report_integrity_zero_outcomes():
     assert integ["n_hard_invalid"] == 0
     assert integ["n_recoverable_invalid"] == 0
     assert integ["recoverable_invalid_rate"] == 0.0
+
+
+def test_report_integrity_surfaces_extractor_warnings():
+    """#2873: a run whose extractor emitted warnings must self-declare its
+    warning load (count + first N distinct) in the report — previously such a
+    run was byte-indistinguishable from a clean one, so an extraction-quality
+    regression that surfaced only as a warning was invisible to the harness."""
+    o1 = _outcome("q1")
+    o1["ingest"] = {"warnings": {
+        "count": 3, "distinct": 2,
+        "sample": ["R8: no prior matches — skipped (fail-open)",
+                   "Tier-A: ambiguous (2 priors) — never guess"]}}
+    o2 = _outcome("q2")
+    o2["ingest"] = {"warnings": {"count": 0, "distinct": 0, "sample": []}}
+    integ = _report([o1, o2])["integrity"]
+    ew = integ["extractor_warnings"]
+    assert ew["count"] == 3, "per-question warning counts must be summed"
+    assert ew["questions_with_warnings"] == 1
+    assert ew["sample"] == ["R8: no prior matches — skipped (fail-open)",
+                            "Tier-A: ambiguous (2 priors) — never guess"]
+    # DIAGNOSTIC only — never a gate limb or a veto source.
+    assert integ["valid"] is True
+    assert "criterion" in ew
+
+
+def test_report_integrity_extractor_warnings_zero_without_ingest_stats():
+    """Legacy / non-v2 outcomes carry no ``ingest.warnings`` — the report
+    must report a zero warning load, never crash or omit the surface."""
+    integ = _report([_outcome("q1")])["integrity"]
+    ew = integ["extractor_warnings"]
+    assert ew["count"] == 0
+    assert ew["questions_with_warnings"] == 0
+    assert ew["sample"] == []
+
+
+def test_report_integrity_extractor_warnings_malformed_fails_closed():
+    """#2873 (review P1): a tampered checkpoint carrying a malformed
+    ``ingest.warnings`` must NOT take down report assembly (the
+    ``_outcome_shape_ok`` posture). Non-numeric ``count`` reads 0; a
+    non-list ``sample`` contributes nothing; ``valid`` is unaffected."""
+    bad_count = _outcome("q1")
+    bad_count["ingest"] = {"warnings": {"count": "abc", "sample": 5}}
+    bad_bool = _outcome("q2")
+    bad_bool["ingest"] = {"warnings": {"count": True, "sample": {"a": 1}}}
+    ok = _outcome("q3")
+    ok["ingest"] = {"warnings": {"count": 7, "sample": "ab"}}
+    integ = _report([bad_count, bad_bool, ok])["integrity"]
+    ew = integ["extractor_warnings"]
+    assert ew["count"] == 7  # only q3's numeric count survives
+    assert ew["questions_with_warnings"] == 1
+    assert ew["sample"] == []  # the string sample is not iterated char-wise
+    assert integ["valid"] is True
+
+
+def test_report_integrity_extractor_warnings_dedupes_by_qid():
+    """#2873 (review P2): duplicate outcome entries for one qid (the #1747
+    concurrent-checkpoint overlap) must not double-count — the rest of the
+    integrity block dedupes by qid, and this readout must too."""
+    a = _outcome("q1")
+    a["ingest"] = {"warnings": {"count": 5, "distinct": 1,
+                                "sample": ["w1"]}}
+    b = _outcome("q1")
+    b["ingest"] = {"warnings": {"count": 5, "distinct": 1,
+                                "sample": ["w1"]}}
+    integ = _report([a, b])["integrity"]
+    ew = integ["extractor_warnings"]
+    assert integ["n_attempted"] == 1
+    assert ew["count"] == 5, "one question's warnings must not be counted twice"
+    assert ew["questions_with_warnings"] == 1
+    assert ew["sample"] == ["w1"]
+
+
+def test_report_integrity_extractor_warning_sample_capped():
+    """#2873: the run-level sample is a first-N-distinct window — the count
+    stays exact while the sample is bounded (mirrors the ingest lane's cap)."""
+    from tools.longmem_eval.report import EXTRACTOR_WARNING_SAMPLE_CAP
+    n = EXTRACTOR_WARNING_SAMPLE_CAP + 3
+    outcomes = []
+    for i in range(n):
+        o = _outcome(f"q{i}")
+        o["ingest"] = {"warnings": {"count": 1, "distinct": 1,
+                                    "sample": [f"w{i}"]}}
+        outcomes.append(o)
+    ew = _report(outcomes)["integrity"]["extractor_warnings"]
+    assert ew["count"] == n
+    assert ew["sample"] == [f"w{i}" for i in range(EXTRACTOR_WARNING_SAMPLE_CAP)]
+
+
+def test_print_summary_surfaces_extractor_warnings(capsys):
+    """#2873 (review P2): the operator-facing console summary must not be
+    byte-identical between a warning-emitting run and a clean one."""
+    o = _outcome("q1")
+    o["ingest"] = {"warnings": {
+        "count": 3, "distinct": 2,
+        "sample": ["R8: skipped (fail-open)", "Tier-A: ambiguous"]}}
+    _print_summary(_report([o]))
+    out = capsys.readouterr().out
+    assert "extractor warnings: 3 across 1 question(s)" in out
+    assert "R8: skipped (fail-open)" in out
+    assert "Tier-A: ambiguous" in out
+
+
+def test_print_summary_silent_on_clean_run(capsys):
+    """#2873: a clean run's console summary is unchanged (no warning line)."""
+    _print_summary(_report([_outcome("q1")]))
+    assert "extractor warnings" not in capsys.readouterr().out
 
 
 def test_report_integrity_threshold():
@@ -346,6 +454,31 @@ def test_report_integrity_ingest_transient_recoverable_rates():
         "failed_at_utc": "2026-08-20T00:00:00Z",
     }], threshold=1.0)["integrity"]
     assert bare["valid"] is False         # bare ingest vetoes at ANY threshold
+
+
+def test_print_summary_retrieval_only_does_not_crash(capsys):
+    """#4803: a `--retrieval-only` run must not die in the summary it prints.
+
+    ``report.py`` records ``"accuracy": None if retrieval_only else {...}``,
+    and ``_print_summary`` read ``report["accuracy"]`` as a dict
+    unconditionally — so every retrieval-only run raised ``TypeError:
+    'NoneType' object is not subscriptable`` in the terminal summary AFTER
+    ``save_report()`` had already written a correct report, and the CLI
+    exited 1 for a run that had worked.
+
+    The defect is on the PRINT path only — the report on disk was correct and
+    the CLI's exit status was not — so this pins the printed summary itself,
+    not the report dict that the other retrieval-only tests assert on.
+    """
+    # A retrieval-only outcome carries no label — the judge never ran.
+    report = _report([_outcome("q1", label=None)], retrieval_only=True)
+    assert report["accuracy"] is None        # the shape the defect tripped on
+    _print_summary(report)                   # must not raise
+    out = capsys.readouterr().out
+    assert "── score ──" in out
+    # The absence is STATED, not omitted: an absent accuracy line is
+    # indistinguishable from a run whose accuracy was fine.
+    assert "accuracy:                n/a (retrieval-only)" in out
 
 
 def test_print_summary_integrity_before_score(capsys):
@@ -1682,8 +1815,11 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     from tools.longmem_eval.run import _build_parser as runner_parser
 
     def _runner_argv(cmd):
-        # drop the [sys.executable, "-m", "tools.longmem_eval.run"] head.
-        return cmd[3:]
+        # drop the [sys.executable, "-B", "-m", "tools.longmem_eval.run"] head
+        # by MEANING, not by index: the byte-code-free `-B` (#3712) sits
+        # between the interpreter and `-m`, so a fixed `cmd[3:]` would leave
+        # the module name in the runner's argv.
+        return cmd[cmd.index("tools.longmem_eval.run") + 1:]
 
     rp = runner_parser()
     overridden = build_command(STEPS_BY_NUMBER[5],

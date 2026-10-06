@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -19,6 +20,27 @@ from pathlib import Path
 # path COMPONENTS only (see _markdown_files) — `docs/venv/` is dropped while
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
+
+# The RECORDED local-receipt refusal set: a refusal in this set must never be
+# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
+# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
+# error, NO receipt) … that rule is correct and must not be weakened"*).
+#
+# Named EXPLICITLY rather than derived from `classify_failure`, because the two
+# answer DIFFERENT questions, and both answers are correct:
+#
+#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
+#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
+#     capture KEPT in the spool (its `est` is computed from the incoming
+#     capture, so the identical capture succeeds once a node is freed).
+#   * this set answers *"is this a refusal the user must be shown?"* — and 402
+#     is.
+#
+# Deriving one from the other let #4614's reclassification of 402 silently
+# weaken the receipt rule: the receipt gates stopped excluding it, so a 402
+# whose session happened to be durable minted a receipt for a refusal.
+# `tests/test_session_confirm.py` pins the two rules as independent.
+_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
 
 
 def _markdown_files(root: Path | str) -> list[Path]:
@@ -42,23 +64,153 @@ def _markdown_files(root: Path | str) -> list[Path]:
 
 
 def _cmd_rebuild(args):
+    from tortoise.log import TornTailResurrectionError
+
     print(f"Rebuilding from {args.dir} → {args.db}")
+    proj = None
     try:
-        from tortoise.projection import FalkorProjection
+        from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
-        counts = proj.rebuild_all(args.dir)
+        # #2944 L1: `tortoise rebuild` IS the operator-invoked wipe+replay
+        # recovery tool — the human running this command is the authorization.
+        # The token is passed HERE, at the entry point, so a new caller of
+        # rebuild_all() elsewhere cannot wipe a graph by forgetting it.
+        counts = proj.rebuild_all(args.dir, confirm_destructive=True)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+        # #2814: the operator surface for the config third state. Without this a
+        # SUCCESSFUL rebuild that staged the `config_reset` marker would print
+        # `Done:` and say nothing — the marker would be written and never
+        # surfaced on the very path an operator reads. Printed even at zero
+        # expected, so "there was no authoritative config to preserve" is
+        # distinguishable from "preservation was not attempted".
+        print(f"Config: {counts.get('config_restored', 0)} of "
+              f"{counts.get('config_expected', 0)} authoritative entr(y/ies) restored")
+        # #4641: onboarding state rides the same rescue file but is not
+        # "config", so it gets its own line — printed at zero expected too, so
+        # "no onboarding state to preserve" is distinguishable from
+        # "preservation was not attempted". This line is the COUNT only; the
+        # failure shapes (UNVERIFIED, UNKNOWN, confirmed loss) are reported
+        # separately below, because the projection's aggregate `onboarding_gap`
+        # is a max that collapses them.
+        # The three shapes below are NOT mutually exclusive: a
+        # pre-preservation rescue file (UNKNOWN) can coexist with an
+        # unverified restore and with a confirmed partial loss. Each is
+        # printed on its own so one cannot suppress the other, and the CLI
+        # reports the sources SEPARATELY rather than printing the projection's
+        # aggregate `onboarding_gap`: that aggregate is a max, so it collapses
+        # coexisting sources into one number and a UNKNOWN would be absorbed
+        # into a loss count (#4641 review round 7).
+        onboarding_unverified = counts.get("onboarding_verified") is False
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        onboarding_missing_total = counts.get("onboarding_missing_total") or 0
+        # "Could not confirm" must not be printed as a LOSS: the projection
+        # forces `onboarding_restored` to 0 for an unverified restore, so the
+        # count line would read "0 of N restored" and contradict the stderr
+        # line right below it. The unverified shape gets non-loss wording.
+        if onboarding_unverified:
+            print(f"Onboarding: restore UNVERIFIED "
+                  f"({counts.get('onboarding_expected', 0)} org state(s) "
+                  f"expected)")
+        else:
+            print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
+                  f"{counts.get('onboarding_expected', 0)} org state(s) "
+                  f"restored")
+        # Mutually additive: an UNVERIFIED restore, a pre-preservation
+        # UNKNOWN, and a confirmed gap must not suppress each other.
+        if onboarding_unverified:
+            # "Could not confirm" must not be printed as "gone": the
+            # projection's own branch says UNVERIFIED, and the CLI must not
+            # contradict it (round 5).
+            print(
+                "Onboarding: the post-restore verification COULD NOT RUN "
+                "— this graph's onboarding state is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Re-check it "
+                "before trusting the organizations' onboarding state "
+                "(#4641).",
+                file=sys.stderr,
+            )
+        if onboarding_unknown:
+            print(
+                "Onboarding: the leftover pre-wipe snapshot does not carry a "
+                "usable onboarding record — it either predates onboarding "
+                "preservation, carries only one of the two onboarding "
+                "sections, or carries a state-UNKNOWN marker from an earlier "
+                "interrupted rebuild — so whether the destroyed graph held "
+                "any onboarding state CANNOT be determined (UNKNOWN, not "
+                "absent). Re-run onboarding for any org whose onboarding "
+                "state is uncertain (#4641).",
+                file=sys.stderr,
+            )
+        if onboarding_missing_total:
+            print(
+                f"Onboarding: {onboarding_missing_total} state/edge restore "
+                f"gap(s) — the wipe is unconditional and only the journal "
+                f"is replayed, so those onboarding states/edges are gone. "
+                f"Re-run onboarding for the affected org(s) (#4641).",
+                file=sys.stderr,
+            )
+        if counts.get("config_reset"):
+            if counts.get("config_reset_read_failed"):
+                # `config_reset` is fail-SAFE, so it does not prove the marker
+                # is on the graph. Do not assert "IS SET" about a node the
+                # rebuild could not read — and do not tell the operator to
+                # clear a marker whose read is exactly what is failing.
+                print(
+                    "Config: the `config_reset` STATE COULD NOT BE READ — the "
+                    "marker may or may not be present, so this graph's "
+                    "configuration is unproven. Re-check the marker (the "
+                    "`_clear_config_reset()` clear path re-reads it and will "
+                    "fail the same way) before assuming any configuration was "
+                    "preserved "
+                    "(see operations/skills/tortoise-rebuild/SKILL.md, #2814).",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Config: the `config_reset` marker IS SET — the configuration "
+                    "this graph had could not be proven restored (or its state is "
+                    "unknown after a pre-preservation rescue file). Re-provision "
+                    "the pack configuration and clear the marker "
+                    "(see operations/skills/tortoise-rebuild/SKILL.md, #2814).",
+                    file=sys.stderr,
+                )
+    except RebuildDroppedEpisodicPoints as e:
+        # #3947 review (cycle 2, D5): the refusal is the intended outcome for a
+        # store whose episodic roster cannot be proven recoverable, so it must
+        # reach the operator as the message it was written to be — not as a
+        # traceback on a supported ops path. Nothing was wiped; exit non-zero
+        # so a scripted caller cannot read the refusal as success.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
+    except TornTailResurrectionError as e:
+        # #3316: same contract as the episodic refusal above — a journal whose
+        # torn trailing record dropped a removal must NOT be rebuilt (replaying
+        # without it resurrects the state it removed), and the operator must
+        # see the refusal as a message, not a traceback. Nothing was wiped.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
-        from tortoise.log import EventLog  # noqa: I001
+        from tortoise.log import EventLog, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import fold
         import os
         events = []
-        for f in sorted(os.listdir(args.dir)):
-            if f.endswith('.jsonl'):
-                events.extend(EventLog(os.path.join(args.dir, f)).read_all())
+        try:
+            for f in sorted(os.listdir(args.dir)):
+                if f.endswith('.jsonl'):
+                    file_log = EventLog(os.path.join(args.dir, f))
+                    chunk = file_log.read_all()
+                    # #3316: the in-memory fallback is a replay engine too — a
+                    # dropped torn trailing removal record must not be folded
+                    # into an in-memory "success".
+                    refuse_torn_tail_revival(
+                        file_log.torn_tail_revival_records())
+                    events.extend(chunk)
+        except TornTailResurrectionError as refusal:
+            print(f"Refused: {refusal}", file=sys.stderr)
+            return 1
         points = fold(events)
         statements, ops = 0, 0
         for p in points.values():
@@ -67,6 +219,11 @@ def _cmd_rebuild(args):
             else:
                 statements += 1
         print(f"Done: {len(points)} total ({statements} statements, {ops} operators) [in-memory, no DB]")
+    finally:
+        # #3316: close the embedded projection on EVERY exit path (the refusal
+        # paths too) so a refusal cannot leave a redislite server behind.
+        if proj is not None:
+            proj.close()
 
 def _cmd_demo(args):
     from pathlib import Path  # noqa: I001
@@ -230,13 +387,27 @@ def _cmd_reconcile(args):
         return 1
 
     try:
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
 
-    events = EventLog(log_path).read_all()
+    # #3316: ``reconcile`` is a replay engine too — it folds journal records
+    # into the graph, so a torn trailing REMOVAL record must not be applied
+    # over (``EventRecorded``'s connector leg deletes a superseded
+    # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source``).
+    # Refused before the projection is even opened.
+    log = EventLog(log_path)
+    try:
+        events = log.read_all()
+        refuse_torn_tail_revival(log.torn_tail_revival_records())
+    except TornTailResurrectionError as refusal:
+        # Same operator contract as ``tortoise rebuild``: the refusal is the
+        # intended outcome for this journal, so it is a message and a non-zero
+        # exit, never a traceback. Nothing has been applied.
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
 
     proj = None
     try:
@@ -307,7 +478,7 @@ def _cmd_init(args):
                     _emit_json({
                         "status": "connected",
                         "already_connected": True,
-                        "team_id": existing.get("team_id"),
+                        "org_id": existing.get("org_id"),
                         "api_url": existing_api_url,
                         "mcp": {
                             "endpoint": f"{existing_api_url}/mcp/",
@@ -363,14 +534,14 @@ def _cmd_init(args):
 
         # Validation outcome: (error_kind, message, http_code) or None when the
         # key validated. Hard-fail kinds → config NOT saved; warn kinds → saved.
-        team_id = None
+        org_id = None
         fail: tuple[str, str, int | None] | None = None
 
         try:
             for attempt in range(2):
                 try:
-                    team_data = _validate_key()
-                    team_id = (team_data or {}).get("team_id") if isinstance(team_data, dict) else None
+                    org_data = _validate_key()
+                    org_id = (org_data or {}).get("org_id") if isinstance(org_data, dict) else None
                     if not json_mode:
                         print("✅ API key validated against Tortoise Cloud")
                     break
@@ -382,11 +553,11 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        # #308: suspended teams get a structured 403 — surface
+                        # #308: suspended orgs get a structured 403 — surface
                         # the appeal link instead of the generic rejection.
                         sus = _suspended_info(body)
                         if sus is not None:
-                            fail = ("team_suspended", f"Team suspended — {sus[0]}", e.code)
+                            fail = ("org_suspended", f"Team suspended — {sus[0]}", e.code)
                         else:
                             fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
@@ -455,7 +626,7 @@ def _cmd_init(args):
             # Machine-consumable output — full shape for agents (#304).
             _emit_json({
                 "status": "connected",
-                "team_id": team_id,
+                "org_id": org_id,
                 "api_url": base_url,
                 "mcp": {
                     "endpoint": f"{base_url}/mcp/",
@@ -489,9 +660,10 @@ def _cmd_init(args):
         print()
         _print_mcp_configs(args.api_key, base_url, harness)
         print()
-        print("── Onboarding skill ──")
-        print("Give this skill to your agent to complete setup (tortoise-onboarding —")
-        print("the successor to the archived onboarding prompt, M8):")
+        print("── Onboarding instructions ──")
+        print("Give these instructions to your agent to complete setup — they are a")
+        print("document your agent reads, never an installed skill (the successor to")
+        print("the archived onboarding prompt, M8):")
         print(f"  {ONBOARDING_PROMPT_URL}")
         print()
         print("Next steps:")
@@ -521,12 +693,30 @@ def _cmd_init(args):
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
         # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
-        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (a plain path with no
+        # '@' passes through unchanged; #2987 fails closed on any other.
+        # scheme-less line carrying an '@').
         print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
     graph_ready = False
     uri_mode = False
+    # #4579: bound before the mode branches so every error return below can
+    # release a probe that was created before the failure.
+    _proj = None
+
+    def _close_probe() -> None:
+        """#4579: release the reachability probe (idempotent, never raises).
+
+        Every error return in the two mode branches routes through here —
+        including the `except ImportError` arms, which are declared FIRST and
+        therefore also catch an ImportError raised by a LATER statement
+        (`_proj.g.query`, the `_mark_embedded_opened` import, the fallback
+        notice import) after the probe is already bound.
+        """
+        with contextlib.suppress(Exception):
+            if _proj is not None:
+                _proj.close()
 
     if is_db_uri(target):
         # 1. URI mode — connect to the configured URI target itself (never a
@@ -542,6 +732,7 @@ def _cmd_init(args):
         except ImportError:
             print(f"  ❌ falkordb not installed — required for URI mode")  # noqa: F541
             print(f"     pip install falkordb")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
             err = str(e).lower()
@@ -550,6 +741,7 @@ def _cmd_init(args):
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            _close_probe()
             return 1
     else:
         # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
@@ -598,8 +790,13 @@ def _cmd_init(args):
             print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")  # noqa: F541
             print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")  # noqa: F541
             print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
+            # #4579: release a probe that succeeded before a later step in
+            # this branch failed — otherwise it can outlive the call and,
+            # collected late, leave the daemon running uninstrumented.
+            _close_probe()
             print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
@@ -607,6 +804,7 @@ def _cmd_init(args):
         return 1
 
     # Write welcome Point to the graph
+    sdk = None  # #4579: bound before the try so the close seam always sees it
     try:
         from tortoise.sdk import TortoiseSDK
         if uri_mode:
@@ -640,6 +838,33 @@ def _cmd_init(args):
         # '?' placeholder a user can't act on. Omit the count and point at
         # doctor so the failure is diagnosable, not masked.
         point_count = None
+    finally:
+        # #4579: release the clients THIS call opened, on every path.
+        #
+        # `tortoise init` is an in-process entry point (`_cmd_onboard`
+        # invokes it directly; agents/tests call `main(["init"])`), and it
+        # opens TWO clients on the same embedded daemon: the reachability
+        # probe projection and the welcome-write `TortoiseSDK`. Neither was
+        # closed here, which is correct for a one-shot CLI process — the
+        # exit cascade closes them — but wrong for any in-process caller.
+        #
+        # Left to GC/atexit, the two clients share the daemon, so the
+        # co-tenant release path withdraws each `.tortoise-owners` record
+        # WITHOUT shutting the daemon down (the shared branch only
+        # disconnects). The daemon then outlives the call UNINSTRUMENTED
+        # with its registry data dir present — exactly the class #3767
+        # deliberately refuses to fast-kill — so a long-lived host process
+        # (or the `test-slow (b)` leg, whose session sweep is the last
+        # reaper pass) leaks it. Closing explicitly makes the LAST client
+        # take the normal `_cleanup()` path, which shuts the daemon down and
+        # reclaims its socket dir. Order-independent: only the final close
+        # performs the shutdown; the other is a co-tenant disconnect.
+        for _client in (sdk, _proj):
+            if _client is None:
+                continue
+            with contextlib.suppress(Exception):
+                # teardown context: a failed close must not fail init
+                _client.close()
 
     if point_count is None:
         print("  Graph: tortoise  |  Points: unavailable — run 'tortoise doctor'")
@@ -863,11 +1088,11 @@ def _is_invalid_signup_token(body: str) -> bool:
 
 def _cmd_recover(args) -> int:
     """Keyless config-loss recovery (#1709): POST /v1/agent/recover with the
-    saved st_ token → a NEW key on the SAME team; config rewritten, data
+    saved st_ token → a NEW key on the SAME org; config rewritten, data
     intact. The token is persisted back into the config — the recover
     endpoint does NOT re-issue tokens (rotation rejected), so without
     persistence this surface would be one-shot-only and the NEXT key-loss
-    would silently fresh-mint and orphan the recovered team.
+    would silently fresh-mint and orphan the recovered org.
     """
     import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
@@ -935,21 +1160,21 @@ def _cmd_recover(args) -> int:
         print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
         return 1
 
-    if not (isinstance(data, dict) and "key" in data and "team_id" in data):
-        # #1709 fixer P2.2: a 200 with valid JSON but no key/team_id (proxy/
+    if not (isinstance(data, dict) and "key" in data and "org_id" in data):
+        # #1709 fixer P2.2: a 200 with valid JSON but no key/org_id (proxy/
         # edge garbage) must not KeyError-traceback on the derefs below —
         # mirror _cmd_signup's malformed-response guard (fail-soft: the
         # recovery may have committed server-side, so never blindly retry).
         print("Recovery may have succeeded but the response was malformed "
-              "(missing 'key' or 'team_id') — check the dashboard or support "
+              "(missing 'key' or 'org_id') — check the dashboard or support "
               "before re-running; do NOT blindly retry.", file=sys.stderr)
         return 1
 
     config = {
         "api_key": data["key"],
         "api_url": api_url,
-        "team_id": data["team_id"],
-        "team_name": data.get("team_name"),
+        "org_id": data["org_id"],
+        "org_name": data.get("org_name"),
         "signup_token": token,  # ⛔ persist — recovery must not be one-shot
     }
     # Write to the #1708 global store (0600, dir 0700, atomic) — same shape
@@ -968,7 +1193,7 @@ def _cmd_recover(args) -> int:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
-    print(f"✅ Key recovered on team {data.get('team_name')} (data intact)")
+    print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     print(f"   Recovery token kept: {token[:14]}…")
@@ -978,17 +1203,17 @@ def _cmd_recover(args) -> int:
 def _cmd_token_revoke(args) -> int:
     """User-facing signup-token revocation (#1715): POST
     /v1/agent/token/revoke with the saved (or --token) st_ token → the
-    token can no longer recover keys on the team. The request is
-    authenticated with the stored team key (env → cwd → global resolver,
-    #1708) — the same credential that proves team ownership server-side;
-    the endpoint is team-scoped, so a leaked token is killable the moment
+    token can no longer recover keys on the org. The request is
+    authenticated with the stored org key (env → cwd → global resolver,
+    #1708) — the same credential that proves org ownership server-side;
+    the endpoint is org-scoped, so a leaked token is killable the moment
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
 
     #1755 UX gate: revocation is PERMANENT (no un-revoke RPC exists) — a
-    stray invocation permanently destroys the team's only keyless-recovery
+    stray invocation permanently destroys the org's only keyless-recovery
     path. Requires explicit [y/N] confirmation unless --force, mirroring
-    _cmd_team_keys_revoke; non-interactive runs fail closed (no revoke).
+    _cmd_org_keys_revoke; non-interactive runs fail closed (no revoke).
     """
     import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
@@ -1008,14 +1233,14 @@ def _cmd_token_revoke(args) -> int:
     # #1752: the token must come from the SAME config the auth key came
     # from — an env key has no token, so a stored token from another source
     # is used only with a warning naming the shadow source (no silent 403
-    # "Not your signup token" dead-end when the sources are different teams).
+    # "Not your signup token" dead-end when the sources are different orgs).
     token = _resolve_same_source_token(args, _cfg_path, _cfg)
     if not token:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
         return 1
     # #1755 confirmation gate — revoke is PERMANENT (no un-revoke RPC
-    # exists) and removes the team's only keyless-recovery path. Only an
+    # exists) and removes the org's only keyless-recovery path. Only an
     # explicit yes proceeds; --force skips the prompt for scripts; a
     # non-interactive run without --force fails CLOSED (no revoke).
     if not getattr(args, "force", False):
@@ -1137,7 +1362,7 @@ def _cmd_signup(args) -> int:
         The 401/403 source may be a higher-precedence key (env or a legacy
         cwd/.tortoise config) that still shadows the global store at read
         time — re-running would re-validate the dead source and mint ANOTHER
-        team (the exact duplicate-mint incident #1708 fixes). When the
+        org (the exact duplicate-mint incident #1708 fixes). When the
         shadowing source is rejected, check the store the mint would write:
 
           "valid"         — GET /v1/team 200 → reuse instead of minting.
@@ -1152,7 +1377,7 @@ def _cmd_signup(args) -> int:
         except (json.JSONDecodeError, ValueError, OSError):
             # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
             # a ValueError subclass — a corrupt store is FAIL-CLOSED (D6):
-            # never mint over an unreadable store (the team it belonged to
+            # never mint over an unreadable store (the org it belonged to
             # would be orphaned and its signup budget silently burned).
             return "unvalidatable"
         if not isinstance(store, dict):
@@ -1186,7 +1411,7 @@ def _cmd_signup(args) -> int:
             # is the EXACT state `tortoise recover` is designed for — the
             # corrupt-config boilerplate ("fix or delete it, or use --force")
             # is destructive here: deleting destroys the recovery token and
-            # --force mints a NEW team, orphaning the old one. Point at
+            # --force mints a NEW org, orphaning the old one. Point at
             # recovery; genuinely corrupt files keep the boilerplate below.
             token_only, shadow = _token_only_config_path()
             if token_only is not None:
@@ -1230,7 +1455,7 @@ def _cmd_signup(args) -> int:
                 body = e.read().decode() if e.fp else ""
                 if e.code in (401, 403):
                     # #308: SUSPENDED 403 must NOT mint (mirrors the other
-                    # _cmd_* team handlers — a suspended team must not be
+                    # _cmd_* org handlers — a suspended org must not be
                     # silently orphaned by a fresh anonymous mint).
                     sus = _suspended_info(body)
                     if sus is not None:
@@ -1240,7 +1465,7 @@ def _cmd_signup(args) -> int:
                     # the mint would write to. When the 401/403 came from a
                     # higher-precedence source (env/cwd), a valid global key
                     # must be REUSED — otherwise every re-run re-validates the
-                    # dead source and mints ANOTHER team (the duplicate-mint
+                    # dead source and mints ANOTHER org (the duplicate-mint
                     # incident). The store's own host is used when it differs.
                     if cfg_path != config_path:
                         gs = _global_key_status(base)
@@ -1304,14 +1529,14 @@ def _cmd_signup(args) -> int:
         stored["device_id"] = legacy_device_id
     device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
-    # #1709: a stored st_ signup token re-presents the SAME team on re-signup
+    # #1709: a stored st_ signup token re-presents the SAME org on re-signup
     # (keyless recovery — the dedupe check). Read from the active configs.
     stored_token = _read_stored_signup_token()
     if force:
         # #1709 fixer P2.4: --force is the documented escape hatch — a FRESH
         # mint, never a recovery. Without this the stored token was still
         # re-presented and --force silently performed a RECOVERY (a suspended
-        # team + dead token could never be escaped). Clearing it here also
+        # org + dead token could never be escaped). Clearing it here also
         # makes the recovery/fresh-mint branch distinction below purely
         # request-shaped (P2.5).
         stored_token = None
@@ -1321,7 +1546,7 @@ def _cmd_signup(args) -> int:
         payload = {"identity": device_id}
         if stored_token:
             # #1709: token possession = the dedupe credential — the server
-            # RECOVERS the same team (new key, no second team).
+            # RECOVERS the same org (new key, no second org).
             payload["signup_token"] = stored_token
         try:
             req = Request(
@@ -1356,8 +1581,8 @@ def _cmd_signup(args) -> int:
                 return 1
             if e.code == 422 and stored_token and _is_invalid_signup_token(body):
                 # #1709 P3: a revoked/truncated token must NOT silently orphan the
-                # original team — warn FIRST and require confirmation before
-                # clearing the token + minting a NEW team. Non-interactive runs
+                # original org — warn FIRST and require confirmation before
+                # clearing the token + minting a NEW org. Non-interactive runs
                 # fail CLOSED (no mint, no orphan).
                 print("⚠️  Your recovery token is invalid — this will create a NEW "
                       "team; the old team will be unreachable.", file=sys.stderr)
@@ -1417,8 +1642,8 @@ def _cmd_signup(args) -> int:
     config = {
         "api_key": data["key"],
         "api_url": mint_url,
-        "team_id": data.get("team_id"),
-        "team_name": data.get("team_name"),
+        "org_id": data.get("org_id"),
+        "org_name": data.get("org_name"),
         "device_id": device_id,
     }
     if new_token:
@@ -1460,7 +1685,7 @@ def _cmd_signup(args) -> int:
         # Orphan class: the key was minted but cannot be saved — echo it AND
         # the recovery token (the success-path shown-once contract) and fail
         # closed so the user never loses either and never silently re-mints
-        # (the incident pattern #1750 fixes: a re-run minted a SECOND team
+        # (the incident pattern #1750 fixes: a re-run minted a SECOND org
         # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
@@ -1471,16 +1696,16 @@ def _cmd_signup(args) -> int:
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)
         if stored_token:
-            # recovery-orphan leg: the server recovered the SAME team, only the
+            # recovery-orphan leg: the server recovered the SAME org, only the
             # save failed — re-running re-presents the token and re-recovers
-            # the SAME team; no new team is created (review P2, #1750).
+            # the SAME org; no new org is created (review P2, #1750).
             print("Fix the path permissions and re-run — recovery is re-attempted "
                   "on the SAME team (no new team is created). "
                   "The key+token above are your only access until then.",
                   file=sys.stderr)
         elif orphan_token:
             # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
-            # team and orphans the first — warn hard (the incident pattern).
+            # org and orphans the first — warn hard (the incident pattern).
             print("Fix the path permissions and re-run, or use the key directly — "
                   "but do NOT re-run blindly: this creates a NEW team; the old "
                   "team's key+token above are your only access.", file=sys.stderr)
@@ -1512,13 +1737,13 @@ def _cmd_signup(args) -> int:
     # (stored_token — a recovery) vs whether the mint RETURNED one (new_token —
     # a fresh mint). A fresh mint whose response lacks signup_token (server
     # version skew / a field-stripping proxy) is NOT a recovery — "data intact"
-    # would be false — so say "Free team created" and warn the recovery
+    # would be false — so say "Free org created" and warn the recovery
     # backdoor was not issued (the same fail-soft contract as the missing-key
     # leg: never misreport, never silently drop a credential).
     if stored_token:
-        print(f"✅ Key recovered on existing team: {data.get('team_name')} (data intact)")
+        print(f"✅ Key recovered on existing team: {data.get('org_name')} (data intact)")
     else:
-        print(f"✅ Free team created: {data.get('team_name')}")
+        print(f"✅ Free team created: {data.get('org_name')}")
         if not new_token:
             print("⚠️  Recovery backdoor NOT created — the server did not return "
                   "a signup token; you cannot use `tortoise recover` for this "
@@ -1528,13 +1753,13 @@ def _cmd_signup(args) -> int:
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
-        # back into this team if the key is lost). Shown once, like the key.
+        # back into this org if the key is lost). Shown once, like the key.
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
     if getattr(args, "claim", False):
-        # #1082: the anonymous team can attach a verified identity (same key,
-        # same team, memories intact) — one-time human act, no device flow.
+        # #1082: the anonymous org can attach a verified identity (same key,
+        # same org, memories intact) — one-time human act, no device flow.
         dashboard = os.environ.get(
             "TORTOISE_DASHBOARD_URL", "https://app.premiselabs.co")
         print()
@@ -1549,8 +1774,8 @@ def _cmd_signup(args) -> int:
     return 0
 
 
-def _cmd_team_info(args) -> int:
-    """Show team info from Tortoise Cloud API."""
+def _cmd_org_info(args) -> int:
+    """Show org info from Tortoise Cloud API."""
     import json, sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1579,7 +1804,7 @@ def _cmd_team_info(args) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=sys.stderr)
         return 1
 
-    print(f"Team:       {data.get('team_id', '?')}")
+    print(f"Team:       {data.get('org_id', '?')}")
     print(f"Tier:       {data.get('tier', 'free')}")
     print(f"Points:     {data.get('point_count', 0)}")
     print(f"Max users:  {data.get('max_users', 1)}")
@@ -1601,7 +1826,7 @@ def _resolve_config_path(include_env: bool = True, *,
     Returns (config_path, config, api_key, api_url) or (None, None, None, None).
     INVARIANT: whenever api_key is not None, config is a dict (env candidate is
     synthesized as {"api_key": key, "api_url": url} — callers like
-    _cmd_team_keys_list do config.get(...) unconditionally and must never see None).
+    _cmd_org_keys_list do config.get(...) unconditionally and must never see None).
     - Empty/whitespace env TORTOISE_API_KEY (.strip()) is treated as unset
       (prevents a lockout shadow where a bad env key beats a good stored one).
     - A candidate file that exists but fails JSON parse / is unreadable / has a
@@ -1622,7 +1847,12 @@ def _resolve_config_path(include_env: bool = True, *,
       surfaces that transmit prompts (the per-turn volunteer reflex + the
       session-start hosted digest) resolve their identity from the user-global
       config only; a repo-supplied .tortoise must never authorize transmission
-      to a host the repo (attacker-controllable) chose.
+      to a host the repo (attacker-controllable) chose. The transcript-upload
+      family (#3660 — `session capture` / `session probe` / `session verify` /
+      `session list` / `session view` / `session drain` / `sessions import`)
+      resolves through `_resolve_transmit_config()`, which uses this
+      `global_only` FILE posture but leaves `include_env=True` — see that
+      function's docstring for the divergence.
     """
     import json as _json
     import os as _os
@@ -1666,11 +1896,51 @@ def _resolve_config_path(include_env: bool = True, *,
     return None, None, None, None
 
 
+def _resolve_transmit_config() -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Resolve identity for a TRANSMITTING surface — the cwd file is excluded.
+
+    Every subcommand that reaches this resolver — `session capture`,
+    `session probe`, `session verify`, `session list`, `session view`,
+    `session drain` and `sessions import` — resolves its identity here, so the
+    exchange below applies to all of them (the resolver runs before dispatch in
+    `_cmd_session`, so even the read-only subcommands are narrowed). A
+    repo-committed `./.tortoise` is attacker-controllable and must never choose
+    the host a transcript — or a stored Bearer key — is sent to; skipping the
+    cwd candidate is what makes those surfaces fail CLOSED (no identity → no
+    transmission) instead of quietly filing content at a repo-chosen endpoint.
+
+    ⚠️ What is actually true, and where this DIVERGES from the surfaces the
+    original change claimed to mirror:
+
+    * The cwd `./.tortoise` candidate is excluded, and
+      `~/.tortoise/credentials.json` is the only *FILE* candidate.
+    * The env channel is NOT excluded. This call is
+      `_resolve_config_path(global_only=True)`, which leaves
+      `include_env=True`; `context` and `volunteer` both pass
+      `include_env=False, global_only=True`, so **env alone can still make
+      these surfaces transmit** where it cannot for those two. The
+      "same posture as context/volunteer" claim is FALSE.
+    * The D1.1 co-source rule only stops a bare `TORTOISE_API_URL` from
+      redirecting a *file*-store key. An env-supplied KEY + URL is still one
+      coherent identity that fully chooses the host, and that pair is
+      reachable from a repo-committed harness config (e.g.
+      `.claude/settings.json`'s `env` block, applied to the hook subprocesses
+      this repo installs) — so the env channel remains a complete identity
+      source for the `session capture` / `drain` / `import` uploaders.
+    * Removing env here is a USER-FACING behaviour change (env-keyed setup is
+      documented: `docs/quickstart-cloud.md`) and is PENDING AN OWNER
+      DECISION; it is deliberately not done in the #3660 commit.
+      `test_env_identity_still_honoured_for_capture` pins the current
+      behaviour as a known divergence, not as the desired end state.
+    """
+    return _resolve_config_path(global_only=True)
+
+
 def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
     """Read the resolved config → (config, api_key, api_url) (env → cwd → global).
 
     Thin wrapper over _resolve_config_path preserving the legacy 3-tuple +
-    _cmd_fail contract for the hosted-team commands (team info, team keys *).
+    _cmd_fail contract for the hosted-org commands (org info, org keys *).
     Prints the failure reason to stderr; callers must return 1 when api_key is
     None. With json_mode, also emits the machine-readable error on stdout so
     the --json contract holds even for config failures (#875 P2).
@@ -1710,7 +1980,7 @@ def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int
 def _suspended_info(body: str) -> tuple[str, str | None] | None:
     """#308 (R5): parse a 403 body for the SUSPENDED detail code.
 
-    Returns (message, appeal_url) when the team is suspended, else None —
+    Returns (message, appeal_url) when the org is suspended, else None —
     unparseable/other bodies keep each caller's pre-#308 behavior."""
     try:
         import json as _j
@@ -1725,7 +1995,7 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
-    """MCP config for one harness — mirrors website/welcome.html (#497/#529).
+    """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
     Hosted (HTTP) shapes — pinned by tests/test_onboarding_variants.py T3:
     - claude: {"mcpServers": {"tortoise": {"type": "http", ...}}} — a url
@@ -1782,7 +2052,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
-    Shapes mirror website/welcome.html Block A (T3-pinned): claude's CLI
+    Shapes mirror website/apps/dashboard/public/welcome.html Block A (T3-pinned): claude's CLI
     one-liner + type:http .mcp.json alternative, env-expansion forms for
     cursor/pi, codex mcp add command.
     """
@@ -1796,10 +2066,10 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
         elif harness == "claude":
-            print("Run this ONE command in your terminal:")
+            print("Run this ONE command in your terminal — writes LOCAL scope to ~/.claude.json (private, never committed):")
             print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
             print()
-            print("File alternative (.mcp.json) — env expansion, no literal key on disk:")
+            print("File alternative (.mcp.json) — project scope, committable; env expansion, no literal key in the file:")
             print(f"  export TORTOISE_API_KEY={api_key}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         else:  # cursor / pi
@@ -1876,8 +2146,8 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     return 0
 
 
-def _cmd_team_keys_list(args) -> int:
-    """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
+def _cmd_org_keys_list(args) -> int:
+    """List org API keys (GET /v1/team/keys). Hashes only — no plaintext."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1899,7 +2169,7 @@ def _cmd_team_keys_list(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1919,11 +2189,11 @@ def _cmd_team_keys_list(args) -> int:
 
     keys = data.get("keys", [])
     if getattr(args, "json", False):
-        _emit_json({"team_id": config.get("team_id"), "keys": keys})
+        _emit_json({"org_id": config.get("org_id"), "keys": keys})
         return 0
 
-    team_id = config.get("team_id")
-    print(f"API keys for team {team_id}:" if team_id else "API keys:")
+    org_id = config.get("org_id")
+    print(f"API keys for team {org_id}:" if org_id else "API keys:")
     print(f"  {'ID':<14}{'Name':<20}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
@@ -1934,8 +2204,8 @@ def _cmd_team_keys_list(args) -> int:
     return 0
 
 
-def _cmd_team_keys_create(args) -> int:
-    """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
+def _cmd_org_keys_create(args) -> int:
+    """Mint a new org API key (POST /v1/team/keys). Key shown exactly once."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1972,7 +2242,7 @@ def _cmd_team_keys_create(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1997,7 +2267,7 @@ def _cmd_team_keys_create(args) -> int:
             "id": data.get("id"),
             "created_at": data.get("created_at"),
             "name": data.get("name"),
-            "team_id": config.get("team_id"),
+            "org_id": config.get("org_id"),
         })
         return 0
 
@@ -2011,8 +2281,8 @@ def _cmd_team_keys_create(args) -> int:
     return 0
 
 
-def _cmd_team_keys_revoke(args) -> int:
-    """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
+def _cmd_org_keys_revoke(args) -> int:
+    """Revoke an org API key (DELETE /v1/team/keys/{id}). Soft delete."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -2043,11 +2313,11 @@ def _cmd_team_keys_revoke(args) -> int:
         if e.code == 404:
             return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
         if e.code == 403:
-            # #308: a suspended team's revoke also 403s — the SUSPENDED
-            # detail (with appeal link) must not masquerade as cross-team.
+            # #308: a suspended org's revoke also 403s — the SUSPENDED
+            # detail (with appeal link) must not masquerade as cross-org.
             sus = _suspended_info(body)
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=403,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "cross_team",
@@ -2452,6 +2722,261 @@ def _cmd_volunteer(args) -> int:
 
 
 def _cmd_install_hooks(args) -> int:
+    """`tortoise install <harness>` — the full harness seam (#3808).
+
+    Two independent halves:
+
+    * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
+    * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
+      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
+      hooks.json`` registration), and pi (the in-repo capture extension).
+
+    Capture used to be a copy-paste block in the dashboard: the installer gave
+    a user the read path and nothing that files a session — and because the
+    capture hook is fail-open, a hand-merge that missed the ``timeout`` filed
+    sessions silently.  Installing it here is what makes the seam real.
+
+    Capture failures are loud: a non-zero exit and a message on stderr — never
+    a printed success over an install that did not land.
+    """
+    from tortoise.capture_install import install_capture
+
+    harness = getattr(args, "harness", None)
+    listing = getattr(args, "list", False) or not harness
+    uninstall = getattr(args, "uninstall", False)
+
+    # `--uninstall` is scoped to the read-hook registration (its documented
+    # contract) and never removes the capture scripts out from under a project.
+    # `pi` has NO read-hook registration, so it must not fall through to
+    # `_install_read_hook`'s cline target (a non-codex/claude harness lands in
+    # that `else` branch): `tortoise install pi --uninstall` would otherwise
+    # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
+    if uninstall and harness == "pi":
+        print("pi has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The pi capture extension (~/.pi/agent/extensions/"
+              "tortoise-capture.ts) is left in place; delete that file to "
+              "uninstall it.")
+        return 0
+    # `cursor` has no shell-hook read seam either: routing `--uninstall` to
+    # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
+    # HOME-scoped capture hook stayed live — the opposite of what a user
+    # asking to uninstall capture concluded (#3819).
+    if uninstall and harness == "cursor":
+        print("cursor has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The capture seam is left in place: delete "
+              "~/.cursor/hooks/tortoise-session-end.sh and its "
+              "sessionEnd entry in ~/.cursor/hooks.json to "
+              "uninstall capture.")
+        return 0
+    # `--list` / no harness prints the catalogue.
+    if listing or uninstall:
+        rc = _install_read_hook(args)
+        if uninstall and harness == "claude":
+            # Claude is the one harness with a SECOND half: the capture seam
+            # (every script in `CLAUDE_CAPTURE_HOOKS` + its registration).
+            # `--uninstall` is scoped to the read-hook registration and never
+            # deletes a project's capture scripts, so the run must SAY that
+            # instead of leaving a user to conclude "Uninstalled
+            # volunteer-turn.sh" meant the seam was gone while the capture
+            # registrations stayed live (#3808 R14).  The accounting is DERIVED
+            # from the declaration, not retyped: naming two of three scripts
+            # reads as complete while leaving the third's registration live and
+            # unmentioned (#3963).
+            from pathlib import Path as _P
+
+            from tortoise.capture_install import CLAUDE_CAPTURE_HOOKS
+
+            root = _P(getattr(args, "dir", "."))
+            scripts = " and ".join(f".claude/hooks/{name}"
+                                   for name, _, _ in CLAUDE_CAPTURE_HOOKS)
+            events = "/".join(sorted({event
+                                       for _, event, _ in CLAUDE_CAPTURE_HOOKS}))
+            print(
+                "Note: `--uninstall` removes only the per-turn read hook "
+                "(volunteer-turn.sh). If the capture seam is installed it is "
+                f"left in place — {scripts} plus their {events} entries in "
+                f"{root / '.claude' / 'settings.json'} are untouched. Delete "
+                "those to uninstall capture."
+            )
+        return rc
+
+    # Validate the read half BEFORE the capture half writes.  `tortoise install
+    # claude` and `tortoise install codex` each install two halves; if the read
+    # half refuses (a malformed ``UserPromptSubmit``, a symlink that escapes the
+    # root, a foreign cline hook) the command must fail with NOTHING written,
+    # not leave a project with capture installed and the read registration
+    # refused.  The read half's own dry run performs the exact checks the real
+    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
+    # capture.
+    if harness in ("claude", "codex"):
+        refusal = _read_hook_refusal(args)
+        if refusal != 0:
+            return refusal
+
+    # Capture first: if any half of the seam is REFUSED (the read half's
+    # shape/symlink checks above, or the capture half's own pre-flight), the
+    # command fails with NOTHING written rather than leave a project with a
+    # read hook and a silently-absent capture step.
+    if harness in ("claude", "codex", "pi", "cursor"):
+        rc = _install_capture_seam(args, install_capture)
+        if rc != 0:
+            return rc
+    if harness == "pi":
+        # Pi has no shell-hook read seam — its only seam is the capture
+        # extension; `_install_capture_seam` already reported the install,
+        # the no-op, and the MCP/restart guidance.
+        return 0
+    if harness == "cursor":
+        # Cursor has no shell-hook read seam either: the sessionEnd capture
+        # hook is its only seam, and `_install_capture_seam` already reported
+        # the install, the no-op, and the IDE-only disclosure.  Falling
+        # through to `_install_read_hook` would inspect (and could rewrite) a
+        # CLINE registration as if it were Cursor's.
+        return 0
+    return _install_read_hook(args)
+
+
+#: Pi's capture seam is its whole install; the MCP wiring is set up by the
+#: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
+#: Pi process. Printed after a real (non-dry-run) run, whether or not that run
+#: wrote the file.
+_PI_MCP_GUIDANCE = (
+    "The Tortoise MCP config comes from the dashboard's Pi setup (or "
+    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
+    "old environment."
+)
+
+
+def _install_capture_seam(args, install_capture) -> int:
+    """Install the capture seam for ``args.harness`` and report honestly.
+
+    The success sentence is printed ONLY by a run that actually changed
+    something: ``install_capture`` is idempotent, so a re-run (which is also
+    the upgrade path) must report the no-op — never "installed" over a run
+    that wrote nothing (#3808 R13).
+    """
+    from pathlib import Path as _P
+
+    result = install_capture(
+        args.harness,
+        root=_P(getattr(args, "dir", ".")),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    if not result.ok:
+        print(f"Capture install FAILED for {args.harness}: {result.error}",
+              file=sys.stderr)
+        return 1
+    for action in result.actions:
+        print(action)
+    if not result.changed:
+        print(f"{args.harness} capture seam already installed — nothing to do.")
+    if args.harness == "pi" and not getattr(args, "dry_run", False):
+        # Under `--dry-run` nothing was written, so the success sentence would
+        # be a lie (the action lines already said what WOULD happen).
+        claim = "Pi capture extension installed. " if result.changed else ""
+        print(f"{claim}{_PI_MCP_GUIDANCE}")
+    if args.harness == "codex" and not getattr(args, "dry_run", False):
+        # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
+        # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
+        # to RUN an untrusted hook, so a user who only trusts the (dead)
+        # project-local .codex/hooks.json captures nothing while the install
+        # prints success. Name the ACTUAL effective file.
+        from tortoise.capture_install import codex_home
+        codex_root = codex_home(_P.home())
+        print(
+            f"Codex runs a hook only after you TRUST it. The capture hook "
+            f"registered in {codex_root / 'hooks.json'} is HOME-scoped: "
+            "trust it from the Hooks menu on the next interactive `codex` run "
+            "(non-interactive runs need `codex exec "
+            "--dangerously-bypass-hook-trust`). Trusting a project-local "
+            ".codex/hooks.json does NOT cover it - Codex reads hook "
+            "registrations from $CODEX_HOME/hooks.json.")
+    if args.harness == "cursor" and not getattr(args, "dry_run", False):
+        # #3819 (owner ruling): the IDE-only limitation is DISCLOSED where the
+        # user chooses Cursor — the install surface — not buried. Cursor's own
+        # docs: "Cloud agents have no editor-lifetime session boundary."
+        from tortoise.capture_install import cursor_home
+        cursor_root = cursor_home(_P.home())
+        print(
+            f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
+            f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
+            "desktop-editor sessions (the expected surface). CURSOR CLOUD "
+            "AGENT sessions are NOT captured — Cursor's docs: 'Cloud agents "
+            "have no editor-lifetime session boundary. sessionEnd is tied to "
+            "the IDE session, not a cloud agent chat.' If you use cloud "
+            "agents, their sessions are not filed by this seam.")
+    return 0
+
+
+def _install_read_hook(args) -> int:
+    """`tortoise install <harness>` read half — the read-hook registration.
+
+    A thin boundary around :func:`_install_read_hook_impl`: the whole read
+    half runs inside ONE catch-all, so any failure on the read/parse/merge
+    path is a populated ``Install failed`` message with a non-zero exit —
+    never an uncaught traceback out of the CLI (#3808 R23).
+
+    The raise-set this boundary must cover is enumerated from the code
+    paths, *not* from the exceptions that happened to be filed:
+
+    * ``OSError`` and subclasses — ``IsADirectoryError`` (a directory where
+      the registration file belongs), ``PermissionError`` (a ``settings.json``
+      the process may not read), ``FileExistsError``/``NotADirectoryError``
+      (a FILE where an intermediate directory belongs), ELOOP from
+      ``Path.resolve``, and any write that fails at the last moment;
+    * ``RuntimeError`` — ``Path.resolve()`` raises it (deliberately, not
+      ``OSError``) on a symlink cycle; ``RecursionError`` (a subclass) from
+      ``json.loads`` on a deeply nested document;
+    * ``ValueError`` — ``UnicodeDecodeError`` from a non-UTF-8
+      ``settings.json`` (#3988), and the locally-handled ``JSONDecodeError``
+      / ``shlex.split`` / ``relative_to`` cases;
+    * ``TypeError`` — valid JSON of the wrong SHAPE, e.g. ``{"hooks": null}``,
+      where ``setdefault`` hands back the ``None`` and the subscript raises
+      (#3987);
+    * ``MemoryError`` — a huge file, re-raised below rather than converted;
+    * anything unenumerated a future read/parse/merge path adds.
+
+    The last member is the reason this is a CATCH-ALL and not a list: an
+    ``except (A, B, ...)`` boundary is refutable by the next unenumerated
+    member, which is exactly how ``TypeError`` (#3987) and
+    ``UnicodeDecodeError`` (#3988) escaped the previous
+    ``(OSError, RuntimeError)`` tuple. ``except Exception`` cannot be escaped
+    by an unenumerated ``Exception``; the two ``BaseException`` control-flow
+    signals (``KeyboardInterrupt``, ``SystemExit``) are outside it and
+    propagate. ``MemoryError`` is the one member where a refusal is the wrong
+    answer — the refusal message itself allocates — so it is re-raised first.
+    """
+    try:
+        return _install_read_hook_impl(args)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"Install failed: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+
+
+def _read_hook_refusal(args) -> int:
+    """Validate the read half with a write-free dry run, discarding its report.
+
+    Returns the read half's status (0 = it will install or no-op; non-zero =
+    it refuses).  ``_cmd_install_hooks`` calls this BEFORE the capture half
+    writes, so a read-half refusal fails the install with NOTHING on disk
+    instead of leaving the capture scripts and their registrations installed
+    (#3808 R20).  The dry run runs the same checks on the same files as the
+    real run; only its ``[dry-run] would …`` stdout is swallowed.
+    """
+    import contextlib
+    import io
+
+    probe = argparse.Namespace(**vars(args))
+    probe.dry_run = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _install_read_hook(probe)
+
+
+def _install_read_hook_impl(args) -> int:
     """Agent-first harness seam onboarding (epic #2080 #2123/#2124).
 
     Writes the per-harness UserPromptSubmit hook registration pointing at the
@@ -2464,8 +2989,14 @@ def _cmd_install_hooks(args) -> int:
       hooks are merged key-wise; codex hooks.json entries are appended only
       when our registration is absent; an existing cline UserPromptSubmit hook
       that is not ours is REFUSED (printed conflict), never overwritten.
-    - --uninstall removes ONLY registrations whose command references
-      volunteer-turn.sh (wrapper-aware for both flat and claude shapes).
+    - --uninstall removes ONLY registrations this installer can PROVE it
+      wrote: the exact shipped registration (``<shipped volunteer-turn.sh>
+      <harness>``), or a structurally identical 2-token registration whose
+      script path is DEAD (the stale remnant of a relocated install — the
+      same case the install-side repair claims). A user wrapper, a comment
+      mention, another product's LIVE volunteer-turn.sh at a different path,
+      and malformed commands are NOT ours and are left untouched: an
+      uninstall must never delete config it cannot prove it created (#2383).
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
@@ -2476,15 +3007,26 @@ def _cmd_install_hooks(args) -> int:
     from pathlib import Path as _P
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
-        print("Installable harness seams (per-turn volunteering-memory hook):")
+        print("Installable harness seams (per-turn volunteering-memory hook "
+              "+ capture):")
         print("  tortoise install codex   → <dir>/.codex/hooks.json "
-              "(UserPromptSubmit → volunteer-turn.sh codex)")
+              "(UserPromptSubmit → volunteer-turn.sh codex) + capture: "
+              "tortoise-session-end.sh into <codex-home>/hooks with a merged "
+              "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
-              "hooks merged (UserPromptSubmit → volunteer-turn.sh claude)")
+              "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
+              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
+              "with a merged SessionStart/SessionEnd entry (timeout 60)")
         print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
               "(→ volunteer-turn.sh cline)")
-        print("Other seams (docs/matrix only, this wave): pi extension, "
-              "devin, cursor, gemini, opencode — see "
+        print("  tortoise install pi      → ~/.pi/agent/extensions/"
+              "tortoise-capture.ts (the capture extension; Pi has no "
+              "shell-hook read seam)")
+        print("  tortoise install cursor  → ~/.cursor/hooks.json "
+              "(the sessionEnd capture hook; Cursor has no shell-hook read "
+              "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
+        print("Other seams (docs/matrix only, this wave): "
+              "devin, gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
         return 0
 
@@ -2515,9 +3057,17 @@ def _cmd_install_hooks(args) -> int:
         target = root / ".claude" / "settings.json"
         registration = [{"hooks": [{"type": "command",
                                     "command": f"{quoted_script} claude"}]}]
-    else:  # cline
+    elif harness == "cline":
         target = root / ".cline" / "hooks" / "UserPromptSubmit"
         registration = None
+    else:
+        # Never let a harness with no read seam fall into the cline target —
+        # that would inspect and could rewrite a cline file as if it were the
+        # requested harness's registration (`tortoise install pi --uninstall`
+        # used to do exactly this).
+        print(f"{harness!r} has no shell-hook read seam — nothing to install "
+              "or remove here.", file=_sys.stderr)
+        return 1
 
     dry = getattr(args, "dry_run", False)
     uninstall = getattr(args, "uninstall", False)
@@ -2561,6 +3111,33 @@ def _cmd_install_hooks(args) -> int:
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
+    def _cline_marker_owns(text: str) -> bool:
+        """True iff ``text`` carries OUR registration LINE — ``exec
+        <…volunteer-turn.sh> cline`` — not merely a mention of the script.
+
+        The line is shlex-parsed (so the quoted shipped path matches), a
+        leading ``exec`` shell keyword is stripped, and ownership requires the
+        exact shipped path OR a DEAD path (a stale marker from a relocated
+        install — cline's self-heal rewrites it). A comment/echo mention, a
+        different product's LIVE hook, and malformed lines are NOT ours.
+        """
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                toks = _shlex.split(line)
+            except ValueError:
+                continue
+            if toks and toks[0] == "exec":
+                toks = toks[1:]
+            if (len(toks) == 2 and toks[1] == harness
+                    and toks[0].endswith("volunteer-turn.sh")
+                    and (toks[0] == str(script)
+                         or not Path(toks[0]).exists())):
+                return True
+        return False
+
     if harness == "cline":
         # Cline hooks are files at .cline/hooks/<EventName> (project) or
         # ~/.cline/hooks (global); hooks must also be enabled in settings.
@@ -2572,18 +3149,22 @@ def _cmd_install_hooks(args) -> int:
         if target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
-            if uninstall:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} is not a volunteer-turn.sh hook — refusing "
-                          "to delete it.", file=_sys.stderr)
-                    return 1
-            else:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} already exists and is not a "
+            # #2383: ownership is the registration LINE, not a substring.
+            # The old check (``"volunteer-turn.sh" in existing_text``)
+            # treated a user hook that merely MENTIONS the script name — in a
+            # comment or an echo — as ours, and silently OVERWROTE it on
+            # install / DELETE it on uninstall. A marker-line match cannot
+            # fire on a mention.
+            if not _cline_marker_owns(existing_text):
+                if uninstall:
+                    print(f"{target} is not our volunteer-turn.sh hook — "
+                          "refusing to delete it.", file=_sys.stderr)
+                else:
+                    print(f"{target} already exists and is not our "
                           "volunteer-turn.sh hook — refusing to overwrite it. "
                           "Remove it manually or install into another dir.",
                           file=_sys.stderr)
-                    return 1
+                return 1
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
@@ -2614,6 +3195,54 @@ def _cmd_install_hooks(args) -> int:
             return inner if isinstance(inner, str) else ""
         return ""
 
+    def _cmd_dict(e):
+        """The dict whose command carries the command, for either the flat
+        or the nested claude wrapper shape (or None)."""
+        if isinstance(e, dict) and isinstance(e.get("command"), str):
+            return e
+        if isinstance(e, dict):
+            hs = e.get("hooks")
+            if (isinstance(hs, list) and hs
+                    and isinstance(hs[0], dict)
+                    and isinstance(hs[0].get("command"), str)):
+                return hs[0]
+        return None
+
+    # The registration THIS build writes. '' only if the shape ever changes.
+    desired = _entry_command(registration[0])
+
+    def _entry_is_ours(e) -> bool:
+        """POSITIVE ownership: the only entries ``--uninstall`` may delete.
+
+        True only for a registration this build provably wrote:
+
+        * the EXACT shipped registration (``<shipped volunteer-turn.sh>
+          <harness>``), which is what a real install leaves behind; or
+        * a structurally identical 2-token registration whose script path is
+          DEAD — the stale remnant of a relocated install, the same case the
+          install-side repair claims.
+
+        Everything else is NOT ours and must never be deleted: a user wrapper
+        (``firejail … volunteer-turn.sh …``), a comment mention (the old
+        substring marker), another product's LIVE ``volunteer-turn.sh`` at a
+        different path, and malformed / non-str commands. ``#2383``: the
+        install half already refuses to rewrite these very entries, so an
+        uninstall that deletes them destroys config it did not create.
+        """
+        cmd_d = _cmd_dict(e)
+        if cmd_d is None:
+            return False
+        cmd = cmd_d["command"]
+        if desired and cmd == desired:
+            return True
+        try:
+            toks = _shlex.split(cmd)
+        except ValueError:
+            return False
+        return (len(toks) == 2 and toks[1] == harness
+                and "volunteer-turn.sh" in toks[0]
+                and not Path(toks[0]).exists())
+
     existing = target.read_text(encoding="utf-8") if target.exists() else None
     if existing is not None:
         try:
@@ -2642,13 +3271,27 @@ def _cmd_install_hooks(args) -> int:
         ups = ups or []
         ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
         if uninstall:
-            if not ours:
+            # #2383: delete only what we can PROVE we wrote. `ours` (above)
+            # stays the broad "mentions our script" list — the install half
+            # uses it to decide "the hook is already wired, don't add a
+            # duplicate" — but DELETION needs positive ownership, because the
+            # broad marker also matches a user wrapper and another product's
+            # live hook, which install deliberately leaves untouched.
+            deletable = [e for e in ups if _entry_is_ours(e)]
+            if not deletable:
+                if ours:
+                    print(f"{target} has volunteer-turn.sh registration(s) "
+                          "that this installer did not write — refusing to "
+                          "remove them (a wrapper, a foreign hook, or a "
+                          "malformed entry). Remove the entry manually if "
+                          "you want it gone.", file=_sys.stderr)
+                    return 1
                 # #2383: nothing of ours present — never rewrite the file
                 # and claim "Uninstalled".
                 print(f"No volunteer-turn.sh registration in {target} — "
                       "nothing to remove.")
                 return 0
-            remaining = [e for e in ups if e not in ours]
+            remaining = [e for e in ups if e not in deletable]
             if remaining:
                 hooks["UserPromptSubmit"] = remaining
             else:
@@ -2682,20 +3325,6 @@ def _cmd_install_hooks(args) -> int:
             # volunteer-turn.sh, live-but-moved installs — are left
             # untouched: rewriting them silently strips the security wrapper
             # or hijacks a foreign hook (R2 finding).
-            desired = _entry_command(registration[0])
-            def _cmd_dict(e):
-                """The dict whose command carries the command, for either
-                the flat or the nested claude wrapper shape (or None)."""
-                if isinstance(e, dict) and isinstance(e.get("command"), str):
-                    return e
-                if isinstance(e, dict):
-                    hs = e.get("hooks")
-                    if (isinstance(hs, list) and hs
-                            and isinstance(hs[0], dict)
-                            and isinstance(hs[0].get("command"), str)):
-                        return hs[0]
-                return None
-
             repaired = 0
             live_ours = 0
             foreign = []
@@ -2739,7 +3368,18 @@ def _cmd_install_hooks(args) -> int:
         if dry:
             print(f"[dry-run] would merge into {target}:")
             print(out)
-        else:
+        elif not target.exists() or target.read_text(encoding="utf-8") != out:
+            # #3808: a re-run is the upgrade path, so a byte-identical
+            # document must not be rewritten — `tortoise install claude`
+            # running twice is a no-op only if neither half churns the file.
+            #
+            # The explicit encoding is load-bearing, not style (#3808 R24):
+            # the default is locale.getencoding(), so on an ASCII host a
+            # UTF-8 document with one non-ASCII byte raised UnicodeDecodeError
+            # — a ValueError, which the `(OSError, RuntimeError)` boundary
+            # above does not catch — and the CLI died with a traceback.  The
+            # sibling read above (``existing = target.read_text(...)``) has
+            # always passed utf-8.
             target.write_text(out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
@@ -2763,6 +3403,418 @@ def _cmd_install_hooks(args) -> int:
     return 0
 
 
+def _upgrade_artifact_seam(args, root, home) -> int:
+    """Repair a non-shell capture seam through the installer that owns it.
+
+    The ARTIFACT half of `hooks upgrade`.  A seam with no ``hooks_dir`` has no
+    ``upgrade_install``, so the repair is the file copy that IS the install —
+    ``capture_install.install_capture``, the same entry point
+    ``tortoise install <harness>`` calls.  A second writer would be the
+    two-detectors defect inverted: two installers that drift, with the stale
+    one reported by `hooks status` and the fresh one by `install` (#5351).
+
+    ``home`` is the validated ``$HOME`` the artifact root is scoped under
+    (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
+    ``--dir`` is honoured rather than ignored in favour of the process HOME,
+    which would install into a different tree and leave ``--dir`` untouched.
+    """
+    import sys as _sys
+
+    from tortoise.capture_install import install_capture
+    from tortoise.hook_install import detect_artifact_install
+
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        result = install_capture(args.harness, root=root, home=home,
+                                 dry_run=dry_run)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The installer's contract is "refuse, never raise"; this catch-all is
+        # the same belt-and-suspenders the layout path carries, because a
+        # traceback out of the CLI is never a reportable outcome (#4024 P2-2).
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.error, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if dry_run else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture seam at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `install_capture` already prefixes its planned actions in dry-run;
+        # prefixing again here would print `[dry-run] [dry-run]`.
+        print(action)
+    if dry_run:
+        return 0
+    # The repair's own evidence: re-read through the SAME detector `status`
+    # prints, so "upgraded" is never claimed over bytes still reported stale.
+    remaining = [f for f in detect_artifact_install(root, args.harness)
+                 if f.blocking]
+    if remaining:
+        print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+              file=_sys.stderr)
+        for f in remaining:
+            print(f"  {f.line()}", file=_sys.stderr)
+        return 1
+    print(f"✅ {args.harness} capture seam upgraded.")
+    return 0
+
+
+def _artifact_detail_would_refuse(finding, harness: str, *,
+                                  unrepairable: bool) -> bool:
+    """Whether rendering ``finding``'s OWN detail would prescribe a repair
+    the installer refuses (#5351).
+
+    Declared ONCE, because BOTH surfaces that render an artifact finding —
+    ``hooks status`` line by line and ``doctor``'s one summary row — must make
+    this call identically; a copy in each caller drifts, and the drifted copy
+    either prints a command that refuses or deletes an instruction the user
+    needs.
+
+    Three conditions, each load-bearing for a specific kind:
+
+    * ``unrepairable`` — the seam's installer refuses right now (a MANUAL kind
+      or the legacy collision; the caller decides which findings those are).
+      In a repairable seam the detail's command WORKS and must be printed.
+    * the detail embeds one of :data:`hook_install.ARTIFACT_INSTALLER_CLAUSES`.
+      The details that name no command are never withheld, because the pointer
+      does not always recover them — ``tortoise session verify`` resolves its
+      transmit identity first and, with no API key configured, returns before
+      printing a single finding.  The clauses are matched whole so an install
+      PATH cannot masquerade as one, and a note that merely MENTIONS the
+      installer (``ahead-artifact``: ``would replace it with N``) embeds none.
+    * the kind is not a MANUAL one.  That exempts the third way a detail can
+      name the installer without being the repair the verdict calls for: a
+      conditional two-step whose first action is the user's — ``foreign-artifact``
+      (``move it aside, then re-run …``) and the ``symlinked-install`` note
+      (``replace it with a real directory, then re-run …``).  Withholding those
+      would delete the step that clears the refusal.
+
+    ``Finding.blocking`` is deliberately NOT consulted: every clause-bearing
+    kind that is a note rather than a verdict is already exempt above, so the
+    test would change no reachable state (measured — dropping it leaves every
+    state's rendering identical), and a future non-blocking detail that names
+    the installer would be one whose first step is the user's, exactly like
+    ``symlinked-install``.
+    """
+    from tortoise.hook_install import ARTIFACT_INSTALLER_CLAUSES, is_manual_fix
+    return (unrepairable
+            and not is_manual_fix(finding.kind)
+            and any(clause.format(harness=harness) in finding.detail
+                    for clause in ARTIFACT_INSTALLER_CLAUSES))
+
+
+def _cmd_hooks(args) -> int:
+    """Detect and repair drift in an already-installed capture-hook seam.
+
+    The install contract is two halves: the script bytes (marked with
+    ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
+    carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
+    checked here; ``upgrade`` merges the settings half rather than
+    overwriting it, and re-copies the scripts.  Seam-agnostic: the two
+    registries in ``tortoise.hook_install`` — ``HARNESS_LAYOUTS`` for the
+    shell hooks and ``ARTIFACT_CONTRACTS`` for a non-shell seam like Pi's
+    TypeScript extension — supply the targets, and neither class is a
+    hand-written harness list (#5351).
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from tortoise.capture_install import legacy_extension_obstacle
+    from tortoise.hook_install import (
+        ARTIFACT_CONTRACTS,
+        artifact_home,
+        artifact_root,
+        contract_version_for,
+        default_root,
+        detect_artifact_install,
+        detect_install,
+        get_layout,
+        is_manual_fix,
+        upgrade_install,
+    )
+
+    # `--harness` is implicit for the default (claude) in every hint this
+    # command prints; declared once so the hints cannot drift apart.
+    hsel = "" if args.harness == "claude" else f" --harness {args.harness}"
+
+    # TWO seam classes, ONE command (#5351).  A shell-hook harness resolves
+    # through `HARNESS_LAYOUTS`; a non-shell seam (Pi's TypeScript extension)
+    # through `ARTIFACT_CONTRACTS` — the SAME registries the verifier and
+    # `doctor` read, never a third hand-written harness list.  Anything in
+    # NEITHER is genuinely unknown, and `get_layout` owns that message (one
+    # home for the wording).
+    try:
+        layout = get_layout(args.harness)
+    except ValueError as e:
+        if args.harness not in ARTIFACT_CONTRACTS:
+            print(str(e), file=_sys.stderr)
+            return 1
+        layout = None
+    # An explicit `--dir` always wins (Claude's project-scoped install depends
+    # on it). With NO `--dir`, a layout that declares an env root (Codex)
+    # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
+    # its hooks ONLY from the HOME-scoped file: defaulting to the cwd inspected
+    # and "upgraded" the dead project-local path Codex never reads, printing
+    # `✅ ... upgraded.` while leaving the real install untouched — the silent
+    # no-capture this seam exists to prevent (#3818).
+    explicit_dir = getattr(args, "dir", None)
+    # The HOME that `default_root` consumed, when no explicit `--dir` was given.
+    # It is threaded into `upgrade_install` so the `hook-src-dir` record is
+    # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
+    # consults HOME (#4110).
+    resolved_home = None
+    # The `$HOME` an ARTIFACT seam's install root is scoped under, derived from
+    # the resolved root once so `status` and `upgrade` cannot disagree (#5351).
+    artifact_home_dir = None
+    try:
+        # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
+        # return a non-absolute path: with `$HOME` set to a literal `~` (or
+        # `~/x`) the expansion is a no-op and `pathlib` raises
+        # `RuntimeError("Could not determine home directory.")`; a RELATIVE
+        # `$HOME` (`relhome`) is returned verbatim and refused by
+        # `default_root` as a `ValueError`.  Those are two members of ONE
+        # raise-set, so the boundary is the sibling module's catch-all —
+        # `except MemoryError: raise` then `except Exception` — never an
+        # `except (ValueError, RuntimeError)` enumeration, which the next
+        # unenumerated member refutes (the shape that let `TypeError` #3987
+        # and `UnicodeDecodeError` #3988 escape `capture_install`'s old
+        # `(OSError, RuntimeError)` tuple; see tortoise/capture_install.py).
+        # Guarding the whole root-resolution expression covers the raise from
+        # `_P.home()`, not just the call after it.  Surface every member the
+        # way every other failure in this command is surfaced: a populated
+        # message on stderr plus a non-zero exit, never an uncaught traceback
+        # (#4024 P2-1).  The sibling call sites are already guarded
+        # (`capture_install`'s catch-all, `doctor`'s `except Exception`);
+        # this one was not.
+        # `_P.home()` stays INSIDE the boundary but in the ELSE arm: it can
+        # RAISE, so it must be guarded, but an explicit `--dir` makes HOME
+        # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
+        # above the ternary made an unresolvable HOME abort a `--dir` inspect
+        # or repair that would otherwise have worked.
+        if explicit_dir is not None:
+            root = _P(explicit_dir)
+        else:
+            resolved_home = _P.home()
+            # A non-shell seam has no layout to resolve a default from: its
+            # root is the ARTIFACT contract's `root_relpath` under the same
+            # HOME (`~/.pi/agent/extensions`), never a cwd default.
+            if layout is not None:
+                root = default_root(layout, resolved_home)
+            else:
+                root = artifact_root(args.harness, resolved_home)
+        if layout is None:
+            # The artifact installer is scoped by HOME and `--dir` names the
+            # ROOT it installs into (`<home>/<root_relpath>`), so derive that
+            # HOME back out.  A `--dir` that is NOT the contract's root has no
+            # install this command can inspect OR repair — the installer would
+            # write under HOME and leave the named directory untouched — so it
+            # is refused rather than guessed at.  Doing it HERE, before either
+            # subcommand, is what keeps `status` from ever recommending an
+            # `upgrade` that refuses.
+            artifact_home_dir = artifact_home(args.harness, root)
+            if artifact_home_dir is None:
+                print(
+                    f"--dir {root} is not {args.harness}'s artifact install "
+                    f"root (expected a path ending in "
+                    f"{ARTIFACT_CONTRACTS[args.harness].root_relpath}) — pass "
+                    f"that directory, or omit --dir to use $HOME.",
+                    file=_sys.stderr)
+                return 1
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(str(e), file=_sys.stderr)
+        # Same repair-hint shape as the drift refusal below.  It names a
+        # PLACEHOLDER dir rather than a concrete one: the root is exactly what
+        # could not be resolved, so echoing one back would teach a path that
+        # is itself unresolvable.
+        print("\nRun `tortoise hooks upgrade"
+              f"{hsel}" " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+        return 1
+
+    if args.hooks_cmd == "status":
+        try:
+            # ONE detector per seam class, and the SAME pair `session verify`
+            # grades with (#5351): a Pi finding printed here is the finding the
+            # verifier already reported, not a second, differently-worded
+            # opinion about the same file.
+            if layout is None:
+                findings = detect_artifact_install(root, args.harness)
+            else:
+                findings = detect_install(root, args.harness)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            # A CATCH-ALL, not an enumeration: `detect_install` reads and
+            # parses `<root>/settings.json` (or `hooks.json`), and the raise-set
+            # is open-ended.  An `except OSError` (the previous form) let
+            # `json.loads`' `RecursionError` — a `RuntimeError` — escape on a
+            # deeply nested document, so `hooks status` died with a raw
+            # traceback (#4024 P2-2).  The next unenumerated member refutes any
+            # tuple, which is how `TypeError` (#3987) and `UnicodeDecodeError`
+            # (#3988) escaped `capture_install`'s old boundary.  Same shape as
+            # the root resolution above and `install_capture`'s catch-all.
+            print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
+                  file=_sys.stderr)
+            return 1
+        version = contract_version_for(args.harness)
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps({
+                "harness": args.harness,
+                "root": str(root),
+                "contract_version": version,
+                "current": not any(f.blocking for f in findings),
+                # #3797: the same observation the text surface renders, as a
+                # field — a machine consumer must be able to tell
+                # "installed and ran" from "never ran" too.  `None` means this
+                # harness's hooks do not write a record at all.
+                "hook_run": _hook_run_json(args.harness, layout, root),
+                # `detail` is the DETECTOR's own finding, verbatim (#5351): it
+                # is data about the install, not a recommendation to execute,
+                # and the TEXT surface — which owns the human-facing repair
+                # wording — is where a prescription that would refuse is
+                # withheld.  A consumer that RENDERS `detail` to a human owns
+                # that distinction.
+                "findings": [
+                    {"kind": f.kind, "script": f.script, "event": f.event,
+                     "detail": f.detail, "blocking": f.blocking}
+                    for f in findings
+                ],
+            }, indent=2))
+        elif not findings:
+            print(f"✅ {args.harness} capture hooks in {root} are current "
+                  f"(contract v{version}).")
+        else:
+            # Repairability is decided BEFORE the findings are rendered, because
+            # an ARTIFACT finding's OWN detail can embed a repair command
+            # ("reinstall with `tortoise install pi`") — unconditionally — and
+            # the installer REFUSES that command whenever this seam is
+            # unrepairable.  That detail is the "second place a refusing
+            # recommendation can come from" (the same reason `doctor` withholds
+            # it, through the SAME predicate).  TWO independent reasons make the
+            # installer refuse: a MANUAL kind (`is_manual_fix` is the DECLARED
+            # conservative proxy for refusal — see its docstring; for an
+            # artifact leaf link it can be true where the installer would in
+            # fact succeed, which is the documented cheap error), and the legacy
+            # collision (#3713).  A manual step does not clear the collision, so
+            # both are reported below.
+            blocking = [f for f in findings if f.blocking]
+            # Some blocking kinds are NOT repairable by `upgrade` (it refuses
+            # rather than clobber an unreadable/unsafe/foreign path), so the
+            # hint must name the manual fix for those instead of recommending
+            # a command that will refuse.  Which kinds those are is declared
+            # ONCE, in `hook_install`, because `doctor` recommends a repair for
+            # the same kinds (#4680 review).  It is asked over ALL findings,
+            # not just the blocking ones, so a non-blocking symlink note still
+            # blocks the recommendation.
+            manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+            # An artifact seam's installer has ONE refusal state no finding
+            # kind expresses — a legacy extension already disabled at its
+            # backup name (#3713) — so repairability cannot be read off the
+            # kinds alone.  Consult the ONE declaration `doctor` also reads,
+            # never a second copy of the condition (#5351).
+            obstacle = ("" if layout is not None
+                        else legacy_extension_obstacle(args.harness, root))
+            unrepairable = bool(manual) or bool(obstacle)
+            print(f"Capture-hook install at {root} (contract v{version}):")
+            for f in findings:
+                # The call is the SHARED predicate; the two rules it replaces
+                # each failed a measured case.  A kind-based rule withheld
+                # `bytes differ from the shipped seam` (non-manual) while
+                # exempting the manual details, and the round-5 collision arm
+                # withheld `chmod it so the seam can load` the moment any
+                # collision existed — neither is a command the installer owns.
+                if (layout is None
+                        and _artifact_detail_would_refuse(
+                            f, args.harness, unrepairable=unrepairable)):
+                    print(f"  ❌ {f.kind}: run `tortoise session verify "
+                          f"--harness {args.harness}` for the repair path")
+                else:
+                    print(f"  {f.line()}")
+            if blocking:
+                kinds = {f.kind for f in blocking}
+                if manual:
+                    # A manual kind makes `upgrade` refuse the WHOLE run, so
+                    # recommending it (even alongside repairable findings)
+                    # would point at a command that refuses.
+                    print("\nSome findings need a manual fix before upgrade "
+                          "can run: " + ", ".join(sorted(manual)) + ".")
+                # NOT an `elif`: the two obstacles are INDEPENDENT — clearing
+                # the manual kind (e.g. re-pointing a symlink) does not clear
+                # the legacy collision, so suppressing this line would promise
+                # a repair that still refuses.  Both are named when both hold.
+                if obstacle:
+                    # The installer's own refusal, in its own words: `upgrade`
+                    # would refuse, so name the obstacle instead of a command
+                    # that cannot run until a human clears it.
+                    print("\nUpgrade cannot run until this is fixed: "
+                          + obstacle + ".")
+                elif not manual and kinds:
+                    print("\nRun `tortoise hooks upgrade"
+                          f"{hsel}" f" --dir {root}` to repair.")
+        # #3797: the hook-run observation — the install's OWN evidence that
+        # it ran, which is what separates "installed and ran" from "not
+        # installed" without a credential.  Human-readable branch ONLY: the
+        # `--json` document carries the same observation as a FIELD (`hook_run`
+        # above), never as a stray line.  And only for a harness whose shipped
+        # hooks actually WRITE the record (`HarnessLayout.writes_hook_run`):
+        # rendering an absence of observation for a harness that structurally
+        # never writes one would assert what was never observed — the very
+        # defect this line removes.
+        if (not getattr(args, "json", False) and layout is not None
+                and layout.writes_hook_run):
+            _print_hook_run(args.harness, layout, root)
+        return 1 if any(f.blocking for f in findings) else 0
+
+    # upgrade (also performs a fresh install when nothing is present)
+    if layout is None:
+        # The artifact half's installer, not `upgrade_install` — a seam with no
+        # `hooks_dir` has no layout-driven upgrade, and a second writer would
+        # be the two-detectors defect inverted (#5351).  `artifact_home_dir` is
+        # the validated HOME: the guard above refused a `--dir` outside it.
+        return _upgrade_artifact_seam(args, root, artifact_home_dir)
+    try:
+        result = upgrade_install(root, args.harness,
+                                 dry_run=getattr(args, "dry_run", False),
+                                 home=resolved_home)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The install path is fail-closed and its refusal TEXT tells the user
+        # to run this very command, so the command must never crash: same
+        # catch-all boundary as `status` above (#4024 P2-2).
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.refused, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if getattr(args, "dry_run", False) else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture hooks at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `upgrade_install` already prefixes its planned actions when in
+        # dry-run; prefixing again here printed `[dry-run] [dry-run]`.
+        print(action)
+    if not getattr(args, "dry_run", False):
+        remaining = [f for f in result.findings_after if f.blocking]
+        if remaining:
+            print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+                  file=_sys.stderr)
+            for f in remaining:
+                print(f"  {f.line()}", file=_sys.stderr)
+            return 1
+        print(f"✅ {args.harness} capture hooks upgraded.")
+    return 0
+
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
@@ -2770,28 +3822,96 @@ def _cmd_session(args) -> int:
     from urllib.request import Request, urlopen  # noqa: F401
     from urllib.error import URLError, HTTPError  # noqa: F401
 
-    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
+    # #3963: `session spool` is the CHEAP local capture — no network, no
+    # credentials, and it must survive a BROKEN config. Dispatching it after the
+    # resolver (or after the api_key gate) made the per-turn mechanism of record
+    # a silent no-op for every local-only user, and turned a corrupt
+    # `credentials.json` into a total capture outage.
+    if args.session_cmd == "spool":
+        return _cmd_session_spool(args)
+    if args.session_cmd == "drain":
+        # ALWAYS exit 0 (it is backgrounded from SessionStart): with no config —
+        # or a CORRUPT one — there is simply nothing to file, and that is not an
+        # error the caller can act on.
+        return _cmd_session_drain_best_effort(args)
+
+    # Transmitting-identity resolver (#2369 D1.2, #3660): this resolver runs
+    # BEFORE dispatch, so the uploaders (`capture`) and the read-only
+    # subcommands (`probe` / `verify` / `list` / `view`) all share it — a
+    # repo/cwd `./.tortoise` must never choose the host they talk to. Note the
+    # env channel remains an identity source here (unlike `context` /
+    # `volunteer`, which pass `include_env=False`); see
+    # `_resolve_transmit_config` for the divergence.
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
         return _cmd_session_capture(args, api_key, api_url)
     elif args.session_cmd == "probe":
         return _cmd_session_probe(args, api_key, api_url)
+    elif args.session_cmd == "verify":
+        return _cmd_session_verify(args, api_key, api_url)
     elif args.session_cmd == "list":
         return _cmd_session_list(api_key, api_url)
     elif args.session_cmd == "view":
         return _cmd_session_view(args, api_key, api_url)
     else:
-        print("Unknown session command. Try capture, probe, list, or view.", file=sys.stderr)
+        print("Unknown session command. Try capture, probe, verify, list, or "
+              "view.", file=sys.stderr)
         return 1
+
+
+def _cmd_session_verify(args, api_key: str, api_url: str) -> int:
+    """`tortoise session verify` — one-command behavioural install check.
+
+    Thin CLI boundary over :func:`tortoise.session_verify.verify_session_capture`:
+    the whole chain runs inside ONE catch-all, so every failure on the
+    resolve/fire/observe path is a populated message plus a non-zero exit —
+    never an uncaught traceback out of the CLI.  A ``MemoryError`` is
+    re-raised first (resource exhaustion is not a refusal; the handler
+    allocates).  Deliberately NOT an ``except (A, B)`` tuple — the next
+    unenumerated member refutes a finite enumeration (#3987/#3988 class).
+    """
+    from pathlib import Path
+
+    from tortoise.session_verify import (
+        EXIT_BROKEN,
+        render_report,
+        verify_session_capture,
+    )
+
+    try:
+        report = verify_session_capture(
+            args.harness,
+            api_key=api_key,
+            api_url=api_url,
+            home=Path.home(),
+            install_dir=getattr(args, "dir", None),
+            timeout=float(getattr(args, "timeout", 90.0)),
+            keep=bool(getattr(args, "keep", False)),
+        )
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"verify failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps(report, indent=2))
+    else:
+        print(render_report(report))
+    return int(report.get("exit_code", EXIT_BROKEN))
 
 
 def _parse_transcript(text: str) -> list:
@@ -2843,90 +3963,559 @@ def _parse_transcript(text: str) -> list:
     return turns
 
 
-def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
-    """Read transcript, parse into turns, POST to /v1/sessions."""
-    import json as _json, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+def _session_post(api_key: str, api_url: str):
+    """Build the POST callable the capture spool replays through (#3963).
+
+    Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
+    transport: network/timeout failures come back with ``status=None`` (the
+    spool retries with backoff), HTTP errors keep their status (permanent 4xx
+    are discarded *with a reason*, not retried).
+    """
+    import json as _json
+    from http.client import HTTPException
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
+
+    from tortoise.capture_spool import PostOutcome
+
+    def handle(payload: dict) -> PostOutcome:
+        def _refused(outcome: PostOutcome) -> PostOutcome:
+            """A RETRYABLE refusal is not proof that nothing committed (#4675).
+
+            The transport bound ABANDONS its handler rather than cancelling it,
+            so a 504 routinely arrives after the server has already written the
+            session AND its turns. Without this read the spool defers an entry
+            that is already durable, and `session drain` can never reach
+            `filed N, deferred 0`. Only an exact match on the posted turn ids
+            AND their stored text files; every inconclusive read falls through
+            to the original outcome and defers, which is always safe.
+
+            The recorded refusal set (:data:`_NO_RECEIPT_REFUSAL_STATUSES` =
+            402/403/503) is excluded BY NAME here, with the same constant and
+            for the same reason as the LOCAL-receipt gate in
+            `_confirm_already_captured` — see the recorded 2xx-only rule there.
+            Both 402 and 503 are `retry` to the CLASSIFIER (402 since #4614's
+            data-loss fix, 503 via `status >= 500`), so the classifier gate
+            alone would confirm them. Uniformity is deliberate: a reviewer must
+            not have to work out why one path confirms a 402 and the other does
+            not. The deferral is recoverable either way (each is `retry`, so the
+            entry is kept and re-posted); #5051 holds the question of broadening
+            both.
+            """
+            from tortoise.capture_spool import classify_failure
+            if (outcome.ok
+                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(
+                        outcome.status, outcome.detail) != "retry"):
+                return outcome
+            if not isinstance(payload, dict):
+                # A non-mapping payload has nothing to confirm against; the
+                # caller's own contract decides the outcome, not this wrapper.
+                return outcome
+            from tortoise.session_confirm import (
+                FILED,
+                UNEXTRACTED,
+                confirm_capture,
+            )
+            from tortoise.session_verify import session_detail
+
+            verdict = confirm_capture(
+                session_detail, api_url, api_key,
+                str(payload.get("session_id") or ""),
+                payload.get("conversation") or [])
+            if verdict in (FILED, UNEXTRACTED):
+                # The spool's contract is TURN DURABILITY, so a confirmed
+                # capture terminalises on either verdict — `_flush_one` stamps
+                # `filed_key` through its own compare-and-swap.
+                #
+                # An UNEXTRACTED confirmation carries the keyless-mode marker
+                # so `session capture`'s existing #4188 disclosure fires: the
+                # caller must not print an unqualified success for a capture
+                # whose memory points were never minted.
+                body: dict = {"confirmed": verdict}
+                if verdict == UNEXTRACTED:
+                    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+                    body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
+                return PostOutcome(
+                    ok=True, status=200,
+                    detail=f"{outcome.status} after commit — confirmed {verdict}",
+                    body=body)
+            return outcome
+
+        try:
+            data = _json.dumps(payload).encode("utf-8")
+            req = Request(
+                f"{api_url}/v1/sessions",
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as resp:
+                # `getattr` default keeps transcript-conversion fakes (and any
+                # transport that omits `.status`) working — a returned context
+                # manager is a success by construction.
+                return PostOutcome(ok=True, status=getattr(resp, "status", 200),
+                                   body=_json.loads(resp.read()))
+        except HTTPError as e:
+            # Read INSIDE the handler: an exception raised here is not caught by
+            # the sibling clauses below, so an unguarded read made a 504 whose
+            # error body stalls raise out of the drain and record a spurious
+            # `entry_failed` discard (#4714 review). Broad on purpose — this is
+            # a diagnostic body; failing to read it must not fail the entry.
+            try:
+                body = e.read().decode("utf-8", "replace") if e.fp else ""
+            except Exception as read_exc:
+                body = f"<error body unreadable: {read_exc}>"
+            return _refused(PostOutcome(ok=False, status=e.code,
+                                        detail=body[:500]))
+        except URLError as e:
+            return _refused(PostOutcome(ok=False, status=None,
+                                        detail=str(getattr(e, "reason", e))))
+        except OSError as e:
+            # Transient transport failures urllib does NOT wrap: a read timeout
+            # after the headers (`TimeoutError` from resp.read()) and
+            # `http.client.RemoteDisconnected` from getresponse() are both
+            # OSErrors. They must defer, not crash the capture path.
+            return _refused(PostOutcome(ok=False, status=None, detail=str(e)))
+        except ValueError as e:
+            # A 2xx with an empty / non-JSON body. The write may or may not have
+            # landed, and the idempotent key makes a retry safe → defer.
+            return _refused(PostOutcome(ok=False, status=None,
+                                        detail=f"unparseable response: {e}"))
+        except HTTPException as e:
+            # `http.client.HTTPException` derives from Exception, NOT OSError:
+            # a proxy/LB with a malformed status line, an over-long header, or a
+            # truncated body (`BadStatusLine`, `InvalidURL`, `LineTooLong`,
+            # `IncompleteRead`, `NotConnected`) would otherwise escape and abort
+            # the whole drain loop — the entries sorted after it never attempted.
+            return _refused(PostOutcome(ok=False, status=None,
+                                        detail=f"malformed response: {e}"))
+    return handle
+
+
+def _local_session_id(transcript_path) -> str:
+    """A STABLE session id for a transcript that arrives without one (#3963).
+
+    Anchored to the resolved path (not the content) so every per-turn snapshot
+    of one conversation addresses ONE spool entry. The stem keeps it readable;
+    the path digest disambiguates two files with the same basename.
+    """
+    import hashlib
+    from pathlib import Path
+
+    path = Path(transcript_path)
+    try:
+        anchor = str(path.resolve())
+    except OSError:  # pragma: no cover - resolution is best-effort
+        anchor = str(path)
+    digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:12]
+    return f"{path.stem[:240]}-{digest}"
+
+
+def _spool_transcript(args) -> dict:
+    """Parse a transcript and SPOOL it durably — no network (#3963).
+
+    Shared by ``session capture`` (spool then file) and ``session spool`` (the
+    per-turn Claude hook's cheap capture: spool only). Returns
+    ``{"rc", "root", "session_id", "turns", "harness", "source", "written"}``;
+    ``rc != 0`` means nothing usable was spooled (and the reason is on stderr).
+    """
+    import sys as _sys  # noqa: I001
+    from pathlib import Path
+    from tortoise.capture_spool import (
+        Snapshot,
+        spool_dir,
+        write_spool_entry,
+    )
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
-    if not transcript_path.exists():
+    # NO `transcript_path.exists()` pre-check: `Path.exists()` RAISES
+    # `PermissionError` when a parent directory lacks traverse permission (the
+    # same class as the spool-ROOT bug), so the guard below was unreachable and
+    # the CLI exited 1 with a traceback and no record. The read classifies it:
+    # ENOENT is "not found", every other failure is a recorded loss.
+    try:
+        text = transcript_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         print(f"Transcript file not found: {args.file}", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
+    except (OSError, UnicodeDecodeError) as exc:
+        # `session spool` documents "always exits 0" because it is the per-turn
+        # mechanism of record: an unreadable or non-UTF-8 transcript must not
+        # raise a traceback out of the hook (it did), and the failure must be
+        # RECORDED, not just printed.
+        print(f"Transcript unreadable: {args.file} ({exc})", file=_sys.stderr)
+        from tortoise.capture_spool import record_discard
+        record_discard(spool_dir(), {
+            "session_id": _local_session_id(transcript_path),
+            "reason": "transcript_unreadable",
+            "detail": f"{args.file}: {exc}",
+        })
+        return {"rc": 1}
 
-    text = transcript_path.read_text(encoding="utf-8")
     turns = _parse_transcript(text)
 
     if not turns:
         print("No conversation turns found in transcript.", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
 
-    payload = {
-        "source": transcript_path.stem,
-        "conversation": turns,
-    }
+    # #3963: align the CLI leg with the server's legal window. The Pi leg caps
+    # at the same bounds; without this a long Claude transcript POSTs >500 turns
+    # (hosted 400) → the spool entry is discarded as a permanent error instead
+    # of being filed.
+    from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.sdk import _clip_capture_turn_content
+    from tortoise.session_import import window_turns
+    # #4897: the per-turn clip is the SDK's ONE definition of the stored window
+    # — this leg used to slice to a bare `5000`, which both re-declared the cap
+    # and cut SILENTLY (a reader could not tell a complete turn from a cut one).
+    # The clip reserves its marker inside the cap, so the server's own
+    # re-application of the window cannot remove it.
+    turns = [{"role": t["role"],
+              "content": _clip_capture_turn_content(t["content"])}
+             for t in turns]
+    # The spool's store IS the record and the meta digest is computed over it, so
+    # what is stored must be what is posted. Non-conversational roles (the
+    # transcript's `System:` lines) are excluded by POLICY — the same policy the
+    # Pi leg applies at capture (extractTurns keeps user/assistant text only) —
+    # and the exclusion is REPORTED, never silent (#3963).
+    conversational = [t for t in turns if t["role"] in ("user", "assistant")]
+    if len(conversational) != len(turns):
+        print(f"ignored {len(turns) - len(conversational)} non-conversational turn(s) "
+              "(system/other roles are not filed)", file=_sys.stderr)
+    turns = conversational
+    if not turns:
+        print("No user/assistant turns found in transcript.", file=_sys.stderr)
+        return {"rc": 1}
+    turns, dropped = window_turns(turns)
+    if dropped:
+        print(f"windowed: dropped {dropped} oldest turn(s) past the {MAX_SESSION_TURNS}-turn cap",
+              file=_sys.stderr)
+
     # #1727 Slice 2 (Task 14, T1-P11): harness + session_id pass through to
-    # SessionRequest — both set-only-when-present (None never erases a stored
-    # Session.harness, and the hook forwards Claude Code's real session_id as
-    # the idempotency key so re-captures converge to ONE Session). The hook
-    # (session-end.sh) drives these; the no-arg form stays legacy-compatible.
-    if getattr(args, "harness", None):
-        payload["harness"] = args.harness
-    if getattr(args, "session_id", None):
-        payload["session_id"] = args.session_id
+    # SessionRequest. The hook forwards Claude Code's real session_id as the
+    # idempotency key so re-captures converge to ONE Session; the legacy no-arg
+    # form now derives a CONTENT-ADDRESSED id (#3963) instead of letting the
+    # server mint a random one — so a replay of the same transcript is
+    # idempotent even without the hook's metadata.
+    harness = getattr(args, "harness", None) or "claude"
+    # Without an explicit `--session-id`, derive one anchored to the TRANSCRIPT
+    # PATH — NOT to the content (#3963 review P2). A content-addressed id changes
+    # on every snapshot of a growing conversation, so the per-turn spool created
+    # ONE ENTRY PER TURN, filed as N separate sessions (N server-side
+    # extractions). A path-anchored id is stable across snapshots, so the per-turn
+    # capture appends to ONE entry and the eventual filing is one session. The
+    # path digest also keeps two distinct transcripts with the same basename from
+    # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
+    # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
+    # discard of the whole capture.
+    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
 
-    # #2681: derive machine_id + forward model when provided.  Derive-only
+    # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
-    machine_id = derive_machine_id()
-    if machine_id:
-        sanitized = sanitize_attribution_field(machine_id, max_length=256)
-        if sanitized:
-            payload["machine_id"] = sanitized
-    model = sanitize_attribution_field(
-        getattr(args, "model", None), max_length=128)
-    if model:
-        payload["model"] = model
+    machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
+    model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
 
-    try:
-        data = _json.dumps(payload).encode("utf-8")
-        req = Request(
-            f"{api_url}/v1/sessions",
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+    root = spool_dir()
+    written = write_spool_entry(root, Snapshot(
+        session_id=session_id,
+        turns=turns,
+        source=transcript_path.stem,
+        machine_id=machine_id,
+        model=model,
+        harness=harness,
+        # #3516 §B: BOTH callers of this helper are the HOOK/CLI leg —
+        # `session capture` (the SessionEnd hook) and `session spool` (the
+        # per-turn hook) — so they claim the 'hook' lane. Backfill/import takes
+        # `tortoise.session_import`, a different path, and stays lane-less.
+        # Without this stamp a WORKING claude install reads as hook-not-live:
+        # the store-sync half posts the same payload and the lane is the only
+        # discriminator.
+        capture_lane="hook",
+    ))
+    return {
+        "rc": 0,
+        "root": root,
+        "session_id": session_id,
+        "turns": turns,
+        "harness": harness,
+        "source": transcript_path.stem,
+        "written": written,
+    }
+
+
+def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
+    """Read a transcript, SPOOL it durably, then attempt the filing (#3963).
+
+    The spool write happens BEFORE the network call, so a cancelled SessionEnd
+    hook (Claude Code cancels at ~1.5 s — #3754) or a killed process loses the
+    *filing* only; the turns are already in ``~/.tortoise/capture-spool`` and
+    ``tortoise session drain`` files them at the next opportunity.
+    """
+    import sys as _sys
+
+    # #3615: capture is a DATA-SHARING act, not an authentication act. The
+    # Bearer credential (api_key, already resolved by the caller) authenticates
+    # the upload; it must never *authorize* it — exporting TORTOISE_API_KEY for
+    # the MCP Authorization header must not opt the machine into shipping
+    # transcripts. Explicit consent or nothing (default OFF). Gated here, on
+    # the TRANSMISSION primitive, so a stale copied hook calling this CLI
+    # cannot bypass it.
+    #
+    # MERGE NOTE (main's #3963 spool layer + this PR): `TORTOISE_CAPTURE` is
+    # "client transmission authorization" (the #3615 scoping layer model), so
+    # the gate belongs on the primitives that TRANSMIT — this one, `sessions
+    # import`, and `session drain` — never on the shared `_spool_transcript`
+    # helper. That helper is also `session spool`, the per-turn LOCAL hook: a
+    # gate there would (a) disable main's local durability for every
+    # unconsented host and (b) still leave `session drain` — a THIRD upload
+    # path — ungated, the "second upload primitive as a side door" class the
+    # #3615 threat surface declares in scope.
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
+    from tortoise.capture_spool import flush_spool, read_spool_meta
+    if not capture_consent_enabled():
+        # Durable + one-time: a stale copied hook discards this stderr
+        # (`2>/dev/null`), so the same notice is also written to
+        # ~/.tortoise/capture-consent-notice and pushed to stderr by the next
+        # interactive command (see `_flush_pending_capture_notice`).
+        record_capture_declined()
+        print(f"capture declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        return prep["rc"]
+    root = prep["root"]
+    session_id = prep["session_id"]
+    turns = prep["turns"]
+    harness = prep["harness"]
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+
+    if not written["written"] and written["bytes"] == 0:
+        # The entry exceeded the per-entry bound (the discard above names it).
+        return 1
+
+    summary = flush_spool(root, _session_post(api_key, api_url), only_session_id=session_id)
+    for d in summary.discarded:
+        print(f"capture discarded ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    outcome = summary.outcomes.get(session_id)
+    if outcome is None:
+        # Not attempted: already filed, inside its backoff window, or the entry
+        # was discarded above. Distinguish them — "already filed" for a pending
+        # retry is a lie to the operator (#3963 review).
+        if summary.lost or written["discards"]:
+            return 1
+        meta = read_spool_meta(root, session_id) or {}
+        if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+            print(f"Session {session_id} already filed — nothing to capture.")
+            return 0
+        print(f"capture deferred: session {session_id} is spooled (backoff window) "
+              "and will retry", file=_sys.stderr)
+        print(f"Spooled session: {session_id}")
+        return 0
+    if not outcome.ok:
+        if summary.lost:
+            return 1
+        # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
+        # the spool — report the deferral honestly and exit 0 (the data is not
+        # lost; the hook must never be blocked by a capture failure).
+        print(
+            f"capture deferred: session {session_id} is spooled and will retry "
+            f"({outcome.status if outcome.status is not None else 'network error'})",
+            file=_sys.stderr,
         )
-        with urlopen(req, timeout=30) as resp:
-            result = _json.loads(resp.read())
-    except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"API error ({e.code}): {body}", file=_sys.stderr)
-        return 1
-    except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        return 1
+        print(f"Spooled session: {session_id}")
+        return 0
 
-    session_id = result.get("session_id", result.get("id", "unknown"))
+    body = outcome.body or {}
+    server_session = body.get("session_id", body.get("id", session_id))
+    # #3963: a grown conversation re-POSTed under an existing session_id is
+    # replayed server-side (the turns land; extraction is deliberately skipped —
+    # the server extracts a session once). Surface it honestly instead of
+    # claiming a fresh extraction happened.
+    if body.get("extraction_mode") == "replayed":
+        print(f"Session {server_session} already captured — replayed (no new extraction).")
+        return 0
     # P1 #1529: a status-only consumer must not report success on a failed
     # capture — extraction failures surface as HTTP 200 + additive body
     # errors with extraction_mode "error"/"empty" (the turn mutation already
     # happened; the body is the failure surface). Exit 1 with the errors on
     # stderr, never "Captured session: …" with extracted: 0.
-    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
+    if body.get("extraction_mode") in ("error", "empty") or body.get("errors"):
         print(
-            f"capture failed: {result.get('errors') or result.get('extraction_mode')}",
+            f"capture failed: {body.get('errors') or body.get('extraction_mode')}",
             file=_sys.stderr,
         )
         return 1
-    print(f"Captured session: {session_id}")
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # store-only mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. BOTH store-only modes mean "not extracted"
+    # (#4258 adds the team's extraction-disabled setting); "replayed" means a
+    # PRIOR capture SUCCEEDED, so its memory points DO exist — printing
+    # "memory points were not extracted" for it would be a false statement
+    # about the session.
+    #
+    # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
+    # RETARGETED to this branch's variables + #4258's mode set. Main binds
+    # `result` only in its own direct-POST version of this function; here the
+    # response body arrives via `summary.outcomes` as `body`, so `result` is
+    # unbound and either side's hunk adopted verbatim would raise NameError.
+    # The success line keeps `server_session` (the server-assigned id) rather
+    # than the locally-derived `session_id`.
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
+    _capture_mode = body.get("extraction_mode")
+    if _capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                         _CAPTURE_EXTRACTION_DISABLED_MODE):
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
+    if body.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in body["warnings"]), file=_sys.stderr)
+    print(f"Captured session: {server_session}")
     print(f"  Turns: {len(turns)}")
-    print(f"  Source: {transcript_path.stem}")
-    if getattr(args, "harness", None):
-        print(f"  Harness: {args.harness}")
+    print(f"  Source: {prep['source']}")
+    print(f"  Harness: {harness}")
+    return 0
+
+
+def _cmd_session_drain_best_effort(args) -> int:
+    """Resolve config for the drain and ALWAYS return 0 (#3963).
+
+    `session drain` is backgrounded from the SessionStart hook, so a missing or
+    corrupt `.tortoise` config must not surface as a non-zero exit — there is
+    nothing to file and nothing the caller can do about it.
+    """
+    import sys as _sys
+
+    # ONE blanket try around EVERYTHING — including the config resolver. That is
+    # deliberate: `_resolve_config_path()` calls `Path.is_file()`, which RAISES
+    # `PermissionError` (not `_ConfigError`) when `~/.tortoise` is unreadable, so
+    # a resolver-only outside the belt still let the backgrounded drain exit 1
+    # with a traceback. The drain is backgrounded from SessionStart: whatever
+    # goes wrong, its contract is exit 0 with the reason on stderr.
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
+        if api_key is None:
+            print("spool drain: no user-global .tortoise config — nothing to file "
+                  "(a repo-local ./.tortoise never chooses the upload host, "
+                  "#3660)", file=_sys.stderr)
+            return 0
+        return _cmd_session_drain(api_key, api_url,
+                                  getattr(args, "exclude_session_id", None))
+    except Exception as e:
+        print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
+        return 0
+
+
+def _cmd_session_drain(api_key: str, api_url: str,
+                       exclude_session_id: str | None = None) -> int:
+    """Replay every spooled session that has not been filed (#3963).
+
+    This is the "next opportunity" the SessionStart hook wires in: an
+    interrupted session's filing survives in the spool and is delivered here.
+    Best-effort by contract — it must never block a session from starting, so
+    it always exits 0 and reports what it did.
+
+    ``exclude_session_id`` is the session that is LIVE right now (Claude Code
+    passes it on the SessionStart hook's stdin). Filing it would make the server
+    replay it — extraction is skipped once a session exists — so every turn
+    after a `--resume`/`clear`/`compact` would be stored but never mined. The
+    drain files OTHER sessions only, exactly as the Pi leg's `session_start`
+    flush does.
+    """
+    import sys as _sys
+
+    # #3615: the drain is a TRANSMISSION primitive (it POSTs spooled turns), so
+    # it carries the same consent gate as `session capture` / `sessions
+    # import`. Without it, a host that was consented earlier and has the switch
+    # withdrawn would still ship its spool on the next SessionStart — the
+    # "second upload primitive as a side door" class. The LOCAL spool write
+    # (`session spool`) stays ungated: consent authorizes transmission, not
+    # durability. Best-effort contract preserved: report and exit 0, so a
+    # backgrounded SessionStart drain never blocks the session.
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
+    from tortoise.capture_spool import flush_spool, spool_dir
+    if not capture_consent_enabled():
+        record_capture_declined()
+        print(f"spool drain: capture declined — {CAPTURE_DECLINED_HINT}",
+              file=_sys.stderr)
+        return 0
+
+    summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
+                          exclude_session_id=exclude_session_id)
+    for d in summary.discarded:
+        print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
+              file=_sys.stderr)
+    # A probe refusal is counted in `held_back` alongside the live-session hold,
+    # so without this line an operator cannot tell WHY a spooled session never
+    # lands — the entry is retried every drain and only leaves the spool when
+    # the count/byte ceiling evicts it (there is no TTL).
+    for r in summary.probe_refusals:
+        print(f"spool refusal: {r['session_id']} — {r['detail']}",
+              file=_sys.stderr)
+    if summary.attempted or summary.discarded or summary.probe_refusals \
+            or summary.held_by_backoff:
+        print(
+            f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
+            f"skipped {summary.skipped} "
+            f"({summary.held_by_backoff} waiting on backoff), "
+            f"held back {summary.held_back}, "
+            f"probe refusals {len(summary.probe_refusals)}, "
+            f"discarded {len(summary.discarded)}",
+            file=_sys.stderr,
+        )
+    return 0
+
+
+def _cmd_session_spool(args) -> int:
+    """Cheap capture: SPOOL a transcript, NO network (#3963).
+
+    This is what the per-turn Claude hook (``UserPromptSubmit``) calls. The
+    costly filing (which triggers server-side extraction) is deferred: the
+    SessionStart drain and the SessionEnd final flush do it. Spooling per turn
+    is what makes an interrupted / killed / laptop-closed session recoverable —
+    the durable record exists before the next turn starts.
+
+    Always exits 0: a turn must never be blocked, and a transient failure just
+    means the next turn's snapshot (which carries the whole conversation)
+    re-spools it. A PERMANENT problem (an entry past its bound) is reported and
+    recorded in `discarded.jsonl`.
+    """
+    import sys as _sys
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        # Nothing usable in this snapshot — the next turn re-spools the same
+        # (growing) conversation, so this is not a loss.
+        return 0
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    if not written["written"] and written["bytes"] == 0:
+        # ALWAYS exit 0: this is the per-turn mechanism of record, and a
+        # non-zero exit would (a) contradict the documented contract and
+        # (b) let a caller treat a completed capture as a failure. The reason is
+        # on stderr and in `discarded.jsonl`.
+        return 0
+    print(f"Spooled session: {prep['session_id']}")
     return 0
 
 
@@ -2937,7 +4526,7 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     UNCONDITIONAL install telemetry (harness + timestamp only, no content) —
     not gated on session_recording, but auth-gated (the .tortoise config
     key). The server
-    records install_probe_{harness} on the team's onboarding state — the
+    records install_probe_{harness} on the org's onboarding state — the
     dashboard's server-visible install signal (the browser cannot stat the
     user's filesystem). The CLI resolves api_url from the .tortoise config
     (self-hosted routing pin: probes target the configured TORTOISE_API_URL,
@@ -2975,42 +4564,557 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _state_dir(leaf: str) -> Path:
+    """The HOME-scoped local-state directory ``leaf`` (#3797).
+
+    A thin name for :func:`tortoise.hook_install.local_state_dir` — the ONE
+    derivation, shared with the shipped shell hook (``_tortoise_state_dir`` in
+    ``tortoise/claude-hooks/session-start.sh``) and with
+    ``tortoise.capture_spool``'s breadcrumb clear.  The hook WRITES the record
+    these callers READ, so a disagreement makes a real run invisible; the
+    empty-as-unset rule and the ``.parent`` step live in that function.
+
+    NOTE the scope: this is HOME-scoped (machine-wide) local state, while
+    ``detect_install`` for Claude is project-scoped.  On a machine with two
+    projects a run in one is visible from the other, which is why the
+    rendered line says "observed on this machine".
+
+    ``Path.home()`` is only touched when there is no override at all, so it
+    can still RAISE when ``$HOME`` is ``~``/``~/x`` — callers must treat the
+    derivation as fallible (see :func:`_print_hook_run`).
+    """
+    from tortoise.hook_install import local_state_dir
+    return local_state_dir(leaf)
+
+
+def _capture_error_file(harness: str) -> Path:
+    """Local breadcrumb for a capture attempt that never wrote a receipt.
+
+    The dashboard's ``session_capture_last_error_{harness}`` is SERVER state,
+    so a pre-POST failure (an unreachable host, no config, 0 parsed turns)
+    never reaches it and the panel reads healthy while the session is lost.
+    This file is the local companion: ``tortoise sessions import`` writes it
+    on failure and removes it on a 2xx, so a silent no-capture is at least
+    observable on the machine that produced it (the rollout survives on disk
+    for a ``sessions import`` backfill).
+
+    #5838: this is the ``capture-failure`` slot ONLY.  An inert install's
+    ``install-inert`` evidence lives in its OWN sibling file
+    (``<harness>-install.json``, :func:`hook_install.breadcrumb_file`) so the
+    two causes coexist instead of overwriting each other.  The slot is decided
+    by the KIND, through the ONE derivation, never by a second literal here.
+    """
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE, breadcrumb_file
+    return breadcrumb_file(harness, KIND_CAPTURE_FAILURE)
+
+
+def _hook_run_file(harness: str) -> Path:
+    """The local ``hook-run`` observation for ``harness`` (#3797).
+
+    Uses the shared :func:`_state_dir` derivation, so it cannot drift from
+    the shipped shell hook that WRITES the record nor from the sibling
+    ``capture-errors`` reader.  Two derivations of one path is how the #4373
+    false-PROVEN happened, so the agreement is pinned by
+    ``tests/test_hook_run_observation.py`` rather than assumed.
+
+    The derivation is fallible (``Path.home()`` can raise) — see
+    :func:`_print_hook_run`.
+    """
+    return _state_dir("hook-runs") / f"{harness}.json"
+
+
+def _read_hook_run(harness: str) -> dict | None:
+    """The ``hook-run`` record for ``harness``, or ``None``.
+
+    The READ condition is the WRITE condition (#4314): a record is accepted
+    only when its ``kind`` marker equals
+    :data:`tortoise.hook_install.KIND_HOOK_RUN` AND its recorded ``harness``
+    is the one asked about.  A file that is ABSENT, or that PARSES to
+    something which is not that record, is therefore indistinguishable from
+    "no observation" — which is exactly what the caller must render.  This is
+    the same rule ``session_verify._install_link`` applies to the sibling
+    ``capture-errors`` record, and it is what stops a foreign file at this
+    path from reading as "the hook ran".
+
+    The catch on the PARSE is broad ON PURPOSE and must stay broad: the next
+    unenumerated parse failure is the same silent-suppression bug — a deeply
+    nested document raises ``RecursionError`` (a ``RuntimeError``), which
+    escaped an ``OSError``-only tuple here and in ``capture_install`` (#4024
+    P2-2), and an escape reads as "no record", i.e. as a run that never
+    happened.  Same shape as ``detect_install``'s boundary above.
+
+    A record that is present but whose BYTES cannot be turned into a record —
+    unreadable, undecodable, or not JSON at all — is not treated as absent: it
+    raises :class:`_HookRunUnreadable`, because rendering it as "no run
+    recorded" would be an absence nobody observed.  The shipped writer
+    truncates and rewrites with a plain ``>`` redirect, so a torn file is a
+    real (if brief) state, and it must not become a claim that the hook never
+    ran.  A non-regular file (FIFO, directory, socket) is never read at all —
+    ``open()`` on a FIFO blocks forever, and this command is credential-free
+    and interactive (``hook_install._load_settings`` carries the same rule for
+    settings.json) — and it is reported as an observation that could not be
+    made, not as an absence: the hook's write could not have landed there as a
+    record.
+    """
+    import json as _json
+    import stat as _stat
+
+    from tortoise.hook_install import KIND_HOOK_RUN
+
+    path = _hook_run_file(harness)
+    try:
+        st_mode = path.stat().st_mode
+    except FileNotFoundError:
+        # Absent (including a broken symlink): the writer gap decides whether
+        # that absence is evidence or an opinion we cannot form.
+        return None
+    except OSError as e:
+        # The path could not even be STAT-ED — an unsearchable state directory,
+        # a symlink loop.  `is_file()` would swallow this into `False` and the
+        # caller would render a real absence about a record nobody read, which
+        # is the #3797 defect on the very reason set added for it.
+        raise _HookRunUnreadable(str(e)) from e
+    if not _stat.S_ISREG(st_mode):
+        # A FIFO, directory or socket at the record path: never OPEN it
+        # (`open()` on a FIFO blocks forever), and never call the resulting
+        # silence an absence — the hook's own write could not have landed here
+        # as a record, so the observation could not be MADE.
+        raise _HookRunUnreadable(f"not a regular file (mode {st_mode:#o})")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        # A decode failure is a READ failure, not a parse result: the bytes a
+        # concurrent rewrite can leave behind are not evidence that no run was
+        # recorded.
+        raise _HookRunUnreadable(str(e)) from e
+    except MemoryError:
+        raise
+    except Exception as e:
+        # Same class as the parse arm below, and the same reason the read arm is
+        # not `(OSError, UnicodeError)` only: an unenumerated read failure must
+        # not be swallowed into a rendered claim of absence.
+        raise _HookRunUnreadable(str(e)) from e
+    try:
+        data = _json.loads(raw)
+    except MemoryError:
+        raise
+    except Exception as e:
+        # Not a record at all — a torn write (the writer truncates first), an
+        # empty file, or plain garbage.  The observation could not be MADE.
+        raise _HookRunUnreadable(str(e)) from e
+    if not isinstance(data, dict):
+        return None
+    if data.get("kind") != KIND_HOOK_RUN or data.get("harness") != harness:
+        return None
+    return data
+
+
+#: Reason codes for an ABSENT hook-run record.  :data:`NO_WRITER_MISSING` is
+#: real evidence that the hook did not run — nothing is installed to run it.
+#: The other two are NOT evidence: the session-start path is not a writer that
+#: can be qualified (a directory, a FIFO, a broken symlink, an unreadable or
+#: un-markered file, below the floor), so a reader must say it could not tell.
+#: Deliberately coarse — naming WHICH condition holds is
+#: `hook_install.detect_install`'s job, and its finding is printed beside this
+#: reason; a vocabulary that guessed would be able to contradict it.
+NO_WRITER_MISSING = "hook-script-missing"
+NO_WRITER_UNQUALIFIED = "hook-script-unqualified"
+NO_WRITER_TOO_OLD = "hook-scripts-too-old"
+
+
+class _HookRunUnreadable(Exception):
+    """The record could not be read — a record may exist at the path, or the
+    path could not even be looked at (#3797).
+
+    Distinct from "no record": a file that is present but yields no record —
+    unreadable, undecodable, not JSON at all, torn mid-write, or not a regular
+    file — must not be rendered as an absence nobody observed, and neither must
+    a path that could not be stat-ed.  ``None`` from :func:`_read_hook_run` is
+    reserved for a record that is ABSENT, or that PARSES to something which is
+    not this harness's ``hook-run`` marker.
+    """
+
+
+def _hook_run_writer_gap(layout, root) -> tuple[str, int | None, int] | None:
+    """``(reason, installed, writer)`` for an absent hook-run record.
+
+    ``None`` means the installed scripts COULD have written the record, so the
+    absence is a real absence of a RUN.  :data:`NO_WRITER_MISSING` means the
+    same thing for a different reason — there is nothing installed to write
+    one.  The other two reasons mean the record could NOT have been written, so
+    a reader must say it could not tell: :data:`NO_WRITER_UNQUALIFIED` (a path
+    that is present but cannot be qualified as a writer — not a regular file,
+    unreadable, foreign, or carrying no version marker) and
+    :data:`NO_WRITER_TOO_OLD` (marked below
+    :data:`~tortoise.hook_install.HOOK_RUN_GENERATION`).
+
+    Coarse ON PURPOSE: `read_hook_version` returns ``None`` for three different
+    causes (no marker, an unreadable file — it swallows the `OSError` — and a
+    foreign script), so a reason that named one of them would assert an
+    install fact nobody read, and could contradict the `detect_install`
+    finding printed beside it.  A failure to LOOK is reported the same coarse
+    way rather than as a real absence.
+    """
+    from tortoise.hook_install import (
+        HOOK_RUN_GENERATION,
+        _has_owner_exec_bit,
+        read_hook_version,
+    )
+
+    try:
+        spec = next((s for s in layout.scripts if "session-start" in s.name),
+                    None)
+        if spec is None:
+            return (NO_WRITER_MISSING, None, HOOK_RUN_GENERATION)
+        path = layout.hooks_root(root) / spec.name
+        if not path.exists() and not path.is_symlink():
+            return (NO_WRITER_MISSING, None, HOOK_RUN_GENERATION)
+        if not path.is_file():
+            # A directory, FIFO or broken symlink: it is THERE (detect_install
+            # reports not-a-regular-file / symlinked-script), so calling it
+            # missing would contradict the finding beside it.
+            return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
+        installed = read_hook_version(path)
+        # A current marker is not enough: `detect_install` also requires the
+        # OWNER's exec bit (its `not-executable` finding is blocking), and a
+        # script the harness cannot execute is not a writer that could have
+        # recorded a run.  Same predicate, one definition.
+        current = installed is not None and installed >= HOOK_RUN_GENERATION
+        if current and not _has_owner_exec_bit(path.stat().st_mode):
+            return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
+    except MemoryError:
+        raise
+    except Exception:
+        # NO OPINION — which must not be rendered as a real absence: `None`
+        # from this function means "the writer could have recorded one", so a
+        # read failure that returned it would fabricate the absence #3797
+        # exists to remove.  `detect_install`'s catch-all shape, and the same
+        # reasoning as `_read_hook_run`'s parse boundary.
+        return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
+    if installed is None:
+        # Marker-less (pre-#3795), unreadable, or foreign — see the docstring.
+        return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
+    if installed < HOOK_RUN_GENERATION:
+        return (NO_WRITER_TOO_OLD, installed, HOOK_RUN_GENERATION)
+    return None
+
+
+def _hook_run_probe_outcome(record: dict) -> tuple[bool, int | None] | None:
+    """``(recorded, rc)`` when the record's probe fields can be STATED.
+
+    ``None`` means they cannot, and the honest rendering is to say so rather
+    than to invent an outcome.  ``probe_rc`` rejects ``bool`` EXPLICITLY:
+    ``isinstance(True, int)`` is True, and "exit True" is not an exit status.
+    A missing/odd ``recorded`` is an unknown; a ``null`` ``probe_rc`` alongside
+    ``recorded=false`` is NOT — it is the writer's own encoding for "the probe
+    never ran" (``session-start.sh`` passes the bare JSON token ``null`` on
+    those branches), and the caller states it as such.
+    """
+    recorded = record.get("probe_recorded")
+    rc = record.get("probe_rc")
+    if not isinstance(recorded, bool):
+        return None
+    if rc is None:
+        return None if recorded else (False, None)
+    if type(rc) is not int:
+        return None
+    return (recorded, rc)
+
+
+def _print_hook_run(harness: str, layout, root) -> None:
+    """Render the hook-run observation for ``hooks status`` (#3797).
+
+    BEST-EFFORT and exit-code-NEUTRAL.  The status verdict and exit code are
+    already settled by the drift findings before this is called, so neither
+    an unresolvable state directory nor an unreadable record may change
+    them: this may print, or print nothing, and must never raise or return a
+    verdict.  (``tests/test_capture_install.py::test_explicit_dir_keeps_an_
+    unresolvable_home_irrelevant`` drives ``HOME=~`` through this block and
+    asserts rc 0 plus the currency line, which prints BEFORE it.)
+
+    Every rendering reports an OBSERVATION and carries the scope.  None of
+    them says "installed" — the record proves a RUN, and the drift findings
+    above are the only thing that speak to the install.  Where the observation
+    could not be MADE — the state directory is unresolvable, a record is
+    present but yielded none, or the session-start path cannot be qualified as
+    a writer (the findings above say which condition holds) — the line says so
+    rather than reporting an absence it did not observe; and where the
+    record's own probe fields are unreadable it says that instead of inventing
+    an outcome.
+    """
+    label = "Last hook run observed on this machine:"
+    try:
+        path = _hook_run_file(harness)
+    except MemoryError:
+        raise
+    except Exception:
+        # Cannot even resolve WHERE to look — report the observation (the
+        # read could not be made), never an absence we did not observe.
+        print(f"{label} cannot tell whether a run was recorded "
+              "(the state directory is unresolvable)")
+        return
+    try:
+        record = _read_hook_run(harness)
+    except MemoryError:
+        raise
+    except Exception:
+        # The record EXISTS but refused to be read (or the path could not be
+        # resolved): the observation could not be MADE, so say that, never an
+        # absence we did not observe.
+        print(f"{label} cannot tell whether a run was recorded "
+              "(the record could not be read)")
+        return
+    if record is None:
+        gap = _hook_run_writer_gap(layout, root)
+        if gap is not None and gap[0] == NO_WRITER_TOO_OLD:
+            print(f"{label} cannot tell whether a run was recorded (the hook "
+                  f"scripts on this machine are generation {gap[1]}; the "
+                  f"record starts at generation {gap[2]})")
+        elif gap is not None and gap[0] == NO_WRITER_UNQUALIFIED:
+            # The reason is deliberately coarse (see _hook_run_writer_gap):
+            # `read_hook_version` cannot tell a marker-less script from an
+            # unreadable or foreign one, so NAMING a cause here could assert
+            # an install fact nobody read.  The findings printed above carry
+            # the precise kind (unversioned-script / not-readable /
+            # foreign-script / not-a-regular-file).
+            print(f"{label} cannot tell whether a run was recorded (the "
+                  "session-start script on this machine could not be "
+                  "qualified as a writer — see the findings above)")
+        else:
+            # Including NO_WRITER_MISSING: nothing is there to run, so the
+            # absence of a record is real (the drift findings above say what
+            # is missing).
+            print(f"{label} none — no run recorded under {path.parent}")
+        return
+    stamp = record.get("recorded_at") or "?"
+    outcome = _hook_run_probe_outcome(record)
+    if outcome is None:
+        # A record accepted on kind+harness but carrying no readable probe
+        # outcome.  Rendering `exit {rc}` here would fabricate a FAILURE
+        # nobody observed (`exit None`), which is the same class of lie as
+        # reading a missing record as a run.
+        print(f"{label} ran at {stamp} — the record does not say what the "
+              "install probe did")
+    elif outcome[0]:
+        print(f"{label} ran at {stamp} — install probe recorded "
+              f"(exit {outcome[1]})")
+    elif outcome[1] is None:
+        print(f"{label} ran at {stamp} — the hook exited before the probe "
+              "was attempted")
+    else:
+        print(f"{label} ran at {stamp} — install probe NOT recorded "
+              f"(exit {outcome[1]}); run 'tortoise session probe --harness "
+              f"{harness}' to see why")
+
+
+def _hook_run_json(harness: str, layout, root) -> dict | None:
+    """The observation as a JSON fragment for ``hooks status --json``.
+
+    The machine-readable companion of :func:`_print_hook_run`: the same read
+    and the same acceptance rule, so a consumer can make the
+    "installed-and-ran" vs "never ran" distinction #3797 is about without a
+    human reading stdout.  ``None`` means THIS harness's hooks do not write a
+    record at all (codex/cursor) — distinct from ``observed: false``, which
+    is a real absence of a RUN for a hook that does write one.
+
+    ``observed`` is ``True``/``False``/``None``.  ``False`` is a REAL absence
+    of a RUN, and ``reason`` names its basis: ``null`` (a qualified writer
+    that could have recorded one) or :data:`NO_WRITER_MISSING` (nothing is
+    installed to write one).  ``None`` is "the observation could not be
+    made" — never a fabricated absence — with :data:`NO_WRITER_UNQUALIFIED`
+    or :data:`NO_WRITER_TOO_OLD` (plus ``generation``) when the writer could
+    not be qualified, and ``record-unreadable`` /
+    ``state-directory-unresolvable`` when the record could not be read.
+    When ``observed`` IS ``True`` but the probe fields are unreadable,
+    ``reason`` STAYS ``None`` and ``probe_outcome`` carries the problem
+    instead, so a consumer keying on ``reason is not None`` is never told an
+    observed run was not observed.  Best-effort and exit-code-neutral, like
+    its text sibling.
+    """
+    if layout is None or not layout.writes_hook_run:
+        return None
+    try:
+        path = str(_hook_run_file(harness))
+    except MemoryError:
+        raise
+    except Exception:
+        return {"observed": None, "path": None,
+                "reason": "state-directory-unresolvable"}
+    try:
+        record = _read_hook_run(harness)
+    except MemoryError:
+        raise
+    except Exception:
+        return {"observed": None, "path": path, "reason": "record-unreadable"}
+    if record is None:
+        gap = _hook_run_writer_gap(layout, root)
+        if gap is None:
+            return {"observed": False, "path": path, "reason": None}
+        reason, installed, _writer = gap
+        out = {"observed": False if reason == NO_WRITER_MISSING else None,
+               "path": path, "reason": reason}
+        if installed is not None:
+            out["generation"] = installed
+        return out
+    out = {"observed": True, "path": path, "reason": None,
+           "recorded_at": record.get("recorded_at")}
+    outcome = _hook_run_probe_outcome(record)
+    if outcome is None:
+        # No readable probe outcome.  This is NOT an absence reason, so it
+        # gets its own field rather than overloading `reason` (which every
+        # other value of means "the record was not observed"): the fields are
+        # OMITTED so a consumer cannot mistake them for a stated result.
+        out["probe_outcome"] = "unreadable"
+    else:
+        out["probe_recorded"], out["probe_rc"] = outcome
+    return out
+
+
+def _record_capture_error(harness: str, detail: str,
+                          session_id: str | None = None) -> None:
+    """Write the local capture-failure breadcrumb. Best-effort only — a
+    breadcrumb write must never break the capture path it observes.
+
+    The record carries ``kind: capture-failure``.  #5838: it is written to its
+    OWN slot (``capture-errors/<harness>.json``), SEPARATE from the shipped
+    hook's ``install-inert`` evidence (``<harness>-install.json``).  The two
+    used to share one path, so an inert install destroyed a live capture
+    refusal; session verify must never read a capture outage as an inert
+    install, and nothing may read an inert install as a failed capture — the
+    slot split is what keeps both facts on disk.  The slot comes from the ONE
+    derivation (:func:`hook_install.breadcrumb_file`).
+    """
+    import json as _json
+    import time
+    try:
+        # INSIDE the guard on purpose: the derivation is FALLIBLE by contract
+        # (`Path.home()` raises RuntimeError for `$HOME=~`/`~/x`), and this
+        # function runs on the failure paths of `sessions import` — a raise
+        # here would replace a reportable capture failure with a traceback.
+        path = _capture_error_file(harness)
+    except (OSError, RuntimeError):
+        return
+    try:
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({
+            "harness": harness,
+            "detail": detail,
+            "kind": KIND_CAPTURE_FAILURE,
+            # WHICH session failed. Without it a later clear can only guess from
+            # timestamps, and `updated_at` is not a proxy for "when this session
+            # failed" — it is frozen on the spool's dedup path, so the most
+            # obvious retry (re-import identical content) never cleared its own
+            # record (#4714 review).
+            "session_id": session_id,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_capture_error(harness: str) -> None:
+    """Remove the failure breadcrumb after a 2xx receipt lands."""
+    import contextlib
+    # RuntimeError as well as OSError: the derivation raises it for
+    # `$HOME=~`/`~/x` (see `_record_capture_error`), and clearing a breadcrumb
+    # that was never writable is not a reason to fail a successful import.
+    with contextlib.suppress(OSError, RuntimeError):
+        _capture_error_file(harness).unlink()
+
+
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
     transcript from a harness store (codex / claude-desktop / pi).
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
-    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
-    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
-    same content is a no-op (receipt exists ⇒ already imported) — and even a
-    re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi REUSES the codex parser (named reuse — pi session
-    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403 ⇒ exit 1, honest error, NO receipt) — and a RETRYABLE refusal
+    (402/408/425/429/5xx) is additionally spooled for a later drain by
+    `_spool_if_retryable` while still exiting 1 with no receipt (#4714) —
+    EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED store-only session
+    (keyless, or the team's extraction-disabled setting — #4188/#4258)
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
+
+    Every failure that does NOT reach a 2xx also writes a local breadcrumb
+    (``_record_capture_error``), and a 2xx clears it: a pre-POST failure
+    (unreachable host, no config, 0 turns) otherwise leaves the dashboard's
+    server-side failure key unset, so the panel would read healthy over a
+    session that was never captured.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+    from http.client import HTTPException as _HTTPException
 
-    from tortoise.session_import import parse_transcript
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
+    # #3615: this is the SECOND transcript-upload primitive (same
+    # POST /v1/sessions) — it carries the same explicit-consent gate so it
+    # cannot be used as a consent bypass for the first.
+    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
+                                          capture_consent_enabled,
+                                          record_capture_declined)
+    if not capture_consent_enabled():
+        # Intent: the gate is FIRST (before the local receipt no-op at the
+        # bottom) because consent is a precondition OF THIS COMMAND, and a
+        # fail-fast refusal has no *import* side effects (no receipt, no parse).
+        # The durable notice mirrors `session capture` (stale hooks discard
+        # stderr; the next interactive command pushes it).
+        record_capture_declined()
+        print(f"import declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
 
     file_path = Path(args.file)
-    if not file_path.exists():
-        print(f"Session file not found: {args.file}", file=_sys.stderr)
-        return 1
     # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
     # SessionRequest Literal member — receipt key session_capture_receipt_
-    # claude-desktop).
+    # claude-desktop). Resolved BEFORE the existence check so a missing file
+    # still records its breadcrumb under the right harness.
     harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
+    if not file_path.exists():
+        print(f"Session file not found: {args.file}", file=_sys.stderr)
+        _record_capture_error(harness, f"session file not found: {args.file}")
+        return 1
     try:
         turns = parse_transcript(str(file_path), harness)
     except ValueError as e:
         print(f"parse failed: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"parse failed: {e}")
         return 1
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"no conversation turns parsed from {file_path.name}")
         return 1
+
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
+        print(
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
+            file=_sys.stderr,
+        )
 
     raw = file_path.read_bytes()
     session_id = args.session_id or (
@@ -3026,15 +5130,211 @@ def _cmd_sessions_import(args) -> int:
         return 0
 
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.",
               file=_sys.stderr)
+        _record_capture_error(
+            harness, "no user-global .tortoise config found (a repo-local "
+                     "./.tortoise never chooses the upload host, #3660)")
         return 1
+    # Validate the URL BEFORE the request try. `Request()` raises ValueError for
+    # a scheme-less URL, and the response-phase clause now takes the
+    # superclasses — so without this a typo in TORTOISE_API_URL was reported as
+    # "import failed reading the response", sending the user to debug a spool
+    # instead of the URL they mistyped (#4714 review). This stays LOUD and
+    # writes no spool entry: a malformed URL never becomes valid by retrying.
+    # Only the scheme-less case can be judged here — a malformed URL that still
+    # parses falls through to the response-phase clause, where it is at least
+    # SPOOLED rather than lost (fail-safe, but its message is less precise).
+    if not api_url.startswith(("http://", "https://")):
+        print(f"Invalid API URL {api_url!r} — set TORTOISE_API_URL to an "
+              "absolute http(s) URL.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid API URL {api_url!r}",
+                              session_id=session_id)
+        return 1
+
+    def _spool_if_retryable(status: int | None, detail: str) -> None:
+        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+
+        The server's capture guard REFUSES rather than enqueues (its capacity
+        gate advertises `Retry-After`), and `classify_failure` already treats
+        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
+        therefore a DEFERRAL, not a rejection of the content: the POST reached
+        the server, there is no server-side copy to fall back on, and without
+        this the turns are lost. `claude` and `pi` survive the identical 504
+        because `session capture` spools BEFORE its POST; this path must too.
+
+        PERMANENT failures must NOT be parked here — a malformed payload never
+        becomes valid by waiting, and it would retry forever.
+
+        Best-effort by construction: the spool is ADDITIONAL to the
+        `capture-failure` breadcrumb the caller already wrote, never a
+        replacement, so a spool bug must not replace the honest error with a
+        traceback (the hook's fail-open contract).
+        """
+        try:
+            import time as _time
+
+            from tortoise.capture_spool import (
+                RETRY_MAX_SECONDS,
+                Snapshot,
+                _backoff_ms,
+                capture_key,
+                classify_failure,
+                read_spool_meta,
+                spool_dir,
+                write_spool_entry,
+            )
+            from tortoise.sdk import _clip_capture_turn_content
+            from tortoise.session_attribution import (
+                derive_machine_id,
+                sanitize_attribution_field,
+            )
+
+            if classify_failure(status, detail) != "retry":
+                return
+            # Clamp exactly as `session capture` does — through the SDK's ONE
+            # clip definition (#4897), never a bare literal: the spool's
+            # per-entry bound is sized on the CLAMPED maximum (500 turns x the
+            # stored window), so an unclamped turn can overflow it — and
+            # write_spool_entry then DISCARDS the entry, losing the very
+            # session this exists to save. The clip keeps the bound AND marks
+            # the cut, so nothing stored differs from what the server stores.
+            spool_turns = [{"role": t["role"],
+                            "content": _clip_capture_turn_content(t["content"])}
+                           for t in turns]
+            root = spool_dir()
+            spooled = write_spool_entry(root, Snapshot(
+                session_id=session_id,
+                turns=spool_turns,
+                source=file_path.stem,
+                machine_id=sanitize_attribution_field(
+                    derive_machine_id(), max_length=256) or "",
+                # `sessions import` registers no --model, so there is nothing to
+                # attribute; `session capture` derives it from its own arg.
+                model=None,
+                harness=harness,
+            ))
+            for d in spooled.get("discards", []):
+                print(f"spool discard ({d['reason']}): {d['detail']}",
+                      file=_sys.stderr)
+            if not (spooled.get("written") or spooled.get("bytes")):
+                return
+            # Report truthfully: an entry whose content was ALREADY filed is
+            # SKIPPED by the next drain, so promising a filing would be false.
+            meta = read_spool_meta(root, session_id) or {}
+            already_filed = bool(meta.get("filed_key")) and \
+                meta.get("filed_key") == capture_key(session_id, spool_turns)
+            if already_filed:
+                print(f"Session {session_id} is already filed; the spooled copy "
+                      "is a no-op.", file=_sys.stderr)
+            else:
+                now_ms = _time.time() * 1000.0
+                window = _backoff_ms(meta)
+                if now_ms < window <= now_ms + RETRY_MAX_SECONDS * 1000:
+                    # The window is CARRIED across a rewrite now, so a drain
+                    # inside it will NOT file this: promising one would be false
+                    # (#4714 review). The upper bound matters too — `_flush_one`
+                    # treats a window beyond now + RETRY_MAX as corrupt and files
+                    # it IMMEDIATELY, so claiming a drain is pointless there
+                    # would be the opposite lie.
+                    print(f"Spooled session: {session_id} — a retry is waiting "
+                          "on the backoff window; a later drain will file it.",
+                          file=_sys.stderr)
+                else:
+                    # Name the command: only the claude/pi SessionStart hook
+                    # drains automatically, so for a codex/cursor-only install
+                    # nothing would file this without the user being told how.
+                    print(f"Spooled session: {session_id} — run 'tortoise session "
+                          "drain' to file it.", file=_sys.stderr)
+        except Exception as exc:
+            print(f"spool write failed: {exc}", file=_sys.stderr)
+
+    def _confirm_already_captured(status: int | None, detail: str) -> bool:
+        """Did the refused POST commit anyway? (#4675)
+
+        The transport bound ABANDONS its handler rather than cancelling it, so
+        a 504 routinely arrives AFTER the server has written the session and
+        its turns. Without this read the turns are parked in the spool and the
+        user is told a capture that already landed "would retry" — and (with
+        no drain wired for this harness) it would never be filed.
+
+        RETRYABLE ONLY. A non-retryable status is not the post-commit-timeout
+        shape this closes. The same gate the drain's `_refused` applies.
+
+        **The recorded refusal set is excluded by NAME**
+        (:data:`_NO_RECEIPT_REFUSAL_STATUSES` = 402/403/503) rather than by
+        deriving it from `classify_failure`. The local receipt is 2xx-only by a
+        RECORDED decision (#4675's own body: *"a LOCAL receipt is written on a
+        **2xx** (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is
+        correct and must not be weakened"*; `tortoise/__main__.py` carries it as
+        the Task-15 acceptance line). The classifier no longer excludes two of
+        the three: it calls 503 `retry` (`status >= 500`) and, since #4614's
+        data-loss fix, 402 `retry` too. So the classifier gate alone would let a
+        402 whose session happened to be durable mint a receipt for a refusal —
+        the set is what keeps the recorded rule true, and it is deliberately
+        INDEPENDENT of the classifier: the classifier decides what to KEEP in
+        the spool, this decides what to RECEIPT. The cost of honouring it is a
+        deferral, not a loss: a 402/503 whose commit landed is spooled (both are
+        `retry`, so `_spool_if_retryable` keeps it) and filed by a later
+        attempt. #5051 records the tension — 503 and 504 are both 5xx and the
+        post-commit shape is identical; broadening needs that reopened.
+
+        Writes the local receipt ONLY on :data:`FILED`. The turn rows are
+        durable BEFORE extraction, so the read can confirm the turns while the
+        extraction the bound abandoned is still running; the receipt asserts a
+        COMPLETED import, and #4188 requires a keyless capture to keep
+        re-attempting extraction — so an unextracted confirmation deliberately
+        still falls through to the spool (where it defers, never so lost).
+
+        Best-effort by construction, like the spool: a confirmation bug must
+        never replace the honest error with a traceback (fail-open contract).
+        """
+        try:
+            from tortoise.capture_spool import (
+                _clear_breadcrumb_for,
+                classify_failure,
+            )
+            from tortoise.session_confirm import FILED, confirm_capture
+            from tortoise.session_verify import session_detail
+
+            if (status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(status, detail) != "retry"):
+                return False
+            if confirm_capture(session_detail, api_url, api_key,
+                               session_id, turns) != FILED:
+                return False
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(_json.dumps({
+                "session_id": session_id,
+                "harness": harness, "file": str(file_path),
+                "imported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime()),
+                "turns": len(turns),
+                "confirmed_after_refusal": True,
+            }, indent=2), encoding="utf-8")
+            # `_clear_breadcrumb_for`, not `_clear_capture_error`: it checks
+            # `kind == capture-failure` and matches the session id, so this can
+            # never erase an unrelated record (the shared-spool sibling of that
+            # defect is #1529's install-inert false PROVEN).
+            _clear_breadcrumb_for(harness, session_id)
+            print(f"Imported session {session_id} ({len(turns)} turns, "
+                  f"harness={harness}) — the refusal arrived after the "
+                  "server committed it.", file=_sys.stderr)
+            return True
+        except Exception as exc:
+            print(f"post-refusal confirmation failed: {exc}", file=_sys.stderr)
+            return False
 
     payload = {"harness": harness, "session_id": session_id,
                "source": file_path.stem, "conversation": turns}
@@ -3050,26 +5350,136 @@ def _cmd_sessions_import(args) -> int:
         with urlopen(req, timeout=60) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
+        # The error body is read INSIDE this handler, and an exception raised in
+        # an `except` block is NOT caught by the later clauses of the same `try`
+        # — so a server that returns 504/429 and then stalls or truncates the
+        # body escaped the command entirely (no spool, no receipt): the exact
+        # silent-loss shape this path exists to close (#4714 review). Decode
+        # with `replace` so a non-UTF-8 body cannot raise UnicodeDecodeError
+        # either — an undecodable body is still a retryable refusal.
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+        except Exception as read_exc:
+            # Deliberately broad: reading a DIAGNOSTIC body must never replace
+            # the honest failure with a traceback, whatever it raises.
+            body = f"<error body unreadable: {read_exc}>"
+        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
+        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
+        # later drain (#4714) but still exits 1 above with no receipt.
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
+        if _confirm_already_captured(e.code, body):
+            return 0
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}",
+                              session_id=session_id)
+        _spool_if_retryable(e.code, body)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        if _confirm_already_captured(None, str(e.reason)):
+            return 0
+        _record_capture_error(
+            harness, f"cannot reach API at {api_url}: {e.reason}",
+            session_id=session_id)
+        # No status at all (network / timeout) is classified "retry" — and it is
+        # the MOST COMMON transient failure, so it must reach the spool too. A
+        # retryable failure never losing the session is the point of this path.
+        _spool_if_retryable(None, str(e.reason))
+        return 1
+    except (OSError, ValueError, _HTTPException) as e:
+        # RESPONSE-PHASE failures. `urlopen`'s handler covers the connect; the
+        # body read and its parse happen UNDER the `with` and none of them is a
+        # URLError — and the members are deliberately SUPERCLASSES, because
+        # enumerating them is how this kept losing sessions (#4714 review):
+        #   * OSError       — a read timeout is a bare TimeoutError, a truncated
+        #                     body is ConnectionResetError, and ssl.SSLError and
+        #                     generic OSError all share this base. URLError is
+        #                     NOT caught here (listed first, above).
+        #   * ValueError    — `json.loads(bytes)` raises UnicodeDecodeError for a
+        #                     non-UTF-8 proxy page, which is NOT a
+        #                     JSONDecodeError; ValueError covers both.
+        #   * HTTPException — a malformed HTTP response.
+        # A refusal we cannot even read the body of is still a retryable
+        # refusal, so it must spool rather than escape as a traceback.
+        print(f"import failed reading the response: {e}", file=_sys.stderr)
+        if _confirm_already_captured(None, str(e)):
+            return 0
+        _record_capture_error(harness, f"import failed reading the response: {e}",
+                              session_id=session_id)
+        _spool_if_retryable(None, str(e))
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its
     # per-harness receipt state key. A degraded extraction (error/empty) or
     # server-side errors/warnings still imported the session; surface them as
-    # warnings, not failures (403/402/503 ⇒ fail above via HTTPError).
+    # warnings, not failures (403 ⇒ fail above via HTTPError; a retryable
+    # 402/408/425/429/5xx — including 503 — is spooled by _spool_if_retryable
+    # and also fails).
     if result.get("errors") or result.get("warnings") or \
             result.get("extraction_mode") in ("error", "empty"):
         print("import warnings: " + str(
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op).
+    # #4188/#4258: ANY store-only 2xx is DEFERRED — the keyless capture (no
+    # provider key) and the extraction-disabled capture (the team's per-org
+    # `capture_extract` setting) both STORE the turns and SKIP extraction.
+    # Writing the local "imported" receipt would make every later explicit
+    # re-import skip the POST, so the session could never gain memory points
+    # once extraction can run — and the owner ruling requires an EXPLICIT
+    # re-capture to extract (nothing here spends automatically). Deferred ⇒
+    # NO local receipt: the server keeps the graph state truthful
+    # (capture_ok=False; lane "none" for the keyless store, "disabled" for
+    # the setting-disabled store) and re-running this import re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
+    _clear_capture_error(harness)
+    _capture_mode = result.get("extraction_mode")
+    _warns = result.get("warnings") or []
+    # #4258/#4188: a store-only 2xx is DEFERRED in TWO shapes — the store-only
+    # MODES, and a "replayed" receipt carrying an upgrade-refused warning (the
+    # server REPLAYS a FAILED store-only prior on the non-convergent M2 lane,
+    # which is still "no extraction ever ran"). Writing a local receipt for
+    # either would make every later re-import skip the POST on a stale receipt,
+    # so the session could never gain memory points, and would leave the
+    # warning's own remedy an instruction the CLI itself makes unreachable.
+    _upgrade_refused = (
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
+        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                          _CAPTURE_EXTRACTION_DISABLED_MODE)
+            or _upgrade_refused):
+        # #4258: the missing key and the turned-off setting are INDEPENDENT
+        # reasons. When BOTH hold, the mode is "no-provider" but the receipt
+        # also carries the disabled warning — the remedy must then name both
+        # levers, or it sends the user to a key that will not extract.
+        _setting_off = (
+            _capture_mode == _CAPTURE_EXTRACTION_DISABLED_MODE
+            or _CAPTURE_EXTRACTION_DISABLED_WARNING in _warns
+            or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+        _keyless = (
+            _capture_mode == _CAPTURE_NO_PROVIDER_MODE
+            or _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns)
+        if _setting_off and _keyless:
+            _why = ("no LLM provider key, and extraction into memory is "
+                    "turned OFF for this team (capture_extract)")
+            _remedy = ("re-run this import once a key is configured and "
+                       "extraction is turned back on.")
+        elif _setting_off:
+            _why = ("extraction into memory is turned OFF for this team "
+                    "(capture_extract)")
+            _remedy = "re-run this import once extraction is turned back on."
+        else:
+            _why = "no LLM provider key"
+            _remedy = "re-run this import once a key is configured."
+        print(f"import deferred: {_why} — turns stored, extraction skipped; "
+              f"{_remedy}", file=_sys.stderr)
+        return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
@@ -3243,76 +5653,264 @@ def _mask_uri_userinfo(target: str) -> str:
     terminal/log. Host/port/path stay visible for debuggability (matches
     the FALKORDB_* legacy display mask, conf 95).
 
-    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
-    authority region (everything before the first '?'/'#'), NOT
-    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
-    host:... is RFC-invalid but urlparse/redis-py accept it, and
-    urlsplit's netloc cuts at the first '/'), which would split
-    mid-credential and leak the tail. The '://' may also sit mid-message
-    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
-    scheme:// pattern in the string is scanned, not just a leading one.
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of
+    everything after the scheme, NOT urlsplit's netloc — a password may
+    contain '/' (docker://user:p/ss@host:... is RFC-invalid but
+    urlparse/redis-py accept it, and urlsplit's netloc cuts at the first
+    '/'), which would split mid-credential and leak the tail. The '://'
+    may also sit mid-message (RELATIVE_PATH_ERROR embeds the raw URI in
+    prose), so the scheme token is recovered by walking back over scheme
+    characters rather than assuming a leading position.
+
+    #2983 fail-closed: a literal '?'/'#'/'://'/'@' inside a password is
+    RFC-invalid (it should be %3F/%23) but is copy-pasteable, and each
+    used to truncate the region before the real '@' and re-emit the
+    credential in clear. The boundary is therefore the LAST '@' of the
+    whole remainder: over-reaching past a genuine query/fragment, or
+    across later prose or a second URI in the same message, is
+    diagnosability loss and never a leak (it mirrors
+    entrypoint.sh::_redact_uri). For well-formed URIs the output is
+    unchanged.
+
+    #2987 fail-closed, no-'@' form: '@' is the usual userinfo marker, but it
+    is not the only credential shape. A copy-paste that dropped the '@host'
+    tail leaves `rediss://:pw` (empty user) or `rediss://user:pw`; one that
+    kept the port leaves `rediss://user:pw:6379`. The last-'@' boundary finds
+    nothing in any of them, so all used to pass through verbatim and print
+    the password. The predicate below fails closed on every shape that is not
+    a RECOGNISED-SAFE host; entrypoint.sh::_redact_uri mirrors it, and
+    tests/test_boot_regressions.py pins the two together over an enumerated
+    authority grammar.
+
+    Processing is PER LINE: a line is the unit the boot log emits, so a line
+    must be safe on its own. (The last-'@' rule used to consume a multi-line
+    value ACROSS its newline, masking one line while echoing another, which is
+    exactly the leak #2987 records; both implementations now walk lines.)
+
+    Both implementations are held to one rule at the LINE level: a malformed or
+    absent scheme is treated as "no scheme" (predicate the text after the first
+    '://'), an '@' anywhere on a line the mask did not otherwise change fails
+    closed (a continuation line may carry the userinfo while the scheme sits on
+    an earlier line; an '@' may also precede the scheme, where the
+    last-'@'-after-the-scheme rule never looks), and the authority cut set is
+    the same explicit ASCII set. (RESIDUAL,
+    #2987-followup: a continuation line with a NON-empty user, e.g.
+    `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
+    containing a colon) in this helper, so it is emitted — recorded on the issue
+    rather than guessed at.)
     """
     from urllib.parse import urlsplit
 
     def _scheme_ok(scheme: str) -> bool:
-        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
-        return (scheme[:1].isalpha()
-                and all(c.isalnum() or c in "+-." for c in scheme))
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter. Restricted to ASCII
+        # to match entrypoint.sh's sed class `[a-zA-Z][a-zA-Z0-9+.-]*` —
+        # `str.isalpha()` alone accepts Unicode letters, which the shell does
+        # not, so a Unicode scheme would mask in one implementation and not the
+        # other.
+        return (scheme[:1].isascii() and scheme[:1].isalpha()
+                and all(c.isascii() and (c.isalnum() or c in "+-.")
+                        for c in scheme))
 
-    out: list[str] = []
-    i = 0
-    while True:
-        j = target.find("://", i)
-        if j < 0:
-            out.append(target[i:])
-            break
-        # Recover the scheme token by walking back from '://' over scheme
-        # characters (stops at prose when the URI is embedded in a message).
-        k = j
-        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
-            k -= 1
-        scheme = target[k:j]
-        if not _scheme_ok(scheme):
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        if i == 0 and k == 0:
-            # Bare URI — urlsplit is the authoritative scheme parse.
-            try:
-                if not urlsplit(target).scheme:
-                    out.append(target[i:])
+    def _authority_region(rest: str) -> str:
+        """The authority portion of `rest` (everything after '://').
+
+        #2987: bounded by the first path/query/fragment delimiter, quote or
+        ASCII whitespace (`\t\n\v\f\r`) — the SAME cut set as
+        entrypoint.sh::_redact_uri's `candidate="${candidate%%$cut*}"` with
+        `cut=$'[/?#"\047 \t\v\f\r\n]'`. That set is spelled out rather
+        than `[[:space:]]` in BOTH implementations so it is locale-independent
+        (`[[:space:]]` matches NBSP under a UTF-8 locale in the shell but not
+        in this literal set — a parity break). It is deliberately NOT bounded
+        by ':' or '@' (the credential's own shape markers), so the two
+        implementations bound the same region on every input.
+        """
+        for idx, char in enumerate(rest):
+            if char in "/?#\"' \t\n\v\f\r":
+                return rest[:idx]
+        return rest
+
+    def _credential_shaped(region: str) -> bool:
+        """True unless a no-'@' authority is a RECOGNISED-SAFE shape.
+
+        #2987: a missing '@' does not prove there is no password. A copy-paste
+        that dropped the '@host' tail leaves `rediss://:pw` (empty user) or
+        `rediss://user:pw`; one that kept the port leaves
+        `rediss://user:pw:6379`. All are credentials. Only these pass
+        unchanged: the empty region, a plain host with no ':', a single-':'
+        `host:port` whose port is NUMERIC, or a bracketed IPv6 host (`[::1]`)
+        with an optional numeric port. Mirrors entrypoint.sh::_redact_uri's
+        predicate exactly.
+        """
+        if not region:
+            return False
+        if region.startswith("["):
+            _, sep, rest = region[1:].partition("]")
+            safe = bool(sep) and (
+                rest == ""
+                or (rest.startswith(":")
+                    and rest[1:].isascii() and rest[1:].isdigit())
+            )
+            return not safe
+        if ":" not in region:
+            return False
+        user, _, tail = region.partition(":")
+        if not user:
+            return True  # empty user before the first ':' — a dropped '@host'
+        if ":" in tail:
+            return True  # a genuine host:port has exactly one ':'
+        # ASCII digits only: `str.isdigit()` also accepts non-ASCII digits
+        # (e.g. U+0660), which the shell's `[0-9]` does not.
+        return not (tail.isascii() and tail.isdigit())
+
+    def _mask_line(line: str) -> str:
+        # A line must be safe ON ITS OWN: the boot log emits lines, and the
+        # continuation line of a multi-line value carries its own credential.
+        # This mirrors entrypoint.sh::_redact_uri's per-line decision exactly.
+        if "://" not in line:
+            # No scheme on this line. entrypoint.sh fail-closes on ANY '@' here
+            # (the userinfo marker can be present with the scheme left on an
+            # earlier line), and on a colon-led line whose colon-prefixed text
+            # is credential-shaped. Without the '@' rule a scheme-less
+            # continuation like `pw@host` is echoed verbatim — the #2987 T1
+            # leak.
+            if "@" in line:
+                return "<uri-redacted-unrecognised-shape>"
+            if (line.startswith(":")
+                    and _credential_shaped(_authority_region(line))):
+                return "<uri-redacted-unrecognised-shape>"
+            return line
+        out: list[str] = []
+        i = 0
+        while True:
+            j = line.find("://", i)
+            if j < 0:
+                out.append(line[i:])
+                break
+            # Recover the scheme token by walking back from '://' over scheme
+            # characters (stops at prose when the URI is embedded in a message).
+            k = j
+            while k > i and (line[k - 1].isalnum() or line[k - 1] in "+-."):
+                k -= 1
+            # entrypoint.sh masks only a line whose scheme is at the start
+            # (after optional whitespace); any OTHER line carrying an '@' fails
+            # closed. A pre-scheme '@' is therefore never part of a userinfo, so
+            # it must not ride through as a "prose prefix" while the tail is
+            # masked — `user:SECRETPW@rediss://user2:pw2@host` re-emitted
+            # `user:SECRETPW@` exactly that way.
+            if "@" in line[i:k]:
+                return "<uri-redacted-unrecognised-shape>"
+            scheme = line[k:j]
+            # "Bare" = nothing but whitespace precedes the scheme.
+            # entrypoint.sh replaces such a line WHOLESALE with the sentinel,
+            # while an embedded URI keeps its prose prefix.
+            bare = i == 0 and not line[:k].strip()
+            if not _scheme_ok(scheme):
+                # entrypoint.sh treats an invalid or empty scheme as "no
+                # scheme": it predicates the text after the FIRST '://' and
+                # fails closed on an '@' anywhere on the line. Mirror it, or a
+                # malformed `1://user:pw` / `://user:pw` is echoed verbatim
+                # while the shell masks it.
+                rest = line[j + 3:]
+                region = _authority_region(rest)
+                if "@" in line or _credential_shaped(region):
+                    if bare:
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        out.append(
+                            line[i:k] + line[k:j + 3]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + rest[len(region):]
+                        )
                     break
-            except ValueError:
-                pass  # malformed authority (e.g. unmatched '[') — mask below
-        # The authority region runs to the earliest of: the start of the
-        # next URI's scheme token (a second URI in the same message), or a
-        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
-        # '@' in a query value must not swallow the host).
-        rest_start = j + 3
-        cut = None
-        for c in ("?", "#"):
-            pos = target.find(c, rest_start)
-            if pos >= 0 and (cut is None or pos < cut):
-                cut = pos
-        nxt = target.find("://", rest_start)
-        if nxt >= 0:
-            s = nxt
-            while s > rest_start and (target[s - 1].isalnum()
-                                      or target[s - 1] in "+-."):
-                s -= 1
-            if s < nxt and (cut is None or s < cut):
-                cut = s
-        region_end = cut if cut is not None else len(target)
-        authority = target[rest_start:region_end]
-        at = authority.rfind("@")
-        if at < 0:
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        out.append(target[i:k])
-        out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = region_end
-    return "".join(out)
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            if i == 0 and k == 0:
+                # Bare URI — urlsplit is the authoritative scheme parse.
+                try:
+                    if not urlsplit(line).scheme:
+                        out.append(line[i:])
+                        break
+                except ValueError:
+                    pass  # malformed authority (unmatched '[') — mask below
+            # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+            # everything that follows the scheme. A password may contain '?',
+            # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+            # region on any of those truncates it before the real '@' and
+            # re-emits credential material. Masking to the last '@' can
+            # over-reach — past a genuine query/fragment, or across later prose
+            # or a second URI in the same message — which loses diagnosability
+            # but cannot leak the userinfo, because what FOLLOWS the '@' is
+            # judged as a target below (#2987 review). Over-reaching past a
+            # second URI without that judgement would echo the second URI's
+            # credential. For well-formed URIs (delimiters only after the
+            # userinfo '@') the output is unchanged.
+            rest_start = j + 3
+            authority = line[rest_start:]
+            at = authority.rfind("@")
+            if at < 0:
+                # #2987 fail-closed, no-'@' form: the last-'@' boundary found
+                # nothing, but a credential may still be there (`rediss://:pw`,
+                # `rediss://user:pw`, `rediss://user:pw:6379`). Replace the
+                # credential-shaped URI rather than echoing it — the app
+                # rejects a malformed URI, but only AFTER an error path may
+                # already have printed it. A recognised-safe target (a plain
+                # host, `host:port`, bracketed IPv6) is left byte-identical.
+                region = _authority_region(authority)
+                if _credential_shaped(region):
+                    if bare:
+                        # Bare URI (the whole line): the sentinel replaces it,
+                        # identical to entrypoint.sh::_redact_uri's per-line
+                        # fail-closed output on the same value.
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        # Embedded in a message: replace only the URI so the
+                        # prose around it stays diagnosable.
+                        out.append(
+                            line[i:k] + line[k:rest_start]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + line[rest_start + len(region):]
+                        )
+                    break
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            # #2987 review — fail-open fix. The text after the last '@' is the
+            # host for a well-formed URI, but a malformed value can carry a
+            # credential there, and this mask used to echo it verbatim:
+            #   rediss://u:pw@host:SECRET      (credential-shaped tail)
+            #   rediss://u:pw@h:1 rediss://:SECRET   (a later scheme:// this
+            #                                         walk cannot reach)
+            #   rediss://u:pw@:SECRET:6379     (empty user before the ':')
+            # Both are judged by the predicate the no-'@' branch already uses,
+            # so `host:pw` behaves the SAME with and without an '@' — that
+            # asymmetry is what let this leak past the no-'@' fix. A
+            # recognised-safe target (host, host:port, bracketed IPv6, empty)
+            # is still emitted unchanged.
+            #
+            # NOTE: this reverses the "bad port / malformed IPv6 stays readable"
+            # behaviour recorded in the #720 review (tests/test_doctor.py) —
+            # `...@127.0.0.1:notaport` and `...@[abc` now fail closed. The port
+            # value is still named by the exception text in the same message
+            # (`Port could not be cast to integer value as 'notaport'`), so the
+            # diagnostic survives; see the PR body.
+            remainder = authority[at + 1:]
+            if ("://" in remainder
+                    or _credential_shaped(_authority_region(remainder))):
+                return "<uri-redacted-unrecognised-shape>"
+            out.append(line[i:k])
+            out.append(f"{scheme}://:***@{remainder}")
+            i = len(line)
+        result = "".join(out)
+        # Mirror entrypoint.sh's unconditional guard: a line the mask did not
+        # change that carries an '@' fails closed. The pre-scheme guard above
+        # catches an '@' before the scheme; this is the final catch-all for any
+        # other unmasked '@'.
+        if result == line and "@" in line:
+            return "<uri-redacted-unrecognised-shape>"
+        return result
+
+    return "\n".join(_mask_line(_line) for _line in target.split("\n"))
 
 
 def _index_github_child_cmd(target: str, repo_root: str,
@@ -3538,11 +6136,12 @@ def _cmd_onboard(args) -> int:
     print("Next: tortoise serve    — start MCP server for agents")
     print("      tortoise setup    — configure per-role memory")
     print()
-    # #544/#1998 (M8): reference the ONE live onboarding skill — install it
-    # (curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <h>)
-    # or hand its markdown to your agent after connecting it to the local MCP
-    # server (the archived prompt is retired — never two live scripts).
-    print("Onboarding skill — install or fetch this to complete setup:")
+    # #544/#1998 (M8) / #4365: reference the ONE live onboarding document.
+    # It is INSTRUCTIONS the agent reads — the skill installer ships the three
+    # reusable capabilities only, never onboarding. Hand its markdown to your
+    # agent after connecting it to the local MCP server (the archived prompt is
+    # retired — never two live scripts).
+    print("Onboarding instructions — give this document to your agent to complete setup:")
     print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
     return 0
 
@@ -3552,11 +6151,27 @@ def _cmd_verify(args):
     from .projection import FalkorProjection
     proj = FalkorProjection.from_uri(args.db)
     try:
-        proj.apply([{"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}}])
+        # #3600: apply() takes ONE event dict. This passed a one-element list;
+        # _norm() degrades a non-dict to {} and the type guard then skips it, so
+        # the write was a silent no-op.
+        proj.apply({"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}})
+        # Confirm the write landed before reporting it. The original printed
+        # "✓ write OK" unconditionally, which is the same silent-success defect
+        # the list argument caused — a health check must be able to fail.
+        written = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p").result_set
+        if not written:
+            print("✗ write FAILED")
+            return 1
         print("✓ write OK")
-        result = proj.db.query("MATCH (p:Point {id: 'test-verify'}) RETURN p")
-        print("✓ read OK" if result.result_set else "✗ read FAILED")
-        proj.db.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
+        # Read leg asserts the properties round-trip, not merely that the node
+        # exists (the write probe above already covers existence) — and it must
+        # affect the exit code, which it previously did not.
+        result = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p.content")
+        if not result.result_set or result.result_set[0][0] != "verify":
+            print("✗ read FAILED")
+            return 1
+        print("✓ read OK")
+        proj.g.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
         print("✓ delete OK")
     except Exception as e:
         print(f"✗ {e}")
@@ -3810,6 +6425,7 @@ def _cmd_pack_new(args) -> int:
         CANONICAL_EVENT_KINDS,
         CANONICAL_OBJECT_KINDS,
         CANONICAL_POINT_KINDS,
+        registered_source_types,
     )
 
     ns = (args.namespace or "").strip()
@@ -3822,8 +6438,14 @@ def _cmd_pack_new(args) -> int:
         errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
     if ns and ns in RESERVED_STARTER_NAMESPACES:
         errors.append(f"namespace '{ns}' is a reserved starter pack — pick a different name")
+    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from the object-kind
+    # axis to the SOURCE-kind axis (a document is a `:Source`), so the guard must
+    # read the source vocabulary too: the word was reserved before only
+    # incidentally, as an objectKind. The property is unchanged — a pack
+    # namespace must not collide with ANY canonical ontology word, whichever
+    # axis carries it.
     _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
-        | CANONICAL_DOCUMENT_KINDS
+        | CANONICAL_DOCUMENT_KINDS | registered_source_types()
     if ns and ns in {k.lower() for k in _canon}:
         errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
     if errors:
@@ -4027,6 +6649,9 @@ def _cmd_setup(args) -> int:
 
     # Interactive mode
     from pathlib import Path
+
+    from tortoise.capture_install import PI_EXTENSION_NAME, pi_home
+
     home = Path.home()
 
     print("Tortoise Setup — Agent Memory Configuration")
@@ -4035,7 +6660,7 @@ def _cmd_setup(args) -> int:
 
     # ── Harness detection ──────────────────────────────────────
     detections: dict[str, bool] = {}
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+    if (pi_home(home) / PI_EXTENSION_NAME).exists():
         detections["pi"] = True
     if (home / ".claude").exists() or Path(".claude").exists():
         detections["claude"] = True
@@ -4091,7 +6716,7 @@ def _cmd_setup(args) -> int:
         print("No role entered. Skipping.")
         return 0
 
-    team_name = input("Team name (e.g., app, org-design): ").strip() or role_name
+    org_name = input("Team name (e.g., app, org-design): ").strip() or role_name
 
     config = {}
 
@@ -4165,7 +6790,7 @@ def _cmd_setup(args) -> int:
     print()
     print("=" * 50)
     output = {
-        "team": team_name,
+        "team": org_name,
         "role": role_name,
         "memory_filter": config,
     }
@@ -4177,7 +6802,7 @@ def _cmd_setup(args) -> int:
         try:
             with open("tortoise-setup.yaml", "w") as f:
                 f.write("# Tortoise memory_filter config\n")
-                f.write(f"# Role: {role_name}  Team: {team_name}\n")
+                f.write(f"# Role: {role_name}  Team: {org_name}\n")
                 f.write(yaml_text)
             print("Saved to tortoise-setup.yaml")
         except OSError as e:
@@ -4268,7 +6893,7 @@ def _cmd_index_github(args):
     (keyed by content hash via idempotency.document_key).
     """
     import atexit
-    import os  # noqa: F401
+    import os
     import subprocess
     import sys
     import tempfile
@@ -4371,6 +6996,29 @@ def _cmd_index_github(args):
         print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
         print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
         return 1
+
+    # #2947: the embedded projection (and its redis-server child) is now fully
+    # built. Signalling DURING construction lands while an in-flight server
+    # command still holds a connection, so redislite's last-client cleanup
+    # guard (correctly) declines to shut the server down and the kill orphans
+    # it. Expose a readiness marker for a supervisor/test that must signal
+    # this process at a deterministic point; the index loop's next step is the
+    # first file read, which the test blocks on (a FIFO), so the projection is
+    # open and the process quiescent. Written as a file under
+    # TORTOISE_INDEX_READY_FILE purely to synchronize the regression test —
+    # normal runs see nothing (env unset).
+    _ready_file = os.environ.get("TORTOISE_INDEX_READY_FILE")
+    if _ready_file:
+        try:
+            with open(_ready_file, "w") as _fh:
+                _fh.write("ready\n")
+        except OSError:
+            # Narrow on purpose: a failure here surfaces as the test's
+            # readiness timeout, which names the marker path (and the child's
+            # rc, if the child has also exited) — more useful than a silently
+            # swallowed error in a process that is about to be signalled
+            # anyway. A non-OSError bug should not hide.
+            pass
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
@@ -4486,6 +7134,89 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
+#: #280 check 4 — the shared empty-corpus detail (the corpus has no `*.md`
+#: files yet). Used by the graph-aware branch and by the `pre-init-default`
+#: fallback; the other fallback reasons carry their own empty-corpus wording.
+_SESSION_INDEX_EMPTY_DETAIL = (
+    "corpus empty — nothing indexed (expected for new setups)"
+)
+
+#: The remediation for a target that was explicitly configured but has no DB
+#: file: point at the target, not at the first-run remedy. Shared by BOTH
+#: variants (empty and populated corpus) so the arm cannot answer a config
+#: error with a first-run remedy in one variant and nothing in the other.
+#: Deliberately NOT an enumeration of the DB-target knobs — several flags and env
+#: vars reach this arm (`--db`, `--path`, TORTOISE_DB_URI, FALKORDB_*,
+#: TORTOISE_DB_PATH) and the `Graph: health` row above already names the
+#: resolved target, so a list here is a drift surface, not information.
+_SESSION_INDEX_CONFIGURED_FIX = ("fix the configured target, then re-run doctor")
+
+
+def _session_index_rows_without_graph(
+        reason: str = "graph-unavailable") -> list[tuple[str, str, str]]:
+    """Session-indexing row when no graph-aware verdict was produced (#5815).
+
+    `doctor` rendered the row inside the graph-health block, so the row's
+    EXISTENCE was coupled to a different check's execution and it vanished in
+    every state where that block did not run or raised: no Tortoise DB file
+    (fresh install, CI — the #5815 bug), an unresolved target, an unopenable
+    embedded DB, an unreachable URI. The caller renders this row from ONE
+    post-graph seam instead, so the row is structurally exactly-once in every
+    target state rather than branch-locally present.
+
+    `reason` selects wording only, never polarity — every row here is ⚠️:
+
+    * ``pre-init-default`` — the canonical DEFAULT target has no DB file, the
+      expected first-run state (#2204, rc 0). Keeps the shared empty-corpus
+      detail and the `tortoise init` remediation.
+    * ``pre-init-configured`` — an EXPLICITLY CONFIGURED target has no DB file.
+      #2204's verdict split grades that a config error (❌ + rc 1 on the
+      `Graph: health` row), so this row points at the configured target rather
+      than at the first-run remediation.
+    * ``graph-unavailable`` — the target did not resolve, or the projection /
+      status call raised. The corpus is reported, never graded.
+
+    ⚠️-not-❌ on a NON-empty corpus is a deliberate departure from #280/#793's
+    "delta > 0 → fail" contract, and it is deliberate for one reason: on a
+    never-initialized target every corpus file is unindexed BY CONSTRUCTION, so
+    failing here would fail every `doctor` run on the fresh machines #2204
+    rules must pass (rc 0) — reintroducing the false alarm this check exists to
+    avoid. Recorded as an `OVERRIDES:` ruling on issue #5815. Do not "restore"
+    the ❌ without reopening that decision.
+
+    No SDK or projection is constructed: the #2204 guard exists so doctor never
+    creates state on a target it only inspects.
+    """
+    from tortoise.session_indexer import corpus_files
+    try:
+        files = corpus_files()
+    except Exception as e:
+        return [("Session indexing", "⚠️", f"check unavailable: {str(e)[:60]}")]
+    n = len(files)
+    plural = "" if n == 1 else "s"
+    if reason == "pre-init-default":
+        if n == 0:
+            return [("Session indexing", "⚠️", _SESSION_INDEX_EMPTY_DETAIL)]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 "resolved target yet (run `tortoise init`, then `tortoise "
+                 "index sessions`)")]
+    if reason == "pre-init-configured":
+        if n == 0:
+            return [("Session indexing", "⚠️",
+                     "corpus empty — nothing indexed (no graph at the "
+                     f"configured target; {_SESSION_INDEX_CONFIGURED_FIX})")]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 f"configured target ({_SESSION_INDEX_CONFIGURED_FIX})")]
+    if n == 0:
+        return [("Session indexing", "⚠️",
+                 "corpus empty — nothing indexed (graph unavailable)")]
+    return [("Session indexing", "⚠️",
+             f"{n} corpus file{plural}, not graded — graph unavailable "
+             "(see the `Graph: health` row)")]
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -4537,6 +7268,8 @@ def _cmd_doctor(args):
     # Docker server to probe.
     if target is not None and is_db_uri(target):
         from urllib.parse import urlparse
+
+        from tortoise.config import parse_uri_userinfo
         # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
         # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
         # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
@@ -4550,8 +7283,9 @@ def _cmd_doctor(args):
         try:
             parsed = urlparse(target)
             probe_host = parsed.hostname or "localhost"
-            probe_user = parsed.username or None
-            probe_pass = parsed.password or None
+            # #3039: decode userinfo through the single shared rule —
+            # urlparse does NOT percent-decode userinfo.
+            probe_user, probe_pass = parse_uri_userinfo(target)
             # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
             # "tortoise") — probe the URI path's graph, never a hardcoded
             # "tortoise" (#720 P2 conf 62): a non-default graph name must be
@@ -4563,10 +7297,12 @@ def _cmd_doctor(args):
             # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
             probe_port = parsed.port or 16379
             from falkordb import FalkorDB
-            dbc = FalkorDB(host=probe_host, port=probe_port,
-                           username=probe_user, password=probe_pass,
-                           ssl=(parsed.scheme == "rediss"),
-                           socket_connect_timeout=5, socket_timeout=10)
+
+            from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
+                                 username=probe_user, password=probe_pass,
+                                 ssl=(parsed.scheme == "rediss"),
+                                 socket_connect_timeout=5, socket_timeout=10)
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
@@ -4590,6 +7326,12 @@ def _cmd_doctor(args):
     # 3. Graph health — verify the SAME resolved target above (probe + check
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
+    #
+    # #5815: WHY the graph-aware session-index verdict may not appear. Set
+    # below and consumed by ONE post-graph seam after this block, so the row
+    # renders in every target state instead of only the states in which this
+    # block happens to complete.
+    _session_index_reason = "graph-unavailable"
     if target is not None:
         # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
         # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
@@ -4637,6 +7379,12 @@ def _cmd_doctor(args):
         if not _initialized:
             from tortoise.config import DEFAULT_DB_PATH, _abs
             _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            # #5815: grade the corpus against the #2204 verdict split — a
+            # missing DEFAULT target is the expected first run, a missing
+            # configured target is a config error and must not be narrated as
+            # a first run.
+            _session_index_reason = ("pre-init-default" if _is_default_target
+                                     else "pre-init-configured")
             _icon = "⚠️" if _is_default_target else "❌"
             _detail = (
                 f"not set up yet — no Tortoise DB at {target}"
@@ -4667,7 +7415,7 @@ def _cmd_doctor(args):
                         _fc = _chk4["file_count"]
                         if _fc == 0:
                             results.append(("Session indexing", "⚠️",
-                                            "corpus empty — nothing indexed (expected for new setups)"))
+                                            _SESSION_INDEX_EMPTY_DETAIL))
                         else:
                             _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
                             _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
@@ -4693,6 +7441,38 @@ def _cmd_doctor(args):
             except Exception as e:
                 results.append(("Graph: health", "❌", str(e)[:60]))
 
+    # #280 check 4 / #5815 — ONE seam, exactly once. The session-index row used
+    # to be appended inside the graph-health block, so its EXISTENCE was
+    # coupled to a different check's execution: it disappeared whenever that
+    # block did not run or raised (no DB file → the #5815 fresh-install/CI
+    # case; `target is None`; an existing-but-unopenable embedded DB; an
+    # unreachable URI). The graph-aware verdict is authoritative when it ran;
+    # this corpus-only row speaks whenever it did not, from every target
+    # state. #2204 still holds — no projection is constructed to say this.
+    if not any(r[0] == "Session indexing" for r in results):
+        results.extend(_session_index_rows_without_graph(_session_index_reason))
+
+    # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
+    # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
+    # authorizes it. Surfaced here because `doctor` is a diagnostic surface a
+    # user reaches when capture silently stopped. The glyph is deliberately NOT
+    # ⚠️: capture-off is the privacy-correct DEFAULT, and painting every healthy
+    # install as "1 warn" is the alert-fatigue pattern this migration avoids.
+    from tortoise.capture_consent import (
+        CAPTURE_OPT_IN_ENV,
+        capture_consent_enabled,
+        capture_notice_path,
+    )
+    if capture_consent_enabled():
+        results.append(("Session capture", "✅",
+                        f"explicit consent granted ({CAPTURE_OPT_IN_ENV})"))
+    else:
+        _notice = capture_notice_path()
+        _hint = (f" — migration notice at {_notice}" if _notice.exists() else "")
+        results.append(("Session capture", "ℹ️",
+                        "off (default) — explicit consent not granted; set "
+                        f"{CAPTURE_OPT_IN_ENV}=1 to file sessions{_hint}"))
+
     # 5. MCP server
     mcp_running = False
     try:
@@ -4710,15 +7490,15 @@ def _cmd_doctor(args):
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
     # 5.5 Session extraction — LLM provider (#1197)
-    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
-    # key is configured (#822 — regex extraction removed as a product path;
-    # this is the beta testers' most-critical feature). Doctor surfaces the
-    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
-    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
-    # provider-missing as a HARD failure: the flagship feature cannot work at
-    # all. Local/selfhosted is a warning — capture still fails closed, but
-    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
-    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    # A missing LLM provider key no longer refuses a capture (#3892 owner
+    # ruling): the Session + its turn Points are still STORED and searchable,
+    # and only the LLM extraction into memory points is skipped. Doctor
+    # surfaces the missing provider BEFORE testers wonder why nothing reaches
+    # memory. Hosted mode (FLY_APP_NAME — precedent: hosted_api.py, sdk.py)
+    # still treats provider-missing as a HARD failure: the flagship extraction
+    # feature cannot work at all, so ops must not ship it. Local/selfhosted is
+    # a warning. Mirrors hosted_api._llm_provider_available +
+    # sdk._build_session_llm_extractor exactly (the seam they must agree on).
     import os as _os
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
@@ -4778,7 +7558,8 @@ def _cmd_doctor(args):
                         results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
-                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                "no LLM provider key — captures are STORED (turns only), but "
+                "LLM extraction into memory is skipped. "
                 f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
                 "(docs/infra-runbook.md §4.6)."
             )
@@ -4786,21 +7567,221 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
 
-    # 6. Harness detection
-    home = Path.home()
-    detections: list[str] = []
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
-        detections.append("Pi (extension found)")
-    if (home / ".claude").exists() or Path(".claude").exists():
-        detections.append("Claude Code")
-    if (home / ".codex").exists() or Path(".codex").exists():
-        detections.append("Codex")
-    if Path(".cursor").exists():
-        detections.append("Cursor")
-    if detections:
-        results.append(("Harnesses", "✅", ", ".join(detections)))
-    else:
-        results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
+    # 6. Harness detection.  `Path.home()` sits INSIDE this boundary because
+    # it can RAISE, not merely return: with `$HOME` a literal `~` (`~/x`
+    # alike) the expansion is a no-op and `pathlib` raises
+    # `RuntimeError("Could not determine home directory.")` — the same
+    # raise-set member that traced back from `_cmd_hooks` (#4024 P2-1).  Same
+    # catch-all with the explicit `MemoryError` re-raise as the sibling
+    # seams, never an `except (A, B)` enumeration (see
+    # tortoise/capture_install.py).  A failed resolution is a WARNING row and
+    # leaves `home` None, so the detection block below is skipped rather than
+    # run against a substituted root.
+    from tortoise.capture_install import PI_EXTENSION_NAME, pi_home
+
+    home: Path | None = None
+    try:
+        home = Path.home()
+        detections: list[str] = []
+        if (pi_home(home) / PI_EXTENSION_NAME).exists():
+            detections.append("Pi (extension found)")
+        if (home / ".claude").exists() or Path(".claude").exists():
+            detections.append("Claude Code")
+        if (home / ".codex").exists() or Path(".codex").exists():
+            detections.append("Codex")
+        if Path(".cursor").exists():
+            detections.append("Cursor")
+        if detections:
+            results.append(("Harnesses", "✅", ", ".join(detections)))
+        else:
+            results.append(("Harnesses", "⚠️",
+                            "none detected — run tortoise setup to configure"))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        results.append(("Harnesses", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
+    # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
+    # manual copy, so an already-installed host keeps a byte-frozen script and
+    # an un-timed settings entry — and silently files no sessions (the hook is
+    # fail-open). Drift is therefore a FAIL, not a warning. Read-only, and
+    # checked ONLY when a capture-hook install is actually present: a project
+    # that never installed the hooks must not be nagged (they may use the
+    # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    #
+    # Each layout is checked at the root a REAL install uses — through the same
+    # `default_root` resolver the CLI uses: Claude is project-scoped (cwd) and
+    # Codex lives in `$CODEX_HOME`. Checking Codex at the cwd would report a
+    # green row for an install Codex never reads (#3818) — the same silent
+    # no-capture the row exists to catch.
+    try:
+        from tortoise.capture_install import legacy_extension_obstacle
+        from tortoise.hook_install import (
+            ARTIFACT_CONTRACTS,
+            HARNESS_LAYOUTS,
+            artifact_root,
+            contract_version_for,
+            default_root,
+            detect_artifact_install,
+            detect_install,
+            get_layout_optional,
+            is_installed,
+            is_manual_fix,
+        )
+        # `pi` is a non-shell artifact seam: it has NO `HarnessLayout`, so it
+        # cannot go through `default_root`/`detect_install`, and omitting it
+        # here left step 6's green "Pi (extension found)" as the ONLY Pi
+        # signal — a stale or unmarkered seam exited 0 with no freshness row
+        # at all, which is the silent state #4680 exists to remove.
+        #
+        # MEMBERSHIP IS DERIVED FROM THE REGISTRIES, never a literal list: a
+        # third hand-written harness list would drift from `HARNESS_LAYOUTS` /
+        # `ARTIFACT_CONTRACTS`, and a seam registered there would be silently
+        # ungraded here — the same omission class this row exists to remove
+        # (#4680 review).
+        for _harness in (*HARNESS_LAYOUTS, *ARTIFACT_CONTRACTS):
+            # Per-harness boundary: one bad harness must not cost the OTHERS
+            # their freshness row.  `detect_install` can raise on a malformed
+            # `settings.json` (`_load_settings` catches only `ValueError`, so
+            # a `RecursionError` from `json.loads` escapes), and with a single
+            # loop-wide handler a raise on `claude` would hide the Pi row this
+            # step exists to print (#4680 review).
+            try:
+                _label = ("Capture hooks" if _harness == "claude"
+                          else f"Capture hooks ({_harness})")
+                _layout = get_layout_optional(_harness)
+                if _layout is not None:
+                    # Claude is project-scoped (`root_env is None`) and ignores
+                    # this argument; a `None` home (step 6 could not resolve
+                    # it) is given the cwd so a codex layout still refuses as a
+                    # populated `ValueError` rather than raising `TypeError` on
+                    # `Path(None)`.
+                    _root = default_root(
+                        _layout, home if home is not None else Path("."))
+                    if not is_installed(_root, _harness):
+                        continue
+                    findings = detect_install(_root, _harness)
+                else:
+                    # No home to anchor an artifact install, so there is
+                    # nothing to probe (step 6 already warned that home did not
+                    # resolve).
+                    if home is None:
+                        continue
+                    _root = artifact_root(_harness, home)
+                    if _root is None:
+                        # Registered in neither class — unreachable given the
+                        # loop source, but fail visibly rather than probe
+                        # another harness's path.
+                        results.append((
+                            _label, "⚠️",
+                            f"check unavailable: no layout or artifact "
+                            f"contract for {_harness!r}"))
+                        continue
+                    _artifact = _root / ARTIFACT_CONTRACTS[
+                        _harness].install_name
+                    if not (_artifact.exists() or _artifact.is_symlink()):
+                        continue
+                    findings = detect_artifact_install(_root, _harness)
+            except MemoryError:
+                raise  # resource exhaustion is not a refusal
+            except Exception as e:
+                results.append((
+                    _label, "⚠️", f"check unavailable: {str(e)[:60]}"))
+                continue
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version_for(_harness)
+            if not blocking:
+                results.append((_label, "✅",
+                                f"install current (contract v{version})"))
+                continue
+            first = blocking[0]
+            # Never recommend a command that REFUSES: `hooks upgrade` rejects
+            # every manual-fix kind, and `tortoise install <harness>` refuses
+            # the same kinds for an artifact seam (a foreign or unreadable
+            # artifact, a non-regular file, a symlinked install root) — so
+            # those get the finding's own manual instruction instead.
+            # Repairability is declared once, in `hook_install.is_manual_fix`
+            # (#4680 review), and it is asked over ALL findings, not just the
+            # blocking ones: the artifact detector reports a symlinked install
+            # root / leaf as a NON-blocking note, and that note is exactly what
+            # makes `tortoise install` refuse while a blocking `stale-artifact`
+            # sits beside it.  Scoping this set to `blocking` would print the
+            # refusing command — the same mistake `hooks status` avoids.
+            _manual = sorted({f.kind for f in findings
+                              if is_manual_fix(f.kind)})
+            # A collision the DETECTOR cannot see, so it cannot arrive as a
+            # finding: `install_capture` refuses when a REAL legacy extension
+            # directory is already disabled at its backup name (it will not
+            # overwrite the previous backup).  The condition lives in
+            # `capture_install`, the module that owns BOTH the names and the
+            # refusal, and `hooks status` consults the SAME declaration for the
+            # artifact seams (#5351) — a copy in each caller drifts, and the
+            # drifted copy tells the user to run a command that refuses (the
+            # argument `MANUAL_FIX_KINDS` is declared once for).  The detector's
+            # legacy blind spot is #3713.
+            _legacy_obstacle = legacy_extension_obstacle(_harness, _root)
+            if _manual:
+                _hint = ("needs a manual fix before "
+                         f"`tortoise hooks upgrade --harness {_harness}` "
+                         f"can run ({', '.join(_manual)})" if _layout is not None
+                         else "needs a manual fix before `tortoise install "
+                         f"{_harness}` can run ({', '.join(_manual)})")
+                # NOT an `elif`, for the reason recorded at the same pair of
+                # arms in `hooks status`: the two obstacles are INDEPENDENT, so
+                # clearing the manual kind (re-pointing a symlink, moving a
+                # foreign file aside) does not clear the legacy collision —
+                # naming only the manual one promises a repair that still
+                # refuses, and no other line in this row would mention it.
+                if _legacy_obstacle:
+                    _hint += f"; also {_legacy_obstacle}"
+            elif _legacy_obstacle:
+                # The predicate's own sentence IS the hint: one home for the
+                # wording, so a reworded refusal cannot leave a stale copy here.
+                _hint = _legacy_obstacle
+            else:
+                _hint = (f"run `tortoise hooks status --harness {_harness}` "
+                         "for the repair path" if _layout is not None else
+                         f"run `tortoise install {_harness}` to repair")
+            # The finding's OWN detail names the repair command too, so it is
+            # the SECOND place a refusing recommendation can come from, and
+            # BOTH surfaces decide that through the same predicate
+            # (`_artifact_detail_would_refuse`): the seam is unrepairable
+            # (`_manual` OR the collision — the installer refuses either way),
+            # the detail embeds one of `hook_install.ARTIFACT_INSTALLER_CLAUSES`,
+            # and the kind is not MANUAL.  Exempting the manual kinds keeps
+            # instructions whose first step is the user's (`foreign-artifact`,
+            # the `symlinked-install` note), and matching whole clauses keeps a
+            # note that merely mentions the installer (`ahead-artifact`) out,
+            # together with a path that merely looks like a command.
+            # A MANUAL kind's second step can still be blocked by the collision,
+            # and the collision is named in the hint above it (the non-`elif`
+            # arms), so the row carries that counter-signal — `doctor` puts it
+            # in the same summary row, `hooks status` prints it as the following
+            # paragraph.  The replacement names a command that ACCEPTS the
+            # harness: the read-only diagnostic that carries the finding.
+            _withhold = (_layout is None
+                         and _artifact_detail_would_refuse(
+                             first, _harness,
+                             unrepairable=(bool(_manual)
+                                           or bool(_legacy_obstacle))))
+            _detail = (
+                f"({first.kind}; run `tortoise session verify "
+                f"--harness {_harness}` for the repair path)" if _withhold
+                else f"({first.kind}: {first.detail})")
+            results.append((
+                _label, "❌",
+                f"{len(blocking)} stale issue(s) — {_hint} {_detail}",
+            ))
+    except MemoryError:
+        # The inner `except MemoryError: raise` is re-caught by the handler
+        # below, because MemoryError is an Exception — so the refusal has to be
+        # repeated at THIS level or resource exhaustion reads as an
+        # unavailable check (and rc stays 0).
+        raise
+    except Exception as e:
+        results.append(("Capture hooks", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # Print results
     for check, icon, detail in results:
@@ -5551,14 +8532,14 @@ def _cmd_serve_http(args) -> int:
 
     # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
     # EVERY HTTP auth mode serves an isolated namespace, never the stdio
-    # 'tortoise' graph: tenant → team_{id}; static/none → team_selfhost
-    # (SELFHOST_TEAM_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
+    # 'tortoise' graph: tenant → org_{id}; static/none → org_selfhost
+    # (SELFHOST_ORG_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
     # switch would otherwise land on a silently empty graph — say it out loud.
     if not is_db_uri(db_uri):
         db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         try:
             if os.path.exists(db_path):
-                namespace = "team_{id}" if args.auth == "tenant" else "team_selfhost"
+                namespace = "org_{id}" if args.auth == "tenant" else "org_selfhost"
                 print(f"  ℹ️  HTTP ({args.auth}) mode uses a fresh {namespace} namespace — existing stdio data")
                 print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
         except Exception:
@@ -5599,7 +8580,7 @@ def _cmd_serve_http(args) -> int:
         return 1
 
     if args.auth == "tenant":
-        # Inject the registry SDK built from the SAME canonical DB as the team
+        # Inject the registry SDK built from the SAME canonical DB as the org
         # SDK (avoids the /data default divergence — #702).
         registry_sdk = TortoiseSDK(namespace="registry")
         app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
@@ -5658,12 +8639,12 @@ def _cmd_serve_http(args) -> int:
 
 
 def _cmd_key_create(args) -> int:
-    """Bootstrap a local registry team + tt_ API key for `serve --http --auth tenant`.
+    """Bootstrap a local registry org + tt_ API key for `serve --http --auth tenant`.
 
-    Mirrors hosted /internal/provision: Team + APIKey nodes in the registry
-    graph, TeamMeta in the team_{team_id} graph. Prints ONLY the apikey_create
-    key (the one apikey_verify actually matches — team_create's returned key
-    is stored on the Team node and never verifies).
+    Mirrors hosted /internal/provision: Org + APIKey nodes in the registry
+    graph, TeamMeta in the org_{org_id} graph. Prints ONLY the apikey_create
+    key (the one apikey_verify actually matches — org_create's returned key
+    is stored on the Org node and never verifies).
     """
     import os
     import sys
@@ -5681,7 +8662,7 @@ def _cmd_key_create(args) -> int:
     else:
         from tortoise.config import resolve_db_path
         print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
-        # #942: team keys on embedded = single-writer eval only. The key-mint
+        # #942: org keys on embedded = single-writer eval only. The key-mint
         # moment is the enforcement point — interactive/foreground, unlike a
         # daemonized serve's stderr.
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
@@ -5690,31 +8671,38 @@ def _cmd_key_create(args) -> int:
     sdk = TortoiseSDK(namespace="registry")
     reg = sdk._get_registry()
 
-    # Find an existing team with this name (idempotent re-runs), else create.
-    team_id = None
+    # Find an existing org with this name (idempotent re-runs), else create.
+    org_id = None
     rows = reg.query("MATCH (t:Team) RETURN t.id, t.name").result_set or []
     for tid, tname in rows:
         if tname == args.name:
-            team_id = tid
+            org_id = tid
             print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
             break
-    if team_id is None:
+    if org_id is None:
         try:
-            result = sdk.team_create(args.name)
+            result = sdk.org_create(args.name)
         except ControlPlaneError as e:
             # conf 85: an invalid --name (spaces/punctuation, >64 chars,
             # blank) must surface as a clean CLI error, never a raw
             # ControlPlaneError traceback.
             print(f"  ❌ {e}", file=sys.stderr)
             return 1
-        team_id = result["id"]
-        print(f"  ✅ Team {args.name!r} created (id {team_id})")
+        org_id = result["id"]
+        print(f"  ✅ Team {args.name!r} created (id {org_id})")
 
-    # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
+    # Seed the org_{org_id} graph the tools actually resolve (hosted parity).
     try:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
-        team_graph.query(
+        # #3390 WRITE-AHEAD: journal the seeded org_{org_id} graph BEFORE the
+        # CREATE materializes it. sdk.org_create above journaled org_{name} —
+        # a DIFFERENT graph — so this seed was otherwise an unjournaled org_*
+        # orphan, invisible to the journal-driven sweep. No-op outside a test
+        # session (the journal is a test-session artifact).
+        from tortoise.projection import journal_mint_write_ahead
+        journal_mint_write_ahead(f"org_{org_id}")
+        org_graph = sdk._get_proj().db.select_graph(f"org_{org_id}")
+        org_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": args.name, "now": now},
         )
@@ -5722,7 +8710,7 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
-    key = sdk.apikey_create(team_id, created_by="local-cli")
+    key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
     print("   Store it securely — the plaintext is shown once.")
@@ -5745,9 +8733,70 @@ def _cmd_key_create(args) -> int:
     return 0
 
 
+def _stderr_is_human_facing() -> bool:
+    """True only when stderr is a terminal — #3615's notice-delivery gate.
+
+    Anything that can silently swallow stderr (a harness hook's `2>/dev/null`,
+    a background sweep, an agent-run subprocess with a pipe or a file) must not
+    be able to consume the human's one sighting of the migration notice.
+    Testing the surface instead of enumerating commands closes the DEFAULT path
+    — the `tortoise context 2>/dev/null` SessionStart hook included — regardless
+    of how the command list grows.
+
+    DECLARED RESIDUAL (not closed by construction): a caller that allocates a
+    pty (`script`, `expect`, `unbuffer`, `docker run -t`, …) has a terminal
+    stderr by construction, so it will print and stamp the notice even with no
+    human watching. There is no reliable process-level test that separates a
+    human terminal from a pty, so this is accepted rather than chased with a
+    command denylist (the mechanism this gate replaced). The impact is capped
+    at notice delivery: the flush never authorizes capture —
+    `capture_consent_enabled()` is the sole authority and never consults stderr.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        # `sys.stderr` can be None (pythonw) or a closed/replaced stream.
+        return False
+
+
+def _flush_pending_capture_notice() -> None:
+    """Push the #3615 migration notice to stderr at most once per machine.
+
+    `record_capture_declined` writes the notice whenever a capture is refused —
+    including from a STALE copied hook that swallows the CLI's stderr
+    (`2>/dev/null`), which is exactly the population a breaking change must not
+    migrate silently. A file nobody reads is evidence, not notification: the
+    user's whole view of this change would be "capture quietly stopped", with
+    `tortoise doctor` — which they have no reason to run — as the only consumer.
+    So the next HUMAN-FACING command delivers it, once (stamped separately from
+    the notice file so an unattended run cannot consume the single sighting).
+
+    Security review P1: the first cut gated delivery on a five-entry command
+    denylist and missed `context` — the command the SessionStart hook runs as
+    `tortoise context 2>/dev/null`, so the notice was printed into /dev/null and
+    stamped "shown" on every session START, silently consuming it on exactly the
+    hosts the migration exists for (as did `volunteer`, whose hook relays only
+    prefixed lines). The TTY test above closes that default path; the
+    pty-allocating residual is declared on `_stderr_is_human_facing`.
+    """
+    if not _stderr_is_human_facing():
+        return
+    from tortoise.capture_consent import mark_capture_notice_shown, pending_capture_notice
+    text = pending_capture_notice()
+    if not text:
+        return
+    print(text, file=sys.stderr)
+    mark_capture_notice_shown()
+
+
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
+    # #3809: the harness choices for `session verify` come from the module's
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
+    from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -5803,7 +8852,7 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
-    au = sp.add_parser("audit", help="Audit graph wiring quality (8 checks: source tiering, superseded gaps, mitigation coverage)")
+    au = sp.add_parser("audit", help="Audit graph wiring quality (9 checks: source tiering, superseded gaps, mitigation coverage, inverted validity windows)")
     au.add_argument("--db", default=None, help=(
         f"DB target override — URI ({uri_schemes_hint}) or absolute path "
         "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)"))
@@ -5894,24 +8943,24 @@ def main(argv: list[str] | None = None) -> int:
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    # tortoise team <subcommand>
-    team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
-    team_sp = team.add_subparsers(dest="team_cmd")
-    team_info_p = team_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
-    # tortoise team keys {list,create,revoke} (#304)
-    team_keys = team_sp.add_parser("keys", help="Manage API keys")
-    team_keys_sp = team_keys.add_subparsers(dest="team_keys_cmd")
-    team_keys_list_p = team_keys_sp.add_parser("list", help="List API keys")
-    team_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_create_p = team_keys_sp.add_parser("create", help="Create a new API key (shown once)")
-    team_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_create_p.add_argument("--name", metavar="LABEL", default="",
+    # tortoise org <subcommand>
+    org = sp.add_parser("team", help="Team management (Tortoise Cloud)")
+    org_sp = org.add_subparsers(dest="team_cmd")
+    org_info_p = org_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
+    # tortoise org keys {list,create,revoke} (#304)
+    org_keys = org_sp.add_parser("keys", help="Manage API keys")
+    org_keys_sp = org_keys.add_subparsers(dest="team_keys_cmd")
+    org_keys_list_p = org_keys_sp.add_parser("list", help="List API keys")
+    org_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p = org_keys_sp.add_parser("create", help="Create a new API key (shown once)")
+    org_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p.add_argument("--name", metavar="LABEL", default="",
                                     help="Optional label (max 64 chars) to remember which key is which")
-    team_keys_revoke_p = team_keys_sp.add_parser("revoke", help="Revoke an API key")
-    team_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
-    team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
-    # tortoise signup — zero-email free-team mint (issue #663)
+    org_keys_revoke_p = org_keys_sp.add_parser("revoke", help="Revoke an API key")
+    org_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
+    org_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
+    # tortoise signup — zero-email free-org mint (issue #663)
     signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
     signup_p.add_argument(
         "--force", action="store_true",
@@ -5983,7 +9032,11 @@ def main(argv: list[str] | None = None) -> int:
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")
-    session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
+    session_capture = session_sp.add_parser(
+        "capture",
+        help="Capture a session from a transcript file "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
     # #1727 Slice 2 (Task 14, T1-P11): the hook forwards Claude Code's real
     # session_id (idempotency key — re-capture converges to one Session) and
@@ -6010,25 +9063,81 @@ def main(argv: list[str] | None = None) -> int:
     session_probe.add_argument(
         "--harness", default="claude",
         help="Harness that installed the hook (default: claude)")
+    # #3963: the replay opportunity. An interrupted/laptop-closed session left
+    # its turns in the local spool; the SessionStart hook calls this to file
+    # them. Best-effort, always exits 0.
+    session_drain = session_sp.add_parser(
+        "drain",
+        help="File every spooled session that has not been filed yet (#3963)")
+    session_drain.add_argument(
+        "--exclude-session-id", default=None,
+        help="Session id to leave alone (the LIVE session — filing it would "
+             "make the server replay it and skip extraction)")
+    # #3963: the CHEAP per-turn capture. The Claude Code `UserPromptSubmit` hook
+    # calls this: spool the transcript locally, no network. Filing is deferred
+    # to the drain (SessionStart) or the final flush (session capture).
+    session_spool = session_sp.add_parser(
+        "spool",
+        help="Spool a transcript locally without filing it (#3963)")
+    session_spool.add_argument("--file", required=True, help="Transcript file path")
+    session_spool.add_argument(
+        "--harness", default="claude",
+        help="Harness that produced the transcript (default: claude)")
+    session_spool.add_argument(
+        "--session-id", default=None,
+        help="Harness session id (the idempotency key when filing)")
+    session_spool.add_argument(
+        "--model", default=None, help="Model label to record with the session")
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3809: one-command behavioural install verification — fire the installed
+    # seam and assert installed -> captured -> in-memory, exiting non-zero on
+    # any broken link. Named `verify` to sit in the existing
+    # `session capture|probe|list|view` grammar (a noun-verb subcommand of the
+    # session surface); NOT a new top-level verb, which would duplicate the
+    # session namespace `capture`/`probe` already own.
+    session_verify = session_sp.add_parser(
+        "verify",
+        help="Verify a harness install end-to-end: installed -> captured -> "
+             "in memory (#3809)")
+    session_verify.add_argument(
+        "--harness", required=True, choices=list(HARNESSES),
+        help="Harness to verify (claude | codex | cursor | pi)")
+    session_verify.add_argument(
+        "--dir", default=None,
+        help="Install root to verify (claude: project dir; codex: $CODEX_HOME; "
+             "cursor: ~/.cursor; pi: ~/.pi/agent/extensions) — default: the "
+             "harness's own root")
+    session_verify.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="Seconds to wait for the fired seam's capture (default: 90)")
+    session_verify.add_argument(
+        "--keep", action="store_true",
+        help="Do NOT delete the probe session after asserting (it is "
+             "reported, never silently left behind)")
+    session_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable report (for CI)")
     # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
     # (plural — the plan's pinned CLI shape) ingests historical transcripts
-    # from harness stores (codex / claude-desktop / pi).
+    # from harness stores (codex / claude-desktop / cursor / pi).
     sessions = sp.add_parser(
         "sessions",
         help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
     sessions_sp = sessions.add_subparsers(dest="sessions_cmd")
     sess_import = sessions_sp.add_parser(
-        "import", help="Import a session transcript from a harness store")
+        "import",
+        help="Import a session transcript from a harness store "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     sess_import.add_argument("--file", required=True,
                              help="Path to the session transcript (JSONL or text)")
     sess_import.add_argument(
         "--harness", required=True,
-        choices=["codex", "claude-desktop", "desktop", "pi"],
-        help="Harness format to parse (pi reuses the codex parser; "
-             "'desktop' is an alias for claude-desktop)")
+        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
@@ -6042,11 +9151,11 @@ def main(argv: list[str] | None = None) -> int:
     # volunteering-memory reflex (volunteer-turn.sh).
     inst = sp.add_parser(
         "install",
-        help="Install a harness seam (per-turn memory hook registration)")
+        help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline"],
-        help="Harness to install (codex | claude | cline)")
+        choices=["codex", "claude", "cline", "cursor", "pi"],
+        help="Harness to install (codex | claude | cline | cursor | pi)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")
@@ -6058,7 +9167,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the registration file(s) without writing")
     inst.add_argument(
         "--uninstall", action="store_true",
-        help="Remove the hook registration for the harness")
+        help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
+             "for the harness — only registrations this installer wrote are "
+             "removed (a user wrapper or a foreign hook is refused, not "
+             "deleted); the capture seam is left in place")
+    # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
+    # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
+    # (re-copies the scripts AND merges the settings.json timeout). Also
+    # installs when nothing is present. Layout-driven (tortoise.hook_install),
+    # so Cursor/Codex seams plug in without new CLI surface.
+    hooks_p = sp.add_parser(
+        "hooks",
+        help="Detect and upgrade installed capture hooks (Claude Code)")
+    hooks_sp = hooks_p.add_subparsers(dest="hooks_cmd", required=True)
+    hooks_status = hooks_sp.add_parser(
+        "status", help="Report whether the installed capture hooks are stale")
+    hooks_upgrade = hooks_sp.add_parser(
+        "upgrade",
+        help="Install or upgrade the capture hooks in place (merges settings)")
+    for _hp in (hooks_status, hooks_upgrade):
+        _hp.add_argument(
+            "--harness", default="claude",
+            help="Harness seam to inspect (default: claude)")
+        _hp.add_argument(
+            "--dir", default=None,
+            help="Directory holding the install (default: the harness's own "
+                 "root — cwd for claude, $CODEX_HOME for codex)")
+    hooks_status.add_argument(
+        "--json", action="store_true",
+        help="Emit a machine-readable drift report")
+    hooks_upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the planned writes without touching anything")
     # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
     # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
     # shared canonical pipeline (POST /v1/context hosted / SDK
@@ -6112,9 +9252,12 @@ def main(argv: list[str] | None = None) -> int:
     # Idempotent; a no-op for commands that never open an embedded server.
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
+    _flush_pending_capture_notice()
     if args.cmd == "rebuild":
-        _cmd_rebuild(args)
-        return 0
+        # #3947 review (cycle 3): propagate the refusal's exit code — the
+        # handler's documented non-zero exit is worthless if the dispatcher
+        # discards it and returns 0 (the same false PASS, at the CLI edge).
+        return _cmd_rebuild(args)
     elif args.cmd == "demo":
         _cmd_demo(args)
         return 0
@@ -6167,6 +9310,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "restore":
         from tortoise.backup import restore
+        # No refusal handler here: the CLI's restore does not replay the
+        # journal (`into_falkor` defaults to False, so it only copies files),
+        # so it cannot resurrect removed state. The refusal lives in
+        # `backup.restore`'s replay path (`into_falkor=True`) for programmatic
+        # replay callers.
         result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
         print(f"Restored {result['events']} events — {result['status']}")
         return 0
@@ -6209,17 +9357,17 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_token_revoke(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
-            return _cmd_team_info(args)
+            return _cmd_org_info(args)
         elif args.team_cmd == "keys":
             if args.team_keys_cmd == "list":
-                return _cmd_team_keys_list(args)
+                return _cmd_org_keys_list(args)
             elif args.team_keys_cmd == "create":
-                return _cmd_team_keys_create(args)
+                return _cmd_org_keys_create(args)
             elif args.team_keys_cmd == "revoke":
-                return _cmd_team_keys_revoke(args)
-            team_keys.print_help()
+                return _cmd_org_keys_revoke(args)
+            org_keys.print_help()
             return 1
-        team.print_help()
+        org.print_help()
         return 1
     elif args.cmd == "create-point":
         return _cmd_create_point(args)
@@ -6245,6 +9393,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_context(args)
     elif args.cmd == "install":
         return _cmd_install_hooks(args)
+    elif args.cmd == "hooks":
+        return _cmd_hooks(args)
     elif args.cmd == "volunteer":
         return _cmd_volunteer(args)
     elif args.cmd == "list-sources":

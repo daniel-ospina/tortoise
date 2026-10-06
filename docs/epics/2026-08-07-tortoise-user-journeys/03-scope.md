@@ -47,7 +47,7 @@ created: 2026-08-07
 
 11. **User↔Team↔Graph decoupling — PRODUCT ONTOLOGY FOUNDATION (owner-confirmed)** — the many-to-many user↔team and one-to-many team↔graph relationships are critical to the product ontology (not the graph ontology). Concretely:
     - **Supabase `user_teams` 1:1 → M:N junction:** drop `UNIQUE(user_id)`; a user belongs to many teams; a team has many members (role on the membership).
-    - **Team→Graph 1:N:** replace the single `team_{id}` namespace assumption with a graph entity per team (create/list/select graphs within a team); `max_graphs` tier limit enforced at graph creation.
+    - **Team→Graph 1:N:** replace the single `org_{id}` namespace assumption with a graph entity per team (create/list/select graphs within a team); `max_graphs` tier limit enforced at graph creation.
     - **Tier-driven limits:** replace hardcoded `max_users: 1, max_teams: 1, max_graphs: 1` (hosted_api.py:320) with limits from `product/pricing.md` (Free graphs/users/keys 1/1/2 · Solo 2/1/5 · Pro ∞/2/10 · Team ∞/∞/20 (max_graphs/max_users/max_api_keys; NO max_teams — user-level)).
     - **Billing is per TEAM, not per user:** a user can be a freelancer paying for their own Solo/Pro team AND a member of a client's Team-tier team in parallel. The subscription attaches to the Team entity; the tier is a Team property.
     - **Invites + RBAC (Team tier):** invitation flow + role-based access (owner/admin/member) — the SDK primitives exist (`membership_create`, `invitation`); the hosted surface (dashboard invite UI, API) is built here.

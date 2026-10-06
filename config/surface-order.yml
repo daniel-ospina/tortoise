@@ -1,0 +1,94 @@
+# config/surface-order.yml — the ordering and keyword-derivation table for the
+# agent-facing surface list (#3863).
+#
+# WHO READS THIS FILE
+#   AC13's ordering lint reads it. The expansion gate (`surface-guard`) does NOT:
+#   the gate reads `config/surface-manifest.yml` and the declaration.
+#
+# WHY IT IS A SEPARATE FILE
+#   The lint's pass/fail must not be satisfiable by editing the rows it checks.
+#   The keyword set, the keyword order and the family ranks live here; the rows
+#   live in the manifest; the lint only compares them.
+#
+# keyword derivation (stated once, implemented in tools/surface_manifest.py):
+#   split the tool name on "_", drop the leading "tortoise", take the LEFTMOST
+#   token that appears under `tokens:` below; if no token appears, use the first
+#   word of the description; else "operate".
+
+# The ten job keywords, in emitted order. The value is the RANK used by the
+# sort key — the RANK, not the string: a literal string comparison would sort
+# `check` before `create` and place `fetch` fourth inside `memory`.
+keywords:
+  fetch: 1
+  create: 2
+  update: 3
+  delete: 4
+  list: 5
+  find: 6
+  trace: 7
+  check: 8
+  link: 9
+  operate: 10
+
+# tokens: which name tokens resolve to which keyword. The derivation takes the
+# LEFTMOST token of the tool name that appears here. This table is the whole
+# rule — a token that is absent from it is as if it were not there, so adding a
+# tool whose name carries a new verb means adding a token here, in a reviewed
+# change. It is kept separate from `keywords` above because the emitted order
+# and the token vocabulary are different decisions: `fetch` sorts first, but the
+# token that produces it is `get`.
+tokens:
+  fetch: [get, recall, search, query, traverse, overview, provenance, stale, belief]
+  create: [create, index, ingest, backfill, write, seed, demo, record, capture]
+  update: [update, set, promote, calibrate, refresh]
+  delete: [delete, invalidate, supersede, retract, prune]
+  list: [list, enumerate]
+  find: [find, mine, dream, issue, ask, discover]
+  trace: [events, timeline, history]
+  check: [check, validate, compute, confidence, assess, review, summarize, verify, diagnose]
+  link: [operator, mitigate, annotate, action, link, connect]
+
+# family_rank: computed ONCE from the declared family sizes at the cut
+# (largest first, ties broken alphabetically), then stored. It is never
+# recomputed for recommendations — recomputing it would let a proposed family
+# change silently reorder the list.
+family_rank:
+  memory: 1
+  graph: 2
+  reasoning: 3
+  sessions: 4
+  admin: 5
+  onboarding: 6
+  journal: 7
+  sources: 8
+  review: 9
+  ask: 10
+  mining: 11
+
+# The baseline per-keyword distribution. AC13's `distribution agreement`
+# property recomputes these counts from the declaration and REDS on any
+# difference, so a registry or table edit that moves rows between keywords
+# cannot pass silently. To change the surface you update this file and the
+# manifest together, in a PR that carries the owner's approval.
+#
+# THE ONE VALUE THAT IS NOT DERIVED. Everything else in this file FEEDS the
+# derivation (the keyword set, the ranks, the token table); this is a FROZEN
+# EXPECTATION the derivation's output is compared against. The check REQUIRES it
+# and requires one entry per keyword: an empty or partial `baseline_counts` used
+# to short-circuit its own comparison (`if baseline and ...`), so deleting the
+# table turned the distribution check OFF while every gate stayed green. A change
+# to the keyword distribution therefore requires editing the registry AND
+# recording the new expectation here.
+# #3849: `find` 7 -> 6 — `tortoise_ask` was the removed row (its name token
+# `ask` derives `find`), so the removal moves this count and nothing else.
+baseline_counts:
+  fetch: 14
+  create: 18
+  list: 9
+  check: 8
+  operate: 7
+  update: 8
+  find: 6
+  delete: 6
+  link: 4
+  trace: 2

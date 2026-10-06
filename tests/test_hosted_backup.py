@@ -259,6 +259,111 @@ def test_empty_graph_dump_restore():
         proj2.close()
 
 
+# ── #3902: the event-log counter survives the backup boundary ────────────
+# Embedded-lane parity for tests/test_restore_seq_3902.py (the docker-lane
+# full-pipeline regression). ``dump_graph`` excludes the :GraphEventMeta
+# label (#1625), so its ``last_seq`` counter must be carried as the top-level
+# ``event_meta`` block — otherwise a restore rebuilds the :GraphEvent log and
+# ``next_seq`` hands out a colliding seq 1.
+
+
+class _GProj:
+    """event_store's next_seq/append_event read only ``proj.g``."""
+
+    def __init__(self, g):
+        self.g = g
+
+
+def _seed_event_log(proj, n: int = 3) -> None:
+    """Emit ``n`` events through the REAL next_seq/append_event path, so
+    ``last_seq`` lands exactly as in production."""
+    from tortoise.event_store import append_event, next_seq
+
+    for i in range(n):
+        seq = next_seq(proj)
+        append_event(proj, seq, "test.event", {"i": i},
+                     f"ev-{i}-{os.urandom(4).hex()}")
+
+
+def test_dump_carries_event_meta_and_restore_preserves_counter():
+    """Acceptance 1 (#3902): a new dump carries the counter and the restored
+    graph continues the seq at max(restored seq) + 1."""
+    from tortoise.event_store import next_seq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        assert dump["event_meta"] == {"last_seq": 3, "first_seq": 1}
+        # #1625 stays in force: the counter node is NOT in the node set.
+        assert dump["node_count"] == 3  # the three :GraphEvent nodes only
+        assert all("GraphEventMeta" not in n["labels"] for n in dump["nodes"])
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        assert restore_graph(proj2.g, dump) == {"nodes": 3, "edges": 0}
+        row = proj2.g.query(
+            "MATCH (m:GraphEventMeta) RETURN m.last_seq, m.first_seq"
+        ).result_set
+        assert row == [[3, 1]]
+        assert next_seq(proj2) == 4  # max(restored seq) + 1, not a colliding 1
+        proj2.close()
+
+
+def test_restore_old_dump_without_event_meta_rederives_counter():
+    """Acceptance 3 (#3902): a pre-fix artifact (no counter) must re-derive
+    the watermark from the restored log. Revert the re-derivation and this
+    returns 1 over a restored log holding seq 1."""
+    from tortoise.event_store import next_seq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        dump.pop("event_meta", None)  # simulate every backup written before #3902
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        restore_graph(proj2.g, dump)
+        seqs = [int(r[0]) for r in proj2.g.query(
+            "MATCH (e:GraphEvent) RETURN e.seq ORDER BY e.seq").result_set]
+        assert seqs == [1, 2, 3]
+        row = proj2.g.query(
+            "MATCH (m:GraphEventMeta) RETURN m.last_seq, m.first_seq"
+        ).result_set
+        assert row == [[3, 1]]
+        assert next_seq(proj2) == 4
+        proj2.close()
+
+
+def test_restore_backup_swap_preserves_counter(monkeypatch):
+    """Acceptance 4 (#3902): the counter written into the temp graph is
+    carried by GRAPH.COPY temp→live, so the LIVE graph continues the seq."""
+    from tortoise.event_store import next_seq
+
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = MemoryStorage()
+        manifest = create_backup(
+            proj, registry, store, org_id="team_3902", graph_name="tortoise")
+        dump_key = next(
+            k for k in store.list("backups/team_3902/")
+            if k.endswith("dump.enc")
+        )
+
+        restore_backup(
+            proj.db, registry, store, dump_key,
+            org_id="team_3902", graph_name="tortoise",
+        )
+        live = proj.db.select_graph("tortoise")
+        assert next_seq(_GProj(live)) == 4
+        proj.close()
+        assert manifest["graph_name"] == "tortoise"
+
+
 def test_restore_rejects_bad_format_and_labels():
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
@@ -330,11 +435,11 @@ def test_create_backup_list_and_restore_swap(monkeypatch):
 
         store = MemoryStorage()
         manifest = create_backup(
-            proj, registry, store, team_id="team_x", graph_name="tortoise"
+            proj, registry, store, org_id="team_x", graph_name="tortoise"
         )
         assert manifest["node_count"] == 6
         assert manifest["edge_count"] == 5
-        assert manifest["team_id"] == "team_x"
+        assert manifest["org_id"] == "team_x"
         assert manifest["graph_name"] == "tortoise"
         assert manifest["backup_id"].startswith("team_x/")
         # both objects uploaded
@@ -363,7 +468,7 @@ def test_create_backup_list_and_restore_swap(monkeypatch):
         # restore → swap
         result = restore_backup(
             proj.db, registry, store, dump_key,
-            team_id="team_x", graph_name="tortoise",
+            org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
         assert result["restored"]["edges"] == manifest["edge_count"]
@@ -434,12 +539,12 @@ def test_empty_graph_full_pipeline(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_e', tier:'pro'})")
         store = MemoryStorage()
-        manifest = create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
+        manifest = create_backup(proj, registry, store, org_id="team_e", graph_name="tortoise")
         assert manifest["node_count"] == 0
         dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, registry, store, dump_key,
-            team_id="team_e", graph_name="tortoise",
+            org_id="team_e", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 0, "edges": 0}
         live = proj.db.select_graph("tortoise")
@@ -457,7 +562,7 @@ def test_restore_empty_backup_over_live_rejected(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_e', tier:'pro'})")
         store = MemoryStorage()
         # empty backup first
-        create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_e", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # then seed live data
         _seed(proj.g)
@@ -466,7 +571,7 @@ def test_restore_empty_backup_over_live_rejected(monkeypatch):
         with pytest.raises(RestoreVerificationError, match="empty backup"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_e", graph_name="tortoise",
+                org_id="team_e", graph_name="tortoise",
             )
         # live data untouched
         assert proj.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 7
@@ -484,20 +589,20 @@ def test_restore_rejects_layer1_key_prefix_guard(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # manifest claims team_y (so the MANIFEST guard would PASS for team_y);
         # the key lives under backups/team_x/ — only the key-prefix guard fires
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
-        manifest["team_id"] = "team_y"
+        manifest["org_id"] = "team_y"
         store.upload(manifest_key, json.dumps(manifest).encode())
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-team"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_y", graph_name="tortoise",
+                org_id="team_y", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -512,14 +617,14 @@ def test_restore_rejects_cross_graph(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-graph"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="other_graph",
+                org_id="team_x", graph_name="other_graph",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         # the target graph was never created
@@ -536,7 +641,7 @@ def test_restore_rejects_manifest_missing_sha256(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
@@ -546,7 +651,7 @@ def test_restore_rejects_manifest_missing_sha256(monkeypatch):
         with pytest.raises(ValueError, match="missing sha256"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
@@ -562,14 +667,14 @@ def test_restore_rejects_cross_team_backup(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-team"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_y", graph_name="tortoise",
+                org_id="team_y", graph_name="tortoise",
             )
         # live graph untouched (marker proves no wrongful swap — backup and
         # live both have 6 nodes, so a count assert would be ambiguous)
@@ -578,7 +683,7 @@ def test_restore_rejects_cross_team_backup(monkeypatch):
 
 
 def test_restore_rejects_manifest_team_mismatch(monkeypatch):
-    """P0 tenant isolation layer 2: manifest team_id guard (key prefix passes,
+    """P0 tenant isolation layer 2: manifest org_id guard (key prefix passes,
     manifest claims another team)."""
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -587,19 +692,19 @@ def test_restore_rejects_manifest_team_mismatch(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # rewrite manifest under the same key to claim a DIFFERENT team
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
-        manifest["team_id"] = "team_y"
+        manifest["org_id"] = "team_y"
         store.upload(manifest_key, json.dumps(manifest).encode())
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-team"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -614,7 +719,7 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         store.upload(manifest_key, b"{not json")
@@ -623,13 +728,13 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
         with pytest.raises(ValueError, match="manifest unreadable"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
 
 
-def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
+def test_restore_verify_count_mismatch_swaps_live_graph(monkeypatch):
     """#1625: verification keys off the AUTHENTICATED payload node LIST, not
     the forgeable plaintext manifest node_count. Forge the manifest's
     node_count (the plaintext a naive verifier would trust) → restore must
@@ -639,10 +744,11 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
+        source_dump = dump_graph(proj.g, graph_name="tortoise")
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -657,11 +763,26 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         # restore must SUCCEED (verification derives from the authenticated
-        # payload nodes list, not the forgeable manifest node_count)
+        # payload nodes list, not the forgeable manifest node_count) AND must
+        # actually SWAP the live graph — a silent no-op restore would leave
+        # the pre-restore marker in place.
         restore_backup(
             proj.db, registry, store, dump_key,
-            team_id="team_x", graph_name="tortoise",
+            org_id="team_x", graph_name="tortoise",
         )
+        # re-select: the projection's graph handle is stale after the swap
+        live = proj.db.select_graph("tortoise")
+        assert live.query(
+            "MATCH (p:Point {id:'pt-x'}) RETURN count(p)"
+        ).result_set[0][0] == 0, "pre-restore marker survived — restore did not swap"
+        live_dump = dump_graph(live, graph_name="tortoise")
+        assert _norm_nodes(live_dump["nodes"]) == _norm_nodes(source_dump["nodes"]), (
+            "restored node set differs from the backed-up payload")
+        # Edge-endpoint preservation — a count-preserving rewire would otherwise
+        # pass the node-set check above (matches the sibling
+        # test_create_backup_list_and_restore_swap).
+        assert _norm_edges(live_dump["edges"], live_dump["nodes"]) == _norm_edges(
+            source_dump["edges"], source_dump["nodes"])
         proj.close()
 
 
@@ -673,7 +794,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         # corrupt the stored blob → sha256 mismatch
@@ -685,7 +806,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
         with pytest.raises(ValueError, match="integrity"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         # live graph untouched (marker proves no wrongful swap)
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
@@ -694,7 +815,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
 
 def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
     """Swap failure: live graph deleted, verified temp graph remains recoverable."""
-    from falkordb import Graph
+    import tortoise.hosted_backup as hb
 
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -703,20 +824,24 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
-        def _boom_copy(self, clone):
-            if clone == "tortoise":  # only the temp→live promotion fails
-                raise RuntimeError("copy boom")
-            return real_copy(self, clone)
+        real_copy = hb._issue_graph_copy
 
-        real_copy = Graph.copy
-        monkeypatch.setattr(Graph, "copy", _boom_copy)
+        def _boom_copy(redis_client, src_name, dst_name):
+            if dst_name == "tortoise":  # only the temp→live promotion fails
+                raise RuntimeError("copy boom")
+            return real_copy(redis_client, src_name, dst_name)
+
+        # #3813: the swap's GRAPH.COPY is now issued through the restore's own
+        # client (its own read bound), so the failpoint lives at that seam
+        # instead of ``falkordb.Graph.copy``.
+        monkeypatch.setattr(hb, "_issue_graph_copy", _boom_copy)
         with pytest.raises(RuntimeError, match="copy boom"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         # live graph is GONE (deleted before copy) and the verified temp graph
         # survives with full content — the documented recovery copy. The
@@ -739,7 +864,7 @@ def test_restore_verify_edge_count_mismatch(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -756,7 +881,7 @@ def test_restore_verify_edge_count_mismatch(monkeypatch):
         with pytest.raises(RuntimeError, match="verification failed"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         assert set(proj.db.list_graphs()) == pre_graphs
@@ -772,7 +897,7 @@ def test_restore_rejects_non_dump_payload(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -787,7 +912,7 @@ def test_restore_rejects_non_dump_payload(monkeypatch):
         with pytest.raises(ValueError, match="not a tortoise logical dump"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -807,14 +932,14 @@ def test_restore_missing_object(monkeypatch):
         with pytest.raises(ValueError, match="not found"):
             restore_backup(
                 proj.db, registry, store, "backups/team_x/nonexistent/dump.enc",
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
 
 
-def test_restore_rejects_manifest_missing_team_id(monkeypatch):
-    """Fail-closed tenant isolation: manifest WITHOUT team_id is rejected."""
+def test_restore_rejects_manifest_missing_org_id(monkeypatch):
+    """Fail-closed tenant isolation: manifest WITHOUT org_id is rejected."""
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
@@ -822,18 +947,18 @@ def test_restore_rejects_manifest_missing_team_id(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
-        del manifest["team_id"]
+        del manifest["org_id"]
         store.upload(manifest_key, json.dumps(manifest).encode())
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-team"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -849,7 +974,7 @@ def test_restore_registry_stamp_failure_is_best_effort(monkeypatch):
         _seed(proj.g)
         registry = proj.db.select_graph("registry_tortoise")
         store = MemoryStorage()
-        manifest = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")  # noqa: F841
+        manifest = create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")  # noqa: F841
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         class RegistryDown:
@@ -861,7 +986,7 @@ def test_restore_registry_stamp_failure_is_best_effort(monkeypatch):
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
         result = restore_backup(
             proj.db, RegistryDown(), store, dump_key,
-            team_id="team_x", graph_name="tortoise",
+            org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
         live = proj.db.select_graph("tortoise")
@@ -892,8 +1017,8 @@ def test_create_backup_distinct_ids_within_second(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        m1 = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        m2 = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        m1 = create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
+        m2 = create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         # same second (timestamp portion before the random suffix), distinct ids
         assert m1["backup_id"].split("/")[1].split("_")[0][:15] == \
             m2["backup_id"].split("/")[1].split("_")[0][:15]
@@ -912,7 +1037,7 @@ def test_restore_payload_missing_counts_rejected(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -931,7 +1056,7 @@ def test_restore_payload_missing_counts_rejected(monkeypatch):
         with pytest.raises(ValueError, match="missing nodes list"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         assert set(proj.db.list_graphs()) == {"tortoise", "registry_tortoise"}
@@ -948,7 +1073,7 @@ def test_restore_payload_graph_name_guard(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -964,7 +1089,7 @@ def test_restore_payload_graph_name_guard(monkeypatch):
         with pytest.raises(ValueError, match="cross-graph"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -979,7 +1104,7 @@ def test_restore_staging_cleaned_on_validation_failure(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
@@ -997,7 +1122,7 @@ def test_restore_staging_cleaned_on_validation_failure(monkeypatch):
         with pytest.raises(ValueError, match="Edge restore incomplete"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         # live untouched AND no staging residue
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
@@ -1022,7 +1147,7 @@ def test_create_backup_orphan_rollback_on_manifest_failure(monkeypatch):
 
         store = FailingManifestStore()
         with pytest.raises(RuntimeError, match="transient"):
-            create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+            create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         # no orphaned blob left behind
         assert store.list("backups/team_x/") == []
         proj.close()
@@ -1041,7 +1166,7 @@ def test_prune_skips_foreign_backup_id(monkeypatch):
     # backup_id = team_b/<ts>
     forged = {
         "backup_id": foreign_bid,
-        "team_id": "team_b",
+        "org_id": "team_b",
         "graph_name": "tortoise",
         "created_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),  # noqa: UP017
         "node_count": 1, "edge_count": 0, "sha256": "0" * 64, "format": DUMP_FORMAT,
@@ -1064,7 +1189,7 @@ def test_restore_rejects_non_dict_manifest(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         store.upload(manifest_key, b'[1,2,3]')
@@ -1073,7 +1198,7 @@ def test_restore_rejects_non_dict_manifest(monkeypatch):
         with pytest.raises(ValueError, match="manifest unreadable"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
@@ -1088,7 +1213,7 @@ def test_restore_wrong_key_keeps_live_graph(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
@@ -1096,7 +1221,7 @@ def test_restore_wrong_key_keeps_live_graph(monkeypatch):
         with pytest.raises(ValueError, match="Cannot restore"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise", key=wrong_key,
+                org_id="team_x", graph_name="tortoise", key=wrong_key,
             )
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         assert set(proj.db.list_graphs()) == {"tortoise", "registry_tortoise"}
@@ -1107,8 +1232,8 @@ def test_prune_intra_team_forged_backup_id(monkeypatch):
     """Delete-path trust: a forged manifest claiming a NEWER backup's id under
     an old key must not delete the newer backup's objects."""
     store = MemoryStorage()
-    team_id = "team_p"
-    ids = _seed_old_backups(store, team_id, [30, 1])  # old + newest
+    org_id = "team_p"
+    ids = _seed_old_backups(store, org_id, [30, 1])  # old + newest
     newest = ids[1]
     # forge: manifest under the OLD key claiming the NEWEST backup's id
     old_key = f"backups/{ids[30]}/manifest.json"
@@ -1116,26 +1241,26 @@ def test_prune_intra_team_forged_backup_id(monkeypatch):
     forged["backup_id"] = newest
     store.upload(old_key, json.dumps(forged).encode())
 
-    prune_backups(store, team_id)
+    prune_backups(store, org_id)
     # the newest backup's objects survive (deletion is key-derived, not
     # manifest-declared)
-    assert any(newest in k for k in store.list(f"backups/{team_id}/"))
+    assert any(newest in k for k in store.list(f"backups/{org_id}/"))
 
 
-def test_team_id_validation(monkeypatch):
-    """Path-injecting team_ids are rejected before they touch object keys."""
+def test_org_id_validation(monkeypatch):
+    """Path-injecting org_ids are rejected before they touch object keys."""
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
         registry = proj.db.select_graph("registry_tortoise")
         store = MemoryStorage()
-        with pytest.raises(ValueError, match="Invalid team_id"):
-            create_backup(proj, registry, store, team_id="x/y", graph_name="tortoise")
-        with pytest.raises(ValueError, match="Invalid team_id"):
+        with pytest.raises(ValueError, match="Invalid org_id"):
+            create_backup(proj, registry, store, org_id="x/y", graph_name="tortoise")
+        with pytest.raises(ValueError, match="Invalid org_id"):
             restore_backup(proj.db, registry, store, "backups/x/y/a/dump.enc",
-                           team_id="x/y", graph_name="tortoise")
-        with pytest.raises(ValueError, match="Invalid team_id"):
+                           org_id="x/y", graph_name="tortoise")
+        with pytest.raises(ValueError, match="Invalid org_id"):
             prune_backups(store, "x/y")
         proj.close()
 
@@ -1151,7 +1276,7 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         real_delete = Graph.delete
@@ -1165,7 +1290,7 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
         with pytest.raises(RuntimeError, match="Restore swap failed"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         # live graph intact (delete failed → copy onto existing key fails) and
         # the verified temp recovery copy + pre-restore snapshot exist
@@ -1187,14 +1312,14 @@ def test_restore_into_missing_live_graph(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # simulate the DR incident: the live graph is gone
         proj.g.delete()
 
         result = restore_backup(
             proj.db, registry, store, dump_key,
-            team_id="team_x", graph_name="tortoise",
+            org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
         live = proj.db.select_graph("tortoise")
@@ -1227,13 +1352,13 @@ def test_prune_leaves_unpaired_orphan(monkeypatch):
     """Documented behavior: a manifest-less dump.enc (crash artifact) is not
     touched by prune — new orphans are prevented by create_backup rollback."""
     store = MemoryStorage()
-    team_id = "team_o"
-    _seed_old_backups(store, team_id, [40])
-    orphan_key = f"backups/{team_id}/orphan/dump.enc"
+    org_id = "team_o"
+    _seed_old_backups(store, org_id, [40])
+    orphan_key = f"backups/{org_id}/orphan/dump.enc"
     store.upload(orphan_key, b"blob")
 
-    prune_backups(store, team_id)  # no crash
-    assert any(k == orphan_key for k in store.list(f"backups/{team_id}/"))
+    prune_backups(store, org_id)  # no crash
+    assert any(k == orphan_key for k in store.list(f"backups/{org_id}/"))
 
 
 def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
@@ -1247,15 +1372,15 @@ def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "t.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_sdk = TortoiseSDK(db_path=db_path, namespace="team_x")
+        org_sdk = TortoiseSDK(db_path=db_path, namespace="team_x")
         # seed a Team node in the canonical registry (as provision does)
         reg_sdk._get_registry().query("CREATE (t:Team {id:'team_x', tier:'pro'})")
-        _seed(team_sdk._get_proj().g)
+        _seed(org_sdk._get_proj().g)
         store = MemoryStorage()
 
         manifest = create_backup(
-            team_sdk._get_proj(), reg_sdk._get_registry(), store,
-            team_id="team_x", graph_name="team_team_x",
+            org_sdk._get_proj(), reg_sdk._get_registry(), store,
+            org_id="team_x", graph_name="team_team_x",
         )
         assert manifest["node_count"] == 6
         # stamp lands in the canonical registry graph
@@ -1263,7 +1388,7 @@ def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
             "MATCH (t:Team {id:'team_x'}) RETURN t.backup_latest_at"
         ).result_set
         assert row and row[0][0]
-        team_sdk.close()
+        org_sdk.close()
         reg_sdk.close()
 
 
@@ -1279,7 +1404,7 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
-        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         real_query = Graph.query
@@ -1303,7 +1428,7 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         with pytest.raises(RestoreVerificationError, match="fail closed"):
             restore_backup(
                 proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         # restore the real methods, then assert: live untouched, no staging residue
         monkeypatch.setattr(Graph, "query", real_query)
@@ -1322,7 +1447,7 @@ def test_restore_rejects_non_dump_key():
         with pytest.raises(ValueError, match="dump.enc"):  # noqa: RUF043
             restore_backup(
                 proj.db, registry, store, "backups/team_x/x/manifest.json",
-                team_id="team_x", graph_name="tortoise",
+                org_id="team_x", graph_name="tortoise",
             )
         proj.close()
 
@@ -1336,7 +1461,7 @@ def test_create_backup_default_graph_name(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_t', tier:'pro'})")
         store = MemoryStorage()
-        manifest = create_backup(proj, registry, store, team_id="team_t")
+        manifest = create_backup(proj, registry, store, org_id="team_t")
         assert manifest["graph_name"] == proj.g.name  # falls back to the real graph name
         proj.close()
 
@@ -1353,7 +1478,7 @@ def test_create_backup_registry_stamp_failure_is_best_effort(monkeypatch):
                 raise RuntimeError("registry down")
 
         store = MemoryStorage()
-        manifest = create_backup(proj, RegistryDown(), store, team_id="team_x", graph_name="tortoise")
+        manifest = create_backup(proj, RegistryDown(), store, org_id="team_x", graph_name="tortoise")
         assert manifest["node_count"] == 6
         assert any(k.endswith("dump.enc") for k in store.list("backups/team_x/"))
         proj.close()
@@ -1508,7 +1633,7 @@ def test_r2storage_happy_path(monkeypatch):
 # ── listing / retention ──────────────────────────────────────────────────────
 
 
-def _seed_old_backups(store: MemoryStorage, team_id: str, days_ago: list[int]) -> dict[int, str]:
+def _seed_old_backups(store: MemoryStorage, org_id: str, days_ago: list[int]) -> dict[int, str]:
     """Seed backups at day offsets; returns {days_ago: backup_id}.
 
     IDs are derived from the SAME timestamp as created_at (consistent test
@@ -1519,11 +1644,11 @@ def _seed_old_backups(store: MemoryStorage, team_id: str, days_ago: list[int]) -
     ids: dict[int, str] = {}
     for i, d in enumerate(days_ago):  # noqa: B007
         created = now - timedelta(days=d) - timedelta(hours=1)
-        backup_id = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
+        backup_id = f"{org_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
         ids[d] = backup_id
         manifest = {
             "backup_id": backup_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "graph_name": "tortoise",
             "created_at": created.isoformat(),
             "node_count": 10,
@@ -1539,16 +1664,16 @@ def _seed_old_backups(store: MemoryStorage, team_id: str, days_ago: list[int]) -
 
 def test_prune_retention_keeps_daily_and_weekly():
     store = MemoryStorage()
-    team_id = "team_y"
+    org_id = "team_y"
     # 15 backups: 7 inside daily window, 8 older (each a distinct ISO week)
     days_ago = [0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28, 35, 42, 49, 56]
-    ids = _seed_old_backups(store, team_id, days_ago)
+    ids = _seed_old_backups(store, org_id, days_ago)
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=4)
     # Weekly anchors are the NEWEST of each distinct older ISO week:
     # days 7, 14, 21, 28 are kept; days 35, 42, 49, 56 are deleted.
     assert sorted(deleted) == sorted([ids[d] for d in (35, 42, 49, 56)])
-    remaining = [k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]
+    remaining = [k for k in store.list(f"backups/{org_id}/") if k.endswith("manifest.json")]
     assert len(remaining) == 11  # 7 daily + 4 weekly
     for d in (0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28):
         assert any(ids[d] in k for k in remaining), f"backup at day {d} should be kept"
@@ -1564,36 +1689,36 @@ def test_prune_keeps_newest_backup_of_each_week():
     assert friday.isocalendar()[:2] == sunday.isocalendar()[:2]  # same ISO week
 
     store = MemoryStorage()
-    team_id = "team_t"
+    org_id = "team_t"
     ids: dict[str, str] = {}
     for label, created in (("old", friday), ("new", sunday)):
-        bid = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
+        bid = f"{org_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
         ids[label] = bid
         store.upload(
             f"backups/{bid}/manifest.json",
             json.dumps({
-                "backup_id": bid, "team_id": team_id, "graph_name": "tortoise",
+                "backup_id": bid, "org_id": org_id, "graph_name": "tortoise",
                 "created_at": created.isoformat(), "node_count": 10, "edge_count": 3,
                 "sha256": "0" * 64, "format": DUMP_FORMAT,
             }).encode(),
         )
         store.upload(f"backups/{bid}/dump.enc", b"blob")
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=4)
     assert ids["old"] in deleted
     assert ids["new"] not in deleted
 
 
 def test_prune_deletes_corrupt_created_at():
     store = MemoryStorage()
-    team_id = "team_w"
-    _seed_old_backups(store, team_id, [20])  # valid old backup (weekly anchor)
-    corrupt_id = f"{team_id}/20260801T000000Z"
+    org_id = "team_w"
+    _seed_old_backups(store, org_id, [20])  # valid old backup (weekly anchor)
+    corrupt_id = f"{org_id}/20260801T000000Z"
     store.upload(
         f"backups/{corrupt_id}/manifest.json",
         json.dumps({
             "backup_id": corrupt_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "graph_name": "tortoise",
             "created_at": "not-a-date",
             "node_count": 1, "edge_count": 0, "sha256": "0" * 64, "format": DUMP_FORMAT,
@@ -1601,9 +1726,9 @@ def test_prune_deletes_corrupt_created_at():
     )
     store.upload(f"backups/{corrupt_id}/dump.enc", b"blob")
 
-    deleted = prune_backups(store, team_id)
+    deleted = prune_backups(store, org_id)
     assert corrupt_id in deleted
-    assert not any(k.startswith(f"backups/{corrupt_id}") for k in store.list(f"backups/{team_id}/"))
+    assert not any(k.startswith(f"backups/{corrupt_id}") for k in store.list(f"backups/{org_id}/"))
 
 
 def test_prune_keeps_only_own_team():
@@ -1625,40 +1750,40 @@ def test_prune_keeps_only_own_team():
 
 def test_prune_zero_windows_deletes_all():
     store = MemoryStorage()
-    team_id = "team_u"
-    ids = _seed_old_backups(store, team_id, [1, 8])
-    deleted = prune_backups(store, team_id, keep_daily=0, keep_weekly=0)
+    org_id = "team_u"
+    ids = _seed_old_backups(store, org_id, [1, 8])
+    deleted = prune_backups(store, org_id, keep_daily=0, keep_weekly=0)
     assert sorted(deleted) == sorted(ids.values())
-    assert store.list(f"backups/{team_id}/") == []
+    assert store.list(f"backups/{org_id}/") == []
 
 
 def test_prune_fewer_than_window_keeps_all():
     store = MemoryStorage()
-    team_id = "team_s"
-    ids = _seed_old_backups(store, team_id, [0, 1, 2])  # noqa: F841
-    assert prune_backups(store, team_id, keep_daily=7, keep_weekly=4) == []
-    assert len([k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]) == 3
+    org_id = "team_s"
+    ids = _seed_old_backups(store, org_id, [0, 1, 2])  # noqa: F841
+    assert prune_backups(store, org_id, keep_daily=7, keep_weekly=4) == []
+    assert len([k for k in store.list(f"backups/{org_id}/") if k.endswith("manifest.json")]) == 3
 
 
 def test_prune_handles_naive_created_at():
     """A parseable-but-naive created_at must not crash the whole team's prune."""
     store = MemoryStorage()
-    team_id = "team_n"
-    ids = _seed_old_backups(store, team_id, [1])  # valid recent backup (kept)
-    naive_id = f"{team_id}/20260701T000000Z"
+    org_id = "team_n"
+    ids = _seed_old_backups(store, org_id, [1])  # valid recent backup (kept)
+    naive_id = f"{org_id}/20260701T000000Z"
     store.upload(
         f"backups/{naive_id}/manifest.json",
         json.dumps({
-            "backup_id": naive_id, "team_id": team_id, "graph_name": "tortoise",
+            "backup_id": naive_id, "org_id": org_id, "graph_name": "tortoise",
             "created_at": "2026-07-01T00:00:00",  # naive — no tz
             "node_count": 1, "edge_count": 0, "sha256": "0" * 64, "format": DUMP_FORMAT,
         }).encode(),
     )
     store.upload(f"backups/{naive_id}/dump.enc", b"blob")
 
-    deleted = prune_backups(store, team_id)  # must NOT raise TypeError
+    deleted = prune_backups(store, org_id)  # must NOT raise TypeError
     # the valid daily backup is never touched
-    assert any(ids[1] in k for k in store.list(f"backups/{team_id}/"))
+    assert any(ids[1] in k for k in store.list(f"backups/{org_id}/"))
     # the naive backup (2026-07-01, old) is deterministically kept as the
     # team's only weekly anchor — never dropped, never crashes pruning
     assert deleted == []
@@ -1671,7 +1796,7 @@ def test_prune_weekly_cap_drops_oldest_weeks(monkeypatch):
 
     _freeze_clock(monkeypatch)  # run-date independent (daily/weekly boundary)
     store = MemoryStorage()
-    team_id = "team_r"
+    org_id = "team_r"
     now = hb.datetime.now(timezone.utc)  # SAME clock prune_backups will use  # noqa: UP017
     monday_anchor = now.date() - timedelta(days=now.date().weekday() + 21)
     weeks = [
@@ -1682,19 +1807,19 @@ def test_prune_weekly_cap_drops_oldest_weeks(monkeypatch):
     ]
     ids: dict[str, str] = {}
     for label, created in weeks:
-        bid = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
+        bid = f"{org_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
         ids[label] = bid
         store.upload(
             f"backups/{bid}/manifest.json",
             json.dumps({
-                "backup_id": bid, "team_id": team_id, "graph_name": "tortoise",
+                "backup_id": bid, "org_id": org_id, "graph_name": "tortoise",
                 "created_at": datetime.combine(created, datetime.min.time(), tzinfo=timezone.utc).isoformat(),  # noqa: UP017
                 "node_count": 10, "edge_count": 3, "sha256": "0" * 64, "format": DUMP_FORMAT,
             }).encode(),
         )
         store.upload(f"backups/{bid}/dump.enc", b"blob")
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=2)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=2)
     # W2 + W3 are the 2 newest weeks → kept; the entire oldest week (W1, both
     # copies) is beyond the cap → deleted
     assert sorted(deleted) == sorted([ids["w1a"], ids["w1b"]])
@@ -1712,12 +1837,12 @@ def test_registry_team_node_absent(monkeypatch):
         _seed(proj.g)
         registry = proj.db.select_graph("registry_tortoise")  # EMPTY — no Team node
         store = MemoryStorage()
-        manifest = create_backup(proj, registry, store, team_id="team_ghost", graph_name="tortoise")
+        manifest = create_backup(proj, registry, store, org_id="team_ghost", graph_name="tortoise")
         assert manifest["node_count"] == 6
         dump_key = [k for k in store.list("backups/team_ghost/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, registry, store, dump_key,
-            team_id="team_ghost", graph_name="tortoise",
+            org_id="team_ghost", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
         # no stamp written (MATCH finds nothing, SET no-ops silently)
@@ -1733,22 +1858,22 @@ def test_prune_and_list_empty_store():
 
 def test_list_backups_skips_corrupt_manifest():
     store = MemoryStorage()
-    team_id = "team_v"
-    _seed_old_backups(store, team_id, [1])
-    bad_id = f"{team_id}/20260701T000000Z"
+    org_id = "team_v"
+    _seed_old_backups(store, org_id, [1])
+    bad_id = f"{org_id}/20260701T000000Z"
     store.upload(f"backups/{bad_id}/manifest.json", b"{this is not json")
     store.upload(f"backups/{bad_id}/dump.enc", b"blob")
 
-    listed = list_backups(store, team_id)
+    listed = list_backups(store, org_id)
     assert len(listed) == 1  # corrupt manifest skipped, no exception
     assert listed[0]["node_count"] == 10
 
 
 def test_list_backups_sorted_newest_first():
     store = MemoryStorage()
-    team_id = "team_z"
-    _seed_old_backups(store, team_id, [30, 1])
-    listed = list_backups(store, team_id)
+    org_id = "team_z"
+    _seed_old_backups(store, org_id, [30, 1])
+    listed = list_backups(store, org_id)
     assert len(listed) == 2
     assert listed[0]["created_at"] > listed[1]["created_at"]
 
@@ -1769,7 +1894,7 @@ def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
     from datetime import timedelta as _td
 
     store = MemoryStorage()
-    team_id = "team_hourly"
+    org_id = "team_hourly"
     fixed = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
     seeds = [
@@ -1784,11 +1909,11 @@ def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
     ids: dict[str, str] = {}
     for h, m in seeds:
         created = fixed - _td(hours=h, minutes=m)
-        backup_id = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
+        backup_id = f"{org_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
         ids[f"{h}:{m}"] = backup_id
         manifest = {
             "backup_id": backup_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "graph_name": "tortoise",
             "created_at": created.isoformat(),
             "node_count": 10,
@@ -1798,12 +1923,12 @@ def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
         store.upload(f"backups/{backup_id}/manifest.json", json.dumps(manifest).encode())
         store.upload(f"backups/{backup_id}/dump.enc", b"x")
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4, keep_hourly=24)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=4, keep_hourly=24)
 
     assert sorted(deleted) == sorted(
         [ids["36:0"], ids["55:0"], ids["501:0"]]
     ), f"deleted={deleted}"
-    remaining = [k for k in store.list(f"backups/{team_id}/")
+    remaining = [k for k in store.list(f"backups/{org_id}/")
                  if k.endswith("manifest.json")]
     assert len(remaining) == 7
     for h, m in [(1, 0), (23, 0), (30, 0), (55, -10), (100, 0), (200, 0), (500, 0)]:
@@ -1813,13 +1938,13 @@ def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
 def test_prune_keep_hourly_zero_preserves_legacy():
     """keep_hourly=0 (default) is byte-for-byte the legacy keep-all behavior."""
     store = MemoryStorage()
-    team_id = "team_legacy"
+    org_id = "team_legacy"
     days_ago = [0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28, 35, 42, 49, 56]
-    ids = _seed_old_backups(store, team_id, days_ago)
+    ids = _seed_old_backups(store, org_id, days_ago)
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4, keep_hourly=0)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=4, keep_hourly=0)
     assert sorted(deleted) == sorted([ids[d] for d in (35, 42, 49, 56)])
-    remaining = [k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]
+    remaining = [k for k in store.list(f"backups/{org_id}/") if k.endswith("manifest.json")]
     assert len(remaining) == 11
 
 
@@ -1917,7 +2042,7 @@ def test_backup_seam_dialect_detection():
         registry = proj.db.select_graph("registry_tortoise")
         assert not _is_supabase_source(registry)  # falkordb Graph → Cypher
         assert _is_supabase_source(FakeControlPlane())
-        assert _is_supabase_source(FakeControlPlane().seed("teams", []))
+        assert _is_supabase_source(FakeControlPlane().seed("organizations", []))
 
         class _VarArgsStub:  # *args stub → treated as the registry dialect
             def query(self, *a, **k):
@@ -1946,19 +2071,19 @@ def test_create_backup_stamps_supabase_teams_row(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
-        cp = FakeControlPlane().seed("teams", [
+        cp = FakeControlPlane().seed("organizations", [
             {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
              "backup_enabled": True},
             {"id": "team_y", "graph_name": "tortoise", "tier": "pro",
              "backup_enabled": True},
         ])
         store = MemoryStorage()
-        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")
+        manifest = create_backup(proj, cp, store, org_id="team_x", graph_name="tortoise")
         assert manifest["node_count"] == 6
-        row = cp.query("teams", select=["backup_latest_at"],
+        row = cp.query("organizations", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"]  # stamped on the target team
-        other = cp.query("teams", select=["backup_latest_at"],
+        other = cp.query("organizations", select=["backup_latest_at"],
                          filters=[("id", "eq", "team_y")])
         assert other[0]["backup_latest_at"] is None  # untouched
         proj.close()
@@ -1981,8 +2106,8 @@ def test_create_backup_supabase_stamp_blip_best_effort(monkeypatch):
 
         store = MemoryStorage()
         manifest = create_backup(
-            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
-            team_id="team_x", graph_name="tortoise",
+            proj, StampBlip().seed("organizations", [{"id": "team_x"}]), store,
+            org_id="team_x", graph_name="tortoise",
         )
         assert manifest["node_count"] == 6
         assert any(k.endswith("dump.enc") for k in store.list("backups/team_x/"))
@@ -1996,18 +2121,18 @@ def test_restore_backup_stamps_supabase_teams_row(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
-        cp = FakeControlPlane().seed("teams", [
+        cp = FakeControlPlane().seed("organizations", [
             {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
              "backup_enabled": True},
         ])
         store = MemoryStorage()
-        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")  # noqa: F841
+        manifest = create_backup(proj, cp, store, org_id="team_x", graph_name="tortoise")  # noqa: F841
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
-            proj.db, cp, store, dump_key, team_id="team_x", graph_name="tortoise",
+            proj.db, cp, store, dump_key, org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
-        row = cp.query("teams", select=["backup_restored_at"],
+        row = cp.query("organizations", select=["backup_restored_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_restored_at"]
         proj.close()
@@ -2030,13 +2155,13 @@ def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
 
         store = MemoryStorage()
         manifest = create_backup(  # noqa: F841
-            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
-            team_id="team_x", graph_name="tortoise",
+            proj, StampBlip().seed("organizations", [{"id": "team_x"}]), store,
+            org_id="team_x", graph_name="tortoise",
         )
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
-            proj.db, StampBlip().seed("teams", [{"id": "team_x"}]), store, dump_key,
-            team_id="team_x", graph_name="tortoise",
+            proj.db, StampBlip().seed("organizations", [{"id": "team_x"}]), store, dump_key,
+            org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
         live = proj.db.select_graph("tortoise")
@@ -2047,7 +2172,7 @@ def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
 # ── #2313 per-graph key layout (Option A) ────────────────────────────────────
 
 
-def _seed_manifest(store, team_id, graph_id, ts, *, age_days=None):
+def _seed_manifest(store, org_id, graph_id, ts, *, age_days=None):
     """Craft a manifest object (bypassing create_backup) at the given key
     shape so prune tests can control created_at directly.
 
@@ -2056,11 +2181,11 @@ def _seed_manifest(store, team_id, graph_id, ts, *, age_days=None):
     now = datetime.now(timezone.utc)  # noqa: UP017
     created = now - timedelta(days=age_days) if age_days is not None else now
     ts_part = f"{ts}_{'0' * 8}"
-    backup_id = f"{team_id}/{graph_id}/{ts_part}" if graph_id else f"{team_id}/{ts_part}"
+    backup_id = f"{org_id}/{graph_id}/{ts_part}" if graph_id else f"{org_id}/{ts_part}"
     key = f"backups/{backup_id}"
     manifest = {
         "backup_id": backup_id,
-        "team_id": team_id,
+        "org_id": org_id,
         "graph_name": f"graph-{graph_id}" if graph_id else "default-graph",
         "created_at": created.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "node_count": 1, "edge_count": 0,
@@ -2079,7 +2204,7 @@ def test_create_backup_graph_keyed_layout(monkeypatch):
         registry = proj.db.select_graph("registry_tortoise")
         store = MemoryStorage()
         manifest = create_backup(
-            proj, registry, store, team_id="team_x",
+            proj, registry, store, org_id="team_x",
             graph_name="team_x_g_x", graph_id="g_x",
         )
         assert manifest["graph_id"] == "g_x"
@@ -2167,17 +2292,17 @@ def test_prune_tolerates_locked_objects_and_keeps_pruning():
     must skip the locked object (retried after the window expires) and STILL
     prune the rest of the pool — a locked object never wedges retention."""
     store = _LockedPrefixStorage(locked_prefix="")
-    team_id = "team_z"
-    ids = _seed_old_backups(store, team_id, [30, 37, 44, 51, 58, 65])
+    org_id = "team_z"
+    ids = _seed_old_backups(store, org_id, [30, 37, 44, 51, 58, 65])
     # 4 weekly anchors kept (30/37/44/51); 58 and 65 are the candidates.
     store._locked_prefix = f"backups/{ids[65]}/"
 
-    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4)
+    deleted = prune_backups(store, org_id, keep_daily=7, keep_weekly=4)
 
     # the unlocked candidate was pruned; the locked one was skipped + logged
     assert deleted == [ids[58]]
     assert store.locked_delete_attempts >= 1
-    remaining = [k for k in store.list(f"backups/{team_id}/")
+    remaining = [k for k in store.list(f"backups/{org_id}/")
                  if k.endswith("manifest.json")]
     assert len(remaining) == 5  # 4 anchors + the still-locked 65
     assert any(ids[65] in k for k in remaining)
@@ -2187,15 +2312,15 @@ def test_prune_zero_windows_tolerates_locked_deletes():
     """Even a zero-window prune (delete EVERYTHING) must not raise when some
     objects are locked — the unlocked ones go, locked ones stay for later."""
     store = _LockedPrefixStorage(locked_prefix="")
-    team_id = "team_l"
-    ids = _seed_old_backups(store, team_id, [5, 10, 15])
+    org_id = "team_l"
+    ids = _seed_old_backups(store, org_id, [5, 10, 15])
     store._locked_prefix = f"backups/{ids[10]}/"
 
-    deleted = prune_backups(store, team_id, keep_daily=0, keep_weekly=0,
+    deleted = prune_backups(store, org_id, keep_daily=0, keep_weekly=0,
                             keep_hourly=0)
 
     assert sorted(deleted) == sorted([ids[5], ids[15]])
-    remaining = [k for k in store.list(f"backups/{team_id}/")]
+    remaining = [k for k in store.list(f"backups/{org_id}/")]
     # only the locked pair survives
     assert len(remaining) == 2
     assert all(ids[10] in k for k in remaining)
@@ -2219,7 +2344,7 @@ def test_mirror_backup_copies_and_sha256_verifies():
     bid = "team_m/20260101T000000Z_abcd"
     primary.upload(f"backups/{bid}/dump.enc", blob)
     primary.upload(f"backups/{bid}/manifest.json", json.dumps({
-        "backup_id": bid, "team_id": "team_m", "graph_name": "tortoise",
+        "backup_id": bid, "org_id": "team_m", "graph_name": "tortoise",
         "created_at": "2026-01-01T00:00:00+00:00", "node_count": 3,
         "edge_count": 1, "sha256": sha, "format": DUMP_FORMAT,
     }).encode(), content_type="application/json")
@@ -2241,7 +2366,7 @@ def test_mirror_backup_detects_corrupted_readback():
     bid = "team_m/20260101T000000Z_abcd"
     primary.upload(f"backups/{bid}/dump.enc", blob)
     primary.upload(f"backups/{bid}/manifest.json", json.dumps({
-        "backup_id": bid, "team_id": "team_m", "graph_name": "tortoise",
+        "backup_id": bid, "org_id": "team_m", "graph_name": "tortoise",
         "created_at": "2026-01-01T00:00:00+00:00", "node_count": 3,
         "edge_count": 1, "sha256": sha, "format": DUMP_FORMAT,
     }).encode())

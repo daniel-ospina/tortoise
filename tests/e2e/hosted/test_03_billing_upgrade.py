@@ -42,7 +42,7 @@ def test_hermetic_upgrade_to_pro(api, tenant_factory):
     """Positive: two signed webhooks upgrade the team to pro with pro limits."""
     t = tenant_factory("upgrade")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
     r = api.get("/v1/team", headers=h)
     assert r.status == 200, r.text()
     team = r.json()
@@ -57,12 +57,12 @@ def test_webhook_replay_idempotent(api, tenant_factory):
     tier stays pro and both deliveries 200."""
     t = tenant_factory("replay")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
     cust = f"cus_e2e_{uuid.uuid4().hex[:10]}"
     # bind a customer first, then replay the SAME subscription.updated twice
     checkout = {"id": f"evt_replay_co_{uuid.uuid4().hex[:6]}",
                 "type": "checkout.session.completed",
-                "data": {"object": {"client_reference_id": t["team_id"],
+                "data": {"object": {"client_reference_id": t["org_id"],
                                     "customer": cust}}}
     body, sig = sign_stripe_event(checkout)
     assert api.post("/webhooks/stripe", data=body,
@@ -93,11 +93,11 @@ def test_webhook_unknown_price_keeps_tier_200(api, tenant_factory):
     (review-fix-7: ops notification, never a silent downgrade)."""
     t = tenant_factory("unknownprice")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "pro")
+    bump_team_tier(api, t["org_id"], "pro")
     cust = f"cus_e2e_{uuid.uuid4().hex[:10]}"
     checkout = {"id": f"evt_up_co_{uuid.uuid4().hex[:6]}",
                 "type": "checkout.session.completed",
-                "data": {"object": {"client_reference_id": t["team_id"],
+                "data": {"object": {"client_reference_id": t["org_id"],
                                     "customer": cust}}}
     body, sig = sign_stripe_event(checkout)
     api.post("/webhooks/stripe", data=body, headers={"Stripe-Signature": sig})

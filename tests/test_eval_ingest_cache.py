@@ -32,12 +32,12 @@ import contextlib
 import hashlib
 import json
 import os
-import socket
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 
+from tests import _live_utils
 from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
@@ -59,14 +59,15 @@ DB_URI = os.environ.get(
     "TORTOISE_DB_URI",
     # CI's falkordb service requires the password (python-ci.yml
     # `--requirepass falkordb`); local passwordless instances can override.
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+    # #6673: the host port is the PROVISIONED (ephemeral) one, not the 6379
+    # literal — see tests/_live_utils.py.
+    _live_utils.docker_uri("tortoise_test_matrix"),
 )
 
 
 def _falkordb_up() -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1.0)
-        return s.connect_ex(("127.0.0.1", 6379)) == 0
+    """True when the PROVISIONED passworded docker-lane service answers."""
+    return _live_utils.docker_reachable()
 
 
 class _StableModel:
@@ -104,42 +105,86 @@ def test_ingest_fingerprint_stable_same_inputs():
     invocations (deterministic — no repr/address)."""
     fp1 = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     fp2 = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     assert fp1 == fp2
     assert fp1 != "0" * 64
 
 
+def test_prompt_digest_covers_the_vet_switch(monkeypatch):
+    """#5005: ``TORTOISE_VET`` removes candidates from the
+    embed list, so it changes extraction output — and a knob that changes
+    output while absent from ``INGEST_CACHE_PROMPT_ENVS`` is the
+    silent-stale-HIT bug that tuple's docstring forbids (a ``TORTOISE_VET=0``
+    vs ``=1`` ingest A/B would serve the other arm's cached graph). Toggling it
+    MUST move the digest."""
+    monkeypatch.delenv("TORTOISE_VET", raising=False)
+    off = runner.extractor_prompt_digest()
+    monkeypatch.setenv("TORTOISE_VET", "1")
+    assert runner.extractor_prompt_digest() != off
+
+
+def test_prompt_digest_knobs_are_names_the_extractor_reads():
+    """The tuple rotted once — it listed ``TORTOISE_LABEL_SEED`` while the
+    extractor reads ``TORTOISE_LABEL_ORDER_SEED``, so the shuffle seed sat
+    silently outside the fingerprint. Pin every
+    entry to a name the extractor source actually contains: a dead entry is
+    exactly the maintenance failure that leaks a stale cache hit."""
+    import inspect
+
+    from tortoise import extractor_v2 as v2
+    src = inspect.getsource(v2)
+    dead = [n for n in runner.INGEST_CACHE_PROMPT_ENVS if n not in src]
+    assert not dead, f"dead digest knob(s) not read by extractor_v2: {dead}"
+
+
 def test_ingest_fingerprint_sensitive_to_every_input(tmp_path):
     """(a) fingerprint invalidation: each dimension (extractor code version,
-    extraction model, prompt, question id/content, chunk_turns) changes the
-    hash — any extractor change auto-invalidates cached ingests."""
+    extraction model, prompt, question id/content, chunk_turns,
+    session_workers) changes the hash — any extractor change auto-invalidates
+    cached ingests. #1744 (review P1): ``session_workers`` changes graph
+    content (batched phase order drops cross-session consolidation), so a
+    sw=1 cache must not be reused for a sw>1 ingest."""
     base = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("other"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="d" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="d" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="q" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="q" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q("fq-2"), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     changed = _q()
     changed["haystack_sessions"][0].append(
         {"role": "user", "content": "a content revision"})
     assert runner.ingest_cache_fingerprint(
         question=changed, extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=4) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=4,
+        session_workers=1) != base
+    # #1744 (review P1): the session-parallel toggle rides the digest
+    assert runner.ingest_cache_fingerprint(
+        question=_q(), extractor_model=_StableModel("deepseek"),
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=4) != base
 
 
 def test_ingest_code_fingerprint_content_hash(tmp_path):
@@ -249,7 +294,8 @@ def test_cache_cli_parser_tristate():
 # ── docker lane: cache lifecycle over the real namespace machinery ─────────
 
 pytestmark = pytest.mark.skipif(
-    not _falkordb_up(), reason="FalkorDB not reachable at docker://localhost:6379"
+    not _falkordb_up(),
+    reason=f"FalkorDB not reachable at docker://localhost:{_live_utils.docker_port()}",
 )
 
 
@@ -279,7 +325,7 @@ def _clean_question(namespace: str, qid: str) -> None:
         sdk.close()
     with contextlib.suppress(Exception):
         TortoiseSDK(namespace=namespace)._get_proj().db.select_graph(
-            f"team_{namespace}").delete()
+            f"org_{namespace}").delete()
 
 
 def _fake_extract_factory(calls: list):
@@ -346,7 +392,8 @@ def test_cache_miss_ingests_writes_marker_and_persists(monkeypatch, tmp_path):
             question=next(x for x in _mini() if x["question_id"] == qid),
             extractor_model=_StableModel("mock"),
             code_hash=runner.ingest_code_fingerprint(),
-            prompt_digest=runner.extractor_prompt_digest(), chunk_turns=2)
+            prompt_digest=runner.extractor_prompt_digest(), chunk_turns=2,
+            session_workers=1)
         # the graph is still there AFTER the run (persisted as the cache)
         sdk = TortoiseSDK(namespace=ns)
         try:

@@ -34,7 +34,7 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import email_notify
 from tortoise.hosted_api import app, get_current_user
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"   # owner
 _U_BOB = "9f2c1a40-0000-4a00-8000-00000000000e"
@@ -90,33 +90,33 @@ def _as_user(user_id: str, email: str):
     }
 
 
-def _seed_team(reg, team_id: str, tier: str = "team"):
+def _seed_team(reg, org_id: str, tier: str = "team"):
     reg.query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
-        params={"id": team_id, "tier": tier},
+        params={"id": org_id, "tier": tier},
     )
 
 
-def _seed_membership(reg, team_id: str, user_id: str, role: str,
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:$role, "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id, "role": role, "status": status},
+        params={"uid": user_id, "tid": org_id, "role": role, "status": status},
     )
 
 
-def _seed_team_with_owner(reg, team_id: str, owner: str = _U1,
+def _seed_team_with_owner(reg, org_id: str, owner: str = _U1,
                           tier: str = "team"):
-    _seed_team(reg, team_id, tier=tier)
-    _seed_membership(reg, team_id, owner, "owner")
+    _seed_team(reg, org_id, tier=tier)
+    _seed_membership(reg, org_id, owner, "owner")
 
 
-def _invite(client, reg, *, team_id="team-f", email="bob@example.com",
+def _invite(client, reg, *, org_id="team-f", email="bob@example.com",
             role="member"):
-    _seed_team_with_owner(reg, team_id)
+    _seed_team_with_owner(reg, org_id)
     r = client.post("/v1/invites",
-                    json={"team_id": team_id, "email": email, "role": role})
+                    json={"org_id": org_id, "email": email, "role": role})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -132,8 +132,8 @@ def _env(monkeypatch):
 def _capture_otp(monkeypatch, captured: dict):
     """Monkeypatch the OTP email sender so tests can read the code (the API
     never returns it — the mailbox is the only channel)."""
-    def fake_send(team_name, invitee_email, code, on_sent=None):
-        captured.update(team_name=team_name, email=invitee_email, code=code)
+    def fake_send(org_name, invitee_email, code, on_sent=None):
+        captured.update(org_name=org_name, email=invitee_email, code=code)
 
     monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
 
@@ -164,7 +164,7 @@ class TestLegacyPreserved:
         _as_user(_U_BOB, "bob@example.com")
         r = _v2_accept(client, inv["token"])
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-f", "role": "member"}
+        assert r.json() == {"org_id": "team-f", "role": "member"}
 
     def test_v2_does_not_intercept_invalid_tokens(self, client, reg):
         """v2 + unknown token falls through to the legacy 400."""
@@ -197,7 +197,7 @@ class TestThreePathChoice:
         assert choice["invited_email"] == "bob@example.com"
         # nothing consumed, no membership minted (never silent / never auto)
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-f', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-f', user_id:$uid, "
             "status:'active'}) RETURN count(m)",
             params={"uid": _U_ALICE},
         ).result_set[0][0]
@@ -229,7 +229,7 @@ class TestOtpGate:
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "invite_mismatch_otp_required"
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-f', status:'active'}) "
+            "MATCH (m:Membership {org_id:'team-f', status:'active'}) "
             "RETURN count(m)").result_set[0][0]
         assert rows == 1  # owner only — nothing minted
         rows = reg.query(
@@ -246,7 +246,7 @@ class TestOtpGate:
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "invite_mismatch_otp_required"
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-f', status:'active'}) "
+            "MATCH (m:Membership {org_id:'team-f', status:'active'}) "
             "RETURN count(m)").result_set[0][0]
         assert rows == 1
 
@@ -294,7 +294,7 @@ class TestOtpGate:
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "invite_otp_invalid"
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-f', status:'active'}) "
+            "MATCH (m:Membership {org_id:'team-f', status:'active'}) "
             "RETURN count(m)").result_set[0][0]
         assert rows == 1
 
@@ -333,9 +333,9 @@ class TestOtpGate:
 
 
 class TestMismatchOverrideAccept:
-    def _ready(self, client, reg, monkeypatch, team_id="team-f",
+    def _ready(self, client, reg, monkeypatch, org_id="team-f",
                email="bob@example.com"):
-        inv = _invite(client, reg, team_id=team_id, email=email)
+        inv = _invite(client, reg, org_id=org_id, email=email)
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
         _capture_otp(monkeypatch, captured)
@@ -352,14 +352,14 @@ class TestMismatchOverrideAccept:
         r = _v2_accept(client, inv["token"], path="fuse", otp=code)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["team_id"] == "team-f"
+        assert body["org_id"] == "team-f"
         assert body["role"] == "member"
         assert body["accepted_via"] == "fuse"
         assert body["mismatch"] == {"invited_email": "bob@example.com",
                                     "recorded": True}
         # membership for alice (current account)
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-f', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-f', user_id:$uid, "
             "status:'active'}) RETURN m.role",
             params={"uid": _U_ALICE},
         ).result_set
@@ -399,7 +399,7 @@ class TestMismatchOverrideAccept:
     def test_otp_code_single_use_across_paths(self, client, reg, monkeypatch):
         """The verified code is single-use — a second override with the same
         code is blocked even before the token consumption is hit."""
-        inv, code = self._ready(client, reg, monkeypatch, team_id="team-g")
+        inv, code = self._ready(client, reg, monkeypatch, org_id="team-g")
         assert _v2_accept(client, inv["token"], path="fuse", otp=code).status_code == 200
         # the accept consumed the token too — replay is 400 (consumed invite)
         r = _v2_accept(client, inv["token"], path="accept-mismatch", otp=code)
@@ -414,16 +414,16 @@ class TestMismatchOverrideAccept:
             "max_users:2})",
         )
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:'team-cap', "
+            "CREATE (m:Membership {user_id:$uid, org_id:'team-cap', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
         )
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:'team-cap', "
+            "CREATE (m:Membership {user_id:$uid, org_id:'team-cap', "
             "role:'member', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U_CAROL},
         )
-        inv = _invite(client, reg, team_id="team-cap", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-cap", email="bob@example.com")
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
         _capture_otp(monkeypatch, captured)
@@ -466,12 +466,12 @@ class TestOtpRateLimits:
         _capture_otp(monkeypatch, captured)
         for i in range(2):
             _as_user(_U1, "owner@example.com")
-            inv = _invite(client, reg, team_id=f"team-ip{i}", email=f"b{i}@example.com")
+            inv = _invite(client, reg, org_id=f"team-ip{i}", email=f"b{i}@example.com")
             _as_user(_U_ALICE, "alice@example.com")
             r = client.post("/v1/invites/otp", json={"token": inv["token"]})
             assert r.status_code == 200, r.text
         _as_user(_U1, "owner@example.com")
-        inv3 = _invite(client, reg, team_id="team-ip3", email="b3@example.com")
+        inv3 = _invite(client, reg, org_id="team-ip3", email="b3@example.com")
         _as_user(_U_ALICE, "alice@example.com")
         r3 = client.post("/v1/invites/otp", json={"token": inv3["token"]})
         assert r3.status_code == 429, r3.text
@@ -486,7 +486,7 @@ class TestOtpRateLimits:
         _capture_otp(monkeypatch, captured)
         for i in range(3):
             _as_user(_U1, "owner@example.com")
-            inv = _invite(client, reg, team_id=f"team-opt{i}", email=f"o{i}@example.com")
+            inv = _invite(client, reg, org_id=f"team-opt{i}", email=f"o{i}@example.com")
             _as_user(_U_ALICE, "alice@example.com")
             assert client.post("/v1/invites/otp",
                                json={"token": inv["token"]}).status_code == 200
@@ -504,12 +504,12 @@ class TestAdminResendExpire:
         inv = _invite(client, reg, email="bob@example.com")
         scheduled = {}
 
-        def fake_send(team_name, invitee_email, role, token, invitation_id,
+        def fake_send(org_name, invitee_email, role, token, invitation_id,
                       on_sent=None):
             scheduled.update(token=token, email=invitee_email)
 
         monkeypatch.setattr(email_notify, "send_invite_email", fake_send)
-        r = client.post(f"/v1/invites/{inv['invite_id']}/resend?team_id=team-f")
+        r = client.post(f"/v1/invites/{inv['invite_id']}/resend?org_id=team-f")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "resent"
@@ -529,7 +529,7 @@ class TestAdminResendExpire:
         inv = _invite(client, reg, email="bob@example.com")
         _seed_membership(reg, "team-f", _U_BOB, "member")
         _as_user(_U_BOB, "bob@example.com")
-        r = client.post(f"/v1/invites/{inv['invite_id']}/resend?team_id=team-f")
+        r = client.post(f"/v1/invites/{inv['invite_id']}/resend?org_id=team-f")
         assert r.status_code == 403
 
     def test_resend_rate_cap(self, client, reg, monkeypatch):
@@ -543,10 +543,10 @@ class TestAdminResendExpire:
             inv = _invite(client, reg, email="bob@example.com")
             for _ in range(2):
                 r = client.post(
-                    f"/v1/invites/{inv['invite_id']}/resend?team_id=team-f")
+                    f"/v1/invites/{inv['invite_id']}/resend?org_id=team-f")
                 assert r.status_code == 200, r.text
             r3 = client.post(
-                f"/v1/invites/{inv['invite_id']}/resend?team_id=team-f")
+                f"/v1/invites/{inv['invite_id']}/resend?org_id=team-f")
             assert r3.status_code == 429, r3.text
             assert r3.json()["detail"]["error_code"] == "over_invite_resend_rate_limit"
         finally:
@@ -556,7 +556,7 @@ class TestAdminResendExpire:
         """Admin expire-now: the invite leaves the invitee pending list and
         the link dies; consumed invites cannot be expired (409)."""
         inv = _invite(client, reg, email="bob@example.com")
-        r = client.post(f"/v1/invites/{inv['invite_id']}/expire?team_id=team-f")
+        r = client.post(f"/v1/invites/{inv['invite_id']}/expire?org_id=team-f")
         assert r.status_code == 200, r.text
         assert r.json()["expired"] is True
         # pending list (invitee side) is empty
@@ -568,22 +568,22 @@ class TestAdminResendExpire:
         assert r.status_code == 400
         # consumed invite → 409 on expire
         _as_user(_U1, "owner@example.com")
-        inv2 = _invite(client, reg, team_id="team-h", email="carol@example.com")
+        inv2 = _invite(client, reg, org_id="team-h", email="carol@example.com")
         _as_user(_U_CAROL, "carol@example.com")
         assert client.post("/v1/invites/accept",
                            json={"token": inv2["token"]}).status_code == 200
         _as_user(_U1, "owner@example.com")
-        r2 = client.post(f"/v1/invites/{inv2['invite_id']}/expire?team_id=team-h")
+        r2 = client.post(f"/v1/invites/{inv2['invite_id']}/expire?org_id=team-h")
         assert r2.status_code == 409
         # expired invite cannot be rescinded-then-resurrected: resend 400
-        r3 = client.post(f"/v1/invites/{inv['invite_id']}/resend?team_id=team-f")
+        r3 = client.post(f"/v1/invites/{inv['invite_id']}/resend?org_id=team-f")
         assert r3.status_code == 400
 
     def test_expire_member_403(self, client, reg):
         inv = _invite(client, reg, email="bob@example.com")
         _seed_membership(reg, "team-f", _U_BOB, "member")
         _as_user(_U_BOB, "bob@example.com")
-        r = client.post(f"/v1/invites/{inv['invite_id']}/expire?team_id=team-f")
+        r = client.post(f"/v1/invites/{inv['invite_id']}/expire?org_id=team-f")
         assert r.status_code == 403
 
 
@@ -593,19 +593,19 @@ class TestAdminResendExpire:
 
 
 class TestMemberProgressArming:
-    def _member_node(self, team_id: str):
+    def _member_node(self, org_id: str):
         from tortoise.hosted_api import _make_sdk
         from tortoise.onboarding import state as _os
-        sdk = _make_sdk(namespace=team_id)
+        sdk = _make_sdk(namespace=org_id)
         _REG_SDKS.append(sdk)
-        return _os.read_onboarding_node(sdk._get_proj(), team_id)
+        return _os.read_onboarding_node(sdk._get_proj(), org_id)
 
-    def _completed_steps(self, team_id: str):
+    def _completed_steps(self, org_id: str):
         from tortoise.hosted_api import _make_sdk
         from tortoise.onboarding import state as _os
-        sdk = _make_sdk(namespace=team_id)
+        sdk = _make_sdk(namespace=org_id)
         _REG_SDKS.append(sdk)
-        return _os.completed_steps(sdk._get_proj(), team_id)
+        return _os.completed_steps(sdk._get_proj(), org_id)
 
     def test_match_accept_arms_member_slot_without_faking_org_steps(
             self, client, reg):
@@ -616,7 +616,7 @@ class TestMemberProgressArming:
         auto-satisfied AT INIT like every team-create lane; it is not a
         member write). Member writes never add member-scoped steps to
         org-level edges; the node is not 'complete'."""
-        inv = _invite(client, reg, team_id="team-m1", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-m1", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r = client.post("/v1/invites/accept", json={"token": inv["token"]})
         assert r.status_code == 200, r.text
@@ -637,7 +637,7 @@ class TestMemberProgressArming:
         """A mismatch-override accept (fuse + OTP) arms the CURRENT user's
         slot — org-level steps still untouched (skipping never completes);
         the member slot is a user-scoped key, not a COMPLETED_STEP edge."""
-        inv = _invite(client, reg, team_id="team-m2", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-m2", email="bob@example.com")
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
         _capture_otp(monkeypatch, captured)
@@ -658,16 +658,16 @@ class TestMemberProgressArming:
         a real step the member completed) does NOT advance org-level steps —
         member entries are user-scoped keys, not COMPLETED_STEP edges."""
         from tortoise.onboarding import state as _os
-        inv = _invite(client, reg, team_id="team-m3", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-m3", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         assert client.post("/v1/invites/accept",
                            json={"token": inv["token"]}).status_code == 200
         # the invitee's inline setup completes the harness step FOR THEM
-        team = {"team_id": "team-m3", "session_user_id": _U_BOB,
+        team = {"org_id": "team-m3", "session_user_id": _U_BOB,
                 "graph_name": "team_team-m3"}
         app.dependency_overrides.clear()  # checkpoint is dual-auth via team dep
-        from tortoise.hosted_api import get_current_team_session_ungated
-        app.dependency_overrides[get_current_team_session_ungated] = lambda: team
+        from tortoise.hosted_api import get_current_org_session_ungated
+        app.dependency_overrides[get_current_org_session_ungated] = lambda: team
         r = client.post("/v1/onboarding/state/checkpoint",
                         json={"member_progress": {_U_BOB: ["harness-connected"]}})
         assert r.status_code == 200, r.text
@@ -700,7 +700,7 @@ class TestConcurrentAcceptSingleUse:
         accept wins; the loser 409s; exactly ONE active membership exists
         (never a second from the losing request)."""
         import httpx
-        inv = _invite(client, reg, team_id="team-race1", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-race1", email="bob@example.com")
         # Alice mints + captures the OTP (mismatch override needs it)
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
@@ -753,7 +753,7 @@ class TestConcurrentAcceptSingleUse:
         # exactly ONE active NON-owner membership on this team (owner _U1 is
         # seeded by _seed_team_with_owner) — pre-fix the loser minted a dup
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-race1', status:'active'}) "
+            "MATCH (m:Membership {org_id:'team-race1', status:'active'}) "
             "RETURN collect(m.user_id)",
         ).result_set[0][0]
         non_owner = [u for u in rows if u != _U1]
@@ -776,7 +776,7 @@ class TestConcurrentAcceptSingleUse:
         authoritative claim and NEVER reaches the membership write (pre-fix it
         minted a duplicate — registry has no (user,team) unique constraint)."""
         import httpx
-        inv = _invite(client, reg, team_id="team-race2", email="bob@example.com")
+        inv = _invite(client, reg, org_id="team-race2", email="bob@example.com")
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
         _capture_otp(monkeypatch, captured)
@@ -816,7 +816,7 @@ class TestConcurrentAcceptSingleUse:
                                                                  r2.text]
         # exactly ONE active membership for alice on this team (no dup)
         rows = reg.query(
-            "MATCH (m:Membership {team_id:'team-race2', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-race2', user_id:$uid, "
             "status:'active'}) RETURN count(m)",
             params={"uid": _U_ALICE},
         ).result_set[0][0]

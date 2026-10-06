@@ -6,13 +6,14 @@ the shared resolution logic (resolve_api_key, user_memberships, ...) runs
 verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
-Filter ops: eq | neq | is (None → IS NULL) | gt | lt | lte (all ordered
+Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
-rows; POST appends a row (return=representation semantics); DELETE
+rows (an EMPTY body makes no updates and returns `[]`, matching PostgREST);
+POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
-(#765 plan Task 8: the atomic teams + team_memberships + api_keys upsert,
+(#765 plan Task 8: the atomic teams + org_memberships + api_keys upsert,
 migration 0010; #1716: all-NULL key params → keyless provision, NO
 api_keys row) plus the #1709 agent-signup-token trio
 (``provision_team_with_token`` / ``resolve_signup_token`` /
@@ -23,8 +24,9 @@ mirroring the SQL semantics the real functions execute
 """
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
@@ -32,7 +34,14 @@ from typing import Any
 # the fake raise the SAME RuntimeError surface the real query() raises, so
 # a future unsanitized call site fails CI instead of silently no-matching
 # ("CI green while prod 500s"). Extendable registry (mirrors missing_columns).
-UUID_FILTER_COLUMNS: set[tuple[str, str]] = {("team_memberships", "user_id")}
+UUID_FILTER_COLUMNS: set[tuple[str, str]] = {
+    ("org_memberships", "user_id"),
+    # #2636: `connectors.id` is uuid, and the per-id connector endpoints filter
+    # it with the raw client path param — so the fake must reject a non-UUID
+    # literal exactly as PostgREST does, or it stays green against the
+    # production 500 (#2642 re-review P2).
+    ("connectors", "id"),
+}
 
 
 def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | None) -> None:
@@ -57,10 +66,260 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #4243: columns whose SQL type is ``timestamptz``. Postgres's timestamptz input
+# function REJECTS a bare JSON number — the number reaches it as text and is not
+# a valid timestamp literal — so PostgREST 400s. Verified against Postgres 18
+# (PGlite 0.5.4, every migration applied):
+# ``json_populate_record(NULL::organizations,
+# '{"current_period_end":1756348800}')`` → `date/time field value out of
+# range: "1756348800"`, and with ``'{"current_period_end":2024}'`` → `invalid
+# input syntax for type timestamp with time zone: "2024"`, and a JSON
+# boolean likewise; JSON null and an ISO-8601 string are accepted. The fake
+# stored ANY JSON value verbatim, so it accepted an epoch int — exactly how
+# #4216 (Stripe delivers the period bounds as Unix epoch ints, PATCHed into
+# ``timestamptz`` columns) passed CI and 400'd in production. Default-on
+# fidelity makes the fake raise the SAME RuntimeError surface the real query()
+# raises, so "a write of a shape the real PostgREST rejects" fails in CI.
+# Extendable registry (mirrors UUID_FILTER_COLUMNS).
+#
+# DERIVED, not hand-copied, from ``supabase/migrations/*.sql``: every column
+# declared ``timestamptz`` in a CREATE TABLE body or an
+# ``ALTER TABLE ... ADD COLUMN``, with the 20260915000001 renames applied
+# transitively (``teams`` → ``organizations``, ``user_teams`` →
+# ``team_memberships`` → ``org_memberships``). Regenerate rather than guess
+# when a migration adds a column; ``tests/test_fake_control_plane.py`` pins the
+# set against the migrations so a forgotten column fails the suite.
+TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
+    ("abuse_events", "created_at"),
+    ("account_deletions", "created_at"),
+    ("account_deletions", "deleted_at"),
+    ("agent_signup_tokens", "created_at"),
+    ("agent_signup_tokens", "last_used_at"),
+    ("agent_signup_tokens", "revoked_at"),
+    ("analytics_events", "created_at"),
+    ("api_keys", "created_at"),
+    ("api_keys", "expires_at"),
+    ("api_keys", "last_used_at"),
+    ("api_keys", "revoked_at"),
+    ("audit_events", "created_at"),
+    ("blog_admins", "created_at"),
+    ("blog_agent_keys", "created_at"),
+    ("blog_posts", "created_at"),
+    ("blog_posts", "published_at"),
+    ("blog_posts", "reviewed_at"),
+    ("blog_posts", "updated_at"),
+    # #2636 connectors (migration 20260922000001): the three timestamptz
+    # columns the fake must type-check like the real seam.
+    ("connectors", "created_at"),
+    ("connectors", "last_sync_at"),
+    ("connectors", "updated_at"),
+    ("graphs", "created_at"),
+    ("graphs", "deleted_at"),
+    ("graphs", "purged_at"),
+    ("invitations", "accepted_at"),
+    ("invitations", "created_at"),
+    ("invitations", "email_sent_at"),
+    ("invitations", "expires_at"),
+    ("invitations", "otp_expires_at"),
+    ("invitations", "otp_sent_at"),
+    ("invitations", "otp_verified_at"),
+    ("link_intents", "consumed_at"),
+    ("link_intents", "created_at"),
+    ("link_intents", "expires_at"),
+    ("metering_records", "graph_storage_measured_at"),
+    ("metering_records", "period_end"),
+    ("metering_records", "period_start"),
+    ("metering_records", "updated_at"),
+    ("metering_unmetered_increments", "first_observed_at"),
+    ("metering_unmetered_increments", "last_observed_at"),
+    ("oauth_access_tokens", "created_at"),
+    ("oauth_access_tokens", "expires_at"),
+    ("oauth_access_tokens", "revoked_at"),
+    ("oauth_clients", "created_at"),
+    ("oauth_clients", "revoked_at"),
+    ("oauth_codes", "created_at"),
+    ("oauth_codes", "expires_at"),
+    ("oauth_codes", "redemption_settled_at"),
+    ("oauth_codes", "used_at"),
+    ("oauth_refresh_tokens", "created_at"),
+    ("oauth_refresh_tokens", "expires_at"),
+    ("oauth_refresh_tokens", "revoked_at"),
+    ("org_memberships", "created_at"),
+    ("org_memberships", "updated_at"),
+    ("organizations", "backup_latest_at"),
+    ("organizations", "backup_restored_at"),
+    ("organizations", "created_at"),
+    ("organizations", "current_period_end"),
+    ("organizations", "current_period_start"),
+    ("organizations", "deleted_at"),
+    ("organizations", "flagged_at"),
+    ("organizations", "grace_until"),
+    ("organizations", "onboarding_email_sent_at"),
+    ("organizations", "suspended_at"),
+    ("user_unlink_permits", "consumed_at"),
+    ("user_unlink_permits", "created_at"),
+    ("waitlist_subscribers", "consented_at"),
+    ("waitlist_subscribers", "created_at"),
+    ("webhook_events", "first_seen"),
+}
+
+
+def _assert_timestamptz_fidelity(table: str, json_body: dict | None) -> None:
+    """Raise RuntimeError("... HTTP 400") when a POST/PATCH body carries a
+    NUMBER on a registered ``timestamptz`` column — mirroring the Postgres
+    ``timestamptz`` input function's rejection (``date/time field value out of
+    range`` / ``invalid input syntax``) that PostgREST surfaces as HTTP 400.
+
+    REJECT, not coerce: #4216 normalised the epoch at the single writer seam
+    (``update_org_billing``) precisely because the control plane cannot bind a
+    epoch; a fake that coerced would be MORE permissive than production and
+    would keep hiding the next writer. ``None`` and every string pass — the fake
+    has no timestamp parser, so only the number shape (``bool`` included, a
+    Python ``int`` subclass, also rejected by Postgres) is provably rejected."""
+    if not json_body:
+        return
+    for col, value in json_body.items():
+        if (table, col) not in TIMESTAMPTZ_COLUMNS:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400"
+            ) from None
+
+
+# #4037: PostgREST's `order` grammar is a comma-separated list of
+# `field[.asc|.desc][.nullsfirst|.nullslast]`. The fake used to speak a private
+# `-col` dialect (`col = order.lstrip("-")`), which ACCEPTED the form PostgREST
+# rejects (a leading `-` is not part of the grammar → PGRST100 / HTTP 400) AND
+# silently NO-OP'd the form it accepts (`col.desc` looked up a column literally
+# named `"created_at.desc"`). So `SupabaseAbuseStore`'s `order="-created_at"`
+# was green in CI while 400ing in prod: Stage-2 suspension never ran and
+# `/v1/team/alerts` was permanently empty (the 400 is swallowed fail-soft).
+#
+# This parser is deliberately an INDEPENDENT oracle — it must NOT import a
+# production order helper, because a shared implementation would share its
+# blind spot, which is the exact failure #4037 fixes. It is a stated SUBSET of
+# the wire grammar: JSON-path (`col->>key`) and embedded-resource ordering raise
+# loudly rather than being silently accepted, and no call site uses them.
+_ORDER_DIRECTIONS = {"asc": False, "desc": True}
+_ORDER_NULLS = {"nullsfirst": True, "nullslast": False}
+
+
+def _is_order_field(token: str) -> bool:
+    """A PostgREST field name, minus the JSON-path/embedded-resource forms the
+    fake does not model. A leading `-` is refused — that is the #4037 defect."""
+    if not token or token[0] == "-":
+        return False
+    if not (token[0].isalpha() or token[0] == "_"):
+        return False
+    return all(c.isalnum() or c in "_$-" for c in token)
+
+
+def _parse_order(table: str, order: str) -> list[tuple[str, bool, bool | None]]:
+    """Parse a PostgREST ``order`` string into ``(field, descending,
+    nulls_first|None)`` terms. An unparseable term raises the same
+    ``RuntimeError(... HTTP 400)`` surface the real client produces when
+    PostgREST rejects the query string (``PGRST100``)."""
+    terms: list[tuple[str, bool, bool | None]] = []
+    for raw in order.split(","):
+        parts = raw.split(".")
+        field = parts.pop(0)
+        if not _is_order_field(field):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        descending = False
+        nulls_first: bool | None = None
+        if parts and parts[0] in _ORDER_DIRECTIONS:
+            descending = _ORDER_DIRECTIONS[parts.pop(0)]
+        if parts and parts[0] in _ORDER_NULLS:
+            nulls_first = _ORDER_NULLS[parts.pop(0)]
+        if parts:
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        terms.append((field, descending, nulls_first))
+    return terms
+
+
+def _apply_order(rows: list[dict],
+                 terms: list[tuple[str, bool, bool | None]]) -> list[dict]:
+    """Apply PostgREST order terms (most-significant first) as successive
+    STABLE sorts, so a tie on a later term keeps the earlier term's order.
+    NULL placement follows Postgres: ``asc`` → nulls last, ``desc`` → nulls
+    first, overridable by an explicit ``nullsfirst``/``nullslast`` token."""
+    for field, descending, nulls_first in reversed(terms):
+        if nulls_first is None:
+            nulls_first = descending
+        present = [r for r in rows if r.get(field) is not None]
+        nulls = [r for r in rows if r.get(field) is None]
+        present.sort(key=lambda r: r.get(field), reverse=descending)
+        rows = (nulls + present) if nulls_first else (present + nulls)
+    return rows
+
+
+# #2863: module-level registry of every control plane a `fail_query` was installed
+# on. The autouse `_no_silent_faults` guard in the OAuth fault suite reads it to
+# fail a test whose injector never fired (a stale matcher is a silent green test) —
+# including bare `FakeControlPlane()` instances a test built itself, not just the
+# fixture's.
+_FAULT_CPS: list = []
+
+
+def _now_iso() -> str:
+    """The current UTC instant, ISO-8601 — the fake's ``now()``.
+
+    A module-level helper, deliberately: ``FakeControlPlane.rpc`` has
+    function-local ``from datetime import datetime, ...`` statements in
+    branches further down, which makes ``datetime`` LOCAL to that whole
+    function — so referencing it earlier in the same function is an
+    ``UnboundLocalError``, not an import.
+    """
+    return datetime.now(UTC).isoformat()
+
+
+def _metering_period_label(period_start) -> str | None:
+    """The DERIVED ``'YYYY-MM'`` label the SQL RPC writes for a window start
+    (``to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM')``). #3825: a
+    derived label, a pure function of the key — never the row key itself."""
+    dt = _as_dt(period_start)
+    if dt is None:
+        return None
+    return f"{dt.year}-{dt.month:02d}"
+
+
+def _as_dt(value):
+    """Parse a stored metering instant for the fake's SQL-semantics
+    comparisons. ``None`` in → ``None`` out (a row with no window cannot match
+    a windowed read). An epoch int is accepted because the registry lane stores
+    whatever the Stripe webhook wrote, and a naive string is read as UTC — the
+    fake emulates a ``timestamptz`` column and every caller in this repo writes
+    UTC."""
+    from datetime import datetime
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
-                 uuid_fidelity: bool = True):
+                 uuid_fidelity: bool = True,
+                 timestamptz_fidelity: bool = True):
         # rows are stored as dicts keyed by column name
         self.tables: dict[str, list[dict]] = tables or {}
         self.query_count = 0
@@ -70,11 +329,27 @@ class FakeControlPlane:
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
         self.uuid_fidelity = uuid_fidelity
-        # #1709: serializes recover_team_key emulation (the real RPC SELECTs
-        # the token row FOR UPDATE — the fake must be atomic under the
-        # concurrency E2E).
+        # #4243: timestamptz write fidelity — a JSON number on a registered
+        # timestamptz column 400s (see TIMESTAMPTZ_COLUMNS). Opt out for the
+        # registry-lane doubles, which store the raw epoch int the Stripe
+        # webhook wrote (``metering._anchor_instant`` reads both shapes).
+        # Independent of uuid_fidelity — each guard covers its own type.
+        self.timestamptz_fidelity = timestamptz_fidelity
+        # #1709/#1879: per-ORG mint lock — models the SQL `FOR NO KEY UPDATE`
+        # on the `organizations` row that `recover_team_key`,
+        # `session_key_mint` and `provision_api_key` all take. It is acquired
+        # and released WITHIN one `rpc()` call, exactly like a real
+        # transaction's row lock — so a production lane that split its
+        # critical section across TWO rpc() calls would NOT be serialized here
+        # and the concurrency tests would say so.
         import threading
-        self._recover_lock = threading.Lock()
+        self._mint_org_locks: dict[str, threading.Lock] = {}
+        self._mint_org_locks_guard = threading.Lock()
+        # #1879 test hook: invoked INSIDE the emulated mint RPC while the org
+        # lock is held (after the cap read, before the write). A test sets it
+        # to force a DETERMINISTIC interleave instead of a flaky thread race.
+        # None (default) = inert.
+        self.mint_rendezvous = None
         # #1765: auth-side rows for user_identity_inventory/reserve_unlink
         # emulations (mirror auth.users + auth.identities shapes).
         self.auth_users: list[dict] = []
@@ -83,20 +358,75 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #4355: a conditional PATCH (the rotate CAS
+        # ``UPDATE ... WHERE id = :id AND revoked_at IS NULL``) is ONE atomic
+        # statement in Postgres — two concurrent statements serialize on the
+        # row. The in-memory check-then-write below is NOT atomic under
+        # threads (the `if _matches(...)` and the `r.update(...)` are separate
+        # bytecodes a switch can land between), so two racing claims could
+        # BOTH observe the row live and both report success — making a genuine
+        # two-thread CAS test nondeterministic instead of red. Serialize the
+        # write to model the statement the fake stands in for.
+        self._patch_lock = threading.Lock()
+        # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
+        self._faults: list[dict] = []
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
         return self
 
-    def _claim_migrate_created_by(self, team_id: str, user_id: str) -> None:
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Scalar-returning RPC — the read counterpart of :meth:`rpc`
+        (``SupabaseControlPlane.rpc_value``). #3825: ``metering_cohort_spend``
+        is reached through this method, so a test that asserts the aggregate
+        over a WINDOW needs it on the double; the RPC emulation in :meth:`rpc`
+        already RETURNS the scalar, so this delegates and records the call
+        exactly once in ``rpc_calls``.
+        """
+        return self.rpc(fn, body)
+
+    def _mint_org_lock(self, org_id: str):
+        """Per-org mint lock (models the SQL `FOR NO KEY UPDATE` row lock)."""
+        with self._mint_org_locks_guard:
+            lock = self._mint_org_locks.get(org_id)
+            if lock is None:
+                import threading
+                lock = threading.Lock()
+                self._mint_org_locks[org_id] = lock
+            return lock
+
+    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
+        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+
+        Mirrors `quota._count_resource("api_keys")` / the migration's
+        `public.api_key_slot_count`: non-revoked, non-expired, and (when
+        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
+        legacy row with no created_via still COUNTS.
+        """
+        from datetime import UTC, datetime
+        now_dt = _as_dt(now) or datetime.now(UTC)
+        n = 0
+        for k in self.tables.get("api_keys", []):
+            if k.get("org_id") != org_id or k.get("revoked_at") is not None:
+                continue
+            exp = _as_dt(k.get("expires_at"))
+            if exp is not None and exp <= now_dt:
+                continue
+            if exclude_bootstrap and k.get("created_via") == "bootstrap":
+                continue
+            n += 1
+        return n
+
+    def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
         the claimer (parenthesized predicate parity — team-scoped)."""
         for k in self.tables.get("api_keys", []):
             cb = str(k.get("created_by") or "")
-            if k.get("team_id") == team_id and (cb.startswith("anon-") or cb.startswith("reg-")):
+            if k.get("org_id") == org_id and (cb.startswith("anon-") or cb.startswith("reg-")):
                 k["created_by"] = str(user_id)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Simulate provision_team (migration 0010) over the in-memory rows.
 
         Mirrors the real SECURITY DEFINER function's observable effects:
@@ -111,33 +441,57 @@ class FakeControlPlane:
         abuse_suspend/abuse_unsuspend RPCs (teams.suspended_at/flagged_at).
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn == "account_deletion_claim_org":
+            # #4029 (cycle-2): the atomic per-org claim. Mirrors the SQL's
+            # single `||` union — appends to claimed_org_ids AND org_ids,
+            # idempotent. A read-then-PATCH would lose an id when two writers
+            # overlap; this is one statement. NOT guarded on `deleted_at`:
+            # the erasure sweep claims an in-window org AFTER the account is
+            # stamped, and a guard there made the claim inert at the one
+            # moment it is needed (#4029 cycle-3 P1).
+            p = body or {}
+            uid = p.get("p_user_id")
+            oid = p.get("p_org_id")
+            for r in self.tables.get("account_deletions", []):
+                if str(r.get("user_id")) != str(uid):
+                    continue
+                if oid is None or not str(oid).strip():
+                    return None
+                claimed = [str(x) for x in (r.get("claimed_org_ids") or [])]
+                if str(oid) in claimed:
+                    return None
+                r["claimed_org_ids"] = [*claimed, str(oid)]
+                intent = [str(x) for x in (r.get("org_ids") or [])]
+                if str(oid) not in intent:
+                    r["org_ids"] = [*intent, str(oid)]
+            return None
         if fn == "abuse_suspend":
             # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
             # NOT touched (the engine's flag-episode state is event-derived).
-            tid = (body or {}).get("p_team_id")
-            for t in self.tables.get("teams", []):
+            tid = (body or {}).get("p_org_id")
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid and t.get("suspended_at") is None:
                     from datetime import datetime, timezone
                     t["suspended_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             from datetime import datetime, timezone
             self.tables.setdefault("abuse_events", []).append(
-                {"team_id": tid, "event_type": "suspend", "weight": 1,
+                {"org_id": tid, "event_type": "suspend", "weight": 1,
                  "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
             return None
         if fn == "abuse_unsuspend":
-            tid = (body or {}).get("p_team_id")
-            for t in self.tables.get("teams", []):
+            tid = (body or {}).get("p_org_id")
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid:
                     t["suspended_at"] = None
                     t["flagged_at"] = None
             from datetime import datetime, timezone
             now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             events = self.tables.setdefault("abuse_events", [])
-            events.append({"team_id": tid, "event_type": "unsuspend",
+            events.append({"org_id": tid, "event_type": "unsuspend",
                            "weight": 1, "created_at": now_iso})
             # end every flag episode (mirrors the SQL)
             for rule in ("point_create", "key_create"):
-                events.append({"team_id": tid, "event_type": "flag_clear",
+                events.append({"org_id": tid, "event_type": "flag_clear",
                                "rule": rule, "weight": 1,
                                "created_at": now_iso})
             return None
@@ -145,31 +499,317 @@ class FakeControlPlane:
             # Emulate migration 0014's SQL function: atomic upsert + increment.
             p = body or {}
             rows = self.tables.setdefault("metering_records", [])
-            row = next((r for r in rows if r["team_id"] == p.get("p_team_id")
-                        and r["period"] == p.get("p_period")), None)
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
             n = int(p.get("p_n") or 1)
             if row:
                 row["write_ops"] = row.get("write_ops", 0) + n
             else:
-                rows.append({"team_id": p.get("p_team_id"),
-                             "period": p.get("p_period"),
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
+        if fn == "metering_increment_ask":
+            # #1987 Task 6 / #3825: the ask lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row — the fake must model the shared
+            # row, otherwise a test cannot tell a single-window ask+capture
+            # pair from two month buckets (the defect #3825 removes).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 1)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["ask_calls"] = row.get("ask_calls", 0) + calls
+                row["ask_tokens_in"] = row.get("ask_tokens_in", 0) + tin
+                row["ask_tokens_out"] = row.get("ask_tokens_out", 0) + tout
+                row["ask_cost_usd"] = (float(row.get("ask_cost_usd") or 0.0)
+                                       + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "ask_calls": calls, "ask_tokens_in": tin,
+                             "ask_tokens_out": tout, "ask_cost_usd": cost})
+            return None
+        if fn == "metering_increment_capture_cost":
+            # #3665/#5045: migrations 20260917000001 then 20260926000001 —
+            # additive upsert mirroring metering_increment_capture_cost (the
+            # capture lane's twin), re-keyed onto the window start by
+            # 20260918000001 (#3825) and carrying the extraction TOKEN
+            # counters as of 20260926000001 (#5045).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_tokens_in"] = (
+                    int(row.get("capture_tokens_in") or 0) + tin)
+                row["capture_tokens_out"] = (
+                    int(row.get("capture_tokens_out") or 0) + tout)
+                row["capture_cost_usd"] = (
+                    float(row.get("capture_cost_usd") or 0.0) + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "capture_calls": calls,
+                             "capture_tokens_in": tin,
+                             "capture_tokens_out": tout,
+                             "capture_cost_usd": cost})
+            return None
+        if fn == "metering_increment_embedding":
+            # #4488: the embed lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row (migration 20260925000003). The
+            # fake models the sticky/paired/skip-safe mixed rule EXACTLY as the
+            # SQL does, so a test can tell "the window used two encoders" from
+            # "the window used one" and from "a skip-only flush erased it".
+            p = body or {}
+            # Mirror the SQL's degenerate-window guard: the real RPC RAISES
+            # before the INSERT, so without this the fake would accept a window
+            # production refuses, and a test would pass on behaviour that cannot
+            # happen (the SQL never executes in CI — this fake is the only
+            # behavioural proxy for the lane).
+            _ps, _pe = _as_dt(p.get("p_period_start")), _as_dt(
+                p.get("p_period_end"))
+            if _ps is not None and _pe is not None and _pe <= _ps:
+                raise RuntimeError(
+                    "metering_increment_embedding: period_end must be after "
+                    "period_start")
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            texts = int(p.get("p_texts") or 0)
+            chars = int(p.get("p_chars") or 0)
+            wall = float(p.get("p_wall_ms") or 0.0)
+            skipped = int(p.get("p_skipped") or 0)
+            model = p.get("p_model")
+            revision = p.get("p_revision")
+            if row:
+                mixed = bool(row.get("embed_identity_mixed"))
+                if p.get("p_identity_mixed"):
+                    mixed = True
+                if (row.get("embed_model") is not None and model is not None
+                        and (row.get("embed_model") != model
+                             or row.get("embed_revision") != revision)):
+                    mixed = True
+                row["embed_identity_mixed"] = mixed
+                row["embed_calls"] = row.get("embed_calls", 0) + calls
+                row["embed_texts"] = row.get("embed_texts", 0) + texts
+                row["embed_chars"] = row.get("embed_chars", 0) + chars
+                row["embed_wall_ms"] = (float(row.get("embed_wall_ms") or 0.0)
+                                       + wall)
+                row["embed_skipped"] = row.get("embed_skipped", 0) + skipped
+                # None must NOT erase the stored identity (skip-safe).
+                if model is not None:
+                    row["embed_model"] = model
+                if revision is not None:
+                    row["embed_revision"] = revision
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "embed_calls": calls, "embed_texts": texts,
+                             "embed_chars": chars, "embed_wall_ms": wall,
+                             "embed_skipped": skipped, "embed_model": model,
+                             "embed_revision": revision,
+                             "embed_identity_mixed": bool(
+                                 p.get("p_identity_mixed"))})
+            return None
+        if fn == "metering_set_graph_storage":
+            # #5331: migration 20260926000002 — a GAUGE SETTER mirroring the SQL
+            # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
+            # a test that cannot tell a gauge from an increment cannot catch the
+            # double-count defect the gauge design exists to avoid.
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            total = float(p.get("p_total_mb") or 0.0)
+            values = {
+                "graph_storage_mb": total,
+                "graph_storage_indices_mb": p.get("p_indices_mb"),
+                "graph_storage_samples": int(p.get("p_samples") or 0),
+                "graph_storage_repeats": int(p.get("p_repeats") or 0),
+                "graph_storage_min_mb": (
+                    float(p["p_min_mb"])
+                    if p.get("p_min_mb") is not None else total),
+                "graph_storage_max_mb": (
+                    float(p["p_max_mb"])
+                    if p.get("p_max_mb") is not None else total),
+                "graph_storage_spread_mb": float(p.get("p_spread_mb") or 0.0),
+                "graph_storage_measured_at": p.get("p_measured_at"),
+            }
+            if row:
+                row.update(values)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             **values})
+            return None
+        if fn == "metering_cohort_spend":
+            # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
+            # truncate it (the reason it is an RPC and not a filtered read).
+            # Mirrors the SQL's HALF-OPEN OVERLAP test
+            # (``period_start < p_period_end AND period_end > p_period_start``),
+            # not a ``period = p_period`` month equality.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            start = _as_dt(p.get("p_period_start"))
+            end = _as_dt(p.get("p_period_end"))
+            total = 0.0
+            for r in self.tables.get("metering_records", []):
+                if str(r.get("org_id")) not in wanted:
+                    continue
+                r_start = _as_dt(r.get("period_start"))
+                r_end = _as_dt(r.get("period_end"))
+                if r_start is None or r_end is None:
+                    continue  # no window → not addressable by a window read
+                if r_start < end and r_end > start:
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
+        if fn == "metering_record_unmetered":
+            # #4779: the SQL writer's atomic upsert. Mirrors
+            # ``metering_record_unmetered`` (20260927000001): PK
+            # (org_id, lane, drop_class), ``first_observed_at`` PRESERVED across
+            # upserts, ``last_observed_at`` advanced, and the same strict
+            # argument guards (an empty org/lane or a zero count is refused —
+            # those are the states the table exists to distinguish). The FK and
+            # the drop_class CHECK are modelled too, so a caller that leans on a
+            # class the migration does not declare fails in CI (the fake is the
+            # only schema the Python lane runs against).
+            p = body or {}
+            org_id = p.get("p_org_id")
+            lane = p.get("p_lane")
+            drop_class = p.get("p_drop_class")
+            # An OMITTED p_n defaults to 1 (the SQL signature's DEFAULT); an
+            # EXPLICIT None is refused, exactly as the migration's
+            # ``IF p_n IS NULL OR p_n < 1 THEN RAISE`` does. Collapsing the two
+            # would let the fake encode a row the real RPC rejects.
+            if "p_n" in p and p["p_n"] is None:
+                raise RuntimeError(
+                    "metering_record_unmetered: p_n must be >= 1 (got NULL) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            n = int(p["p_n"]) if p.get("p_n") is not None else 1
+            # The RPC's guard is Python's own whitespace set, mirrored exactly by
+            # the migration's ``blank_chars`` (a bare ``btrim(x)`` would refuse
+            # fewer keys than the embedded lane does) — so this fake uses the
+            # Python test as well, for BOTH keys.
+            if org_id is None or not str(org_id).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_org_id is required")
+            if lane is None or not str(lane).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_lane is required")
+            if n < 1:
+                raise RuntimeError(
+                    f"metering_record_unmetered: p_n must be >= 1 (got {n}) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            if drop_class not in ("window_unresolvable",
+                                  "increment_write_unconfirmed"):
+                raise RuntimeError(
+                    "metering_record_unmetered: new row violates the declared "
+                    f"drop_class vocabulary ({drop_class!r})")
+            if not any(str(o.get("id")) == str(org_id)
+                       for o in self.tables.get("organizations", [])):
+                raise RuntimeError(
+                    "metering_record_unmetered: org FK violation for "
+                    f"{org_id!r}")
+            now = _now_iso()
+            rows = self.tables.setdefault("metering_unmetered_increments", [])
+            row = next((r for r in rows
+                        if str(r.get("org_id")) == str(org_id)
+                        and r.get("lane") == lane
+                        and r.get("drop_class") == drop_class), None)
+            if row is None:
+                row = {"org_id": str(org_id), "lane": lane,
+                       "drop_class": drop_class, "increments": 0,
+                       "last_error_type": p.get("p_error_type"),
+                       "first_observed_at": now, "last_observed_at": now}
+                rows.append(row)
+            row["increments"] = int(row.get("increments") or 0) + n
+            row["last_error_type"] = p.get("p_error_type")
+            row["last_observed_at"] = now
+            return row["increments"]
+        if fn == "metering_unmetered_for_org":
+            # #4779: the bounded per-org read (lanes x classes <= 12 rows).
+            p = body or {}
+            wanted = str(p.get("p_org_id"))
+            return [
+                {k: r.get(k) for k in
+                 ("lane", "drop_class", "increments", "last_error_type",
+                  "first_observed_at", "last_observed_at")}
+                for r in sorted(
+                    (r for r in self.tables.get(
+                        "metering_unmetered_increments", [])
+                     if str(r.get("org_id")) == wanted),
+                    key=lambda r: (r.get("lane") or "",
+                                   r.get("drop_class") or ""))
+            ]
+        if fn == "metering_unmetered_total":
+            # #4779: ONE scalar over the cohort — a row cap cannot truncate it.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            return sum(int(r.get("increments") or 0)
+                       for r in self.tables.get(
+                           "metering_unmetered_increments", [])
+                       if str(r.get("org_id")) in wanted)
+        if fn == "cohort_org_ids_since":
+            # #3665: array_agg over a bounded subquery — one row/one array,
+            # so a row cap cannot truncate the org set. Mirror the SQL's
+            # ``ORDER BY created_at, id LIMIT p_limit + 1``.
+            p = body or {}
+            since = str(p.get("p_since") or "")
+            limit = int(p.get("p_limit") or 0)
+            rows = [t for t in self.tables.get("organizations", [])
+                    if t.get("id") and str(t.get("created_at") or "") > since]
+            rows.sort(key=lambda t: (str(t.get("created_at") or ""),
+                                     str(t["id"])))
+            return [str(t["id"]) for t in rows[:limit + 1]]
         if fn == "claim_membership":
             # Emulate migration 20260813000004's SQL semantics over the
             # in-memory rows (mirrors the real SECURITY DEFINER function):
             #  1. resolve team from api_keys (lookup_hash + revoked_at IS
             #     NULL; REJECT created_via='bootstrap' session keys and
             #     expired keys)
-            #  2. idempotent re-claim: owner (team_id, user_id) → noop
+            #  2. idempotent re-claim: owner (org_id, user_id) → noop
             #  3. find the NULL-user_id active owner row → 409 already_claimed
             #     when absent
-            #  4. merge/promote when a (user_id, team_id) row exists (drop
+            #  4. merge/promote when a (user_id, org_id) row exists (drop
             #     identity row first, copy key material, reactivate) else
             #     plain link (user_id set, identity NULL)
             #  5. teams.email overwrite (unconditional); cross-team collision
             #     → email_in_use (uq_teams_email parity)
-            #  6. drop leftover placeholder (team_id='')
+            #  6. drop leftover placeholder (org_id='')
             # Errors raise RuntimeError with the RPC code embedded (the real
             # RPC raises → PostgREST 400 → supabase_control.claim_membership
             # maps the code via _CLAIM_ERROR_CODES).
@@ -193,18 +833,18 @@ class FakeControlPlane:
             if exp is not None and isinstance(exp, str) \
                     and exp <= datetime.now(timezone.utc).isoformat():  # noqa: UP017
                 raise RuntimeError("claim_membership:key_expired")
-            team_id = key["team_id"]
-            mem_rows = self.tables.setdefault("team_memberships", [])
+            org_id = key["org_id"]
+            mem_rows = self.tables.setdefault("org_memberships", [])
 
             # idempotent re-claim (noop success)
-            if any(m.get("team_id") == team_id and m.get("user_id") == user_id
+            if any(m.get("org_id") == org_id and m.get("user_id") == user_id
                    and m.get("role") == "owner" and m.get("status") == "active"
                    for m in mem_rows):
-                self._claim_migrate_created_by(team_id, user_id)
+                self._claim_migrate_created_by(org_id, user_id)
                 return None
 
             owner = next((m for m in mem_rows
-                          if m.get("team_id") == team_id
+                          if m.get("org_id") == org_id
                           and m.get("role") == "owner"
                           and m.get("user_id") is None
                           and m.get("status") == "active"), None)
@@ -213,7 +853,7 @@ class FakeControlPlane:
 
             existing = next((m for m in mem_rows
                              if m.get("user_id") == user_id
-                             and m.get("team_id") == team_id), None)
+                             and m.get("org_id") == org_id), None)
             if existing is not None:
                 # merge/promote: drop identity row FIRST, then promote
                 mem_rows.remove(owner)
@@ -227,14 +867,14 @@ class FakeControlPlane:
                 owner["user_id"] = user_id
                 owner["identity"] = None
 
-            # drop leftover placeholder (team_id='') for the user
+            # drop leftover placeholder (org_id='') for the user
             mem_rows[:] = [m for m in mem_rows
                            if not (m.get("user_id") == user_id
-                                   and m.get("team_id") == "")]
+                                   and m.get("org_id") == "")]
             # #1765: created_by migration — anon-/reg- keys in the claiming
             # team are attributed to the claimer (teams.email is NEVER
             # written by claim — demotion, migration 20260827000001).
-            self._claim_migrate_created_by(team_id, user_id)
+            self._claim_migrate_created_by(org_id, user_id)
             return None
         if fn == "user_identity_inventory":
             # #1765: mirror migration 20260827000001's SECURITY DEFINER RPC —
@@ -312,10 +952,10 @@ class FakeControlPlane:
             # whole tx back on uq_agent_signup_tokens_team).
             p = body or {}
             th = p.get("p_signup_token_hash")
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             if th:
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
-                live = [t for t in tokens if t.get("team_id") == tid
+                live = [t for t in tokens if t.get("org_id") == tid
                         and t.get("revoked_at") is None]
                 if live:
                     raise RuntimeError(
@@ -326,11 +966,11 @@ class FakeControlPlane:
                     for t in self.tables.get("agent_signup_tokens", [])):
                 # ON CONFLICT (token_hash) DO NOTHING parity
                 self.tables.setdefault("agent_signup_tokens", []).append({
-                    "token_hash": th, "team_id": tid, "created_at": None,
+                    "token_hash": th, "org_id": tid, "created_at": None,
                     "last_used_at": None, "revoked_at": None})
             return None
         if fn == "resolve_signup_token":
-            # #1709: token → team_id (revocation-aware); NULL = unknown/revoked.
+            # #1709: token → org_id (revocation-aware); NULL = unknown/revoked.
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
@@ -340,8 +980,163 @@ class FakeControlPlane:
                         and t.get("revoked_at") is None), None)
             if row is not None:
                 row["last_used_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-                return row.get("team_id")
+                return row.get("org_id")
             return None
+        if fn == "session_key_mint":
+            # #1879: the whole session-mint critical section in ONE emulated
+            # transaction, under the org lock (released at the end of THIS
+            # call — exactly like the real RPC's commit).
+            from datetime import datetime, timezone
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            user_id = p.get("p_user_id") or ""
+            now = p.get("p_created_at")
+            now_dt = _as_dt(now) or datetime.now(timezone.utc)  # noqa: UP017
+            with self._mint_org_lock(org_id):
+                key_rows = self.tables.setdefault("api_keys", [])
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("session_key_mint: org not found")
+                if self.mint_rendezvous is not None:
+                    # Deterministic interleave point: the caller is INSIDE the
+                    # lock here, so a second mint must block on it.
+                    self.mint_rendezvous()
+                rotated = False
+                rotated_prefix = None
+                if p.get("p_purpose") == "bootstrap":
+                    cap = int(p.get("p_bootstrap_cap") or 3)
+                    boot = [k for k in key_rows
+                            if k.get("org_id") == org_id
+                            and k.get("created_via") == "bootstrap"
+                            and k.get("created_by") == user_id
+                            and k.get("revoked_at") is None
+                            and (_as_dt(k.get("expires_at")) is None
+                                 or _as_dt(k.get("expires_at")) > now_dt)]
+                    if len(boot) >= cap:
+                        raise RuntimeError(
+                            "session_key_mint: bootstrap cap reached")
+                else:
+                    max_keys = p.get("p_max_api_keys")
+                    if max_keys is not None and self._slot_count(org_id, now) >= int(max_keys):
+                        # older-OTHER: live, non-bootstrap, non-expired, owned
+                        # by someone else (#750.10 / #1859 P3-1).
+                        others = [k for k in key_rows
+                                  if k.get("org_id") == org_id
+                                  and k.get("revoked_at") is None
+                                  and k.get("created_by") is not None
+                                  and k.get("created_by") != user_id
+                                  and k.get("created_via") != "bootstrap"
+                                  and (_as_dt(k.get("expires_at")) is None
+                                       or _as_dt(k.get("expires_at")) > now_dt)]
+                        others.sort(key=lambda k: k.get("created_at") or "")
+                        if others:
+                            others[0]["revoked_at"] = now
+                            # NO `_trigger_key_create` here: the real trigger is
+                            # `AFTER INSERT ON public.api_keys` only
+                            # (0015_abuse_events.sql), so a REVOKE must never
+                            # emit a key_create abuse event (the rotation branch
+                            # and the recover_team_key emulation don't either).
+                            # Review P2: emitting one inflated key_create
+                            # telemetry for rows that were never created, and
+                            # `_abuse_evaluate_keys` consumes those events.
+                            # FAIL-CLOSED RE-CHECK (#1879): the revoke frees a
+                            # slot only if the target was still live.
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                        else:
+                            cands = [k for k in key_rows
+                                     if k.get("org_id") == org_id
+                                     and k.get("revoked_at") is None]
+                            legacy = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") is None
+                                 and k.get("created_via") != "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            own_recovery = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "recovery"],
+                                key=lambda k: (k.get("last_used_at") is not None,
+                                               k.get("last_used_at") or "",
+                                               k.get("created_at") or ""))
+                            own_boot = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            rotatable = legacy or own_recovery or own_boot
+                            if not rotatable:
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotatable[0]["revoked_at"] = now
+                            rotated_prefix = rotatable[0].get("key_prefix")
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotated = True
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": ("bootstrap" if p.get("p_purpose") == "bootstrap"
+                                    else "recovery"),
+                    "created_by": user_id,
+                    "created_at": now,
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                })
+                self._trigger_key_create(
+                    org_id, p.get("p_key_id") or "",
+                    "bootstrap" if p.get("p_purpose") == "bootstrap" else "recovery")
+                return {"rotated": rotated, "rotated_key_prefix": rotated_prefix}
+        if fn == "provision_api_key":
+            # #1879: the atomic provisioned/rotate mint (cap gate + INSERT in
+            # one emulated transaction under the org lock).
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            with self._mint_org_lock(org_id):
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("provision_api_key: org not found")
+                if self.mint_rendezvous is not None:
+                    self.mint_rendezvous()
+                max_keys = p.get("p_max_api_keys")
+                credit = int(p.get("p_cap_slot_credit") or 0)
+                if (max_keys is not None
+                        and self._slot_count(org_id, p.get("p_created_at"))
+                        - credit >= int(max_keys)):
+                    raise RuntimeError("provision_api_key: key cap reached")
+                key_rows = self.tables.setdefault("api_keys", [])
+                if any(k.get("lookup_hash") == p.get("p_lookup_hash")
+                       for k in key_rows):
+                    # Mirrors uq_api_keys_lookup_hash: a plain INSERT raises,
+                    # it is NOT an ON CONFLICT no-op (the caller must never
+                    # receive a plaintext for a row it did not insert).
+                    raise RuntimeError(
+                        "provision_api_key: duplicate key value violates unique "
+                        "constraint \"uq_api_keys_lookup_hash\"")
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": p.get("p_created_via"),
+                    "created_by": p.get("p_created_by"),
+                    "created_at": p.get("p_created_at"),
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                    "name": p.get("p_name"),
+                    "graph_id": p.get("p_graph_id"),
+                    "scopes": (p.get("p_scopes") if p.get("p_scopes") is not None
+                               else []),
+                    "created_by_key_id": p.get("p_created_by_key_id"),
+                    "delegation_depth": p.get("p_delegation_depth"),
+                })
+                self._trigger_key_create(org_id, p.get("p_key_id") or "",
+                                         p.get("p_created_via"))
+                return None
         if fn == "recover_team_key":
             # #1709: keyless recovery mint — atomic cap-check + insert under a
             # lock (emulates the RPC's FOR UPDATE row serialization so the
@@ -349,19 +1144,19 @@ class FakeControlPlane:
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             lookup = p.get("p_lookup_hash") or ""
-            with self._recover_lock:
+            with self._mint_org_lock(tid):
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
                 row = next((t for t in tokens
                             if t.get("token_hash") == th
                             and t.get("revoked_at") is None
-                            and t.get("team_id") == tid), None)
+                            and t.get("org_id") == tid), None)
                 if row is None:
                     raise RuntimeError(
                         "recover_team_key: token not found or revoked")
                 if any(t.get("id") == tid and t.get("deleted_at")
-                       for t in self.tables.get("teams", [])):
+                       for t in self.tables.get("organizations", [])):
                     raise RuntimeError("recover_team_key: team deleted")
                 cap = int(p.get("p_max_api_keys") or 2)
                 key_rows = self.tables.setdefault("api_keys", [])
@@ -374,7 +1169,7 @@ class FakeControlPlane:
                     # outcome-equivalent to the SQL's count-after-insert with
                     # > cap.)
                     active = [k for k in key_rows
-                              if k.get("team_id") == tid
+                              if k.get("org_id") == tid
                               and k.get("revoked_at") is None
                               and k.get("created_via") != "bootstrap"]
                     if len(active) >= cap:
@@ -382,7 +1177,7 @@ class FakeControlPlane:
                         oldest["revoked_at"] = now_iso
                     key_rows.append({
                         "id": f"key_{tid}_{lookup[:12]}",
-                        "team_id": tid,
+                        "org_id": tid,
                         "lookup_hash": lookup,
                         "key_prefix": p.get("p_key_prefix") or tid[:8],
                         "created_via": "recovery",
@@ -401,16 +1196,16 @@ class FakeControlPlane:
                 return tid
         if fn == "revoke_signup_token":
             # #1715 (20260826000001): user-facing revocation — team-scoped +
-            # idempotent (UPDATE ... WHERE token_hash AND team_id AND
+            # idempotent (UPDATE ... WHERE token_hash AND org_id AND
             # revoked_at IS NULL); unknown/other-team/already-revoked is a
             # zero-row no-op, never an error.
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             row = next((t for t in self.tables.get("agent_signup_tokens", [])
                         if t.get("token_hash") == th
-                        and t.get("team_id") == tid), None)
+                        and t.get("org_id") == tid), None)
             if row is not None and row.get("revoked_at") is None:
                 row["revoked_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             return None
@@ -423,16 +1218,16 @@ class FakeControlPlane:
             uid = p.get("p_user_id")
             if uid is None and identity:
                 with self._identity_lock:  # atomic check+insert (register race)
-                    mem = self.tables.setdefault("team_memberships", [])
-                    # same (identity, team_id) row is an UPSERT (in-place);
+                    mem = self.tables.setdefault("org_memberships", [])
+                    # same (identity, org_id) row is an UPSERT (in-place);
                     # only a DIFFERENT team with the same unclaimed owner
                     # identity hits uq_member_identity_active
-                    team_id = p.get("p_team_id")
+                    org_id = p.get("p_org_id")
                     if any(m.get("identity") == identity
                            and m.get("role") == "owner"
                            and m.get("status") == "active"
                            and m.get("user_id") is None
-                           and m.get("team_id") != team_id
+                           and m.get("org_id") != org_id
                            for m in mem):
                         raise RuntimeError(
                             "duplicate key value violates unique constraint "
@@ -444,13 +1239,13 @@ class FakeControlPlane:
     def _provision_team_emulation(self, p: dict) -> None:
         """The provision_team RPC body (migration 0010) over the in-memory
         rows — shared by the plain RPC and the #1709 wrapper."""
-        team_id = p.get("p_team_id") or ""
-        team_name = p.get("p_team_name") or ""
+        org_id = p.get("p_org_id") or ""
+        org_name = p.get("p_org_name") or ""
         api_key = p.get("p_api_key") or ""
         lookup = p.get("p_lookup_hash")
         user_id = p.get("p_user_id")
         identity = p.get("p_identity")
-        if not team_id or not team_name:
+        if not org_id or not org_name:
             raise RuntimeError("provision_team: required parameters missing")
         # #1716 all-or-none key guard (mirrors the RPC's SQL IS NULL
         # semantics EXACTLY — Python truthiness would diverge on "" values:
@@ -469,22 +1264,22 @@ class FakeControlPlane:
                 "provision_team: exactly one of p_user_id / p_identity is required")
 
         # teams upsert on id (exactly one row)
-        team_rows = self.tables.setdefault("teams", [])
-        team = next((t for t in team_rows if t.get("id") == team_id), None)
+        team_rows = self.tables.setdefault("organizations", [])
+        team = next((t for t in team_rows if t.get("id") == org_id), None)
         # #2789: unique-name parity (migration 0011 `uq_teams_name`). The real
         # RPC upserts ON CONFLICT (id) ONLY, so a name held by a DIFFERENT team
         # raises a unique violation → PostgREST 409. Without this the fake made
         # a real production failure (stranding a paying customer) invisible to
         # tests; both create lanes key on the "HTTP 409" marker.
         if team is None and any(
-                t.get("name") == team_name and t.get("id") != team_id
+                t.get("name") == org_name and t.get("id") != org_id
                 for t in team_rows):
             raise RuntimeError(
                 'HTTP 409: duplicate key value violates unique constraint '
                 '"uq_teams_name"')
         if team is None:
-            team = {"id": team_id, "name": team_name, "tier": p.get("p_tier", "free"),
-                    "graph_name": p.get("p_graph_name", f"team_{team_id}"),
+            team = {"id": org_id, "name": org_name, "tier": p.get("p_tier", "free"),
+                    "graph_name": p.get("p_graph_name", f"org_{org_id}"),
                     "max_users": p.get("p_max_users", 1),
                     "max_graphs": p.get("p_max_graphs", 1),
                     "ops_allowance": p.get("p_ops_allowance", 10000),
@@ -498,35 +1293,35 @@ class FakeControlPlane:
                 team["email"] = p["p_email"]
             team_rows.append(team)
         else:
-            team["name"] = team_name
+            team["name"] = org_name
             if p.get("p_email"):
                 team["email"] = p["p_email"]
 
-        # membership: refresh in place (user_id,team_id) or (identity,team_id),
+        # membership: refresh in place (user_id,org_id) or (identity,org_id),
         # else insert exactly one row
-        mem_rows = self.tables.setdefault("team_memberships", [])
+        mem_rows = self.tables.setdefault("org_memberships", [])
         if user_id is not None:
             mem = next((m for m in mem_rows
-                        if m.get("user_id") == user_id and m.get("team_id") == team_id),
+                        if m.get("user_id") == user_id and m.get("org_id") == org_id),
                        None)
             anchor = {"user_id": user_id}
         else:
             mem = next((m for m in mem_rows
-                        if m.get("identity") == identity and m.get("team_id") == team_id),
+                        if m.get("identity") == identity and m.get("org_id") == org_id),
                        None)
             anchor = {"user_id": None, "identity": identity}
         if mem is None:
-            mem = {"id": uuid.uuid4().hex[:26], "team_id": team_id,
-                   "team_name": team_name, "api_key": api_key,
+            mem = {"id": uuid.uuid4().hex[:26], "org_id": org_id,
+                   "org_name": org_name, "api_key": api_key,
                    "key_hash": p.get("p_key_hash") or "",
                    "lookup_hash": lookup,
-                   "graph_name": p.get("p_graph_name", f"team_{team_id}"),
+                   "graph_name": p.get("p_graph_name", f"org_{org_id}"),
                    "role": "owner", "status": "active",
                    "created_at": None}
             mem.update(anchor)
             mem_rows.append(mem)
         else:
-            mem.update({"team_name": team_name, "api_key": api_key,
+            mem.update({"org_name": org_name, "api_key": api_key,
                         "key_hash": p.get("p_key_hash") or "",
                         "lookup_hash": lookup, "role": "owner",
                         "status": "active"})
@@ -541,22 +1336,22 @@ class FakeControlPlane:
             key_rows = self.tables.setdefault("api_keys", [])
             if not any(k.get("lookup_hash") == lookup for k in key_rows):
                 key_rows.append({
-                    "id": f"key_{team_id}_{lookup[:12]}",
-                    "team_id": team_id,
+                    "id": f"key_{org_id}_{lookup[:12]}",
+                    "org_id": org_id,
                     "lookup_hash": lookup,
-                    "key_prefix": p.get("p_key_prefix") or team_id[:8],
+                    "key_prefix": p.get("p_key_prefix") or org_id[:8],
                     "created_via": "provisioned",
                     "created_by": str(user_id) if user_id is not None else identity,
                     "created_at": None,
                     "expires_at": None,
                     "revoked_at": None,
                 })
-                self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
+                self._trigger_key_create(org_id, f"key_{org_id}_{lookup[:12]}",
                                          "provisioned")
         return None
 
 
-    def _trigger_key_create(self, team_id: str, key_id: str,
+    def _trigger_key_create(self, org_id: str, key_id: str,
                             created_via: str | None) -> None:
         """Migration 0015 trigger emulation: AFTER INSERT on api_keys →
         key_create abuse event, EXCLUDING created_via='bootstrap'."""
@@ -564,47 +1359,199 @@ class FakeControlPlane:
             return
         from datetime import datetime, timezone
         self.tables.setdefault("abuse_events", []).append(
-            {"team_id": team_id, "event_type": "key_create", "weight": 1,
+            {"org_id": org_id, "event_type": "key_create", "weight": 1,
              "key_id": key_id,
              "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
+
+    def fail_query(self, *, table=None, method=None, select=None, filters=None,
+                   match=None, times: int = 1, after_mutation: bool = False,
+                   exc: Exception | None = None) -> None:
+        """Install a fault injector (#2863). The first unexhausted injector whose
+        predicate accepts the call fires. Provide either the simple attribute matches
+        or (preferred) ``match=fn(table, method, select, filters) -> bool`` — a callable
+        does NOT go stale when a production select list changes (two review cycles were
+        lost to hand-written select literals that never matched). ``after_mutation=True``
+        applies the write THEN raises — the commit-then-lost-response case a plain
+        raise-on-N cannot express."""
+        self._faults.append({
+            "table": table, "method": method, "select": select, "filters": filters,
+            "match": match, "consumed": False,
+            "times": times, "after_mutation": after_mutation,
+            "exc": exc or RuntimeError("Supabase unreachable (simulated)"),
+        })
+        _FAULT_CPS.append(self)          # module-level registry: the guard's only view
+                                         # of a bare `FakeControlPlane()` built by a test
+
+    def unfired_faults(self) -> list[dict]:
+        """Injectors that did not do what the test intended — either never fired, or
+        fired fewer times than `times` asked for. A test MUST fail on these; a stale
+        matcher is otherwise a silent green test."""
+        return [f for f in self._faults if not f["consumed"] or f["times"] > 0]
+
+    def _take_fault(self, table, method, select, filters):
+        for fault in self._faults:
+            if fault["times"] <= 0:
+                continue
+            # The table filter applies INDEPENDENTLY of `match` — otherwise a
+            # shape-scoped injector would also fire on the other token table
+            # (the rollback and lane 3 are both select-less PATCHes).
+            if fault["table"] is not None and fault["table"] != table:
+                continue
+            if (fault["match"] is not None
+                    and not fault["match"](table, method, select, filters)):
+                continue
+            if fault["method"] is not None and fault["method"] != method:
+                continue
+            if fault["select"] is not None and list(fault["select"]) != list(select or []):
+                continue
+            if fault["filters"] is not None and list(fault["filters"]) != list(filters or []):
+                continue
+            fault["times"] -= 1
+            fault["consumed"] = True
+            return fault
+        return None
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
               method: str = "GET", json_body: dict | None = None,
-              order: str | None = None, limit: int | None = None) -> list[dict]:
+              order: str | None = None, limit: int | None = None,
+              timeout: object | None = None) -> list[dict]:
+        # ``timeout`` mirrors the real SupabaseControlPlane per-request
+        # override (#2850/#2988): the health probe passes a composed
+        # httpx.Timeout here. The fake performs no I/O, so it is accepted and
+        # ignored — but it MUST be accepted, or the probe's query would raise
+        # TypeError and /health/ready would 503 in tests.
+        _ = timeout
+        fault = self._take_fault(table, method, select, filters)
+        if fault is not None and not fault["after_mutation"]:
+            raise fault["exc"]
+        result = self._query_impl(table, select=select, filters=filters, method=method,
+                                  json_body=json_body, order=order, limit=limit)
+        if fault is not None:
+            raise fault["exc"]
+        return result
+
+    def _query_impl(self, table: str, *, select: list[str] | None = None,
+                    filters: list[tuple[str, str, object]] | None = None,
+                    method: str = "GET", json_body: dict | None = None,
+                    order: str | None = None, limit: int | None = None) -> list[dict]:
         self.query_count += 1
         # #1719 (Task 3): fidelity check BEFORE method dispatch — GET builds
         # filters in the loop below, but PATCH/DELETE flow through _matches;
         # 22P02 in prod is method-agnostic.
         if self.uuid_fidelity:
             _assert_uuid_fidelity(table, filters)
+        # #4243: the same fidelity for WRITE bodies — a JSON number bound to a
+        # timestamptz column 400s in prod (method-agnostic: PATCH and POST
+        # both carry json_body). Checked here so the raise precedes any
+        # mutation, exactly as the real seam rejects before the row changes.
+        if self.timestamptz_fidelity:
+            _assert_timestamptz_fidelity(table, json_body)
+        # #4037: an order term PostgREST would 400 on (PGRST100) must fail here
+        # too — and, like 22P02, that is method-agnostic → parse BEFORE the
+        # method dispatch below. `if order:` mirrors the real seam, which drops
+        # a falsy order (`supabase_control.query`: `if order:`), so `""`/None
+        # are NOT false refusals.
+        order_terms = _parse_order(table, order) if order else []
         if method == "PATCH":
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
-            # OAuth single-use codes / rotation (PR #1264 review P2).
+            # OAuth single-use codes / rotation (PR #1264 review P2, and the
+            # #4355 rotate claim). `_patch_lock` makes the check-then-write
+            # atomic the way the real single UPDATE statement is (see
+            # __init__) — required for the #4355 two-thread CAS test.
+            #
+            # An EMPTY JSON object updates NOTHING, so the representation is
+            # empty even when the filter matched: PostgREST "makes no
+            # updates" for a bodyless PATCH (UpdateSpec.hs, "when patching
+            # with an empty body" — `PATCH /items?select=id` + `{}` → `[]`).
+            # Returning the matched row here was the fake divergence that hid
+            # the #2642 re-review P2 empty-body 404.
+            #
+            # Validate every filter op BEFORE the empty-body return: that
+            # return scans no rows, so it would otherwise carry the query
+            # straight past _matches' unsupported-op guard (a filter the fake
+            # cannot model must raise for a bodyless PATCH too — #2642
+            # re-review P2). Validating the whole list here also makes the
+            # guard hold when an earlier filter would short-circuit the scan.
+            _validate_filter_ops(filters)
+            if not json_body:
+                return []
             updated: list[dict] = []
-            for r in self.tables.get(table, []):
-                if _matches(r, filters or []):
-                    r.update(json_body or {})
-                    if select is not None:
-                        updated.append({k: r.get(k) for k in select})
+            with self._patch_lock:
+                for r in self.tables.get(table, []):
+                    if _matches(r, filters or []):
+                        r.update(json_body or {})
+                        if select is not None:
+                            updated.append({k: r.get(k) for k in select})
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
+            if table == "account_deletions":
+                # #4029: user_id is the PRIMARY KEY. A second INSERT (a
+                # concurrent schedule racing the first) is a unique violation
+                # → PostgREST 409, which DELETE /v1/user/account treats as
+                # already-scheduled. Without this the fake would accept a
+                # duplicate the real table rejects, and the endpoint's
+                # first-write-wins promise would be untested.
+                _uid = row.get("user_id")
+                if _uid is not None and any(
+                        str(r.get("user_id")) == str(_uid)
+                        for r in self.tables.get(table, [])):
+                    raise RuntimeError(
+                        "Supabase control-plane query failed "
+                        f"({table}): HTTP 409")
             if table == "abuse_events" and row.get("created_at") is None:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
                 row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            if table == "oauth_codes" and row.get("id") is None:
+                # mirror `id bigint GENERATED ALWAYS AS IDENTITY` (0016). #3027
+                # records a redemption outcome BY id and links minted tokens
+                # with `code_id`, so a fake row with no id would make the
+                # durable path silently unwritable in tests. Derived from the
+                # stored rows (not a counter) so it also cannot collide with a
+                # row a test seeded by hand.
+                numeric = [r.get("id") for r in self.tables.get(table, [])
+                           if isinstance(r.get("id"), int)]
+                row["id"] = (max(numeric) + 1) if numeric else 1
+            # #2636 unique parity (migration 20260922000001,
+            # `idx_connectors_org_source`): ONE connector per (org_id,
+            # source_type). Without this the fake silently ACCEPTS a duplicate
+            # the real table rejects with 23505, so the handler's 409 mapping
+            # would have no behavioural proxy and a missing mapping would read
+            # as a green lane.
+            if table == "connectors" and any(
+                    r.get("org_id") == row.get("org_id")
+                    and r.get("source_type") == row.get("source_type")
+                    for r in self.tables.get(table, [])):
+                raise RuntimeError(
+                    'HTTP 409: duplicate key value violates unique constraint '
+                    '"idx_connectors_org_source"')
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)
-                self._trigger_key_create(row.get("team_id", ""),
+                self._trigger_key_create(row.get("org_id", ""),
                                          row.get("id", ""),
                                          row.get("created_via"))
+            # PostgREST honours ?select= on an INSERT with
+            # `Prefer: return=representation` too — the projection is what
+            # keeps a write path from echoing a column the read path withholds
+            # (e.g. connectors.credential_enc, #2642 re-review P1).
+            if select is not None:
+                return [{k: row.get(k) for k in select}]
             return [row]
         if method == "DELETE":
             # PostgREST row-delete semantics (used by the #302 purge).
+            #
+            # Validate every filter op BEFORE the scan: _matches only reaches
+            # its unsupported-op guard while it still has a row to test, so an
+            # EMPTY table, or an earlier filter that fails first, would skip it
+            # — an op the fake cannot model must raise for DELETE too (#2642
+            # re-review P2). Scoped to THIS branch on purpose: POST never reads
+            # ``filters`` (see _validate_filter_ops).
+            _validate_filter_ops(filters)
             self.tables[table] = [
                 r for r in self.tables.get(table, []) if not _matches(r, filters or [])
             ]
@@ -612,21 +1559,33 @@ class FakeControlPlane:
         rows = [dict(r) for r in self.tables.get(table, [])]
         for col, op, value in filters or []:
             if op == "eq":
-                rows = [r for r in rows if r.get(col) == value]
+                rows = [r for r in rows if _col_value(r, col) == value]
             elif op == "neq":
-                rows = [r for r in rows if r.get(col) != value]
+                # SQL semantics: `col <> value` is NULL (not TRUE) when either
+                # side is NULL, so a NULL column (or a NULL comparison value)
+                # never matches. Python's bare `r.get(col) != value` would
+                # KEEP the NULL row — a dialect divergence that would hide an
+                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
+                # filter silently exempting legacy NULL rows — #4140 T4).
+                rows = ([] if value is None else
+                        [r for r in rows
+                         if _col_value(r, col) is not None and _col_value(r, col) != value])
             elif op == "is":
-                rows = [r for r in rows if (r.get(col) is None) == (value is None)]
+                rows = [r for r in rows
+                        if (_col_value(r, col) is None) == (value is None)]
             elif op == "gt":
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) > value]
+                        if _col_value(r, col) is not None and _col_value(r, col) > value]
+            elif op == "gte":
+                rows = [r for r in rows
+                        if _col_value(r, col) is not None and _col_value(r, col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) < value]
+                        if _col_value(r, col) is not None and _col_value(r, col) < value]
             elif op == "lte":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) <= value]
+                        if _col_value(r, col) is not None and _col_value(r, col) <= value]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
@@ -645,32 +1604,136 @@ class FakeControlPlane:
                 # escalation decomposition's sweep/health tests.
                 raise RuntimeError(
                     f"Supabase control-plane query failed ({table}): HTTP 400")
+            if (self.missing_columns and table in self.missing_columns
+                    and order_terms
+                    and self.missing_columns[table]
+                    & {f for f, _, _ in order_terms}):
+                # Ordering by an absent column is the SAME PostgREST rejection as
+                # the `select`/`filter` drift above: real PostgREST 400s on an
+                # undefined column (PGRST204) rather than returning the rows
+                # unordered. Left accepted, it reintroduces the exact #4037 mask
+                # — an invalid order term that 400s in production but is masked
+                # in CI, with a fail-soft consumer reading `rows[0]` after
+                # `limit=1`. The user-facing outcome is identical, so the fake
+                # must not be the one place it stays invisible.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
+            # #4037: order BEFORE the projection — PostgREST orders server-side
+            # before projecting, so an ordered column need not be in `select`
+            # (the old fake sorted after the projection, silently no-oping any
+            # order on a non-selected column, e.g. `active_membership_org_ids`
+            # `select=["org_id"], order="created_at.asc"`).
+            if order_terms:
+                rows = _apply_order(rows, order_terms)
             if select:
                 rows = [{k: r.get(k) for k in select} for r in rows]
-            if order:
-                col = order.lstrip("-")
-                rows.sort(key=lambda r: r.get(col) or "", reverse=order.startswith("-"))
             if limit is not None:
                 rows = rows[:limit]
             return rows
         raise ValueError(f"unsupported method {method!r}")
 
 
+# Filter ops the fake implements. One module-level set so the PATCH
+# empty-body path can validate WITHOUT scanning rows (see
+# _validate_filter_ops) — the guard must not depend on a row existing.
+_SUPPORTED_FILTER_OPS = frozenset({"eq", "neq", "is", "gt", "gte", "lt", "lte"})
+
+
+def _validate_filter_ops(filters: list[tuple[str, str, object]] | None) -> None:
+    """Raise ValueError for a filter op the fake does not implement.
+
+    The fake's unsupported-op guard covers every method that APPLIES filters —
+    GET (in its own inline loop in ``_query_impl``), PATCH and DELETE (via this function) —
+    regardless of body, row count, or whether an earlier filter short-circuits
+    the scan.
+
+    POST is deliberately excluded: it does not read ``filters`` (it inserts the
+    body), so validating a POST filter list would newly reject a query whose
+    filters the fake — like the real client — never applies.
+
+    ``_matches`` raises the same error, but only while scanning rows and only
+    for the filters it actually reaches, so a bodyless PATCH (which scans no
+    rows), an empty table, or a filter list whose earlier predicate fails first
+    would otherwise skip it — and a test could then pass against a query
+    production would answer differently (#3665 / #2642 re-review P2).
+    """
+    for _col, op, _value in filters or []:
+        if op not in _SUPPORTED_FILTER_OPS:
+            raise ValueError(f"unsupported filter op {op!r}")
+
+
+def _col_value(row: dict, col: str) -> object:
+    """#3553: resolve a filter column — a plain column, or a PostgREST JSON path.
+
+    ``organizations.onboarding_state`` is jsonb, and the CAS guard the
+    onboarding write uses is the JSON PATH ``onboarding_state->>state_version``,
+    which is not a column. A bare ``row.get(col)`` reads every such path as
+    ``None``, and that is not a harmless no-match: ``IS NULL`` then matched
+    EVERY row while ``eq`` matched NONE — so a guarded write could never apply,
+    the empty result was read as a lost race, and the caller raised a spurious
+    ``OnboardingStateConflictError`` (measured: the receipt clear on session
+    delete, #4823). The real PostgREST evaluates the path, so the fake must
+    too, or it cannot represent the production shape — the #1719/#4243 class
+    this module exists to close.
+
+    ``->>`` yields TEXT, as Postgres does, so a non-string is rendered as JSON
+    text: the CAS guard compares that against ``str(version)``. ``->`` keeps the
+    JSON type. An absent path is NULL, which is what lets the guard's
+    ``IS NULL`` form (``expected_version == 0``) match a row whose version was
+    never written.
+    """
+    if "->" not in col:
+        return row.get(col)
+    head, rest = col.split("->", 1)
+    cur: object = row.get(head)
+    while True:
+        if rest.startswith(">"):       # ``->>``: the extra '>' is the text op
+            rest = rest[1:]
+            textify = True
+        else:
+            textify = False
+        key, _, rest = rest.partition("->")
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+        if cur is None:
+            return None
+        if not rest:
+            if not textify:
+                return cur
+            # ``->>`` is TEXT: render a non-string as JSON text, as Postgres does.
+            return cur if isinstance(cur, str) else json.dumps(cur)
+
+
 def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
-        if op == "eq" and row.get(col) != value:
+        cur = _col_value(row, col)
+        if op == "eq" and cur != value:
             return False
-        if op == "neq" and row.get(col) == value:
+        if op == "neq" and (value is None or cur is None or cur == value):
             return False
-        if op == "is" and (row.get(col) is None) != (value is None):
+        if op == "is" and (cur is None) != (value is None):
             return False
-        if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+        if op == "gt" and (cur is None or cur <= value):
             return False
-        if op == "lt" and (row.get(col) is None or row.get(col) >= value):
+        if op == "gte" and (cur is None or cur < value):
             return False
-        if op == "lte" and (row.get(col) is None or row.get(col) > value):
+        if op == "lt" and (cur is None or cur >= value):
+            return False
+        if op == "lte" and (cur is None or cur > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
+        if op not in _SUPPORTED_FILTER_OPS:
+            # #3665 review: an op this helper does not implement must RAISE,
+            # not silently no-op. Silently ignoring an op makes PATCH/DELETE
+            # match on the remaining filters — i.e. the fake mutates MORE rows
+            # than the real client would, and a test can pass against
+            # behaviour production does not have. The GET path above already
+            # raises for an unsupported op; this mirrors it. PATCH and DELETE
+            # additionally pre-validate via ``_validate_filter_ops`` (so the
+            # guard holds even when there is no row to scan) — this raise is
+            # their row-scan backstop, not their only line of defence.
+            raise ValueError(f"unsupported filter op {op!r}")
     return True
 
 
@@ -689,5 +1752,6 @@ class ErrorControlPlane(FakeControlPlane):
     def query(self, table: str, *args: Any, **kwargs: Any) -> list[dict]:
         raise self._exc
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         raise self._exc

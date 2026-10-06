@@ -23,6 +23,9 @@ should be exercised; the workflow header comment says the same).
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
 - any changed file UNKNOWN to the surface map -> full (new dirs/subsystems)
+  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES, which is
+  non-python-relevant by explicit name (#6784). There is deliberately NO
+  blanket `*.md` clause: only named files are ever exempted.
 - any changed SHARED/core module -> full (cross-cutting code wants max coverage)
 - otherwise -> tier 2 = core ∪ union(matched surfaces' test files)
   (docs-only PRs -> core set only — the always-on smoke)
@@ -36,24 +39,133 @@ Also:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_selection.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_selection.py`"
+    )
+
 import argparse
+import ast
 import json
+import math
 import os
 import re
-import sys
 from pathlib import Path
 
-SELECTION_FN_VERSION = "1.3.0"
+# 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
+# instead of two hard-coded halves, and the push matrix is emitted as the whole
+# GHA matrix object (`fast_matrix`).
+SELECTION_FN_VERSION = "1.4.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
 TESTS_DIR = REPO / "tests"
 WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 
-# #1266: the test (a)/(b) halves must stay count-balanced within this delta.
-# A tilt beyond it means someone added files to one half without rebalancing
-# (the exact drift that pushed half (a) over the watchdog cap).
+# #1266/#6135: EVERY fast shard must stay count-balanced within this delta of
+# the others — the labels are positional letters (a, b, c, …), so this is no
+# longer just the (a)/(b) pair. A tilt beyond it means someone added files to
+# one shard without rebalancing (the exact drift that pushed shard (a) over the
+# watchdog cap).
+# #3400: this is now the FALLBACK invariant, used only when the manifest
+# carries no `durations` map at all. Once measured durations exist the
+# balance invariant is DURATION (below) — LPT packs by weight, and a correct
+# pack can legitimately carry very different file counts: a few multi-minute
+# files on one side against the long tail of sub-second ones on the other.
 HALF_IMBALANCE_TOLERANCE = 3
+
+# #3400: with measured durations, the halves must stay DURATION-balanced
+# within this ratio. Index parity on the same pool leaves a tilt far above it —
+# which files land on even vs odd indices has nothing to do with what they cost
+# — while the LPT pack balances the same pool. 1.25 is loose enough for noise
+# and tight enough that a reversion to parity reds. (Do not restate either
+# figure here: both move whenever the pool does.)
+HALF_DURATION_IMBALANCE_RATIO = 1.25
+
+# #1473: weight for a fast file with no measured duration. The pack can only
+# be as good as its weights, hence the coverage guard (#3400).
+DEFAULT_FAST_WEIGHT = 2.0
+
+# #3400: `durations` rotted to 15 entries for 500 fast files (97% packed at
+# the flat default), which silently degenerated the duration-aware pack into
+# a count-based one. Floor the coverage so it cannot rot back. The check is
+# skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
+# durations is not failed) and bites once the map is populated. Do not restate
+# the pool size or the current percentage here — the durations map's own header
+# carries the sweep that measures them, and a figure copied into this comment is
+# what went stale before (it read "520 files / 96.5%" while the pool had grown).
+DURATION_COVERAGE_MIN = 0.90
+
+# #6135: the fast pool's SHARD COUNT. This is the one number that decides the
+# PR gate's critical path, because the critical path is `max(shard)`.
+#
+# It is a REVIEWED LITERAL, read from `config/ci-surfaces.yml::fast_shards`,
+# and deliberately NOT derived from the durations map per diff. A per-diff
+# derivation would make the leg-name set (`test (a)`, `test (b)`, …) drift from
+# PR to PR, and the merge rail's lane-parity (`admin-merge.sh`, keyed on job
+# NAMES) plus every branch-protection/queue reference is a REVIEWED contract —
+# a set that changes without review is exactly the hazard this number's own
+# issue (`#6135`) names. Changing it is a one-line, reviewable config edit.
+#
+# Absence of the key keeps the historical S=2 — a repo that has not adopted the
+# shard count is never failed by it.
+DEFAULT_FAST_SHARDS = 2
+# Labels are positional letters (`a`, `b`, …). The rail's lane-parity subtracts
+# the PR's job names from main's, so an S-adding diff is comparable ONLY if the
+# first two labels stay `a` and `b` — a PR whose set is a SUPERSET of main's
+# holds, a rename makes both of main's names missing and refuses every merge.
+# 26 = a..z is therefore also the hard ceiling on S.
+MAX_FAST_SHARDS = 26
+
+# W37: the CARVE-OUT pool's shard count (`config/ci-surfaces.yml::carve_shards`).
+#
+# WHY IT EXISTS. `test-carve-out` was ONE unsharded job and WAS the CI critical
+# path until W37 sharded it: measured over 23 PR runs and 3 successful main runs
+# (2026-09-30), its work was min 16.0m / p50 16.9m against a median run wall of
+# 18.6m — 91% of the wall. Meanwhile the fast band is already split nine ways,
+# so the wall was `max(9 fast shards, 1 carve-out)`, and the carve-out was the
+# pole in EVERY run examined (`test (b)`, which the objective names, ends at
+# +10.5m; it was never the pole). Sharding it converts that `max` into a
+# comparable term.
+#
+# ABSENCE KEEPS THE CURRENT SHAPE, and this is the one place this key differs
+# from `fast_shards`. There, absence means the historical S=2; here the
+# historical shape is ONE job, so absence means 1 and an unadopted repo is
+# byte-identical to today. A single shard is therefore legal (unlike
+# `fast_shards >= 2`) — removing the key must always be a safe rollback.
+DEFAULT_CARVE_SHARDS = 1
+# Same ceiling as the fast band, for the same reason: labels are positional
+# letters, and the rail's lane-parity subtracts main's names from the PR's.
+MAX_CARVE_SHARDS = 26
+
+# #6135: the per-shard WATCHDOG budget. The watchdog is PER-LEG, so a smaller
+# shard needs a smaller budget — inheriting the old 55m means a hung 6.6-minute
+# shard is detected 8× later than it should be, holding the REQUIRED aggregate
+# (`python-ci-gate`) red and blocking every merge while it spins.
+#
+# The rule is the empirically-validated headroom, not a fresh guess: the 30m
+# budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
+# ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
+# margin. The FLOOR is 2.9× the largest single fast file (`310.7 s`), so the
+# watchdog can never kill a shard below the #6133 floor.
+#
+# ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
+# `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
+# wired into `--integrity`, so the REQUIRED `manifest-integrity` check refuses
+# it. Lowering S back toward 2 is therefore an integrity FAILURE, not the
+# ceiling "keeping the validated 55m"; the remedy is a DELIBERATE ceiling raise
+# or a re-split (see the OVERRIDES line on #6145). The ceiling deliberately
+# stays 55m so the worst-case leg stays inside the job's outer
+# `timeout-minutes` — the invariant REFUSES rather than widening it.
+WATCHDOG_HEADROOM = 2.0
+WATCHDOG_FLOOR_MIN = 15
+WATCHDOG_CEILING_MIN = 55
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
 NL = chr(10)
@@ -66,11 +178,52 @@ SHARED_MODULES = (
     # surfaces (test_divergence_conformance, test_epic903_modes,
     # test_ingest_*, test_calibration) — a change here runs the full matrix.
     "tortoise/exceptions.py",
+    # #4097: cross-cutting leaf — the declared env-truthiness contract. Consumed by
+    # `core` (why, rerank, monitoring, model_adapters, frontmatter_validator,
+    # extractor_v2, backup_config, embedded_lifecycle, cimd, projection), `api`
+    # (hosted_api), `sdk` (sdk, retrieval) and `eval` (embeddings) — the `ep` and
+    # `onboarding` surfaces list the guard for coverage reasons, not because they
+    # import the leaf. A change to `env_flag`'s blank/garbage handling changes
+    # consumer behaviour on every surface, so it runs the full matrix (same
+    # rationale as exceptions.py above).
+    "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
-    "tortoise/projection/",
+    # ⚠️ #4713: naming the package's entry point rather than the whole
+    # `tortoise/projection/` directory is a deliberate coverage REDUCTION. A
+    # submodule edit now runs only the surfaces registered for it below, plus the
+    # `core` pins that exercise it — the sdk/api suites wait for the next main
+    # push. Take the `edges.py` treatment below as the model if that is wrong.
+    "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #6673: the docker-lane port/host seam, imported by 50+ test modules that
+    # are registered across every docker-lane surface (core, ep, sdk, api,
+    # eval) — `git grep -l _live_utils -- tests/` lists every file that touches
+    # it (the importers, plus a couple of mention-only references), and the count
+    # is deliberately not restated here because it drifts. A seam edit is
+    # therefore cross-surface by construction: the `_embedded.py` /
+    # `_tmpdir_hygiene.py` case below, at a larger blast radius, because the
+    # seam is now how the whole docker lane resolves its port. Without this
+    # entry a seam-only edit selects `core` and the other surfaces' consumers
+    # never run on the PR that made the edit.
+    "tests/_live_utils.py",
+    # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
+    # imported at conftest MODULE level and hand their fixtures to every surface's
+    # tests, and neither is a `test_*.py` file, so the manifest never classifies
+    # them: without these entries a change to one selected `core` only, and a break
+    # it induced in an api/eval/onboarding/ep/battery test never ran on the PR that
+    # made it (#1349/#3332/#3910). The `tests.*` half of that rule is enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
+    "tests/_tmpdir_hygiene.py",
+    "tests/_embedded.py",
+    # #5049: the verdict contract (`tests/_verdict.py`) is imported at conftest
+    # MODULE level and hands the suite-wide per-test process-global reset to
+    # every surface's tests. It is not a `test_*.py` file, so the manifest never
+    # classifies it; without this entry a change to the contract would select
+    # `core` only and a break it induced in an api/eval/ep test would never run
+    # on the PR that made it (the #1349/#3332/#3910 under-selection class).
+    "tests/_verdict.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -81,12 +234,277 @@ SHARED_MODULES = (
 # from the manifest).
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
-    "onboarding": ("tortoise/onboarding/", "website/welcome.html",
-                   "website/self-hosted.html"),
-    "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
+    "onboarding": ("tortoise/onboarding/",
+                   # #4054: the auth surface moved to the app project — the BFF's
+                   # pages now live in the dashboard's `public/` tree (vite copies
+                   # them to `dist/`, the deployed root). `website/signin.html` was
+                   # deleted outright (it 301'd to /auth and was dead).
+                   "website/apps/dashboard/public/welcome.html",
+                   "website/apps/dashboard/public/signup.html",
+                   "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
+                   "website/index.html",
+                   "website/privacy.html",
+                   # #3485: the shared cross-subdomain session bridge is a
+                   # website asset whose guard test
+                   # (test_cross_subdomain_cookie_sync.py) reads it directly.
+                   # Without this entry a bridge-only PR matched no pattern,
+                   # fell into NON_PYTHON_PREFIXES -> changed == [] -> tier-1
+                   # smoke, and the guard for the file under review never ran
+                   # (the #1349/#3332/#3616 silent-drop class). The file is
+                   # dual-registered: this surface owns the website guards,
+                   # `api` keeps its existing membership.
+                   "website/assets/supabase-session.js",
+                   # #3332: the public pages that own a guard test in this surface.
+                   # docs.html + faq.html -> test_website_docs_consistency.py;
+                   # product.html + welcome.html -> test_website_static.py;
+                   # index.html + privacy.html -> test_waitlist_form.py;
+                   # signup.html + signin.html -> test_signup_form_safety.py;
+                   # self-hosted.html -> test_harness_mcp_config.py.
+                   # Listing a path is what makes a change to it select this
+                   # surface at all — otherwise its guard test never runs.
+                   "website/docs.html", "website/faq.html",
+                   # #3673: the served skill documents and the installer belong to
+                   # this surface. The parity contract between
+                   # `tortoise/onboarding/SKILL.md` and its served mirror is
+                   # asserted by test_onboarding_variants.py, and the installer's
+                   # `SKILLS=(...)` is what the dashboard's shipped-set claim is
+                   # pinned against (test_installer_preserves_foreign_skill_
+                   # content.py, dual-registered onto this surface below).
+                   #
+                   # Before these entries a change to the SERVED copy alone matched
+                   # no pattern: `surfaces=[]` -> the parity gate ran only via the
+                   # tier-1 fallback (coverage by accident, not by design, and it
+                   # would vanish the moment the test left `tier1`). Worse, the
+                   # installer ran NO guard at all — its guard is on `core` and is
+                   # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/public/skills/",
+                   "website/apps/dashboard/public/install-tortoise-skills.sh",
+                   # #3952: the blog-admin console SPA's build config and its
+                   # committed build snapshot own the guard tests added in
+                   # tests/test_admin_return_to.py (the build base, and
+                   # document-independent resolution of the shell's asset refs).
+                   # Neither path is under a Python package prefix, so without
+                   # these entries a PR that reverts `base: '/admin/'` to the
+                   # relative form selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the same
+                   # #3616 pattern these entries sit next to, one level up.
+                   "website/apps/blog-admin/vite.config.ts",
+                   "website/apps/blog-admin/dist/index.html",
+                   # The guards read the moved Functions themselves — and not only
+                   # the gate: `test_admin_return_to.py` reads the gate by exact
+                   # path and derives the console's mount path from its directory,
+                   # `test_pages_bindings.py` rglob-scans the ENTIRE tree for env
+                   # reads (`_env_names_read_by_the_bff`), and
+                   # `test_website_docs_consistency.py` resolves routes from both
+                   # function roots. The directory is therefore the correct
+                   # granularity — not the two files that happened to break.
+                   #
+                   # #4171: this block previously named
+                   # `website/functions/admin/[[path]].ts`, which the admin-origin
+                   # move DELETED. An entry is matched by `startswith`, never
+                   # against the filesystem, so the dead path stayed "alive": a PR
+                   # touching the moved gate selected NO surface and
+                   # `test_admin_return_to.py` silently stopped guarding the file it
+                   # was written for (#1349/#3332 class, one level up — the ratchet
+                   # caught the reverse direction only). Naming single files also
+                   # left every OTHER moved Function unselectable: `auth/signup.ts`,
+                   # `_shared/auth/csrf.ts`, `api/session.ts` and the rest all
+                   # selected surfaces=[] — so a change adding an env read shipped
+                   # green with the binding guard never running. The directory
+                   # closes both holes. `test_source_patterns_all_name_something_real`
+                   # (tests/test_ci_selection.py) now fails on a dead entry.
+                   "website/apps/dashboard/functions/",
+                   # The SPA files the migrated-surface invariant reads by exact
+                   # path (`test_no_legacy_token_path.py` -> MIGRATED_SURFACES)
+                   # and that `test_admin_return_to.py` opens by name. Each of
+                   # these selected surfaces=[] before this commit, so the
+                   # (`website/apps/dashboard/src/main.jsx` is covered by the
+                   # `website/apps/dashboard/src/` directory entry below.)
+                   # legacy-token invariant could not fail on the very files it
+                   # exists to guard — including `main.jsx`, which THIS PR
+                   # rewrites (logout teardown, CSRF content-type). Same
+                   # #1349/#3332 class as the entry above; both are now covered by
+                   # `test_source_patterns_all_name_something_real`.
+                   "website/apps/blog-admin/src/lib/blog-api.ts",
+                   "website/apps/blog-admin/src/hooks/useAuth.ts",
+                   # #4171: two more guarded files this branch MODIFIED while leaving
+                   # them unselectable, found by review after the directory entry
+                   # landed. `supabase.ts` is read by exact constant in
+                   # `test_cross_subdomain_cookie_sync.py` (four STORAGE_KEY/cookie
+                   # scope assertions) and by
+                   # `test_session_bridge_fragment_retention.py`;
+                   # `blog/_shared/admin-auth.ts` by
+                   # `test_no_legacy_token_path.py`'s store-fault-vs-signed-out
+                   # semantics guard. Both are non-tier-1 `onboarding` guards, so
+                   # editing these files shipped green with their guard never
+                   # running — the same #1349/#3332 class, and inconsistent with
+                   # the sibling entries directly above.
+                   "website/apps/blog-admin/src/lib/supabase.ts",
+                   "website/functions/blog/_shared/admin-auth.ts",
+                   # #3523: the dashboard's unknown-address guard
+                   # (tests/test_dashboard_unknown_address.py) reads the Pages
+                   # routing inputs for app.premiselabs.co plus the app's
+                   # location.pathname branches. `website/` sits in
+                   # NON_PYTHON_PREFIXES and neither path is under a Python
+                   # package prefix, so without these entries a PR that deletes
+                   # 404.html, adds a `/* / 200` catch-all, or adds an unrouted
+                   # pathname branch selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the
+                   # #1349/#3332/#3616 silent-drop class, which registration
+                   # alone does not fix (registration only makes the file
+                   # CLASSIFIED; selection is what makes it RUN). `src/` is a
+                   # directory because the anti-drift check scans every non-test
+                   # source module for pathname branches, not just main.jsx.
+                   "website/apps/dashboard/public/_redirects",
+                   "website/apps/dashboard/public/404.html",
+                   "website/apps/dashboard/src/",
+                   # #3048: `functions/assets/[[path]].ts` (the missing-asset 404)
+                   # is already covered by the `website/apps/dashboard/functions/`
+                   # directory entry above, so no entry is added for it here.
+                   # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
+                   # the Stripe ?session_id= return) are BUILT here, so a change to
+                   # the server-side return path must run the guard too — otherwise
+                   # public/_redirects goes stale against it and the guard stays
+                   # green: the same silent-drop class this entry exists to close.
+                   "tortoise/hosted_api.py",
+                   # #3950: the blog-discoverability guard
+                   # (test_website_docs_consistency.py
+                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
+                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # page means a PR touching ONLY that page selects no surface
+                   # (surfaces=[], full=False) and the guard never runs — verified
+                   # before listing: `--changed-files website/tos.html` yielded
+                   # surfaces=[] while website/product.html yielded ['onboarding'].
+                   # That is the #1349/#3332 silent-drop class one more time: the
+                   # guard silently stops covering the page it was written for.
+                   # The ratchet is now two-directional, so adding a guarded page
+                   # without listing it here FAILS a test instead of silently
+                   # shrinking coverage: `test_every_source_pattern_is_selectable`
+                   # (tests/test_ci_selection.py) checks entry -> runs, and
+                   # `test_every_in_scope_page_is_selectable_by_ci`
+                   # (tests/test_website_docs_consistency.py) checks the reverse —
+                   # that every page in the blog guard's derived set reaches a
+                   # surface through this tuple.
+                   "website/security.html", "website/tos.html",
+                   "website/license.html", "website/dpa.html",
+                   "website/aviso-privacidad.html",
+                   # #3436: the remaining top-level page, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
+                   # (tests/test_website_docs_consistency.py), whose scope is
+                   # DERIVED as `website/*.html`. Their absence was verified
+                   # before listing: `select(["website/invite-accept.html"])`
+                   # returned surfaces=[] with the guard absent from
+                   # test_files, so a duplicate id could land on the invite
+                   # landing page without the guard running on the PR that
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
+                   # #4054: `invite-accept.html` moved to the app project with the
+                   # rest of the auth pages, so its entry follows it —
+                   # `website/invite-accept.html` no longer exists, and the stale
+                   # entry was caught by `test_source_patterns_all_name_something_real`
+                   # (tests/test_ci_selection.py) the moment this branch merged main.
+                   "website/404.html",
+                   "website/apps/dashboard/public/invite-accept.html",
+                   # The design-partner one-pager. `noindex`, so it is out of the
+                   # #3950 blog guard's scope — but NOT out of the element-id
+                   # uniqueness guard, whose scope is every served document: a
+                   # noindex page is still a page whose own script runs, and
+                   # duplicate ids are invalid in it. Without this entry a PR
+                   # touching only this page selects no surface and the id guard
+                   # never executes on it.
+                   "website/design-partners-intro.html",
+                   # The shared href extractor both blog-guard layers call
+                   # (tests/test_website_docs_consistency.py here, and
+                   # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
+                   # job, which CI runs on every PR regardless of selection).
+                   # Without this entry, editing ONLY the extractor selects core
+                   # and does NOT run the static guard — so the file implementing
+                   # the guard's rule could be changed without running
+                   # `test_rendered_hrefs_ignores_non_rendered_markup`, the test
+                   # that pins that rule. Same #1349/#3332/#3616 class as the
+                   # pages above, one level up: the helper needs the same
+                   # reachability guarantee as the pages it serves.
+                   # Deliberately NARROW rather than promoted to SHARED_MODULES:
+                   # this file has a single matrix consumer, and the full matrix
+                   # would buy nothing the E2E consumer is not already given.
+                   "tests/_html_links.py",
+                   # #3950 review: two more inputs the guard DERIVES its scope from,
+                   # so each changes guard coverage without changing a page.
+                   # `website/_redirects` is what `_canonical_redirect_targets()`
+                   # reads to drop redirected pages from scope, and
+                   # `website/functions/blog/[[path]].ts` is the Function
+                   # `_function_serves()` resolves the blog link against. A
+                   # routing-only PR could therefore silently shrink or break the
+                   # guard while selecting NO surface (surfaces=[], full=False) —
+                   # the same #1349/#3332/#3616 silent-drop class, applied to the
+                   # derivation's own inputs rather than to its output.
+                   "website/_redirects",
+                   "website/functions/blog/[[path]].ts",
+                   # #4316: the agent API Function (create / edit / DELETE) owns
+                   # the guard in tests/test_blog_agent_delete_guard.py, which
+                   # executes it under Node. Without this entry a PR touching
+                   # ONLY the DELETE guard (posts/[[path]].ts) selects NO surface
+                   # (surfaces=[], full=False) and the guard never runs on the
+                   # very PR that owns it — the #1349/#3332/#3616 silent-drop
+                   # class the entries above exist to close, one level down.
+                   # Directory granularity, deliberately: the sibling Functions
+                   # (generate-seo/-cover, purge) share the API's auth + env
+                   # reads, and naming single files is what left every other
+                   # moved Function unselectable in #4171.
+                   "website/functions/blog/api/",
+                   # #3616: the deploy-binding gate is a PAIR — the checker and
+                   # the manifest it reads. Neither path is under a Python
+                   # package prefix, so without these two entries a PR that
+                   # edits the gate's logic or downgrades a binding to
+                   # `recommended` selects NO surface (surfaces=[], full=False)
+                   # and test_pages_bindings.py never runs on the PR that owns
+                   # it. That is the #3616 pattern one level up: the thing that
+                   # decides whether the gate works would not itself be gated.
+                   "tools/check_pages_bindings.py",
+                   "config/required-bindings.yml",
+                   # #3806: the ship-test instrument and its guard. The guard test
+                   # (tests/test_ship_test_onboarding.py) is registered in BOTH
+                   # `core` (its generic probe helpers) and `onboarding` (the
+                   # onboarding surface it measures). Without this entry a change
+                   # to the instrument alone selects NO surface (`tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, and the docs-only return
+                   # bypasses the `core` fallback) so its guard never runs on the
+                   # PR that edits it — the #3261/#3616/#3910 silent-drop class.
+                   "tools/ship_test_onboarding.py",
+                   # #3620: the Pages UPLOAD-ROOT gate is a pair too — the
+                   # preflight checker and the reviewed classification it reads.
+                   # A PR that adds a top-level entry under website/ (or edits
+                   # the checker) must select this surface, or the ratchet that
+                   # classifies the new entry never runs on the PR that owns it.
+                   "tools/check_pages_upload_root.py",
+                   "config/pages-upload-classification.txt"),
+    # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
+    # A review pointed out that adding it would be a coverage DOWNGRADE: an
+    # unlisted path falls into the unknown-path branch -> FULL matrix (fail
+    # closed), whereas listing it selects only `onboarding`. Today the two tests
+    # that read that workflow both live in onboarding, so nothing is lost — but
+    # a future core-registered test reading it would silently stop running on
+    # the PR that edits it. Fail-closed is the right default for the file that
+    # owns the deploy.
+    "ep": ("tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
+            # #3849: the ask PIPELINE now lives here (moved out of
+            # tortoise/sdk.py, which is a shared module -> FULL matrix). It
+            # is the only home of run_ask_lane/run_ask_assembled, so an
+            # ask_lane-only change must select sdk — otherwise the lane's
+            # own suites (test_ask_sdk / test_assembly_sdk /
+            # test_ask_regression_llm / test_d3_session_identity) silently
+            # stop running (fallback to core ran NO ask tests).
+            "tortoise/ask_lane.py",
             # ask-lane shared vocabulary/gating: a PR touching ONLY these
             # must select sdk so test_ask_sdk.py (+ ask reader/calibration
             # pins) run — the old fallback to core ran NO ask tests.
@@ -94,12 +512,55 @@ SOURCE_PATTERNS = {
             # transport.py is dual-wired with api: its only direct unit test
             # is test_metering.py::test_selfhost_transport_exemption.
             "tortoise/schemas.py", "tortoise/transport.py",
-            # #2071: the spot-check tools are the product ask-lane QA — a
+            # #2071: the spot-check tools are the eval-lane ask QA — a
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
-            "tools/ask_spotcheck_probe.py"),
-    "api": ("tortoise/hosted_api.py", "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            "tools/ask_spotcheck_probe.py",
+            # #3910: the ask-lane recall bench is the same QA family —
+            # tests/test_ask_retrieval_levers.py pins the `_retrieve_pipeline`
+            # it mirrors, so a bench-only PR must select `sdk` rather than
+            # drop to tier-1 smoke with that guard test never running.
+            # Refs #2089, whose criterion 1 this entry satisfies.
+            "tools/ask_recall_bench.py",
+            # #3914: gen_ask_transcripts.py OWNS the seeder whose shape the
+            # committed transcript goldens and tests/test_ask_seed_shape.py
+            # pin. Before this entry the flat "tools/" prefix swallowed the
+            # path, so a seeder-only PR selected NO surface (surfaces=[],
+            # tier-1 smoke only) and both guards ran nowhere — the same
+            # #1349/#3332/#3910 silent-drop class, on the file that
+            # manufactures the graph those guards read.
+            "tools/gen_ask_transcripts.py",
+            # B6 objective 4: the answer-shape instrument is the ask-lane's
+            # shape measurement (it drives sdk.ask, build_reader_model and
+            # the shipping tortoise_search/tortoise_recall handlers to
+            # compute shape_rate). Same family and same silent-drop trap as
+            # the entries above: the flat "tools/" prefix would swallow a
+            # shape-rate-only PR into tier-1 smoke and the ask-lane tests
+            # would not run where the measurement changed.
+            "tools/ask_shape_rate.py",
+            "tortoise/projection/edges.py"),
+    "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
+            "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            # #3154: hosted_api.py imports hosted_backup.py at module level (the
+            # backup/restore/import endpoints), and the boolean-index audit lives
+            # there — without this entry a hosted_backup.py-only change matched
+            # no pattern and fell through to `core`, skipping the api-registered
+            # tests that pin it (test_graphcopy_boolean_index_3154.py,
+            # test_hosted_backup.py, test_dr_endpoints.py). Paired with
+            # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
+            # test_backup_multigraph_e2e.py, test_backup_watcher.py,
+            # test_alert_store.py) also pin it.
+            # #4367: email_notify.py OWNS `_build_invite_link` (and the invite
+            # sender itself). `tests/test_email_integration_resend.py` —
+            # registered in `api` — is the guard that pins the invite-link
+            # contract and replays the recorded accept-page cassette, and
+            # `test_email_notify.py` (also `api`) pins the sender. Without this
+            # entry an email_notify.py-only change matched no pattern, fell
+            # through to `core`, and NEITHER guard ran on the PR that can break
+            # them — the regression was caught only post-merge, on push to
+            # main. Same silent-drop shape as the #2938/#3154 entries above.
+            "tortoise/email_notify.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -108,7 +569,86 @@ SOURCE_PATTERNS = {
             # here (in addition to sdk): its only direct unit test is
             # test_metering.py::test_selfhost_transport_exemption.
             "tortoise/metering.py", "tortoise/selfhost.py",
-            "tortoise/transport.py"),
+            "tortoise/transport.py",
+            # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
+            # `extractor.py`, `m0.py` and `__main__.py` all write through.
+            # Without this entry a `tortoise/api.py`-only change matched no
+            # pattern, fell through to `core`, and skipped the api-registered
+            # tests that pin it (test_api.py, test_attribution_actor.py,
+            # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
+            # its pinning tests are registered across api, core AND ep, so the
+            # named-surface match must not drop `core` (see CORE_ALSO).
+            "tortoise/api.py",
+            # #3036: tortoise/oauth.py is the hosted OAuth implementation, and
+            # its pinning tests are `api`-registered (test_oauth_mcp.py,
+            # test_oauth_token_fault.py, test_3036_oauth_retention.py,
+            # test_attribution_actor.py, test_user_identity_authority.py) plus
+            # `api`+`core` (test_control_plane_offload_3498.py). Without this
+            # entry an oauth.py-only change selected no named surface and fell
+            # through to `core`, silently skipping ALL of those — the
+            # #2938/#3154/#4367 silent-drop class, on the file a retention- or
+            # token-flow fix must change. Paired with CORE_ALSO so the
+            # core-registered half is not dropped by the named-surface match.
+            "tortoise/oauth.py",
+            # #3496: the consent page pins its browser auth client to a CDN
+            # specifier whose version must equal the VENDORED bundle the
+            # behavioural harness executes (test_oauth_consent_pkce.py, api).
+            # `website/` is in NON_PYTHON_PREFIXES, so a vendor-only bump matched
+            # no pattern and fell through to tier-1 smoke — the version pin
+            # would never run on the PR that can break it, and neither would the
+            # harness that executes the very file being bumped (the
+            # #1349/#3332/#4171 silent-drop class). `_selection_relevant()` lets
+            # a SOURCE_PATTERNS match beat the prefix filter, so this entry is
+            # what makes the bump select `api`.
+            "website/apps/dashboard/public/vendor/",
+            # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
+            # and `test_bridge_table.py` (registered in `api`) is the drift gate
+            # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface (`surfaces: []`, `full:
+            # false`) and the gate never ran on precisely the PR that can break
+            # it. Named here because a SOURCE_PATTERNS match beats the
+            # non-python skip. A docs-only hand-edit of the generated file still
+            # skips THIS matrix by the repo's deliberate docs-PR policy; that
+            # direction is covered instead by the required `docs` job, which runs
+            # `tools/bridge_table.py --check` on every PR (#4454).
+            "tools/bridge_table.py",
+            # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
+            # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
+            # (registered in `api` + `core`) is the drift gate. Same shape as the
+            # 0.1 entry directly above and the same reason: a generator-only edit
+            # is swallowed by the flat `tools/` prefix and the gate never runs on
+            # the PR that can break it (a docs-only hand-edit is covered by the
+            # required `docs` job's `--check` instead — #4454).
+            "tools/mcp_rename_table.py",
+            # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
+            # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the
+            # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface and the gate never ran on
+            # the PR that can break it. The generated doc is NOT committed (#5373:
+            # gitignored, generated on demand), so no hand-edited copy can appear
+            # in a PR for the docs-PR policy to skip.
+            "tools/sdk_rename_table.py",
+            # #4282 Phase 0.4 + 1.1: `tools/sdk_surface.py` derives the declared
+            # `TortoiseSDK` public surface and GENERATES `config/sdk-surface.json` +
+            # `docs/product/sdk-surface-declaration.md`; `test_sdk_surface.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
+            # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
+            # selected NO surface and the gate never ran on the PR that can break it.
+            # A docs-only hand-edit of the generated doc still skips THIS matrix by the
+            # repo's deliberate docs-PR policy; the required `docs` job runs
+            # `tools/sdk_surface.py --check` on every PR instead (#4454).
+            "tools/sdk_surface.py",
+            # #5373: `tools/registry_integrity.py` is the fail-closed validator
+            # paired with `merge=union` on the two config registries, and
+            # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
+            # is its proof. Same gap as the generators above: `tools/` is in
+            # NON_PYTHON_PREFIXES, so a validator-only edit selected NO surface
+            # (`surfaces: []`, `full: false`) and the fail-closed proof never ran
+            # on precisely the edit that can neuter it — the #1349/#3332/#3616
+            # silent-drop class. The registry it guards is config/, not api-owned,
+            # which is why the test is ALSO registered in `core`.
+            "tools/registry_integrity.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -122,12 +662,86 @@ SOURCE_PATTERNS = {
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
              "graph-scripts/backfill_embeddings.py",
+             # #3359: the per-session cost report CLI consumes the eval-owned
+             # versioned PRICING_MAP (tools/longmem_eval/costing.py) and is
+             # exercised by tests/test_capture_cost_measurement.py — without
+             # this entry a report-CLI-only change selects NO surface
+             # (surfaces=[], full=False) and that test never runs on the PR
+             # that owns the launch-gate number (the #3616 pattern).
+             "tools/capture_cost_report.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
              "tortoise/embeddings.py", "tortoise/cross_lens.py"),
     # core is the fallback for any other python-relevant path
 }
+
+# #2938: a SOURCE_PATTERNS match REPLACES the `core` fallback in select() —
+# the named surface's file list is more specific than the always-on engine
+# set. That is wrong for a source whose pinning tests are registered across
+# surfaces: `tortoise/api.py` (EventAPI) is imported at module level by 16
+# `core`-registered tests (test_projection, test_extractor, test_m1/m2, the
+# de2e* suite, …) plus the api-registered trio, and a named-surface match
+# would run only the selected surface's half of them. A path listed here adds
+# `core` alongside its matched surface(s) — narrower than promoting the whole
+# module to SHARED_MODULES (which forces the full matrix).
+# Paths listed here ADD `core` alongside whatever surface they matched.
+#
+# #4207/#4351: `tools/skip-guard.py` is the file the frozen-nodeid manifest is
+# enforced by, and BOTH of its pinning tests (`tests/test_skip_guard.py`,
+# `tests/test_ci_expected_manifests.py`) are `core`-registered. `tools/` IS in
+# NON_PYTHON_PREFIXES (a tools-only change is treated as non-python-relevant), and
+# the file matches no SOURCE_PATTERN either, so a follow-up change to
+# `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
+# changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
+# the file this PR modifies.
+#
+# #4069: the temp-dir sweep is test-infra whose guard tests
+# (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
+# core-registered. `_selection_relevant()` consults CORE_ALSO, so
+# this entry has a DUAL role: it admits a `tools/` path past the
+# flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+# adds `core` and marks the path found — so a tool-only change
+# selects `core` instead of the unknown-path fail-closed full
+# matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+# silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+# tuple is redundant for any path already listed here.
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
+             "tortoise/projection/edges.py",
+             "tools/tmpdir_sweep.py",
+             # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
+             # tools/queue_resweep.py-only change was filtered out BEFORE the
+             # "not matched -> core" fallback and took the docs-only early return —
+             # `select(["tools/queue_resweep.py"])` yielded NO surface, so the guard
+             # registered under `core` never ran on the file it guards (the
+             # #1349/#3332/#3616 silent-drop class, and exactly the false "the core
+             # fallback covers it" claim #3261 removed from this file). The CORE_ALSO
+             # entry makes `_selection_relevant()` keep the path, so `core` (and this
+             # tool's own guard) is selected. Pinned by
+             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
+             "tools/queue_resweep.py",
+             # #6138 review P1: the queue-conflict census owns
+             # tests/test_queue_conflict_census.py, which is `core`-registered,
+             # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool — so a census-only change
+             # filtered to `changed == []`, took the docs-only early return, and
+             # fell back to tier-1 smoke: the suite that pins the census never
+             # ran on the PR that edits it (the #1349/#3332/#3616 silent-drop
+             # class, and the same gap tools/drift-guard.py carries).
+             "tools/queue_conflict_census.py",
+             # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
+             # `core`-registered, but `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
+             # tools/drift-guard.py — so a guard-only fix selected NO surface,
+             # dropped to tier-1 smoke, and never ran the tests that pin the
+             # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
+             # and the same defect #4174 describes a gate having.
+             "tools/drift-guard.py",
+             # #3036: oauth.py is pinned by BOTH api-registered tests
+             # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
+             # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
+             # `api` match must not drop the core half.
+             "tortoise/oauth.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -136,6 +750,66 @@ NON_PYTHON_PREFIXES = (
     "capability/", "services/", "integrations/", "apps/", "spike/", "tools/",
     ".ci-checks/", "supabase/",
 )
+
+# ROOT-LEVEL files with a VERIFIED ZERO-READER census (#6784).
+#
+# ⛔ THE HEADLINE CASE OF #6784 IS NOT FIXABLE THIS WAY. The issue assumed a
+# root-level prose file is "not python-relevant". In THIS repo it usually is:
+# the root files are deliberately PINNED by tests across several surfaces, so
+# allowlisting one makes its guard skip on exactly the PR that edits it (measured
+# on README.md and `test_embedded_durability_claim.py`, review cycle 1), and a
+# single-surface CORE_ALSO claim is no safer because its readers span `core`,
+# `api` and `tests/bench`.
+#
+# Membership is ONLY a root file with NO reader. The rule is enforced by
+# `tests/test_ci_selection.py::test_no_allowlisted_root_file_has_a_reader`, which
+# derives the readers per member rather than listing names.
+#
+# ⛔ SCOPE OF THAT GUARD, stated rather than overclaimed (review cycle 4, P2):
+# it is a LITERAL-NAME grep over the roots `tests tools scripts/ .github
+# tortoise`. It does NOT see a reader that finds a root file by GLOB or walk
+# (`REPO.glob("*.md")`), nor one outside those roots (e.g. `docs/`). Both were
+# demonstrated GREEN against it. So this tuple is safe against the readers the
+# census searched, NOT against every conceivable reader — before adding a name,
+# grep for it yourself across the WHOLE tracked tree.
+#
+# A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO instead — which
+# is also why `_keep_changed` tests a CLAIM before this tuple.
+#
+# These three are stray committed artifacts under a dot-prefix or an obvious
+# scratch name, not project files a reader could be pinned to.
+ROOT_NON_PYTHON_FILES = frozenset({
+    ".scope-1894.md", ".scope-comment-2578.md", "pr-body.md",
+})
+
+
+def _is_safe_root_file(path: str) -> bool:
+    """True only for a ROOT-level path NAMED in the #6784 allowlist.
+
+    Root-level only (any path containing "/" is never safe here, so a
+    subdirectory doc keeps whatever behaviour its prefix/fallback already had),
+    and NAME-only: an earlier revision also accepted any root `*.md`, which
+    admitted README.md/CHANGELOG.md/CONTRIBUTING.md — all read by tests — so the
+    pattern clause was removed along with them.
+    """
+    return "/" not in path and path in ROOT_NON_PYTHON_FILES
+
+
+# website/ paths that ARE selection-relevant (#3332).
+#
+# Superseded by the generic rule in select() (`_selection_relevant`): a path that
+# SOURCE_PATTERNS already matches is selection-relevant whatever prefix it sits
+# under, so it no longer needs a second hand-maintained tuple. Kept empty as a
+# documented tombstone rather than deleted, so the next reader finds the reason
+# instead of re-inventing the same broken mirror.
+#
+# Why the mirror was the wrong shape (twice: #1349 for tools/, #3332 for
+# website/): the mirror is only as complete as whoever last edited it, and a
+# missing entry fails SILENTLY — the path is filtered to `changed == []`, the PR
+# drops to tier-1 smoke, and the guard test written for that exact file never
+# runs. SOURCE_PATTERNS is the single source of truth; the ratchet that keeps
+# this true is tests/test_ci_selection.py::test_every_source_pattern_is_selectable.
+SITE_CARVEOUTS: tuple[str, ...] = ()
 
 # tools/ paths that ARE python-relevant for selection (#1349). The flat
 # NON_PYTHON_PREFIXES tuple above includes "tools/", which would swallow
@@ -150,13 +824,21 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
-    # #2071: the product-lane QA spot-check tools (ask_spotcheck + the
+    # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must
     # select the sdk ask-lane surface, not drop to tier-1 smoke.
     "tools/ask_spotcheck.py",
     "tools/ask_spotcheck_consistency.py",
     "tools/ask_spotcheck_probe.py",
+    # #3914: the transcript-golden generator's seeder is what
+    # tests/test_ask_seed_shape.py + tests/test_ask_regression_llm.py pin —
+    # same carve-out as the spot-check harnesses above.
+    "tools/gen_ask_transcripts.py",
+    # B6 objective 4: the answer-shape instrument — same carve-out reason
+    # as gen_ask_transcripts.py above (without it the flat "tools/" prefix
+    # silently drops the path to tier-1 smoke).
+    "tools/ask_shape_rate.py",
     # #2159 review P2-3: the diff-gate selector itself must never classify
     # as docs-only (the two gated legs would skip AND the wiring pins in
     # tests/test_ci_selection.py would never run on the PR that owns them).
@@ -164,12 +846,183 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
+    # #B7 (#3674): the activation-scorecard cohort roll-up. Its `roll_up`
+    # summing logic owns part of tests/test_activation_scorecard.py; without
+    # this carve-out a cohort-script-only change selects NO surface and the
+    # suite that pins it never runs. No SOURCE_PATTERN matches this path, so it
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs,
+    # which is the safe outcome for a file that a metrics number depends on.
+    "tools/activation_cohort.py",
+    # #3261: the pre-dispatch collision check (#3061) owns
+    # tests/test_collision_preflight.py. Without this carve-out a
+    # preflight-only change is swallowed by the flat "tools/" prefix,
+    # `changed` comes back empty, and select() takes the docs-only path
+    # (surfaces=[] -> tier-1 smoke) — so the file's own guard test never
+    # runs on the PR that changes it. The assumption that such a change
+    # already "falls back to core" was never true: the early docs-only
+    # return bypasses the `if not matched: matched.add("core")` fallback
+    # entirely.
+    # No SOURCE_PATTERNS entry matches it, so like tools/ci_selection.py
+    # it lands in the unknown-path branch -> FULL matrix (fail closed).
+    # A narrower core-only mapping is possible but not needed: a
+    # collision-check change is rare and fail-closed is the safe default.
+    "tools/collision_preflight.py",
+    # #4408: the local-branch reaper (tools/branch_reaper.py) owns
+    # tests/test_branch_reaper.py. Same silent-drop class as the preflight
+    # carve-out above: the flat "tools/" prefix would swallow a reaper-only
+    # change, `changed` comes back empty, select() takes the docs-only path and
+    # the reaper's mutation tests never run on the PR that changes it. No
+    # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
+    # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
+    "tools/branch_reaper.py",
+    # #7017: the container-engine probe (tools/engine_probe.py) owns
+    # tests/test_engine_probe.py. Exact same silent-drop class as the two
+    # reaper carve-outs below: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow an engine_probe-only change, `changed`
+    # comes back empty, select() takes the docs-only path, and the probe's
+    # suite never runs on the PR that changes it. No SOURCE_PATTERNS entry
+    # matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for the tool that decides whether a
+    # graph failure is a graph failure at all.
+    "tools/engine_probe.py",
+    # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
+    # tests/test_run_reaper.py. Exact same silent-drop class as the
+    # branch-reaper carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow a reaper-only change, `changed` comes
+    # back empty, select() takes the docs-only path, and the run-reaper's
+    # mutation tests never run on the PR that changes it. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for a tool that CANCELS CI runs.
+    "tools/run_reaper.py",
+    # #2573: the CI embedder gate (tools/embedder_provision.py) owns
+    # tests/test_embedder_provision.py. Same silent-drop class as the
+    # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
+    # change to the gate alone would classify as docs-only (surfaces=[] ->
+    # tier-1 smoke) and its own wiring/behaviour tests would never run on the
+    # PR that edits it.
+    "tools/embedder_provision.py",
+    # #4290: the finding-provenance gate (tools/finding_provenance.py) owns
+    # tests/test_finding_provenance.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return — so the gate's own falsification
+    # suite would never run on the PR that changes the gate. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed). Pinned by
+    # test_ci_selection.test_finding_provenance_tool_change_fails_closed_to_full.
+    "tools/finding_provenance.py",
+    # #3827: the embedded-lane evidence harness owns
+    # tests/test_embedded_evidence.py. Same silent-drop class as the preflight
+    # carve-out above: no SOURCE_PATTERNS entry matches the path, so a
+    # harness-only change is swallowed by the flat "tools/" prefix, `changed`
+    # comes back empty, and select() takes the docs-only return — the harness's
+    # own guard test never runs on the PR that edits the harness. That is the
+    # exact "proxy silent in the case it exists to cover" class this harness is
+    # written to detect, so it must not apply to the harness itself.
+    "tools/embedded_evidence.py",
+    # #2718/#4860: the eval-key isolation launcher owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/run-with-eval-keys.sh`, so a
+    # wrapper-only change (e.g. a fingerprint-format edit, or a change to the
+    # managed-key set) would come back as `changed=[]`, select() would take the
+    # docs-only return, and the wrapper's own guard suite would never run on
+    # the PR that changed the wrapper. No SOURCE_PATTERNS entry matches a `.sh`
+    # path, so it lands in the unknown-path branch -> FULL matrix (fail closed)
+    # — the safe default for the file that owns provider-key isolation.
+    # Pinned by
+    # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
+    "tools/run-with-eval-keys.sh",
+    # #4503: the edge census/probe (tools/edge_census.py) owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as every carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return (surfaces=[] -> tier-1 smoke) — so
+    # the instrument's own guard tests would never run on the PR that changes
+    # the instrument. Verified live before adding: `--changed-files
+    # tools/edge_census.py` returned `"surfaces": []`. No SOURCE_PATTERNS
+    # entry matches the path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed), the same treatment tools/finding_provenance.py and
+    # tools/embedded_evidence.py get. Pinned by
+    # test_ci_selection.test_edge_census_tool_change_fails_closed_to_full.
+    "tools/edge_census.py",
+    # #5050: the measured-durations-map validator (tools/ci_manifest.py) owns
+    # tests/test_ci_manifest.py. Same silent-drop class as the
+    # collision-preflight carve-out above: no SOURCE_PATTERNS entry matches the
+    # path, so a validator-only change is swallowed by the flat "tools/" prefix
+    # in NON_PYTHON_PREFIXES, `changed` comes back empty, and select() takes the
+    # docs-only return — the validator's own verdict-boundary tests would never
+    # run on the PR that changes the validator. Registering
+    # tests/test_ci_manifest.py under `surfaces: core` does NOT cover this: the
+    # early docs-only return bypasses the `matched.add("core")` fallback, so a
+    # tool-only change selects NO surface at all. It lands in the unknown-path
+    # branch -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_manifest_tool_change_fails_closed_to_full.
+    "tools/ci_manifest.py",
+    # #5050: the sole writer of the measured `durations` map (tools/ci_timing.py)
+    # is pinned by the same suites as the validator it feeds:
+    # tests/test_ci_manifest.py holds the `VALUE_FLOOR ==
+    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin
+    # (`test_the_floor_is_the_writers_own`,
+    # `test_the_writers_precision_is_the_one_this_check_assumes`) — the two
+    # contracts the validator ASSUMES about the writer — and
+    # tests/test_ci_timing.py covers the writer's refresh path. A writer-only
+    # change matches no SOURCE_PATTERNS entry, so without this carve-out the
+    # flat "tools/" prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only return — a writer drift would merge green and red
+    # `main` with neither suite having run. It lands in the unknown-path branch
+    # -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_timing_tool_change_fails_closed_to_full.
+    "tools/ci_timing.py",
+    # #6139: the PR lead-time decomposition owns tests/test_pr_lead_time.py,
+    # whose guards pin its residence rule (a zero-length `Mergify Merge Queue`
+    # run is a queue EVALUATION, not residence — measured 6.6x on PR #6106), its
+    # gate clamp into the PR's own life (a gate earlier than created_at made
+    # seconds_a negative and aborted the WHOLE run on PR #5137), and its
+    # exit-code contract (an unobserved read is UNKNOWN, never 0). Same
+    # silent-drop class as the carve-outs above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/pr_lead_time.py`, so a tool-only edit
+    # comes back as `changed=[]`, select() takes the docs-only early return —
+    # which bypasses the `if not matched: matched.add("core")` fallback
+    # entirely — and NOT ONE of those guards runs on the very change that can
+    # break them. An earlier attempt relied on the ci-surfaces.yml `core`
+    # registration alone and was wrong for exactly this reason (the registration
+    # covers the TEST file's own edits, not the tool's). No SOURCE_PATTERNS
+    # entry matches this path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed).
+    # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
+    "tools/pr_lead_time.py",
 )
+
+
+def _surface_members(value) -> list:
+    """A manifest surface value as a member list (#3073).
+
+    ``None`` means "empty surface" (a plausible hand-edit or bad-merge
+    artifact) and a non-list scalar is malformed. Both coerce to ``[]``
+    rather than crashing every consumer with
+    ``TypeError: argument of type 'NoneType' is not iterable`` or, worse,
+    iterating a string character-by-character. The drift gate still reports
+    the orphans, so an empty surface fails loudly later rather than silently
+    at selection time.
+    """
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _normalize_surfaces(manifest: dict) -> dict:
+    """Coerce every surface block to a member list, in place (#3073)."""
+    surfaces = manifest.get("surfaces")
+    if isinstance(surfaces, dict):
+        manifest["surfaces"] = {
+            s: _surface_members(v) for s, v in surfaces.items()}
+    return manifest
 
 
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
-    return yaml.safe_load(MANIFEST.read_text())
+    return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -183,7 +1036,8 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
     """
     base = name.rsplit("/", 1)[-1]
     for surface, files in manifest["surfaces"].items():
-        if name in files or base in files:
+        members = _surface_members(files)
+        if name in members or base in members:
             return surface
     return None
 
@@ -196,7 +1050,7 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
 def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     """Surface -> slow files that run in test-slow (slow minus carve-out).
 
-    The 6 slow carve-out files (test_reaper et al.) run in the dedicated
+    The slow carve-out files (test_reaper et al.) run in the dedicated
     URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
     — the test-slow committed leg set is exactly slow_files - carve_out
     (pinned by the workflow's drift-guard step, #1471).
@@ -211,8 +1065,21 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     tests pin the per-surface splits."""
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
+    # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
+    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # and they build their collect-only input from `slow_selected`. A
+    # `uri_requiring` file in `slow_selected` therefore contributes no tests to
+    # that step, and when it is the leg's ONLY file the collect step exits 5 and
+    # fails unattributably — the same shape as the fast lane, which is what
+    # stranded #6390. Subtracting HERE is single-definition: this function has
+    # exactly one consumer (the tier-2 selection), while `push_legs` builds its
+    # own legs, so the push lane still runs these files (asserted in
+    # tests/test_uri_requiring_selection.py). No file is in both lanes today;
+    # the guard test pins that, and handles a future relocation rather than
+    # forbidding it.
+    uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
-    for f in sorted(slow - carve):
+    for f in sorted(slow - carve - uri_requiring):
         by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
     return by_surface
 
@@ -252,15 +1119,60 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         return _full_selection(manifest, slow)
 
     tier1 = set(manifest.get("tier1", [])) - slow
-    # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
+    # entry already matches is selection-relevant BY DEFINITION, whatever prefix
+    # it sits under (#3332). Mirroring those paths into a second hand-maintained
+    # tuple (the #1349 TOOL_CARVEOUTS shape, and this PR's own first attempt at
+    # SITE_CARVEOUTS) drifts: a missing entry is silent, and the guard test
+    # written for that exact file never runs. SOURCE_PATTERNS is the single
+    # source of truth; test_every_source_pattern_is_selectable is the ratchet.
+    def _selection_relevant(path: str) -> bool:
+        return any(
+            path.startswith(p)
+            for surface, pats in SOURCE_PATTERNS.items()
+            if surface != "core"
+            for p in pats
+        ) or path.startswith(CORE_ALSO)
+
+    def _keep_changed(c: str) -> bool:
+        """#6784: whether a changed path participates in surface selection.
+
+        ORDER IS THE INVARIANT. A path that something else CLAIMS comes first:
+        the carve-outs and `_selection_relevant` (SOURCE_PATTERNS + CORE_ALSO)
+        win, and `_is_safe_root_file` is only a FALLBACK for a path nothing
+        claims. Testing `_is_safe_root_file` first — which an earlier revision
+        did — silently disabled the repo's own documented remedy for the
+        "the guard for file X never runs when X changes" class
+        (#1349/#3332/#3485, and the #6138 review P1 that put
+        `tools/tmpdir_sweep.py` in CORE_ALSO): listing X in SOURCE_PATTERNS or
+        CORE_ALSO could no longer rescue it, and any future root `.md` guard
+        pin would have inherited the same trap.
+        """
+        if c.startswith(SHARED_MODULES):
+            return True
+        if c.startswith(TOOL_CARVEOUTS) or c.startswith(SITE_CARVEOUTS):
+            return True
+        if _selection_relevant(c):
+            return True
+        if _is_safe_root_file(c):
+            return False
+        return not c.startswith(NON_PYTHON_PREFIXES)
+
     changed = [c for c in changed_files
-               if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS))]
+               if c and _keep_changed(c)]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
-        return {"surfaces": [], "full": False, "test_files": sorted(tier1),
+        # #6884: the `uri_requiring` subtraction applies HERE TOO. This returns
+        # before the tier-2 subtraction below, and a URI-less leg cannot run a
+        # module-skipping file no matter which exit selected it. The tier-1
+        # smoke set contains none today, so this is behaviour-neutral — it keeps
+        # the rule in ONE place instead of depending on that staying true, and
+        # the guard test pins it by injecting one into tier-1 (a plain arm on a
+        # docs-only vector could not fail: with tier1 ∩ uri_requiring == []
+        # the output is byte-identical with and without the subtraction).
+        return {"surfaces": [], "full": False,
+                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)),
                 "slow_files": sorted(slow),
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
@@ -279,6 +1191,12 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             if any(c.startswith(p) for p in pats):
                 matched.add(surface)
                 found = True
+        # #2938: a CORE_ALSO path keeps `core` even though a named surface
+        # matched above (see CORE_ALSO) — otherwise its core-registered
+        # pinners silently drop out of the selection.
+        if any(c.startswith(p) for p in CORE_ALSO):
+            matched.add("core")
+            found = True
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
                c.startswith("graph-scripts/") or c.startswith("config/") or \
@@ -304,15 +1222,38 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     surfaces = sorted(matched)
     files = set(tier1)  # tier 2 = tier 1 ∪ surface-matched (scope v5 dec 5)
     for s in surfaces:
-        files.update(manifest["surfaces"].get(s, []))
+        files.update(_surface_members(manifest["surfaces"].get(s)))
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
-    # (URI unset) and exhausts its redislite spawn budget before the late
+    # (URI empty) and exhausts its redislite spawn budget before the late
     # embedded suites (RedisLiteServerStartError); the carve-out job gives
     # them a fresh process. The carve-out job now runs on PRs too.
     carve = set(manifest.get("carve_out", []))
     files -= carve
+    # #6884: the MIRROR of the carve-out subtraction above. A `carve_out` file
+    # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
+    # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
+    # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
+    # (it arms only when full==true, where both are set; python-ci.yml:600-602
+    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # a reversal of a recorded
+    # decision, not an available fix. Handed to such a leg each of these
+    # module-skips at import, so it collects ZERO tests and `pytest
+    # --collect-only` exits 5; the fail-closed manifest guard then kills the leg
+    # BEFORE any test runs, and because that is outside the test step there is
+    # no `FAILED <nodeid>` for the merge rail to attribute — it refuses for want
+    # of a failure identity (the #6798 shape; #6390 was clean-reviewed AT HEAD,
+    # `mergeable=true`, `behind=0`, and still unlandable). A shard left with no
+    # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
+    # for this shard - no manifest (guard skips)') and greys out green having run
+    # nothing — honest only because a tier-2 selection cannot get that small
+    # (`tier1` is 31 files against `fast_shards: 9`), which is a margin, not a
+    # guarantee this comment should claim.
+    #
+    # Tier-2 ONLY: the `full` path returned above and keeps these files, because
+    # a full leg HAS the URI.
+    files -= uri_requiring_files(manifest)
     # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
     # surfaces (slow_selected — carve-out files excluded: they run in the
     # carve-out job when it triggers, never the docker slow legs); test-carve-
@@ -343,13 +1284,47 @@ def integrity(manifest: dict) -> list[str]:
     the manifest's subdir keys.
     """
     missing = []
+    on_demand = on_demand_files(manifest)
     for f in sorted(TESTS_DIR.rglob("test_*.py")):
         rel = f.relative_to(TESTS_DIR)
         if rel.parts[0] == "e2e":
             continue
+        # The on-demand lane is a CLASSIFICATION: the file is deliberately
+        # absent from every surface because it does not gate the merge, so
+        # asking "which surface owns it?" is the wrong question. Without this
+        # the lane reads as drift and `--integrity` reds on a correct manifest.
+        if str(rel) in on_demand or rel.name in on_demand:
+            continue
         if classify_test_file(str(rel), manifest) is None:
             missing.append(str(rel))
     return missing
+
+
+def duplicate_entries(manifest: dict) -> list[str]:
+    """#2913: names listed more than once WITHIN one surface.
+
+    `select()` unions surfaces, so a same-surface duplicate is invisible to
+    selection and to :func:`integrity` (which only asks "is it classified?").
+
+    #5373: this is a GATE FAILURE, not a note. `config/ci-surfaces.yml` carries
+    `merge=union`, which keeps BOTH sides' lines for a conflicting hunk — so a
+    duplicate same-surface entry is exactly what union emits when two lanes append
+    the same registration, and a note would let it in silently. Cross-surface (dual)
+    registration is still deliberate; only same-surface repeats are reported.
+
+    Each offending name is reported ONCE however many times it repeats, so the
+    count is a count of distinct problems.
+    """
+    dupes: list[str] = []
+    for surface, files in manifest.get("surfaces", {}).items():
+        seen: set[str] = set()
+        reported: set[str] = set()
+        for f in files or ():
+            if f in seen and f not in reported:
+                dupes.append(f"{surface}: {f}")
+                reported.add(f)
+            seen.add(f)
+    return dupes
 
 
 def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
@@ -358,8 +1333,16 @@ def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
     Kept from origin/main's refactor — callers (workflow matrix checks)
     use the top-level glob; :func:`integrity` uses the recursive rglob form.
     """
+    lane = on_demand_files(manifest)
     missing = []
     for f in sorted(tests_dir.glob("test_*.py")):
+        if f.name in lane:
+            # A lane file is classified — into a LANE, not a surface. Without
+            # this, `--register` would "fix" the apparent gap by registering it
+            # into a surface, silently putting it back on the merge gate. The
+            # currently-laned file is in a subdir so it never reaches this glob;
+            # the guard is here for the top-level file that eventually joins.
+            continue
         if classify_test_file(f.name, manifest) is None:
             missing.append(f.name)
     return missing
@@ -375,11 +1358,24 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
     default surface is `core` — the selection logic's own fallback; the shared
     / unknown-path / push-to-main rules still expand to the full matrix, so a
     misclassified new test keeps running on every broad change.
+
+    Insertion lands *between real entry lines* (#2913): `pos` indexes the entry
+    list (comment lines excluded), so it is converted to a physical line via the
+    entry immediately before it — never used as a raw line offset, which would
+    drop the new entry inside a comment run and detach the run from the entries
+    it documents.
     """
     missing = unlisted_tests(tests_dir, manifest)
     if not missing:
         return []
-    lines = manifest_path.read_text().splitlines(keepends=True)
+    text = manifest_path.read_text()
+    # #3073: a manifest whose final line lacks a newline would concatenate the
+    # appended entry onto it (`  - test_b.py  - test_c.py`, malformed YAML).
+    # Normalise the terminator before splitting so every insertion point is a
+    # line boundary.
+    if text and not text.endswith(NL):
+        text += NL
+    lines = text.splitlines(keepends=True)
     # locate the surface block: "  <surface>:" then "  - name" lines (strip
     # any trailing inline comment from the key)
     block_start = None
@@ -395,34 +1391,53 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
         anchor = next((i for i, ln in enumerate(lines) if ln.startswith("tier1:")), len(lines))
         new_block = [f"  {surface}:{NL}"] + [f"  - {n}{NL}" for n in missing]
         lines[anchor:anchor] = new_block
-    else:
-        # collect existing entries in this block (until next "  x:" or non-list line)
-        end = block_start + 1
-        entries = []
-        while end < len(lines) and (lines[end].startswith("  - ") or lines[end].lstrip().startswith("#")):
-            if lines[end].startswith("  - "):
-                entries.append(lines[end])
-            end += 1
-        names = [e.strip()[2:].split("#", 1)[0].rstrip() for e in entries]  # "  - name.py" -> "name.py" (strip trailing comments)
-        # INSERT-ONLY: place each new name at its alphabetical position among
-        # the existing entries; never re-order pre-existing lines (keeps the
-        # diff surgical — normalizing the whole block would churn the manifest).
-        to_add = [n for n in missing if n not in set(names)]
-        for n in sorted(to_add):
-            pos = 0
-            while pos < len(names) and names[pos] < n:
-                pos += 1
-            lines[block_start + 1 + pos:block_start + 1 + pos] = [f"  - {n}{NL}"]
-            names.insert(pos, n)
-            end += 1
-    manifest_path.write_text("".join(lines))
-    return missing
+        manifest_path.write_text("".join(lines))
+        return missing
+
+    # Scan the block (until the next "  x:" / non-list line), tracking each
+    # real entry's PHYSICAL line index. Comments are prose about the group that
+    # follows and must never be split by an insertion (#2913).
+    end = block_start + 1
+    entry_lines: list[int] = []
+    while end < len(lines) and (lines[end].startswith("  - ") or lines[end].lstrip().startswith("#")):
+        if lines[end].startswith("  - "):
+            entry_lines.append(end)
+        end += 1
+    names = [lines[i].strip()[2:].split("#", 1)[0].rstrip() for i in entry_lines]
+    # A file already present in THIS surface is a no-op, reported: writing it
+    # again would duplicate the entry, and select() unions surfaces so a
+    # same-surface duplicate is invisible downstream (#2913).
+    already = [n for n in missing if n in set(names)]
+    to_add = [n for n in missing if n not in set(names)]
+    if already:
+        print(f"ℹ️  already registered under {surface}: {already}")
+    # INSERT-ONLY: place each new name at its alphabetical position among
+    # the existing entries; never re-order pre-existing lines (keeps the
+    # diff surgical — normalizing the whole block would churn the manifest).
+    for n in sorted(to_add):
+        pos = 0
+        while pos < len(names) and names[pos] < n:
+            pos += 1
+        # `pos` indexes the entry list; convert to a PHYSICAL line by inserting
+        # right after the preceding entry (or at the top of the block when the
+        # name sorts first). This keeps comment runs contiguous and attached to
+        # the entries they describe — the bug was `block_start + 1 + pos`, which
+        # counted comment lines and landed inside a run.
+        insert_at = block_start + 1 if pos == 0 else entry_lines[pos - 1] + 1
+        lines[insert_at:insert_at] = [f"  - {n}{NL}"]
+        names.insert(pos, n)
+        entry_lines.insert(pos, insert_at)
+        for j in range(pos + 1, len(entry_lines)):
+            entry_lines[j] += 1
+    if to_add:
+        manifest_path.write_text("".join(lines))
+    return to_add
 
 
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
     """Load + register in one call (CLI entry)."""
     import yaml
-    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
@@ -433,7 +1448,7 @@ ENV_BROKEN_FILES = {"test_agent_signup.py"}
 
 
 def carve_out_files(manifest: dict) -> set[str]:
-    """Epic #1647 Task 9 (P3): the 17-file embedded carve-out set.
+    """Epic #1647 Task 9 (P3): the embedded carve-out set.
 
     The carve-out tests run embedded BY DESIGN (E2E-4) in the dedicated
     URI-unset job (TORTOISE_TEST_CARVE_OUT=1) — they are excluded from the
@@ -444,51 +1459,512 @@ def carve_out_files(manifest: dict) -> set[str]:
     return set(manifest.get("carve_out", []))
 
 
-def push_legs(manifest: dict) -> dict:
-    """#1472: partition every manifest-classified file into exactly one push
-    leg (half_a / half_b / slow / env_broken / carve_out), parity-split the
-    fast set.
+def on_demand_files(manifest: dict) -> set[str]:
+    """Files that run only from `.github/workflows/evals-on-demand.yml`.
 
-    Single source of truth for the workflow's push matrix: registration in
-    the manifest is sufficient — no manual matrix edit. Returns .py-less
-    names (the workflow's matrix format). push_extra (bench files, not
-    classifiable as top-level surfaces) appends to half b. Epic #1647
-    Task 9: carve_out files are excluded from every docker leg and emitted
-    as their own leg (the URI-unset carve-out job's file list).
+    Excluded from every PRE-MERGE leg (fast halves, slow, carve-out). The
+    accessor exists so `fast_pool`, `push_legs` and `leg_coverage_issues`
+    read the lane through ONE definition: three independent
+    `manifest.get("on_demand", [])` reads are three places for the lane to be
+    half-adopted, and a half-adopted lane is worse than no lane — the file is
+    excluded from the gate and claimed by nothing, so it silently stops
+    running anywhere at all."""
+    # `on_demand:` with NO entries parses to None, not [] — YAML's empty value.
+    # `manifest.get("on_demand", [])` returns that None (the key IS present),
+    # and `set(None)` raises TypeError, so the guard that exists to NAME an
+    # empty lane instead crashed in every caller before it could report. The
+    # `or []` is the fix; a test pins the None form specifically, because the
+    # obvious `on_demand=[]` spelling in a test is a Python list and never
+    # reproduces the state a human actually types into the YAML.
+    return set(manifest.get("on_demand") or [])
+
+
+def uri_requiring_files(manifest: dict) -> set[str]:
+    """#6884: modules that cannot COLLECT in a URI-EMPTY leg.
+
+    Each module-skips at import when `TORTOISE_DB_URI` is empty — present and
+    empty, the shape the tier-2 leg actually sets — so in a
+    tier-2 PR leg (URI-empty by design) it collects ZERO tests and
+    `pytest --collect-only` exits 5 — the fail-closed manifest guard then kills
+    the leg before any test runs, with no `FAILED <nodeid>` for the merge rail
+    to attribute. Read through ONE definition, like `on_demand_files`: the
+    subtraction happens on two tier-2 paths (the docs-only early return and the
+    main surface path) plus the slow lane, and three independent
+    `manifest.get("uri_requiring", [])` reads are three places for the lane to
+    be half-adopted.
+
+    The `or []` is REQUIRED, not defensive: `uri_requiring:` with no entries
+    parses to None, not [] — YAML's empty value — and `set(None)` raises
+    TypeError in the `changes` job, i.e. on the single path all PR CI goes
+    through. That is reachable at the lane's terminal state: the day the last
+    URI-gated module is fixed, a lane empties the list. (Same trap and same fix
+    as `on_demand_files`; the None form is pinned by
+    tests/test_uri_requiring_selection.py.)
     """
+    return set(manifest.get("uri_requiring") or [])
+
+
+def fast_pool(manifest: dict) -> list[str]:
+    """#3400: the full-matrix fast pool — every manifest-classified file that
+    is not slow, env-broken, or carve-out. Single source of truth for the
+    push halves (push_legs) AND the durations-coverage guard, so the two can
+    never disagree about which files need a weight."""
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
-    fast = sorted(f for f in classified
+    classified.update(on_demand)
+    return sorted(f for f in classified
                   if f not in slow and f not in ENV_BROKEN_FILES
-                  and f not in carve_out)
-    half_a = fast[0::2]
-    half_b = fast[1::2]
-    # #1485: distribute push_extra (bench files) EVENLY so the halves stay
-    # within the #1266 ±3 tolerance (all-bench-in-half-b caused 135 vs 139).
-    for i, f in enumerate(manifest.get("push_extra", [])):
-        (half_a if i % 2 == 0 else half_b).append(f.replace(".py", ""))
+                  and f not in carve_out and f not in on_demand)
+
+
+def fast_shard_count(manifest: dict) -> int:
+    """#6135: the configured fast-pool shard count.
+
+    An ABSENT key keeps the historical 2 (a repo that has not adopted the
+    config is never failed by it). A present-but-unusable value is not silently
+    coerced into a shard count — it collapses to 2 here so a producer path
+    cannot crash, and `fast_shard_issues()` NAMES it for `--integrity`.
+    """
+    raw = manifest.get("fast_shards", DEFAULT_FAST_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_FAST_SHARDS
+    if raw < 2 or raw > MAX_FAST_SHARDS:
+        return DEFAULT_FAST_SHARDS
+    return raw
+
+
+def fast_shard_issues(manifest: dict) -> list[str]:
+    """#6135: fail-closed validation of the `fast_shards` declaration.
+
+    A shard count that is not an int in [2, MAX_FAST_SHARDS] is a malformed
+    declaration, not a default: silently reading it as 2 would leave the
+    workflow running a shard count nobody chose, which is the exact
+    hand-written-literal drift this key exists to end.
+
+    ABSENCE is the "not adopted" state (a repo that never set the key keeps the
+    historical 2, consistently on BOTH lanes). An EXPLICIT null is NOT absence:
+    it is a typo that would silently drop the PR lane to 2 while main runs the
+    configured S, and the merge rail's lane-parity would then refuse every merge
+    (main's `test (c)`… "missing" from the PR) with a green manifest gate.
+    """
+    if "fast_shards" not in manifest:
+        return []
+    raw = manifest.get("fast_shards")
+    if raw is None:
+        return ["fast_shards is explicitly null — remove the key to mean "
+                "'not adopted', or set an integer in [2, "
+                f"{MAX_FAST_SHARDS}] (a null silently drops the lane to 2)"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return [f"fast_shards must be an integer, got {raw!r}"]
+    if raw < 2:
+        return [f"fast_shards must be >= 2 (a single shard is not a shard "
+                f"pool; the merge rail's lane-parity forbids removing one), got {raw}"]
+    if raw > MAX_FAST_SHARDS:
+        return [f"fast_shards must be <= {MAX_FAST_SHARDS} (the a..z label "
+                f"ceiling), got {raw}"]
+    return []
+
+
+def carve_shard_count(manifest: dict) -> int:
+    """W37: the carve-out pool's shard count, floored to 1 (the unsharded
+    job) when the declaration is absent or malformed. Same fail-safe polarity
+    as `fast_shard_count` — an unreadable count falls back to the SHAPE THAT
+    EXISTS TODAY, never to a number nobody chose."""
+    raw = manifest.get("carve_shards", DEFAULT_CARVE_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_CARVE_SHARDS
+    if raw < 1 or raw > MAX_CARVE_SHARDS:
+        return DEFAULT_CARVE_SHARDS
+    return raw
+
+
+def carve_shard_issues(manifest: dict) -> list[str]:
+    """W37: fail-closed validation of the `carve_shards` declaration.
+
+    `fast_shards` demands >= 2 because a shard pool of one is not a pool. Here
+    1 is MEANINGFUL: it is the unsharded job this repo ran until now, and it is
+    what removing the key must give back, so a rollback is a key deletion rather
+    than a rewrite. Absence is 'not adopted'; an EXPLICIT null is a typo, not an
+    absence — same distinction, and the same reason, as `fast_shard_issues`.
+    """
+    if "carve_shards" not in manifest:
+        return []
+    raw = manifest.get("carve_shards")
+    if raw is None:
+        return ["carve_shards is explicitly null — remove the key to mean "
+                "'one unsharded job', or set an integer in [1, "
+                f"{MAX_CARVE_SHARDS}] (a null silently drops the pool to 1)"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return [f"carve_shards must be an integer, got {raw!r}"]
+    if raw < 1:
+        return [f"carve_shards must be >= 1 (1 is the unsharded job; 0 would "
+                f"delete the lane), got {raw}"]
+    if raw > MAX_CARVE_SHARDS:
+        return [f"carve_shards must be <= {MAX_CARVE_SHARDS} (the a..z label "
+                f"ceiling), got {raw}"]
+    return []
+
+
+def carve_shard_entries(manifest: dict) -> list[dict]:
+    """W37: the carve-out set packed into `carve_shards` LPT bins.
+
+    Uses `build_shard_entries`, the SAME pack the tier-2 fast lane uses
+    (`split_fast_gate` + `shard_watchdog_minutes`) — the carve-out gets the
+    established mechanism rather than a second one.
+
+    ⛔ THE FIRST SHARD'S JOB NAME IS THE BARE `test-carve-out`, and that is
+    load-bearing, not cosmetic. The merge rail's lane-parity subtracts main's
+    job names from the PR's, so an unadopted main holds `test-carve-out` and a
+    PR that renamed it to `test-carve-out (a)` would be missing one of main's
+    names and refuse EVERY merge until it landed. Keeping the bare name on
+    shard 0 (and `(b)`, `(c)`, … on the rest) makes the shard set a strict
+    SUPERSET of main's names — the same property `fast_shards` relies on when
+    it keeps `a` and `b`.
+    """
+    count = carve_shard_count(manifest)
+    carve = sorted(carve_out_files(manifest))
+    entries = build_shard_entries(carve, _durations_map(manifest), count)
+    labels = shard_labels(len(entries))
+    for i, e in enumerate(entries):
+        # `suffix` is the workflow's `name:` tail: '' for shard 0 (so the check
+        # is exactly `test-carve-out`), ' (b)'/ ' (c)' after that.
+        e["suffix"] = "" if i == 0 else f" ({labels[i]})"
+        # `label` is the ARTIFACT-name tail, and it must NOT be `suffix`: suffix
+        # carries a leading space and parentheses, and `github.job` is the BASE
+        # job id for every matrix leg, so an upload named `pytest-log-${{ github.job }}`
+        # is the SAME name for every shard — upload-artifact@v4 then 409s and,
+        # because the step is continue-on-error, the shard logs vanish silently
+        # (#6263 pins exactly this).
+        e["label"] = labels[i]
+    return entries
+
+
+def carve_matrix_include(entries: list[dict]) -> dict:
+    """W37: the GHA matrix the `test-carve-out` job expands.
+
+    Emitted COMPLETE, like `fast_matrix_include`: the shard set is the
+    selector's contract, never a workflow literal. `files` is SPACE-JOINED
+    (the workflow's `for f in ${{ matrix.files }}` shape) and, like the fast
+    band, the names are BARE (no `.py`) — the workflow re-adds the extension.
+    """
+    return {"include": [
+        {
+            "suffix": e["suffix"],
+            # Distinct per leg, and filesystem-safe — the artifact name tail.
+            "label": e["label"],
+            "files": " ".join(e["files"]),
+            "watchdog_minutes": e["watchdog_minutes"],
+        }
+        for e in entries
+    ]}
+
+
+def shard_labels(count: int) -> list[str]:
+    """#6135: positional shard labels `a`, `b`, `c`, …
+
+    LETTERS, never digits, and always from the start of the alphabet: the
+    merge rail's lane-parity is a NAME subtraction (`main's names - PR's
+    names`), so an S-adding diff is comparable only while `test (a)` and
+    `test (b)` survive as names. The labels are what makes the added shards
+    a SUPERSET rather than a rename.
+    """
+    import string
+    return list(string.ascii_lowercase[:count])
+
+
+def shard_watchdog_minutes(est_seconds: float) -> int:
+    """#6135: the per-shard pytest watchdog, derived from the shard's own
+    packed estimate.
+
+    Correctness, not tuning: the watchdog is per-leg, so inheriting the old
+    55m lets a hung ~7-minute shard hold the REQUIRED aggregate red for 55
+    minutes. The factor behind the budget and both clamps are owned by the
+    constants block above (which carries their provenance and the #6145 rule) —
+    this function only applies them; the floor keeps a small shard above the
+    #6133 floor (the largest single file).
+
+    ⛔ The CEILING does NOT "keep the validated budget" (#6145): it deliberately
+    stays 55m so the worst-case leg fits the job's outer `timeout-minutes`, and a
+    clamp that drops the budget below `WATCHDOG_HEADROOM` is an integrity FAILURE
+    (`watchdog_headroom_issues`), not a retained one. The remedy is a deliberate
+    ceiling raise or a re-split — see the OVERRIDES record on #6145.
+    """
+    try:
+        minutes = float(est_seconds) / 60.0
+    except (TypeError, ValueError):
+        minutes = 0.0
+    # `inf`/`nan` survive float() but explode inside math.ceil (OverflowError /
+    # ValueError). They are impossible from the current producers (weights are
+    # coerced finite), but this is the seam a future caller passes a raw sum to,
+    # so the finiteness is checked HERE rather than assumed.
+    if not math.isfinite(minutes) or minutes < 0:
+        minutes = 0.0
+    raw = math.ceil(minutes * WATCHDOG_HEADROOM)
+    return int(min(max(raw, WATCHDOG_FLOOR_MIN), WATCHDOG_CEILING_MIN))
+
+
+def watchdog_headroom(est_seconds: float, watchdog_minutes: int) -> float:
+    """#6145: the headroom the EMITTED budget actually retains (`budget / est`).
+
+    `shard_watchdog_minutes()` builds the budget from `WATCHDOG_HEADROOM`, but the
+    FLOOR and CEILING clamps can deliver a different multiple than the one it was
+    built from: upward at the floor (intended — the floor exists to clear the
+    #6133 single-file time) and DOWNWARD at the ceiling, which is the hazard.
+
+    Returns 0.0 for an unusable estimate: the budget is then the floor, and
+    "headroom over an unknown estimate" is not a number anyone should act on.
+    """
+    try:
+        minutes = float(est_seconds) / 60.0
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(minutes) or minutes <= 0:
+        return 0.0
+    return float(watchdog_minutes) / minutes
+
+
+def watchdog_headroom_issues(manifest: dict) -> list[str]:
+    """#6145 / #4819 option 2: NAMED issues where a shard's emitted budget retains
+    LESS headroom than the factor the budget is built from.
+
+    This closes the CEILING half of the gap #4819 recorded and nobody checked —
+    "the watchdog value and the shard count: nothing checks that [they are
+    consistent]". A budget that silently drifts TIGHTER than the factor it is
+    built from is the state in which a shard that fits its own declared estimate
+    is killed, and it is reachable today: at a 30.62-minute estimate
+    `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
+    1.80x — which the ceiling's own comment treated as "the validated budget"
+    rather than as a breach, and which
+    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+    asserts without ever computing the margin.
+
+    ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
+    from. The two axes are independent and only ONE is visible here:
+
+    - What the check sees: the DECLARED `est_seconds` and the emitted budget. It
+      fires iff the ceiling clamped the budget below that factor AT THE
+      PUBLISHED PRECISION — `round(budget / est_min, 2) < 2.0`, i.e. a declared
+      estimate above ~27.57 min. A shard whose DECLARED estimate exceeds that is
+      flagged even when the estimate is perfectly accurate, and one whose
+      declared estimate stays within it passes even when the estimate is far too
+      low. A clamp inside the 2-dp quantum (est in ~(27.500, 27.569] min) passes
+      by design, because the value the matrix publishes reads a compliant 2.0.
+    - What it cannot see: the ACTUAL runtime. The observed kills are the other
+      axis — a shard that ran ~2.11x its declared cost (the shape #6145
+      measured) — and a shard like that passes if its DECLARED value is in
+      range. So a green `manifest-integrity` means "the emitted budgets are
+      consistent with their own declared factors", NOT "the watchdog sizing is
+      sound", and this change covers neither the kills nor the runner-pool
+      capacity deficit behind them (#5215 / #6792).
+
+    The floor direction is intentionally not an issue: the floor binding is the
+    normal, intended case (it clears the #6133 single-file time), not a breach.
+
+    Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
+    SELECTION time instead of being killed at run time (#6145's sizing contract:
+    "a shard unable to fit is flagged rather than silently killed"). The estimate
+    and the budget therefore move together: raising an estimate (or lowering the
+    shard count) past the ceiling's reach REDS this check, and the remedy is a
+    deliberate ceiling raise or a re-split — never a silent kill. "Fail-closed"
+    includes the extreme: an estimate so large that the ratio rounds to `0.00`
+    still fires, because the SENTINEL is read from the UNROUNDED value. A `0.00`
+    on a PASSING row therefore means one thing only — that the leg has no usable
+    estimate (an empty leg) — and never that its margin was too small to report.
+    """
+    issues = []
+    for s in push_legs(manifest)["shards"]:
+        budget = s["watchdog_minutes"]
+        est = s["est_seconds"]
+        # #6145: decide on the SAME value the matrix PUBLISHES (2 dp, the same
+        # rounding the emitters apply). A gate comparing an exact ratio while
+        # emitting a rounded one would refuse a manifest whose own emitted row
+        # read a compliant 2.0 — and its message would say "2.00x, below the
+        # 2.0x", contradicting itself at exactly the boundary this check exists
+        # to police. Decision, message and emission are therefore ONE value; the
+        # cost is that a sub-0.005 excursion is inside the reporting quantum.
+        #
+        # The SENTINEL test reads the UNROUNDED value. `raw == 0.0` is
+        # `watchdog_headroom`'s "no usable estimate" answer (est <= 0, or a
+        # non-finite one), and it is NOT the same thing as a genuine ratio small
+        # enough to round to 0.00: testing the ROUNDED value for truthiness would
+        # FAIL OPEN on an estimate large enough to collapse the ratio onto the
+        # sentinel — the guard would skip the very leg it exists to name, and
+        # would publish `0.00` on a row it passed.
+        raw = watchdog_headroom(est, budget)
+        headroom = round(raw, 2)
+        if raw and headroom < WATCHDOG_HEADROOM:
+            issues.append(
+                f"shard {s['name']}: its emitted budget retains "
+                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x it is built "
+                f"from — the shard may still fit the {budget}m wall, but the "
+                f"budget no longer holds that factor (est={est:.1f}s = "
+                f"{est / 60.0:.2f} min; the {WATCHDOG_CEILING_MIN}m ceiling "
+                f"clamped it). Raise the ceiling deliberately or re-split the "
+                f"shards (#6145/#4819)")
+    return issues
+
+
+def push_legs(manifest: dict) -> dict:
+    """#1472/#6135: partition every manifest-classified file into exactly one
+    push leg (fast shards / slow / env_broken / carve_out), duration-balanced
+    across the fast shards (#3400 LPT, #6135 N shards).
+
+    Single source of truth for the workflow's push matrix: registration in
+    the manifest is sufficient — no manual matrix edit. Returns .py-less
+    names (the workflow's matrix format). `push_extra` (bench files, not
+    classifiable as top-level surfaces) is spread round-robin across the
+    shards. Epic #1647 Task 9: carve_out files are excluded from every docker
+    leg and emitted as their own leg (the URI-unset carve-out job's file list).
+
+    Each shard entry carries its `est_seconds` (the LPT bin weight, the
+    declared test time), the `watchdog_minutes` derived from it, and the
+    `watchdog_headroom` that budget actually retains relative to that estimate
+    (#6145) — the per-leg budget is a property of the SHARD, not a workflow
+    literal.
+    """
+    slow = set(manifest.get("slow_files", []))
+    carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
+    fast = fast_pool(manifest)
+    # #3400: pack the fast shards by measured duration (#1473 LPT) instead of
+    # the duration-blind index-parity split this used to be (`fast[0::2]` /
+    # `fast[1::2]`). Parity on the real pool leaves a tilt far above the ratio
+    # below — the pool's cost is not index-uniform — and blew the 55m watchdog;
+    # LPT is deterministic (ties and the empty-bin choice go to the LOWEST
+    # label — the historical "ties -> a") and balances the same pool.
+    durations = _durations_map(manifest)
+    bins = split_fast_gate(fast, durations, shards=fast_shard_count(manifest))
+    labels = shard_labels(len(bins))
+    # #1485: distribute push_extra (bench files) round-robin across the shards.
+    # Durations now drive the balance (#3400), but even spreading keeps this
+    # neutral rather than dumping the whole bench set on one shard.
+    extras = [f.replace(".py", "") for f in manifest.get("push_extra", [])]
+    shards = []
+    for i, (label, bin_files) in enumerate(zip(labels, bins, strict=True)):
+        # BARE names (no `.py`): the workflow's run step maps them with
+        # `tests/<name>.py`, and `workflow_halves_issues` keys the manifest on
+        # bare names too. A `.py` left here would be read as a file named
+        # `test_x.py.py`.
+        names = [f[len("tests/"):].replace(".py", "") for f in bin_files]
+        names += extras[i::len(labels)]
+        est = sum(_duration_weight(durations.get(f + ".py")) for f in names)
+        # #6145: derive the budget from the ROUNDED estimate — the value the
+        # matrix publishes — so the estimate, the budget and the emitted
+        # headroom are mutually consistent. The builder and the integrity check
+        # must not read the same quantity at two different precisions; that
+        # mismatch is how a boundary value slips through the gate, and the
+        # ceiling boundary is exactly what the gate polices.
+        est = round(est, 1)
+        budget = shard_watchdog_minutes(est)
+        shards.append({"name": label, "files": sorted(names),
+                       "est_seconds": est,
+                       "watchdog_minutes": budget,
+                       "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
-    return {"half_a": strip(half_a), "half_b": strip(half_b),
+    return {"shards": shards,
             # Epic #1647 Task 9: slow carve-out files (test_reaper et al.)
             # run in the URI-unset carve-out job, never the docker slow legs.
             "slow": strip(slow - carve_out),
             "env_broken": sorted(ENV_BROKEN_FILES),
-            "carve_out": strip(carve_out)}
+            "carve_out": strip(carve_out),
+            # W37: the same set, packed. `carve_out` is KEPT above because the
+            # `changes` job publishes it as its `carve_out` output and several
+            # pins read this emitted key; `leg_coverage_issues` enforces the
+            # coverage contract over the same set, read from the manifest rather
+            # than from this leg. The partition itself — the shards must cover
+            # `carve_out` exactly, never re-derive it — is pinned by
+            # `tests/test_ci_selection.py::test_carve_out_matrix_partitions_the_leg`;
+            # no check in THIS module enforces it.
+            "carve_shards": carve_shard_entries(manifest),
+            # Not a push leg: emitted so leg_coverage_issues() can account for
+            # the file. Nothing in python-ci.yml consumes this key — that is
+            # the POINT of the lane.
+            "on_demand": strip(on_demand)}
+
+
+def all_shard_files(legs: dict) -> list[str]:
+    """#6135: every fast file across every shard. Consumers MUST read the
+    union of `shards`, never a single shard or a fixed prefix of them — a
+    consumer that assumed `half_a`/`half_b` grew a silent coverage hole the
+    moment S rose."""
+    return [f for shard in legs["shards"] for f in shard["files"]]
+
+
+def build_shard_entries(files: list[str], durations: dict,
+                        shards: int) -> list[dict]:
+    """#6135: an LPT pack of `files` into `shards` labelled entries, each
+    carrying its packed estimate, the per-shard watchdog derived from it, and
+    the headroom that budget retains (#6145).
+
+    Used by the tier-2 `--split` path AND by `carve_shard_entries()` (the W37
+    carve-out lane, which `push_legs()` routes through). `push_legs()` itself
+    inlines the same pack for the fast shards (it must round-robin `push_extra`
+    across the shards in the same pass), so the shared seam that keeps every
+    lane's shard budgets in agreement is `shard_watchdog_minutes()`, NOT this
+    function — but editing the packing here DOES change both the tier-2 `--split`
+    lane and the carve-out lane, not the fast shards.
+    """
+    bins = split_fast_gate(files, durations, shards=shards)
+    labels = shard_labels(len(bins))
+    entries = []
+    for label, bin_files in zip(labels, bins, strict=True):
+        # BARE names — see push_legs: the workflow maps them with `tests/<n>.py`.
+        names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
+                       .replace(".py", "") for f in bin_files)
+        est = sum(_duration_weight(durations.get(n + ".py")) for n in names)
+        est = round(est, 1)  # #6145: the budget follows the published estimate
+        budget = shard_watchdog_minutes(est)
+        entries.append({"name": label, "files": names,
+                        "est_seconds": est,
+                        "watchdog_minutes": budget,
+                        "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
+    return entries
+
+
+def fast_matrix_include(shards: list[dict]) -> dict:
+    """#6135: the GitHub Actions matrix the `test` job expands.
+
+    Emitted COMPLETE (the workflow does no shell composition), because the
+    shard set is the selector's contract, not the workflow's. `canary_producer`
+    marks the ONE shard whose artifacts feed the canary streak: the last shard,
+    chosen positionally so the marker never has to name a half (`half == 'b'`
+    stopped existing the moment S rose — the exact coupling #6135 removes).
+    """
+    include = []
+    for i, s in enumerate(shards):
+        # #6145: carry the headroom alongside the budget so the margin a leg was
+        # actually given is VISIBLE in the matrix — the ceiling can silently
+        # deliver less than the factor the budget was built from, and an
+        # implicit margin cannot be audited.
+        headroom = s.get("watchdog_headroom")
+        if headroom is None:
+            headroom = watchdog_headroom(s.get("est_seconds", 0.0),
+                                         s["watchdog_minutes"])
+        include.append({
+            "half": s["name"],
+            "files": " ".join(s["files"]),
+            "watchdog_minutes": s["watchdog_minutes"],
+            "watchdog_headroom": round(float(headroom), 2),
+            "canary_producer": i == len(shards) - 1,
+        })
+    return {"include": include}
 
 
 def leg_coverage_issues(manifest: dict) -> list[str]:
     """#1472 reverse drift: every classified file in exactly one push leg."""
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
     legs = push_legs(manifest)
-    half_a = {f + ".py" for f in legs["half_a"]}
-    half_b = {f + ".py" for f in legs["half_b"]}
-    fast = half_a | half_b
+    # #6135: the union of EVERY shard, never a fixed pair of them — a consumer
+    # that read two shards would grow a silent coverage hole the moment S rose.
+    fast = {f + ".py" for f in all_shard_files(legs)}
     issues = []
     overlap = fast & slow
     if overlap:
@@ -508,11 +1984,53 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
         issues.append(f"carve-out file leaked into the slow legs: {sorted(slow_leg & carve_out)}")
     if carve_out & ENV_BROKEN_FILES:
         issues.append(f"carve-out/env-broken overlap: {sorted(carve_out & ENV_BROKEN_FILES)}")
+    # ABSENT is not the same as EMPTY. A repo that has not adopted the lane
+    # has no `on_demand:` key and is fine; a repo that declares the key and
+    # leaves it empty has a no-op exclusion — the expensive file is back on
+    # the merge path with a lane that reads as a saving. Same polarity as
+    # `duration_issues`' durations guard (absent = not adopted = PASS, a
+    # present-but-unusable declaration = RED), so adopting the tool without
+    # the lane is not a portability regression.
+    if "on_demand" in manifest and not on_demand:
+        issues.append("on_demand lane is present but EMPTY — it excludes nothing")
+    if on_demand & slow:
+        issues.append(f"on-demand/slow overlap (still on the merge path): {sorted(on_demand & slow)}")
+    # REACHABLE but DORMANT with the current config: `fast_pool()` filters the
+    # lane out, and `push_extra` is EMPTY today, so this branch does not fire on
+    # the real manifest. It fires when a `push_extra` entry names a lane file —
+    # `push_legs()` appends `push_extra` into the halves AFTER `fast_pool`'s
+    # filter, so such an entry lands in a fast leg and is caught here.
+    #
+    # (This comment has now been wrong in BOTH directions: first it claimed the
+    # branch was "structurally unreachable in every constructible state" — it is
+    # not — and then, over-corrected, that it "fires today" — it does not. A
+    # claim about reachability is checkable, and both versions were checked.
+    # State reachability precisely, and do not restate the history twice: an
+    # earlier draft of this very paragraph concatenated a second copy of itself
+    # mid-line.)
+    if fast & on_demand:
+        issues.append(f"on-demand file leaked into a fast leg: {sorted(fast & on_demand)}")
+    if on_demand & carve_out:
+        issues.append(f"on-demand/carve-out overlap: {sorted(on_demand & carve_out)}")
+    if on_demand & ENV_BROKEN_FILES:
+        issues.append(f"on-demand/env-broken overlap: {sorted(on_demand & ENV_BROKEN_FILES)}")
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
+    # DEAD-ENTRY check, mirroring the carve-out lane's. The membership test
+    # that used to be here was VACUOUS: `classified` had just been updated with
+    # the lane itself, so `f not in classified` was tautologically False and the
+    # branch could never fire. (Its comment also justified the placement with a
+    # NameError that could not happen — `on_demand` is bound at the top of the
+    # function. A guard that cannot fail plus a rationale that cannot be checked
+    # is two defects wearing one.) What actually needs catching is a lane entry
+    # naming a file that does not exist: the exclusion would look healthy while
+    # excluding nothing that runs.
+    for f in sorted(on_demand):
+        if not (TESTS_DIR / f).exists():
+            issues.append(f"on-demand {f} has no tests/{f} (dead entry)")
     for f in manifest.get("push_extra", []):
         if f in classified:
             issues.append(f"push_extra {f} is a classified top-level file (move it into a surface)")
@@ -532,23 +2050,41 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
 
 
 def workflow_matrix_issues(workflow_path: str, manifest: dict) -> list[str]:
-    """#1472: the workflow's matrix rows must come from the derivation, never
-    re-hardcoded lists; ENV_BROKEN_FILES must not be duplicated in env."""
+    """#1472/#6135: the workflow's fast matrix must come from the derivation,
+    never a re-hardcoded list or a hand-written shard count; ENV_BROKEN_FILES
+    must not be duplicated in env.
+
+    #6135: the `test` job's matrix is the WHOLE derived matrix object
+    (`${{ fromJSON(needs.changes.outputs.fast_matrix) }}`), so there are no
+    `include:` rows left to inspect. The properties that mattered are now: the
+    matrix is the selector's output (not a literal), the row count is not
+    pinned in the workflow, and the aggregate still observes the `test` job.
+    """
     import yaml
     issues = []
     try:
         wf = yaml.safe_load(open(workflow_path))  # noqa: SIM115
     except Exception as exc:
         return [f"cannot parse workflow {workflow_path}: {exc}"]
-    inc = wf.get("jobs", {}).get("test", {}).get("strategy", {}).get("matrix", {}).get("include", [])
-    for row in inc:
-        files = str(row.get("files", ""))
-        # #1472 regression fix: the matrix rows consume the SPACE-JOINED
-        # matrix_a/matrix_b outputs directly (fromJSON(...) yields a JS array
-        # that renders as "Array" in the shell `for f in ${{ matrix.files }}`
-        # loop — every full-matrix run collected tests/Array.py).
-        if not files.startswith("${{ needs.changes.outputs.matrix_"):
-            issues.append(f"matrix row {row.get('half')} files is not derived (matrix_* output)")
+    test_job = wf.get("jobs", {}).get("test", {})
+    matrix = test_job.get("strategy", {}).get("matrix")
+    derived = "${{ fromJSON(needs.changes.outputs.fast_matrix) }}"
+    if derived not in str(matrix):
+        issues.append(
+            "the `test` job matrix is not the derived fast_matrix output "
+            f"(got {matrix!r}; expected {derived!r}) — a hand-written shard "
+            "count is the drift #6135 exists to end")
+    # A frozen `include:` row count is the old hand-written-literal shape: the
+    # matrix must carry NO literal rows in the workflow.
+    if isinstance(matrix, dict) and matrix.get("include"):
+        issues.append("the `test` job matrix carries literal include rows "
+                      "(the shard set must come from the selector, #6135)")
+    # The aggregate's `needs:` is its whole claim (#5219) — if the derived
+    # matrix's job id drifted, the required check would certify nothing.
+    gate_needs = wf.get("jobs", {}).get("python-ci-gate", {}).get("needs", [])
+    if "test" not in gate_needs:
+        issues.append("python-ci-gate does not need the `test` job — the "
+                      "required aggregate would not observe the fast shards")
     if "ENV_BROKEN_FILES" in wf.get("env", {}):
         issues.append("workflow env re-defines ENV_BROKEN_FILES (single source is ci_selection.py)")
     return issues
@@ -574,12 +2110,20 @@ def slow_file_issues(manifest: dict) -> list[str]:
 
 
 def parse_matrix_halves(workflow_text: str) -> dict[str, list[str]]:
-    """#1266: extract the test job's (a)/(b) matrix halves from python-ci.yml.
+    """#1266: extract LEGACY literal `- half:` / `files: >-` matrix rows from
+    python-ci.yml — the pre-#6135 `test`-job shape.
 
-    The halves are folded scalars (`files: >-`) with bare file names
-    (no .py) — the run step maps them to `tests/<name>.py` and `bench/*`.
-    Returns {"a": [...], "b": [...]} — empty when the parse fails so callers
-    can fail closed on "workflow changed shape" instead of silently passing.
+    #6135: the `test` job carries no literal rows any more (its matrix is
+    `fromJSON(...fast_matrix)`), so the only block this regex can still match
+    is the `test-slow` job's. Both callers reach it only on the integrity
+    gate's FAILURE fallback — `ci_selection.py --integrity`, and the same
+    composition in `ci_timing.integrity_problems()` (used by
+    `--refresh-durations`) — i.e. once `workflow_matrix_issues()` has ALREADY
+    reported the workflow drifted off the derived shape; the normal path feeds
+    the derived shards from `push_legs()` instead. The halves are folded
+    scalars with bare file names (no .py) — the run step maps them to
+    `tests/<name>.py` and `bench/*`. Returns {} when the parse fails so callers
+    fail closed on "workflow changed shape" instead of silently passing.
     """
     halves: dict[str, list[str]] = {}
     for m in re.finditer(r"- half: ([ab])\n\s+files: >-\n\s+([^\n]+)\n", workflow_text):
@@ -618,23 +2162,98 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
             if not (tests_dir / f"{f}.py").exists():
                 issues.append(f"half {half} entry {f} has no tests/{f}.py (dead entry, #1266)")
             if f in seen:
-                issues.append(f"half entry {f} is in BOTH halves (double-run, #1266)")
+                issues.append(f"shard entry {f} is in MORE THAN ONE shard (double-run, #1266)")
             seen.add(f)
     counts = {h: len(fs) for h, fs in halves.items()}
-    if abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
-        issues.append(
-            f"matrix halves imbalanced: a={counts.get('a', 0)} vs "
-            f"b={counts.get('b', 0)} (tolerance ±{HALF_IMBALANCE_TOLERANCE}) — "
-            "rebalance before adding more files (#1266)")
+    # #3400: the balance invariant is DURATION once measured weights exist.
+    # LPT packs by weight, so a heavy file dumped entirely on one half is
+    # caught even when the counts look even — and a correct duration pack may
+    # legitimately carry very different counts.
+    # The ±3 count check would red that correct split, so it now applies only
+    # to manifests with no durations map at all (e.g. the small test
+    # fixtures, or a repo that has not adopted durations).
+    durations = _durations_map(manifest)
+    if durations:
+        weights = {h: sum(_duration_weight(durations.get(
+                            f if f.endswith(".py") else f + ".py"))
+                          for f in fs)
+                   for h, fs in halves.items()}
+        lo, hi = min(weights.values()), max(weights.values())
+        # P2 (#3407 review): compute the ratio BEFORE the f-string. `lo <= 0`
+        # short-circuits the comparison but the message still evaluated
+        # `hi / lo`, so the one branch written to CATCH a zero-weight half died
+        # with ZeroDivisionError while formatting its own diagnosis. A
+        # single-sided pack is reachable (a 1-file pool, or an all-zero
+        # measured map) and this is the only check that catches it —
+        # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
+        # pass when one half is empty.
+        # #6145, same root as `watchdog_headroom_issues`: decide at the
+        # precision the message PRINTS. Comparing the exact ratio and then
+        # rendering both operands at 2 dp let a fire inside (1.25, 1.255) print
+        # "ratio 1.25x, tolerance 1.25x" — a diagnosis that reads as compliant
+        # while the gate refuses. Decision and message are one value; the cost
+        # is that a sub-0.005 excursion is inside the reporting quantum.
+        ratio = float("inf") if lo <= 0 else round(hi / lo, 2)
+        if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
+            issues.append(
+                f"matrix halves duration-imbalanced: "
+                f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
+                f"(ratio {ratio:.2f}x, tolerance "
+                f"{HALF_DURATION_IMBALANCE_RATIO:.2f}x) — rebalance the "
+                f"durations map (#3400)")
+    else:
+        # #6135: over EVERY shard, not just a/b — with N shards a tilt between
+        # c and i is as much a watchdog risk as one between a and b.
+        lo_c, hi_c = min(counts.values()), max(counts.values())
+        if hi_c - lo_c > HALF_IMBALANCE_TOLERANCE:
+            issues.append(
+                f"matrix shards imbalanced: {counts} "
+                f"(tolerance ±{HALF_IMBALANCE_TOLERANCE}) — "
+                "rebalance before adding more files (#1266)")
     return issues
 
 
 def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) -> list[str]:
     """#1266 (informational): manifest fast files that are in NO half — the
-    full-matrix coverage hole. Slow files, bench/*, and the epic #1647
-    carve-out set (their leg is `carve_out`) are excluded. Kept as
-    a warning (not fail-closed): closing it would push 100+ files into the
-    fast gate and blow the watchdog budget (see the scoping doc).
+    full-matrix coverage hole. Slow files, bench/*, the epic #1647
+    carve-out set (their leg is `carve_out`), and ENV_BROKEN_FILES are
+    excluded. Kept as a warning (not fail-closed): closing it would push
+    100+ files into the fast gate and blow the watchdog budget (see the
+    scoping doc).
+
+    ENV_BROKEN_FILES is excluded for the SAME reason as `slow` and
+    `carve_out`: `fast_pool()` drops those groups from the push/full-matrix
+    fast pool, and the halves this function is called with are derived from
+    that pool (`push_legs`). A group the pool omits can therefore never appear
+    in `halfset`, so leaving ENV_BROKEN_FILES out of this subtraction reported
+    its members as a coverage hole on EVERY run — structurally, not because of
+    the data. Empirically the set intersected with the surfaces is exactly one
+    file, which is why the warning was always the same one. It is not a hole:
+    the file needs a live environment the shard jobs do not have, and it is
+    executed by `.github/scripts/verify-cutover` instead.
+
+    Two boundaries, stated because the obvious generalisations of the sentence
+    above are each FALSE:
+      * This is the PUSH pool's exclusion, not every lane's. `select()`'s
+        tier-2 path does not subtract ENV_BROKEN_FILES, so a PR touching a
+        kept file can still place a member of the set in a tier-2 fast shard.
+        That is a separate question and is NOT changed here.
+      * `fast_pool()` also omits `on_demand`, which this function does not
+        subtract. That is LATENT rather than live only because no on_demand
+        file is currently a member of any surface, and the universe this check
+        walks is the surfaces — so such a file cannot reach it today. Add one
+        to a surface and it becomes this same false positive.
+
+    The durable rule: this subtraction must stay in sync with `fast_pool`'s own
+    filter, since the two are complements of the same pool.
+
+    The cost of leaving it in was not cosmetic: `--integrity` printed
+    `1 manifest fast files are in NO shard (full-matrix coverage hole, #1266)`
+    on every run, and two independent readings of a shard-split PR took that
+    warning at face value and reported that the split had dropped a test file
+    from the matrix. A permanent warning that is always false trains its
+    readers to discount the warning that is sometimes true — which is the
+    whole #1266 check.
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
@@ -643,48 +2262,1034 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
         fast.update(fs)
     fast -= slow
     fast -= carve_out
+    fast -= ENV_BROKEN_FILES
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
 
-def split_fast_gate(files, durations: dict, default_weight: float = 2.0):
-    """#1473: LPT greedy pack of the selected fast-gate files across halves
-    a/b by measured duration — deterministic (ties -> a; assignment order).
-    Raises ValueError on non-list input (guards the 'ALL' full-mode string).
+def _duration_weight(value, default: float = DEFAULT_FAST_WEIGHT) -> float:
+    """#3407 review: a malformed `durations` value must never crash a consumer.
+
+    `split_fast_gate`'s sort key negates the weight, so a `None`/string value
+    raised `TypeError: bad operand type for unary -` deep inside the sort —
+    which killed `--integrity` in `leg_coverage_issues()` *before*
+    `duration_issues()` was ever called, so the gate that exists to NAME the bad
+    entry tracebacked instead. A `NaN` was worse: every comparison is False, so
+    it passed both the value check and the imbalance check and silently
+    produced a maximally single-sided pack with a green exit.
+
+    Coercing to the default here means every consumer degrades safely, while
+    `duration_issues()` still names the offending entry and fails the gate.
+    `bool` is excluded explicitly (`isinstance(True, int)` is True).
+
+    #3407 review cycle 3: the finiteness probe must be TOTAL. `math.isfinite`
+    converts to float, so an int beyond float range (>=309 digits) raised
+    `OverflowError` — i.e. the probe introduced to stop a crash could itself
+    crash. A negative duration is impossible data and is likewise coerced.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:  # an int beyond float range
+        finite = False
+    if not finite or value < 0:
+        return default
+    return value
+
+
+def split_fast_gate(files, durations: dict, shards: int = DEFAULT_FAST_SHARDS,
+                    default_weight: float = DEFAULT_FAST_WEIGHT):
+    """#1473/#6135: LPT greedy pack of the selected fast-gate files across N
+    shards by measured duration — deterministic (ties and the empty-bin choice
+    go to the LOWEST label; assignment order is the sorted weight order).
+
+    Returns a list of N file lists (position -> `shard_labels`), each entry
+    prefixed with `tests/`. Raises ValueError on non-list input (guards the
+    'ALL' full-mode string).
+
+    #6135: N comes from the manifest's `fast_shards`, not a literal here, and is
+    NOT capped by the file count — a shard with no files is fine (it exits
+    early), while a MISSING shard makes the event's job-name set a non-superset
+    of the push lane's and the merge rail refuses NOT COMPARABLE. The only cap is
+    MAX_FAST_SHARDS (the a..z label space). Note the `--integrity` balance
+    check runs over the PUSH shards, not these: at any S <= MAX_FAST_SHARDS the
+    push pool is far larger, so the push shards are never empty and that
+    check's zero-weight arm is unreachable there.
     """
     if not isinstance(files, list):
         raise ValueError(f"split_fast_gate expects a list, got {type(files).__name__}")
+    try:
+        n = int(shards)
+    except (TypeError, ValueError):
+        n = DEFAULT_FAST_SHARDS
     weighted = []
     for f in files:
         name = f[len("tests/"):] if f.startswith("tests/") else f
-        weighted.append((name, durations.get(name, default_weight)))
-    a, b = [], []
-    ta = tb = 0.0
+        weighted.append((name, _duration_weight(
+            durations.get(name, default_weight), default_weight)))
+    # #6135: the shard COUNT is NOT capped by the file count. It must be the
+    # SAME count as the push matrix on every event, because the merge rail's
+    # lane-parity compares job-NAME SETS: a tier-2 PR that emitted fewer shards
+    # than main runs would be refused `NOT COMPARABLE` (main's extra `test (c)`…
+    # would be "missing" from the PR). A shard with no files exits early with an
+    # honest report; a shard that does not EXIST cannot be compared at all.
+    # The floor of 1 keeps an empty selection from expanding to zero matrix
+    # rows (GitHub refuses an empty matrix).
+    n = max(1, min(n, MAX_FAST_SHARDS))
+    bins: list[list[str]] = [[] for _ in range(n)]
+    totals = [0.0] * n
     for name, w in sorted(weighted, key=lambda x: (-x[1], x[0])):
-        if ta <= tb:
-            a.append("tests/" + name)
-            ta += w
-        else:
-            b.append("tests/" + name)
-            tb += w
-    return a, b
+        # ties and the initial all-zero state resolve to the lowest index
+        # (the historical "ties -> a").
+        i = totals.index(min(totals))
+        bins[i].append("tests/" + name)
+        totals[i] += w
+    return bins
+
+
+def _durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping. (#3407 c4)
+
+    `None`/absent is the documented "this repo has not adopted the duration
+    gate" state and collapses to `{}` (a PASS, per `duration_coverage_issues`).
+    A non-mapping is malformed and is NAMED by `duration_issues` before it gets
+    here; this exists so a PRODUCER path (`--split`) can never crash either.
+    """
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
 
 
 def duration_issues(manifest: dict) -> list[str]:
-    """#1473: every durations key must be classified and non-slow."""
+    """#1473/#4712: every durations key must be a CLASSIFIED test file.
+
+    Slow and carve-out lane keys carry their measured cost here too, so a cost
+    regression in a lane that exists *because* it is expensive is visible.
+    Values must additionally be numeric and finite.
+    """
     issues = []
-    durations = manifest.get("durations", {})
-    slow = set(manifest.get("slow_files", []))
+    # #3407 review cycle 4 (pre-existing): this site and `--split` below used
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as `None` — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure" — and crashed with a raw TypeError instead.
+    #
+    # The precise predicate: `None`/absent means "this repo has not adopted the
+    # duration gate" and is a PASS. ANY other non-mapping (`0`, a string, a
+    # list) is a malformed declaration and must be NAMED — collapsing it into
+    # the empty case with `or {}` would have turned a wrong crash into a silent
+    # wrong pass.
+    raw = manifest.get("durations")
+    if raw is not None and not isinstance(raw, dict):
+        return [f"durations is not a mapping: {type(raw).__name__}"]
+    durations = _durations_map(manifest)
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
+    # Same reason as `integrity()`: an on-demand file is classified into a LANE
+    # rather than a surface, and its measured cost belongs here precisely
+    # because it is the lane's whole justification.
+    classified.update(on_demand_files(manifest))
     for name in durations:
-        if name in slow:
-            issues.append(f"durations key {name} is a slow file (must be fast-gate)")
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
+        # P2 (#3407 review): validate the VALUE, not just the key. Both guards
+        # iterated keys only, so a hand-edit typo in a now-505-line map passed
+        # `--integrity` silently and then crashed `push_legs` with a TypeError
+        # inside `split_fast_gate`'s sort key — the gate's whole job is to name
+        # the bad entry instead of tracebacking on it. `bool` is excluded
+        # explicitly: it is an `int` subclass and would slip through.
+        v = durations[name]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            issues.append(f"durations value for {name} is not numeric: {v!r}")
+        else:
+            # #3407 review P2: a NaN passed the type check AND was invisible to
+            # the imbalance guard (every comparison is False), so it produced a
+            # maximally single-sided pack with a green exit. Type-checking is
+            # necessary but not sufficient — finiteness is the real predicate.
+            # Cycle 3: the probe must be TOTAL (`math.isfinite` raises
+            # OverflowError on an int beyond float range), and a negative
+            # duration is impossible data that otherwise exited 0.
+            try:
+                finite = math.isfinite(v)
+            except OverflowError:
+                finite = False
+            if not finite:
+                issues.append(f"durations value for {name} is not finite: {v!r}")
+            elif v < 0:
+                issues.append(f"durations value for {name} is negative: {v!r}")
     return issues
+
+
+def duration_coverage_issues(manifest: dict,
+                             threshold: float = DURATION_COVERAGE_MIN) -> list[str]:
+    """#3400: the `durations` map must cover (almost) the whole fast pool.
+
+    A fast file with no measured duration is packed at DEFAULT_FAST_WEIGHT,
+    so a mostly-empty map silently turns `split_fast_gate` back into a
+    count-based pack — the exact rot that left 15 weights for 500 fast files
+    (#1266/#1473) and left the push halves duration-blind. Fail-closed once
+    the map is populated; an ABSENT or EMPTY map is NOT a failure, so a repo
+    that has not adopted durations is never hard-failed by this guard.
+    """
+    durations = _durations_map(manifest)
+    if not durations:
+        return []
+    fast = fast_pool(manifest)
+    if not fast:
+        return []
+    missing = sorted(f for f in fast if f not in durations)
+    coverage = (len(fast) - len(missing)) / len(fast)
+    if coverage < threshold:
+        return [
+            f"durations coverage {coverage:.1%} "
+            f"({len(fast) - len(missing)}/{len(fast)} fast files) is below the "
+            f"{threshold:.0%} floor — {len(missing)} file(s) pack at the flat "
+            f"{DEFAULT_FAST_WEIGHT}s default, so the push split is effectively "
+            f"count-based (#3400). Refresh config/ci-surfaces.yml `durations` "
+            f"from tools/ci_timing.py / the CI junit artifacts. Example: "
+            f"{missing[:5]}"
+        ]
+    return []
+
+
+# ── #2938: surface audit (report-only, non-blocking) ─────────────────────
+#
+# `config/ci-surfaces.yml` membership is hand-curated: a surface's members are
+# the test files that should RUN when that surface's source changes, which is
+# not the same thing as "the files that reference that surface's source".
+# Deriving membership mechanically was rejected (#2938: it proposed 326/562
+# file moves, 28 out of `onboarding`, and emptied `classify`) because a naive
+# import scan cannot resolve `from tortoise import X`, a source path no
+# SOURCE_PATTERNS entry maps, fixture/HTTP indirection, or human intent. This
+# mode derives nothing: it prints the mismatches, with evidence, for a human.
+#
+# Pin-resolution rules — each gap the mechanical attempt hit is handled (or
+# explicitly surfaced):
+#   (a) `from tortoise import X` / `import tortoise.X` -> `tortoise/X.py` or
+#       `tortoise/X/__init__.py`, accepted only when the file exists on disk
+#       (a class re-exported from the package root is not a submodule). The
+#       bare package roots `tortoise` / `tests` are never pins themselves:
+#       the root re-exports many surfaces and every test imports it.
+#   (b) a pinned source path that no SOURCE_PATTERNS entry maps (the #2938
+#       `tortoise/api.py` case, since fixed by mapping it) is reported under
+#       "uncovered source paths" rather than silently binned as `core` (the
+#       selection fallback), naming the pinning files and the surfaces they
+#       are registered under. A path named after a surface
+#       (`tortoise/<surface>.py`) is additionally called out under
+#       "SOURCE_PATTERNS coverage gaps".
+#   (c) string references: every non-docstring string literal is scanned for
+#       path-like tokens (a subprocess argv, a Path(...) literal, a path read
+#       from disk); evidence is rendered quoted (`file <- "path/string"`).
+#   (d) fixture/helper indirection: a test that imports another module under
+#       tests/ inherits that module's pins transitively (cycle-safe), EXCEPT
+#       helpers in SHARED_MODULES (conftest.py, fake_control_plane.py) —
+#       those already force the full matrix, so following them would make
+#       every test "pin" everything. Helper-derived evidence is tagged
+#       `(via tests/helper.py)` so direct and indirect evidence are distinct.
+# SHARED_MODULES are excluded from pins entirely (a change to them forces the
+# full matrix, so a file importing sdk.py is not a mismatch).
+#
+# Still undecided by construction (kept visible, never hidden):
+#   - `classify` and `core` have no SOURCE_PATTERNS entry, so "pins nothing
+#     from this surface" is undefined for them; the report says so and skips
+#     removal analysis instead of proposing to empty `classify`.
+#   - intent ("this suite should run when this area changes") is not derivable
+#     from references; a removal candidate whose only pins are uncovered or
+#     helper-derived is labelled rather than asserted.
+#   - seams the path scan cannot resolve at all (a pytest marker, a fixture
+#     name, an HTTP route string with no source path) stay invisible.
+
+# Bare package roots that are not pins: `from tortoise import X` / `import
+# tortoise` mean "the package", and the root re-exports many surfaces.
+_AUDIT_NAMESPACE_ROOTS = frozenset({"tortoise", "tests"})
+
+# Mirror of select()'s per-file fallback branch: engine/config paths with no
+# SOURCE_PATTERNS entry select the `core` surface.
+_AUDIT_CORE_FALLBACK = ("tortoise/", "graph-scripts/", "config/",
+                        "validation/", "packs/")
+
+# Source trees worth naming in the uncovered report (tests/ is test-internal
+# scaffolding, not a selectable source surface).
+_AUDIT_SOURCE_TREES = ("tortoise/", "tools/", "battery/", "graph-scripts/",
+                       "benchmarks/", "config/", "packs/", "validation/",
+                       "website/", "services/", "integrations/")
+
+# Source trees whose modules are followed TRANSITIVELY when a test imports
+# them (rule (d) extension, #2938 review P2). A test reaching a surface only
+# through a repo-root helper (tools/longmem_eval/retrieve.py ->
+# tortoise/retrieval.py) must not read as "pins nothing". `tortoise/` is
+# deliberately excluded: it IS the surface source, and its internals are not
+# helper indirection.
+_AUDIT_HELPER_TREES = ("tests/", "tools/", "graph-scripts/", "battery/",
+                       "benchmarks/", "services/", "integrations/")
+
+_AUDIT_PATH_TOKEN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\\/-]*")
+_AUDIT_EVIDENCE_CAP = 6
+
+
+def _audit_is_shared(path: str) -> bool:
+    return any(path == s or (s.endswith("/") and path.startswith(s))
+               for s in SHARED_MODULES)
+
+
+def _audit_module_files(module: str, repo: Path, tests_dir: Path) -> set[str]:
+    """Existing repo files a dotted module may resolve to.
+
+    Checked under BOTH import roots: the repo root and tests/ (pytest puts
+    tests/ on sys.path, so `eval.harness.schema` lives at
+    tests/eval/harness/schema.py while `tortoise.embeddings` lives at
+    tortoise/embeddings.py).
+    """
+    rel = module.replace(".", "/")
+    out: set[str] = set()
+    for root in (repo, tests_dir):
+        for cand in (root / f"{rel}.py", root / rel / "__init__.py"):
+            if cand.is_file():
+                out.add(cand.relative_to(repo).as_posix())
+    return out
+
+
+def _audit_classify(path: str) -> tuple[frozenset[str], bool, str]:
+    """(surfaces, covered, reason) for a repo-relative source path.
+
+    ``reason`` is ``pattern`` (matched SOURCE_PATTERNS), ``shared``
+    (SHARED_MODULES -> full matrix), ``core-fallback`` (select()'s core
+    branch) or ``outside`` (not selection-relevant).
+    """
+    if _audit_is_shared(path):
+        return frozenset(), False, "shared"
+    surfaces = {s for s, pats in SOURCE_PATTERNS.items()
+                if any(path == p or path.startswith(p) for p in pats)}
+    if surfaces:
+        return frozenset(surfaces), True, "pattern"
+    if any(path.startswith(p) for p in _AUDIT_CORE_FALLBACK):
+        return frozenset({"core"}), False, "core-fallback"
+    return frozenset(), False, "outside"
+
+
+def _audit_parse(abs_path: Path) -> ast.AST | None:
+    try:
+        return ast.parse(abs_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+
+def _audit_relative_base(node: ast.ImportFrom, pkg: list[str]) -> str:
+    """Resolve a (possibly relative) ImportFrom base module name."""
+    if node.level == 0:
+        return node.module or ""
+    base = list(pkg)
+    drop = node.level - 1
+    if drop:
+        base = base[:-drop] if drop <= len(base) else []
+    if node.module:
+        base = base + node.module.split(".")
+    return ".".join(base)
+
+
+def _audit_import_nodes(tree: ast.AST, module_level_only: bool):
+    """Import nodes to honor, optionally skipping deferred (call-time) ones.
+
+    #2938 review P1: `ast.walk` visits every nested import, so an import
+    inside a function body reads exactly like a module-level one. A helper
+    module that is only IMPORTED (never called) never executes its
+    function-local imports, so those must not become strong pins. Descend
+    through statements that execute at import time (if/try/with/class
+    bodies); stop at function/lambda scopes.
+    """
+    if not module_level_only:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                yield node
+        return
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _audit_import_paths(tree: ast.AST, module_name: str, repo: Path,
+                        tests_dir: Path,
+                        module_level_only: bool = False) -> list[str]:
+    """Repo-relative files the file's import statements resolve to.
+
+    `from A import n` descends into `A.n` as well as `A`, so
+    `from tortoise import onboarding` pins tortoise/onboarding/__init__.py
+    and `from tortoise.api import EventAPI` pins tortoise/api.py (api is a
+    module, not a package, so the name descent finds nothing and the base
+    does).
+
+    ``module_level_only`` skips imports nested in function/lambda bodies
+    (see :func:`_audit_import_nodes`): true for a transitively followed
+    helper, false for the root test file (whose function bodies DO run).
+    """
+    pkg = module_name.split(".")[:-1]
+    out: set[str] = set()
+    for node in _audit_import_nodes(tree, module_level_only):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _AUDIT_NAMESPACE_ROOTS:
+                    continue
+                out.update(_audit_module_files(alias.name, repo, tests_dir))
+        elif isinstance(node, ast.ImportFrom):
+            base = _audit_relative_base(node, pkg)
+            if base and base not in _AUDIT_NAMESPACE_ROOTS:
+                out.update(_audit_module_files(base, repo, tests_dir))
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                sub = f"{base}.{alias.name}" if base else alias.name
+                out.update(_audit_module_files(sub, repo, tests_dir))
+    return sorted(out)
+
+
+def _audit_string_paths(tree: ast.AST) -> list[str]:
+    """Path-like tokens from non-docstring string literals (rule (c))."""
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in docstrings:
+            continue
+        for raw in _AUDIT_PATH_TOKEN.findall(node.value):
+            token = raw.replace("\\", "/")
+            while token.startswith("./"):
+                token = token[2:]
+            out.add(token)
+    return sorted(out)
+
+
+def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
+                    tests_dir: Path,
+                    cache: dict[tuple[str, bool], tuple] | None = None,
+                    module_level_only: bool = False):
+    """Direct reference scan of one file.
+
+    Returns ``(surface_pins, uncovered, shared, helpers)`` where
+    surface_pins maps a SOURCE_PATTERNS surface to evidence strings,
+    uncovered maps a pinned-but-unmapped source path to evidence, shared is
+    the referenced SHARED_MODULES set, and helpers is the set of repo-relative
+    modules imported and worth following (rule (d): tests/ helpers plus any
+    module in ``_AUDIT_HELPER_TREES``). ``cache`` memoizes the scan (a helper
+    reached by many test roots is parsed once); the cache key carries
+    ``module_level_only`` because the same file can be scanned both as a
+    test root (all imports) and as a helper (module-level only).
+    """
+    key = (abs_path.as_posix(), module_level_only)
+    if cache is not None and key in cache:
+        return cache[key]
+    surface_pins: dict[str, set[str]] = {}
+    uncovered: dict[str, set[str]] = {}
+    shared: set[str] = set()
+    helpers: set[str] = set()
+    tree = _audit_parse(abs_path)
+    if tree is None:
+        result = (surface_pins, uncovered, shared, helpers)
+        if cache is not None:
+            cache[key] = result
+        return result
+
+    def record(path: str, evidence: str) -> None:
+        surfaces, covered, reason = _audit_classify(path)
+        if reason == "shared":
+            shared.add(path)
+        elif covered:
+            for s in surfaces:
+                surface_pins.setdefault(s, set()).add(evidence)
+        elif reason == "core-fallback" or any(
+                path.startswith(p) for p in _AUDIT_SOURCE_TREES):
+            uncovered.setdefault(path, set()).add(evidence)
+
+    for path in _audit_import_paths(tree, module_name, repo, tests_dir,
+                                    module_level_only):
+        if path.startswith("tests/") and path.endswith(".py"):
+            # test-internal module: a helper to follow, not a source pin.
+            if _audit_is_shared(path):
+                shared.add(path)
+            else:
+                helpers.add(path)
+            continue
+        record(path, path)
+        # #2938 review P2: a repo-root helper (tools/, graph-scripts/, …) is
+        # both a pin of its own surface AND indirection — follow it so a test
+        # reaching a surface only through it is not read as pinning nothing.
+        if path.endswith(".py") and path.startswith(_AUDIT_HELPER_TREES) \
+                and not _audit_is_shared(path):
+            helpers.add(path)
+    for token in _audit_string_paths(tree):
+        # rule (c) precision: a string naming no file/dir on disk is data,
+        # not a source reference (e.g. an MCP method name "tools/call").
+        if not (repo / token).exists():
+            continue
+        record(token, f'"{token}"')
+    result = (surface_pins, uncovered, shared, helpers)
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def _audit_file_refs(abs_path: Path, rel: str, repo: Path, tests_dir: Path,
+                     cache: dict[tuple[str, bool], tuple] | None = None):
+    """Pins for one test file, following its imported helper modules.
+
+    Cycle-safe BFS over repo-relative paths: each helper contributes its own
+    pins tagged ``(via tests/helper.py)`` (or ``(via tools/…)`` for a
+    repo-root helper); SHARED_MODULES helpers are never followed. Helpers are
+    scanned module-level only (#2938 review P1): a helper is imported, not
+    called, so its function-local imports never execute — and a helper's own
+    deferred import of another helper is not followed either.
+    """
+    surface_pins: dict[str, set[str]] = {}
+    uncovered: dict[str, set[str]] = {}
+    shared: set[str] = set()
+    seen: set[str] = set()
+    root = rel if rel.startswith("tests/") else f"tests/{rel}"
+    queue = [root]
+    while queue:
+        cur = queue.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        cur_abs = repo / cur
+        if not cur_abs.is_file():
+            continue
+        module_name = cur[:-3].replace("/", ".")
+        sp, unc, sh, helpers = _audit_own_refs(
+            cur_abs, module_name, repo, tests_dir, cache,
+            module_level_only=(cur != root))
+        shared |= sh
+        tag = "" if cur == root else f" (via {cur})"
+        for s, evs in sp.items():
+            for ev in evs:
+                surface_pins.setdefault(s, set()).add(ev + tag)
+        for p, evs in unc.items():
+            for ev in evs:
+                uncovered.setdefault(p, set()).add(ev + tag)
+        for helper in sorted(helpers):
+            if helper not in seen:
+                queue.append(helper)
+    return surface_pins, uncovered, shared
+
+
+def _audit_coverage_gaps(repo: Path) -> dict[str, str]:
+    """Surface-named source paths absent from that surface's SOURCE_PATTERNS.
+
+    The #2938 case (b): a source named after a surface (`tortoise/<s>.py`,
+    e.g. `tortoise/api.py` before this PR mapped it) exists, but that
+    surface's `SOURCE_PATTERNS` entry does not list it — so a change to it
+    selects `core` (or nothing), and the surface-registered tests pinning it
+    never run. Reporting this explicitly is the whole point of the audit:
+    silently binning the path as `core` would make the numbers lie.
+    """
+    gaps: dict[str, str] = {}
+    for surface in sorted(SOURCE_PATTERNS):
+        pats = SOURCE_PATTERNS[surface]
+        for cand in (f"tortoise/{surface}.py", f"tortoise/{surface}",
+                     surface):
+            if not (repo / cand).exists() or _audit_is_shared(cand):
+                continue
+            covered = any(cand == p or cand.startswith(p) or p == cand + "/"
+                          for p in pats)
+            if not covered:
+                gaps[cand] = surface
+                break
+    return gaps
+
+
+def _audit_is_string_evidence(evidence: str) -> bool:
+    """True when the evidence came from a path *string*, not an import."""
+    return evidence.startswith('"')
+
+
+def _audit_entries(entries) -> list:
+    """Manifest surface value as a list.
+
+    #2938 review P3: a curated manifest can carry `null` for a surface, and a
+    hard-edited one a scalar. `None` means empty (like integrity()'s
+    `files or ()`); a non-list scalar is malformed and is treated as empty
+    rather than silently iterated (`api: "test_x.py"` used to become a list
+    of characters).
+    """
+    if entries is None:
+        return []
+    return _surface_members(entries)
+
+
+def _audit_gap_selection(rec: dict, manifest: dict) -> tuple[list[str], list[str], list[str]]:
+    """(selected_surfaces, victims, runners) for one coverage-gap record.
+
+    #2938 review P2: the previous renderer asserted the non-gap pinners "run
+    via {others}", but `others` is just the union of non-gap registrations —
+    `select([unmapped_path], ...)` selects only the fallback `core` surface
+    and does NOT select `ep`, so a pinner registered solely under `ep` does
+    not run. A pinner RUNS when it is in the change's fast-gate `test_files`,
+    in the selected surfaces' slow leg, or in a triggered carve-out job;
+    every other pinner is a victim. Callers pass a manifest whose surface
+    values are already normalised via :func:`_audit_entries`.
+    """
+    selection = select([rec["path"]], "pull_request", manifest)
+    if selection["full"] or selection["test_files"] == "ALL":
+        return sorted(manifest["surfaces"]), [], sorted(rec["files"])
+    runs: set[str] = set(selection["test_files"])
+    runs |= set(selection.get("slow_selected") or [])
+    if selection.get("carve_out_run"):
+        runs |= set(manifest.get("carve_out") or [])
+    runners, victims = [], []
+    for f in sorted(rec["files"]):
+        base = f.rsplit("/", 1)[-1]
+        (runners if (f in runs or base in runs) else victims).append(f)
+    return sorted(selection["surfaces"]), victims, runners
+
+
+def surface_audit(manifest: dict, repo: Path | None = None,
+                  tests_dir: Path | None = None) -> dict:
+    """#2938: report-only manifest/source mismatch audit.
+
+    Never mutates the manifest and never feeds selection: it returns a
+    structured report consumed by :func:`render_surface_audit`. ``repo`` /
+    ``tests_dir`` are injectable for synthetic-manifest tests. Surface values
+    are normalised with :func:`_audit_entries` (``null``/scalars -> empty),
+    so a curated manifest with a malformed value still audits without raising.
+    """
+    repo = Path(repo) if repo is not None else REPO
+    tests_dir = Path(tests_dir) if tests_dir is not None else TESTS_DIR
+    owners: dict[str, list[str]] = {
+        s: _audit_entries(entries)
+        for s, entries in manifest["surfaces"].items()
+    }
+    # select() gets the normalised surfaces (a scalar value would crash its
+    # `files.update(...)`); the original manifest is left untouched.
+    audit_manifest = {**manifest, "surfaces": owners}
+    source_mapped = set(SOURCE_PATTERNS)
+    gaps = _audit_coverage_gaps(repo)
+    cache: dict[tuple[str, bool], tuple] = {}
+
+    disk: list[str] = []
+    for f in sorted(tests_dir.rglob("test_*.py")):
+        rel_path = f.relative_to(tests_dir)
+        if rel_path.parts and rel_path.parts[0] == "e2e":
+            continue
+        disk.append(rel_path.as_posix())
+
+    def registered_in(rel: str) -> list[str]:
+        base = rel.rsplit("/", 1)[-1]
+        return sorted(s for s, entries in owners.items()
+                      if rel in entries or base in entries)
+
+    by_surface = {
+        s: {"members": list(entries),
+            "source_mapped": s in source_mapped,
+            "removal": [], "addition": []}
+        for s, entries in owners.items()
+    }
+    uncovered_index: dict[str, dict] = {}
+    for rel in disk:
+        surface_pins, uncovered, shared = _audit_file_refs(
+            tests_dir / rel, rel, repo, tests_dir, cache)
+        registered = registered_in(rel)
+        for s in sorted(surface_pins):
+            if s in by_surface and s not in registered:
+                evs = sorted(surface_pins[s])
+                # #2938 review P1-2: a path STRING is weak evidence — it may
+                # be fixture data (test_ci_selection.py's own corpus names six
+                # surfaces). Keep it visible (the renderer labels it), but only
+                # an import-derived reference makes the file an addition
+                # candidate a human should act on.
+                by_surface[s]["addition"].append({
+                    "file": rel, "evidence": evs,
+                    "strong": any(not _audit_is_string_evidence(e)
+                                   for e in evs),
+                    "registered": registered})
+        for s in registered:
+            if s not in source_mapped or surface_pins.get(s):
+                continue
+            by_surface[s]["removal"].append({
+                "file": rel, "surface": s,
+                "pins": {t: sorted(v)
+                         for t, v in sorted(surface_pins.items())},
+                "uncovered": sorted(uncovered), "shared": sorted(shared),
+                "gap": sorted(p for p in uncovered if p in gaps)})
+        for path, evs in uncovered.items():
+            rec = uncovered_index.setdefault(
+                path, {"path": path, "files": {}, "weak_files": {},
+                       "evidence": set()})
+            evs = sorted(evs)
+            # #2938 review P1-2: only a file with an import-derived reference
+            # to this path counts as a STRONG pinnner. A string-only pinnner
+            # (test_ci_selection.py names tortoise/api.py as fixture data) is
+            # kept in weak_files so the "never run" claim is not inflated.
+            bucket = (rec["files"]
+                      if any(not _audit_is_string_evidence(e) for e in evs)
+                      else rec["weak_files"])
+            bucket[rel] = sorted(registered)
+            rec["evidence"].update(evs)
+
+    uncovered = []
+    for rec in uncovered_index.values():
+        rec["files"] = {f: rec["files"][f] for f in sorted(rec["files"])}
+        rec["weak_files"] = {f: rec["weak_files"][f]
+                             for f in sorted(rec["weak_files"])}
+        rec["registered"] = sorted(
+            {s for regs in rec["files"].values() for s in regs}
+            | {s for regs in rec["weak_files"].values() for s in regs})
+        rec["evidence"] = sorted(rec["evidence"])
+        rec["surface"] = gaps.get(rec["path"])
+        uncovered.append(rec)
+    uncovered.sort(key=lambda r: (r["surface"] is None, r["path"]))
+
+    coverage_gaps = [r for r in uncovered if r["surface"] is not None]
+    for rec in coverage_gaps:
+        sel, victims, runners = _audit_gap_selection(rec, audit_manifest)
+        rec["selected_surfaces"] = sel
+        rec["victims"] = victims
+        rec["runs"] = runners
+
+    # #2938 review P3: a curated manifest can carry `null` for a surface;
+    # a bare `entries.count()` would traceback. `owners` is normalised above.
+    duplicates: dict[str, list[str]] = {}
+    for s, entries in owners.items():
+        dupes = sorted({e for e in entries if entries.count(e) > 1})
+        if dupes:
+            duplicates[s] = dupes
+
+    return {
+        "surfaces": by_surface,
+        # A lane file is unregistered ON PURPOSE — that is what the lane means.
+        # Reporting it under "files in NO surface" reads as drift, and the
+        # obvious fix for that reading is to re-register the file into a
+        # surface, which silently puts it back on the merge gate. The two
+        # states are separated instead of merged.
+        "no_surface": sorted(r for r in disk
+                             if not registered_in(r)
+                             and r not in on_demand_files(manifest)),
+        "on_demand": sorted(r for r in disk
+                            if not registered_in(r)
+                            and r in on_demand_files(manifest)),
+        "duplicates": {s: d for s, d in duplicates.items() if d},
+        "coverage_gaps": coverage_gaps,
+        "uncovered": [r for r in uncovered if r["surface"] is None],
+        "disk_files": len(disk),
+    }
+
+
+def _audit_fmt_paths(paths: list[str], cap: int = _AUDIT_EVIDENCE_CAP) -> str:
+    shown = ", ".join(paths[:cap])
+    if len(paths) > cap:
+        shown += f", … (+{len(paths) - cap} more)"
+    return shown
+
+
+def _audit_label_evidence(evidence: str) -> str:
+    """Mark string-derived evidence so a human sees it is not an import."""
+    if not _audit_is_string_evidence(evidence):
+        return evidence
+    core, sep, via = evidence.partition(" (via ")
+    if sep:
+        return f"{core} (string, not an import; via {via}"
+    return f"{core} (string, not an import)"
+
+
+def _audit_fmt_evidence(evs: list[str],
+                        cap: int = _AUDIT_EVIDENCE_CAP) -> str:
+    return _audit_fmt_paths([_audit_label_evidence(e) for e in evs], cap)
+
+
+def _audit_removal_line(entry: dict) -> str:
+    parts = [f"{s}: {_audit_fmt_evidence(v)}"
+             for s, v in sorted(entry["pins"].items())]
+    if entry["shared"]:
+        parts.append(f"shared: {_audit_fmt_paths(entry['shared'])}")
+    if entry["uncovered"]:
+        parts.append(f"uncovered: {_audit_fmt_paths(entry['uncovered'])}")
+    if entry["gap"]:
+        parts.append(f"⚑ coverage gap: {_audit_fmt_paths(entry['gap'])}")
+        warn = ("  ⚑ surface-named source is unmapped — fix SOURCE_PATTERNS "
+                "before removing")
+    else:
+        # #2938 review P3: every entry in this list has NO pin for its own
+        # surface BY DEFINITION, so the "don't act" cue belongs on all of
+        # them — shared-only members (`shared: tortoise/sdk.py`) used to
+        # render as bare removal candidates.
+        warn = (f"  ⚠ no `{entry['surface']}` pin resolved — helper/dynamic "
+                "indirection unresolved; confirm before removing")
+    body = "; ".join(parts) if parts else "no source references at all"
+    return f"  {entry['file']} <- ({body}){warn}"
+
+
+def render_surface_audit(report: dict) -> str:
+    """Human-readable rendering of :func:`surface_audit` (deterministic)."""
+    lines = [
+        "CI surface audit (#2938) — report only; select() / --integrity are "
+        "unchanged.",
+        f"scanned tests/**/test_*.py (tests/e2e/ exempt): {report['disk_files']} files",
+        "",
+        "Summary (surface: members / no-pin removal candidates / addition "
+        "candidates):",
+    ]
+    for s in sorted(report["surfaces"]):
+        v = report["surfaces"][s]
+        if v["source_mapped"]:
+            n_add = sum(1 for e in v["addition"] if e["strong"])
+            lines.append(f"  {s:<11} {len(v['members']):>4} members   "
+                         f"{len(v['removal']):>3} no-pin   "
+                         f"{n_add:>3} additions")
+        else:
+            lines.append(f"  {s:<11} {len(v['members']):>4} members   "
+                         "  n/a (no SOURCE_PATTERNS entry)")
+    unmapped = sorted(s for s, v in report["surfaces"].items()
+                      if not v["source_mapped"])
+    if unmapped:
+        lines += [
+            "",
+            f"⚠ {', '.join(unmapped)}: no SOURCE_PATTERNS entry — nothing maps a "
+            "source change to this surface, so \"pins",
+            "  nothing from it\" is undefined and removal analysis is skipped "
+            "(a naive scan would propose",
+            "  emptying `classify`; the rejected mechanical rule did exactly "
+            "that).",
+        ]
+    lines.append("")
+    for s in sorted(report["surfaces"]):
+        v = report["surfaces"][s]
+        if not v["source_mapped"]:
+            continue
+        lines.append(f"── {s} " + "─" * max(0, 58 - len(s)))
+        if v["removal"]:
+            lines.append(f"removal candidates — members pinning nothing from "
+                         f"`{s}` ({len(v['removal'])}):")
+            lines += [_audit_removal_line(e) for e in v["removal"]]
+        else:
+            lines.append(f"removal candidates — none (every member pins `{s}`)")
+        strong_add = [e for e in v["addition"] if e["strong"]]
+        weak_add = [e for e in v["addition"] if not e["strong"]]
+        if strong_add:
+            lines.append(f"addition candidates — files pinning `{s}` but not "
+                         f"registered ({len(strong_add)}):")
+            for e in strong_add:
+                reg = ", ".join(e["registered"]) or "none"
+                lines.append(f"  {e['file']} <- "
+                             f"{_audit_fmt_evidence(e['evidence'])}"
+                             f"  (registered: {reg})")
+        else:
+            lines.append("addition candidates — none")
+        if weak_add:
+            lines.append(f"string-only references — weak evidence, not counted "
+                         f"as pins ({len(weak_add)}):")
+            for e in weak_add:
+                reg = ", ".join(e["registered"]) or "none"
+                lines.append(f"  {e['file']} <- "
+                             f"{_audit_fmt_evidence(e['evidence'])}"
+                             f"  (registered: {reg})")
+        lines.append("")
+
+    gaps = report["coverage_gaps"]
+    if gaps:
+        lines.append(f"⚑ SOURCE_PATTERNS coverage gaps ({len(gaps)}) — surface-named "
+                     "source that no pattern maps:")
+        for rec in gaps:
+            # #2938 review P2: do NOT assert which files run from the union of
+            # non-gap registrations — `select()` decides. Victims are the
+            # pinners this change does not select (e.g. a pinner registered
+            # only under a surface the change does not select).
+            victims = rec["victims"]
+            selected = "/".join(rec["selected_surfaces"]) or "none"
+            weak_victims = sorted(
+                f for f, regs in rec["weak_files"].items()
+                if rec["surface"] in regs)
+            total = len(rec["files"]) + len(rec["weak_files"])
+            weak_note = (f" (+{len(weak_victims)} string-only pinnner(s), "
+                         "weak)" if weak_victims else "")
+            lines.append(f"  {rec['path']} is not in "
+                         f"SOURCE_PATTERNS[{rec['surface']!r}] — a change to "
+                         f"it selects `{selected}`,")
+            if victims:
+                lines.append(f"    never run on a change to {rec['path']}: "
+                             f"{_audit_fmt_paths(victims)}")
+            else:
+                lines.append(f"    every pinning file still runs on a change "
+                             f"to {rec['path']} (via `{selected}`)")
+            lines.append(f"    (pinned by {total} file(s) in total; "
+                         f"{len(victims)} never run, {len(rec['runs'])} run via "
+                         f"`{selected}`{weak_note}; evidence: "
+                         f"{_audit_fmt_evidence(rec['evidence'])})")
+        lines.append("")
+
+    nosurf = report["no_surface"]
+    lines.append(f"files in NO surface ({len(nosurf)})"
+                 + (":" if nosurf else " — none"))
+    for f in nosurf:
+        lines.append(f"  {f} <- (unregistered; a tests/ change cannot select it)")
+    # Reported from the report's own `on_demand` key, populated by
+    # `surface_audit()` — which is the function that has the manifest. (An
+    # earlier version of this line read `report["manifest"]`, a key the report
+    # does not carry, so it silently evaluated to an empty list and the note
+    # never appeared. A fix that cannot fail is not a fix.)
+    lane = report.get("on_demand", [])
+    if lane:
+        lines.append(f"in the on_demand lane ({len(lane)}) — unregistered on "
+                     f"purpose; they RUN but do not gate the merge:")
+        for f in lane:
+            lines.append(f"  {f}")
+        lines.append("")
+    lines.append("")
+
+    dupes = report["duplicates"]
+    total_dupes = sum(len(v) for v in dupes.values())
+    lines.append(f"same-surface duplicate entries ({total_dupes})"
+                 + (":" if total_dupes else " — none"))
+    for s in sorted(dupes):
+        for e in dupes[s]:
+            lines.append(f"  {s}: {e} (listed "
+                         f"{report['surfaces'][s]['members'].count(e)}x)")
+    lines.append("")
+
+    unc = report["uncovered"]
+    lines.append(f"other pinned paths with no SOURCE_PATTERNS entry ({len(unc)}) "
+                 "— these select `core` (the fallback):")
+    for rec in unc:
+        reg = ", ".join(rec["registered"]) or "none"
+        weak = (f" (+{len(rec['weak_files'])} string-only)"
+                if rec["weak_files"] else "")
+        lines.append(f"  {rec['path']}  (pinned by {len(rec['files'])}{weak}, "
+                     f"registered: {reg})")
+    return NL.join(lines)
+
+
+def _ci_manifest_module():
+    """The ``tools.ci_manifest`` module, reusing an already-loaded copy.
+
+    ``ci_manifest`` imports this module back for the manifest helpers, so the
+    import is lazy and must not create a second copy under a different name
+    (which would split module state under pytest). The RUNNING module is probed
+    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
+    name-only lookup imported a SECOND copy of the same file.
+    """
+    import sys as _sys
+    main = _sys.modules.get("__main__")
+    if main is not None and hasattr(main, "check"):
+        _file = getattr(main, "__file__", None)
+        if _file:
+            try:
+                if Path(_file).resolve() == (REPO / "tools" / "ci_manifest.py").resolve():
+                    return main
+            except OSError:  # pragma: no cover - defensive
+                pass
+    for _name in ("tools.ci_manifest", "ci_manifest"):
+        mod = _sys.modules.get(_name)
+        if mod is not None and hasattr(mod, "check"):
+            return mod
+    for path in (str(REPO), str(REPO / "tools")):
+        if path not in _sys.path:
+            _sys.path.insert(0, path)
+    try:
+        from tools import ci_manifest as mod
+    except ImportError:  # pragma: no cover - module shipped with the repo
+        import ci_manifest as mod
+    return mod
+
+
+def _manifest_contract_issues(manifest: dict) -> list[str]:
+    """#5050: the measured-durations-map contract, as RED issues only.
+
+    Delegated to ``tools/ci_manifest.py`` so the map's checks live in ONE place
+    and cannot be half-wired: this call replaces the three direct
+    ``duration_issues``/``leg_coverage_issues``/``duration_coverage_issues``
+    calls that used to sit in the ``--integrity`` composition, and adds the
+    plausibility/freshness checks the validator contributes (any weight the
+    writer could not have rendered — sub-floor, finer precision, or negative —
+    a non-empty map whose every weight is the `0.0` sentinel, and a stale
+    capture date).
+
+    `ci_manifest.map_issues` also carries main's TWO newer manifest checks —
+    `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
+    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) —
+    because they landed beside this change and the union of the two pipelines
+    must not drop either. Composing them here keeps the branch's invariant
+    (every check reachable from ONE place) while keeping main's coverage.
+
+    An ImportError is reported as an issue, never swallowed: returning ``[]``
+    would leave ``--integrity`` GREEN with none of these checks having run —
+    the "silent omission with every gate green" class they exist to kill.
+
+    The validator's UNKNOWN verdict is printed as a NOTICE rather than added to
+    ``problems`` — for every reason EXCEPT the one observed defect below. The
+    states are genuinely different: a RED map is observed to be wrong, while
+    UNKNOWN means the map's fidelity could not be observed. The notice keeps
+    the genuinely-UNKNOWN cases visible instead of silent and preserves this
+    gate's documented polarity (an absent map must not hard-fail a repo that
+    never adopted it; pinned by
+    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``):
+    failing on absence would red ``manifest-integrity`` repo-wide until a weekly
+    data refresh landed — refusing honest merges for a state no lane owns.
+
+    ABSENCE ONLY is softened, and absence is the KEY'S. A
+    ``durations_captured_at`` that is PRESENT but unparseable is a MALFORMED
+    manifest value — an OBSERVED defect — and is added to ``problems`` (RED).
+    The predicate is structural: ``durations_captured_at not in manifest`` is
+    the sole non-gating case; otherwise ``ci_manifest._parse_captured_at``
+    decides, and a ``None`` verdict there is RED. So ``""``, an explicit
+    ``null``, ``"   "``, ``"not-a-date"``, ``0``, ``[]`` and ``{}`` are ALL
+    red, while a MISSING key stays the notice. Softening any present
+    unparseable value would invert fail-closed: a stale-but-parseable stamp is
+    RED, so degrading that same value to ``'not-a-date'`` would turn exit 1
+    into exit 0 — strictly worse data, strictly better verdict — and a
+    one-character typo would silently disable the staleness control at this,
+    the only CI-invoked, entry point. The strict exit-2 verdict for the
+    genuinely-UNKNOWN states lives in ``tools/ci_manifest.py``, which no
+    workflow invokes yet: this enforcing entry point exits 0 on an ABSENT
+    stamp until #6091 lets a refresh carry a real date. The promotion is
+    decided and worded in ONE place — ``ci_manifest.unparseable_stamp_issue`` —
+    so this gate and ``ci_timing.integrity_problems`` cannot disagree.
+    """
+    try:
+        module = _ci_manifest_module()
+        red, unknown = module.check(manifest)
+    except ImportError as exc:  # pragma: no cover - module shipped with the repo
+        return [
+            "the #5050 durations-map validator (tools/ci_manifest.py) could "
+            f"not be imported — the map's value/coverage/partition/staleness "
+            f"checks DID NOT RUN: {exc}"
+        ]
+    # #6243 review cycle 3: the promotion is STRUCTURAL. `unparseable_stamp_issue`
+    # decides from the PARSER's verdict plus the KEY's presence — never a
+    # hand-rolled value tuple (which exempted `""` and an explicit `null`, so a
+    # blanked stamp read as absence and exited 0 while the same stale value
+    # exited 1), and never a substring of another module's reason string (which
+    # a reword silently disabled). It is computed FIRST, because it also decides
+    # which UNKNOWN reasons stay non-gating.
+    stamp_issue = module.unparseable_stamp_issue(manifest)
+    promoted: set[str] = set()
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
+        # One condition must not be reported as BOTH "not gating this run" and
+        # RED, and an OBSERVED defect must not travel the soft channel.
+        # `staleness` owns the stamp's reason, so it names exactly the ones this
+        # promotion replaces — by IDENTITY, not by their wording. (An explicit
+        # `null` reaches `staleness`'s absent branch, so that reason is
+        # suppressed here too; the missing-key case never promotes.)
+        promoted = set(module.staleness(manifest)[1])
+    for reason in unknown:
+        if reason in promoted:
+            continue
+        print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
+    return red
 
 
 def main() -> int:
@@ -692,6 +3297,9 @@ def main() -> int:
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
     ap.add_argument("--event", default="pull_request", choices=["push", "pull_request", "schedule"])
     ap.add_argument("--integrity", action="store_true", help="verify manifest coverage")
+    ap.add_argument("--surface-audit", action="store_true",
+                    help="#2938: report manifest/source membership mismatches "
+                         "(non-blocking, never changes selection)")
     ap.add_argument("--register", action="store_true",
                     help="auto-register unlisted test files in the manifest (#1429)")
     ap.add_argument("--surface", default="core",
@@ -700,30 +3308,56 @@ def main() -> int:
                     help="surface for --register (default: core — the selection fallback)")
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
-                    help="#1472: print the derived push halves {half_a, half_b}")
+                    help="#1472/#6135: print the derived push fast_matrix + shards")
     ap.add_argument("--split", action="store_true",
-                    help="#1473: LPT-pack the stdin JSON test-file list into {a, b}")
+                    help="#1473/#6135: LPT-pack the stdin JSON test-file list "
+                         "into the configured number of shards")
     args = ap.parse_args()
 
     manifest = load_manifest()
 
     if args.integrity:
         missing = integrity(manifest)
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`
+        # — the latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # durations value used to raise inside the packer before the check that
+        # names it had run (fail-closed, but with no diagnosis; `_duration_weight`
+        # now coerces as well, so the packer cannot raise at all). That order is
+        # preserved inside `ci_manifest.map_issues`, which owns the composition
+        # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
+        # `duration_coverage_issues`), main's two newer manifest checks
+        # (`fast_shard_issues` for the top-level `fast_shards` declaration and
+        # `duplicate_entries` for the same-surface `merge=union` gate — both
+        # landed beside this one while it was open, so BOTH were folded into the
+        # same one place rather than being re-added here), plus the
+        # plausibility/freshness checks the validator adds (any weight the writer
+        # could not have rendered — sub-floor, finer precision, or negative — a
+        # non-empty map whose every weight is the `0.0` sentinel, and a stale
+        # capture date) are called from ONE place, so they cannot be half-wired
+        # into one entry point and missing from the other.
+        #
+        # `watchdog_headroom_issues` is the EXCEPTION, and deliberately composed
+        # here instead: `ci_manifest` does not own it (main added it after this
+        # validator was cut, and `ci_manifest.map_issues` composes only the five
+        # above). It is re-added at this call site so the union of the two
+        # pipelines drops neither — the same rule the two folded-in checks
+        # followed. Both entry points compose it, so it stays single-sourced.
         problems = missing + slow_file_issues(manifest) \
-            + leg_coverage_issues(manifest) + duration_issues(manifest)
-        # #1472: the matrix rows must come from the selector derivation
-        # (space-joined matrix_* outputs) — when they do, the #1266
-        # halves-parse tie check is
+            + _manifest_contract_issues(manifest) \
+            + carve_shard_issues(manifest) \
+            + watchdog_headroom_issues(manifest)
+        # #1472: the matrix must come from the selector derivation — when it
+        # does, the #1266 halves-parse tie check is
         # subsumed (the derivation guarantees no slow leaks / dupes / dead
         # files by construction). Legacy hardcoded halves keep the #1266 check.
         wf_issues = workflow_matrix_issues(
             REPO / ".github" / "workflows" / "python-ci.yml", manifest)
         problems += wf_issues
         if not wf_issues:
-            # derived rows: feed the derived halves so the #1266 tie checks
-            # still run against the ACTUAL execution split.
+            # derived matrix: feed the derived shards so the #1266 tie checks
+            # still run against the ACTUAL execution split (all N of them).
             legs = push_legs(manifest)
-            halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+            halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
             problems += workflow_halves_issues(manifest, halves)
         else:
             halves = parse_matrix_halves(WORKFLOW.read_text())
@@ -734,9 +3368,15 @@ def main() -> int:
         absent = fast_files_absent_from_halves(manifest, halves)
         if absent:
             sample = ", ".join(absent[:8])
-            print(f"⚠️  {len(absent)} manifest fast files are in NO half "
+            print(f"⚠️  {len(absent)} manifest fast files are in NO shard "
                   f"(full-matrix coverage hole, #1266): {sample} …")
-        print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
+        print("✅ integrity: all test files classified; slow_files consistent; shards consistent")
+        return 0
+
+    if args.surface_audit:
+        # #2938: report-only. Always exits 0 — a mismatch is a curation
+        # decision, never a gate; `--integrity` keeps its own exit code.
+        print(render_surface_audit(surface_audit(manifest)))
         return 0
 
     if args.register:
@@ -757,8 +3397,12 @@ def main() -> int:
 
     if args.emit_push_matrix:
         legs = push_legs(manifest)
-        print(json.dumps({"half_a": legs["half_a"], "half_b": legs["half_b"],
-                          "carve_out": legs["carve_out"]}))
+        print(json.dumps({
+            "fast_matrix": fast_matrix_include(legs["shards"]),
+            "shards": legs["shards"],
+            "carve_out": legs["carve_out"],
+            "carve_matrix": carve_matrix_include(legs["carve_shards"]),
+        }))
         return 0
 
     if args.split:
@@ -767,8 +3411,10 @@ def main() -> int:
         # every tier-2 PR (json.loads('') raises).
         raw = sys.stdin.read().strip()
         files = json.loads(raw) if raw else []
-        a, b = split_fast_gate(files, manifest.get("durations", {}))
-        result = {"a": a, "b": b}
+        shards = build_shard_entries(files, _durations_map(manifest),
+                                     fast_shard_count(manifest))
+        result = {"fast_matrix": fast_matrix_include(shards),
+                  "shards": shards}
         out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
         out_dir.mkdir(exist_ok=True)
         (out_dir / "split.json").write_text(json.dumps(result, indent=2))

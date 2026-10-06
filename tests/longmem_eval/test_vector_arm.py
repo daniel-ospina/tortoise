@@ -16,7 +16,14 @@ Covers the vector arm of the embedder-selection harness:
   * ``--db`` mode — per-(question, model) graph namespace isolation
     (probe-level, no live FalkorDB required).
 
-Runs fully offline (mini fixture, mocked reader/judge, fake embeddings).
+Runs offline (mini fixture, mocked reader/judge, fake embeddings).
+
+The harness invocations whose subject is NOT the dense leg itself carry an
+explicit ``--skip-preflight`` waiver (#4718): ``--mock`` selects the
+reader/judge and is not an authorisation to run without the embedder, so
+without the flag these tests would require sentence-transformers + the
+cached model on every run. Tests that DO exercise the dense leg inject it
+via ``fake_embeddings`` instead of waiving it.
 """
 from __future__ import annotations
 
@@ -58,7 +65,14 @@ from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
 
-_FAKE_DIM = 32
+_FAKE_DIM = 32  # token-hash bucket count — the vectors' only information
+# #4280: the STORED width must be the store's index width. A narrower vector is
+# refused by an indexed store (`create_point` → `encode_for_store` → the store's
+# `required_embedding_dim`), so this buckets into ``_FAKE_DIM`` and then
+# ZERO-PADS to :data:`EMBEDDING_DIM`. Padding adds only exact 0.0 terms, so
+# every cosine — and therefore every hand-computed rank/threshold in this
+# module — is unchanged, while the vector is storable on BOTH lanes (embedded
+# and a `TORTOISE_DB_URI` server, which has the 384-dim Point HNSW index).
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -75,7 +89,7 @@ def _fake_vec(text: str) -> list[float]:
     dims: dict[str, float] = {}
     for tok in _TOKEN_RE.findall((text or "").lower()):
         dims[tok] = dims.get(tok, 0.0) + 1.0
-    vec = [0.0] * _FAKE_DIM
+    vec = [0.0] * emb.EMBEDDING_DIM
     for tok, c in dims.items():
         vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
@@ -98,10 +112,17 @@ def _reset_breakers():
 
 @pytest.fixture()
 def fake_embeddings(monkeypatch):
-    """Deterministic embedding path: ingest + query encode via _fake_vec."""
+    """Deterministic embedding path: ingest + query encode via _fake_vec.
+
+    #4718: the stand-in must accept the real ``EmbeddingModel.get`` signature
+    — the dense-leg pre-flight calls it with ``load_timeout=…`` and treats a
+    failure to load as fatal for any run that requires the leg. A lambda that
+    rejected the kwarg would make the pre-flight read the fake as ABSENT.
+    """
     monkeypatch.setattr(emb, "compute_embedding",
                         lambda content, max_tokens=512: _fake_vec(content))
-    monkeypatch.setattr(emb.EmbeddingModel, "get", lambda: _FakeModel())
+    monkeypatch.setattr(emb.EmbeddingModel, "get",
+                        lambda load_timeout=None: _FakeModel())
 
 
 # ── nDCG@10 / P@10 / P@5 (hand-computed binary-gain) ────────────────────────
@@ -163,7 +184,8 @@ def test_run_main_empty_graph_exits_with_distinct_code(tmp_path, monkeypatch, ca
     with pytest.raises(SystemExit) as ei:
         runner.run_main([
             "--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
-            "--retriever", "vector", "--output", str(tmp_path / "o.json"),
+            "--skip-preflight", "--retriever", "vector",
+            "--output", str(tmp_path / "o.json"),
             "--work-dir", str(tmp_path),
         ])
     assert ei.value.code == retrieve.MODEL_ENCODE_FAILED_EXIT
@@ -496,6 +518,31 @@ def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
             assert calls["n"] == 0  # every text served from the disk cache
         finally:
             sdk.close()
+
+
+def test_encode_cache_intercepts_the_batched_embedder(tmp_path, monkeypatch):
+    """#4194: the cache wraps the BATCHED form too.
+
+    ``compute_embedding`` now delegates to ``compute_embeddings``, and the
+    capture turn write calls the batched form directly. Wrapping only the
+    single form would silently let that write path bypass the cache.
+    """
+    calls = {"n": 0}
+
+    def _counting_batch(texts, max_tokens=512):
+        calls["n"] += 1
+        return [_fake_vec(t) for t in texts]
+
+    monkeypatch.setattr(emb, "compute_embeddings", _counting_batch)
+    cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
+    with cache.active():
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # ONE batched encode for both misses
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # second call served from the cache
+    assert emb.compute_embeddings is _counting_batch  # restored
 
 
 def test_encode_query_routes_through_active_cache(tmp_path):
@@ -1514,7 +1561,8 @@ def test_run_main_v2_session_workers_threads_trio_guard_silent(monkeypatch,
                               "--split", "s", "--ingest-mode", "v2",
                               "--session-workers", "2",
                               "--extractor-model", "deepseek-v4-pro",
-                              "--mock", "--output", str(out)])
+                              "--mock", "--skip-preflight",
+                              "--output", str(out)])
     # reached the question loop: 1 outcome, no ValueError from the guard
     assert len(report["outcomes"]) == 1
     assert report["methodology"]["ingest_mode"] == "v2"
@@ -1554,7 +1602,7 @@ def test_run_main_v2_session_workers_guard_fires_on_config_divergence(
                          "--split", "s", "--ingest-mode", "v2",
                          "--session-workers", "2",
                          "--extractor-model", "deepseek-v4-pro",
-                         "--mock"])
+                         "--mock", "--skip-preflight"])
 
 
 def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
@@ -2113,8 +2161,8 @@ def test_db_mode_sdk_gets_per_question_namespace(monkeypatch, tmp_path):
 def test_db_mode_requires_uri(tmp_path):
     with pytest.raises(SystemExit):
         runner.run_main(["--db", "/tmp/not-a-uri.db", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
 
 
 # ── --spot-check: named paired artifact ─────────────────────────────────────
@@ -2173,6 +2221,7 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
         "--db", "docker://localhost:6379/bench", "--spot-check",
         "--model", "arctic-s", "--retriever", "vector",
         "--data", str(MINI), "--limit", "2", "--split", "s", "--mock",
+        "--skip-preflight",
         "--work-dir", str(tmp_path), "--cache-dir", str(tmp_path / "cache"),
         "--output", str(out),
     ])
@@ -2275,12 +2324,12 @@ def test_spotcheck_artifact_absent_question_dropped():
 def test_spot_check_requires_db_and_model(tmp_path):
     with pytest.raises(SystemExit):
         runner.run_main(["--spot-check", "--model", "arctic-s", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
     with pytest.raises(SystemExit):
         runner.run_main(["--db", "docker://x/y", "--spot-check", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
 
 
 def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
@@ -2289,8 +2338,8 @@ def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
     with pytest.raises(SystemExit) as ei:
         runner.run_main(["--db", "docker://x/y", "--spot-check",
                          "--model", "minilm", "--retriever", "vector",
-                         "--mock", "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--mock", "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
     # argparse error() exits with status 2 (code may be the (2, msg) tuple)
     code = ei.value.code
     assert code == 2 or (isinstance(code, tuple) and code[0] == 2)

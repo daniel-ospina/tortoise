@@ -56,7 +56,7 @@ must produce ONE reconciled thresholds.yaml — no two authoritative sets.
 
 ```text
 POST /v1/sessions/commit     # derived commit (BYOK default path)
-Auth: tt_ key (get_current_team) — same as capture_session
+Auth: tt_ key (get_current_org) — same as capture_session
 200 {session_id, commit_id, nodes_created, nodes_merged, held[], duplicate}
 422 schema (retry once allowed) · 402 quota · 500 fail-closed count
 ```

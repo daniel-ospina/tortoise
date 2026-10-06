@@ -1,0 +1,410 @@
+{
+  "seeding_mode": {
+    "dense": "_seed_memory(embed=True) \u2014 product's own turn vector via encode_batch_for_store/required_embedding_dim (#4194/#4304); the DEFAULT",
+    "backlog": "_seed_memory(embed=False) \u2014 pre-#4194/no-embedder store (#4197)"
+  },
+  "questions": {
+    "0a995998": {
+      "question": "How many items of clothing do I need to pick up or return from a store?",
+      "gold_sessions": [
+        "answer_afa9873b_2",
+        "answer_afa9873b_3",
+        "answer_afa9873b_1"
+      ],
+      "gold_turns": [
+        "answer_afa9873b_2_t10",
+        "answer_afa9873b_3_t6",
+        "answer_afa9873b_1_t4"
+      ],
+      "backlog": {
+        "arm": "backlog",
+        "seeded_embedded_points": 0,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_afa9873b_2_t10": 20,
+          "answer_afa9873b_3_t6": "ABSENT",
+          "answer_afa9873b_1_t4": "ABSENT"
+        },
+        "gold_in_cut40": {
+          "answer_afa9873b_2_t10": true,
+          "answer_afa9873b_3_t6": false,
+          "answer_afa9873b_1_t4": false
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 0
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      },
+      "dense": {
+        "arm": "dense",
+        "seeded_embedded_points": 484,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_afa9873b_2_t10": 3,
+          "answer_afa9873b_3_t6": 38,
+          "answer_afa9873b_1_t4": 23
+        },
+        "gold_in_cut40": {
+          "answer_afa9873b_2_t10": true,
+          "answer_afa9873b_3_t6": true,
+          "answer_afa9873b_1_t4": true
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      }
+    },
+    "1d4e3b97": {
+      "question": "I noticed my bike seems to be performing even better during my Sunday group rides. Could there be a reason for this?",
+      "gold_sessions": [
+        "answer_e6b6353d"
+      ],
+      "gold_turns": [
+        "answer_e6b6353d_t2",
+        "answer_e6b6353d_t4"
+      ],
+      "backlog": {
+        "arm": "backlog",
+        "seeded_embedded_points": 0,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_e6b6353d_t2": 56,
+          "answer_e6b6353d_t4": 84
+        },
+        "gold_in_cut40": {
+          "answer_e6b6353d_t2": false,
+          "answer_e6b6353d_t4": false
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 0
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      },
+      "dense": {
+        "arm": "dense",
+        "seeded_embedded_points": 474,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_e6b6353d_t2": 8,
+          "answer_e6b6353d_t4": 7
+        },
+        "gold_in_cut40": {
+          "answer_e6b6353d_t2": true,
+          "answer_e6b6353d_t4": true
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      }
+    },
+    "1de5cff2": {
+      "question": "I was going through our previous conversation about high-end fashion brands, and I was wondering if you could remind me of the brand that uses wild rubber sourced from the Amazon rainforest?",
+      "gold_sessions": [
+        "answer_ultrachat_440262"
+      ],
+      "gold_turns": [
+        "answer_ultrachat_440262_t7"
+      ],
+      "backlog": {
+        "arm": "backlog",
+        "seeded_embedded_points": 0,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_ultrachat_440262_t7": 67
+        },
+        "gold_in_cut40": {
+          "answer_ultrachat_440262_t7": false
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 0
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      },
+      "dense": {
+        "arm": "dense",
+        "seeded_embedded_points": 473,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_ultrachat_440262_t7": 11
+        },
+        "gold_in_cut40": {
+          "answer_ultrachat_440262_t7": true
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      }
+    },
+    "ceb54acb": {
+      "question": "In our previous chat, you suggested 'sexual compulsions' and a few other options for alternative terms for certain behaviors. Can you remind me what the other four options were?",
+      "gold_sessions": [
+        "answer_sharegpt_cGdjmYo_0"
+      ],
+      "gold_turns": [
+        "answer_sharegpt_cGdjmYo_0_t3"
+      ],
+      "backlog": {
+        "arm": "backlog",
+        "seeded_embedded_points": 0,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_sharegpt_cGdjmYo_0_t3": 93
+        },
+        "gold_in_cut40": {
+          "answer_sharegpt_cGdjmYo_0_t3": false
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 0
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      },
+      "dense": {
+        "arm": "dense",
+        "seeded_embedded_points": 493,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_sharegpt_cGdjmYo_0_t3": 4
+        },
+        "gold_in_cut40": {
+          "answer_sharegpt_cGdjmYo_0_t3": true
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      }
+    },
+    "e9327a54": {
+      "question": "I'm planning to revisit Orlando. I was wondering if you could remind me of that unique dessert shop with the giant milkshakes we talked about last time?",
+      "gold_sessions": [
+        "answer_ultrachat_480665"
+      ],
+      "gold_turns": [
+        "answer_ultrachat_480665_t7"
+      ],
+      "backlog": {
+        "arm": "backlog",
+        "seeded_embedded_points": 0,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_ultrachat_480665_t7": 89
+        },
+        "gold_in_cut40": {
+          "answer_ultrachat_480665_t7": false
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 0
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      },
+      "dense": {
+        "arm": "dense",
+        "seeded_embedded_points": 533,
+        "n_hits": 120,
+        "gold_turn_ranks": {
+          "answer_ultrachat_480665_t7": 9
+        },
+        "gold_in_cut40": {
+          "answer_ultrachat_480665_t7": true
+        },
+        "leg_trace": [
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "vector",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          }
+        ]
+      }
+    }
+  }
+}

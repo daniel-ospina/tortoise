@@ -23,18 +23,61 @@ re-includes drafts identically everywhere:
 
 from __future__ import annotations
 
-# Terminal statuses — a Point in any of these is dead for EP factor
-# extraction (ontology §5: retracted/superseded are terminal; outdated is the
-# legacy flag-status supersede/invalidate write; archived is reserved;
-# deprecated is written by legacy/assessment paths and already excluded from
-# every read surface — search_engine + recall_state — so EP must not let it
-# vote either). Mirrors the read-surface vocabulary
-# (search_engine.TERMINAL_EXCLUDED_STATUSES).
-TERMINAL_EXCLUDED_STATUSES = frozenset(
-    {"retracted", "superseded", "outdated", "archived", "deprecated"})
+# ══════════════════════════════════════════════════════════════════════════
+# #2901 — THE canonical Point-status partition. ONE declaration, imported by
+# every reader that must skip non-current Points.
+#
+# Do NOT re-declare a status set at a call site. A hand-written subset is how
+# ``outdated`` was omitted from three reader filters (#2901: github_indexer,
+# audit_beta_gate, 1714_dedup_observation) and a superseded/outdated claim was
+# then served as the CURRENT statement. Import ``TERMINAL_EXCLUDED_STATUSES``
+# from HERE instead.
+#
+# live.py is the LEAF status module: ``tortoise/sdk.py`` imports it (sdk.py:
+# ``from .live import TERMINAL_EXCLUDED_STATUSES``), so the module can be
+# imported by every consumer without a cycle. Because it is below sdk.py it
+# cannot import the full vocabulary (``POINT_STATUS_VALUES``, canonical in
+# ``tortoise/sdk.py``) at import time. The partition below is therefore held
+# to that vocabulary by ``tests/test_terminal_status_vocabulary.py``, which
+# DERIVES the expected terminal set as
+# ``POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` and asserts equality —
+# so adding a status to the vocabulary without classifying it here REDs that
+# test instead of silently defaulting to "current" on every read surface.
+# (A parity test, not import-time coercion, is the guard: the alternative —
+# declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
+# and a circular import makes the reverse direction impossible.)
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The non-terminal members of the Point vocabulary — a Point in one of these
+#: is CURRENT (draft is not-yet-published, not dead).
+CURRENT_POINT_STATUS_VALUES = frozenset({"draft", "live"})
+
+#: The vocabulary's terminal members (ontology §5: retracted/superseded are
+#: terminal; ``outdated`` is the legacy supersede/invalidate status;
+#: ``archived`` is reserved — no v1 write path).
+TERMINAL_STATUS_VALUES = frozenset(
+    {"retracted", "superseded", "outdated", "archived"})
+
+#: ``deprecated`` is deliberately NOT in ``POINT_STATUS_VALUES``: no SDK/API
+#: write path emits it (only direct graph writes / legacy assessment paths
+#: ever did — see tests/test_lifecycle_guards.py, which asserts its absence),
+#: so it is not a legal create-time status. It IS present in legacy graphs and
+#: must never be served as current, so it joins the EXCLUSION set below but
+#: not ``TERMINAL_STATUS_VALUES``. #2901 inverse-shape ruling: the vocabulary
+#: is right (no writer) and the recall_state test that sets ``n.status =
+#: 'deprecated'`` directly is a legitimate simulation of legacy graph data.
+LEGACY_NON_CURRENT_STATUS_VALUES = frozenset({"deprecated"})
+
+#: Every status a read surface (FTS/vector/structural, EP factor extraction,
+#: recall_state, the SDK query paths, the indexers) must treat as NOT current.
+#: ``None``/absent status is separately LIVE (legacy nodes — see
+#: ``_terminal_excluded``'s NULL handling).
+TERMINAL_EXCLUDED_STATUSES = (
+    TERMINAL_STATUS_VALUES | LEGACY_NON_CURRENT_STATUS_VALUES)
 
 
-def _terminal_excluded(clause: str) -> str:
+def _terminal_excluded(clause: str, excluded=None, *,
+                       include_outdated_flag: bool = True) -> str:
     """Cypher predicate: the node's status is NOT terminal AND its legacy
     ``outdated`` flag is not true.
 
@@ -44,12 +87,28 @@ def _terminal_excluded(clause: str) -> str:
     leaves status untouched) so both must be excluded. Legacy nodes without a
     stored status are LIVE (the entity write path defaults
     ``coalesce($st, n.status, 'live')``), hence the NULL check.
+
+    ``excluded`` — the vocabulary to exclude. Default ``None`` = the canonical
+    ``TERMINAL_EXCLUDED_STATUSES`` (the POINT vocabulary), so the default call
+    is byte-identical to the pre-#3301 composition and every existing caller
+    is unaffected. The OBJECT read surfaces (#3301) pass
+    ``commit_ops.OBJECT_TERMINAL_STATUSES`` — a different family with no
+    ``outdated`` member — and must pass ``include_outdated_flag=False``: no
+    Object writer sets ``outdated``, so ANDing that Point conjunct would hide
+    an Object nobody can mark, and the two families' vocabularies would be
+    conflated in one predicate.
     """
+    if excluded is None:
+        excluded = TERMINAL_EXCLUDED_STATUSES
     alias = clause.split(".", 1)[0] if "." in clause else clause
     flag = f"{alias}.outdated"
-    chain = " AND ".join(f"{clause} <> '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
-    return (f"(({clause} IS NULL OR ({chain})) "
-            f"AND coalesce({flag}, false) = false)")
+    chain = " AND ".join(
+        f"{clause} <> '{s}'" for s in sorted(excluded))
+    status_part = (f"({clause} IS NULL OR ({chain}))"
+                   if chain else "true")
+    if not include_outdated_flag:
+        return status_part
+    return f"({status_part} AND coalesce({flag}, false) = false)"
 
 
 # #2490 (terminal posterior freeze): a terminalized claim's posterior pins at
@@ -62,19 +121,44 @@ def _terminal_excluded(clause: str) -> str:
 # successor recomputes independently). Defined HERE (live.py is a leaf — sdk.py
 # imports live.py and projection/entities.py can import it without a cycle via
 # sdk.py:31's `from .projection import`).
+
+#: The belief half of a terminalizing write, as DATA. ``decay_clause`` renders
+#: it into Cypher and the in-memory fold (``projection._apply_one``) writes it
+#: into its ``{id: point}`` index, so those two representations of the SAME
+#: write cannot drift apart. They did: the pure fold's ``PointRetracted`` arm
+#: tombstoned without decaying, so ``fold()`` kept the pre-retract belief while
+#: ``rebuild_all`` held the vacuous one — a divergence on EVERY retract
+#: (#4542).
+#:
+#: ⚠️ This is NOT yet the only declaration, and nothing here should be read as
+#: claiming it is. TWO hand-declared copies of the same triple remain besides
+#: this one: ``tortoise/consistency.py``'s ``_DECAY`` (the JOURNAL side of the
+#: divergence detector that measures this very invariant; pinned to this
+#: declaration by ``tests/test_4542_retract_fold_decay.py``) and the
+#: ``assess_source`` sweep's ``ConfidenceChanged`` payload in ``tortoise/sdk.py``
+#: (whose values ``test_2884_ep_state_journaled.py``'s
+#: ``test_f3_assess_source_decay_is_journaled`` holds to the contract, though not
+#: to this declaration). Read the values from here; do not add a third.
+VACUITY_BELIEF: dict[str, float] = {
+    "confidence": 0.5,
+    "posterior_alpha": 1.0,
+    "posterior_beta": 1.0,
+}
+
+
 def decay_clause(alias: str) -> str:
     """Cypher SET fragment decaying a terminalizing claim to vacuity.
 
-    Appends ``{alias}.confidence=0.5, {alias}.posterior_alpha=1.0,
-    {alias}.posterior_beta=1.0`` to a SET clause — crash-atomic with the
+    Renders ``VACUITY_BELIEF`` as ``{alias}.confidence=0.5,
+    {alias}.posterior_alpha=1.0, {alias}.posterior_beta=1.0`` for a SET clause
+    — crash-atomic with the
     status/flag write it rides (single statement). ``alias`` is the node
     variable (``"n"`` for retract/supersede/invalidate/folds, ``"p"`` for
     assess_source's older-assessment SET). Reading a decayed claim back:
     coalesce(posterior_alpha, ep_alpha, 1.0) = 1.0 and confidence = 0.5 —
     the vacuous Beta(1,1) posterior mean.
     """
-    return (f"{alias}.confidence=0.5, {alias}.posterior_alpha=1.0, "
-            f"{alias}.posterior_beta=1.0")
+    return ", ".join(f"{alias}.{k}={v}" for k, v in VACUITY_BELIEF.items())
 
 
 def _terminal_expression(clause: str) -> str:

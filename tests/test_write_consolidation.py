@@ -20,6 +20,7 @@ Runnable with: ../tortoise/.venv/bin/python -m pytest tests/test_write_consolida
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -37,6 +38,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
@@ -73,7 +75,9 @@ class TestCreateEntity:
     def test_routes_document(self, sdk):
         node = sdk.create_entity("document", "Q3 Plan", documentKind="planDoc")["node"]
         assert node.get("documentKind") == "planDoc"
-        assert node.get("doc_status") == "draft"  # documents enter as draft
+        # D10 (ONTOLOGY v3.15 §4.4): doc_status is retired — liveness is a read
+        # of the extracted entities, never a stored field on the document Source.
+        assert node.get("doc_status") is None
 
     def test_routes_event_requires_eventkind(self, sdk):
         with pytest.raises(ValueError, match="eventKind"):
@@ -498,15 +502,15 @@ class TestEventAboutEdgesSemanticProxy:
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 @pytest.mark.timeout(600)  # Epic #1647 (PR #1684 CI-fix): MCP _get_sdk connect + the reaper kill-wait under CI load exceed the default 300s (2× observed). The handlers themselves run in <2s locally — the timeout is CI-contention headroom.
@@ -544,8 +548,8 @@ class TestMcpHandlers:
         from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_point, tortoise_supersede,
         )
-        a = tortoise_create_point("statement", "mcp old claim zz")
-        b = tortoise_create_point("statement", "mcp new claim zz")
+        a = tortoise_create_point("statement", "mcp old claim zz", dedup=False)
+        b = tortoise_create_point("statement", "mcp new claim zz", dedup=False)
         if "error" in a or "error" in b:
             pytest.skip("FalkorDB not available")
         r = tortoise_supersede(a["id"], b["id"], transfer_edges=False)

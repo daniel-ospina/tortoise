@@ -20,12 +20,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from tortoise.domain_loader import known_kinds
-from tortoise.schemas import (  # the /v1/ask body (#1987 Task 9, shared constant layer)
-    CODE_READER_UNAVAILABLE,
-    CODE_RETRIEVAL_UNAVAILABLE,
-    CODE_TIMEOUT,
-    AskRequest,
-)
 
 _logger = logging.getLogger(__name__)
 
@@ -37,6 +31,14 @@ class CreatePointRequest(BaseModel):
     kind: str = Field(default="statement")
     tags: list[str] = Field(default_factory=list)
     dedup: bool = Field(default=True)
+    # #4032: parity with hosted_api.CreatePointRequest — the SAME hosted client
+    # (agent-infra scripts/tortoise-memory.mjs, TORTOISE_BASE_URL pointing
+    # here for a self-hosted daemon) sends `confidence` / `authoredBy`, and
+    # pydantic's default `extra='ignore'` DROPPED them at this boundary too —
+    # the write reported ok while neither was stored. `sdk.create_point`
+    # persists both as props, so declare + forward them.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("kind")
     @classmethod
@@ -212,11 +214,19 @@ async def create_point(body: CreatePointRequest):
     """Create a Point in the self-host graph (registry: POST /v1/points)."""
     sdk = _sdk()
     try:
+        # #4032: forward caller confidence/authoredBy as props — only when
+        # supplied (a None would stamp a null property).
+        _author_props: dict = {}
+        if body.confidence is not None:
+            _author_props["confidence"] = body.confidence
+        if body.authoredBy is not None:
+            _author_props["authoredBy"] = body.authoredBy
         result = sdk.create_point(
             content=body.content,
             kind=body.kind,
             tags=body.tags,
             dedup=body.dedup,
+            **_author_props,
         )
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost create_point failed")
@@ -459,47 +469,3 @@ async def volunteer_context(body: VolunteerContextRequest):
         if completed:
             sdk.close()
     return result
-
-
-@router.post("/ask", dependencies=[Depends(_require_key)])
-async def ask_question(body: AskRequest):
-    """Self-host answer surface — REST parity with hosted /v1/ask (#1987
-    Task 9): the LOCAL SDK lane (no team registry, NO budget — unmetered,
-    ZERO metering records: ``team_id=None`` flows through the ``not team_id``
-    exemption), bounded by the SAME ``run_ask_bounded`` wrapper (Semaphore(8)
-    + 60s → 504 discipline) via ``team_id=None`` (P2-4). Errors mirror the
-    hosted vocabulary via the path-scoped handler on ``selfhost.app``:
-    502 ``reader_unavailable`` / ``retrieval_unavailable``, 504 ``timeout``,
-    400 canonical codes from the SHARED ``AskRequest`` validators (identical
-    input-boundary behavior to hosted — P2-8)."""
-    from tortoise.exceptions import (
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        run_ask_bounded,
-    )
-    sdk = _sdk()
-    try:
-        return await run_ask_bounded(
-            sdk.ask, None, body.question,
-            question_type=body.question_type,
-            question_date=body.question_date,
-            _sdk_team_id=None,
-        )
-    except AskValidationError as e:
-        raise HTTPException(status_code=400, detail=e.code) from e
-    except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
-    except AskReaderUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_READER_UNAVAILABLE) from None
-    except AskRetrievalUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_RETRIEVAL_UNAVAILABLE) from None
-    except Exception as e:  # noqa: BLE001, RUF100
-        _logger.exception("selfhost ask failed")
-        raise HTTPException(status_code=502,
-                            detail=CODE_READER_UNAVAILABLE) from e

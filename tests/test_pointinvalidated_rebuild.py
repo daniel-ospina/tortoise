@@ -18,8 +18,9 @@ Pinned contracts here:
   - EP no-resurrection after rebuild (#2422 ghost assertions);
   - idempotency across rebuild → rebuild;
   - mixed supersede+invalidate in BOTH orders converges to live;
-  - double-invalidate folds every survivor (live-legal) — distinct
-    corrected_by → 2 CORRECTS, identical → 1;
+  - double-invalidate folds every survivor (#2498: the REPEAT itself is now
+    rejected by the shared lifecycle guard — the folds are driven raw) —
+    distinct corrected_by → 2 CORRECTS, identical → 1;
   - id-reuse (raw hard-delete lane) drops pre-recreation folds;
   - raw same-id PointAdded re-emission after invalidate resurrects the
     rebuilt node live while the SDK-live node stays outdated (journal
@@ -43,6 +44,7 @@ import os
 
 import pytest
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -58,7 +60,7 @@ def sup(tmp_path):
 
 
 def _rebuild(sdk, events_dir) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 def _corr(proj, old_id: str, new_id: str) -> int:
@@ -245,54 +247,60 @@ def test_rebuild_is_idempotent_for_invalidate_state(sup):
 # Mixed supersede + invalidate on one old id, BOTH orders → live parity
 # ═══════════════════════════════════════════════════════════════════════
 
-def _assert_mixed_parity(sup, do_sup_first: bool) -> None:
+_MIXED_TS = "2026-09-08T12:00:00+00:00"
+_MIXED_TS2 = "2026-09-08T13:00:00+00:00"
+
+
+def _assert_mixed_converges(sup, do_sup_first: bool) -> None:
     _, events, sdk = sup
     a = sdk.create_point("statement", "A", status="live")["id"]
     b = sdk.create_point("statement", "B (successor)", status="live")["id"]
     c = sdk.create_point("statement", "C (corrector)", status="live")["id"]
+    t = _MIXED_TS
     if do_sup_first:
         sdk.supersede_point(a, b)
-        sdk.invalidate_point(a, c)   # live-legal: invalidate has no terminal guard
+        # #2498: A is terminal (superseded) — invalidate rejected.
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(a, c)
+        # A raw/legacy producer can still journal the second fold.
+        _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=c,
+                    ts=t, valid_to=t, expired_at=t)
     else:
         sdk.invalidate_point(a, c)
-        sdk.supersede_point(a, b)    # live-legal: invalidate left status='live'
+        # #2498: A is terminal (legacy outdated=true flag) — supersede rejected.
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.supersede_point(a, b)
+        _raw_append(events, sdk, "PointSuperseded", id=a, new_id=b, ts=t,
+                    valid_to=t, expired_at=t)
     proj = sdk._get_proj()
-    pre = _point_state(sdk, a)
-    # Both folds are live-truth: A is superseded (status from the supersede
-    # fold) AND outdated, stamps = the LAST event's journaled ts, and the
-    # CORRECTS from BOTH the supersede and the invalidate survive (live
-    # supersede only MERGEs its own CORRECTS — it never deletes a prior one).
-    assert pre["status"] == "superseded"
-    assert pre["outdated"] is True
-    assert _corr(proj, a, b) == 1
-    assert _corr(proj, a, c) == 1
     _rebuild(sdk, events)
-    # updatedAt is deliberately NOT in the equality: when the SUPERSEDE fold
-    # is the id's last writer its updatedAt = the JSONL line's own ts (the
-    # pre-existing #2164-P4 µs drift — supersede's emit passes no ts=now),
-    # not the live SET clock. #2488's ts=now guarantees EXACT updatedAt
-    # parity only when the invalidate fold is the last writer (core test).
+    # Both folds applied in journal order: A is superseded (from the supersede
+    # fold) AND outdated (both folds), stamps = the LAST event's journaled ts,
+    # and the CORRECTS from BOTH folds survive (each fold only MERGEs its own).
     post = _point_state(sdk, a)
-    for k in ("status", "outdated", "validTo", "expiredAt"):
-        assert post[k] == pre[k], (
-            f"mixed supersede+invalidate (sup_first={do_sup_first}) drifted "
-            f"across rebuild: {pre} != {post}")
-    assert _corr(proj, a, b) == 1 and _corr(proj, a, c) == 1, (
-        "both CORRECTS edges must survive rebuild")
+    assert post["status"] == "superseded", post
+    assert post["outdated"] is True, post
+    assert post["validTo"] == t and post["expiredAt"] == t, post
+    assert _corr(proj, a, b) == 1 and _corr(proj, a, c) == 1
+    assert _corr_total(proj, a) == 2, "both CORRECTS must survive rebuild"
+    _rebuild(sdk, events)
+    assert _point_state(sdk, a) == post, "second rebuild drifted"
 
 
-def test_supersede_then_invalidate_live_parity(sup):
-    """supersede(A,B) → invalidate(A,C): rebuild reproduces live A
-    (superseded + outdated + stamps of the LAST event (the invalidate) + both
-    CORRECTS)."""
-    _assert_mixed_parity(sup, do_sup_first=True)
+def test_supersede_then_invalidate_mixed_journal_converges(sup):
+    """#2498 supersedes the pre-#2498 "live-legal" premise: supersede(A,B) →
+    invalidate(A,C) is rejected at the SDK boundary (A is terminal). A raw
+    journal carrying both folds must still converge on rebuild —
+    superseded + outdated + both CORRECTS, idempotently."""
+    _assert_mixed_converges(sup, do_sup_first=True)
 
 
-def test_invalidate_then_supersede_live_parity(sup):
-    """invalidate(A,C) → supersede(A,B): rebuild reproduces live A
-    (superseded + outdated + stamps of the LAST event (the supersede) + both
-    CORRECTS)."""
-    _assert_mixed_parity(sup, do_sup_first=False)
+def test_invalidate_then_supersede_mixed_journal_converges(sup):
+    """#2498 supersedes the pre-#2498 "live-legal" premise: invalidate(A,C) →
+    supersede(A,B) is rejected at the SDK boundary (A is terminal via the
+    outdated flag). A raw journal carrying both folds must still converge on
+    rebuild — superseded + outdated + both CORRECTS, idempotently."""
+    _assert_mixed_converges(sup, do_sup_first=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -300,43 +308,47 @@ def test_invalidate_then_supersede_live_parity(sup):
 # every survivor fold is live-truth
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_double_invalidate_distinct_correctors_two_corrects(sup):
-    """invalidate(A,B) then invalidate(A,C): both folds survive the id filter
-    (no re-creation) and fold in journal order → 2 CORRECTS edges live AND
-    rebuilt (distinct corrected_by). Stamps/updatedAt = the second (last)
-    invalidate's journaled ts — exact live parity."""
+def test_double_invalidate_rejected_and_raw_journal_converges(sup):
+    """invalidate(A,B) then invalidate(A,C): the SDK REJECTS the second call
+    (#2498 — the first write sets the legacy outdated=true flag, which the
+    shared lifecycle guard treats as terminal). A raw journal with both folds
+    must rebuild to 2 CORRECTS (distinct corrected_by), stamps = the last
+    fold's ts, idempotently."""
     _, events, sdk = sup
     a = sdk.create_point("statement", "A", status="live")["id"]
     b = sdk.create_point("statement", "B", status="live")["id"]
     c = sdk.create_point("statement", "C", status="live")["id"]
     sdk.invalidate_point(a, b)
-    sdk.invalidate_point(a, c)
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.invalidate_point(a, c)
+    _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=c,
+                ts=_MIXED_TS2, valid_to=_MIXED_TS2, expired_at=_MIXED_TS2)
     proj = sdk._get_proj()
-    pre = _point_state(sdk, a)
-    assert _corr(proj, a, b) == 1 and _corr(proj, a, c) == 1
-    assert _corr_total(proj, a) == 2
     _rebuild(sdk, events)
     post = _point_state(sdk, a)
-    assert post == pre, f"double-invalidate drifted across rebuild: {pre} != {post}"
+    assert post["status"] == "live", "invalidate is a flag write, not a status"
+    assert post["outdated"] is True
+    assert post["validTo"] == _MIXED_TS2 and post["expiredAt"] == _MIXED_TS2
     assert _corr(proj, a, b) == 1 and _corr(proj, a, c) == 1
     assert _corr_total(proj, a) == 2, "both CORRECTS must survive rebuild"
+    _rebuild(sdk, events)
+    assert _point_state(sdk, a) == post, "second rebuild drifted"
 
 
-def test_double_invalidate_same_corrector_single_corrects(sup):
-    """invalidate(A,B) twice (re-assert, live-legal): the MERGE keeps ONE
-    CORRECTS edge live and rebuilt."""
+def test_double_invalidate_same_corrector_rejected_merges_once(sup):
+    """invalidate(A,B) twice: the SDK REJECTS the second call (#2498). A raw
+    producer replaying the same pair still folds to ONE CORRECTS edge."""
     _, events, sdk = sup
     a = sdk.create_point("statement", "A", status="live")["id"]
     b = sdk.create_point("statement", "B", status="live")["id"]
     sdk.invalidate_point(a, b)
-    sdk.invalidate_point(a, b)
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.invalidate_point(a, b)
+    _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=b,
+                ts=_MIXED_TS2, valid_to=_MIXED_TS2, expired_at=_MIXED_TS2)
     proj = sdk._get_proj()
-    pre = _point_state(sdk, a)
-    assert _corr_total(proj, a) == 1
     _rebuild(sdk, events)
-    post = _point_state(sdk, a)
-    assert post == pre, f"re-assert invalidate drifted across rebuild: {pre} != {post}"
-    assert _corr_total(proj, a) == 1, "re-assert must not mint parallel CORRECTS"
+    assert _corr_total(proj, a) == 1, "replayed pair must not mint parallel CORRECTS"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -349,9 +361,16 @@ def test_id_reuse_drops_pre_recreation_invalidate_fold(sup):
     """invalidate(A,B) → [raw producer hard-deletes + re-creates A] →
     invalidate(A,C). Only the POST-recreate fold is live-truth — rebuild must
     drop the pre-recreate fold entirely (no ghost CORRECTS B→A, no older
-    stamps) and fold the post-recreate one verbatim. Uses the RAW hard-delete
-    lane (NOT SDK delete_point — that emits PointRetracted, which tombstones
-    the fresh incarnation pre-sweep and breaks the id-reuse premise)."""
+    stamps) and fold the post-recreate one verbatim.
+
+    Uses the RAW hard-delete lane rather than ``sdk.delete_point``. The original
+    reason — "delete_point emits PointRetracted, which tombstones the fresh
+    incarnation pre-sweep and breaks the id-reuse premise" — NO LONGER HOLDS:
+    since #3300, ``delete_point`` journals a JSONL ``EntityMutated op="delete"``
+    that the fold replays as a HARD delete, so ``delete_point`` would no longer
+    tombstone the fresh incarnation. The raw lane is kept because this test
+    exercises the raw producer's own delete/recreate interleaving, which is the
+    sequence under test — not because the SDK door is unusable."""
     _, events, sdk = sup
     a = sdk.create_point("statement", "A v1", status="live")["id"]
     b = sdk.create_point("statement", "B (v1 corrector)", status="live")["id"]
@@ -545,3 +564,142 @@ def test_invalidate_raw_producer_no_corrected_by_flag_still_folds(sup):
     )
     assert post[2] == "live", "no status write"
     assert _corr_total(proj, a) == 0, "no CORRECTS without corrected_by (by design)"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the apply() replay arm must fold PointInvalidated too
+#
+# ``rebuild(EventLog)`` is the one-record engine behind ``recover_from_log``
+# (DB-loss recovery) and the backup JSONL restore. It had NO branch for
+# PointInvalidated, so the record fell through to the ``unrecognized event
+# type`` warning and an invalidated Point came back with no outdated flag,
+# no window stamps, no CORRECTS and an un-decayed posterior.
+# ══════════════════════════════════════════════════════════════════════
+
+def _apply_replay(sdk, events_dir) -> None:
+    """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
+    canonical apply()-based engine. ``consistency.recover_from_log`` and
+    ``backup.restore`` are independent replay loops wired to the SAME shared
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
+    they are exercised by their own suites, not here."""
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")), confirm_destructive=True)
+
+
+def test_apply_replay_folds_invalidate(sup):
+    """#3305: an apply()-based replay of an invalidated Point must end with
+    outdated=true and status still 'live' — both asserted as literals."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    pre = _point_state(sdk, a)
+    assert pre["outdated"] is True and pre["status"] == "live"
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["outdated"] is True, (
+        f"apply() replay dropped the outdated flag (the #2488 ghost): {post}")
+    assert post["status"] == "live", (
+        "invalidate must NOT change status — even on the apply() arm")
+    assert post["validTo"] and post["expiredAt"]
+    assert post == pre, (
+        f"apply() replay drifted from live: {pre} != {post}")
+    assert _corr(sdk._get_proj(), a, corr) == 1, (
+        "CORRECTS edge dropped by the apply() arm")
+
+
+def test_apply_replay_folds_the_invalidate_belief_decay(sup):
+    """#3305: the invalidate record carries the belief decay too — the
+    apply() arm must reproduce it (or the restored claim keeps its
+    pre-invalidate posterior and re-enters EP voting)."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    _apply_replay(sdk, events)
+    decayed = sdk.get_point(a)
+    assert decayed["confidence"] == 0.5, (
+        f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
+    assert decayed["posterior_alpha"] == 1.0
+    assert decayed["posterior_beta"] == 1.0
+
+
+def test_apply_replay_matches_rebuild_all_on_invalidate(sup):
+    """#3305: the two replay engines must converge on the same Point state —
+    the shared ``_fold_point_restamp`` dispatch is what keeps them from
+    drifting."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    live = _point_state(sdk, a)
+    assert live["outdated"] is True and live["status"] == "live"
+
+    _rebuild(sdk, events)
+    via_all = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    via_apply = _point_state(sdk, a)
+
+    assert via_all == live, f"rebuild_all drifted from live: {via_all}"
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all: {via_apply} != {via_all}")
+
+
+def test_apply_replay_keeps_a_clean_point_clean(sup):
+    """#3305 no-over-correction: a Point with no invalidate in the journal
+    stays clean across the apply() arm."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["outdated"] is None
+    assert post["status"] == "live"
+    assert post["validTo"] is None
+
+
+def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
+    """#3305 (review P1): the apply() arm must obey the SAME SELECTION as
+    rebuild_all. A bare same-id ``PointAdded`` re-emit ADVANCES the recreate
+    boundary, so the pre-recreation invalidate fold must be DROPPED — while the
+    belief decay, which is anchored on the real delete→recreate boundary, must
+    STILL fire (#2884 A3). An inline fold that ignores this re-introduces the
+    outdated flag + ghost CORRECTS on the recovery path."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A v1", status="live")["id"]
+    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
+    sdk.invalidate_point(a, b)
+    _raw_append(events, sdk, "PointAdded", point={
+        "id": a, "content": "A v2 (recreated)", "status": "live",
+        "pointKind": "statement"})
+
+    _rebuild(sdk, events)
+    via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_all = _corr_total(sdk._get_proj(), a)
+    belief_all = {k: (sdk.get_point(a) or {}).get(k) for k in
+                  ("confidence", "posterior_alpha", "posterior_beta")}
+    _apply_replay(sdk, events)
+    via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_apply = _corr_total(sdk._get_proj(), a)
+    belief_apply = {k: (sdk.get_point(a) or {}).get(k) for k in
+                    ("confidence", "posterior_alpha", "posterior_beta")}
+
+    assert via_all["outdated"] is not True, (
+        "rebuild_all follows the re-emission — the pre-recreation fold drops")
+    # updatedAt is the re-emission's replay-time stamp — each replay runs at a
+    # different wall clock, so the comparison is on the fold's SEMANTIC fields,
+    # not on wall clock.
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all on same-id re-emission: "
+        f"{via_apply} != {via_all}")
+    assert corr_apply == corr_all == 0, (
+        "pre-recreation CORRECTS died with the node")
+    # The OTHER half of the selection: the invalidate's BELIEF decay is anchored
+    # on the REAL delete→recreate boundary, so it must STILL fire even though
+    # the stamp half is dropped (#2884 A3) — asserted against literals, on BOTH
+    # engines, because a decay silently dropped on one is exactly the class of
+    # drift this contract exists to catch.
+    vacuous = {"confidence": 0.5, "posterior_alpha": 1.0,
+               "posterior_beta": 1.0}
+    assert belief_all == vacuous, (
+        f"rebuild_all dropped the #2884 A3 belief decay: {belief_all}")
+    assert belief_apply == vacuous, (
+        f"apply() replay dropped the #2884 A3 belief decay: {belief_apply}")

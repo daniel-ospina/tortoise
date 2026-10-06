@@ -22,15 +22,15 @@ def _transport_context():
     context (quota skipped). Restore after each test.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 def test_stdio_embedded_banner(monkeypatch, capsys, tmp_path):
@@ -143,10 +143,10 @@ class _StubQuerySDK:
 
 @pytest.fixture
 def query_sdk(monkeypatch):
-    """Swap _get_team_sdk for a stub; return the stub to assert on calls."""
+    """Swap _get_org_sdk for a stub; return the stub to assert on calls."""
     from tortoise import mcp_server
     stub = _StubQuerySDK()
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: stub)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
     return stub
 
 
@@ -390,18 +390,57 @@ class TestToolFunctions:
         assert callable(tortoise_diary_write)
         assert callable(tortoise_diary_read)
 
+    def test_get_operator_surfaces_transport_failure_not_fabricated_error(self):
+        """#4576: a failed get_point must surface the typed ``_SafeError``,
+        never be mis-read as a successful non-operator point.
+
+        ``_safe`` reports ANY failure (transport, auth, quota, exception) as an
+        ``_SafeError`` — itself a ``dict`` subclass. The old guard
+        (``isinstance(point, dict) and point and not point.get("is_operator")``)
+        matched that failure dict and returned a plain
+        ``{"error": "Point ... is not an operator"}`` — fabricating a domain
+        fact and dropping the real cause and the typed channel. Unset transport
+        mode makes ``_safe`` fail closed before any SDK call (no live DB).
+        """
+        from tortoise.mcp_auth import _transport_mode
+        from tortoise.mcp_server import tortoise_get_operator
+
+        token = _transport_mode.set(None)  # fail-closed: _safe returns auth error
+        try:
+            result = tortoise_get_operator("some-point-id")
+        finally:
+            _transport_mode.reset(token)
+        assert isinstance(result, mcp_mod._SafeError), result
+        assert "is not an operator" not in result.get("error", ""), result
+        assert "Authentication required" in result.get("error", ""), result
+
+    def test_get_operator_still_rejects_real_non_operator(self, monkeypatch):
+        """#4576 other direction: a *successful* fetch of a genuine
+        non-operator point must still return the canonical domain error — the
+        typed-failure gate must not swallow it."""
+        class _StubSDK:
+            def get_point(self, id):
+                return {"id": id, "is_operator": False}
+
+        monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: _StubSDK())
+        from tortoise.mcp_server import tortoise_get_operator
+
+        result = tortoise_get_operator("plain-point")
+        assert result == {"error": "Point 'plain-point' is not an operator"}, result
+        assert not isinstance(result, mcp_mod._SafeError), result
+
     def test_github_connect_oauth_unset_returns_canonical_text(self, monkeypatch):
         """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
         only) → the prompt-canonical text, not the misleading
         'GitHub OAuth not configured' (AGENT_ONBOARDING.md lines 51/209)."""
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.mcp_server import tortoise_onboarding_github_connect
         monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
-        token = _current_team_id.set("team-github-oauth")
+        token = _current_org_id.set("team-github-oauth")
         try:
             result = tortoise_onboarding_github_connect("acme")
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
         assert result == {"error": "No team context (HTTP mode required)"}
 
     def test_github_index_wraps_repo_into_list(self, monkeypatch):
@@ -412,11 +451,11 @@ class TestToolFunctions:
         (repo='repo1' → walks org/r, org/e, ...)."""
         import tortoise.hosted_api as ha
         import tortoise.mcp_server as ms
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.mcp_server import tortoise_onboarding_github_index
 
         calls: list = []
-        token = _current_team_id.set("team-github-index")
+        token = _current_org_id.set("team-github-index")
         import asyncio as _asyncio
         # Hermetic (CI workers may have no current event loop — the tool's
         # get_event_loop().create_task raises RuntimeError there): create an
@@ -428,7 +467,7 @@ class TestToolFunctions:
             monkeypatch.setattr(ha, "_start_index_job",
                                 lambda tid, kind="github": ("job1", True))
 
-            async def _capture(job_id, team_id, org, repos):
+            async def _capture(job_id, org_id, org, repos):
                 calls.append((org, repos))
 
             monkeypatch.setattr(ha, "_run_indexing", _capture)
@@ -449,7 +488,7 @@ class TestToolFunctions:
             assert calls == [("acme", ["repo1"])], \
                 "the repo must be wrapped into a one-item list, not a bare str"
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
             loop.close()
             _asyncio.set_event_loop(None)
 
@@ -465,7 +504,7 @@ class TestGraphBoundTeamSurfaceReject:
 
     # tool name → call kwargs the function body needs BEFORE its reject
     # fires (required params only — the reject is the first gate in every
-    # body; only demo_create checks team_id first, so the probe sets it).
+    # body; only demo_create checks org_id first, so the probe sets it).
     TOOL_ARGS = {  # noqa: RUF012
         "tortoise_onboarding_demo_create": {},
         "tortoise_onboarding_state": {},
@@ -481,10 +520,10 @@ class TestGraphBoundTeamSurfaceReject:
         from fastmcp.exceptions import AuthorizationError  # noqa: I001
         from tortoise.mcp_auth import (
             _current_graph_id, _current_graph_namespace,
-            _current_legacy_full_access, _current_scopes, _current_team_id,
+            _current_legacy_full_access, _current_scopes, _current_org_id,
         )
         toks = [
-            _current_team_id.set("gb-team"),
+            _current_org_id.set("gb-team"),
             _current_graph_id.set("g_gb"),
             _current_graph_namespace.set("team_gb_g_gb"),
             _current_scopes.set(["graphs:read", "graphs:write"]),
@@ -750,7 +789,7 @@ class TestAnalyzeLlmBudget:
         """Beyond the per-minute budget, tortoise_analyze skips llm_classify
         (no outbound call) and degrades to keyword-only."""
         import tortoise.mcp_server as ms
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
 
         # embedded env (no Docker) so the team SDK resolves
@@ -760,7 +799,7 @@ class TestAnalyzeLlmBudget:
         monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
 
         # Team context (HTTP) → budget accounting
-        token = _current_team_id.set("team-budget")
+        token = _current_org_id.set("team-budget")
         try:
             # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
@@ -780,7 +819,7 @@ class TestAnalyzeLlmBudget:
             # Keyword path still answers
             assert result.get("pattern") is not None or "disagreement" in str(result.get("answer", ""))
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
 
 
@@ -814,7 +853,7 @@ class TestEventsTools:
         db = os.path.join(str(tmp_path), "evt.db")
         sdk = TortoiseSDK(db)
         sdk.create_point("statement", "hello from mcp")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll()
@@ -828,7 +867,7 @@ class TestEventsTools:
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll(types=["Nope"])
@@ -842,7 +881,7 @@ class TestEventsTools:
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
         p = sdk.create_point("statement", "retract me")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_retract_point(p["id"])
@@ -931,7 +970,7 @@ class TestIngestPromotionPolicy:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         conn = {"from": "pA", "to": "pB", "operator": "IMPL"}
         if reify:
             # §8 (INGEST_CONTRACT): reify:true anchors a REAL operator node
@@ -1090,7 +1129,10 @@ class TestStdioEntrypointToolRegistration:
             # Issue #993 target (1): tools/list >= 70 on this entrypoint.
             assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
-            assert "tortoise_health" in names
+            # #3883: tortoise_health is RETIRED — the consolidator is advertised
+            # and the retired name still answers, with a warning, off the list.
+            assert "tortoise_overview" in names
+            assert "tortoise_health" not in names
             onboarding = {
                 "tortoise_onboarding_demo_create",
                 "tortoise_onboarding_state",

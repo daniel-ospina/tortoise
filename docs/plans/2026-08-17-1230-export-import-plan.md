@@ -10,7 +10,7 @@
 **Team:** epistemic-team
 **Role:** (unset)
 
-**Architecture:** Wiring + surfacing the existing production-verified `tortoise/hosted_backup.py` engine (`dump_graph`/`restore_graph`, `tortoise-logical-dump-v1`). The CLI wraps `dump_graph()` output in a new versioned envelope (`tortoise-export-v1`) and encrypts by default (AES-256-GCM via existing `encrypt_backup`) with a **caller-supplied key** (env `TORTOISE_BACKUP_KEY` or an ephemeral key printed once at export). The hosted endpoint authenticates the team (owner-only, mirroring `GET /v1/teams/{team_id}/export`), enforces size/rate caps, validates the envelope (format/version/blob-sha256 — fail closed pre-decrypt, plaintext-sha256 post-decrypt), restores into a temp graph, verifies counts, then atomically swaps into the team graph (the temp→verify→swap stage is **extracted from `restore_backup` into a shared helper** so both paths share the guards: empty-guard, pre-restore safety copy, cross-team isolation; the storage-coupled manifest/R2 layer stays in `restore_backup`). Point IDs + edge topology preserved as props; EP recomputes server-side (derived, as today). No new third-party deps, no schema change.
+**Architecture:** Wiring + surfacing the existing production-verified `tortoise/hosted_backup.py` engine (`dump_graph`/`restore_graph`, `tortoise-logical-dump-v1`). The CLI wraps `dump_graph()` output in a new versioned envelope (`tortoise-export-v1`) and encrypts by default (AES-256-GCM via existing `encrypt_backup`) with a **caller-supplied key** (env `TORTOISE_BACKUP_KEY` or an ephemeral key printed once at export). The hosted endpoint authenticates the team (owner-only, mirroring `GET /v1/organizations/{org_id}/export`), enforces size/rate caps, validates the envelope (format/version/blob-sha256 — fail closed pre-decrypt, plaintext-sha256 post-decrypt), restores into a temp graph, verifies counts, then atomically swaps into the team graph (the temp→verify→swap stage is **extracted from `restore_backup` into a shared helper** so both paths share the guards: empty-guard, pre-restore safety copy, cross-team isolation; the storage-coupled manifest/R2 layer stays in `restore_backup`). Point IDs + edge topology preserved as props; EP recomputes server-side (derived, as today). No new third-party deps, no schema change.
 
 ### Pattern Research
 
@@ -102,20 +102,20 @@ Run: `uv run pytest tests/test_export_cli.py -v` — Expected: PASS. Then `uv ru
 
 **Step 4: Commit** — `git add tortoise/export.py tortoise/__main__.py tests/test_export_cli.py && git commit -m "feat(export): tortoise export CLI — tortoise-export-v1 envelope, encrypt-by-default (epic #1230)"`
 
-## Task 2: Hosted `POST /v1/teams/{team_id}/import` — key-scoped, caps, verify-before-swap, idempotency
+## Task 2: Hosted `POST /v1/organizations/{org_id}/import` — key-scoped, caps, verify-before-swap, idempotency
 
 **Intent:** Hosted ingests the artifact into a team graph — the second half of the migration path (Indicator 2). Security-critical: the endpoint accepts arbitrary graph content into a tenant graph.
 **Acceptance:** An owner-authenticated team key can import a valid artifact (supplying the artifact key) → team graph node/edge counts + Point IDs match the artifact (verified via `tortoise_check_structure`); foreign-key/team 403; payload over cap 413 (enforced while streaming, not just Content-Length); rate-exceeded 429; tampered envelope → 422 + quarantine (audit logged, live graph untouched); re-import of the same plaintext sha256 → 200 `{"imported": false, "already": true}`; swap is atomic (crash mid-import leaves the old graph intact); `restore_backup` behavior unchanged (refactor regression-tested).
 **Files:**
-- Modify: `tortoise/hosted_api.py` (new route at `POST /v1/teams/{team_id}/import` + caps + quarantine; `_SENSITIVE_OP_LIMITS` already lives here at ~line 1628 — extend with `"import": 5`)
+- Modify: `tortoise/hosted_api.py` (new route at `POST /v1/organizations/{org_id}/import` + caps + quarantine; `_SENSITIVE_OP_LIMITS` already lives here at ~line 1628 — extend with `"import": 5`)
 - Modify: `tortoise/hosted_backup.py` (extract the temp-restore→verify→swap stage of `restore_backup` into a shared helper `_restore_into_temp_verify_swap(...)`; import calls it directly with an explicit `graph_name_override` — `restore_backup` keeps its storage/manifest layer and delegates to the same helper)
 - Test: `tests/hosted/test_import_endpoint.py` (harness matching E2E-6-D export tests)
 
 **Step 1: Freeze the endpoint contract.**
 
 ```text
-POST /v1/teams/{team_id}/import
-Auth: tt_ API key scoped to {team_id} AND owner-only (mirror export's _require_owner — a
+POST /v1/organizations/{org_id}/import
+Auth: tt_ API key scoped to {org_id} AND owner-only (mirror export's _require_owner — a
       full-graph overwrite must not be writable by any member key; fail closed: foreign/
       absent key → 403, no existence oracle). Audit event (team_import, actor_key, sha256).
 Body: raw artifact bytes (Content-Type: application/vnd.tortoise.export.v1) +
@@ -140,7 +140,7 @@ Restore (shared helper extracted from restore_backup — storage/manifest layer 
   documented crash-window: a crash between swap and stamp can double-import — idempotency is
   convergence, not strict-once)
   graph_name isolation: payload.graph_name is the SELFHOST graph name and is NOT matched
-  against team_{team_id} — the explicit import-mode override (logged) is what makes the
+  against org_{org_id} — the explicit import-mode override (logged) is what makes the
   migration legitimate; cross-TEAM isolation is still enforced by auth (step Auth).
 Quarantine on ANY verify/restore failure: 422 + audit event (quarantined_import, actor_key, sha256) +
   team node prop last_import_quarantined_sha256; live graph NEVER touched.
@@ -154,7 +154,7 @@ Run: `uv run pytest tests/hosted/test_import_endpoint.py -v` — Expected: FAIL 
 
 Run: `uv run pytest tests/hosted/test_import_endpoint.py tests/hosted/test_backup*.py -v` — Expected: PASS (incl. restore_backup regression). Then the full hosted suite (`uv run pytest tests/hosted/ -v`) — no regressions (esp. existing export/backup tests).
 
-**Step 4: Commit** — `git add tortoise/hosted_api.py tortoise/hosted_backup.py tests/hosted/test_import_endpoint.py && git commit -m "feat(import): hosted POST /v1/teams/{team_id}/import — owner-scoped, capped, verify-before-swap, idempotent (epic #1230)"`
+**Step 4: Commit** — `git add tortoise/hosted_api.py tortoise/hosted_backup.py tests/hosted/test_import_endpoint.py && git commit -m "feat(import): hosted POST /v1/organizations/{org_id}/import — owner-scoped, capped, verify-before-swap, idempotent (epic #1230)"`
 
 ## Task 3: E2E parity + docs
 
@@ -166,7 +166,7 @@ Run: `uv run pytest tests/hosted/test_import_endpoint.py tests/hosted/test_backu
 - Modify: `CHANGELOG.md`
 - Test: the parity test itself (`test_parity_export_import` — pinned name, referenced by the `-k parity` selector) + docs link check
 
-**Step 1: Write the failing parity E2E** (`test_parity_export_import`) — build a selfhost graph with ≥3 points (one with a Point ID assertion) + ≥1 operator + ≥1 edge; run `tortoise export` (subprocess); register fresh hosted team; `POST /v1/teams/{team_id}/import` with the artifact key; assert:
+**Step 1: Write the failing parity E2E** (`test_parity_export_import`) — build a selfhost graph with ≥3 points (one with a Point ID assertion) + ≥1 operator + ≥1 edge; run `tortoise export` (subprocess); register fresh hosted team; `POST /v1/organizations/{org_id}/import` with the artifact key; assert:
 - `tortoise_check_structure` node count == source node count, edge count == source edge count
 - every source Point ID present in hosted graph (survives round-trip)
 - edge count via `MATCH ()-[r]->() RETURN count(r)` == source edge count

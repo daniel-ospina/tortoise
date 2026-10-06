@@ -3,7 +3,7 @@
 
 **#310 ships a working MVP billing loop — Checkout → tier-aware enforcement → webhook-driven subscription state mirror — so that paying a Stripe subscription actually changes runtime team limits, with a billing portal and grace/revert behavior. Metering, overage billing, and the Supabase control-plane migration (#669) are explicitly out of scope (file separately).**
 
-**Root cause (verified in code):** the `tier` field is **inert**. `_check_team_limit` (hosted_api.py:505) enforces hardcoded defaults (`points=1000, api_keys=20, sessions=1000`) and never reads `tier`; `get_current_team` (hosted_api.py:491) returns only `tier, max_users, max_graphs, max_teams` — never the fields `_check_team_limit` actually enforces. Team nodes are created with `tier:'free'/1/1/1` from constants, not pricing. So the issue as written — "webhook sets `team.subscription_tier`" — would move real money through Stripe while delivering **zero user-visible change**: a paying team still hits the invisible 1000-point ceiling. Shipping #310 without the tier-aware enforcement fix is a chargeback/refund liability, not a feature.
+**Root cause (verified in code):** the `tier` field is **inert**. `_check_team_limit` (hosted_api.py:505) enforces hardcoded defaults (`points=1000, api_keys=20, sessions=1000`) and never reads `tier`; `get_current_org` (hosted_api.py:491) returns only `tier, max_users, max_graphs, max_teams` — never the fields `_check_team_limit` actually enforces. Team nodes are created with `tier:'free'/1/1/1` from constants, not pricing. So the issue as written — "webhook sets `team.subscription_tier`" — would move real money through Stripe while delivering **zero user-visible change**: a paying team still hits the invisible 1000-point ceiling. Shipping #310 without the tier-aware enforcement fix is a chargeback/refund liability, not a feature.
 
 **Quality over convenience:** The easy path (issue's own framing) is writing `tier` from a webhook. The right path is fixing the tier→limits lever (the value half of the loop) *and* building the subscription state mirror (Stripe as billing authority, registry Team node as enforcement mirror), with idempotent webhook handling.
 
@@ -29,7 +29,7 @@ Core diagnosis (inert tier, no metering, no pricing home, no webhook infra, iden
 ### problem-verify: 1 cycle — NO P0; 3 P1s incorporated
 - **problem-diverge:** 2 sub-agents (alternatives + devil's advocate). 5 framings generated; adversarial kill-shot (inert tier field) verified correct.
 - **problem-converge:** 1 sub-agent; trimmed F2 selected, confidence 78; F1/F3/F4/F5 rejected with rationale.
-- **P1s incorporated (controller):** (1) enforcement mechanism plumbing must be explicit — `get_current_team` must return the enforced fields and `_check_team_limit` must resolve limits from a tier→limits map; (2) idempotency/orphan guard was dropped in converge — restored: event-ID dedup + one-active-subscription guard on Checkout creation; (3) owner bridge made honest — solve identity at point of truth (`checkout.session.completed.customer_details.email` → store on Team node) and name the notification channel explicitly.
+- **P1s incorporated (controller):** (1) enforcement mechanism plumbing must be explicit — `get_current_org` must return the enforced fields and `_check_team_limit` must resolve limits from a tier→limits map; (2) idempotency/orphan guard was dropped in converge — restored: event-ID dedup + one-active-subscription guard on Checkout creation; (3) owner bridge made honest — solve identity at point of truth (`checkout.session.completed.customer_details.email` → store on Team node) and name the notification channel explicitly.
 
 ### solution-verify: 1 cycle — NO P0; 4 P1s incorporated
 - **solution-diverge:** 1 sub-agent; 3 architecturally distinct approaches (graph mirror / Supabase ledger / stateless read-through).
@@ -43,7 +43,7 @@ Tortoise Hosted has no way for customers to pay. The Stripe integration as scope
 
 ### Proposed Solution — Approach A: Graph-native billing mirror with lazy grace enforcement
 
-**Architecture:** Stripe = authority for *money*; FalkorDB registry Team node = authority for *enforcement*. Single data plane (graph), single process (webhook writes graph; requests read graph), no scheduler, no queue, no second DB. Grace is enforced **lazily** at request time in `get_current_team`/`_check_team_limit` — no cron. Reconcile repairs drift at boot.
+**Architecture:** Stripe = authority for *money*; FalkorDB registry Team node = authority for *enforcement*. Single data plane (graph), single process (webhook writes graph; requests read graph), no scheduler, no queue, no second DB. Grace is enforced **lazily** at request time in `get_current_org`/`_check_team_limit` — no cron. Reconcile repairs drift at boot.
 
 **New module: `tortoise/billing.py`**
 ```python
@@ -62,7 +62,7 @@ TIERS = {
 # JSON (8 entries: 4 tiers × monthly/annual, annual = -20%, annual_default: true).
 
 class StripeClient:  # thin httpx wrapper; signature verify via hmac.compare_digest
-    def create_checkout_session(team_id, price_id, customer_email, success_url, cancel_url) -> str
+    def create_checkout_session(org_id, price_id, customer_email, success_url, cancel_url) -> str
     def create_portal_session(customer_id, return_url) -> str
     def get_subscription(subscription_id) -> dict
     def list_subscriptions(customer_id) -> list[dict]
@@ -73,8 +73,8 @@ def effective_tier(team: dict, now=None) -> str:
     """Lazy grace: past_due + now > grace_until → 'free';
     current_period_end passed with no webhook yet → defensive 'free'."""
 def limits_for_tier(tier: str) -> dict: ...
-def apply_limits(sdk, team_id: str, tier: str) -> None: ...
-def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
+def apply_limits(sdk, org_id: str, tier: str) -> None: ...
+def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
     """Fetch subscription from Stripe; repair mirror (idempotent absolute SETs)."""
 ```
 
@@ -85,7 +85,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 
 **Step 1 — Canonical pricing on main (prerequisite, absorbs E4):** Land `product/pricing.json` (owner-confirmed version: Free 10k write ops post-#662, Solo $9, Pro $25, Team $149, annual 20%, overage $5/10k) onto main and mirror the tier→limits table in `tortoise/billing.py` with a test asserting parity. The server currently reads no pricing artifact — the 8 price IDs need a committed home (`STRIPE_PRICE_IDS` env JSON, validated against the catalog).
 
-**Step 2 — Tier-aware enforcement (the value half):** Extend `get_current_team`'s registry query to return `tier, max_users, max_graphs, max_teams, max_api_keys, max_points, max_sessions, subscription_status, current_period_end, grace_until`. Rewire `_check_team_limit` to resolve limits from `limits_for_tier(team["tier"])` instead of hardcoded `or 1000/20/1000` defaults. Extend `TeamInfoResponse` with the same fields for dashboard display. Add 402 detail with upgrade guidance + portal link. Never degrade below `free`.
+**Step 2 — Tier-aware enforcement (the value half):** Extend `get_current_org`'s registry query to return `tier, max_users, max_graphs, max_teams, max_api_keys, max_points, max_sessions, subscription_status, current_period_end, grace_until`. Rewire `_check_team_limit` to resolve limits from `limits_for_tier(team["tier"])` instead of hardcoded `or 1000/20/1000` defaults. Extend `TeamInfoResponse` with the same fields for dashboard display. Add 402 detail with upgrade guidance + portal link. Never degrade below `free`.
 
 **Step 3 — Stripe client + secrets + deps:** Add `tortoise/billing.py` (`StripeClient` over `httpx`, already imported in-file; pin `httpx` in requirements.txt — currently transitive/unpinned via fastmcp). Add `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_IDS` to `.env.example`, `deploy-hosted.yml` secrets-verify step, and the `flyctl secrets set` command. Ops checklist: register webhook endpoint in Stripe dashboard with event types `checkout.session.completed`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`; enable Customer Portal config; create 8 price IDs (4 tiers × monthly/annual, annual −20%, `annual_default: true`). **Do NOT create a new Stripe account** — use the existing Apresto Internal gmail account (same as El Dato); document test/live key separation.
 
@@ -105,7 +105,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
    - `customer.subscription.deleted` → revert `tier='free'` + free limits at period end.
 4. Audit each event via `_async_audit` (`billing_upgrade`, `billing_downgrade`, `billing_payment_failed`, `billing_cancel`) + analytics via `_track_analytics_event` (add `plan`/`tier`/`interval` to `_ALLOWED_ANALYTICS_PROPS`).
 
-**Step 6 — Grace/revert enforcement (lazy):** In `get_current_team`/`_check_team_limit`: `effective_tier(team)` degrades to free when `past_due` past `grace_until`, or `current_period_end` passed with no webhook (defensive). No scheduler. Grace semantics documented: **grace is a local enforcement window, not Stripe's dunning** — Stripe retries internally; local window is the app's own "keep service during payment trouble" period. (If MVP wants grace display-only, state that explicitly — default is local enforcement.)
+**Step 6 — Grace/revert enforcement (lazy):** In `get_current_org`/`_check_team_limit`: `effective_tier(team)` degrades to free when `past_due` past `grace_until`, or `current_period_end` passed with no webhook (defensive). No scheduler. Grace semantics documented: **grace is a local enforcement window, not Stripe's dunning** — Stripe retries internally; local window is the app's own "keep service during payment trouble" period. (If MVP wants grace display-only, state that explicitly — default is local enforcement.)
 
 **Step 7 — Boot reconcile:** In `_lifespan` (hosted_api.py:71 seam): best-effort, **non-fatal** on Stripe outage (must not break health check / release_command); for teams with `subscription_id` **or `stripe_customer_id`** (first-event blind spot: a missed `checkout.session.completed` leaves no `subscription_id`; customer-based match repairs it), fetch subscription(s) and repair mirror. Add `Team.stripe_customer_id` + `WebhookEvent.event_id` to `_ensure_registry_indexes`.
 
@@ -145,7 +145,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 **When this WOULD have been better:** If #669 lands within ~a quarter — then billing built directly in Supabase is the end-state and the graph mirror becomes vestigial. **Migration path if A is later abandoned:** graph billing fields seed future Supabase tables via the same reconcile pattern; event history reconstructible from Stripe's List Events API.
 
 ### Approach C — Stripe-hosted, stateless read-through (Payment Links + TTL cache)
-**Rejected because:** Structurally cannot close the payment→team loop — Payment Links cannot bind server-side `team_id` metadata (no customer creation, no metadata association), violating the confirmed problem's "webhook-driven subscription state mirror." Also couples the enforcement hot path to Stripe API latency/availability (fail-open vs fail-closed decision with product consequences), leaves no durable billing record (orphans undetectable), and Payment Links are less expressive (no backend checkout customization).
+**Rejected because:** Structurally cannot close the payment→team loop — Payment Links cannot bind server-side `org_id` metadata (no customer creation, no metadata association), violating the confirmed problem's "webhook-driven subscription state mirror." Also couples the enforcement hot path to Stripe API latency/availability (fail-open vs fail-closed decision with product consequences), leaves no durable billing record (orphans undetectable), and Payment Links are less expressive (no backend checkout customization).
 **When this WOULD have been better:** If #669 landed immediately AND the team accepted read-through enforcement with an explicit fail-open decision AND no event-driven behavior was needed. None hold.
 
 ### Inline-extension of the issue's own approach (webhook → tier field only)
@@ -157,7 +157,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 |-------------|------|------------|--------|
 | Registry Team node (`stripe_customer_id`, `subscription_id` + new `subscription_status`, `current_period_end`, `grace_until`, `max_*`) | Graph DB | Steps 2, 5 (webhook SET) + `team_update` allowlist ext (Step 1) | ✅ |
 | `:WebhookEvent` dedup nodes + indexes (`event_id`, `Team.stripe_customer_id`) | Graph DB | Step 5, 7 (`_ensure_registry_indexes`) | ✅ |
-| `get_current_team` + `_check_team_limit` (tier-aware limits, lazy grace) | API/auth path | Step 2 | ✅ |
+| `get_current_org` + `_check_team_limit` (tier-aware limits, lazy grace) | API/auth path | Step 2 | ✅ |
 | `POST /webhooks/stripe` (SKIP + SKIP_AUTH + signature verify) | API | Step 5 | ✅ |
 | `POST /v1/billing/checkout`, `POST /v1/billing/portal` | API | Step 4 | ✅ |
 | `GET /v1/team` + `TeamInfoResponse` (plan/status/limits) | API | Step 2 | ✅ |
@@ -186,7 +186,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 
 | Domain | Rating |
 |--------|--------|
-| Tier | **Standard** (confirmed — issue's rating). Multi-surface (billing module, auth/enforcement path, registry mirror, dashboard SPA, secrets, tests) but each surface is small and well-bounded; single new module + one file's middleware extension. **Escalation condition:** if the enforcement plumbing (Step 2) turns out to touch auth broadly beyond `get_current_team`/`_check_team_limit`, escalate to complex rather than compressing. |
+| Tier | **Standard** (confirmed — issue's rating). Multi-surface (billing module, auth/enforcement path, registry mirror, dashboard SPA, secrets, tests) but each surface is small and well-bounded; single new module + one file's middleware extension. **Escalation condition:** if the enforcement plumbing (Step 2) turns out to touch auth broadly beyond `get_current_org`/`_check_team_limit`, escalate to complex rather than compressing. |
 | UX_RATING | medium — new upgrade CTA + billing portal link + plan/status display in the dashboard SPA (user-visible flow change). UX Prototype Gate: fork-mode (modify `main.jsx` component — prototype IS the implementation); no new HTML prototype needed. |
 | ONTOLOGY_RATING | medium — Team node gains `subscription_status`, `current_period_end`, `grace_until`, `max_*` fields; new `:WebhookEvent` node label. Update `docs/registry-graph-schema.md` in same PR. |
 | ARCH_RATING | medium-high — new `billing.py` module, external-service integration (Stripe), webhook security surface, reconcile path, pricing parity constraint. No new infra (no queue/scheduler/DB). |
@@ -200,10 +200,10 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 3. **Land `product/pricing.json` on main** — canonical pricing is branch-only (feat/575-pricing etc.); free-tier ops changed 1k→10k in #662 branch-only. Server reads no pricing artifact → guaranteed drift. (Absorbed into #310 as Step 1 prerequisite, but a standalone doc-hygiene issue is warranted: enforce "pricing.json must exist on main" as a CI check.)
 4. **`max_users`/`max_graphs`/`max_teams` stored but never enforced** — downgrade-over-limit (Pro→Free with 2 memberships) has no handling; dashboard displays limits that aren't enforced. Adjacent enforcement gap.
 5. **MCP write limits are tier-free** — `mcp_server.py` has zero `_check_team_limit` calls; a paid upgrade changes REST limits but not MCP limits (pre-existing gap, exposed by this work).
-6. **API-key `last_used_at` not updated** — documented TODO in `tortoise/hosted_middleware.py`; `get_current_team` never SETs it. Adjacent bug in touched area.
+6. **API-key `last_used_at` not updated** — documented TODO in `tortoise/hosted_middleware.py`; `get_current_org` never SETs it. Adjacent bug in touched area.
 7. **Owner identity / notification channel** — no email delivery infra exists (no Resend/SMTP/in-app table). #307 (Email Integration — Resend for Invitations + Key Recovery) partially covers the channel; "notify Owner on payment failure" needs the channel decision (see open questions).
 8. **`_check_team_limit` fail-open on count errors** — currently returns (fail-open) if counting fails; with money at stake, revisit fail-closed vs fail-open explicitly.
-9. **get_current_team O(keys) scan** — API-key verification iterates all non-revoked keys per request; scales poorly with paid growth. Tech debt, not this issue.
+9. **get_current_org O(keys) scan** — API-key verification iterates all non-revoked keys per request; scales poorly with paid growth. Tech debt, not this issue.
 
 ## Open Scoping Questions (for user)
 
@@ -212,7 +212,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 3. **Grace period semantics:** Confirm 72h grace (`grace_until = current_period_end + 72h`) as local enforcement window, with `past_due` teams degraded to free after expiry. Or is grace display-only (revert rides solely on Stripe dunning → `subscription.deleted`)?
 4. **Price catalog home:** `STRIPE_PRICE_IDS` env JSON vs checked-in catalog module. And confirm all **8** prices (4 tiers × monthly/annual) should be created even though Free ($0) never goes through Checkout — Free prices are display-only.
 5. **Reconcile cadence:** Boot-only (recommended for MVP) vs periodic background loop in the single worker. Boot-only keeps it standard-complexity.
-6. **Escalation check-in:** If Step 2 (enforcement rewiring) exceeds `get_current_team`/`_check_team_limit`, escalate complexity to complex rather than compressing — confirm this is acceptable.
+6. **Escalation check-in:** If Step 2 (enforcement rewiring) exceeds `get_current_org`/`_check_team_limit`, escalate complexity to complex rather than compressing — confirm this is acceptable.
 7. **E2E scope:** E2E-3-D (upgrade flow) requires Stripe test-mode keys in CI — confirm availability, or gate the E2E behind `@pytest.mark.stripe` like the existing `postgres` marker pattern.
 
 ## User Decisions (2026-08-08) — recorded after human approval gate

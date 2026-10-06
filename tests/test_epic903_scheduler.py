@@ -8,9 +8,10 @@ id tie-break); retained-dirty root included despite being outside top-N
 (union); eventual full coverage within a bounded number of passes; all-null
 graph → single pass. Boundaries: budget=0 → no-op; budget ≥ graph → single
 pass; budget=None → default 200-op selector cap respected (no unbounded
-interpretation). D2-3 index sub-assertion: the ``:Point(lastDreamedAt)``
-index (composite ``:Point(is_operator, lastDreamedAt)`` on docker/server)
-exists at init and the ranking query's null-inclusion semantics are pinned
+interpretation). D2-3 index sub-assertion: the plain ``:Point(lastDreamedAt)``
+index exists at init on every engine (#3154 retired the docker/server
+``is_operator`` composite — GRAPH.COPY can copy a boolean RANGE index
+without its ``false`` postings)
 (nulls rankable as stalest). Determinism: fixed seeds, fixed ISO fixture
 stamps — never wall-clock state manufacturing (fixtures rule #1250).
 
@@ -302,8 +303,8 @@ class TestIndexSubAssertion:
         f = f2_staleness_regions()
         proj = f.sdk._get_proj()
         # Presence: a :Point index covering lastDreamedAt exists at init
-        # (embedded: plain :Point(lastDreamedAt); docker/server: composite
-        # :Point(is_operator, lastDreamedAt) — #1240, replay-safe).
+        # (plain :Point(lastDreamedAt) on every engine — #3154 retired the
+        # is_operator composite; #1240, replay-safe).
         rows = proj.g.query("CALL db.indexes()").result_set
         point_idx = {r[0]: r[1] for r in rows if r[0] == "Point"}
         assert "lastDreamedAt" in str(point_idx), (

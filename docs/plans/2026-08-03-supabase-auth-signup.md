@@ -55,14 +55,14 @@
 ### Task 2: Database Migration — user_teams table
 
 **Intent:** Create a `user_teams` table in Supabase Postgres to store the mapping between auth users and their provisioned teams, including the API key for one-time display.
-**Acceptance:** Table exists with columns: id, user_id (FK → auth.users), team_id, team_name, api_key (plaintext for welcome page), key_hash, graph_name, created_at. Trigger on auth.users INSERT calls edge function.
+**Acceptance:** Table exists with columns: id, user_id (FK → auth.users), org_id, org_name, api_key (plaintext for welcome page), key_hash, graph_name, created_at. Trigger on auth.users INSERT calls edge function.
 **Files:**
 - Create: `supabase/migrations/0001_user_teams.sql`
 
 ### Task 3: FastAPI Provision Endpoint
 
 **Intent:** Add `POST /api/provision` endpoint to the existing graph-viz FastAPI server that creates a team via `TortoiseSDK.team_create()` and returns the API key.
-**Acceptance:** Endpoint accepts `{team_name, user_id}` (authenticated via Supabase service role key), creates team + namespace, returns `{team_id, api_key, graph_name}`.
+**Acceptance:** Endpoint accepts `{org_name, user_id}` (authenticated via Supabase service role key), creates team + namespace, returns `{org_id, api_key, graph_name}`.
 **Files:**
 - Modify: `apps/graph-viz/server/main.py`
 

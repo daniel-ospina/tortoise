@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 
@@ -370,10 +371,12 @@ def _set_status(sdk, pid, status):
 
 @pytest.fixture
 def mining_sdk():
-    sdk = TortoiseSDK(os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_mining_test_"), "test.db"))
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_mining_test_")
+    sdk = TortoiseSDK(os.path.join(tmpdir, "test.db"))
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestQuarantineBatch:
@@ -725,7 +728,7 @@ class TestW3PipelineWiring:
 
         # Rebuild from the REAL mining event log (points came from PointAdded
         # events that do NOT carry batch_id — only the snapshot restores it).
-        rebuilt = proj.rebuild_all(str(tmp_path))
+        rebuilt = proj.rebuild_all(str(tmp_path), confirm_destructive=True)
         assert rebuilt["events"] >= 1
         bs = mining.batch_status(proj, batch_id)
         assert bs is not None and bs["status"] == "quarantined", (

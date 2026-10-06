@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile  # noqa: F401
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -137,6 +138,34 @@ def test_fallback_snapshot_status_and_kind_semantics(sdk):
     assert b["id"] not in ids_ex and a["id"] in ids_ex
 
 
+def test_fallback_snapshot_turn_echo_exclusion_is_pre_ranking(sdk):
+    """#4509: the degraded fallback honours the same OPT-IN turn-echo exclusion
+    as the primary path — the capture's own turn echoes are dropped from the
+    CORPUS before ranking (so they cannot consume the window), and naming
+    another session is a no-op.
+
+    FALSIFIER — (1) *what value makes this test fail?* Whether ``fb_t0`` is in
+    the excluded result and whether ``fb_real`` survives. (2) *reachable?* Yes:
+    the fallback returns the whole corpus on a non-matching query, so all four
+    rows are in the window; only the corpus filter can remove the echoes."""
+    for i in range(3):
+        sdk.create_point("event", f"[user] unrelated filler {i}",
+                         id=f"fb_t{i}", is_episodic=True)
+    sdk.create_point("statement", "unrelated filler prior", id="fb_real")
+
+    default = [r["id"] for r in _no_match_query(sdk)]
+    assert {"fb_t0", "fb_t1", "fb_t2", "fb_real"} <= set(default), default
+
+    other = [r["id"] for r in sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, exclude_turn_echo_session="other")]
+    assert other == default, (default, other)
+
+    opted = [r["id"] for r in sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, exclude_turn_echo_session="fb")]
+    assert "fb_real" in opted, opted
+    assert not any(i.startswith("fb_t") for i in opted), opted
+
+
 def test_fallback_snapshot_supersede_decoration(sdk):
     """E5 Task 5 (#1537): the embedded TF-IDF fallback decorates its hits
     with the promoted epistemic state (fetch_point_epistemic_state — the D8
@@ -232,11 +261,16 @@ def test_fallback_snapshot_invalidated_on_delete(sdk):
 
 def test_fallback_snapshot_lazy_ttl_fires(monkeypatch):
     """TTL fires at read time (not a background timer) → rebuild, logged."""
+    monkeypatch.setattr(fs, "SNAPSHOT_TTL_SECONDS", 1.0)
+    # ``built_at`` must be seeded TTL-RELATIVE, not as an absolute literal:
+    # ``time.monotonic()`` is seconds since BOOT, so a bare ``0.0`` only reads
+    # as expired while host uptime exceeds the TTL — the same uptime coupling
+    # as #3416 (harmless at a 1s TTL, but the same latent defect).
     fs._store.put(("g", "n"), {
-        "built_at": 0.0, "dirty": False, "points": [],
+        "built_at": time.monotonic() - fs.SNAPSHOT_TTL_SECONDS - 1.0,
+        "dirty": False, "points": [],
         "vectorizer": None, "doc_vecs": None, "model_id": None,
     })
-    monkeypatch.setattr(fs, "SNAPSHOT_TTL_SECONDS", 1.0)
     got = fs._store.get(("g", "n"))
     assert got is None, "stale snapshot must be dropped at read"
 

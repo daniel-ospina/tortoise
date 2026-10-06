@@ -200,7 +200,7 @@ reported finding, including exact stored-property and surface reads.
 - **(d) CLI/MCP contracts (#2219 × #2215 × #2227)**: no leftover `@mcp.tool`
   decorators (4 remaining occurrences are comments); `register_all` runs at
   module bottom after every tool definition; dedupe-skip is inert now that no
-  decorators remain. `tortoise_health` → `monitoring.metrics(sdk=_get_team_sdk())`
+  decorators remain. `tortoise_health` → `monitoring.metrics(sdk=_get_org_sdk())`
   probes the same namespace `/health` probes on selfhost (`namespace="selfhost"`,
   selfhost.py:199-223) and the team SDK on hosted; stdio resolves to the base
   SDK. The standalone `serve_health` no-registration path now reports

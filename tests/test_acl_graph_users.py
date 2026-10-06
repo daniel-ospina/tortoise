@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests import _live_utils
 from tortoise import acl_graph_users as acl
 
 _SUPPORTED = {"docker", "redis", "rediss"}
@@ -189,7 +190,7 @@ def test_cross_graph_noperm(acl_env):
     try:
         c = redis_py.Redis(
             host=urlparse(os.environ["TORTOISE_DB_URI"]).hostname,
-            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or 16379,
+            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or _live_utils.docker_port(),
             username=cred["username"], password=cred["password"],
             decode_responses=True, socket_timeout=5,
         )
@@ -212,7 +213,7 @@ def test_cross_graph_noperm(acl_env):
         # (research: GRAPH.CONFIG is unkeyed — its ONLY protection is the
         # command deny; second-model S5 closes the untested hole).
         for probe in (["GRAPH.CONFIG", "GET", "TIMEOUT"],
-                      ["GRAPH.DEBUG", f"team_{tid}_{gid}",
+                      ["GRAPH.DEBUG", f"org_{tid}_{gid}",
                        "metadata"],
                       ["GRAPH.LIST"],
                       ["GRAPH.UDF", "SET", "x", "x"]):
@@ -277,7 +278,7 @@ def test_rollback_drops_user_and_node(acl_env):
     assert not acl.acl_user_exists(gid)
     # Node is gone too.
     rows = ha._make_sdk(namespace="registry")._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.id",
+        "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.id",
         params={"gid": gid, "tid": tid},
     ).result_set
     assert rows == []
@@ -290,7 +291,7 @@ def test_strict_mint_failure_no_orphan(acl_env, monkeypatch):
     from tortoise.acl_graph_users import AclLayerError
     ha, tid, gid = acl_env["ha"], acl_env["tid"], acl_env["gid"]
 
-    def _boom(graph_id, team_id):
+    def _boom(graph_id, org_id):
         raise AclLayerError("simulated SETUSER failure")
 
     monkeypatch.setattr(acl, "create_acl_user", _boom)
@@ -313,7 +314,7 @@ def test_soft_mint_survives_acl_failure(acl_env, monkeypatch):
     from tortoise.acl_graph_users import AclLayerError
     ha, tid, gid = acl_env["ha"], acl_env["tid"], acl_env["gid"]
 
-    def _boom(graph_id, team_id):
+    def _boom(graph_id, org_id):
         raise AclLayerError("simulated SETUSER failure")
 
     monkeypatch.setattr(acl, "create_acl_user", _boom)
@@ -364,7 +365,7 @@ def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
     # Simulate the store-miss window: wipe the node's stored password.
     sdk = acl_env["sdk"]
     sdk._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.acl_pass = null",
+        "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.acl_pass = null",
         params={"gid": gid, "tid": tid},
     )
     client = acl._admin_client()
@@ -378,12 +379,12 @@ def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
     import redis as redis_py
     uri = _up(os.environ["TORTOISE_DB_URI"])
     with pytest.raises((redis_py.AuthenticationError, redis_py.ResponseError)):
-        redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+        redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
                        username=f"tenant_{gid}", password=cred1["password"],
                        decode_responses=True, socket_timeout=5,
                        ).execute_command("PING")
     # New password authenticates.
-    redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+    redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
                    username=f"tenant_{gid}", password=cred2["password"],
                    decode_responses=True,
                    ).execute_command("PING")
@@ -430,7 +431,7 @@ def test_open_default_strict_provision_503(acl_env, monkeypatch):
     # gone — its name never landed).
     sdk = ha._make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
-        "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+        "MATCH (g:Graph {org_id:$tid}) RETURN count(g)",
         params={"tid": tid},
     ).result_set
     assert rows[0][0] == 1  # fixture graph only — provisioned graph rolled back
@@ -447,6 +448,6 @@ def test_team_purge_drops_custom_graph_users(acl_env):
     acl.create_acl_user(g2["graph_id"], tid)
     assert acl.acl_user_exists(gid)
     assert acl.acl_user_exists(g2["graph_id"])
-    ha._drop_team_acl_users(tid)
+    ha._drop_org_acl_users(tid)
     assert not acl.acl_user_exists(gid)
     assert not acl.acl_user_exists(g2["graph_id"])

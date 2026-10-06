@@ -37,7 +37,7 @@ The first-timer branch of the mount gate (`~:1740-1790`) returns before `complet
 |---|----------|-----------|
 | D1 | Persist the key at reveal (provisioned branch), not in `finishWelcomeLoads` | Persisting at reveal is strictly earlier — a reload mid-wizard (after the key was shown once) keeps it too. Both verifiers confirmed the reload stored-key probe (`~:1787-1810`) reuses `localStorage[KEY_STORAGE]` when it passes the `/v1/team` probe + membership check. |
 | D2 | Guard the persist with `if (provisioned.api_key)` + try/catch | Verifier P2: `provisionInApp`'s consumed-reveal path returns `api_key: ''`; the codebase forbids falsy values in `KEY_STORAGE` ("a falsy value must never land in localStorage", `~:1897-1906`) and try/catches localStorage (private-mode throw). |
-| D3 | Fire `loadAll` + `refreshTeam` in `finishWelcomeLoads` AFTER `await loadTeams()` | `loadTeams`' Round-8 fallback pins `teamIdRef`/`currentTeamId` (`~:2337-2339`); `loadAll`'s `?team_id=` pin + staleness guard (`teamIdRef.current !== _teamAtCall`, `~:2309`) need the pin. **Sequencing is load-bearing** — do NOT parallelize with the loadTeams await (verifier P2). Both calls `.catch(() => {})` fire-and-forget, preserving the "finishWelcomeLoads never rejects" invariant. |
+| D3 | Fire `loadAll` + `refreshTeam` in `finishWelcomeLoads` AFTER `await loadTeams()` | `loadTeams`' Round-8 fallback pins `orgIdRef`/`currentOrgId` (`~:2337-2339`); `loadAll`'s `?org_id=` pin + staleness guard (`orgIdRef.current !== _teamAtCall`, `~:2309`) need the pin. **Sequencing is load-bearing** — do NOT parallelize with the loadTeams await (verifier P2). Both calls `.catch(() => {})` fire-and-forget, preserving the "finishWelcomeLoads never rejects" invariant. |
 | D4 | Re-fire `refreshTeam` after the seed step in `wizardSeedGraph` | Load-bearing for the mid-seed header-exit race: the header "Open dashboard →" is available on every wizard step, so `finishWelcomeLoads`' refreshTeam (D3) can snapshot `point_count=0` while the seed commit is in flight; Step 3's post-seed refire lands the correct count. (The Overview cards are dashboard-only — `!welcomeMode` — so this is a race fix, not an in-welcome re-render.) Idempotent — a third refreshTeam call is a guarded pure fetch; no mint/side effects. |
 | D5 | `welcomeKey || ''` as the key arg | `loadAll`'s key param is documented-unused (session-authed reads); empty string keeps the call shape safe for the claim/error paths where `welcomeKey` is ''. |
 
@@ -66,8 +66,8 @@ Inside `finishWelcomeLoads`, after `loadBackups(...)` and BEFORE `await refreshO
 
 ```js
 // #1906: the first-timer path never ran loadAll — Overview 'API Keys'
-// stayed 0 until reload. loadTeams just pinned currentTeamId (Round-8),
-// so loadAll's ?team_id= targets the new team. Fire-and-forget like
+// stayed 0 until reload. loadTeams just pinned currentOrgId (Round-8),
+// so loadAll's ?org_id= targets the new team. Fire-and-forget like
 // completeLogin's card loads (each loader carries its own staleness guard).
 // #1906: refetch the team so 'Data points' reflects the seeded graph —
 // team.point_count was captured at provisioning (pre-seed, 0).
@@ -102,7 +102,7 @@ Reviewers (guidance, bug shallow+deep, history, PR-comments, security, UX consis
 
 | # | Finding | Resolution |
 |---|---------|------------|
-| R1 | P1 (history): welcome key never recorded in `teamKeysRef` — switchTeam away-and-back mints a DIFFERENT bootstrap key; revokeKey skips the localStorage re-mint branch | Provisioned branch's `refreshTeam(...).then` now records `teamKeysRef.current[t.team_id] = provisioned.api_key` (guarded truthy) alongside `loadAlerts` |
+| R1 | P1 (history): welcome key never recorded in `teamKeysRef` — switchTeam away-and-back mints a DIFFERENT bootstrap key; revokeKey skips the localStorage re-mint branch | Provisioned branch's `refreshTeam(...).then` now records `teamKeysRef.current[t.org_id] = provisioned.api_key` (guarded truthy) alongside `loadAlerts` |
 | R2 | P1/P2 (ux-consistency + bug-deep): header "Open dashboard →" clickable during provisioning → finishWelcomeLoads against a non-existent team → 'API Keys 0' + false error banner until reload | Header button `disabled={welcomeProvisioning}`; label canonicalized to "Open my dashboard →" (matches the wizard done-step CTA — terminology drift P2) |
 | R3 | P1 (ux-coverage): step-0 "Go to API Keys →" exit (consumed-reveal path, api_key '') bypassed the chokepoint — no replaceState, no loads → API Keys tab lied "No keys yet.", eternal skeleton, /welcome URL stuck | Routed through the chokepoint: `replaceState('/') + setWelcomeMode(false) + setTab('keys') + finishWelcomeLoads()` (session-JWT loads need no key) |
 | R4 | P2 (history): refreshTeam has 3 welcome-path producers with no ordering guard — a pre-seed point_count 0 response could land after the post-seed 1 | Monotonic `teamRefreshSeqRef` + optional `seq` param on refreshTeam: post-seed refire bumps the seq and tags its call; the exit's refreshTeam tags with the current seq — a stale-seq response is dropped before setTeam (mirrors the file's Round-N staleness pattern) |
@@ -119,5 +119,5 @@ Reviewers (guidance, bug shallow+deep, history, PR-comments, security, UX consis
 | Failure | Handling |
 |---------|----------|
 | `refreshTeam`/`loadAll` reject (transient 5xx) | `.catch(() => {})` — silent; cards show '—'/0 until next trigger (same as completeLogin's best-effort) |
-| `loadTeams` fails → `teamIdRef` unpinned | `loadAll`/`refreshTeam` still run session-authed without `?team_id=` (null pin → guards pass) — verifier-confirmed |
+| `loadTeams` fails → `orgIdRef` unpinned | `loadAll`/`refreshTeam` still run session-authed without `?org_id=` (null pin → guards pass) — verifier-confirmed |
 | Stale switch mid-wizard | Both loaders' staleness guards drop the stale response; switchTeam's own loaders own data under the new selection |

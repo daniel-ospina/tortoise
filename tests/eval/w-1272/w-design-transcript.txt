@@ -198,7 +198,7 @@
 197: assistant: Issue #1009 filed; the label POST hiccuped (nested substitution). Adding labels directly:
 198: assistant: Labels on #1009. Now the fix — making the change in the worktree, then finding the right test home:
 199: assistant: Now the pinning test — checking how existing tests exercise the onboarding tools:
-200: assistant: `test_mcp_server.py` has exactly the pattern I need (`_current_team_id.set`/`reset`). Checking its import style and adding the pinning test:
+200: assistant: `test_mcp_server.py` has exactly the pattern I need (`_current_org_id.set`/`reset`). Checking its import style and adding the pinning test:
 201: assistant: Adding the pinning test to `TestToolFunctions`:
 202: assistant: 6/6 pass (new test + tool-function suite). Running the full mcp_server test file for regressions, and checking #1007's welcome-e2e re-run in parallel:
 203: assistant: **P2 fix fully green (65/65).** #1007 needs a main sync + the flaky welcome-e2e to clear (email bucket saturated by the batch — it's failed 3× today). Let me commit the P2, then sync #1007 so both go through one CI cycle:

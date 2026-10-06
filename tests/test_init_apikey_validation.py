@@ -179,12 +179,12 @@ class TestInitApiKeyEnhancements:
 
     # ── --json success shape (agent consumption) ──────────────
     def test_json_output_valid_key(self, monkeypatch, tmp_path, capsys):
-        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b'{"team_id": "team123"}')):
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b'{"org_id": "team123"}')):
             rc = self._run(monkeypatch, tmp_path, ["init", "--api-key", "tt_testkey", "--json"])
         assert rc == 0
         out = json.loads(capsys.readouterr().out)  # stdout is pure JSON
         assert out["status"] == "connected"
-        assert out["team_id"] == "team123"
+        assert out["org_id"] == "team123"
         assert out["api_url"] == "https://api.premiselabs.co"
         assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert out["mcp"]["auth_header"] == "Bearer tt_testkey"

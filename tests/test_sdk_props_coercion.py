@@ -8,6 +8,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -25,6 +26,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── _coerce_props unit tests ──────────────────────────────────────────
@@ -113,6 +115,69 @@ class TestUpdateAndEntityProps:
         )
         assert obj.get("name") == "Test Product"
         assert obj.get("objectKind") == "product"
+
+
+# ── search_keys flattening parity across the write paths (#5482) ──────
+
+class TestSearchKeysFlattenedOnEveryWritePath:
+    """#5482: ``search_keys`` must be stored FLAT on a Point by EVERY writer.
+
+    FalkorDB's fulltext index does not index array-valued properties, so a
+    Point whose ``search_keys`` is a list is permanently unfindable by
+    ``queryNodes`` — while the write reports success. ``create_point`` and
+    ``update_point`` flatten via ``_flatten_search_keys_prop``; the generic
+    entity surface (``update_entity``, the ``surface.update_entity`` MCP tool)
+    wrote caller props straight through ``SET n += $props`` and did not.
+    """
+
+    @staticmethod
+    def _stored(sdk, pid):
+        """The RAW graph value of ``search_keys`` — not the SDK's rendering of
+        it, because the defect is precisely a mismatch between the two."""
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.search_keys",
+            params={"id": pid},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def test_update_entity_flattens_a_list_search_keys(self, sdk):
+        """The defect: a list landed as an ARRAY, so FTS could never match it."""
+        p = sdk.create_point("statement", "flatten target",
+                             search_keys=["alpha", "beta"])
+        sdk.update_entity(p["id"], search_keys=["gamma", "delta"])
+        stored = self._stored(sdk, p["id"])
+        assert stored == "gamma delta", (
+            "update_entity must flatten search_keys to a space-joined string "
+            f"exactly as create_point/update_point do; got {stored!r}")
+
+    def test_an_empty_list_omits_the_key_rather_than_clearing_it(self, sdk):
+        """``_flatten_search_keys_prop`` POPS an empty/blank list, so the key is
+        omitted from the write and any stored value is left ALONE — it does not
+        clear it. Pinned on BOTH update paths, because \"a blank list never
+        writes the key\" is the convention all three writers share and the pop
+        is easy to misread as a clear.
+        """
+        p = sdk.create_point("statement", "empty-list target",
+                             search_keys="keepme")
+        sdk.update_entity(p["id"], search_keys=[])
+        assert self._stored(sdk, p["id"]) == "keepme"
+        sdk.update_point(p["id"], search_keys=[])
+        assert self._stored(sdk, p["id"]) == "keepme"
+
+    def test_update_entity_leaves_a_flat_string_alone(self, sdk):
+        """No-op for scalars — flattening must not rewrite a flat value."""
+        p = sdk.create_point("statement", "scalar target")
+        sdk.update_entity(p["id"], search_keys="already flat")
+        assert self._stored(sdk, p["id"]) == "already flat"
+
+    def test_the_other_two_paths_are_the_parity_baseline(self, sdk):
+        """Pin the two paths that already flattened, so the parity claim above
+        is checked AGAINST them rather than asserted from them."""
+        p = sdk.create_point("statement", "parity create",
+                             search_keys=["one", "two"])
+        assert self._stored(sdk, p["id"]) == "one two"
+        sdk.update_point(p["id"], search_keys=["three", "four"])
+        assert self._stored(sdk, p["id"]) == "three four"
 
 
 # ── Entity arbitrary props persistence (#228) ─────────────────────────
@@ -340,14 +405,20 @@ class TestFromUriForwarding:
             captured.update(kwargs)
 
         monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
+        # TEST-PREFIXED path: `from_uri` journals its resolved graph name in a
+        # test session, and the session-end sweep drops every journaled graph
+        # except the env-URI default — a shared path would put the dev/compose
+        # graph in that drop set (#7795). The census in test_derived_names.py
+        # takes its literal-test-prefix branch, so no route-table exemption is
+        # needed here.
         FalkorProjection.from_uri(
-            "rediss://myuser:mypass@db.example.com:6379/tortoise"
+            "rediss://myuser:mypass@db.example.com:6379/test_sdk_props_coercion"
         )
         assert captured["username"] == "myuser"
         assert captured["password"] == "mypass"
         assert captured["host"] == "db.example.com"
         assert captured["port"] == 6379
-        assert captured["graph_name"] == "tortoise"
+        assert captured["graph_name"] == "test_sdk_props_coercion"
         assert captured["ssl"] is True
 
     def test_from_uri_docker_no_ssl(self, monkeypatch):
@@ -358,9 +429,11 @@ class TestFromUriForwarding:
             captured.update(kwargs)
 
         monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
-        FalkorProjection.from_uri("docker://:@localhost:16379/tortoise")
+        FalkorProjection.from_uri(
+            "docker://:@localhost:16379/test_sdk_props_coercion"
+        )
         assert captured["ssl"] is False
-        assert captured["graph_name"] == "tortoise"
+        assert captured["graph_name"] == "test_sdk_props_coercion"
 
 
 # ── _load_dotenv parsing (inline comments, quoted values, bare #) ────────
@@ -443,11 +516,34 @@ class TestNoConnectAtImport:
         sys.modules.pop("tortoise.mcp_server", None)
 
         try:
-            import tortoise.mcp_server as fresh  # noqa: F401, F811, RUF100
-            assert not called, (
-                "TortoiseSDK() must NOT be called at import time. "
-                "SDK construction is deferred to _get_sdk() on first use (#451)."
+            import tortoise.mcp_server as fresh  # noqa: F811, RUF100
+            # #6136: attribute the claim to THIS import. `called` below is a
+            # PROCESS-GLOBAL negative — under xdist a co-tenant module's leaked
+            # thread or cached side effect in the same worker trips it with no
+            # relation to this import, which is why the CI red was
+            # unreproducible (measured: `1 failed, 1744 passed` on gw1 while
+            # this test passes serially, under `-n 2`, and as a whole module).
+            # The #451 invariant is about the IMPORT, so assert it on the
+            # freshly imported module itself: `_sdk` is the cache `_get_sdk()`
+            # populates, so it being None is exactly "this import built no
+            # SDK", with no attribution to another caller.
+            assert fresh._sdk is None and fresh.sdk is None, (
+                "tortoise.mcp_server must NOT construct a TortoiseSDK at "
+                "import time — construction is deferred to _get_sdk() on "
+                "first use (#451). "
+                f"_sdk={fresh._sdk!r}, sdk={fresh.sdk!r}"
             )
+            # The global counter stays as a diagnostic ONLY: it can no longer
+            # fail this test, but if it fires while `_sdk` is None above, the
+            # construction came from elsewhere in this process — print it so
+            # the distinction is visible instead of being an unattributable
+            # red.
+            if called:
+                print(
+                    "[#451] note: an SDK was constructed elsewhere in this "
+                    "process during the import window; mcp_server's own "
+                    "_sdk is still None, so this import is clean."
+                )
         finally:
             tortoise.sdk.TortoiseSDK.__init__ = real_init
 

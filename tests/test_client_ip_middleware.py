@@ -262,3 +262,28 @@ async def test_fly_flag_alone_does_not_trust_fly_forwarded_proto_absent_xfp(
         _FakeRequest(headers={}, scheme="http"),
     )
     assert req.scope["scheme"] == "http"
+
+
+# ── #2866: the trust flag must actually be ON in the deployed image ─────────
+
+def test_fly_toml_enables_trust_fly_client_ip():
+    """Config seam for the #2866 trusted-CIDR exemption.
+
+    ClientIPMiddleware only honors ``Fly-Client-IP`` when
+    ``TORTOISE_TRUST_FLY_CLIENT_IP=1``. That flag lives in fly.toml's [env]
+    for the hosted deployment, while the per-request behavior is unit-tested
+    against an injected env — so without this config assertion the DCR
+    trusted-CIDR exemption (and every per-IP limiter, #1081) silently
+    becomes dead code on the next fly.toml edit.
+    """
+    import tomllib
+    from pathlib import Path
+
+    fly_toml = Path(__file__).resolve().parent.parent / "fly.toml"
+    with fly_toml.open("rb") as fh:
+        config = tomllib.load(fh)
+    assert config["env"]["TORTOISE_TRUST_FLY_CLIENT_IP"] == "1", (
+        "fly.toml must set TORTOISE_TRUST_FLY_CLIENT_IP = \"1\" in [env] — "
+        "without it ClientIPMiddleware falls back to request.client.host "
+        "(the Fly proxy IP), collapsing every per-IP limiter to one global "
+        "bucket and making the #2866 trusted-CIDR exemption unreachable.")

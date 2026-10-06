@@ -61,7 +61,7 @@ cannot hold credentials, #2246 ADR-010).
   (plan R2 stance; NOT triggered at runtime — version-dependent).
 - Per-graph sweep enumeration (backup/event-retention) = C5 handoff
   residual; R13 periodic audit owns retention amplification.
-- MCP `_get_team_sdk` vanish race = accepted residual (honest error).
+- MCP `_get_org_sdk` vanish race = accepted residual (honest error).
 - Dashboard key panel mints the graphs:read+write pair only (scope-aware
   mint UI = documented future).
 

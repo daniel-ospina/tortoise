@@ -37,6 +37,52 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     return TestClient(selfhost.app)
 
 
+def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = True):
+    """Block until the background liveness refresher's verdict has SETTLED.
+
+    #2988: ``/health`` reads an in-memory snapshot, so a fresh process
+    truthfully reports "probe has not produced a result" (→ degraded) until the
+    refresher's first probe lands. Waiting for that is deterministic; sleeping
+    a fixed amount is not.
+
+    #7520: for a test that needs a HEALTHY daemon, mere ARRIVAL is not enough.
+    The first probe after a cold start pays the O(graph) projection cold start
+    and the refresh cycle is ``max(health_probe_interval(), probe_duration)``
+    (documented worst case ~20 s + 10 s), so the refresher legitimately reads
+    ``ok=False`` for the early cycles — and asserting ``/health == "ok"`` on a
+    merely-arrived verdict asserts a precondition the test never established.
+    By DEFAULT we therefore wait for the ``/health`` read path's own ``ok=True``
+    verdict (``snapshot()`` — the same in-memory view ``/health`` serves). Pass
+    ``require_ok=False`` when the test DELIBERATELY drives a failing probe and
+    only needs the verdict to land.
+
+    On expiry the failure names the probe's OWN state instead of surfacing as a
+    bare ``assert 'degraded' == 'ok'``, which misreads as a product divergence.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        info = selfhost_mod._HEALTH_PROBE.info()
+        if info.get("result_age_s") is not None:
+            if not require_ok:
+                return
+            if selfhost_mod._HEALTH_PROBE.snapshot().get("ok") is True:
+                return
+        if time.monotonic() >= deadline:
+            if not require_ok:
+                raise AssertionError(
+                    "the selfhost liveness refresher never produced a verdict "
+                    f"within {timeout}s — probe info {info!r}"
+                )
+            raise AssertionError(
+                "the selfhost daemon never became healthy within "
+                f"{timeout}s — snapshot "
+                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}"
+            )
+        time.sleep(0.02)
+
+
 def test_embedded_banner_stderr(monkeypatch, tmp_path, capsys):
     """#942: the selfhost daemon prints the loud SINGLE-WRITER / EVAL-ONLY
     banner to stderr when started in embedded mode (no TORTOISE_DB_URI)."""
@@ -62,28 +108,82 @@ def test_uri_mode_no_banner(monkeypatch, tmp_path, capsys):
 class TestHealth:
     def test_health_liveness(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        from tortoise import selfhost
+
         with tc:
+            _wait_for_probe(selfhost)
             r = tc.get("/health")
             assert r.status_code == 200
             body = r.json()
             assert body["status"] == "ok"
-            # #1384 deep check: db probe rides along on liveness.
+            # #1384 deep check: the DB verdict rides along on liveness (now from
+            # the coordinator's in-memory snapshot, #2988).
             assert body["db"]["ok"] is True
             assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_read_path_is_in_memory_and_refresher_carries_the_allowance(
+            self, monkeypatch, tmp_path):
+        """#2988/#3243: the read path and the allowance must stay separated.
+
+        The READ path must do NO I/O (that is what keeps the gate fast under
+        saturation), while the projection cold-start allowance lives on the
+        background refresher — where a large graph's slow cold start costs no
+        request anything. Threading the allowance into the read path is what
+        #3243 explicitly forbids; leaving it out of the refresher is the false
+        degrade the same issue reports.
+        """
+        # A long refresh period keeps the background loop from probing again
+        # inside the measured request window ("15" is the clamp ceiling).
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k",
+                             TORTOISE_HEALTH_PROBE_INTERVAL="15")
+        import tortoise.monitoring as mon
+        from tortoise import selfhost
+
+        seen = {"calls": 0, "setup_timeout": None}
+
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
+            seen["calls"] += 1
+            seen["setup_timeout"] = setup_timeout
+            seen["acquire"] = acquire
+            return {"ok": True, "latency_ms": 0.1, "error": None}
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        with tc:
+            _wait_for_probe(selfhost)
+            calls_after_refresh = seen["calls"]
+            assert calls_after_refresh >= 1, "the refresher never probed"
+            assert seen["setup_timeout"] == mon.probe_setup_timeout(), (
+                "the refresher did not pass the #3243 cold-start allowance — a "
+                f"reachable cold graph would read degraded {seen}"
+            )
+            assert seen["acquire"] is not None, (
+                "#3446: the refresher must hand its SDK lookup to probe_db as "
+                "acquire= so the phase is bounded — passing an already-acquired "
+                "sdk leaves it unbounded on this coordinator's thread"
+            )
+            r = tc.get("/health")
+            assert r.status_code == 200
+            assert seen["calls"] == calls_after_refresh, (
+                "the /health read path ran the DB probe — it must read in-memory "
+                "state only (#2988)"
+            )
 
     def test_health_degraded_when_db_down(self, monkeypatch, tmp_path):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
         500 or a crashed handler."""
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
         import tortoise.monitoring as mon
+        from tortoise import selfhost
 
-        def _boom_probe(sdk):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             raise ConnectionError("NXDOMAIN")
 
         # probe_db is imported lazily from tortoise.monitoring inside the
-        # handler — patch it there, not on the selfhost module.
+        # refresher's probe — patch it there, not on the selfhost module.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             body = r.json()
@@ -200,8 +300,10 @@ def _tool_result(body):
     the call path; both are handled here."""
     result = body.get("result", {}) if body else {}
     if isinstance(result, dict) and "content" in result:
+        # Skip the trailing #3883 retirement warning block (it is not payload).
         text = "".join(c.get("text", "") for c in result["content"]
-                       if isinstance(c, dict))
+                       if isinstance(c, dict)
+                       and not c.get("text", "").startswith("RETIRED TOOL"))
         if text:
             import json
             try:
@@ -243,7 +345,10 @@ class TestHealthTruthMCP:
         """Healthy daemon: tools/call tortoise_health == ok, exactly like
         GET /health — no no_sdk_registered, graph probed."""
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        from tortoise import selfhost
+
         with tc:
+            _wait_for_probe(selfhost)
             health = tc.get("/health")
             assert health.status_code == 200
             assert health.json()["status"] == "ok"
@@ -267,20 +372,33 @@ class TestHealthTruthMCP:
         probe)."""
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
         import tortoise.monitoring as mon
+        from tortoise import selfhost
 
-        def _boom_probe(sdk):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             # probe_db's contract is never-raise: a dead DB is a FAILED probe
             # result, not an exception. Return the degraded shape both /health
-            # and metrics() turn into status="degraded".
+            # and metrics() turn into status="degraded". (#3143 widened the
+            # signature with optional budget args, #3446 added keyword-only
+            # ``acquire=`` — the stub must accept ALL of them. This stub serves
+            # BOTH callers: selfhost._probe_db passes ``acquire=``, while
+            # metrics() passes an already-acquired ``sdk`` positionally. A
+            # signature mismatch raises a TypeError that HealthProbe._run
+            # SWALLOWS, so the test below also asserts the error MESSAGE.)
             return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
 
         # probe_db is imported lazily from tortoise.monitoring inside both
         # /health (selfhost.py) and metrics() (the MCP tool) — patch it there.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             assert r.json()["status"] == "degraded"
+            assert "NXDOMAIN" in r.json()["db"]["error"], (
+                "the stub's own error must survive: a swallowed TypeError would "
+                "also produce 'degraded', so assert the MESSAGE (#3446)"
+            )
 
             r, body = _mcp_post_auth(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -300,9 +418,11 @@ class TestHealthTruthMCP:
         unit-level in test_onboarding_gate_short_circuits_on_selfhost — a
         sys.modules diff here would be vacuous once an earlier file in the
         same pytest process imported hosted_api.)"""
-        import tempfile
-
-        tmp = tempfile.gettempdir()
+        # #3752: discovery is scoped to the private per-session temp root
+        # (`scan_root()` refuses the shared system temp dir), never the host
+        # tree — a stray-db assertion must not depend on ambient host state.
+        from tests._tmpdir_hygiene import scan_root
+        tmp = scan_root()
         stray_before = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
 
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
@@ -313,7 +433,9 @@ class TestHealthTruthMCP:
             })
             assert r.status_code == 200, r.text
             names = [t["name"] for t in body["result"]["tools"]]
-            assert "tortoise_health" in names
+            assert "tortoise_overview" in names
+            # #3883: tortoise_health is RETIRED — callable and warned, never listed.
+            assert "tortoise_health" not in names
 
         stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
         assert stray_after == stray_before, (
@@ -329,10 +451,11 @@ class TestHealthTruthMCP:
         listing. Pin the guard ORDER: hosted_api imports are BLOCKED here, and
         the gate still returns False (fail-open: onboarding tools stay
         listed)."""
+        import asyncio
         import builtins
 
         from tortoise import mcp_server as _ms
-        from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+        from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
 
         real_import = builtins.__import__
 
@@ -344,11 +467,14 @@ class TestHealthTruthMCP:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", _blocked_import)
-        token = _current_team_id.set(SELFHOST_TEAM_ID)
+        token = _current_org_id.set(SELFHOST_ORG_ID)
         try:
-            assert _ms._team_onboarding_complete() is False
+            # #2924: the gate is ``async`` (its hosted read is offloaded), so it
+            # must be awaited — the SELFHOST early return still happens BEFORE
+            # any ``tortoise.hosted_api`` import, which is what this pins.
+            assert asyncio.run(_ms._org_onboarding_complete()) is False
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
 
 
 class TestOriginProtection:

@@ -83,7 +83,7 @@ def _mk_files(*paths: str) -> list[dict]:
 
 def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
     """docs/ blobs are fetched and staged under
-    {TORTOISE_INGEST_BASE_DIR}/{team_id}/{repo}/docs/... with the original
+    {TORTOISE_INGEST_BASE_DIR}/{org_id}/{repo}/docs/... with the original
     relative layout preserved."""
     base = str(tmp_path / "ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
@@ -115,7 +115,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
 
 def test_two_team_staging_isolation(tmp_path, monkeypatch):
     """Team A blobs are never picked up by team B — staging is partitioned
-    under {base}/{team_id}/ (T2-P2b)."""
+    under {base}/{org_id}/ (T2-P2b)."""
     base = str(tmp_path / "ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")
@@ -448,20 +448,23 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     assert stats["files_staged"] == 2
 
     def _docs_count():
+        # D10 (#5026): a document is a :Source.
         rows = sdk._get_proj().g.query(
-            "MATCH (d:Document) RETURN count(d)").result_set
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "RETURN count(s)").result_set
         return int(rows[0][0])
 
-    team_root = GitHubDocsIndexer.team_root(TEAM_A)
-    assert str(team_root) == os.path.join(base, TEAM_A)
+    org_root = GitHubDocsIndexer.org_root(TEAM_A)
+    assert str(org_root) == os.path.join(base, TEAM_A)
     first = sdk.index_directory(
-        str(team_root), file_type="doc", extract_metadata=False,
+        str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert first["indexed"] == 2
     assert _docs_count() == 2
     # doc ids are repo-unique: {owner}/{repo} is embedded in the rel path
     rows = sdk._get_proj().g.query(
-        "MATCH (d:Document) RETURN d.id ORDER BY d.id").result_set
+        "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+        "RETURN s.url ORDER BY s.url").result_set
     assert rows == [["doc_acme/repo1/main/docs/README.md"],
                     ["doc_acme/repo1/main/docs/guides/setup.md"]]
 
@@ -472,7 +475,7 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     stats2 = _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
     assert stats2["blobs_fetched"] == 0
     second = sdk.index_directory(
-        str(team_root), file_type="doc", extract_metadata=False,
+        str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert second["indexed"] == 0
     assert second["skipped"] == 2

@@ -6,7 +6,7 @@
 ## Task 1 — Quarantine + owner restore surfaces (backend)
 
 **1a. Enumerate tombstones (owner view).** Add `GET /v1/graphs/trash` (owner/admin session
-only; never keys): registry mode queries `Graph {team_id, status:'deleted'}` rows returning
+only; never keys): registry mode queries `Graph {org_id, status:'deleted'}` rows returning
 `{graph_id, name, namespace, kind, deleted_at}`; supabase mode queries `graphs` `status eq
 deleted` via the existing control-plane seam (`soft_delete_graph` sets a deleted_at — confirm
 column; if absent add it in the same migration touch). Default graph never appears. Requires
@@ -44,10 +44,10 @@ by a live graph must NOT be dropped). If re-occupied → skip the namespace drop
 `purged_at` with `namespace_retained:true` residual for operator review (data of the deleted
 graph no longer separately addressable; the live occupant owns the namespace).
 
-**2c. Namespace drop.** `_drop_team_graph_impl(team_id, namespace)` (GRAPH.DELETE via
+**2c. Namespace drop.** `_drop_team_graph_impl(org_id, namespace)` (GRAPH.DELETE via
 select_graph(namespace).delete(); absent-graph = success). Idempotent.
 
-**2d. Backup artifacts.** Delete the graph's nested R2 pool `backups/{team}/{gid}/` +
+**2d. Backup artifacts.** Delete the graph's nested R2 pool `backups/{org_id}/{gid}/` +
 per-graph state `ops/teams/{team}/graphs/{gid}/` via the storage seam. Delete legacy FLAT
 archives of this graph via the #2370 classification index (`ops/legacy-flat-index/{team}.json`
 entries with graph_id == gid) → delete those flat objects + rebuild the index object.

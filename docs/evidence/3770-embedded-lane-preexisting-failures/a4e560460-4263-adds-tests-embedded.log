@@ -1,0 +1,185 @@
+....F.F.....F.x                                                          [100%]
+=================================== FAILURES ===================================
+_____________________ test_bare_reemit_supersedes_revision _____________________
+
+sup = (PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_supersedes_re0/events'), <tortoise.sdk.TortoiseSDK object at 0x1167fafc0>)
+tmp_path = PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_supersedes_re0')
+
+    def test_bare_reemit_supersedes_revision(sup, tmp_path):
+        """A bare same-id re-emit (no delete) is ALSO a content boundary:
+        ``n.content`` is written unconditionally live, so the re-emit wins."""
+        events, sdk = sup
+        pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+        records = _journal(events)
+        records.extend([
+            _revised(sdk, pid, new_content="CHANGED"),
+            _added(sdk, pid, "REEMITTED"),
+        ])
+        _rewrite_journal(events, records)
+    
+        applied = _oracle(tmp_path, "oracle_reemit", records, pid)
+        assert applied["content"] == "REEMITTED"
+        _rebuild(sdk, events)
+>       _assert_parity(sdk.get_point(pid), applied)
+
+tests/test_rebuild_recreate_content_parity.py:244: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+post = OrderedDict({'id': '1a0c55411b5-04eb0e9d1432', 'content': 'REEMITTED', 'is_operator': False, 'pointKind': 'statement',...026-09-21T18:56:56.053256+00:00', 'updatedAt': '2026-09-21T18:56:56.711275+00:00', 'ep_dirty': True, 'ep_dirty_at': 1})
+applied = OrderedDict({'id': '1a0c55411b5-04eb0e9d1432', 'content': 'REEMITTED', 'is_operator': False, 'pointKind': 'statement',...026-09-21T18:56:56.053256+00:00', 'updatedAt': '2026-09-21T18:56:56.525920+00:00', 'ep_dirty': True, 'ep_dirty_at': 1})
+
+    def _assert_parity(post: dict, applied: dict) -> None:
+        """Content + both derived fields match the live oracle.
+    
+        ``content_hash`` is asserted unconditionally (deterministic) so the test
+        cannot pass vacuously in a no-embeddings environment; ``embedding`` is
+        compared, and where the oracle has one, it must be present on both sides.
+        """
+        assert post["content"] == applied["content"], (
+            "rebuild_all diverged from the live apply() oracle (#330)")
+        assert post.get("content_hash") == applied.get("content_hash"), (
+            "content_hash diverged from the live oracle — a stale indexed dedup "
+            "key (or a dead revision's hash leaked onto the re-created node)")
+        assert (post.get("embedding") is None) == (applied.get("embedding") is None)
+        if applied.get("embedding") is not None:
+>           assert post.get("embedding") == applied.get("embedding"), (
+                "embedding derives from content and must not drift independently")
+E           AssertionError: embedding derives from content and must not drift independently
+E           assert [-0.052870392...29608536, ...] == [-0.006130898...63226962, ...]
+E             
+E             At index 0 diff: -0.05287039279937744 != -0.006130898837000132
+E             Use -v to get more diff
+
+tests/test_rebuild_recreate_content_parity.py:128: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection:__init__.py:2968 rebuild: the event-log dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_supersedes_re0/events differs from the embedded DB dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_supersedes_re0 — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_supersedes_re0/events` to recover (#2943)
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+_____________________ test_intermediate_derived_write_wins _____________________
+
+sup = (PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_intermediate_derived_writ0/events'), <tortoise.sdk.TortoiseSDK object at 0x1184f26f0>)
+tmp_path = PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_intermediate_derived_writ0')
+
+    def test_intermediate_derived_write_wins(sup, tmp_path):
+        """Derived are keyed on the last same-file WRITER, not the last creation:
+        ``ORIG → revise → R1(truthy) → ""`` — live keeps R1's derived."""
+        events, sdk = sup
+        pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+        records = _journal(events)
+        records.extend([
+            _revised(sdk, pid, new_content="CHANGED"),
+            _added(sdk, pid, "R1"),
+            _added(sdk, pid, ""),
+        ])
+        _rewrite_journal(events, records)
+    
+        applied = _oracle(tmp_path, "oracle_r1", records, pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") == content_hash("R1")
+    
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+>       _assert_parity(post, applied)
+
+tests/test_rebuild_recreate_content_parity.py:293: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+post = OrderedDict({'id': '1a0c554185f-6c3bc223a5ed', 'content': '', 'is_operator': False, 'pointKind': 'statement', 'status'...026-09-21T18:56:57.765912+00:00', 'updatedAt': '2026-09-21T18:56:58.444367+00:00', 'ep_dirty': True, 'ep_dirty_at': 1})
+applied = OrderedDict({'id': '1a0c554185f-6c3bc223a5ed', 'content': '', 'is_operator': False, 'pointKind': 'statement', 'status'...026-09-21T18:56:57.765912+00:00', 'updatedAt': '2026-09-21T18:56:58.217155+00:00', 'ep_dirty': True, 'ep_dirty_at': 1})
+
+    def _assert_parity(post: dict, applied: dict) -> None:
+        """Content + both derived fields match the live oracle.
+    
+        ``content_hash`` is asserted unconditionally (deterministic) so the test
+        cannot pass vacuously in a no-embeddings environment; ``embedding`` is
+        compared, and where the oracle has one, it must be present on both sides.
+        """
+        assert post["content"] == applied["content"], (
+            "rebuild_all diverged from the live apply() oracle (#330)")
+        assert post.get("content_hash") == applied.get("content_hash"), (
+            "content_hash diverged from the live oracle — a stale indexed dedup "
+            "key (or a dead revision's hash leaked onto the re-created node)")
+        assert (post.get("embedding") is None) == (applied.get("embedding") is None)
+        if applied.get("embedding") is not None:
+>           assert post.get("embedding") == applied.get("embedding"), (
+                "embedding derives from content and must not drift independently")
+E           AssertionError: embedding derives from content and must not drift independently
+E           assert [-0.052870392...29608536, ...] == [-0.028066106...15614772, ...]
+E             
+E             At index 0 diff: -0.05287039279937744 != -0.028066106140613556
+E             Use -v to get more diff
+
+tests/test_rebuild_recreate_content_parity.py:128: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection:__init__.py:2968 rebuild: the event-log dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_intermediate_derived_writ0/events differs from the embedded DB dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_intermediate_derived_writ0 — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_intermediate_derived_writ0/events` to recover (#2943)
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+__________________ test_bare_reemit_still_folds_annotator_dim __________________
+
+sup = (PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_still_folds_a0/events'), <tortoise.sdk.TortoiseSDK object at 0x11c838bc0>)
+tmp_path = PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_still_folds_a0')
+
+    def test_bare_reemit_still_folds_annotator_dim(sup, tmp_path):
+        """The content gate must NOT suppress the annotator dims on the same
+        record. A bare re-emit never clears ``annotator_*`` live, so a
+        pre-reemit ``PointRevised`` carrying a dim stays live-valid."""
+        events, sdk = sup
+        pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+        records = _journal(events)
+        records.extend([
+            _revised(sdk, pid, new_content="CHANGED", annotator_bias=0.4),
+            _added(sdk, pid, "REEMITTED"),
+        ])
+        _rewrite_journal(events, records)
+    
+        applied = _oracle(tmp_path, "oracle_dim", records, pid)
+        assert applied["content"] == "REEMITTED"
+        assert applied["annotator_bias"] == 0.4
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+>       _assert_parity(post, applied)
+
+tests/test_rebuild_recreate_content_parity.py:437: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+post = OrderedDict({'id': '1a0c5542bd1-6bf12d5d2332', 'content': 'REEMITTED', 'is_operator': False, 'pointKind': 'statement',...78+00:00', 'updatedAt': '2026-09-21T18:57:03.414466+00:00', 'ep_dirty': True, 'ep_dirty_at': 1, 'annotator_bias': 0.4})
+applied = OrderedDict({'id': '1a0c5542bd1-6bf12d5d2332', 'content': 'REEMITTED', 'is_operator': False, 'pointKind': 'statement',...78+00:00', 'updatedAt': '2026-09-21T18:57:03.218489+00:00', 'ep_dirty': True, 'ep_dirty_at': 1, 'annotator_bias': 0.4})
+
+    def _assert_parity(post: dict, applied: dict) -> None:
+        """Content + both derived fields match the live oracle.
+    
+        ``content_hash`` is asserted unconditionally (deterministic) so the test
+        cannot pass vacuously in a no-embeddings environment; ``embedding`` is
+        compared, and where the oracle has one, it must be present on both sides.
+        """
+        assert post["content"] == applied["content"], (
+            "rebuild_all diverged from the live apply() oracle (#330)")
+        assert post.get("content_hash") == applied.get("content_hash"), (
+            "content_hash diverged from the live oracle — a stale indexed dedup "
+            "key (or a dead revision's hash leaked onto the re-created node)")
+        assert (post.get("embedding") is None) == (applied.get("embedding") is None)
+        if applied.get("embedding") is not None:
+>           assert post.get("embedding") == applied.get("embedding"), (
+                "embedding derives from content and must not drift independently")
+E           AssertionError: embedding derives from content and must not drift independently
+E           assert [-0.052870392...29608536, ...] == [-0.006130898...63226962, ...]
+E             
+E             At index 0 diff: -0.05287039279937744 != -0.006130898837000132
+E             Use -v to get more diff
+
+tests/test_rebuild_recreate_content_parity.py:128: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection:__init__.py:2968 rebuild: the event-log dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_still_folds_a0/events differs from the embedded DB dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_still_folds_a0 — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-15853/test_bare_reemit_still_folds_a0/events` to recover (#2943)
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+=========================== short test summary info ============================
+FAILED tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_supersedes_revision
+FAILED tests/test_rebuild_recreate_content_parity.py::test_intermediate_derived_write_wins
+FAILED tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_still_folds_annotator_dim
+3 failed, 11 passed, 1 xfailed in 24.60s
