@@ -1006,6 +1006,28 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
+    # #7435 review P1: tools/docs_lint_baseline.py owns
+    # tests/test_docs_lint_baseline.py (`core`), whose 33 cases pin the differ's
+    # fail-CLOSED behaviour — the unreadable report, the missing `Summary:`, the
+    # count mismatch, the multiset semantics, the generated-file fix target.
+    #
+    # The `core` registration alone is INERT for a differ-only change: `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+    # tool, so `select()` returned NO surface and fell back to the 31-file tier-1
+    # smoke set, which does not contain the guard. The PR that can make the
+    # differ fail OPEN would therefore never run the tests that catch it. Same
+    # #3261/#3332/#3616 silent-drop class as tools/queue_resweep.py above.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails the second assert.
+    r = _sel(["tools/docs_lint_baseline.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_docs_lint_baseline.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_queue_resweep_tool_change_selects_core_not_tier1():
     # tools/queue_resweep.py owns tests/test_queue_resweep.py (82 hermetic cases
     # pinning dry-run-by-default, the never-touch-a-queued-PR rule, and the

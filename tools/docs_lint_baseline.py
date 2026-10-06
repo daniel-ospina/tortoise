@@ -4,8 +4,9 @@
 WHY THIS EXISTS (#7435, owner ruling 2026-10-06)
 
 The REQUIRED `docs` check lints each changed `.md` file **whole**. On the day the
-snapshot was taken, 11,238 markdownlint findings sat in 650 of the 837 tracked
-markdown files, and 151 link findings (many of them inherited) across 44 files.
+snapshot was taken, 11,238 markdownlint findings sat in 650 of the 838 tracked
+markdown files, plus the link findings (read them from the snapshot's own
+``counts`` — that half checks REMOTE links and varies between generations).
 Because the file is read whole, every one of those files is a trap: the next
 change to touch one is failed for findings it did not write. Two measured
 instances:
@@ -58,7 +59,16 @@ number** — a line-number key would invalidate the whole snapshot the moment an
 file grew above the offending line, which is the churn this exists to stop.
 
   * markdownlint — ``path|RULE|column|normalized_detail``
-  * lychee       — ``path|link_target|kind``
+  * lychee       — ``path|link_target``
+
+The lychee key deliberately carries NO status text. lychee reports a URL it has
+already seen in a run as ``Error (cached)``, so the status is a property of the
+RUN'S FILE POPULATION — the same untouched link keys differently when the run
+covers the whole repo (what ``update`` does) and when it covers only a PR's
+changed files (what CI does). A status in the key therefore reds an unrelated PR
+on an inherited finding, which is the #7475 failure this exists to remove. The
+status IS still shown in the report; it is just not part of the identity. Two
+findings on one target stay distinguished by the occurrence count below.
 
 ``normalized_detail`` keeps the rule's message and its ``[Context: …]`` (the
 offending line's text), and ``column`` is horizontal, so both survive a shift of
@@ -78,8 +88,14 @@ END STATE — THIS IS A SNAPSHOT, NOT AN AMNESTY (#7534)
 This file records debt; it does not repair any of it. It is a **ceiling, never a
 floor**: every finding removed from the codebase must be removed from the
 snapshot (run ``update``), and the entry count must never grow — a new entry is a
-new failure, not a snapshot edit. **#7534 drains it to zero**, and when the
-snapshot is empty this program and its baseline file are deleted.
+new failure, not a snapshot edit. The ceiling is ENFORCED (a pinned count in
+``tests/test_docs_lint_baseline.py``), because the snapshot sits in a PR's own
+diff and nothing else stops a change from appending the very findings it
+introduces. **#7534 owns the burn-down** — see its comment for the population
+gap: this snapshot covers ALL tracked markdown, while #7534 was scoped by a
+``docs/``-subtree measurement, so it empties only when the non-``docs/`` remainder
+is drained too. When the snapshot is empty this program and its baseline file are
+deleted.
 
 GENERATED FILES
 
@@ -203,18 +219,29 @@ def normalize_link_target(url: str, repo_root: Path) -> str:
 
     lychee resolves a local link to an ABSOLUTE ``file://`` URL, so the raw value
     embeds the checkout path and could never be committed as a baseline. The
-    repo-relative form is what the link actually points at.
+    repo-relative form is what the link actually points at — FRAGMENT INCLUDED,
+    because two dead anchors in one file are two different dead links, and
+    dropping the fragment would let a swap of one for the other keep the same
+    occurrence count and pass.
     """
     if not url.startswith("file://"):
         return _collapse(url)
     parsed = urlparse(url)
     raw = Path(unquote(parsed.path))
     try:
-        return raw.relative_to(repo_root).as_posix()
+        relative = raw.relative_to(repo_root).as_posix()
     except ValueError:
-        # Outside the checkout (or an odd platform path): keep the tail of the
-        # URL rather than an absolute machine path.
-        return raw.as_posix()
+        # A path outside the checkout has NO portable repo-relative spelling: any
+        # form embeds this machine's layout, so committing it makes the snapshot
+        # unreproducible on the next runner. Refuse rather than write a
+        # machine-specific key — this branch used to return exactly the absolute
+        # path the docstring above promises to avoid.
+        raise FailClosed(
+            f"link target {url!r} resolves outside the repository — it has no "
+            "portable repo-relative form, so it cannot be recorded in a baseline"
+        ) from None
+    fragment = f"#{parsed.fragment}" if parsed.fragment else ""
+    return _collapse(relative + fragment)
 
 
 def parse_lychee(document: dict, repo_root: Path) -> list[tuple[str, str, str]]:
@@ -239,7 +266,14 @@ def markdownlint_key(finding: tuple[str, str, str, str]) -> str:
 
 
 def lychee_key(finding: tuple[str, str, str]) -> str:
-    return "|".join(finding)
+    """`path|link_target` — the status is observed, but NOT part of the identity.
+
+    See the module docstring: lychee's status text carries the run's cache state
+    (``Error (cached)``), so keying on it makes an untouched link look new
+    whenever the file population changes between ``update`` and CI. The status is
+    still reported; it just cannot decide whether a finding is new.
+    """
+    return "|".join(finding[:2])
 
 
 # ── generated-file detection ─────────────────────────────────────────────────
@@ -365,8 +399,13 @@ def load_baseline(path: Path) -> dict:
 # ── check ────────────────────────────────────────────────────────────────────
 
 
-def _describe(kind: str, key: str) -> str:
-    """A human line for a finding key, plus its fix target when generated."""
+def _describe(kind: str, key: str, observed: tuple | None = None) -> str:
+    """A human line for a finding key, plus the OBSERVED status where one exists.
+
+    The lychee status is printed from the run's own finding, not read back out of
+    the key: it is not part of the identity (a cached vs fresh report of the same
+    link is the same finding), but it is the most useful thing to show.
+    """
     parts = key.split("|")
     if kind == "markdownlint":
         path, code, column, detail = parts[0], parts[1], parts[2], "|".join(parts[3:])
@@ -375,7 +414,8 @@ def _describe(kind: str, key: str) -> str:
     else:
         path, target = parts[0], parts[1]
         location = path
-        what = f"{target} — {'|'.join(parts[2:])}"
+        status = observed[2] if observed and len(observed) > 2 else ""
+        what = f"{target} — {status}" if status else target
     return f"  {location}\n      {what}"
 
 
@@ -401,7 +441,7 @@ def run_check(args: argparse.Namespace) -> int:
         print(f"::error::docs-lint baseline: {exc}", file=sys.stderr)
         return 2
 
-    new: list[tuple[str, str]] = []
+    new: list[tuple[str, str, tuple]] = []
     known = 0
     generated = 0
     # Memoized so a file with hundreds of findings is read once, not per finding.
@@ -422,7 +462,7 @@ def run_check(args: argparse.Namespace) -> int:
             if seen[key] <= recorded[key]:
                 known += 1
             else:
-                new.append((kind, key))
+                new.append((kind, key, finding))
 
     print(
         f"docs-lint baseline: {len(new)} new, {known} known (baseline), "
@@ -432,8 +472,8 @@ def run_check(args: argparse.Namespace) -> int:
     if new:
         print("")
         print(f"NEW findings not in {args.baseline} — these fail the required `docs` check:")
-        for kind, key in new[:MAX_REPORTED]:
-            print(_describe(kind, key))
+        for kind, key, finding in new[:MAX_REPORTED]:
+            print(_describe(kind, key, finding))
             target = _generated(key.split("|")[0])
             if target is not None:
                 print(
@@ -446,7 +486,7 @@ def run_check(args: argparse.Namespace) -> int:
         print(
             "A new finding is a real failure. Fix it, or — if it is genuinely "
             "pre-existing debt this snapshot missed — regenerate the snapshot "
-            "(python3 tools/docs_lint_baseline.py update) in a separate change "
+            "(uv run python tools/docs_lint_baseline.py update) in a separate change "
             "that explains why (#7534 drains it; the entry count must never grow)."
         )
         return 1
@@ -472,8 +512,11 @@ def _population(repo_root: Path, files_from: Path | None) -> list[str]:
         if proc.returncode != 0:
             raise FailClosed(f"git ls-files failed: {proc.stderr.decode(errors='replace')}")
         listed = [p for p in proc.stdout.decode().split("\0") if p]
-    # `./`-prefix every entry: a filename is data, and one starting with `-` must
-    # never be read as an option by a linter (the CI's own contract, #4449).
+    # Returned BARE (repo-relative, no `./`). The `./` prefix a linter needs is
+    # added at the invocation site (`_run_markdownlint` / `_run_lychee`), because
+    # a filename is data and one starting with `-` must never be read as an
+    # option (the CI's own contract, #4449) — but the baseline keys and the
+    # report use the bare form, so the prefix must not leak into `_population`.
     return [normalize_path(p) for p in listed]
 
 
@@ -555,10 +598,14 @@ def run_update(args: argparse.Namespace) -> int:
                 "This file is a CEILING, never a floor. Every finding removed from the "
                 "codebase must be removed from this file (run `update`), and the entry "
                 "count must never grow — a genuinely new entry is a new failure, not a "
-                "snapshot edit. #7534 drains the list to zero; when it is empty, this "
-                "file and tools/docs_lint_baseline.py are deleted."
+                "snapshot edit. #7534 owns the burn-down, but NOTE ITS POPULATION: this "
+                "snapshot covers ALL tracked markdown, while #7534 was scoped by a "
+                "`docs/`-subtree measurement, and the non-`docs/` remainder includes "
+                "tracked `website/apps/dashboard/node_modules` files that a vendored "
+                "re-install rewrites, so they cannot be fixed by hand-editing the .md. "
+                "See the measured breakdown in the comment on #7534."
             ),
-            "regenerate": "python3 tools/docs_lint_baseline.py update",
+            "regenerate": "uv run python tools/docs_lint_baseline.py update",
         },
         "snapshot": {
             "base_sha": head,
@@ -569,9 +616,11 @@ def run_update(args: argparse.Namespace) -> int:
             "counts": {"markdownlint": len(markdownlint), "lychee": len(lychee)},
             "variance": (
                 "markdownlint findings are deterministic. The lychee half also checks "
-                "REMOTE links, so a few of its entries can differ between runs (rate "
-                "limits, transient network, TLS) — measured 151-155 across three "
-                "generations. Regenerate with `update`; never hand-edit."
+                "REMOTE links, so its count varies between generations for reasons no "
+                "author controls (rate limits, transient network, TLS) — which is why "
+                "its key carries no status text, and why its pinned ceiling in "
+                "tests/test_docs_lint_baseline.py has headroom while the markdownlint "
+                "one is exact. Regenerate with `update`; never hand-edit."
             ),
         },
         "markdownlint": markdownlint,

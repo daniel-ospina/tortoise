@@ -735,6 +735,19 @@ jobs:
             printf './%s\0' "$entry" >> "$RUNNER_TEMP/pr-md.nul"
           done < "$RUNNER_TEMP/pr-md.raw.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/pr-md.nul" > "$RUNNER_TEMP/pr-md.txt"
+          # cli2 treats every positional argument as a GLOBBY PATTERN, so a changed
+          # path containing a glob metacharacter is EXPANDED to a different,
+          # pre-existing file. The linter then truthfully reports `Linting: 1 file`
+          # for a file it never read, the cardinality check in the differ is
+          # satisfied, and a genuinely new finding in the changed file passes the
+          # required check silently (measured: `./docs/a[1].md` lints `./docs/a1.md`).
+          # No cli2 flag disables this — `--no-globs` only ignores the CONFIG's
+          # `globs` property. Fail closed instead: such a path cannot be linted by
+          # this invocation, and every tracked `*.md` is free of these characters.
+          if grep -qF -e '*' -e '?' -e '[' -e ']' -e '{' -e '}' "$RUNNER_TEMP/pr-md.txt"; then
+            echo "::error::a changed markdown path contains a glob metacharacter, which markdownlint-cli2 would expand to a DIFFERENT file — the docs check would report the wrong file's findings and could pass a real one. Rename the file."
+            exit 1
+          fi
           count="$(grep -c . "$RUNNER_TEMP/pr-md.txt" || :)"
           echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
@@ -824,6 +837,13 @@ jobs:
             > "$RUNNER_TEMP/changed-md.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
             > "$RUNNER_TEMP/changed-md.txt"
+          # Same glob-metacharacter guard as the PR path above (see its comment):
+          # cli2 expands a positional argument, so such a path would be linted as
+          # a DIFFERENT file while the count still matches.
+          if grep -qF -e '*' -e '?' -e '[' -e ']' -e '{' -e '}' "$RUNNER_TEMP/changed-md.txt"; then
+            echo "::error::a changed markdown path contains a glob metacharacter, which markdownlint-cli2 would expand to a DIFFERENT file — the docs check would report the wrong file's findings and could pass a real one. Rename the file."
+            exit 1
+          fi
           count="$(grep -c . "$RUNNER_TEMP/changed-md.txt" || true)"
           echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (main health, changed files)

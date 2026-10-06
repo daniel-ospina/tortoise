@@ -144,6 +144,51 @@ def test_lychee_target_is_portable_not_an_absolute_checkout_path(tmp_path: Path)
     assert str(tmp_path) not in dlb.normalize_link_target(url, tmp_path)
 
 
+def test_lychee_target_keeps_its_fragment(tmp_path: Path):
+    """Two dead ANCHORS in one file are two different dead links.
+
+    Dropping the fragment collapses them to one key, so replacing one broken
+    anchor with another keeps the occurrence count and passes — a real new dead
+    link absorbed. Measured before the fix: both URLs normalised to `docs/b.md`.
+    """
+    first = dlb.normalize_link_target(f"file://{tmp_path}/docs/b.md#good-anchor", tmp_path)
+    second = dlb.normalize_link_target(f"file://{tmp_path}/docs/b.md#bad-anchor", tmp_path)
+    assert first == "docs/b.md#good-anchor", first
+    assert second == "docs/b.md#bad-anchor", second
+    assert first != second
+
+
+def test_a_link_target_outside_the_checkout_fails_closed(tmp_path: Path):
+    """No portable spelling exists, so it must not be written into a snapshot.
+
+    The old fallback returned the ABSOLUTE path it promised to avoid, which
+    commits this machine's layout and normalises differently on the next runner
+    — so the same finding reads as NEW there and reds the required check.
+    """
+    with pytest.raises(dlb.FailClosed):
+        dlb.normalize_link_target("file:///outside/the/checkout.md", tmp_path)
+
+
+def test_lychee_key_is_stable_across_the_run_population():
+    """The status text is observed, but NOT part of the identity.
+
+    lychee reports a URL it has already seen in a run as `Error (cached)`, so a
+    status in the key makes the SAME untouched link key differently when the run
+    covers the whole repo (what `update` does) and when it covers only a PR's
+    changed files (what CI does). Measured: `docs/license-notes.md` carries the
+    same URL twice in the snapshot, both as `Error (cached)`, so any PR touching
+    that file would have reported an inherited link as NEW and failed the
+    required check — the #7475 failure this snapshot exists to remove.
+    """
+    cached = ("docs/x.md", "https://example.invalid/a", "Error (cached)")
+    fresh = ("docs/x.md", "https://example.invalid/a", "Rejected status code: 429 Too Many Requests")
+    assert dlb.lychee_key(cached) == dlb.lychee_key(fresh) == "docs/x.md|https://example.invalid/a"
+    # A DIFFERENT target is still a different finding, and the count still tells
+    # two occurrences of one target from one.
+    other = ("docs/x.md", "https://example.invalid/b", "Error (cached)")
+    assert dlb.lychee_key(other) != dlb.lychee_key(cached)
+
+
 # ── the check: known passes, new fails ───────────────────────────────────────
 
 
@@ -155,7 +200,7 @@ def test_known_findings_pass(tmp_path: Path, capsys):
     required check.
     """
     lychee_document = _lychee_document(
-        {"docs/x.md": [_file_entry("file:///nowhere/missing.md")]}
+        {"docs/x.md": [_file_entry(f"file://{tmp_path}/docs/missing.md")]}
     )
     lychee = [dlb.lychee_key(f) for f in dlb.parse_lychee(lychee_document, tmp_path)]
     assert len(lychee) == 1, "the fixture really produced a lychee key"
@@ -179,7 +224,7 @@ def test_new_lychee_finding_fails(tmp_path: Path, capsys):
     """The link half is diffed too — a new dead link must not slip through."""
     baseline = _baseline(_md_keys(MARKDOWNLINT_REPORT), [])
     assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 0
-    lychee = _lychee_document({"docs/x.md": [_file_entry("file:///nowhere/missing.md")]})
+    lychee = _lychee_document({"docs/x.md": [_file_entry(f"file://{tmp_path}/docs/missing.md")]})
     rc = _check(tmp_path, MARKDOWNLINT_REPORT, lychee, baseline)
     out = capsys.readouterr().out
     assert rc == 1, out
@@ -532,6 +577,40 @@ def test_snapshot_exists_is_consistent_and_announces_its_end_state():
     assert baseline["snapshot"]["base_sha"]
     assert baseline["end_state"]["issue"] == 7534
     assert "NOT AN AMNESTY" in baseline["note"]
+    assert baseline["end_state"]["regenerate"] == "uv run python tools/docs_lint_baseline.py update", (
+        "the snapshot must name the invocation that WORKS — a bare `python3` is "
+        "refused by the #5128 guard on this host's 3.9 interpreter"
+    )
+
+
+def test_snapshot_is_a_ceiling_never_a_floor():
+    """The snapshot may SHRINK freely and may never GROW unnoticed.
+
+    Nothing else stops a PR from appending the very findings it introduces and
+    bumping `snapshot.counts` — the file is in the PR's own diff, and the
+    consistency test above only checks that the counts describe the lists, which
+    a grown file still satisfies. That is a self-service amnesty: the snapshot
+    then ratifies new debt instead of blocking it. These ceilings are the
+    enforcement, and the burn-down (#7534) lowers them as the debt is paid; a row
+    that needs RAISING is a new failure, not a snapshot edit.
+    """
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    counts = baseline["snapshot"]["counts"]
+    # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
+    # deliberate append, never noise. The lychee half also checks REMOTE links,
+    # whose count drifts between generations (measured 151-160) for reasons no
+    # author controls, so its ceiling leaves headroom for that variance while
+    # still refusing a bulk append. The asymmetry is deliberate — tightening
+    # lychee to its committed value would red an honest re-baseline on a network
+    # hiccup, which is the gate-refuses-honest-work failure mode.
+    ceilings = {"markdownlint": 11238, "lychee": 180}
+    for kind, ceiling in ceilings.items():
+        assert counts[kind] <= ceiling, (
+            f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
+            "CEILING, never a floor: a new finding is a new FAILURE to fix, not an entry to "
+            "add. If a raise is genuinely required, raise this ceiling in the same change "
+            "and say why."
+        )
 
 
 def test_every_mapped_generator_exists_and_its_doc_is_tracked():
