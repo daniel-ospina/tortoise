@@ -2,8 +2,8 @@ name: Install CPU-only torch (#7473)
 description: >
   Install torch from PyTorch's CPU wheel index BEFORE the `embeddings` extra is
   installed, so that extra cannot pull PyPI's DEFAULT linux wheel — the CUDA
-  build, which declares the ~3,200 MB of `nvidia_*` runtime wheels as
-  dependencies.
+  build, which declares ~2.5 GB of CUDA runtime wheels as dependencies (`nvidia_*`
+  alone is 2,190 MB, measured below).
 
   Nothing here uses CUDA. The only `cuda` occurrences in the tree are two mocks
   raising `RuntimeError("CUDA out of memory")` (`tests/test_embeddings_filters.py`,
@@ -17,13 +17,13 @@ description: >
   "384-dim CPU benchmark pool" and names Docker-CPU candidates, with a GPU/API
   tier only as a later path.
 
-  MEASURED (run 37461537748 on main, job `test-carve-out (b)` log): the install
-  step downloaded 31 sized wheels totalling 3,184 MB — `nvidia_cublas`,
-  `nvidia_cudnn_cu13`, `nvidia_cuda_cupti`, `nvidia_cuda_nvrtc`,
-  `nvidia_cuda_runtime`, `nvidia_cufft`, `nvidia_cufile`, `nvidia_curand`,
-  `nvidia_cusolver`, `nvidia_cusparse`, `nvidia_cusparselt_cu13`,
-  `nvidia_nccl_cu13` — and the step ran 93-219 s across the 16 jobs that
-  install.
+  MEASURED (run 37461537748 on main, job `test-carve-out (b)` log): that
+  install step downloaded 140 wheels totalling 3,200 MB. Its CUDA stack is
+  19 wheels / 2,445 MB — `nvidia_*` alone is 15 wheels / 2,190 MB, plus the
+  CUDA-built `torch` wheel itself (554.6 MB, against ~190 MB for the CPU build)
+  — and the step ran 93-219 s across the 15 jobs that install. Roughly 2.55 GB
+  of that is avoidable: runtime libraries that can never be loaded on a host
+  with no GPU.
 
   `--index-url` (not `--extra-index-url`) keeps the surface unambiguous: the
   `+cpu` specifier exists ONLY on PyTorch's index, so PyPI's CUDA build cannot
@@ -33,28 +33,43 @@ description: >
   with `pip install --report --platform manylinux_2_28_{x86_64,aarch64}
   --python-version 3.12 --abi cp312 --only-binary=:all:`. It is not a PyPI mirror
   in general: it lags PyPI (its newest `setuptools` is 78.1.0 vs requirements.txt's
-  `==84.0.0`, which the later requirements install restores) and serves no macOS
-  wheel — this action is linux-only by construction, and no macOS or
-  `workflow_dispatch` path calls it.
+  `==84.0.0`, which the later requirements install restores). This command is
+  linux-only because PyTorch publishes no `+cpu`-SUFFIXED macOS wheel — the index
+  does carry macOS wheels, under their plain version names — and one
+  `workflow_dispatch` caller does use this action
+  (`evals-on-demand.yml`), which is fine on its `ubuntu-latest` runner; a future
+  caller on macOS would fail loudly here rather than silently install CUDA.
 
   `--no-deps` is deliberately NOT used: with torch already satisfied, the later
   extras install would not pull torch's own dependencies back in, and
   `sympy`/`networkx` are needed by torch alone.
 
-  The pin MUST track `uv.lock`'s `torch` pin (currently 2.13.0): the point is to
-  swap the BUILD, not the release. `uv.lock` is unaffected by this action (`uv
-  sync --frozen` installs the dev group, which has no torch). Two guards keep the
-  copy from drifting, because both halves of the hole are real:
+  The pin is the release `uv.lock` already specifies (currently 2.13.0), and that
+  ALIGNS THE RELEASE as well as the build — deliberately. The extras installs
+  never resolve from the lock, so on main they drifted to PyPI's newest
+  (measured: `torch 2.14.1`, i.e. the wheel downloaded during the run above)
+  while `uv.lock` pins 2.13.0 — the version `uv sync --extra embeddings` gives a
+  developer. Installing 2.13.0+cpu makes CI and the hosted image install the
+  release the lock already names, closing one instance of the extras drift
+  accepted in #494. `uv.lock` itself is unaffected by this action (`uv sync
+  --frozen` installs the dev group, which has no torch).
+
+  Two guards keep CI from drifting, because both halves of the hole are real:
 
     * the extras install is a LATER step and resolves torch from the live index
       (not the lock), so a transitive floor rise there could put PyPI's CUDA
       wheel back on top of this one. This action therefore exports
       `PIP_CONSTRAINT`, which applies to every subsequent pip invocation in the
-      job — that makes the override impossible BY CONSTRUCTION rather than
-      merely detectable after the fact;
+      job — that makes the override impossible BY CONSTRUCTION. Residual, stated
+      rather than hidden: if a future runner image stopped honouring
+      `PIP_CONSTRAINT`, CI would return to installing CUDA torch with no check
+      failing, and the only signal would be `Downloading nvidia_*` in the log;
+      the Dockerfile, which cannot export a job-wide pip variable without
+      leaking it into the runtime image, checks AFTER its extras install instead,
+      so the two halves of the hole are guarded by different mechanisms;
     * the lock can move ahead of the pin. The action reads uv.lock's torch
       version and fails loudly on a mismatch, and asserts `torch.version.cuda is
-      None` right after installing, so a CUDA torch can never pass unnoticed.
+      None` right after installing.
 
 runs:
   using: composite
@@ -76,10 +91,10 @@ runs:
         PY
         )
         if [ "$locked" != "$pin" ]; then
-          echo "::error::CPU-only torch pin ($pin) no longer matches uv.lock's torch pin ($locked). Bump this file and Dockerfile.hosted together (#7473) - otherwise the extras install pulls PyPI's CUDA wheel back on top and CI stays green with ~3.2 GB of nvidia_* wheels restored."
+          echo "::error::CPU-only torch pin ($pin) no longer matches uv.lock's torch pin ($locked). Bump this file and Dockerfile.hosted together (#7473) - otherwise the extras install pulls PyPI's CUDA wheel back on top and CI stays green with ~2.5 GB of CUDA wheels restored."
           exit 1
         fi
-        pip install --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
+        "$py" -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
         "$py" -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
 
         # Close the other half of the hole: the extras install is a LATER step and
