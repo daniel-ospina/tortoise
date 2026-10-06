@@ -4652,7 +4652,8 @@ class BranchTerminalLookupTests(unittest.TestCase):
     SHA = "adcfedc4221329a0f5ae9079248b3b0261134a73"
     PR_HEAD = "a749c662d075a5dc0c96560b21b784578e5c1d63"
     MAIN_TIP = "b9c1a1323000000000000000000000000000000000"
-    BRANCH = "fix/6134-6146-6151-graph-correctness"
+    BRANCH = "refs/heads/fix/6134-6146-6151-graph-correctness"
+    SHORT = "fix/6134-6146-6151-graph-correctness"
 
     @classmethod
     def setUpClass(cls):
@@ -4693,7 +4694,7 @@ class BranchTerminalLookupTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_gh_json", side_effect=fake):
             return self.mod._branch_terminal_state_from_prs(
                 "gh", "daniel-ospina/tortoise", ".", 30.0,
-                "fix/6134-6146-6151-graph-correctness" if branch is None else branch,
+                self.BRANCH if branch is None else branch,
                 self.SHA if sha is None else sha,
                 self.MAIN_TIP if main_tip is None else main_tip,
                 first_parent=first_parent,
@@ -4776,14 +4777,41 @@ class BranchTerminalLookupTests(unittest.TestCase):
         # The second half of predicate 1's exclusion: with the first-parent
         # witness UNAVAILABLE, a tip in the `--merged` walk's set is still a
         # commit main already contains, so it cannot be an absorbed branch head.
-        self.assertIsNone(
-            self._call(
-                self._merged_pr(self.SHA),
-                first_parent=None,
-                ancestor_merged={self.BRANCH},
-            ),
-            "a tip in the --merged set must never demote",
-        )
+        # `ancestor_merged` holds FULL refnames (`for-each-ref %(refname)`), which
+        # is the shape the production call site passes — pinned here, and in both
+        # spellings below, so the guard cannot be dodged by how a caller spells
+        # the ref.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNone(
+                    self._call(
+                        self._merged_pr(self.SHA),
+                        first_parent=None,
+                        ancestor_merged={self.BRANCH},
+                        branch=spelling,
+                    ),
+                    "a tip in the --merged set must never demote",
+                )
+
+    def test_the_lookup_is_shape_agnostic_for_the_ref_name(self):
+        # ⛔ Review round 2: the guard compares against `ancestor_merged`, which is
+        # a set of REFNAMES, while the URL needs the SHORT branch name. The one
+        # production caller happens to pass the full refname, so the equivalence
+        # rested on an undocumented coincidence — and a caller (or refactor) passing
+        # the natural short name would have made the guard compare a short name
+        # against refnames, never match, and re-open the fail-open with a GREEN
+        # suite. The function now normalises, so BOTH spellings must behave
+        # identically on the wire AND behind the guard.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNotNone(
+                    self._call(self._merged_pr(self.SHA), branch=spelling),
+                    "the demotion must not depend on how the ref is spelled",
+                )
+                url = next(a for a in self.seen[0] if "pulls?" in a)
+                self.assertIn("head=daniel-ospina:fix/6134-", url)
+                self.assertNotIn("refs%2Fheads", url)
+                self.assertNotIn("refs/heads", url)
 
     def test_a_full_page_is_refused_rather_than_read_as_not_found(self):
         # `sort=created desc` puts the OLDEST PR last — so the merged PR this
@@ -4839,6 +4867,12 @@ class BranchTerminalLookupTests(unittest.TestCase):
         self.assertIn("state=all", url)
         self.assertIn("sort=created", url)
         self.assertIn("direction=desc", url)
+        # ⛔ `per_page` is UNPINNED COUPLING unless asserted here: the same constant
+        # is both the page size and the truncation bound, so a request that drifts
+        # below it can never fill the page, `test_a_full_page_is_refused…` would
+        # still pass on its fabricated fixture, and the refusal would be dead code
+        # while an off-page merged PR silently read as "not found" (#5485 again).
+        self.assertIn(f"per_page={self.mod._TARGETED_PR_PAGE}", url)
         # And the projection the arms read is still requested.
         self.assertIn("headSha", " ".join(self.seen[0]))
 

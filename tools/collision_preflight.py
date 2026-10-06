@@ -334,8 +334,10 @@ PR_LIMIT = 1000
 CLOSED_PR_LIMIT = 100
 #: Page size for the TARGETED head-ref lookup (#5485). Bounded on purpose: the
 #: lookup runs only for local refs that match the issue number AND survive every
-#: predicate, so it is normally 0-2 calls; a FULL page is treated as a possible
-#: truncation and refused rather than read as "no merged PR".
+#: predicate, and it is ONE list request plus one `compare` per MERGED PR that
+#: request returns — so normally 0-2 calls, and never a call per branch. A FULL
+#: page is treated as a possible truncation and refused rather than read as "no
+#: merged PR".
 _TARGETED_PR_PAGE = 100
 
 # One request's wall-clock budget. The multi-request enumeration this replaced
@@ -2152,19 +2154,43 @@ def _branch_terminal_state_from_prs(
       * a branch name REUSED after its merge has moved past that sha and keeps
         blocking (the merge is not evidence about the NEW commits),
       * a CLOSED-unmerged PR is not a landing and keeps blocking,
-      * `sha == main_tip` refuses, for the reason predicate 1 needs the same
-        guard: a lane that has just created a worktree sits ON main's tip, and if
-        that tip is itself a merged PR's head (a fast-forward or empty-diff
-        landing) an unguarded test would call a branch with NO COMMITS OF ITS OWN
-        terminal — a live lane read as free, the dangerous direction.
+      * ALL THREE of predicate 1's exclusions refuse: a tip equal to main's tip,
+        a tip on main's FIRST-PARENT chain, and — when that witness is
+        unreadable — a tip in the `--merged` walk's set. `sha == main_tip` alone
+        is ONE COMMIT DEEP: a lane that has just created a worktree sits ON
+        main's tip, and if that tip is itself a merged PR's head (a fast-forward
+        or empty-diff landing) an unguarded test would call a branch with NO
+        COMMITS OF ITS OWN terminal — a live lane read as free, the dangerous
+        direction,
+      * a FULL page (>= `_TARGETED_PR_PAGE` PRs) refuses: with `sort=created
+        desc` the OLDEST PR is the one that falls off it, and the merged PR this
+        function exists to find is exactly the oldest one on a busy ref.
 
-    Returns a human reason, or None when the ref must keep blocking. EVERY
-    failure (no slug, no resolvable tip, gh error, non-list payload) returns
-    None: the caller's default is BLOCKING, so an unanswerable question is never
-    a demotion.
+    Returns a human reason, or `None` when the ref must keep blocking. TWO
+    outcomes, and telling them apart is load-bearing:
+      * `None` — the lookup RAN and found no merged PR for this ref, or one of
+        the guards above excluded it, or there is no slug/tip to ask about. The
+        caller's default is BLOCKING, so this is never a demotion by itself.
+      * `SurfaceError` — the lookup COULD NOT RUN (gh error, non-list payload, a
+        full page). It PROPAGATES so the caller can COUNT it and name the
+        inability in the surface note; the ref blocks either way, so "I could not
+        ask" is never presented as "there is no such PR". ⛔ An earlier cut of
+        this PR swallowed these into `None`, which made the caller's counting
+        DEAD CODE and hid an unanswerable lookup behind a confident-looking block.
     """
     if not slug or not sha:
         return None
+    # ⛔ ONE REFNAME, BOTH USES. The production caller passes the FULL refname
+    # (`refs/heads/...`) because `ancestor_merged` holds `%(refname)` values — but
+    # the parameter is named `branch` and the REST `head=` filter takes the SHORT
+    # name. Normalising HERE rather than at the call site is what keeps those two
+    # from drifting: a caller (or a later refactor) passing the natural short name
+    # would otherwise compare a short name against a set of refnames, never match,
+    # and silently re-open the `--merged` fail-open this function exists to close —
+    # with every test still green. Both spellings resolve in the API (verified
+    # live 2026-10-06: `owner:refs/heads/x` and `owner:x` returned the same PR).
+    ref = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
+    branch = ref.removeprefix("refs/heads/")
     # ⛔ THE SAME THREE GUARDS PREDICATE 1 USES, AND THEY ARE REQUIRED HERE FOR A
     # SHARPER REASON: this function is called PRECISELY when
     # `_branch_terminal_state` has ALREADY refused, so a guard omitted here is a
@@ -2183,7 +2209,7 @@ def _branch_terminal_state_from_prs(
     if (
         main_tip is not None
         and first_parent is None
-        and (ancestor_merged is None or branch in ancestor_merged)
+        and (ancestor_merged is None or ref in ancestor_merged)
     ):
         return None
     owner = slug.split("/")[0]
@@ -2328,7 +2354,7 @@ def scan_branch_surface(
       2b. **terminal, targeted** — a MERGED PR whose head is this ref's tip, or
           whose head CONTAINS this ref's tip, found outside the closed-PR
           sample (#5485); supplied by the caller, which has the gh binary and
-          the resolved slug. Demoted on EITHER an exact tip/hold-sha match OR
+          the resolved slug. Demoted on EITHER an exact tip match OR
           containment — see `_branch_terminal_state_from_prs`
       3. otherwise **blocking** — a live lane that names this issue
 
@@ -2365,9 +2391,10 @@ def scan_branch_surface(
             continue
         # #5485: the tests above cannot see a squash-merge older than the closed-PR
         # sample. The caller looked THAT up for exactly the refs reaching here, and a
-        # reason exists only for an EXACT tip/hold-sha match on a merged PR, or when
-        # the tip is CONTAINED in one (ancestry) — both supplied by the caller, which
-        # is where the fail-open guards live.
+        # reason exists only for an EXACT tip match on a merged PR, or when
+        # the tip is CONTAINED in one (ancestry) — both supplied by the caller. The
+        # fail-open guards live in `_branch_terminal_state_from_prs` (NOT here):
+        # this site only forwards the two witnesses the guards need.
         targeted = (targeted_terminal or {}).get(ref)
         if targeted is not None:
             surface.add(
@@ -3606,10 +3633,13 @@ def run_preflight(
     # added API cost — decision D4, which is why that test reuses this list
     # instead of issuing a `gh pr list --head <ref>` per branch. ⛔ D4's
     # ZERO-COST CONSTRAINT IS AMENDED BY #5485, and this comment is the place it
-    # would otherwise be lost: the TARGETED lookup above DOES issue one bounded
-    # REST call (plus a compare when the tip is not the PR head) for local refs
-    # that match the issue number AND survive every predicate — normally 0-2 calls,
-    # never a call per branch. The reuse path is unchanged for predicate 1.
+    # would otherwise be lost: the TARGETED lookup in `run_preflight` DOES issue
+    # REST calls for local refs that match the issue number AND survive every
+    # predicate — ONE bounded list request, plus one `compare` per MERGED PR that
+    # request returns (up to the page cap), so normally 0-2 and never a call per
+    # branch. A `compare` failure aborts that ref's whole lookup and is COUNTED,
+    # so the ref keeps blocking (fail-closed). The reuse path is unchanged for
+    # predicate 1.
     merged_head_shas: set[str] = set()
     for surface_name, state, limit in (
         (SURFACE_OPEN_PRS, "open", open_pr_limit),
