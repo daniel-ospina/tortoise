@@ -1027,6 +1027,7 @@ def test_the_clause_classifier_PINS_each_round7_and_8_fix():
         "CALL apoc.trigger.add()",
         "CALL apoc.config.set()",
         "CALL apoc.cypher.doIt('CREATE (n) SET n.x=$m', {})",
+        "CALL apoc.cypher.runMany('CREATE (n) SET n.x=1', {})",
         "CALL apoc.atomic.add(n,'p',1)",
         "CALL dbms.setConfigValue()",
         "DROP INDEX ON :Point(embedding)",
