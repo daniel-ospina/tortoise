@@ -13,23 +13,23 @@ version: 1
 #
 # The value (recomputable from the committed `durations` map:
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
-# LPT puts max(shard) at 5.18 min of test time at S=9 — after the #6137
-# relocation the critical path sits at the single-file floor,
-# `test_onboarding_state_split.py` (310.7 s = 5.18 min) — and the measured
-# per-shard fixed cost is ~3.4 min, so T ≈ 8.6 min, inside the epic's
-# 10-minute goal.
+# S is chosen by that formula on the committed map, and the minutes it yields
+# are deliberately NOT restated here — they move with every re-cut, which is
+# how this block went stale twice. The authoritative pins are the balance-band
+# test (`test_real_workflow_halves_are_consistent`) and the lane-parity
+# superset test below, both of which recompute from the map.
 #
 # S=9 is also what the lane-parity contract requires: main publishes
 # `test (a)`…`test (i)` and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
 # merge rail refuses a removal).
 #
-# The 1.25x balance band holds at S=9 (`test_real_workflow_halves_are_
-# consistent`): above the floor the extra shards keep shrinking while
-# `test_onboarding_state_split.py` saturates max(shard), and after the #6137
-# relocation the measured ratio is 1.00x at S=9 (1.00x at S=8/7/6) against the
-# band's 1.25x. Going below the 5.18 min floor means splitting that one file
-# (#6133), not adding shards.
+# The 1.25x balance band is enforced by `test_real_workflow_halves_are_
+# consistent`, which recomputes the ratio from the committed map. The old
+# "single-file floor" argument is RETIRED: it rested on
+# `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
+# file — so extra shards do keep reducing max(shard). S=9 is held by the
+# lane-parity contract above, not by that argument.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
@@ -2252,11 +2252,12 @@ slow_files:
 # pre-merge docker pools needs no such declaration and loses no coverage —
 # which is why it is the instrument used here.
 #
-# WHICH FILES, AND WHY THIS CUT. 43 files leave the fast pool; that drops the
-# fast pool's heaviest shard to the single-file floor
-# (`test_onboarding_state_split.py`, 310.7s = 5.18 min), which is what puts the
-# fast leg at ~8.6 min wall. 43 files, 1,604.2s of committed `durations`
-# weight. Four exclusions, all load-bearing:
+# WHICH FILES, AND WHY THIS CUT. The cut is the list below: the files under
+# `slow_files` that the base cut did not already move (35 of them, 1,317.6s of
+# committed `durations` weight at the time of writing). Both figures are
+# recomputable from that list — quote the list, not this sentence, and note the
+# leg-union check fails closed if the two diverge. Four exclusions, all
+# load-bearing:
 #   * test_capture_install.py and test_session_verify.py are NOT moved. Each is
 #     registered under `api` while its own source's diff selects `core`, and
 #     `classify_test_file` takes the FIRST match — so with a `slow_files` home
@@ -2302,7 +2303,8 @@ slow_files:
 # THE RESIDUAL, NAMED. These legs are packed on the `durations` map, and the
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
-# row mis-ranks the pack. The watchdog's headroom (2.16x the heavier leg) is
+# row mis-ranks the pack. The watchdog's headroom (recomputed from the
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
 # what absorbs a ranking error; the durable fix is the scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
