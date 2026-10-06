@@ -2078,8 +2078,10 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
     `fast_pool` does NOT include it — so omitting it put files in the numerator's
     own jobs with no weight on the other side (the #7537 defect, sign flipped).
 
-    Differential by design: the two manifests differ ONLY by `push_extra`, so
-    the assertion cannot pass by duplicating the pool expression in the test.
+    Differential by design: the two manifests differ only in `push_extra`, plus
+    the measured weight of the single file it names (without that the added
+    weight would be 0 and the assertion vacuous), so the assertion cannot pass
+    by duplicating the pool expression in the test.
     """
     import argparse
 
@@ -2107,3 +2109,15 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"
     )
+
+
+def test_the_pooled_branch_does_not_double_count_a_normalised_duplicate() -> None:
+    """`full_pool` may carry both `tests/a` and `tests/a.py` — the same file.
+
+    Normalising into a LIST summed it twice (100 -> 200), a regression the
+    review caught in this PR's own first revision. The pool must be de-duplicated
+    after normalisation.
+    """
+    sel = {"full": True, "test_files": "ALL", "slow_run": False}
+    assert ci_timing.selected_weight_s(
+        sel, {"tests/a.py": 100}, full_pool={"tests/a", "tests/a.py"}) == 100.0

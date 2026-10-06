@@ -177,14 +177,15 @@ TEST_JOB_PREFIX = "test"
 
 # The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
 # `test-slow (a)`, or a bare `test`/`test-slow`. Everything else that starts
-# with `test` is reported separately in `excluded_jobs` — see `paid_vs_selected`
-# for WHY, which is NOT that their files are unweighted: `test-track-b`,
-# `test-concurrency-falkor` and `test-d14-hosted-api` run files that ARE in the
-# fast pool and in the denominator. Their seconds are excluded to avoid
-# double-counting work a counted shard already paid; the carve-out job is
-# excluded because `select()` subtracts carve-out files from the weighted keys.
-# So `paid_s` covers the COUNTED shards only — say so when quoting it, because
-# the excluded legs are a substantial share of real gate execution.
+# with `test` is reported separately in `excluded_jobs` — see
+# `paid_vs_selected` for the TWO different reasons, which are NOT that their
+# files are unweighted: `test-track-b`, `test-concurrency-falkor` and
+# `test-d14-hosted-api` run files that ARE in the fast pool and in the
+# denominator. They are excluded because the counted shards run
+# `-m 'not track_b and not live and not integration'` while these legs run
+# exactly those marks — the two job sets cover DIFFERENT work, and one ratio
+# cannot describe both. So `paid_s` covers the COUNTED shards only; say so when
+# quoting it, because the excluded legs are a real share of gate execution.
 SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
 
 
@@ -272,8 +273,10 @@ def selected_weight_s(selection: dict, durations: dict,
             # `durations` falls back to `default_weight` exactly as the list-leg
             # branch below does. Filtering the map instead made the two branches
             # disagree: the same absence was 0 here and `default_weight` there.
-            norm = [k if k.endswith(".py") else f"{k}.py" for k in full_pool]
-            values = [durations.get(k) for k in norm]
+            # A SET, not a list: two pool members that normalise to the same key
+            # ("tests/a" and "tests/a.py") must not be summed twice.
+            norm = {k if k.endswith(".py") else f"{k}.py" for k in full_pool}
+            values = [durations.get(k) for k in sorted(norm)]
         total = 0.0
         for value in values:
             w = _finite(value)
@@ -296,19 +299,31 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
                      full_pool: set[str] | None = None) -> dict:
     """What the gate PAID against what the diff SELECTED (#7532).
 
-    `ratio` is the diagnostic: a push run selects the FULL pool and calibrates
-    near 1.0, while a PR run that selects a small surface but pays a large one
-    is execution inflation, not selection weight. `queue_s` is reported
-    alongside so queue latency cannot be mistaken for execution cost.
+    `ratio` is the diagnostic: a push run selects the FULL pool (measured 1.177
+    on run 37468261628, the residual being job wall time the per-file
+    denominator cannot see), while a PR run that selects a small surface but
+    pays a large one is execution inflation, not selection weight. `queue_s` is
+    reported alongside so queue latency cannot be mistaken for execution cost.
 
-    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME LEGS. Only the shard jobs
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the shard jobs
     whose work `test_files`/`slow_selected` actually weight (`test (a)`, …,
-    `test-slow (a)`, …) are counted. Other `test*` legs — `test-carve-out`,
-    `test-d14-hosted-api`, `test-concurrency-falkor`, `test-track-b` — run file
-    sets that `select()` EXPLICITLY SUBTRACTS from both of those keys
-    (`ci_selection.py:1231,1271`), so counting their seconds would add
-    execution with no weight and inflate the ratio by construction. They are
-    returned in `excluded_jobs` instead of being silently dropped.
+    `test-slow (a)`, …) are counted. Counting any other `test*` leg would add
+    seconds with no matching weight and inflate the ratio by construction.
+    There are TWO distinct reasons a leg is excluded, and they are not the
+    same reason (a previous version of this docstring claimed the first for
+    all four, which is false):
+
+      * `test-carve-out` — `select()` SUBTRACTS carve-out files from
+        `test_files`/`slow_selected` (`ci_selection.py:1233,1081`), so its
+        seconds have no weight on the other side at all.
+      * `test-d14-hosted-api`, `test-concurrency-falkor`, `test-track-b` —
+        their files ARE in the fast pool and the denominator. They are excluded
+        because the counted shards run `-m 'not track_b and not live and not
+        integration'` while these legs run exactly those marks, so the two job
+        sets cover DIFFERENT work; one ratio cannot describe both.
+
+    Either way the legs are returned in `excluded_jobs`, and `paid_s` therefore
+    covers the COUNTED shards only — not total gate execution.
     """
     paid = 0.0
     queue = 0.0
@@ -907,16 +922,15 @@ def paid_vs_selected_cli(args) -> int:
         print("--paid-vs-selected needs both --run-id and --changed-files",
               file=sys.stderr)
         return 2
-    import yaml  # lazy by design
-
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    # `_normalize_surfaces` is what every other consumer gets via
-    # `load_manifest()`. Feeding the raw YAML straight to `fast_pool` would
-    # iterate a scalar surface character-by-character and raise on a None one.
-    manifest = ci_selection._normalize_surfaces(
-        yaml.safe_load(Path(args.manifest).read_text()))
+    # `_manifest_of` is this module's existing seam for exactly this — it wraps
+    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
+    # `load_manifest()` does for every other consumer. Feeding the raw YAML
+    # straight to `fast_pool` would iterate a scalar surface
+    # character-by-character and raise on a None one.
+    manifest = _manifest_of(Path(args.manifest).read_text())
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
     # #7537 cycle 2: on a full selection the gate runs the fast pool plus the
