@@ -17,12 +17,22 @@
 #
 # SCOPE — THE JOB, NOT THE GATE
 #   The obvious fix is "alert when the migration-drift gate fails". That is too
-#   narrow: ≥8 steps in `deploy-api` are fail-closed (dependency parity, verify
-#   secrets, Fly secret provenance, migration drift, Fly machines, set secrets,
-#   deploy, plus `check-fly-secret-drift.py`'s exit-2 provisioning path), and a
-#   per-gate alert would leave the same silence on the other seven. One notifier
-#   at the job boundary covers all of them, and the step attribution below is
-#   what keeps a per-gate reading possible.
+#   narrow in two directions.
+#   1. Within `deploy-api`, ≥8 steps are fail-closed (dependency parity, verify
+#      secrets, Fly secret provenance, migration drift, Fly machines, set
+#      secrets, deploy, plus `check-fly-secret-drift.py`'s exit-2 provisioning
+#      path), so a per-gate alert would leave the same silence on the other
+#      seven. One notifier at the job boundary covers all of them, and the step
+#      attribution below is what keeps a per-gate reading possible.
+#   2. `packaging-smoke` and `post-deploy-verify` can EACH fail while the other
+#      two jobs of the workflow are SKIPPED (`deploy-api` is gated on
+#      packaging-smoke's result; `post-deploy-verify` is gated on deploy-api's) —
+#      a notifier only inside `deploy-api` would leave a failed pack smoke, which
+#      silently blocks the whole deploy, exactly as unobserved as the 4.6-day
+#      stall this issue is about. So the SAME script is attached at all three
+#      sites. They are mutually exclusive at runtime (a skipped job cannot also
+#      fail), so at most one alert fires per run — no duplicate issue, no double
+#      page.
 #
 # THE TWO LEGS, IN THIS ORDER
 #   1. THE LEDGER (hard). ONE GitHub issue per failing (job, step), via the
@@ -101,7 +111,31 @@ step_label() { # <step-id> -> human label, or "" when unknown
     fly-machines)   printf '%s' 'Check Fly machines (orphan + crash-loop guard, fail-closed)' ;;
     set-secrets)    printf '%s' 'Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)' ;;
     deploy)         printf '%s' 'Deploy (retry through Fly lease/API races)' ;;
+    buildx)         printf '%s' 'Set up Docker Buildx' ;;
+    build-image)    printf '%s' 'Build hosted image' ;;
+    pack-assert)    printf '%s' 'In-container pack assertion (no boot, no secrets)' ;;
+    health-gate)    printf '%s' 'Post-deploy DB health verification (post-release; does not gate the deploy)' ;;
+    bypass-report)  printf '%s' 'Bypass report — DB health verification (#1719, #4759)' ;;
+    machine-env)    printf '%s' 'Assert the RUNNING machine env honours every fly-toml-env declaration (#5656)' ;;
     *)              printf '' ;;
+  esac
+}
+
+# What a red in THIS job means for the pipeline. Derived per job, because the
+# three alert sites are NOT interchangeable: a skipped `deploy-api` and a failed
+# `post-deploy-verify` are opposite conditions (nothing shipped vs a bad release
+# already live). A job with no entry gets an honest generic sentence rather than
+# a wrong one; a test pins the entry set against the workflow's alert sites.
+job_block_note() { # <job>
+  case "$1" in
+    deploy-api)
+      printf '%s' '`post-deploy-verify` is skipped when this job does not succeed (its `if:` requires `needs.deploy-api.result` to be `success`), so a red here means the app did **NOT** flip — nothing has shipped since the last successful run.' ;;
+    packaging-smoke)
+      printf '%s' '`deploy-api` is gated on this job (its `if:` reads `needs.packaging-smoke.result`), so a red here leaves the deploy **SKIPPED** — the app did **NOT** flip.' ;;
+    post-deploy-verify)
+      printf '%s' 'This job runs **AFTER** the release: a red here means the release is **LIVE and unhealthy** (there is no rollback), NOT that the deploy failed.' ;;
+    *)
+      printf '%s' 'The job failed; read the run to see what it gates.' ;;
   esac
 }
 
@@ -176,9 +210,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
     echo "| commit | \`${GITHUB_SHA:-unknown}\` |"
     echo "| run | ${RUN_URL} |"
     echo
-    echo "**The job's colour is the DEPLOY's colour** — \`post-deploy-verify\` is skipped when this"
-    echo "job does not succeed (\`if: needs.deploy-api.result == 'success'\`), so a red here means"
-    echo "the app did NOT flip. Nothing has shipped since the last successful run."
+    echo "**The job's colour is the pipeline's colour** — $(job_block_note "$job")"
     echo
     if [ "$sid" = "$DRIFT_STEP_ID" ]; then
       echo "### Migration-drift gate report"
@@ -190,18 +222,23 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
       echo "real drift, #1001)."
       echo
       if [ -n "$DRIFT_REPORT_FILE" ] && [ -s "$DRIFT_REPORT_FILE" ]; then
-        # Bounded: an issue body is not a log dump. The head carries the
-        # BLOCKING block and the remediation; a pathological report is truncated
-        # with the run link above as the escape hatch.
-        excerpt="$(head -c 6000 "$DRIFT_REPORT_FILE")"
+        # Bounded: an issue body is not a log dump. ⛔ TAKE THE **TAIL**, not the
+        # head: the gate prints its context — remote-ahead, non-conforming files,
+        # the warn-class preamble — BEFORE the actionable block, and ends with
+        # the `BLOCKING` list, the `OUT OF ORDER` subset and the ordered
+        # remediation. `head -c` would keep the noise and drop the one thing the
+        # alert exists to carry; the run link above is the escape hatch for
+        # anything cut (the measured 2026-09-04 report was 509 bytes, so the cap
+        # is not normally reached).
+        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE")"
         echo '```'
         printf '%s' "$excerpt"
-        # `head -c` can cut mid-line; a fenced block is still closed below.
+        # `tail -c` can start mid-line; a fenced block is still closed below.
         echo
         echo '```'
         if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
           echo
-          echo "_(report truncated at 6000 bytes — the full text is in the run link above)_"
+          echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
         fi
       else
         echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."

@@ -186,14 +186,21 @@ jobs:
   packaging-smoke:
     runs-on: ubuntu-latest
     if: ${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}
+    # #2240: `issues: write` is for the failure alert at the end of this job —
+    # a failed pack smoke leaves `deploy-api` SKIPPED, so without an alert here
+    # the deploy is blocked in silence. `contents: read`/`packages: read` are
+    # unchanged and still needed (checkout; the image build's cache).
     permissions:
       contents: read
       packages: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v3
       - name: Build hosted image
+        id: build-image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -210,6 +217,7 @@ jobs:
           cache-from: type=gha,scope=deploy-pack-smoke
           cache-to: type=gha,scope=deploy-pack-smoke,mode=max
       - name: In-container pack assertion (no boot, no secrets)
+        id: pack-assert
         run: |
           docker run --rm --entrypoint python tortoise-hosted:smoke -c '
           from pathlib import Path
@@ -223,6 +231,25 @@ jobs:
           assert Path("/app/tests/sample_transcript.txt").exists(), "transcript missing"
           print(f"hosted image pack smoke OK: {len(reg.packs)} >= {bound}")
           '
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────
+      # A failure HERE leaves `deploy-api` skipped, i.e. the deploy is blocked
+      # silently — the same shape as the 4.6-day stall #2240 is about. Same
+      # script, same substrate, per-step key; see the long note on the
+      # `deploy-api` site for the token and ordering rationale.
+      - name: Alert on failure (out-of-band) — packaging-smoke (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::packaging-smoke failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job packaging-smoke \
+            --steps "buildx=${{ steps.buildx.outcome }} build-image=${{ steps.build-image.outcome }} pack-assert=${{ steps.pack-assert.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
   deploy-api:
     runs-on: ubuntu-latest
@@ -858,6 +885,10 @@ jobs:
       - name: Alert on failure (out-of-band) — deploy-api (#2240)
         if: failure()
         run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::deploy-api failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
           bash .github/scripts/deploy-api-alert.sh \
             --job deploy-api \
             --steps "parity=${{ steps.parity.outcome }} verify-secrets=${{ steps.verify-secrets.outcome }} provenance=${{ steps.provenance.outcome }} drift=${{ steps.drift.outcome }} fly-machines=${{ steps.fly-machines.outcome }} set-secrets=${{ steps.set-secrets.outcome }} deploy=${{ steps.deploy.outcome }}" \
@@ -919,10 +950,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-api
     if: ${{ needs.deploy-api.result == 'success' }}
+    # #2240: `issues: write` is for the failure alert at the end of this job —
+    # a red here means the release is LIVE and unhealthy, and nothing else in
+    # the pipeline reports that out-of-band. `contents: read` MUST be spelled
+    # out: declaring ANY permission sets the unspecified ones to `none`.
+    permissions:
+      contents: read
+      issues: write
     steps:
       # Own checkout: this job runs the repo script below.
       - uses: actions/checkout@v4
       - name: Post-deploy DB health verification (post-release; does not gate the deploy)
+        id: health-gate
         # The deploy pipeline previously certified a GREEN deploy while the
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
         # 200 with status:degraded). Verify the release on BOTH planes:
@@ -968,7 +1007,15 @@ jobs:
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
         run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
-      - name: Bypass report — DB health verification (#1719, #4759)
+      # ⛔ QUOTED DELIBERATELY. Unquoted, the `, #4759)` is eaten as a YAML
+      # comment (` #` starts one inside a plain scalar), so the step's real name
+      # became `Bypass report — DB health verification (#1719,` — and the alert's
+      # `step_label` map must equal the name GitHub actually renders, or the
+      # issue names a step that does not exist. The same unquoted `, #NNNN)`
+      # pattern costs ~15 other step names across the repo their tails; that is a
+      # pre-existing cosmetic class, NOT swept in here (nothing references them).
+      - name: "Bypass report — DB health verification (#1719, #4759)"
+        id: bypass-report
         # #4759: uniform reporting. The old step said SKIPPED only in this step's
         # log, so a reader of the run SUMMARY saw a green/skipped step and could
         # not tell the gate apart from one that passed. This keeps the
@@ -990,6 +1037,7 @@ jobs:
             --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
             --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
       - name: Assert the RUNNING machine env honours every fly-toml-env declaration (#5656)
+        id: machine-env
         # The second half of #4568. `check-fly-secret-drift.py` proves every name
         # has a declared managing source, and that no Fly SECRET shadows a
         # declared `[env]` name — all BUILD-TIME surfaces. Nothing read the
@@ -1023,6 +1071,26 @@ jobs:
           FLY_APP: tortoise-y4mjjq
         run: python3 .github/scripts/check-fly-machine-env.py
         shell: bash
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────
+      # Placed BEFORE the `if: always()` gate audit so the audit stays the job's
+      # last word. A red here means the release is LIVE and unhealthy, and
+      # nothing else reports that out-of-band. Same script, same substrate,
+      # per-step key; see the long note on the `deploy-api` site for the token
+      # and ordering rationale.
+      - name: Alert on failure (out-of-band) — post-deploy-verify (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::post-deploy-verify failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job post-deploy-verify \
+            --steps "health-gate=${{ steps.health-gate.outcome }} bypass-report=${{ steps.bypass-report.outcome }} machine-env=${{ steps.machine-env.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - name: Deploy gate audit — post-deploy-verify (#4759)
         # This job's only bypassable gate, stated as bypassed or not even when an
         # earlier step failed — so "no bypass block" is never the reader's only

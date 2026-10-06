@@ -1989,11 +1989,11 @@ strongest observed predicate (`/health/ready`, an AND of both planes) *decides*,
 because two independent probes on different budgets can disagree and only the
 stronger one is evidence that the release is actually unready.
 
-### 8.6 When `deploy-api` fails, an issue files itself — and pages Telegram (#2240)
+### 8.6 When a `deploy-hosted` job fails, an issue files itself — and pages Telegram (#2240)
 
-**What fires.** One step in `deploy-hosted.yml`'s `deploy-api` job,
-`Alert on failure (out-of-band) — deploy-api (#2240)`, guarded by
-`if: failure()`. It runs `.github/scripts/deploy-api-alert.sh`, which
+**What fires.** One step at the end of each of `deploy-hosted.yml`'s three jobs —
+`Alert on failure (out-of-band) — {packaging-smoke,deploy-api,post-deploy-verify} (#2240)`,
+each guarded by `if: failure()`. It runs `.github/scripts/deploy-api-alert.sh`, which
 
 1. reads the step list the workflow passes (`id=${{ steps.<id>.outcome }}`) and
    takes the **first** step whose outcome is `failure` — the causal one;
@@ -2013,11 +2013,26 @@ branch-protection context. A blocked deploy lane was therefore silent — 4.6 da
 in 2026-08-30→09-04 (22 consecutive failed runs, zero alerts) and ~2 more days
 in 2026-09-29→10-01. This is the missing channel.
 
-**What it covers — the JOB, not one gate.** ≥8 steps in `deploy-api` are
-fail-closed (dependency parity, verify secrets, Fly secret provenance, migration
-drift, Fly machines, set secrets, deploy, plus `check-fly-secret-drift.py`'s
-exit-2 path). One notifier at the job boundary covers all of them; the step id in
-the title is what keeps a per-gate reading possible.
+**Why all three sites, and not just `deploy-api`.** The three are **mutually
+exclusive at runtime** (`deploy-api` is gated on `packaging-smoke`'s result and
+`post-deploy-verify` on `deploy-api`'s, so a skipped job cannot also fail), so at
+most one alert fires per run. They are all needed: a failed **pack smoke** leaves
+the deploy *skipped*, which is as silent as the 4.6-day stall this exists to end.
+The issue body says **what a red in that job means**, because the three are not
+interchangeable:
+
+| failed job | what it means |
+|---|---|
+| `deploy-api` | nothing has shipped since the last successful run |
+| `packaging-smoke` | the deploy was **skipped** — the app did not flip |
+| `post-deploy-verify` | the release is **live and unhealthy** (there is no rollback) — the deploy itself succeeded |
+
+**Within `deploy-api`, the notifier covers the JOB, not one gate.** ≥8 steps there
+are fail-closed (dependency parity, verify secrets, Fly secret provenance,
+migration drift, Fly machines, set secrets, deploy, plus
+`check-fly-secret-drift.py`'s exit-2 provisioning path); a per-gate alert would
+leave the same silence on the rest. The step id in the title is what keeps a
+per-gate reading possible.
 
 **When the failing step is the migration-drift gate**, the issue body additionally
 carries the gate's **own** report verbatim — the `BLOCKING` versions, the
@@ -2034,11 +2049,12 @@ must never take a production action here:** no DDL, and no
 blanket repair hides real drift, #1001). Close the issue when the streak ends —
 that is what ends it; while it stays open the counter keeps climbing.
 
-**OVERRIDES:** the usual "one monitor, one gate" shape — this notifier is
-attached to the **job**, not to the drift gate it was filed for, because a
-per-gate alert would leave the same silence on the other seven fail-closed steps;
-and it is one issue per **failing step** rather than one per run, because a key
-carrying `${{ github.run_id }}` files a new issue on every failing run (#2706).
+**OVERRIDES:** the usual "one monitor, one gate" shape — each notifier is
+attached to its **job**, not to the drift gate it was filed for, because ≥8 steps
+in `deploy-api` are fail-closed and a per-gate alert would leave the same silence
+on the rest; and it is one issue per **failing step** rather than one per run,
+because a key carrying `${{ github.run_id }}` files a new issue on every failing
+run (#2706).
 
 ## Secrets Matrix
 

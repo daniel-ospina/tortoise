@@ -275,6 +275,35 @@ run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$DRIFT_REPORT"
 assert_eq "$RC" "0" "the happy path succeeds"
 assert_eq "$(count_calls 'CURL')" "1" "the page is sent when the ledger recorded the finding"
 
+echo "── case 17: the other two sites get their OWN key and their own meaning ──"
+# `packaging-smoke` and `post-deploy-verify` can each fail while `deploy-api` is
+# SKIPPED, so a notifier only inside `deploy-api` would leave that silent. They
+# are not interchangeable with it either: a red in one means the deploy was
+# SKIPPED, in the other that a bad release is already live.
+reset_case
+run_alert --job packaging-smoke --steps "buildx=success build-image=failure pack-assert=skipped"
+assert_eq "$RC" "0" "a failed pack smoke alerts"
+assert_contains "$(title_line)" "title=deploy-hosted: packaging-smoke failed at 'build-image'" "the pack-smoke key names ITS job and step"
+assert_not_contains "$(title_line)" "deploy-api" "and cannot be mistaken for a deploy-api failure"
+PACK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$PACK_BODY" "Build hosted image" "the body names the failed step"
+assert_contains "$PACK_BODY" "SKIPPED" "the body says the deploy was skipped (what a red HERE means)"
+assert_not_contains "$PACK_BODY" "LIVE and unhealthy" "and not another job's meaning"
+reset_case
+run_alert --job post-deploy-verify --steps "health-gate=failure bypass-report=skipped machine-env=skipped"
+assert_eq "$RC" "0" "a failed post-deploy verification alerts"
+assert_contains "$(title_line)" "title=deploy-hosted: post-deploy-verify failed at 'health-gate'" "its own key"
+POST_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$POST_BODY" "LIVE and unhealthy" "the body says a bad release is live, NOT that the deploy failed"
+assert_not_contains "$POST_BODY" "did **NOT** flip" "and not the deploy-api meaning (the deploy did succeed here)"
+
+# A job with no declared note still alerts, with an honest generic sentence
+# rather than a wrong one (the workflow's site set is pinned by pytest).
+reset_case
+run_alert --job some-other-job --steps "whatever=failure"
+assert_eq "$RC" "0" "an undeclared job still alerts"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "read the run" "and gets the generic sentence, not a wrong one"
+
 echo "── case 14: usage errors ───────────────────────────────────────────"
 reset_case
 run_alert --steps "$DRIFT_STEPS"
