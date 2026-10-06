@@ -1148,7 +1148,7 @@ def test_wedged_runtime_fails_the_session_unmistakably(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:16379/g")
     monkeypatch.setattr(emb, "_probe_configured_db", lambda t, a: "silent")
     with pytest.raises(pytest.fail.Exception) as exc:
-        emb._assert_configured_db_answers()
+        emb._assert_configured_db_answers(will_connect=True)
     msg = str(exc.value)
     assert "did not answer a PING" in msg
     assert "THIS IS NOT YOUR DIFF" in msg and "#6073" in msg
@@ -1161,7 +1161,7 @@ def test_wedged_runtime_fails_the_session_unmistakably(monkeypatch):
 
     monkeypatch.setattr(emb, "_probe_configured_db", lambda t, a: "unreachable")
     with pytest.raises(pytest.fail.Exception) as exc2:
-        emb._assert_configured_db_answers()
+        emb._assert_configured_db_answers(will_connect=True)
     assert "did not answer a PING" not in str(exc2.value)  # a different diagnosis
 
 
@@ -1178,7 +1178,7 @@ def test_malformed_port_fails_cleanly_without_echoing_the_uri(monkeypatch):
         "TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:notaport/g")
     assert emb._probe_configured_db(0.5, 1) == "malformed"
     with pytest.raises(pytest.fail.Exception) as exc:
-        emb._assert_configured_db_answers()
+        emb._assert_configured_db_answers(will_connect=True)
     msg = str(exc.value)
     assert "malformed port" in msg and "THIS IS NOT YOUR DIFF" in msg
     assert "topsecret" not in msg and "notaport" not in msg
@@ -1209,7 +1209,7 @@ def test_failure_frame_holds_no_credential(monkeypatch):
         "TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:notaport/g")
 
     def wrapper():  # mirrors the real caller's statement ORDER
-        emb._assert_configured_db_answers()
+        emb._assert_configured_db_answers(will_connect=True)
         uri = os.environ.get("TORTOISE_DB_URI", "")  # never reached
         assert uri
 
@@ -1283,51 +1283,48 @@ def test_probe_runs_before_any_local_can_hold_the_uri():
         "_assert_configured_db_answers", \
         "a statement runs before the probe — if it binds the URI, " \
         "--showlocals will render its password"
+    # ... and it must pass the SHARED gate, not a constant: two gates that can
+    # disagree are how the probe came to preempt the locality refusal.
+    kw = {k.arg: k.value for k in first.value.keywords}
+    assert "will_connect" in kw, "the probe must be told whether the session connects"
+    assert "_session_will_connect" in ast.dump(kw["will_connect"]), \
+        "the caller must pass conftest's shared gate, not its own copy"
 
 
-def test_probe_does_not_preempt_the_locality_refusal(monkeypatch):
-    """A non-loopback URI must NOT be probed.
+def test_probe_is_inert_when_the_caller_declines(monkeypatch):
+    """``will_connect=False`` must mean NO probe.
 
-    The session refuses one on locality grounds WITHOUT any I/O (#1647 E2E-6),
-    and that refusal is the more precise diagnosis. Probing first replaced it
-    with "could not be reached" — breaking
-    `tests/test_tripwire.py::test_non_loopback_uri_fails_session`, which pins
-    the session-level behaviour; this pins the helper's.
+    The caller decides whether the session will connect at all (a non-loopback
+    URI is refused on locality grounds without any I/O, #1647 E2E-6, and that
+    refusal is the more precise diagnosis). The helper must not reach for the
+    network once told no. The session-level behaviour — the refusal message
+    itself — is pinned by `tests/test_tripwire.py`.
     """
     import tests._embedded as emb
 
     def _boom(timeout_s, attempts):  # pragma: no cover - must not be reached
-        raise AssertionError("probed a target the session refuses on locality")
+        raise AssertionError("probed although the caller said the session won't")
 
     monkeypatch.setattr(emb, "_probe_configured_db", _boom)
-    for uri in (
-        "docker://:pw@db.internal.example.com:6379/g",  # remote host
-        "docker://:pw@10.0.0.5:6379/g",                  # private, not loopback
-        "docker://:pw@:6379/g",                          # fail-closed: no host
-    ):
-        monkeypatch.setenv("TORTOISE_DB_URI", uri)
-        monkeypatch.delenv("TORTOISE_TEST_ALLOW_REMOTE", raising=False)
-        emb._assert_configured_db_answers()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@db.internal.example.com:6379/g")
+    emb._assert_configured_db_answers(will_connect=False)
 
 
-def test_probe_still_runs_when_the_remote_override_allows_connecting(monkeypatch):
-    """The gate must MIRROR the session's, override included.
+def test_probe_runs_when_the_caller_says_the_session_connects(monkeypatch):
+    """``will_connect=True`` must mean the target IS probed.
 
-    With TORTOISE_TEST_ALLOW_REMOTE=1 the session does connect to a
-    non-loopback target, so skipping the probe there would resurrect the bare
-    `redis.exceptions.TimeoutError` this change exists to remove. Two gates
-    that can disagree are worse than one.
+    With `TORTOISE_TEST_ALLOW_REMOTE=1` the session connects to a non-loopback
+    target; skipping the probe there would resurrect the bare
+    `redis.exceptions.TimeoutError` this change exists to remove.
     """
     import tests._embedded as emb
 
     calls = []
     monkeypatch.setattr(
-        emb, "_probe_configured_db",
-        lambda t, a: calls.append((t, a)) or None)
+        emb, "_probe_configured_db", lambda t, a: calls.append((t, a)) or None)
     monkeypatch.setenv("TORTOISE_DB_URI", "redis://:pw@db.internal.example.com:6379/0")
-    monkeypatch.setenv("TORTOISE_TEST_ALLOW_REMOTE", "1")
-    emb._assert_configured_db_answers()
-    assert calls, "a permitted remote target must still be probed"
+    emb._assert_configured_db_answers(will_connect=True)
+    assert calls, "a target the session connects to must still be probed"
 
 
 def test_probe_is_inert_without_a_supported_uri(monkeypatch):
@@ -1339,9 +1336,9 @@ def test_probe_is_inert_without_a_supported_uri(monkeypatch):
 
     monkeypatch.setattr(emb, "_probe_configured_db", _boom)
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    emb._assert_configured_db_answers()
+    emb._assert_configured_db_answers(will_connect=True)
     monkeypatch.setenv("TORTOISE_DB_URI", "postgres://x@y/z")  # unsupported
-    emb._assert_configured_db_answers()
+    emb._assert_configured_db_answers(will_connect=True)
 
 
 # ── #4164: the marked tests must be SELECTED BY THE MARKER in CI ────────────

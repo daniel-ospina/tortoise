@@ -27,7 +27,7 @@ import threading
 
 import pytest
 
-from tortoise.config import is_db_uri, is_loopback_uri
+from tortoise.config import is_db_uri
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 from tortoise.projection import FalkorProjection
@@ -687,29 +687,27 @@ def _configured_db_where() -> str | None:
     return f"{parsed.hostname or 'localhost'}:{port}"
 
 
-def _assert_configured_db_answers(timeout_s: float | None = None) -> None:
+def _assert_configured_db_answers(
+    *, will_connect: bool, timeout_s: float | None = None
+) -> None:
     """#6073: fail the session loudly when the configured DB never answers.
 
-    Inert unless a SUPPORTED URI is set, so the embedded and carve-out lanes
-    do no network I/O here (their shapes are untouched). Named and importable
-    for the same reason as its sibling above: the autouse session fixture
-    cannot be exercised directly, and importing tests.conftest would
-    re-execute conftest's top-level code.
+    ``will_connect`` is the CALLER's answer to "will this session actually
+    connect to the configured URI?". The probe must not run for a target the
+    session refuses (that refusal is the more precise diagnosis), nor skip one
+    the session accepts (the wedge would resurface as a bare client timeout).
+
+    The caller owns that policy rather than this module recomputing it, for two
+    reasons: `tests/conftest.py` already owns the locality/override decision,
+    so there is only ONE gate and the two cannot diverge; and this module is
+    inside the #4097 env-read scan surface, where a new raw read of
+    `TORTOISE_TEST_ALLOW_REMOTE` would red the frozen ledger — a contract change
+    that needs its own recorded decision, not a drive-by.
+
+    Still inert unless a supported URI is set, so the embedded and carve-out
+    lanes do no network I/O here.
     """
-    if not _uri_set_supported():
-        return
-    # Probe exactly the targets the session will actually CONNECT to. A
-    # non-loopback URI is refused on locality grounds WITHOUT any I/O
-    # (#1647 E2E-6), and that refusal is the more precise diagnosis — probing
-    # first replaced it with "could not be reached", which broke
-    # tests/test_tripwire.py::test_non_loopback_uri_fails_session. The
-    # override is mirrored so the two gates cannot diverge: with
-    # TORTOISE_TEST_ALLOW_REMOTE=1 a remote target IS connected to, and a
-    # wedged one must still get this diagnostic rather than a bare client
-    # timeout. Checked inline, without binding the URI to a local (#3039).
-    if not is_loopback_uri(
-        os.environ.get("TORTOISE_DB_URI", "")
-    ) and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+    if not _uri_set_supported() or not will_connect:
         return
     effective = (
         _probe_timeout_s() if timeout_s is None else _sanitize_timeout(timeout_s)
