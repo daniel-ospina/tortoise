@@ -216,14 +216,13 @@ Run `tortoise doctor` after upgrades.
 
 Capture is best-effort and a capture that does not land is **spooled locally
 and retried**, so it is never lost. But a silent non-capture used to be
-invisible from inside the agent: the local breadcrumb
-(`~/.tortoise/capture-errors/<harness>.json`) was written and read by nobody
-that could tell the user. The Claude Code `SessionStart` hook now **renders
-that breadcrumb to stdout**, which Claude Code injects into the session
-context — so the agent (and you) are told in the same place the memory digest
-arrives:
+invisible from inside the agent: the local breadcrumbs (written under
+`~/.tortoise/capture-errors/`) were written and read by nobody that could tell
+the user. The Claude Code `SessionStart` hook now **renders those breadcrumbs to
+stdout**, which Claude Code injects into the session context — so the agent
+(and you) are told in the same place the memory digest arrives:
 
-```
+```text
 code:     capture-failure
 what:     Tortoise memory for this project has NOT been filed since <when>. claude capture is affected.
 why:      <the recorded error, one bounded line, secrets redacted>
@@ -245,6 +244,13 @@ The `install-inert` form is rendered by the hook itself in **pure shell**,
 because that record is reached precisely when the interpreter or the module
 directory could not be resolved — a Python-only reader could never report it.
 No breadcrumb file means **no output at all**, and the hook still exits 0.
+
+**The two causes are independent and both are reported (#5838).** Each `kind`
+owns its own slot — `capture-failure` in `<harness>.json`, `install-inert` in
+`<harness>-install.json` — so an inert install no longer overwrites a live
+quota or network refusal. A machine can be over quota *and* have a moved
+checkout, so the payload may carry **two four-line blocks**, one per record;
+the hook reads both slots rather than picking one.
 
 The dashboard is deliberately not the surface for this: the agent session is.
 
@@ -318,31 +324,30 @@ silent failure.
    target graph first, so it requires an explicit per-call opt-in (#2944) —
    the CLI below IS that authorization:
 
-```bash
-python -m tortoise rebuild --dir "<events-dir>" --db "<db-path>"
-```
+    ```bash
+    python -m tortoise rebuild --dir "<events-dir>" --db "<db-path>"
+    ```
 
 3. Re-index the corpus:
 
-```bash
-tortoise index directory '<corpus-dir>'
-```
+    ```bash
+    tortoise index directory '<corpus-dir>'
+    ```
 
 4. **Verify — including an EDGE check.** `session_index_health` is edge-blind;
    declare success only after checking a recall/edge surface too:
 
-```bash
-tortoise list-sources                     # count == file_count
-tortoise doctor                           # health
-# edge check: a recall on an indexed url must return its neighbor
-```
+    ```bash
+    tortoise list-sources                     # count == file_count
+    tortoise doctor                           # health
+    # edge check: a recall on an indexed url must return its neighbor
+    ```
 
 **Upgrading is forward-only** — there is no binary rollback: the old binary
 replaying a new journal silently drops the new record kinds (and reintroduces
 wipe-before-parse, turning one torn line into total loss). The restore path is
 a pre-release backup per the drill above.
 
-#
 ## 8. Expansion packs (optional)
 
 Tortoise ships five starter expansion packs by default (`dev`, `marketing`,
@@ -358,7 +363,7 @@ your active packs.
   `tortoise pack validate <dir>` checks it against the shared validator
   before you install.
 - **Learn the format:** [docs/EXPANSION_PACKS.md](EXPANSION_PACKS.md) (behavior)
-  + `packs/_template/manifest.yaml` (schema).
+  - `packs/_template/manifest.yaml` (schema).
 
 ## Troubleshooting: why isn't my file indexed?
 
@@ -380,7 +385,6 @@ your active packs.
   MERGE-keyed writes; **integration-tested to 2 concurrent writers**. Two
   embedded DBs never sync (no replication exists); NFS/shared-volume
   multi-writer is untested.
-
 
 ## 5. Connect your agent (MCP)
 

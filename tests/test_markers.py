@@ -97,6 +97,16 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
+    # #3718: the concurrent-commit cases read the MeteringRecord back through
+    # the CANONICAL registry namespace — the graph prod's `_record_write_op`
+    # writes — because the assertion IS the write-op count production billed
+    # (one per logical payload; the double-apply defect bills two). Same
+    # `prod-coupled` class as test_commit_endpoint / test_dr_endpoints /
+    # test_capture_loop_responsiveness: the read is PINNED to the production
+    # namespace because it must observe the op the production writer billed; if
+    # the two are ever decoupled the read returns 0 rows and the leading
+    # `assert rows and …` fails LOUDLY (it never passes vacuously).
+    "test_dataplane_lane_loop_responsiveness.py": {"registry": "prod-coupled"},
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
@@ -135,7 +145,10 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
     "test_onboarding_truth_surface.py": {"registry": "prod-coupled"},  # #3670/#3671/#3681: registry-resolve seeding for the server-owned capture receipts (same _make_sdk(namespace="registry") lane as the siblings above)
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
-    "test_onboarding_state_split.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_checkpoint.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_init.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_patch.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_projection.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",
@@ -266,9 +279,20 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # otherwise, #1970 main hygiene).
         'f"org_{org_id}"': "endpoint-constrained",
     },
-    "test_onboarding_state_split.py": {
+    "test_onboarding_state_split_checkpoint.py": {
+        # #2001 W5: no select_graph("org_*") site in this split (registry lane
+        # only) — a deliberate "considered, nothing to route" entry.
+    },
+    "test_onboarding_state_split_init.py": {
         'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
         'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
+    },
+    "test_onboarding_state_split_patch.py": {
+        'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
+    },
+    "test_onboarding_state_split_projection.py": {
+        # #2001 W5: no select_graph("org_*") site in this split (endpoint/registry
+        # reads only) — a deliberate "considered, nothing to route" entry.
     },
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert

@@ -32,8 +32,11 @@ from __future__ import annotations
 
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -290,8 +293,12 @@ def _all_gate_steps(name: str) -> list[tuple[str, dict]]:
 # The exact provisioning invocation. Pinning the whole command (rather than
 # checking a few tokens) is what closes the zero-exit escapes: `--help`/`-h`
 # exit 0 via argparse, and an expansion can hide a flag from `shlex.split`.
+# `exec` is part of the pin (#7359): actions/runner sends the cancel signal to
+# the step's DIRECT CHILD with `killProcessOnCancel: false`, so without `exec`
+# bash stays in the middle, Python is a grandchild, and no signal — and therefore
+# no stack dump — ever reaches the script.
 _GATE_COMMAND_RE = re.compile(
-    r"^python3 tools/embedder_provision\.py --attempts \d+ --backoff \d+$"
+    r"^exec python3 tools/embedder_provision\.py --attempts \d+ --backoff \d+$"
 )
 
 
@@ -475,3 +482,458 @@ def test_gate_tool_has_a_ci_carveout():
         "a gate-only change must fail closed to the full matrix; got "
         f"surfaces={result.get('surfaces')!r} full={result.get('full')!r}"
     )
+
+
+# ── #7359: the stall is diagnosed by the run that hits it ─────────────────
+
+_HANGS_FOREVER = (
+    "import time\n"
+    "class SentenceTransformer:\n"
+    "    def __init__(self, *a, **k):\n"
+    "        print('FAKE_HANG_ENTERED', flush=True)\n"
+    "        time.sleep(600)\n"
+)
+
+# The #7359 class: the main thread blocked inside NATIVE code, where a
+# Python-level signal handler can never run (no eval-loop point is reached).
+# `pthread_mutex_lock` on a mutex held by ANOTHER thread is a genuinely
+# uninterruptible C block, and unlike a self-relock its behaviour is well
+# defined on every libc (PTHREAD_MUTEX_DEFAULT may return EDEADLK instead of
+# blocking, which would make the fake not block at all).
+_HANGS_IN_NATIVE_CODE = (
+    "import ctypes, threading\n"
+    "\n"
+    "_libc = ctypes.CDLL(None)\n"
+    "_buf = ctypes.create_string_buffer(64)\n"
+    "_libc.pthread_mutex_init(ctypes.byref(_buf), None)\n"
+    "_held = threading.Event()\n"
+    "\n"
+    "def _hold():\n"
+    "    _libc.pthread_mutex_lock(ctypes.byref(_buf))\n"
+    "    _held.set()\n"
+    "    threading.Event().wait()  # hold it forever\n"
+    "\n"
+    "threading.Thread(target=_hold, daemon=True).start()\n"
+    "assert _held.wait(10), 'helper never took the mutex'\n"
+    "\n"
+    "class SentenceTransformer:\n"
+    "    def __init__(self, *a, **k):\n"
+    "        print('FAKE_NATIVE_HANG_ENTERED', flush=True)\n"
+    "        _libc.pthread_mutex_lock(ctypes.byref(_buf))  # held by the helper\n"
+)
+
+
+def _run_until_hang(tmp_path, fake_source, marker, env_extra=None):
+    """Start the script against a fake, wait until it is INSIDE the hang, return proc."""
+    fake = tmp_path / f"fake-{abs(hash(fake_source)) % 10**8}"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(fake_source, encoding="utf-8")
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    env.update(env_extra or {})
+    proc = subprocess.Popen(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    # Positive evidence it is inside the hang, rather than a fixed sleep guess.
+    # Killed before re-raising: a failure here would otherwise leak the hung
+    # child (and, for the native fake, a thread blocked in C) for its full sleep.
+    try:
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready, "script never reached the fake hanging constructor"
+        assert marker in proc.stdout.readline(), marker
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        raise
+    return proc
+
+
+def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
+    """A DELIVERED signal must produce a dump.
+
+    SCOPE, stated because the first version of this test overclaimed: it proves
+    the C-level signal handler dumps when a signal is DELIVERED TO THIS PROCESS.
+    It does not prove the runner delivers it — that is the `exec` pin in
+    `_GATE_COMMAND_RE` — and it does not cover the native-blocked class, which a
+    Python-level handler cannot reach at all and which
+    `test_the_watchdog_dumps_a_native_blocked_thread` covers.
+
+    What this test actually pins is the narrower, still-real contract: a
+    DELIVERED signal produces a dump carrying real frames. The native-blocked
+    case, the one that discriminates, is the watchdog test below.
+
+    Termination is NOT asserted for either signal. `chain=True` chains to the
+    disposition the process INHERITED, and either signal can be inherited as
+    SIG_IGN (a backgrounded job from a non-interactive shell, `trap '' INT`,
+    `trap '' TERM`, a supervisor that masks it) — the chain preserves the
+    ignore, so the process dumps and then SURVIVES. Requiring an exit reddened
+    the suite after a stall for SIGINT (round 7) and again for SIGTERM
+    (round 8), each time on whichever runner happened to inherit the ignore.
+    The test's contract was always "a DELIVERED signal produces a dump", which
+    never needed one; the dump is read from the raw fd with a deadline and the
+    process is killed.
+    """
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        proc = _run_until_hang(tmp_path, _HANGS_FOREVER, "FAKE_HANG_ENTERED")
+        try:
+            proc.send_signal(sig)
+            seen, deadline = b"", time.monotonic() + 30
+            fd = proc.stderr.fileno()
+            while time.monotonic() < deadline and b"sentence_transformers" not in seen:
+                ready, _, _ = select.select([fd], [], [], 5)
+                if not ready:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                seen += chunk
+            # faulthandler writes its own header; the fake's frame must be in
+            # the body or the dump is not the one we think it is.
+            assert b"Current thread" in seen, (
+                f"no faulthandler dump on {sig!r}:\n" + seen.decode(errors="replace")
+            )
+            assert b"sentence_transformers" in seen, (
+                "dump had no useful frames:\n" + seen.decode(errors="replace")
+            )
+            # NO termination assertion. The chain target is the disposition the
+            # process INHERITED, and EITHER signal can be inherited as SIG_IGN
+            # (`trap '' INT`, `trap '' TERM`, a supervisor that masks it) — then
+            # the handler dumps and the process SURVIVES. Requiring an exit was
+            # this test contradicting its own contract ("a DELIVERED signal
+            # produces a dump") for SIGINT in round 7 and again for SIGTERM in
+            # round 8, each time reddening the suite after a stall on whichever
+            # runner happened to inherit the ignore. The dump is the assertion;
+            # the `finally` kills the process.
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+
+def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
+    """#7359's ACTUAL failure class: the main thread blocked in native code.
+
+    This is the case that made the previous `signal.signal` version inert — a
+    Python-level handler needs an eval-loop point the thread never reaches, and
+    replacing the disposition means the process no longer even dies on the
+    signal. The watchdog thread needs no signal delivery and no eval-loop point,
+    so it is the mechanism that answers this issue.
+
+    The watchdog dumps WITHOUT exiting (`exit=False`), so this asserts the dump
+    is produced and then kills the still-blocked process — asserting a non-zero
+    exit here would pin the very `exit=True` behaviour that was killing working
+    runs (P1, fifth review).
+
+    Load-bearing: delete the `dump_traceback_later` arm and no dump ever appears.
+
+    NOTE the two diagnostic tests are NOT symmetric, and the asymmetry is the
+    point (P2, third review): this one discriminates the round-2 fix, whereas
+    the signal test above does not — it was rebuilt against the round-2
+    `signal.signal` implementation and PASSED, which is how an inert handler
+    survived two reviews. Only a native-blocked main thread separates a
+    Python-level handler from a C-level one.
+    """
+    proc = _run_until_hang(
+        tmp_path, _HANGS_IN_NATIVE_CODE, "FAKE_NATIVE_HANG_ENTERED",
+        {"TORTOISE_EMBEDDER_WATCHDOG_S": "1"},
+    )
+    try:
+        # Read the RAW fd, not `proc.stderr`. This reader must NEVER use
+        # `proc.stderr.read()`/`.readline()`: those drain bytes into the
+        # TextIOWrapper's userspace buffer, after which `select` reports the fd
+        # empty forever and the loop spins to its deadline (P1, sixth review: 1
+        # failed / 21 passed). `os.read` bypasses the wrapper entirely — it does
+        # NOT see bytes the wrapper already swallowed, which is precisely why
+        # nothing here may hand any to it.
+        fd = proc.stderr.fileno()
+        seen = b""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 5)
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen += chunk
+            # `embedder_provision.py` appears only on the MAIN thread's stack;
+            # the helper thread carries the fake module alone. Asserting on
+            # "sentence_transformers" alone was satisfied by the HELPER's frame,
+            # so a green run did not prove the blocked main thread was captured.
+            # `Thread 0x` anchors it to a faulthandler dump, so an ordinary
+            # traceback mentioning the script path cannot satisfy it either.
+            if b"embedder_provision.py" in seen and b"Thread 0x" in seen:
+                break
+        assert b"Thread 0x" in seen, (
+            "no faulthandler dump:\n" + seen.decode(errors="replace")
+        )
+        assert b"embedder_provision.py" in seen, (
+            "no dump of the MAIN thread:\n" + seen.decode(errors="replace")
+        )
+        # `exit=False` is the property under test, and until round 9 NOTHING
+        # pinned it: flipping it to `exit=True` passed all 22 tests while
+        # reinstating round 5's P1 (the watchdog killing a run that was still
+        # working). The fake blocks forever, so a surviving process MUST raise
+        # here, and an exiting one returns — which is the discriminator.
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+
+def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
+    """--print-model/--print-revision emit a machine-read pin, so
+    the #7359 completion marker must not contaminate them.
+
+    The abbreviation cases are the ones that matter and the ones the FIRST
+    version missed: argparse has `allow_abbrev=True`, so `--print-m` is a valid
+    unambiguous spelling that returns the pin early. The first implementation
+    gated the marker on `{"--print-model", "--print-revision"} & set(sys.argv[1:])`,
+    which no abbreviation matches — so `--print-m` printed the pin AND the
+    marker. Emitting from control flow in `main()` is what closes it, and these
+    cases are what keeps it closed.
+    """
+    env = _base_env(tmp_path)
+    cases = (
+        ("--print-model", ep.MODEL),
+        ("--print-revision", ep.REVISION),
+        ("--print-m", ep.MODEL),      # abbreviation — defeated the first gate
+        ("--print-r", ep.REVISION),   # abbreviation
+    )
+    for flag, expected in cases:
+        got = subprocess.run(
+            [sys.executable, str(_SCRIPT), flag],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert got.returncode == 0, f"{flag}: rc={got.returncode} {got.stderr!r}"
+        assert got.stdout == expected + "\n", (
+            f"{flag} stdout must be EXACTLY the pin and a newline — a consumer of "
+            f"check parses it; got {got.stdout!r}"
+        )
+        assert ep.DONE_MARKER not in got.stdout, (
+            f"{flag}: the completion marker leaked into machine-read output"
+        )
+
+
+def test_the_completion_marker_is_emitted_on_success_only(tmp_path):
+    """The marker is the diagnostic that tells a future reader whether a stall
+    is inside the interpreter or outside it, so its PRESENCE on success and its
+    ABSENCE on failure are both load-bearing. Without the first assertion,
+    deleting the marker would go unnoticed and the diagnostic would silently
+    stop existing.
+    """
+    env = _base_env(tmp_path)
+
+    # Success: the cache probe hits.
+    fake_ok = tmp_path / "fake-ok"
+    fake_ok.mkdir(parents=True, exist_ok=True)
+    (fake_ok / "sentence_transformers.py").write_text(_FAITHFUL_CACHED, encoding="utf-8")
+    ok_env = dict(env)
+    ok_env["PYTHONPATH"] = str(fake_ok) + os.pathsep + env.get("PYTHONPATH", "")
+    ok = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=ok_env, timeout=120,
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert ep.DONE_MARKER in ok.stdout, (
+        "the success path must emit the marker — it is the only evidence that a "
+        f"later stall is OUTSIDE the interpreter; got {ok.stdout!r}"
+    )
+
+    # Failure: the model is unobtainable. A "complete" line here would let a
+    # grep read a failed provision as a finished one.
+    fake_bad = tmp_path / "fake-bad"
+    fake_bad.mkdir(parents=True, exist_ok=True)
+    (fake_bad / "sentence_transformers.py").write_text(_ALWAYS_RAISES, encoding="utf-8")
+    bad_env = dict(env)
+    bad_env["PYTHONPATH"] = str(fake_bad) + os.pathsep + env.get("PYTHONPATH", "")
+    bad = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=bad_env, timeout=120,
+    )
+    assert bad.returncode == 1, bad.stderr
+    assert ep.DONE_MARKER not in bad.stdout, (
+        f"the marker must NOT appear on the failure path; got {bad.stdout!r}"
+    )
+
+
+def test_the_watchdog_does_not_kill_a_slow_but_working_run(tmp_path):
+    """The other side of `exit=False`: a working run must still SUCCEED.
+
+    The native test above proves the watchdog does not exit a blocked process;
+    this proves the property that actually matters to CI — a load that is merely
+    slow (round 5's cited run took 336s against a 360s cap) still completes and
+    still prints the marker, with the watchdog firing in between.
+
+    Load-bearing: with `exit=True` this exits 1 with no marker and fails.
+    """
+    delay = 3
+    fake = tmp_path / "fake-slow"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(
+        "import time\n"
+        "class SentenceTransformer:\n"
+        "    def __init__(self, *a, **k):\n"
+        f"        time.sleep({delay})  # slow, but working\n",
+        encoding="utf-8",
+    )
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    env["TORTOISE_EMBEDDER_WATCHDOG_S"] = "1"
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"the watchdog killed a working run (rc={proc.returncode}):\n{proc.stderr}"
+    )
+    assert "embedder provision: complete" in proc.stdout, proc.stdout
+    # The dump DID fire — otherwise this test would pass with no watchdog at all.
+    assert "Thread 0x" in proc.stderr, f"the watchdog never fired:\n{proc.stderr}"
+
+
+def test_sigterm_terminates_under_a_default_disposition(tmp_path):
+    """`chain=True` must re-raise into SIG_DFL, so a cancel still terminates.
+
+    The child's SIGTERM disposition is forced to SIG_DFL EXPLICITLY, in the
+    child, before it execs the script — because nothing else guarantees it.
+    Round 9 used `bash -c 'trap - TERM; exec …'` and claimed that was
+    deterministic; it is not. `trap - SIG` restores the disposition bash
+    INHERITED, so under `trap '' TERM` the child still gets SIG_IGN, the
+    process dumps and survives, and the suite reddens after a 30s stall:
+
+        bash -c 'trap "" TERM; bash -c "trap - TERM; python3 -c \
+          \"import signal; print(signal.getsignal(signal.SIGTERM))\""'
+        → Handlers.SIG_IGN
+
+    That is the round-7/8 flake class reintroduced by a fix for it, and a false
+    determinism claim on top (P1, tenth review). Setting SIG_DFL in the child is
+    immune to the ambient harness because it does not depend on what was
+    inherited.
+
+    Load-bearing: `chain=True` -> `False` leaves the process alive and fails.
+    """
+    fake = tmp_path / "fake-chain"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            # SIG_DFL, then replace ourselves with the script. `execv` keeps the
+            # PID, so the signal below still reaches the script itself.
+            "import os, signal, sys;"
+            " signal.signal(signal.SIGTERM, signal.SIG_DFL);"
+            " os.execv(sys.executable, [sys.executable, *sys.argv[1:]])",
+            str(_SCRIPT),
+            "--attempts",
+            "1",
+            "--backoff",
+            "0",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready, "script never reached the fake hanging constructor"
+        assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) != 0, (
+            "chain=True must let SIGTERM terminate under SIG_DFL"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+def test_the_process_never_runs_atexit_teardown(tmp_path):
+    """The PR's CENTRAL fix, which had no test at all (P2, third review).
+
+    Swapping `os._exit(_rc)` back to `sys.exit(_rc)` left all 20 tests green
+    (identical stdout, identical exit codes on success, failure and both print
+    flags), so the teardown-skip this whole change is about was unpinned.
+
+    The fake registers an `atexit` hook and drops a sentinel file. `sys.exit`
+    runs it during normal interpreter shutdown; `os._exit` never does. So the
+    sentinel's ABSENCE is the assertion, and the assertion can fail.
+
+    Load-bearing: change the `__main__` exit to `sys.exit(_rc)` and this fails.
+    """
+    fake = tmp_path / "fake-atexit"
+    fake.mkdir(parents=True, exist_ok=True)
+    sentinel = tmp_path / "atexit-ran"
+    (fake / "sentence_transformers.py").write_text(
+        "import pathlib\n"
+        "class SentenceTransformer:\n"
+        "    def __init__(self, *a, **k):\n"
+        "        import atexit\n"
+        f"        atexit.register(lambda: pathlib.Path({str(sentinel)!r}).write_text('ran'))\n",
+        encoding="utf-8",
+    )
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not sentinel.exists(), (
+        "atexit teardown ran — the process left via sys.exit, so the unbounded "
+        "interpreter shutdown #7359 measured is back"
+    )
+
+
+def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap():
+    """A per-site invariant, because a flat default regressed (P1, third review).
+
+    Sitting below the site's own worst-case retry sleep produces a premature
+    dump while the script is still legitimately sleeping between retries;
+    sitting at or above `timeout-minutes` makes the dump miss its window (the
+    runner's own kill arrives first). Both bounds are per site, so the check is
+    too — and both are derived from the formula rather than restated, because
+    restating the budget is exactly what went wrong here.
+
+    Enumerated with `_all_gate_steps`, the SAME selector the wiring tests use,
+    not a name-prefix split: the earlier version matched only steps literally
+    named `Embedding model REQUIRED`, so a gate step named differently escaped
+    the check entirely — the reviewer added one to a scratch copy and the suite
+    stayed green (P2, fifth review).
+
+    Load-bearing: a 10-minute site's watchdog set to 60 (below the real 100s
+    budget) or to 600 (= the cap) both fail; verified by mutation.
+    """
+    checked = 0
+    for name in ("python-ci.yml", "post-merge-validation.yml"):
+        for job, step in _all_gate_steps(name):
+            where = f"{name}:{job}"
+            assert "TORTOISE_EMBEDDER_WATCHDOG_S" in (step.get("env") or {}), (
+                f"{where}: the gate step sets no watchdog margin"
+            )
+            raw = str(step["env"]["TORTOISE_EMBEDDER_WATCHDOG_S"])
+            assert raw.isdigit(), f"{where}: watchdog {raw!r} is not a plain integer"
+            # Assert on the CLAMPED runtime value, not the YAML literal: a site
+            # setting `0` would arm a 1s watchdog and still pass a
+            # literal-vs-literal comparison.
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("TORTOISE_EMBEDDER_WATCHDOG_S", raw)
+                armed = ep._watchdog_seconds()
+            cap = int(step["timeout-minutes"]) * 60
+            attempts, backoff = re.search(
+                r"--attempts (\d+) --backoff (\d+)", step["run"]
+            ).groups()
+            # WORST-CASE retry sleep: attempts sleep `backoff * attempt` for
+            # attempt 1..n-1, so they SUM to backoff * n*(n-1)/2. `(n-1)*backoff`
+            # is wrong by 2.5x at the 10-minute sites and let a 60s watchdog
+            # pass at a 100s-budget site (P1, fourth review).
+            n, b = int(attempts), int(backoff)
+            budget = b * n * (n - 1) // 2
+            assert budget < armed < cap, (
+                f"{where}: watchdog {armed}s is outside ({budget}s, {cap}s)"
+            )
+            checked += 1
+    assert checked == 5, f"expected 5 embedder gate steps, found {checked}"

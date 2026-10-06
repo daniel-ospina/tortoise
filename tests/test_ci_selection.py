@@ -353,7 +353,6 @@ _SELF_GUARD_DEBT: dict[str, str] = {
     "tests/test_capture_consent.py": "tortoise/capture_consent.py",
     "tests/test_chain_enforcer.py": "tortoise/chain_enforcer.py",
     "tests/test_commit_schema.py": "tortoise/commit_schema.py",
-    "tests/test_enforcement.py": "tortoise/enforcement.py",
     "tests/test_github_indexer.py": "tortoise/indexer/github_indexer.py",
     "tests/test_github_issue.py": "tortoise/github_issue.py",
     "tests/test_github_map.py": "tortoise/github_map.py",
@@ -908,7 +907,14 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     r = _sel(["tools/longmem_eval/run.py"])
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
-    assert "eval/retrieval/test_run.py" in r["test_files"]
+    # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
+    # slow legs, so the witness that "eval was selected" is another eval file
+    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
+    # leg over (a relocation that dropped it instead would be a coverage loss,
+    # which is the whole thing #6137 must not do).
+    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    assert "eval/retrieval/test_run.py" not in r["test_files"]
+    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
     assert set(r["test_files"]) != _tier1()
 
 
@@ -1208,6 +1214,91 @@ def test_slow_files_never_in_fast_gate_selections():
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
+def test_every_slow_file_a_second_surface_names_runs_for_that_surface():
+    """#6234: a `slow_files` entry named by a SECOND surface must still run on
+    that second surface's diff.
+
+    `classify_test_file` is FIRST-match, and `select()` keys the tier-2 slow
+    leg set on that same first match while subtracting EVERY `slow_files` entry
+    from the fast pool (`files -= slow`). So a slow file that a second surface
+    also names is dropped from the fast set and never re-added to
+    `slow_selected` when the second surface is the matched one — it runs on
+    NEITHER leg. The leg still reports green because the second surface usually
+    owns other slow files, so `slow_run` stays True: the coverage hole is
+    invisible to the drift guard, whose union check is about the committed legs
+    and not about which tier-2 diff reaches them.
+
+    The repo already excludes the two known instances
+    (`test_capture_install.py` / `test_session_verify.py`) and, after #6234,
+    eight more. The property is driven from the manifest — for EVERY slow file
+    a second surface names, not a frozen list — so relocating a
+    dual-registered file back into `slow_files` reds here with its name.
+
+    A selection that matches the second surface is the MINIMAL case: a diff
+    that also matches another surface owning the file would run it, so if the
+    minimal one does not, the hole is real. `uri_requiring` files are exempt:
+    they are deliberately kept out of every URI-less tier-2 leg (see
+    `slow_leg_by_surface`), a separate documented exclusion.
+    """
+    m = load_manifest()
+    slow = set(m["slow_files"])
+    carve = set(m["carve_out"])
+    uri = uri_requiring_files(m)
+    surfaces = m["surfaces"]
+
+    # A path whose diff selects `s` on its own. SOURCE_PATTERNS is the manifest's
+    # source->surface map; `core` and `classify` have NO entry (they are only
+    # reachable as the fallback / via a test-file change), so for those we use a
+    # registered test file that CLASSIFIES as the surface — a test-file change
+    # selects its classifying surface, which is the same path the hole is on.
+    def _probe(s: str) -> str | None:
+        pats = SOURCE_PATTERNS.get(s)
+        if pats:
+            return pats[0]
+        for member in surfaces.get(s) or []:
+            if member in slow or member in carve:
+                continue
+            if classify_test_file(member, m) == s:
+                return "tests/" + member
+        return None
+
+    offenders: list[str] = []
+    for f in sorted(slow - carve - uri):
+        owner = classify_test_file(f, m)
+        base = f.rsplit("/", 1)[-1]
+        offenders_for_f: list[str] = []
+        for s, files in surfaces.items():
+            if s == owner:
+                continue
+            if f not in (files or []) and base not in (files or []):
+                continue
+            probe = _probe(s)
+            assert probe is not None, (
+                f"no probe diff selects surface {s!r} for slow file {f}; the "
+                "probe derivation needs a SOURCE_PATTERNS entry or a "
+                "surface-classifying test file")
+            sel = select([probe], "pull_request", m)
+            assert s in sel["surfaces"], (
+                f"probe {probe!r} no longer selects surface {s!r} (got "
+                f"{sel['surfaces']}) — update `_probe` in this test")
+            ran = set(sel["test_files"]) if sel["test_files"] != "ALL" else set()
+            ran |= set(sel["slow_selected"])
+            if f not in ran:
+                offenders_for_f.append(
+                    f"{f} (owner {owner!r}, reached by a {s!r} diff)")
+        offenders.extend(offenders_for_f)
+
+    assert not offenders, (
+        "slow_files entries a SECOND surface names that the second surface's "
+        "diff would run on NEITHER leg: `classify_test_file` is first-match, so "
+        "the file is subtracted from the fast pool and never re-added to "
+        "`slow_selected`, while the second surface usually keeps `slow_run` "
+        "True so the leg still reports green. Keep them OUT of `slow_files` "
+        "(the test_capture_install.py / test_session_verify.py precedent):\n  "
+        + "\n  ".join(sorted(set(offenders)))
+    )
+
+
 def test_expensive_eval_integration_is_in_the_on_demand_lane():
     """The suite's single most expensive file is OFF the merge gate.
 
@@ -1341,14 +1432,17 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    ranking.py-only PR selects exactly those (never the full committed slow-
-    leg set), and the carve-out job skips (ep owns no carve-out file)."""
+    ranking.py-only PR selects exactly those (never the full leg set), and
+    the carve-out job skips (ep owns no carve-out file). #6137 added
+    test_ep_selector to ep's slow set (it moved out of the fast pool), so
+    the expected list is pinned here as well."""
     r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
     assert r["carve_out_run"] is False
     assert r["slow_selected"] == [
-        "test_dream.py", "test_ep_sources.py", "test_source_inheritance_own.py"]
+        "test_dream.py", "test_ep_selector.py", "test_ep_sources.py",
+        "test_source_inheritance_own.py"]
 
 
 def test_tier2_carve_out_run_when_surface_owns_carve_files():
@@ -2945,6 +3039,63 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"watchdog may legitimately reach it (#6135/#3239)")
 
 
+def test_slow_leg_bounds_clear_the_committed_work():
+    """#6137/#3239: each committed `test-slow` leg must run under a watchdog
+    that clears THAT leg's committed work by the house headroom.
+
+    The slow legs are the only bounded pytest job whose budget is a LITERAL
+    while its work moves with `slow_files`, so a changed leg set can outgrow
+    the budget silently. #6137 moved 43 files in — the legs' committed
+    `durations` weight went from 2.84m to 16.21m each — and left the #3239
+    literal at 10m, so BOTH legs were killed by the 10m WATCHDOG banner on a
+    full-selection run and took the required `python-ci-gate` red with them
+    (PR #6234 run 37229875496; 739 and 1257 tests had passed before the kill).
+    `test_every_bounded_pytest_job_caps_above_its_watchdog` could not see it:
+    a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
+
+    The floor is re-derived from the committed `durations` map, so the budget
+    cannot rot past its work again without reddening here. A leg file with no
+    `durations` row FAILS this test rather than weighing 0.0 — see the guard
+    below for why the default would re-open the very hole."""
+    from tools.ci_selection import WATCHDOG_HEADROOM, _duration_weight
+    job = _load_python_ci()["jobs"]["test-slow"]
+    durations = load_manifest()["durations"]
+    watchdog = _literal_pytest_watchdog(job)
+    assert watchdog is not None, (
+        "test-slow's pytest step must carry a LITERAL watchdog — the per-leg "
+        "budget is what this test derives a floor for")
+    cap = job["timeout-minutes"]
+    assert watchdog < cap, (
+        f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
+        f"({cap}m) so a killed leg still prints its counts (#798)")
+    for row in job["strategy"]["matrix"]["include"]:
+        files = row["files"].split()
+        assert files, f"test-slow leg {row['half']!r} is empty"
+        # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
+        # weigh it ZERO, so the estimate this guard asserts against could sit
+        # arbitrarily below the leg's real work and the budget could rot past
+        # it exactly as it did in #6137 — and no other gate closes the gap:
+        # `duration_coverage_issues` covers `fast_pool()` only (these files have
+        # left it), `duration_issues` validates keys that EXIST, and the
+        # in-workflow drift guard pins the union of the two rows without
+        # reading the map at all.
+        unmeasured = [f for f in files if f + ".py" not in durations]
+        assert not unmeasured, (
+            f"test-slow leg {row['half']!r} has {len(unmeasured)} file(s) with "
+            f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
+            f"0.0 here, so the leg's estimate is not a lower bound on its work "
+            f"and this guard cannot see the budget rot it exists to catch. "
+            f"Register it in config/ci-surfaces.yml `durations`.")
+        committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
+        assert watchdog >= WATCHDOG_HEADROOM * committed, (
+            f"test-slow leg {row['half']!r}: the in-step watchdog "
+            f"({watchdog}m) no longer clears its committed estimate "
+            f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
+            f"the leg is killed mid-suite and the gate reds before pytest can "
+            f"report. Re-derive the budget (and the outer cap above it) from "
+            f"the committed `durations` map.")
+
+
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.
@@ -2966,13 +3117,21 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     job = _load_python_ci()["jobs"]["test-carve-out"]
     cap = job["timeout-minutes"]
     measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    from tools.ci_selection import _duration_weight
     manifest = load_manifest()
     idx = _carve_matrix()
     durations = manifest["durations"]
     for entry in idx["include"]:
         files = entry["files"].split()
         assert files, f"carve shard {entry['suffix']!r} is empty — a dropped leg"
-        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        # An absent row is weighed at the PACK's default (DEFAULT_FAST_WEIGHT),
+        # never 0.0: 0.0 would understate the shard's committed work against the
+        # very watchdog that has to clear it. Three carve-out files carry no row
+        # today, so the default — not a hard failure — is the honest bound here;
+        # the slow legs above fail closed because every one of their files is
+        # measured.
+        committed = sum(_duration_weight(durations.get(f + ".py"))
+                        for f in files) / 60.0
         wd = entry["watchdog_minutes"]
         assert wd >= WATCHDOG_HEADROOM * committed, (
             f"carve shard {entry['suffix']!r} watchdog ({wd}m) no longer clears "

@@ -51,6 +51,7 @@ from tortoise.commit_schema import (
     TelemetryModel,
     point_content_id,
 )
+from tortoise.live import is_terminal_status
 from tortoise.sdk import TortoiseSDK
 
 # URI-less skip guard — mirrors test_acl_graph_users.py's module skipif
@@ -369,3 +370,127 @@ def test_hosted_commit_summary_log_reserves_warning_for_real_warns(
         level == "warning" and "supersessions applied=" in msg
         for level, msg in lines
     ), f"a real warn must WARNING-summary, got {lines}"
+
+
+@pytest.mark.parametrize("marker", ["status", "outdated_flag", "terminal_successor"])
+def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker):
+    """#3366 — a supersede whose PRIOR is already terminal is an idempotent
+    no-op, never a fail-closed 500.
+
+    ``_load_commit_graph_state`` loads reconcile points as ``{id: content}``
+    ONLY — no status — so ``reconcile_payload`` cannot tell a live prior from
+    a terminal one and still returns ``"supersede"`` for "same id, changed
+    content". The writer then called ``supersede_point`` unguarded; its #2498
+    lifecycle guard RAISES on a terminal old point, and the endpoint's
+    catch-all turns that raise into a fail-closed HTTP 500. Because the
+    payload is replay-safe but the transition is permanently illegal, the
+    retry can never succeed — an unrecoverable loop.
+    ``commit_ops.apply_supersessions`` already pre-checks the SHARED
+    ``is_terminal_status`` vocabulary and skips; #3366 is the hosted write
+    phase's missing equivalent.
+
+    Three arms, because the guard has three independent reachable paths:
+    the status set, the legacy ``outdated=true`` flag (a regression dropping
+    either leg would pass a single-arm test while restoring the
+    deterministic 500), and the SUCCESSOR endpoint — ``supersede_point``
+    guards ``role="target"`` as well as ``role="source"``, and
+    ``create_point``'s dedup resolution carries no terminal filter, so it can
+    re-key the successor onto an already-dead node.
+
+    MUTATION: remove the terminal pre-check in ``_execute_commit_writes``'
+    supersede branch and every arm fails on the unhandled raise (nothing here
+    catches it — the catch-all lives in the endpoint handler, which this test
+    does not call). The ``payload.supersessions`` pt_ record cannot mask it:
+    that record is ``apply_supersessions``', which already skipped.
+    """
+    old_pt_id = _pt_id(OLD_PT_CONTENT)
+    new_pt_id = _pt_id(NEW_PT_CONTENT)
+    sdk = TortoiseSDK(str(tmp_path / f"arm-terminal-3366-{marker}.db"))
+    assert sdk._get_proj()._graph_name.startswith("test_"), (
+        "docker-lane redirect must isolate this arm on a test_* server graph"
+    )
+    _seed_baseline(sdk, old_pt_id)
+    g = sdk._get_proj().g
+    if marker == "terminal_successor":
+        # The successor's CONTENT already exists as a dead node, so the
+        # branch's create_point(dedup=True) re-keys the successor onto it and
+        # the write would raise on the TARGET leg of the same guard.
+        sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id)
+        _ = g.query(
+            "MATCH (p:Point {id:$id}) SET p.status = 'deprecated'",
+            params={"id": new_pt_id},
+        ).result_set
+    elif marker == "status":
+        # The prior reached a TERMINAL state in an earlier ingest — invisible
+        # to the {id: content} reconcile state.
+        _ = g.query(
+            "MATCH (p:Point {id:$id}) SET p.status = 'deprecated'",
+            params={"id": old_pt_id},
+        ).result_set
+    else:
+        # The OTHER arm of ``is_terminal_status`` (#2498 widened the rejected
+        # set to the status set AND the legacy flag): the node stays live and
+        # only the flag makes it dead.
+        _ = g.query(
+            "MATCH (p:Point {id:$id}) SET p.outdated = true",
+            params={"id": old_pt_id},
+        ).result_set
+
+    payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id)
+    # The shape ``reconcile_payload`` derives for "same id, changed content"
+    # (commit_schema.py:1544-1548): the payload point carries the id the
+    # GRAPH holds, ``existing_id`` is that same id, and ``supersede_id`` is
+    # the content address of its NEW content — the id the successor is minted
+    # at. Reproducing the invariant ``existing_id == pr.point.id`` matters:
+    # ``pr.point.id`` IS read downstream (it keys the resolved-id map), so a
+    # record violating it would pin a shape production cannot emit.
+    prior_pt = Point(
+        id=old_pt_id,
+        content=NEW_PT_CONTENT,
+        pointKind="statement",
+        reason="REVISES",
+        confidence=0.9,
+        c_cal=0.8,
+        about_entities=[],
+        source_ref="session.md",
+        quote="",
+        status="live",
+    )
+    payload.points[0] = prior_pt
+    plan.reconcile.points = [
+        PointReconcile(
+            prior_pt, "supersede",
+            existing_id=old_pt_id, supersede_id=new_pt_id,
+        )
+    ]
+
+    # Pre-fix this RAISES (the 500); post-fix it returns.
+    hosted_api._execute_commit_writes(sdk, payload, plan)
+
+    # No CORRECTS edge — the supersession did not run.
+    assert int(g.query(
+        "MATCH (n:Point {id:$n})-[:CORRECTS]->(o:Point {id:$o}) RETURN count(o)",
+        params={"n": new_pt_id, "o": old_pt_id},
+    ).result_set[0][0]) == 0
+    # The prior is still terminal per the SHARED predicate (never
+    # resurrected) — asserted THROUGH the same vocabulary the guard uses, so
+    # both terminality legs are checked by one rule. The successor arm is the
+    # opposite: the PRIOR is live and untouched, and it is the SUCCESSOR that
+    # was dead, so asserting the two differ is what proves the two probes are
+    # independent rather than one probe reused.
+    row = g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status, coalesce(p.outdated, false)",
+        params={"id": old_pt_id},
+    ).result_set
+    assert row
+    _prior_dead = is_terminal_status(row[0][0], bool(row[0][1]))
+    if marker == "terminal_successor":
+        assert not _prior_dead, row
+    else:
+        assert _prior_dead, row
+    # The successor node still exists (it is what dedup landed on, or the
+    # fresh mint) — the skip preserves content rather than rolling it back.
+    assert int(g.query(
+        "MATCH (p:Point {id:$id}) RETURN count(p)",
+        params={"id": new_pt_id},
+    ).result_set[0][0]) == 1, "successor point must still exist"

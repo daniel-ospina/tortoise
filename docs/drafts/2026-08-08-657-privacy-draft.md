@@ -28,6 +28,7 @@ created: 2026-08-08
 ### Step 5 — delete-account capability check (build-time, G-gate ⑧)
 
 **RESULT: ABSENT (2026-08-08, re-verified this session).** Evidence:
+
 - `website/welcome.html` — grep for `delete-account|account-settings|deactiv|deleteUser|account-management`: **no matches**; links only to Dashboard (`https://app.premiselabs.co`), signup, self-hosted (no account-settings surface).
 - `apps/dashboard/` — **shell only** (single `index.html`; no account-management UI/content).
 - `apps/graph-viz/server/main.py` — only content-level deletes: `DELETE /api/points/{point_id}` and `DELETE /api/edges/{edge_id}`; **no user/account deletion endpoint**.
@@ -37,7 +38,7 @@ created: 2026-08-08
 
 ### LFPDPPP note (RESOLVED 2026-08-08 — owner clarification)
 
-The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email hello@premiselabs.co, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
+The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
 
 ### Outline coverage (16 areas per plan T2 Step 1 → sections)
 
@@ -68,6 +69,14 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 
 ---
 
+<!-- Deliberate: this file is a two-part document — a drafting/G-gate preface
+  with its own H1 (above), then the policy itself, which opens with its own H1.
+  The config already carves out the frontmatter-title case for the same reason
+  (front_matter_title: ""); this is the body-title twin of it. The sibling TOS
+  draft (`2026-08-08-657-tos-draft.md`) has the identical two-H1 shape.
+  Every other MD025 report in this repo is real, so the rule is left ON and
+  suppressed for this one line only. -->
+<!-- markdownlint-disable-next-line MD025 -->
 # Privacy Policy
 
 **Effective date:** [effective date to be set to the actual deploy date at T8]
@@ -95,7 +104,7 @@ Premise Labs is **not a registered legal entity**. The data controller is the na
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](/aviso-privacidad).
+**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](https://tortoise.premiselabs.co/aviso-privacidad).
 
 ## 2. Data processed by the service (outline ②)
 
@@ -160,7 +169,8 @@ Retention carve-outs, stated honestly:
 - **Billing and transactional records** are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).
 - **Analytics data** is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.
 - **Memory graphs.** Deleting a memory graph removes it from your view immediately and revokes its API keys. It stays restorable from the organization's "Trash" for 7 days. After that it is permanently erased, together with its backup copies.
-- **Backups.** Our backups cover the last four weeks. A backup taken while your data was live can therefore still contain it for up to four weeks. A deleted memory graph is not in that category — its own backups are erased when its 7-day window ends.
+- **Accounts.** Deleting a team account removes it from your view immediately, revoking its API keys and ending its members' access. It stays restorable for 7 days. After that the team account's live data is permanently erased. Deleting your personal account also deletes every team for which you are the only owner: those teams are removed from your view immediately, with their API keys revoked and their members' access ended. The account's live data is permanently erased after the same 7-day window, during which the deletion can be reversed by contacting the email channel in §16.
+- **Backups.** Our backups cover the last four weeks. A backup taken while your data was live can therefore still contain it for up to four weeks. The two deletion paths differ in how their own backup copies end: a deleted memory graph's own backups are erased when its 7-day window ends, while deleting an account does not actively purge its copies in our backups — those age out on the same four-week cycle.
 
 ## 7. Security (outline ⑦)
 
@@ -243,18 +253,21 @@ As stated in §2, "we expect users not to place sensitive data in the service." 
 
 ## 15. Version, effective date, and document history (outline ⑮)
 
-**Current version:** 1.0
+**Current version:** 1.1
 **Effective date:** [effective date to be set to the actual deploy date at T8]
 
 This policy is versioned. When this policy changes, the version number and effective date are updated, and a new entry is added to the document history below. Material changes are posted before they take effect.
 
 ### Document history / revisions
 
-- **v1.0** — [effective date] — Initial publication of the Privacy Policy for the hosted Tortoise service.
+| Version | Effective date | Summary |
+|---|---|---|
+| 1.1 | 2026-09-30 | Added self-service account deletion and the account-deletion retention windows to §6 and §16. |
+| 1.0 | 2026-08-08 | Initial publication of the Privacy Policy for the hosted Tortoise service. |
 
 ## 16. Exercising your rights — deletion and other requests (outline ⑯)
 
-**Primary mechanism: email.** To request deletion of your account and associated data, or to make any other privacy request (access, correction, export, restriction, objection), email your request to <hello@premiselabs.co>.
+**Primary mechanism: email.** To make a privacy request other than the in-product account deletion described below (access, correction, export, restriction, objection) — or to request deletion of your account when you cannot sign in — email your request to <hello@premiselabs.co>.
 
 **Response commitment.** Requests are answered within **one month** of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.
 
@@ -262,9 +275,9 @@ This policy is versioned. When this policy changes, the version number and effec
 
 **What this channel covers.** The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.
 
-**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A deleted memory graph, user account, or team account remains restorable for 7 days before permanent erasure; §6 covers how a deleted memory graph is erased, and the [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md) is the single source of truth for these windows.
+**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A deleted memory graph, user account, or team account remains restorable for 7 days. After that, the deleted item's live data is permanently erased; for a deleted account, copies in our backups are not actively deleted and age out on the four-week cycle described in §6. §6 covers how a deleted memory graph and a deleted account are erased, and the [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md) is the single source of truth for these windows.
 
-**Self-service deletion (future).** An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.
+**Self-service account deletion.** You can delete your personal account yourself from the dashboard's Profile tab. Every team for which you are the only owner is deleted with your account, and those teams are removed from your view immediately with their API keys revoked and their members' access ended. During the recovery window described in §6, a deletion can be reversed by contacting us through the email channel above; after that window the account's live data is permanently erased and — as stated in §6 — its copies in our backups are not actively deleted but age out on the four-week cycle. No in-product restore control is offered: a deleted account is restored only through the channel above, and we do not promise a self-service restore.
 
 ---
 
