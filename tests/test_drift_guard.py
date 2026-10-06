@@ -1,4 +1,4 @@
-"""drift-guard — the two branch-drift gate defects it must not have.
+"""drift-guard — the branch-drift gate defects it must not have (#4174, #4396, #7455).
 
 #4174 — a never-fetched branch must not pass the drift gate on a STALE ref.
     "defect(process): a branch that never fetched merges a STALE ref — the tree
@@ -6,17 +6,29 @@
 
     Two defects are pinned here, both in tools/drift-guard.py:
 
-      1. FAIL-OPEN ON A STALE READ. The pre-fix gate compared HEAD against
-         whatever local `origin/main` happened to point at. A worktree that
-         never fetched holds a stale ref, so the gate reported `behind=0,
+      1. FAIL-OPEN ON A STALE READ. The gate compared HEAD against whatever
+         local `origin/main` happened to point at. A worktree that never
+         fetched holds a stale ref, so the gate reported `behind=0,
          status=ok, exit 0` while the real main had moved on. The fix fetches
          first and FAILS CLOSED (exit 2) when freshness cannot be proven.
-      2. NO REVERT DETECTION / REPORT. Even with a fresh ref, a branch whose
-         tree silently lacks main's newer work (the conflict-free revert) was
-         reported only as a behind-count and passed under the threshold. The
-         fix detects paths main moved since the merge base that the branch
-         never took, reports each with its added/deleted line counts, and
-         fails on them.
+      2. NO REVERT DETECTION / REPORT. Even with a fresh ref, a conflict-free
+         revert (a path both sides moved whose merged content is not main's)
+         was reported only as a behind-count and passed under the threshold.
+         The fix detects it, reports each path with its added/deleted line
+         counts, and fails on it.
+
+#7455 — the revert predicate was INVERTED (the arm's second defect).
+    The #4174 arm was `moved_by_base - moved_by_head` — "main moved a path and
+    the branch did not" — but that set is exactly the one a 3-way merge
+    PRESERVES (only main moved ⇒ git takes main's side). It therefore flagged
+    the COMPLEMENT of the danger set and reddened any branch at least one
+    commit behind, INCLUDING a strict ancestor of main, which cannot delete its
+    descendant's work. The corrected predicate runs ONE virtual merge
+    (`git merge-tree --write-tree`) and flags a path only when the merged blob
+    exists, differs from main's, and the merge is not conflicted. The
+    regression tests below (a strict ancestor green; a two-sided clean edit
+    red) are the acceptance proof, and they are mutation-checked against the
+    old predicate via DRIFT_GUARD_TOOL.
 
 #4396 — the gate must measure the PR head on a merge-ref checkout.
     `actions/checkout@v4` on `pull_request` checks out the synthetic merge ref
@@ -152,6 +164,100 @@ def _make_never_fetched_branch(tmp_path: Path) -> tuple[Path, Path]:
     return actor, feature
 
 
+def _make_never_fetched_revert_branch(tmp_path: Path) -> tuple[Path, Path]:
+    """(actor, feature) where BOTH sides edited shared.txt in DIFFERENT lines.
+
+    main changes line 3, feature changes line 1, so merging feature into main is
+    CONFLICT-FREE — yet the merged blob for shared.txt is neither side's alone.
+    That is #7455's danger set (a path BOTH sides moved, whose merge does not
+    keep main's version), and the OLD `moved_by_base - moved_by_head` predicate
+    excluded it by construction. feature has NOT fetched main's commit, so the
+    gate must fetch before it can see the overlap.
+    """
+    remote = tmp_path / "remote.git"
+    _git_ok(tmp_path, "init", "--bare", "-q", str(remote))
+    _git_ok(tmp_path, "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
+
+    actor = tmp_path / "actor"
+    _git_ok(tmp_path, "clone", "-q", str(remote), str(actor))
+    _git_ok(actor, "config", "user.email", "a@example.com")
+    _git_ok(actor, "config", "user.name", "Actor A")
+    _write(actor, "shared.txt", "A\nB\nC\n")
+    _git_ok(actor, "add", "shared.txt")
+    _git_ok(actor, "commit", "-q", "-m", "A: shared base")
+    _git_ok(actor, "push", "-q", "origin", "main")
+
+    feature = tmp_path / "feature"
+    _git_ok(tmp_path, "clone", "-q", str(remote), str(feature))
+    _git_ok(feature, "config", "user.email", "b@example.com")
+    _git_ok(feature, "config", "user.name", "Actor B")
+    _git_ok(feature, "checkout", "-q", "-b", "feat/thing")
+    _write(feature, "shared.txt", "F\nB\nC\n")
+    _git_ok(feature, "add", "shared.txt")
+    _git_ok(feature, "commit", "-q", "-m", "B: branch edits line 1")
+
+    # main edits a DIFFERENT line of the same file — a clean, overlapping move.
+    _write(actor, "shared.txt", "A\nB\nM\n")
+    _git_ok(actor, "add", "shared.txt")
+    _git_ok(actor, "commit", "-q", "-m", "A: main edits line 3")
+    _git_ok(actor, "push", "-q", "origin", "main")
+    return actor, feature
+
+
+def _make_ancestor_behind(tmp_path: Path, *, behind: int) -> Path:
+    """A repo detached at origin/main~<behind> with ZERO commits of its own.
+
+    A strict ancestor of main. main edits `shared.txt` on every commit in the
+    `behind` window, so the OLD arm had a main-only-moved path to flag on each
+    one. The clone is made BEFORE main advances and never fetched again until
+    the gate runs, so the fetch is exercised too.
+    """
+    remote = tmp_path / "remote.git"
+    _git_ok(tmp_path, "init", "--bare", "-q", str(remote))
+    _git_ok(tmp_path, "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
+
+    work = tmp_path / "work"
+    _git_ok(tmp_path, "clone", "-q", str(remote), str(work))
+    _git_ok(work, "config", "user.email", "w@example.com")
+    _git_ok(work, "config", "user.name", "Worker")
+    _write(work, "shared.txt", "A\nB\nC\n")
+    _git_ok(work, "add", "shared.txt")
+    _git_ok(work, "commit", "-q", "-m", "c0")
+    _git_ok(work, "push", "-q", "origin", "main")
+    for i in range(behind):
+        _write(work, "shared.txt", f"A\nB\nmain-{i}\n")
+        _git_ok(work, "add", "shared.txt")
+        _git_ok(work, "commit", "-q", "-m", f"main-{i}")
+    _git_ok(work, "push", "-q", "origin", "main")
+    tip = _git_ok(work, "rev-parse", "origin/main")
+    _git_ok(work, "checkout", "-q", "--detach", f"{tip}~{behind}")
+    return work
+
+
+def _build_two_sided_edit(tmp_path: Path) -> Path:
+    """A repo on branch `pr` where both sides cleanly edited shared.txt.
+
+    mb = A/B/C; `pr` makes line 1 'F'; main makes line 3 'M'. The merge is
+    conflict-free and its blob is neither side's alone; `origin/main` is a real
+    remote at main's tip, so the gate measures it after fetching.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
+    _write(repo, "shared.txt", "A\nB\nC\n")
+    _git_ok(repo, "add", "shared.txt")
+    _git_ok(repo, "commit", "-q", "-m", "c0")
+    _git_ok(repo, "checkout", "-q", "-b", "pr")
+    _write(repo, "shared.txt", "F\nB\nC\n")
+    _git_ok(repo, "commit", "-qam", "branch edits line 1")
+    _git_ok(repo, "checkout", "-q", "main")
+    _write(repo, "shared.txt", "A\nB\nM\n")
+    _git_ok(repo, "commit", "-qam", "main edits line 3")
+    _make_remote(tmp_path, repo)
+    _git_ok(repo, "checkout", "-q", "pr")
+    return repo
+
+
 def _make_remote(tmp_path: Path, repo: Path) -> None:
     """Give `repo` a REAL bare `origin` whose `main` is its current tip.
 
@@ -277,50 +383,71 @@ def _assert_merge_ref_shape(repo: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_stale_origin_main_is_not_a_pass(tmp_path: Path) -> None:
-    """Pre-fix: {behind: 0, status: ok}, exit 0 on a stale ref. Post-fix: fail."""
-    _, feature = _make_never_fetched_branch(tmp_path)
-    payload, p = _payload(feature)
+    """A never-fetched branch must be measured against the FETCHED tip.
+
+    The fixture's local `origin/main` predates main's edit to shared.txt, and
+    the branch edits a different line of the same file. Measured against the
+    STALE ref the merge base IS main's tip, so nothing main moved since — a
+    green; only the FETCHED tip exposes the overlap (#4174's fetch-first
+    requirement), and it must fail.
+    """
+    _, feature = _make_never_fetched_revert_branch(tmp_path)
 
     # The local ref really is stale — the branch has not seen main's commit.
     stale_tip = _git_ok(feature, "rev-parse", "origin/main")
     assert _git_ok(feature, "rev-parse", "HEAD") != stale_tip
 
+    payload, p = _payload(feature)
     assert payload.get("freshness") == "fetched", (
         "the gate must fetch the base before measuring; an unproven ref is "
         f"not a pass (got payload={payload!r})"
     )
-    assert p.returncode != 0, f"stale origin/main passed the gate: {payload!r}"
+    assert p.returncode == 1, f"stale origin/main passed the gate: {payload!r}"
     assert payload["behind"] >= 1, payload
+    # The measured merge base is the STALE tip the never-fetched worktree held,
+    # so the red can only come from the fetched ref.
+    assert payload["merge_base"] == stale_tip, payload
+    assert {r["path"] for r in payload["reverts"]} == {"shared.txt"}, payload
 
 
 def test_conflict_free_revert_reports_paths_and_line_counts(tmp_path: Path) -> None:
-    """The conflict-free revert must fail and name the path + lines."""
-    _, feature = _make_never_fetched_branch(tmp_path)
+    """The conflict-free overlap must fail and name the path + lines.
 
-    # The merge IS conflict-free: prove it independently of the gate.
-    # Fetch first so the merge-tree is against the real tip (the fixture's
-    # local origin/main is stale by construction).
+    #7455: main edits line 3 of shared.txt and the branch edits line 1. The
+    merge is conflict-free (proved independently below) yet its blob for
+    shared.txt is not main's — both sides moved the path, so merging does not
+    keep main's version. That is what the arm measures now; the OLD set
+    difference excluded exactly this path and flagged the main-only paths a
+    merge preserves instead.
+    """
+    _, feature = _make_never_fetched_revert_branch(tmp_path)
+
+    # The merge IS conflict-free, and its blob is not main's: prove both
+    # independently of the gate. Fetch first so the merge-tree is against the
+    # real tip (the fixture's local origin/main is stale by construction).
     _git_ok(feature, "fetch", "-q", "origin", "main")
     tree = _git(feature, "merge-tree", "--write-tree", "origin/main", "HEAD")
     assert tree.returncode == 0, (
         "fixture is not conflict-free — merge-tree failed: " + tree.stderr
     )
     merged = tree.stdout.splitlines()[0]
-    assert "h.txt" in _git_ok(feature, "ls-tree", "--name-only", merged)
+    base_blob = _git_ok(feature, "rev-parse", "origin/main:shared.txt")
+    merged_blob = _git_ok(feature, "rev-parse", f"{merged}:shared.txt")
+    assert merged_blob != base_blob, "the fixture's merge kept main's blob"
 
     payload, p = _payload(feature)
     assert p.returncode == 1, f"conflict-free revert did not fail: {payload!r}"
     paths = {r["path"] for r in payload["reverts"]}
-    assert "h.txt" in paths, payload
-    assert payload["revert_files"] >= 1
-    assert payload["revert_lines"] >= 1
-    h = next(r for r in payload["reverts"] if r["path"] == "h.txt")
-    assert h["added"] == 1 and h["deleted"] == 0, h
+    assert paths == {"shared.txt"}, payload
+    assert payload["revert_files"] == 1, payload
+    assert payload["revert_lines"] == 2, payload  # main's -C/+M = 1/1
+    s = payload["reverts"][0]
+    assert s["added"] == 1 and s["deleted"] == 1, s
 
     text = _run(feature)
     assert text.returncode == 1
-    assert "h.txt" in text.stderr, text.stderr
-    assert "1 line" in text.stderr, text.stderr
+    assert "shared.txt" in text.stderr, text.stderr
+    assert "1 file(s)" in text.stderr, text.stderr
 
 
 def test_up_to_date_branch_is_green(tmp_path: Path) -> None:
@@ -414,6 +541,24 @@ def test_a_failed_read_raises_instead_of_answering_no_reverts(tmp_path: Path) ->
             f"{fn.__name__} swallowed a failed git read instead of raising"
         )
 
+    # #7455's two new reads must fail closed the same way: an unreadable merge
+    # or an unlistable tree must never answer "this path is unchanged".
+    # `hasattr`: a pre-#7455 mutant predates these helpers, and their absence is
+    # a plumbing difference from the mutant, not a swallowed read.
+    for name, call in (
+        ("_merge_tree", lambda: mod._merge_tree(feature, "no-such-ref-xyz", "HEAD")),
+        ("_tree_blobs", lambda: mod._tree_blobs(feature, "no-such-tree-xyz")),
+    ):
+        if not hasattr(mod, name):
+            continue
+        try:
+            call()
+        except mod.MeasurementError:
+            continue
+        raise AssertionError(
+            f"{name} swallowed a failed git read instead of raising"
+        )
+
 
 def test_a_local_branch_shadowing_the_base_name_is_not_measured(
         tmp_path: Path) -> None:
@@ -427,7 +572,7 @@ def test_a_local_branch_shadowing_the_base_name_is_not_measured(
     fail-open #3 through another route. Pre-fix this fixture passes green
     (status ok, behind 0); post-fix the canonical fetched ref is measured.
     """
-    _, feature = _make_never_fetched_branch(tmp_path)
+    _, feature = _make_never_fetched_revert_branch(tmp_path)
     # The shadow: a local branch with the base's spelling, pinned to the stale tip.
     _git_ok(feature, "branch", "origin/main", "refs/remotes/origin/main")
 
@@ -437,10 +582,108 @@ def test_a_local_branch_shadowing_the_base_name_is_not_measured(
     )
     assert payload["status"] == "drift", payload
     assert payload["freshness"] == "fetched", payload
-    assert {r["path"] for r in payload["reverts"]} == {"h.txt"}, payload
+    assert {r["path"] for r in payload["reverts"]} == {"shared.txt"}, payload
     # The verdict must name the ref it MEASURED, not the spelling that was
     # shadowed — otherwise the report attests to a different commit.
     assert payload["measured_base"] == "refs/remotes/origin/main", payload
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #7455 — the silent-revert predicate was inverted; these are the acceptance
+# ══════════════════════════════════════════════════════════════════════════
+# The old predicate flagged `moved_by_base - moved_by_head` (main moved a path,
+# the branch did not) — the set a 3-way merge PRESERVES. The tests below are the
+# regression (an ancestor must be green) and the danger set the arm must still
+# catch (a path both sides moved whose merge does not keep main's blob). The
+# controls (at-tip green, threshold red) pin behaviour the fix must not change.
+
+
+def test_strict_ancestor_of_main_is_green(tmp_path: Path) -> None:
+    """THE REGRESSION (#7455): a strict ancestor of main must be GREEN.
+
+    HEAD is detached at `origin/main~1` with ZERO commits of its own, and main
+    edited shared.txt in the one commit between. The OLD arm flagged
+    shared.txt ("main moved it, this tree did not") and claimed it "deletes
+    origin/main's newer work" — an ancestor cannot delete its descendant's
+    work. The corrected arm simulates the merge; an ancestor merges to main's
+    own tree, so the merged blob equals main's and nothing is flagged.
+    """
+    work = _make_ancestor_behind(tmp_path, behind=1)
+    assert _git_ok(work, "rev-parse", "HEAD") == _git_ok(
+        work, "rev-parse", "origin/main~1")
+    assert _git_ok(work, "rev-list", "--count", "HEAD..origin/main") == "1"
+    # The fixture has exactly the path the OLD arm flagged.
+    assert _git_ok(work, "diff", "--name-only", "HEAD", "origin/main") == "shared.txt"
+
+    payload, p = _payload(work)
+    assert p.returncode == 0, f"an ancestor of main was reported red: {payload!r}"
+    assert payload["status"] == "ok", payload
+    assert payload["behind"] == 1, payload
+    assert payload["reverts"] == [], payload
+    text = _run(work)
+    assert text.returncode == 0, _out(text)
+    assert "SILENTLY REVERTING" not in _out(text), _out(text)
+
+
+def test_head_exactly_at_origin_main_is_green(tmp_path: Path) -> None:
+    """CONTROL: HEAD at origin/main exactly is green with no reverts.
+
+    This is the companion to the ancestor case (the issue's own control). It
+    passes on the old predicate too — with `behind == 0` the arm is skipped —
+    so it is a no-regression control, not a mutation discriminator.
+    """
+    work = _make_ancestor_behind(tmp_path, behind=1)
+    _git_ok(work, "checkout", "-q", "--detach", "origin/main")
+    payload, p = _payload(work)
+    assert p.returncode == 0, payload
+    assert payload["status"] == "ok", payload
+    assert payload["behind"] == 0, payload
+    assert payload["reverts"] == [], payload
+
+
+def test_two_sided_clean_edit_is_a_silent_revert(tmp_path: Path) -> None:
+    """THE DANGER SET (#7455): a path BOTH sides moved, merged cleanly.
+
+    The OLD predicate EXCLUDED this path (the branch moved it too) and flagged
+    main-only moves instead. The corrected arm flags it: the merge is
+    conflict-free but its blob for shared.txt is not main's, so merging does
+    not keep main's version. The red is the revert arm alone — `behind` is 1,
+    far under the threshold.
+    """
+    repo = _build_two_sided_edit(tmp_path)
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, (
+        "fixture must be a CLEAN merge — " + tree.stderr)
+    merged_tree = tree.stdout.splitlines()[0]
+    base_blob = _git_ok(repo, "rev-parse", "origin/main:shared.txt")
+    merged_blob = _git_ok(repo, "rev-parse", f"{merged_tree}:shared.txt")
+    assert merged_blob != base_blob, "the fixture's merge kept main's blob"
+
+    report, p = _payload(repo)
+    assert p.returncode == 1, f"a two-sided clean edit did not fail: {report!r}"
+    assert report["status"] == "drift", report
+    assert report["behind"] == 1, report  # under the threshold: revert arm only
+    assert {r["path"] for r in report["reverts"]} == {"shared.txt"}, report
+    assert "SILENTLY REVERTING" in _out(_run(repo))
+
+
+def test_threshold_arm_fires_when_behind_beyond_max(tmp_path: Path) -> None:
+    """UNCHANGED ARM: BEHIND > max still fires, and reports no revert (#7455).
+
+    `_build(behind=30)` carries 1 own commit and empty main commits, so this is
+    not the ancestor shape and it cannot be a revert — the red is the threshold
+    arm alone. It passes on the old predicate too (the threshold arm is the
+    part of the tool the fix must NOT touch), so it is a no-regression control.
+    """
+    repo = _build(tmp_path, behind=30, merge_ref=False)
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload
+    assert payload["behind"] == 30, payload
+    assert payload["reverts"] == [], payload
+    text = _out(_run(repo))
+    assert "30 behind" in text and "> 20 max" in text, text
+    assert "SILENTLY REVERTING" not in text, text
 
 
 # ══════════════════════════════════════════════════════════════════════════
