@@ -372,13 +372,21 @@ class TestHealthEndpoints:
         seen = {}
         real_probe_db = mon.probe_db
 
-        def _spy_probe_db(sdk, setup_timeout=None):
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
             seen["setup_timeout"] = setup_timeout
-            return real_probe_db(sdk, setup_timeout=setup_timeout)
+            seen["acquire"] = acquire
+            return real_probe_db(sdk, setup_timeout=setup_timeout,
+                                 acquire=acquire)
 
         monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
         result = ha_mod._probe_db()
         assert seen["setup_timeout"] is None, seen
+        assert seen["acquire"] is not None, (
+            "#3446: _probe_db must hand the SDK acquisition to probe_db as "
+            "acquire= so it runs as a BOUNDED phase — passing an "
+            "already-acquired sdk leaves the phase unbounded on this "
+            "coordinator's thread and makes DB_PROBE_HARD_TIMEOUT unprovable"
+        )
         assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):
@@ -690,27 +698,35 @@ class TestHealthEndpoints:
         ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
         in the docker lane, red in the embedded one). ``HealthProbe.reset()``
         nulls its ``_worker`` handle, so the leftover thread cannot be joined.
-        Fixed by counting only the builds made on THIS test's thread, and by
-        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
-        The autouse fixture also resets the SDK cache, not just the probe
-        coordinators.
+        Fixed by counting only builds attributable to this test's own probe
+        path, and by pinning ``_probe_sdk_key`` so no thread can compute a
+        mismatching key. The autouse fixture also resets the SDK cache, not just
+        the probe coordinators. #3446 moved the build off the caller's thread,
+        so the count follows it onto the probe worker lane (see ``_factory``).
         """
         from unittest.mock import MagicMock
 
         import tortoise.hosted_api as ha_mod
 
         own_thread = threading.current_thread().name
-        calls = {"all": 0, "own": 0}
+        calls = {"all": 0, "own": 0, "probe_lane": 0}
 
         def _factory(*, namespace=None, graph_name=None):
-            # Only builds made by THIS test's two ``_probe_db()`` calls count.
-            # Leftover ``tortoise-health-probe`` threads from earlier tests
-            # share the process-global cache (and cannot be joined —
-            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
-            # counting them is what made the old assertion flaky.
+            # Count builds by the LANE they run on. Leftover
+            # ``tortoise-health-probe`` threads from earlier tests share the
+            # process-global cache (and cannot be joined — ``HealthProbe.reset()``
+            # drops its ``_worker`` handle), so the original test deliberately
+            # counted only its OWN thread's builds. #3446 moved the build off
+            # that thread and onto the shared probe worker, which made
+            # ``calls["own"] <= 1`` structurally 0 — a VACUOUS guard. The
+            # rewritten test asserts the thread move directly (``own == 0``)
+            # and lets ``first_sdk is second_sdk`` carry the anti-rebuild check.
             calls["all"] += 1
-            if threading.current_thread().name == own_thread:
+            name = threading.current_thread().name
+            if name == own_thread:
                 calls["own"] += 1
+            if name.startswith("tortoise-probe-worker"):
+                calls["probe_lane"] += 1
             sdk = MagicMock()
             sdk._get_proj.return_value.g.query.return_value = MagicMock()
             return sdk
@@ -735,11 +751,23 @@ class TestHealthEndpoints:
         assert first["ok"] is True and second["ok"] is True
         assert first_sdk is second_sdk, (
             "the probe rebuilt its connection between two consecutive checks")
-        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
-        # Zero is possible when a still-running probe from an earlier test won
-        # the race and warmed the cache first — that does not weaken the point.
-        assert calls["own"] <= 1, (
-            f"the two checks built the SDK {calls['own']}x — not reused")
+        # #3446: the build must happen on the PROBE WORKER lane, not on this
+        # test's thread. ``own == 0`` is the assertion that carries the weight:
+        # it reds the moment the acquisition moves back inline. (It replaces
+        # the old ``calls["own"] <= 1``, which became structurally 0 — and
+        # therefore VACUOUS — as soon as the acquisition left this thread.)
+        #
+        # Deliberately NOT asserted here: an upper bound on ``probe_lane``. Every
+        # leftover in-flight probe from an earlier test in this file builds on
+        # that same shared lane, so a count is the flaky half — and it is also
+        # redundant: a per-call rebuild is caught by ``first_sdk is
+        # second_sdk`` above. ``>= 1`` is monotone, so it cannot flake.
+        assert calls["probe_lane"] >= 1, (
+            "no SDK build reached the probe worker lane — the acquisition did "
+            "not run there")
+        assert calls["own"] == 0, (
+            "#3446: the SDK acquisition ran on the CALLER's thread — it must be "
+            "handed to probe_db as acquire= and bounded on the probe worker")
 
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
@@ -2955,6 +2983,71 @@ class TestSessionCapture:
             "issues/new?template=bug_report.yml"), b["report_url"]
 
 
+    def test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind(self, client):
+        """#3555: the LIST's `extracted` must count every non-turn point and
+        must agree with the DETAIL endpoint.
+
+        Measured defect: `list_sessions` filtered on `pointKind IN ['decision',
+        'statement']` while `get_session_detail` (both its count and its points
+        list, added under #822) used the non-turn filter, so the SAME session
+        reported a different `extracted` on the list than on the detail.
+
+        The reachable producers of that divergence are pinned separately here,
+        because they need DIFFERENT arms of the predicate: an UNTYPED point
+        (the M2 lane's shape -- extractor_v2 repairs a missing or
+        `unclassified` kind to 'statement' before the write, so NULL arrives
+        from M2) needs `IS NULL`, while a registered kind outside the old pair
+        (mintable through non-extractor write paths) needs `<> 'event'`.
+
+        The graph is built directly (not through POST /v1/sessions) because the
+        subject here is the READ predicate. Over the four points below the
+        candidate predicates separate: 3 = correct, 2 = the `IS NULL` arm
+        dropped, 1 = the old hardcoded pair, 4 = count every contained point
+        (which would report the TURN as an extraction).
+        """
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        sid = "sess-3555-nonturn"
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at='2026-10-05T00:00:00Z', s.turn_count=0 "
+            # 1. an UNTYPED point (no pointKind at all) -- the M2 lane's shape,
+            #    and the only reason the `IS NULL` arm exists:
+            "MERGE (p:Point {id:$sid + '-x1'}) "
+            "SET p.content='untyped (M2)', p.createdAt=1 "
+            "MERGE (s)-[:CONTAINS]->(p) "
+            # 2. a registered kind OUTSIDE the old pair, mintable through a
+            #    non-extractor write path:
+            "MERGE (r:Point {id:$sid + '-x2'}) "
+            "SET r.pointKind='requirement', r.content='counted too', r.createdAt=2 "
+            "MERGE (s)-[:CONTAINS]->(r) "
+            # 3. a kind the old pair already counted (regression):
+            "MERGE (d:Point {id:$sid + '-x3'}) "
+            "SET d.pointKind='decision', d.content='ship it', d.createdAt=3 "
+            "MERGE (s)-[:CONTAINS]->(d) "
+            # 4. a TURN, which must stay excluded:
+            "MERGE (t:Point {id:$sid + '-t9'}) "
+            "SET t.pointKind='event', t.content='[user] hi', t.createdAt=4 "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": sid})
+        try:
+            listed = client.get("/v1/sessions").json()["sessions"]
+            row = next((x for x in listed if x["id"] == sid), None)
+            assert row is not None, f"the session must be listed: {[x['id'] for x in listed][:5]!r}"
+            assert row["extracted"] == 3, (
+                "the list must count every NON-TURN point: the untyped (M2) "
+                "point needs the `IS NULL` arm, the 'requirement' point needs "
+                f"the `<> 'event'` arm, and the turn must stay excluded: {row!r}")
+            detail = client.get(f"/v1/sessions/{sid}").json()
+            assert detail["extracted"] == row["extracted"] == 3, (
+                "list and detail must agree on one session's extracted figure: "
+                f"list={row['extracted']!r} detail={detail['extracted']!r}")
+        finally:
+            proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s", params={"sid": sid})
+            proj.g.query("MATCH (p:Point) WHERE p.id STARTS WITH $sid DETACH DELETE p",
+                         params={"sid": sid})
+
+
 class TestSessionCaptureWriteVerb:
     """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
     verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
@@ -3393,28 +3486,26 @@ class TestSessionList:
             "actor_display", "turn_points", "extracted_points", "source"}
         assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
         for field in SESSION_READ_FIELDS:
-            # #3555: `extracted` is excluded from the LIST comparison — the
-            # one field on which the list endpoint is NOT the shared
-            # projection. `list_sessions` still counts with the legacy typed
-            # filter (pointKind IN ['decision','statement']) while the SDK
-            # and the detail endpoint count every non-turn Point
-            # (pointKind IS NULL OR <> 'event'). For an untyped M2 extraction
-            # — the documented normal shape — the list reports 0 and the
-            # other two report N (measured here: one injected untyped Point
-            # → sdk=2, detail=2, list=1). Asserting the list value would MASK
-            # that divergence rather than bind it; #3555 tracks it.
-            if field != "extracted":
-                assert read[field] == served[field], (
-                    f"{field} diverges between the SDK read ({read[field]!r}) "
-                    f"and GET /v1/sessions ({served[field]!r})")
+            # #3555: `extracted` is compared on ALL THREE surfaces now. It was
+            # excluded below this comment because the list endpoint computed
+            # that one field differently (legacy `pointKind IN
+            # ['decision','statement']` against the SDK/detail non-turn
+            # filter); the list now counts with the same predicate, so the
+            # exclusion is retired WITH the divergence instead of left to hide
+            # a re-divergence.
+            assert read[field] == served[field], (
+                f"{field} diverges between the SDK read ({read[field]!r}) "
+                f"and GET /v1/sessions ({served[field]!r})")
             assert read[field] == detail[field], (
                 f"{field} diverges between the SDK read ({read[field]!r}) "
                 f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
         # The hosted surfaces and the SDK read one node, so the shared field
         # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a TYPED point, which
-        # is why the list endpoint's legacy filter happens to agree here; a
-        # real untyped extraction diverges (#3555, excluded above).
+        # assertion vacuous — the mock extractor mints a TYPED point
+        # ('statement', a kind the legacy pair counted too), so this test
+        # binds SURFACE PARITY only; the predicate itself is discriminated by
+        # test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind
+        # (#3555).
         assert read["extracted"] >= 1
 
 
@@ -8909,7 +9000,9 @@ class TestSessionActorReadPath2600:
             real = str(proj.g.explain(
                 "MATCH (s:Session) WHERE s.actor_user_id = '" + _2600_UUID_A +
                 "' OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-                "WHERE p.pointKind IN ['decision', 'statement'] "
+                # #3555: the literal must track the real query, or this pin
+                # stops pinning the shape that ships.
+                "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
                 "RETURN s.id, s.created_at, s.turn_count, count(p), "
                 "s.actor_user_id, s.harness "
                 "ORDER BY s.created_at DESC LIMIT 50"))

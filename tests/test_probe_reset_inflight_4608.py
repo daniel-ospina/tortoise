@@ -80,19 +80,29 @@ class _FakeSDKFactory:
         return sdk
 
 
-def _fake_probe_db(sdk, setup_timeout=None) -> dict:
+def _fake_probe_db(sdk=None, setup_timeout=None, *, acquire=None) -> dict:
     """Stand-in for ``monitoring.probe_db`` on the cached handle.
 
-    Mirrors the real function's never-raise contract: a query on a handle that
-    was closed underneath it surfaces as ``{ok: False}`` — the verdict that used
-    to be recorded as the CURRENT generation.
+    Mirrors the real function's never-raise contract AND its #3446 ``acquire=``
+    signature: ``hosted_api._probe_db`` hands the SDK acquisition in as
+    ``acquire=``, so a fake that cannot accept it raises ``TypeError`` before
+    the gated query ever runs (the fake predates #3446 on this branch).
+    A query on a handle that was closed underneath it surfaces as
+    ``{ok: False}`` — the verdict that used to be recorded as the CURRENT
+    generation.
     """
+    if acquire is not None:
+        try:
+            sdk = acquire()
+        except Exception as exc:  # mirror probe_db's never-raise contract
+            return {"ok": False, "observed": True, "latency_ms": 0.0,
+                    "error": f"{type(exc).__name__}: {exc}"[:200]}
     try:
         sdk._get_proj().g.query("RETURN 1")
     except Exception as exc:
-        return {"ok": False, "latency_ms": 0.0,
+        return {"ok": False, "observed": True, "latency_ms": 0.0,
                 "error": f"{type(exc).__name__}: {exc}"[:200]}
-    return {"ok": True, "latency_ms": 0.1, "error": None}
+    return {"ok": True, "observed": True, "latency_ms": 0.1, "error": None}
 
 
 def _await_probe_quiescence(mod, timeout: float = 10.0) -> None:

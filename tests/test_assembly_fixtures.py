@@ -364,11 +364,15 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
         f"A-widened arm would be vacuous. Evidence head: {ev[:200]}")
     # non-vacuity: the DEFAULT window still admits in-pool same-subject crowd
     # rows — a starved/empty default arm must fail here, not pass silently.
+    # #3291: the token must be CROWD-UNIQUE. "deep-subject milestone" also
+    # appears in the two GOLD rows (tests/_assembly_graph.py:317), so a gold
+    # row ALONE satisfied this control and it did not pin crowd-row admission
+    # at all. "milestone was discussed" occurs only in the crowd rows (:301).
     # Depth is BOUNDED, not merely non-zero: the floor catches a pool that
     # collapsed to a handful of rows (the gold-count assertion above would
     # still hold) and the ceiling catches a DEFAULT window that silently
     # widened toward the 120-row fetch.
-    assert "deep-subject milestone" in ev, (
+    assert "milestone was discussed" in ev, (
         "R9 geometry broken: the DEFAULT window admits no crowd row — the "
         "pool-40 must bind below the golds, never starve. Evidence: "
         f"{ev[:200]!r}")

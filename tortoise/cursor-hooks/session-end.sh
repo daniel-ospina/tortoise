@@ -79,9 +79,11 @@ _record_breadcrumb() {
   # module dir but found no interpreter" branch, which is reached BECAUSE
   # python3 is missing — a python3-written breadcrumb could never run there.
   # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
-  # keeps it distinguishable from a ``sessions import`` capture failure, which
-  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
-  # a breadcrumb write can never break the exit-0 contract.
+  # keeps it distinguishable from a ``sessions import`` capture failure (#4314).
+  # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
+  # the ``capture-failure`` file and cannot destroy a live quota/network
+  # refusal. Best-effort: a breadcrumb write can never break the exit-0
+  # contract.
   # The ``kind`` argument distinguishes WHO is recording, and the distinction
   # is load-bearing: ``install-inert`` is the INSTALL leg's own evidence (an
   # installer that fired but captured nothing), while ``capture-failure`` is a
@@ -89,6 +91,8 @@ _record_breadcrumb() {
   # capture failure as ``install-inert`` would report a HEALTHY install as
   # INERT — precisely the inversion #4314 exists to prevent. It defaults to
   # the install-inert kind, so the pre-existing callers are unchanged.
+  # #5838: the kind ALSO decides the SLOT (see below), and this is the ONE
+  # place the filename is derived in this script.
   local harness="$1" detail="$2" kind="${3:-install-inert}"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
@@ -143,6 +147,21 @@ _record_breadcrumb() {
   esc_harness="${esc_harness//$'\f'/\\f}"
   esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
+  # #5838: `capture-failure` keeps the historical ``<harness>.json``;
+  # `install-inert` takes ``<harness>-install.json``. Decided from the KIND,
+  # which is the one input both the writer and `session verify` agree on.
+  # An unrecognised kind writes NOTHING.  The `*)` arm used to fall back to the
+  # capture slot — the one carrying a live quota/network refusal, i.e. exactly
+  # the collision #5838 exists to remove — and it did so silently.  `kind`
+  # defaults to `install-inert` (``${3:-install-inert}``), so the 2-argument
+  # callers above still take the install slot; this arm is reachable only by a
+  # genuinely new kind, which must be given a slot deliberately.
+  local crumb_file
+  case "$kind" in
+    capture-failure) crumb_file="$harness.json" ;;
+    install-inert) crumb_file="$harness-install.json" ;;
+    *) return 0 ;;
+  esac
   # #5919: redirect the WHOLE write block. Bash opens redirections left to
   # right and reports a failed open of the STDOUT target BEFORE a trailing
   # `2>/dev/null` takes effect, so an unwritable target dir leaked the shell's
@@ -150,7 +169,7 @@ _record_breadcrumb() {
   {
     printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
       "$esc_harness" "$esc" "$stamp" "$kind" \
-      > "$crumb_dir/$harness.json"
+      > "$crumb_dir/$crumb_file"
   } 2>/dev/null || true
 }
 
