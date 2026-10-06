@@ -1547,26 +1547,33 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("argument, both ways, with the weak parts named.")
     add("")
     _never = [r for r in tools if observed_usage(r) == "never called"]
-    # THE COUNT IS A CLAIM ABOUT A MEASUREMENT, so it is only made when one was taken.
-    # `used_by` carries `in use` / `never called` only when the baseline was cut on a machine
-    # that had the call log; a baseline cut without it leaves `observed_usage()` None for every
-    # row, `_never` empty, and this paragraph asserted "Two thirds of what we advertise has never
-    # been called by anything, including us (0 of 82)" — a negative nobody measured, in the very
-    # document the owner reads to decide what to cut, and self-contradicting besides. Report the
-    # measurement's ABSENCE instead. (Residual carried from the #5456 draft; the stance is
-    # CONTRIBUTING.md's own — "stated as one rather than implied to be automatic".)
-    if any(observed_usage(r) is not None for r in tools):
-        add("**The case for pinning a small advertised set.** Two thirds of what we advertise has never been")
-        add(f"called by anything, including us ({len(_never)} of {len(tools)}). Mainstream clients cap the tools they will show — a")
-        add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
-        add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
+    _measured = [r for r in tools if observed_usage(r) is not None]
+    # THE COUNT IS A CLAIM ABOUT A MEASUREMENT, so it is made only when EVERY row carries one.
+    # `observed_usage()` reads the row's own committed `used_by`, whose first token is `agents`
+    # / `never called` only when the baseline was cut with a call log available; with no such
+    # flag it returns None for the row. `any(...)` was not enough, because the denominator is
+    # ALL rows: `used_by` sits in NON_DERIVABLE_ROW_KEYS (it is excluded from the drift
+    # comparison precisely because it is machine-influenced), so a PARTIALLY flagged baseline
+    # can reach this render, and a count of flagged rows divided by every row states a
+    # quantity over rows nobody assessed. The old unconditional form was worse still: with no
+    # flag anywhere it published "Two thirds of what we advertise has never been called by
+    # anything, including us (0 of 82)" — a negative nobody measured, in the document the
+    # owner reads to decide what to cut, and self-contradicting besides. The prose also now
+    # derives its magnitude from `_never` instead of asserting "Two thirds", which was a
+    # hardcode that contradicted its own parenthetical at any other count. (Residual carried
+    # from the #5456 draft; the stance is CONTRIBUTING.md's own — "stated as one rather than
+    # implied to be automatic".)
+    if tools and len(_measured) == len(tools):
+        add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have never been")
+        add("called by anything, including us. Mainstream clients cap the tools they will show — a")
     else:
-        add("**The case for pinning a small advertised set.** This baseline records no usage signal: it was")
-        add("cut without the call log, so no row carries an `in use` / `never called` flag and **no count of")
-        add("uncalled tools is asserted here** — a count nobody measured is not evidence. Mainstream clients")
-        add("cap the tools they will show — a reported 40 in Cursor — so a surface this large is partly")
-        add("invisible to an agent, and we pay context for it on every turn. Every comparable we studied")
-        add("pins a smaller set,")
+        add("**The case for pinning a small advertised set.** No row of this baseline carries an")
+        add("`in use` / `never called` flag, so it records no usage measurement and **no count of")
+        add("uncalled tools is asserted here** — a count from no measurement is not evidence. Note what")
+        add("this does and does not say: it is an absence of evidence about our usage, not evidence that")
+        add("the tools are used. Mainstream clients cap the tools they will show — a")
+    add("reported 40 in Cursor — so most of this surface is invisible to an agent anyway, and we pay")
+    add("context for it on every turn. Every comparable we studied pins a smaller set,")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
     add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
     add("")

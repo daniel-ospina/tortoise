@@ -1863,54 +1863,118 @@ def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkey
         out.unlink(missing_ok=True)
 
 
-def test_the_render_makes_no_uncalled_count_when_the_baseline_has_no_usage_signal(
-    tmp_path, monkeypatch
-):
-    """The count is a claim about a MEASUREMENT, so it is only made when one was taken.
+def _render_manifest(sm, doc, tmp_path, monkeypatch) -> str:
+    """Render `doc`, and return the bytes `cmd_render` wrote.
 
-    `used_by` carries the `in use` / `never called` flag only when the baseline was cut
-    on a machine that had the call log. A baseline cut without one leaves
-    `observed_usage()` None for every row, so `_never` is empty — and the paragraph then
-    asserted "Two thirds of what we advertise has never been called by anything,
-    including us (0 of 82)": a negative nobody measured, in the document the owner reads
-    to decide what to cut, and self-contradicting besides. What is reported instead is
-    the measurement's ABSENCE.
-
-    The companion assertion pins the other direction — a recorded signal must still
-    print its count, so the guard cannot be satisfied by suppressing the claim always.
+    Both paths are redirected and `_read_manifest` resolves `MANIFEST_FILE` at call time,
+    so the text asserted on is the RENDER's own output — never the committed document,
+    which is what made an earlier form of this check vacuous.
     """
-    sm = _load_manifest_tool()
-    doc = copy.deepcopy(_manifest())
-    stripped = 0
-    for row in doc["rows"]:
-        parts = [p.strip() for p in (row.get("used_by") or "").split(",")]
-        if parts and parts[0] in ("agents", "never called"):
-            row["used_by"] = ", ".join(["tooling", *[p for p in parts[1:] if p]])
-            stripped += 1
-    assert stripped, "the fixture must actually remove the usage signal"
-
     path = _manifest_at(sm, doc, tmp_path)
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     out = _render_scratch()
     monkeypatch.setattr(sm, "RENDERED_FILE", out)
     try:
         assert sm.cmd_render(argparse.Namespace()) == 0
-        text = out.read_text(encoding="utf-8")
+        return out.read_text(encoding="utf-8")
     finally:
         out.unlink(missing_ok=True)
 
-    assert "including us (0 of" not in text, (
-        "the render asserted an uncalled count of 0 from a baseline that recorded no "
-        "usage signal at all — a negative nobody measured"
+
+def _with_first_used_by_token(doc: dict, token: str) -> dict:
+    """Rewrite EVERY row's first `used_by` token — unconditionally, so the fixture does
+    not depend on the state it is about to remove."""
+    out = copy.deepcopy(doc)
+    for row in out["rows"]:
+        rest = [p.strip() for p in (row.get("used_by") or "").split(",") if p.strip()]
+        row["used_by"] = ", ".join([token, *[p for p in rest[1:] if p not in ("agents", "never called")]])
+    return out
+
+
+def test_the_render_makes_no_uncalled_count_when_no_row_carries_a_usage_signal(
+    tmp_path, monkeypatch
+):
+    """The count is a claim about a MEASUREMENT, so it is made only when one was taken.
+
+    `observed_usage()` reads the row's own committed `used_by`; with no `in use` /
+    `never called` flag on any row it returns None for every row, `_never` is empty — and
+    the paragraph then published "Two thirds of what we advertise has never been called
+    by anything, including us (0 of 82)": a negative nobody measured, in the document
+    the owner reads to decide what to cut, and self-contradicting besides. What is
+    reported instead is the measurement's ABSENCE — and only that: the render cannot see
+    WHY the flag is missing, so it must not name a cause.
+    """
+    sm = _load_manifest_tool()
+    doc = _with_first_used_by_token(_manifest(), "tooling")
+    assert doc["rows"], "the fixture must carry rows"
+    assert all(sm.observed_usage(r) is None for r in doc["rows"]), (
+        "the fixture must leave NO row with a usage signal"
     )
-    assert "never been\ncalled by anything" not in text, (
-        "the hardcoded 'Two thirds ... has never been called' survived the guard"
+
+    text = _render_manifest(sm, doc, tmp_path, monkeypatch)
+
+    assert "including us (" not in text, (
+        "the render asserted an uncalled count from a baseline that carries no usage "
+        "signal at all — a negative nobody measured"
     )
     assert "no count of" in text and "asserted here" in text, (
         "the render neither measured the count nor said it was not asserting one"
     )
+    # The cause is not observable from the committed `used_by` cells, so the render must
+    # not assert one — that would be the very defect this guard removes, in new prose.
+    assert "cut without" not in text and "this baseline was cut" not in text.lower(), (
+        "the render named a cause for the missing flag that it cannot observe"
+    )
 
-    # And the measured case is unchanged: the committed baseline still prints its count.
-    assert "(55 of 82)" in RENDERED.read_text(encoding="utf-8"), (
-        "the committed document must still carry the count its baseline does measure"
+
+def test_the_render_prints_a_measured_zero_rather_than_none_at_all(tmp_path, monkeypatch):
+    """A count of ZERO that WAS measured must still be printed (guard on the signal, not
+    on the count).
+
+    Every row carrying `agents` and none `never called` is a legitimate measurement whose
+    answer is "0 of N" — `_never` is empty, yet a signal exists. This is the one state
+    that separates the shipped guard from a wrong `if _never:` guard, which would report
+    the measurement as absent and silently swap a real zero for no answer at all.
+    """
+    sm = _load_manifest_tool()
+    doc = _with_first_used_by_token(_manifest(), "agents")
+    assert all(sm.observed_usage(r) == "in use" for r in doc["rows"])
+
+    text = _render_manifest(sm, doc, tmp_path, monkeypatch)
+
+    tools_total = len([r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")])
+    assert f"0 of the {tools_total} tools we advertise" in text, (
+        "a MEASURED zero was suppressed — the guard keyed on the count being non-zero "
+        "instead of on a signal existing"
+    )
+    assert "no count of" not in text, (
+        "the render claimed it was not asserting a count while it had a measurement"
+    )
+
+
+def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monkeypatch):
+    """The measured branch prints the count IT read, and nothing it did not.
+
+    Read from the RENDER's own output, not from the committed document: an earlier form
+    of this check asserted on `RENDERED.read_text()`, so it passed even under a guard
+    that always reported the measurement as absent.
+    """
+    import re
+
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    never = sum(1 for r in doc["rows"] if sm.observed_usage(r) == "never called")
+    total = len([r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")])
+
+    text = _render_manifest(sm, doc, tmp_path, monkeypatch)
+
+    assert f"{never} of the {total} tools we advertise" in text, (
+        "the measured branch did not print the count its own baseline carries"
+    )
+    assert "Two thirds" not in text, (
+        "the magnitude is hardcoded, so it contradicts its own parenthetical at any "
+        "other count — it must be derived from the measurement"
+    )
+    assert re.search(r"including us\.", text), (
+        "the measured sentence lost its shape"
     )
