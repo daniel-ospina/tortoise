@@ -28,6 +28,7 @@ it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -189,6 +190,29 @@ def test_lychee_key_is_stable_across_the_run_population():
     assert dlb.lychee_key(other) != dlb.lychee_key(cached)
 
 
+def test_lychee_placeholder_target_keeps_the_offending_line_as_its_identity():
+    """With NO URL there is nothing else to key on, so the line must be kept.
+
+    lychee reports the placeholder target `error:` when it cannot extract a URL
+    at all. `path|target` then carries no distinguishing content, so two broken
+    links in one file collapse to one key and editing one to the other keeps the
+    occurrence count — a real new dead link absorbed. Measured on the committed
+    snapshot: two `fdir/README.md` entries (`/BENCHMARKS.md`, `/documentation.md`)
+    both keyed `...|error:`. The status here is the OFFENDING LINE's own text,
+    not the run's cache state, so it is safe to key on.
+    """
+    a = ("docs/x.md", "error:", "Cannot resolve root-relative link '/BENCHMARKS.md'")
+    b = ("docs/x.md", "error:", "Cannot resolve root-relative link '/documentation.md'")
+    assert dlb.lychee_key(a) != dlb.lychee_key(b)
+    assert dlb.lychee_key(a) == "docs/x.md|error:|Cannot resolve root-relative link '/BENCHMARKS.md'"
+    # A cache marker is still excluded even on the placeholder path: no key
+    # anywhere may vary with the run's file population.
+    assert dlb.lychee_key(("docs/x.md", "error:", "Error (cached)")) == "docs/x.md|error:"
+    # A real target keeps the status-free key regardless of its status text.
+    real = ("docs/x.md", "https://example.invalid/a", "Cannot resolve root-relative link '/x'")
+    assert dlb.lychee_key(real) == "docs/x.md|https://example.invalid/a"
+
+
 # ── the check: known passes, new fails ───────────────────────────────────────
 
 
@@ -292,8 +316,42 @@ def test_every_mapping_names_a_generator_that_actually_renders_the_doc():
             f"{document} carries no generated marker, so it must not be in GENERATED_DOCS"
         )
         source = (ROOT / generator).read_text(encoding="utf-8")
-        assert Path(document).name in source, (
-            f"{generator} never references {Path(document).name} — it does not render it"
+        name = Path(document).name
+        assert name in source, (
+            f"{generator} never references {name} — it does not render it"
+        )
+        # The reference must be a WRITE, not a read. `name in source` alone also
+        # matches a `read_text()` reference, which is exactly the #7475
+        # misdirection: `docs/product/beta-sdk-surface.md` is read by
+        # `bridge_table.py` and a finding there must NOT send the author to it.
+        # Resolve the identifier the doc path is bound to, then require that
+        # identifier to be written — directly, or through an argparse option
+        # defaulted to it (`args.doc.write_text(...)`, default `DOC_FILE`).
+        binding = re.search(
+            rf"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^\n]*[\"']{re.escape(name)}[\"']",
+            source,
+            re.M,
+        )
+        assert binding is not None, (
+            f"{generator} references {name} but binds it to no identifier, so it "
+            "cannot be shown to WRITE it"
+        )
+        ident = binding.group(1)
+        written = re.search(rf"\b{re.escape(ident)}\.write_text\s*\(", source) is not None
+        if not written:
+            for opt in re.finditer(
+                rf"add_argument\(\s*[\"']--([A-Za-z0-9-]+)[\"'][^)]*default\s*=\s*{re.escape(ident)}\b",
+                source,
+                re.S,
+            ):
+                dest = opt.group(1).replace("-", "_")
+                if re.search(rf"\bargs\.{re.escape(dest)}\.write_text\s*\(", source):
+                    written = True
+                    break
+        assert written, (
+            f"{generator} binds {name} to `{ident}` but never writes it — a mapping "
+            "to a generator that only READS the doc sends the author to a fix that "
+            "cannot fix it (#7475)"
         )
 
 
@@ -541,6 +599,25 @@ def test_differ_step_exists_and_is_gated_with_the_linters(name: str, gate: str):
     assert "${{" in step["env"]["EXPECTED_MD_FILES"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Get changed markdown files", "Get changed markdown files (main health)"],
+)
+def test_changed_paths_are_guarded_against_glob_expansion(name: str):
+    """cli2 and lychee expand every positional arg as a globby pattern — extglob too.
+
+    `./docs/a[1].md` is linted as `./docs/a1.md`, and `./docs/@(README).md` as
+    `./docs/README.md`: the linter truthfully reports `Linting: 1 file` for a
+    file it never read, the differ's cardinality proof is satisfied, and a new
+    finding in the changed file passes. A denylist of `* ? [ ] { }` was measured
+    bypassable through extglob, so both count steps must carry the ALLOWLIST.
+    """
+    run = _by_name(name)["run"]
+    assert "grep -qvE" in run, "a denylist is bypassable via extglob (@(x), +(x))"
+    assert "[A-Za-z0-9._@/-]" in run
+    assert "exit 1" in run
+
+
 def test_linters_capture_output_instead_of_deciding_the_verdict():
     """The steps must FEED the differ: the report to a file, link JSON to a file.
 
@@ -598,12 +675,12 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     counts = baseline["snapshot"]["counts"]
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
     # deliberate append, never noise. The lychee half also checks REMOTE links,
-    # whose count drifts between generations (measured 151-160) for reasons no
-    # author controls, so its ceiling leaves headroom for that variance while
-    # still refusing a bulk append. The asymmetry is deliberate — tightening
-    # lychee to its committed value would red an honest re-baseline on a network
-    # hiccup, which is the gate-refuses-honest-work failure mode.
-    ceilings = {"markdownlint": 11238, "lychee": 180}
+    # whose count drifts between generations for reasons no author controls, so
+    # its ceiling is the MAXIMUM OBSERVED across generations (151-160, measured
+    # three times) — not a round number: slack above the observed range is an
+    # amnesty window, so it is bounded at 160 and any re-baseline above it must
+    # raise this row out loud. The asymmetry is deliberate.
+    ceilings = {"markdownlint": 11238, "lychee": 160}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "

@@ -59,9 +59,12 @@ number** — a line-number key would invalidate the whole snapshot the moment an
 file grew above the offending line, which is the churn this exists to stop.
 
   * markdownlint — ``path|RULE|column|normalized_detail``
-  * lychee       — ``path|link_target``
+  * lychee       — ``path|link_target`` (status text is NOT part of the key;
+                   for lychee's ``error:`` placeholder — where there is no URL
+                   to key on — the offending line's own text is used instead)
 
-The lychee key deliberately carries NO status text. lychee reports a URL it has
+For a finding with a REAL target, the lychee key deliberately carries no status
+text. lychee reports a URL it has
 already seen in a run as ``Error (cached)``, so the status is a property of the
 RUN'S FILE POPULATION — the same untouched link keys differently when the run
 covers the whole repo (what ``update`` does) and when it covers only a PR's
@@ -69,6 +72,15 @@ changed files (what CI does). A status in the key therefore reds an unrelated PR
 on an inherited finding, which is the #7475 failure this exists to remove. The
 status IS still shown in the report; it is just not part of the identity. Two
 findings on one target stay distinguished by the occurrence count below.
+
+PLACEHOLDER TARGETS ARE THE EXCEPTION, and they are the opposite failure. When
+lychee cannot extract a URL it records the target ``error:``, and ``path|error:``
+has no distinguishing content: two different broken links in one file collapse to
+one key, so editing one to the other keeps the count and absorbs a new dead link.
+For those findings only the offending line's own text is the identity — it is
+source content, not run state, and it is exactly what the paragraph above
+promises changes when the line is edited. A bare ``Error (cached)`` marker is
+still excluded even there, so no key anywhere varies with the run's population.
 
 ``normalized_detail`` keeps the rule's message and its ``[Context: …]`` (the
 offending line's text), and ``column`` is horizontal, so both survive a shift of
@@ -148,6 +160,10 @@ MARKDOWNLINT_SUMMARY = re.compile(
     r"^Summary: (?P<issues>\d+) issues? in (?P<files>\d+) files?$", re.M
 )
 MARKDOWNLINT_LINTING = re.compile(r"^Linting: (?P<files>\d+) files?$", re.M)
+# A bare cache marker in lychee's status. It is the ONE status value that
+# describes the RUN's file population rather than the finding, so it is never
+# allowed into a key (see `lychee_key`).
+_CACHE_MARKER = re.compile(r"^\s*Error \(cached\)\s*$", re.I)
 
 # Files rendered by a generator, mapped to the generator that must be edited.
 # Kept explicit (rather than sniffed) so the fix target is unambiguous; the
@@ -272,8 +288,26 @@ def lychee_key(finding: tuple[str, str, str]) -> str:
     (``Error (cached)``), so keying on it makes an untouched link look new
     whenever the file population changes between ``update`` and CI. The status is
     still reported; it just cannot decide whether a finding is new.
+
+    ONE EXCEPTION, and it is the opposite failure: when lychee could not extract
+    a URL at all it reports the placeholder target ``error:``, and then
+    `path|target` has NO distinguishing content — two different broken links in
+    one file collapse to one key, a swap keeps the occurrence count, and a real
+    new dead link is absorbed (measured: two `fdir/README.md` entries, one for
+    `/BENCHMARKS.md` and one for `/documentation.md`, both keyed the same). For
+    those findings only, the status text IS the identity: it is the offending
+    line's own content, not the run's cache state, and it is exactly what the
+    docstring promises changes when the offending line is edited. The cache
+    marker is excluded even here, so no key anywhere varies with the population.
     """
-    return "|".join(finding[:2])
+    path, target = finding[0], finding[1]
+    status = finding[2] if len(finding) > 2 else ""
+    if target and target != "error:":
+        return f"{path}|{target}"
+    if _CACHE_MARKER.match(status):
+        # No target AND only a cache marker: nothing portable to key on.
+        return f"{path}|{target}"
+    return f"{path}|{target}|{status}"
 
 
 # ── generated-file detection ─────────────────────────────────────────────────
