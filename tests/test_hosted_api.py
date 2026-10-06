@@ -308,7 +308,7 @@ def _reset_health_probe_state(monkeypatch) -> None:
     ha_mod._HEALTH_PROBE.reset()
     ha_mod._READY_PROBE.reset()
     ha_mod._CONTROL_PLANE_PROBE.reset()
-    # Round-2 review (#3062): reset the process-global SDK CACHE too, not just the
+    # #3062's round-2 review: reset the process-global SDK CACHE too, not just the
     # coordinators. A leftover probe worker can rebuild ``_probe_sdk`` with the
     # previous env key after this fixture has run, which is what made
     # ``test_probe_connection_is_reused_not_rebuilt_per_call`` count 2 builds
@@ -317,8 +317,7 @@ def _reset_health_probe_state(monkeypatch) -> None:
     # This and ``_reset_probe_worker()`` below are COMPLEMENTARY, not alternatives:
     # nulling the worker slot does not stop an already-abandoned acquisition from
     # re-populating ``_PROBE_SDK_CACHE`` under the old env key, and clearing the
-    # cache does not release an occupied worker slot. Removing either re-reds that
-    # test in the embedded lane.
+    # cache does not release an occupied worker slot.
     ha_mod._probe_sdk_reset()
     # #3396: the coordinators are not the only process-global singleton — the
     # shared ``monitoring._PROBE_WORKER`` is submitted to by the REAL ``_probe_db``
@@ -349,17 +348,11 @@ def _reset_health_probe(monkeypatch):
     at ``PROBE_SDK_ACQUISITION_BUDGET`` keeps its single slot. A worker that is
     occupied but still ``alive`` is handed back forever by the lazy accessor, so
     without the reset below the slot is never recovered and a later direct
-    ``_probe_db()`` can time out (``first["ok"] is False``).
-    ``monitoring._reset_probe_worker()`` is the escape hatch ops uses for the
-    same condition; ``tests/test_monitoring.py``'s ``_fresh_probe_worker``
-    calls it on both sides of the yield for this reason.
-
-    NOTE — the hang tests below are NOT the cause, and the earlier wording here
-    said they were: they ``monkeypatch.setattr(ha_mod, "_probe_db", _hang)``, so
-    their 600 s sleep runs on the COORDINATOR's own ``tortoise-health-probe``
-    thread and never reaches ``tortoise-probe-worker``. The sentence two
-    paragraphs up ("the hang tests below deliberately wedge IT") is about the
-    coordinator and remains correct.
+    ``_probe_db()`` can time out (``first["ok"] is False``). ``monitoring._reset_probe_worker()``
+    is the escape hatch available for ops recovery, and is what
+    ``tests/test_monitoring.py``'s ``_fresh_probe_worker`` calls on both sides of
+    its yield. (That coordinator sentence above is about the health COORDINATOR
+    and is a different object from the shared worker named here.)
     """
     _reset_health_probe_state(monkeypatch)
     yield
