@@ -290,6 +290,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 EXIT_CLEAN = 0
 EXIT_COLLISION = 1
@@ -331,6 +332,11 @@ PR_LIMIT = 1000
 # against the live API (#5251). `per_page=100` also no longer resets on this
 # host (3/3 runs returned 100 items), so one page can be a full one.
 CLOSED_PR_LIMIT = 100
+#: Page size for the TARGETED head-ref lookup (#5485). Bounded on purpose: the
+#: lookup runs only for local refs that match the issue number AND survive every
+#: predicate, so it is normally 0-2 calls; a FULL page is treated as a possible
+#: truncation and refused rather than read as "no merged PR".
+_TARGETED_PR_PAGE = 100
 
 # One request's wall-clock budget. The multi-request enumeration this replaced
 # needed 600 s; a single call must finish well inside the default.
@@ -2123,6 +2129,8 @@ def _branch_terminal_state(
 def _branch_terminal_state_from_prs(
     gh_bin: str, slug: str | None, cwd: str, timeout: float,
     branch: str, sha: str | None, main_tip: str | None,
+    first_parent: set[str] | None = None,
+    ancestor_merged: set[str] | None = None,
 ) -> str | None:
     """The TARGETED terminal test for ONE local branch — the sampled window's fix.
 
@@ -2136,8 +2144,10 @@ def _branch_terminal_state_from_prs(
 
     This asks GitHub about THIS ref's PRs, over REST (`gh api`), for the same
     reason the closed-PR surface is REST: the `gh pr list` GraphQL path resets on
-    this host (#3587). It demotes ONLY on the predicate decision D4 rests on — a
-    MERGED PR whose `head.sha` EQUALS this branch's tip:
+    this host (#3587). It demotes on EITHER of TWO arms — the exact one that
+    decision D4 rests on (a MERGED PR whose `head.sha` EQUALS this branch's tip),
+    and CONTAINMENT (the tip is an ANCESTOR of a MERGED PR's head, which is what
+    closes #5485's tip-divergence half):
 
       * a branch name REUSED after its merge has moved past that sha and keeps
         blocking (the merge is not evidence about the NEW commits),
@@ -2155,22 +2165,72 @@ def _branch_terminal_state_from_prs(
     """
     if not slug or not sha:
         return None
+    # ⛔ THE SAME THREE GUARDS PREDICATE 1 USES, AND THEY ARE REQUIRED HERE FOR A
+    # SHARPER REASON: this function is called PRECISELY when
+    # `_branch_terminal_state` has ALREADY refused, so a guard omitted here is a
+    # guard BYPASSED BY CONSTRUCTION. `sha != main_tip` alone is ONE COMMIT DEEP
+    # (predicate 1's own words): a lane that has merely CLAIMED the issue by
+    # creating `fix/<N>-…` sits on a main-line commit, and that commit can be a
+    # merged PR's head (fast-forward, rebase or empty-diff landing) — so once main
+    # advances by one, the weak test passes and a branch with NO COMMITS OF ITS
+    # OWN is read terminal: a live lane read as free, the dangerous direction.
+    # Predicate 1 closes that with the first-parent witness and the `--merged`
+    # fallback; mirrored here clause for clause (#5595 cycles 5 and 6).
     if sha == main_tip:
         return None
+    if first_parent is not None and sha in first_parent:
+        return None
+    if (
+        main_tip is not None
+        and first_parent is None
+        and (ancestor_merged is None or branch in ancestor_merged)
+    ):
+        return None
     owner = slug.split("/")[0]
+    # ⛔ THE REF IS PERCENT-ENCODED INTO THE QUERY. `git check-ref-format` permits
+    # `&`, `#`, `+` and `%` in a ref, and a ref name in a shared clone is
+    # writer-influenced: interpolated raw, a branch named `fix/N&head=owner:other`
+    # adds a SECOND `head=` parameter, the API honours the LAST one, and the
+    # lookup is then answered by a DIFFERENT branch's PRs — which breaks the
+    # scoping this arm's whole soundness argument rests on. `/` and `:` are left
+    # intact (the form verified to resolve against the API).
+    query = urlencode(
+        {
+            "state": "all",
+            "head": f"{owner}:{branch}",
+            "per_page": _TARGETED_PR_PAGE,
+            "sort": "created",
+            "direction": "desc",
+        },
+        quote_via=quote,
+        safe="/:",
+    )
     args = [
         "api",
-        f"repos/{slug}/pulls?state=all&head={owner}:{branch}&per_page=20",
+        f"repos/{slug}/pulls?{query}",
         "--jq",
         'map({number, state, headSha: (.head.sha // ""), '
         'mergedAt: (.merged_at // "")})',
     ]
-    try:
-        prs = _gh_json(gh_bin, args, cwd, timeout)
-    except SurfaceError:
-        return None
+    # ⛔ NO INNER SWALLOW, so the CALLER can count the inability and report it in
+    # the surface note. This used to `return None` on failure, which made the
+    # caller's `except SurfaceError` unreachable and the promised "⚠ … could not
+    # run" note DEAD CODE — leaving an unanswerable lookup indistinguishable from
+    # "no merged PR exists". The ref still keeps blocking either way.
+    prs = _gh_json(gh_bin, args, cwd, timeout)
     if not isinstance(prs, list):
-        return None
+        raise SurfaceError(
+            f"head-ref lookup for {branch} returned {type(prs).__name__}, not a list"
+        )
+    # ⛔ A FULL PAGE IS REFUSED, NOT READ AS "NOT FOUND". `sort=created desc` puts
+    # the OLDEST PR last, so the merged PR this function exists to find is exactly
+    # what falls off the page — the silent answer would be the one that keeps the
+    # issue blocked forever (#5485) while looking like a completed lookup.
+    if len(prs) >= _TARGETED_PR_PAGE:
+        raise SurfaceError(
+            f"head-ref lookup for {branch} hit its {_TARGETED_PR_PAGE}-PR page cap; "
+            "an older merged PR may be off-page"
+        )
     for pr in prs:
         if not isinstance(pr, dict):
             continue
@@ -2229,9 +2289,10 @@ def _tip_is_ancestor_of(
     Asked of GITHUB rather than computed locally because a merged PR's head
     object is usually absent from the local clone (after a squash merge it is
     not an ancestor of main), and fetching it would be a second transport for a
-    fact one REST call answers exactly. Any failure — non-2xx, a missing or odd
-    `status`, a non-dict payload — returns False, so an unanswerable question
-    keeps the ref BLOCKING.
+    fact one REST call answers exactly. ⛔ A FAILURE PROPAGATES (`SurfaceError`)
+    rather than returning False: the caller counts it and names the inability in
+    the surface note, because "I could not ask" must not be presented as "there
+    is no such PR". The ref keeps blocking either way.
     """
     args = [
         "api",
@@ -2239,12 +2300,12 @@ def _tip_is_ancestor_of(
         "--jq",
         "{status: .status}",
     ]
-    try:
-        payload = _gh_json(gh_bin, args, cwd, timeout)
-    except SurfaceError:
-        return False
+    payload = _gh_json(gh_bin, args, cwd, timeout)
     if not isinstance(payload, dict):
-        return False
+        raise SurfaceError(
+            f"compare/{tip[:9]}...{head_sha[:9]} returned "
+            f"{type(payload).__name__}, not an object"
+        )
     return str(payload.get("status") or "").strip().lower() in ("ahead", "identical")
 
 
@@ -2264,10 +2325,11 @@ def scan_branch_surface(
 
       1. **self** — the ref is the caller's OWN branch (#3504 class 4)
       2. **terminal** — its content already landed (#5186)
-      2b. **terminal, targeted** — a MERGED PR whose head is this ref's tip, found
-          outside the closed-PR sample (#5485); supplied by the caller, which has
-          the gh binary and the resolved slug, and never demoted on a
-          non-exact match
+      2b. **terminal, targeted** — a MERGED PR whose head is this ref's tip, or
+          whose head CONTAINS this ref's tip, found outside the closed-PR
+          sample (#5485); supplied by the caller, which has the gh binary and
+          the resolved slug. Demoted on EITHER an exact tip/hold-sha match OR
+          containment — see `_branch_terminal_state_from_prs`
       3. otherwise **blocking** — a live lane that names this issue
 
     A self or terminal ref is reported (never silent) at `weak` strength, which
@@ -2302,8 +2364,10 @@ def scan_branch_surface(
             )
             continue
         # #5485: the tests above cannot see a squash-merge older than the closed-PR
-        # sample. The caller looked THAT up for exactly the refs reaching here, and
-        # a reason exists only for an EXACT tip/hold-sha match on a merged PR.
+        # sample. The caller looked THAT up for exactly the refs reaching here, and a
+        # reason exists only for an EXACT tip/hold-sha match on a merged PR, or when
+        # the tip is CONTAINED in one (ancestry) — both supplied by the caller, which
+        # is where the fail-open guards live.
         targeted = (targeted_terminal or {}).get(ref)
         if targeted is not None:
             surface.add(
@@ -3540,7 +3604,12 @@ def run_preflight(
     # already fetches (`head.sha` + `merged_at` are both on the REST payload).
     # The branch surface uses them for the squash-merge test (#5186) at ZERO
     # added API cost — decision D4, which is why that test reuses this list
-    # instead of issuing a `gh pr list --head <ref>` per branch.
+    # instead of issuing a `gh pr list --head <ref>` per branch. ⛔ D4's
+    # ZERO-COST CONSTRAINT IS AMENDED BY #5485, and this comment is the place it
+    # would otherwise be lost: the TARGETED lookup above DOES issue one bounded
+    # REST call (plus a compare when the tip is not the PR head) for local refs
+    # that match the issue number AND survive every predicate — normally 0-2 calls,
+    # never a call per branch. The reuse path is unchanged for predicate 1.
     merged_head_shas: set[str] = set()
     for surface_name, state, limit in (
         (SURFACE_OPEN_PRS, "open", open_pr_limit),
@@ -3761,6 +3830,8 @@ def run_preflight(
                     try:
                         _reason = _branch_terminal_state_from_prs(
                             gh_bin, slug, cwd, timeout, _ref, _sha, main_tip,
+                            first_parent=first_parent,
+                            ancestor_merged=ancestor_merged,
                         )
                     except SurfaceError:
                         targeted_failures += 1

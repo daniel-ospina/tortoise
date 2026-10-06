@@ -4652,6 +4652,7 @@ class BranchTerminalLookupTests(unittest.TestCase):
     SHA = "adcfedc4221329a0f5ae9079248b3b0261134a73"
     PR_HEAD = "a749c662d075a5dc0c96560b21b784578e5c1d63"
     MAIN_TIP = "b9c1a1323000000000000000000000000000000000"
+    BRANCH = "fix/6134-6146-6151-graph-correctness"
 
     @classmethod
     def setUpClass(cls):
@@ -4662,9 +4663,27 @@ class BranchTerminalLookupTests(unittest.TestCase):
         sys.modules["cp_under_test"] = cls.mod
         spec.loader.exec_module(cls.mod)
 
-    def _call(self, prs, status="ahead", sha=None, main_tip=None, raises=False):
-        """Drive the real function with `_gh_json` stubbed at the boundary."""
+    def _call(self, prs, status="ahead", sha=None, main_tip=None, raises=False,
+              first_parent=None, ancestor_merged=frozenset(), branch=None):
+        """Drive the real function with `_gh_json` stubbed at the boundary.
+
+        `ancestor_merged` defaults to an EMPTY frozen set, i.e. "the `--merged`
+        walk RAN and this ref was not in it" — the ordinary production state.
+        `None` is the different, deliberate state where that walk could NOT run,
+        and the function must then refuse the demotion (fail-closed); pass it
+        explicitly to pin that arm. (`frozenset()` rather than `set()` only to
+        avoid a mutable default.)
+
+        The stub records every `args` list it is called with (`self.seen`) so a
+        test can pin the REQUEST, not just the response: a projection or filter
+        regression would otherwise make these arms silently inert while every
+        response-shaped assertion still passed (the class PR #5595's cycle 1
+        raised on this same file).
+        """
+        self.seen = []
+
         def fake(_gh, args, _cwd, _timeout):
+            self.seen.append(list(args))
             if raises:
                 raise self.mod.SurfaceError("gh failed")
             if any("compare" in a for a in args):
@@ -4674,9 +4693,11 @@ class BranchTerminalLookupTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_gh_json", side_effect=fake):
             return self.mod._branch_terminal_state_from_prs(
                 "gh", "daniel-ospina/tortoise", ".", 30.0,
-                "fix/6134-6146-6151-graph-correctness",
+                "fix/6134-6146-6151-graph-correctness" if branch is None else branch,
                 self.SHA if sha is None else sha,
                 self.MAIN_TIP if main_tip is None else main_tip,
+                first_parent=first_parent,
+                ancestor_merged=ancestor_merged,
             )
 
     def _merged_pr(self, head_sha):
@@ -4735,10 +4756,91 @@ class BranchTerminalLookupTests(unittest.TestCase):
     def test_missing_head_sha_does_not_crash_and_does_not_demote(self):
         self.assertIsNone(self._call(self._merged_pr("")))
 
-    def test_gh_failure_keeps_the_ref_blocking(self):
-        # The fail-closed default: the caller keeps the ref BLOCKING, so an
-        # unanswerable question must never become a demotion.
-        self.assertIsNone(self._call(self._merged_pr(self.SHA), raises=True))
+    def test_tip_on_mains_first_parent_chain_never_demotes(self):
+        # ⛔ THE P0 BOTH REVIEWERS FOUND, and the reason `sha != main_tip` is not
+        # enough: `_branch_terminal_state_from_prs` is reached precisely when
+        # `_branch_terminal_state` has ALREADY refused, so any guard omitted here
+        # is bypassed BY CONSTRUCTION. A lane that merely CLAIMED the issue by
+        # creating `fix/<N>-…` sits on a main-line commit; that commit can be a
+        # merged PR's head (fast-forward / rebase / empty-diff landing); and ONE
+        # commit of drift makes the weak guard pass. Predicate 1 refuses on the
+        # first-parent witness for exactly this state, so this arm must too —
+        # otherwise a branch with no commits of its own is read terminal, i.e. a
+        # live lane reported free.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), first_parent={self.SHA}),
+            "a tip on main's first-parent chain must never demote",
+        )
+
+    def test_tip_in_the_merged_fallback_set_never_demotes(self):
+        # The second half of predicate 1's exclusion: with the first-parent
+        # witness UNAVAILABLE, a tip in the `--merged` walk's set is still a
+        # commit main already contains, so it cannot be an absorbed branch head.
+        self.assertIsNone(
+            self._call(
+                self._merged_pr(self.SHA),
+                first_parent=None,
+                ancestor_merged={self.BRANCH},
+            ),
+            "a tip in the --merged set must never demote",
+        )
+
+    def test_a_full_page_is_refused_rather_than_read_as_not_found(self):
+        # `sort=created desc` puts the OLDEST PR last — so the merged PR this
+        # lookup exists to find is exactly what falls off a full page. Reading
+        # that as "not found" would re-create the very bug #5485 removes, while
+        # looking like a completed lookup.
+        page = [self._merged_pr("aa" * 20)[0]] * self.mod._TARGETED_PR_PAGE
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(page)
+
+    def test_a_missing_merged_walk_refuses_rather_than_demoting(self):
+        # The third clause of predicate 1's exclusion, and the state it exists for:
+        # main's tip is known, the first-parent witness is NOT readable, and the
+        # `--merged` walk could not run either. Then `sha != main_tip` is the only
+        # witness left — one commit deep — so the demotion is REFUSED. This is the
+        # fail-closed direction and it must survive any refactor of the guards.
+        self.assertIsNone(
+            self._call(
+                self._merged_pr(self.SHA),
+                first_parent=None,
+                ancestor_merged=None,
+            ),
+            "with no witness available the demotion must be refused",
+        )
+
+    def test_gh_failure_propagates_so_the_caller_can_report_it(self):
+        # ⛔ THE DEAD-CODE DEFECT THE REVIEW FOUND: swallowing `SurfaceError` here
+        # made the caller's `except` unreachable, so `targeted_failures` was always
+        # 0 and the promised "⚠ … could not run" note could never print — leaving
+        # "I could not ask" indistinguishable from "there is no such PR". The
+        # failure must PROPAGATE; the caller counts it and the ref keeps blocking.
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(self._merged_pr(self.SHA), raises=True)
+
+    def test_a_non_list_payload_is_refused_not_demoted(self):
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call("not-a-list")
+
+    def test_the_request_is_scoped_sorted_and_percent_encoded(self):
+        # Pins the WIRE, not the response. Both halves are load-bearing:
+        #  * a ref may legally contain `&`, `#`, `+`, `%` (git check-ref-format),
+        #    so an unencoded name like `fix/N&head=owner:other` would append a
+        #    SECOND `head=` parameter — honored LAST by the API — and the lookup
+        #    would be answered by another branch's PRs, breaking the scoping the
+        #    demotion rests on;
+        #  * `sort=created desc` is what makes the page cap meaningful.
+        hostile = "fix/6151&head=daniel-ospina:some-other-branch#frag"
+        self._call(self._merged_pr(self.SHA), branch=hostile)
+        url = next(a for a in self.seen[0] if "pulls?" in a)
+        self.assertNotIn("&head=daniel-ospina:some-other-branch", url)
+        self.assertIn("%26", url)
+        self.assertIn("%23", url)
+        self.assertIn("state=all", url)
+        self.assertIn("sort=created", url)
+        self.assertIn("direction=desc", url)
+        # And the projection the arms read is still requested.
+        self.assertIn("headSha", " ".join(self.seen[0]))
 
 
 if __name__ == "__main__":
