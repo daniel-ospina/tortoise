@@ -2162,11 +2162,13 @@ def _journal_safe_params(params, cypher=None):
     # ``_flat_writable`` admits them without allocating. Anything nested (a
     # dict, a list of dicts, a set, bytes) fails that test and takes the FULL
     # walk, which is the case that was aborting.
-    if statement and not _statement_writes(statement):
-        if isinstance(params, dict) and all(
-            _flat_writable(val) for val in params.values()
-        ):
-            return params
+    if (
+        statement
+        and not _statement_writes(statement)
+        and isinstance(params, dict)
+        and all(_flat_writable(val) for val in params.values())
+    ):
+        return params
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
     # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
     # scalar in a property — does not match and stays a value position.
@@ -2194,7 +2196,7 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = []
             for i, row in enumerate(value):
-                walked = _walk(row, "%s[%d]" % (path, i), "map")
+                walked = _walk(row, f"{path}[{i}]", "map")
                 if walked is not row:
                     changed = True
                 out.append(walked)
@@ -2208,7 +2210,7 @@ def _journal_safe_params(params, cypher=None):
                     # by the engine, so leave it exactly as it is.
                     out[k] = v
                     continue
-                walked = _walk(v, "%s.%s" % (path, k), None)
+                walked = _walk(v, f"{path}.{k}", None)
                 if walked is not v:
                     changed = True
                 out[k] = walked

@@ -74,6 +74,7 @@ import json
 import logging
 import math
 import pathlib
+from typing import ClassVar
 
 import pytest
 
@@ -309,7 +310,7 @@ def test_a_read_only_statement_is_untouched():
     asserted directly in `test_the_read_fast_path_admits_the_id_list_shape`;
     this test is here for the read path's contract, not its cost.
     """
-    params = {"ids": ["p%d" % i for i in range(5000)]}
+    params = {"ids": [f"p{i}" for i in range(5000)]}
     assert _journal_safe_params(
         params, "MATCH (p:Point) WHERE p.id IN $ids RETURN p",
     ) is params
@@ -324,7 +325,7 @@ def test_the_read_fast_path_admits_the_id_list_shape():
     hot path was preserved. The claim was false and this assertion is the check
     that would have caught it.
     """
-    assert _flat_writable(["p%d" % i for i in range(5000)]) is True
+    assert _flat_writable([f"p{i}" for i in range(5000)]) is True
     assert _flat_writable(("a", "b")) is True
     assert _flat_writable("a") is True
     assert _flat_writable(None) is True
@@ -624,7 +625,7 @@ def test_a_corrupt_valid_to_no_longer_aborts_the_rebuild(superseded):
 def test_a_corrupt_creation_field_no_longer_aborts_the_rebuild(superseded):
     """The creation path is the WIDER half of the class — ~20 ungated values
     on ``_upsert_point_props`` alone — and it is not on the issue's table."""
-    events, sdk, old, _new = superseded
+    events, sdk, _old, _new = superseded
     assert _poison(events, "PointAdded", "point.content", {"evil": 1}) >= 1
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -645,7 +646,7 @@ def test_a_corrupt_point_id_is_skipped_rather_than_aborting_the_rebuild(supersed
     record with ``_writable_id``, so the rebuild COMPLETES and every OTHER
     point still materialises.
     """
-    events, sdk, old, _new = superseded
+    events, sdk, _old, _new = superseded
     assert _poison(events, "PointAdded", "point.id", "bad\x00id") >= 1
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -668,7 +669,7 @@ def test_a_corrupt_PROMOTE_id_is_skipped_rather_than_aborting_the_rebuild(supers
     wipe. Measured on the pre-fix tree: ``Failed to parse query parameter 'id'
     value``. All four promote sites now use ``_writable_id``.
     """
-    events, sdk, old, _new = superseded
+    events, sdk, _old, _new = superseded
     # Append a promote record carrying a poisoned id — the journal for a
     # supersede fixture has no promote, and the guard is what is under test.
     (events / "events.jsonl").write_text(
@@ -778,8 +779,7 @@ def test_a_corrupt_entity_key_does_not_abort_the_rebuild(
         "MATCH (n:Point) RETURN count(n)", params={},
     ).result_set
     assert rows[0][0] >= 1, (
-        "%s: the rebuild lost the healthy points (aborted after the wipe?)"
-        % label
+        f"{label}: the rebuild lost the healthy points (aborted after the wipe?)"
     )
 
 
@@ -822,7 +822,7 @@ class _MissingNodeDriver(_StrictDriver):
     """``_StrictDriver`` whose existence probe answers "the node is missing"."""
 
     class _Result:
-        result_set = [[False]]
+        result_set: ClassVar[list[list[object]]] = [[False]]
 
     def query(self, cypher, params=None, timeout=None):
         super().query(cypher, params=params, timeout=timeout)
