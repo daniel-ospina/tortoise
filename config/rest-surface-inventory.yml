@@ -120,6 +120,27 @@ routes:
   - method: GET
     path: /v1/claim/status
     class: tenant
+  # #2636 (epic #2632): the connector CRUD surface. Declared here because
+  # #3875's check reads the SOURCE — these `@app.*` routes would otherwise
+  # expand the public API with every other #3863 check green.
+  - method: GET
+    path: /v1/connectors
+    class: tenant
+  - method: POST
+    path: /v1/connectors
+    class: tenant
+  - method: GET
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: PATCH
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: DELETE
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: POST
+    path: /v1/connectors/{source_type}/auth
+    class: tenant
   - method: GET
     path: /v1/context
     class: tenant
@@ -392,6 +413,13 @@ routes:
     class: tenant
   - method: GET
     path: /v1/topics/{topic}/summary
+    class: tenant
+  # #4029: self-service account deletion. The route is `DELETE
+  # /v1/user/account` in tortoise/hosted_api.py; the #3875 guard
+  # (tests/test_rest_surface_inventory.py) fails closed on a live route absent
+  # here, so this is a DECLARATION of the product's public API, not a waiver.
+  - method: DELETE
+    path: /v1/user/account
     class: tenant
   - method: GET
     path: /v1/user/identity

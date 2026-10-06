@@ -64,7 +64,13 @@ swapped between discovery and the action is refused too (T4). Ownership is
 the one property a foreign uid cannot forge. A kill whose candidate dir has
 already vanished is authorized only by the live pid's OWN argv naming that
 dir (the pass-1 binding — no foreign uid can edit another process's
-command line). The policy is STRICT-ONLY:
+command line). Ownership alone proves the TARGET is ours, not that WE
+SELECTED it: pass-1 derives the candidate dir from the pgrep hit's argv, so
+#4238 additionally requires a LIVE pass-1 candidate's pid to be the process
+the kernel reports at the other end of the socket inside that dir
+(`_socket_served_by`: `SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS) — a
+decoy argv can name one of our dirs, but it cannot be the process serving
+it. The policy is STRICT-ONLY:
 there is deliberately no environment override, config flag, or allowlist
 to act on another uid's directory — a root-run scheduled sweep therefore
 reaps nothing (not the documented deployment; see
@@ -82,6 +88,7 @@ import re
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -370,6 +377,43 @@ def _pid_cmdline_names_dir(pid: int, dbdir: str) -> bool:
     return argv_dir == dbdir
 
 
+def _selection_binding_refusal(record: dict, dbdir: str) -> str | None:
+    """#4238: None only when `dbdir` is authorized by the SELECTION binding.
+
+    A directory is selection-bound when it is PRESENT, owned by the invoking
+    euid, and — for a pass-1 `_live` record — the kernel-reported peer pid of
+    the socket inside it IS the recorded pid (`_socket_served_by`). This is
+    the evidence a kill may rest on, AND the evidence the post-kill rmtree
+    of a directory the record's registry names may rest on: `settings` is
+    read out of the candidate dir, so it is only as trustworthy as that
+    dir's provenance.
+
+    The dir-ABSENT argv arm is deliberately excluded: "this live pid's argv
+    NAMES the dir" proves the dir belongs to the pid, not that a
+    `redis.config` read out of a possibly-foreign-authored dir names a
+    directory of OURS. `reap()`'s cleanup loop therefore consults this for
+    the registry-supplied `settings["dir"]` target (P1).
+
+    Fail closed: a missing/empty dir, a foreign-owned dir, and a live pass-1
+    record whose recorded pid is falsy or is not the socket's peer all
+    return a refusal.
+    """
+    if not dbdir:
+        return "candidate carries no directory to authorize its kill"
+    if not _dir_owned_by_euid(dbdir):
+        return (f"candidate dir {dbdir!r} is not owned by euid "
+                f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
+    pid = record.get("pid")
+    # `_socket_served_by` already refuses a falsy pid, so the check fails
+    # CLOSED for `pid in (None, 0)` — no `and pid` short-circuit (#4238 P2).
+    if record.get("_live") and not _socket_served_by(
+            record.get("socket_path"), pid):
+        return (f"candidate dir {dbdir!r} is not served by pid {pid} "
+                f"— pass-1 named it from argv only (selection binding, "
+                f"#4238)")
+    return None
+
+
 def _kill_provenance_refusal(record: dict) -> str | None:
     """Return a refusal reason when a kill is not provenance-authorized.
 
@@ -389,8 +433,26 @@ def _kill_provenance_refusal(record: dict) -> str | None:
     `dbdir`, so an attacker who toggles the path (absent → symlink to a dir
     the victim's argv names) cannot forge the binding.
 
+    #4238 — SELECTION, not just ownership. The present arm above proves the
+    target dir is OURS; it does NOT prove WE selected it. A pass-1 record
+    (`_live`, set by `_discover_from_live`) took its dir from the pgrep hit's
+    own argv, which only NAMES a directory — a local decoy process whose
+    command line contains `--unixsocket <our-dir>/redis.socket` becomes a
+    candidate whose `dbdir` is one of our dirs while its recorded pid is the
+    decoy's. That record would then be killed (harmlessly, by the attacker's
+    own choice) and its post-kill cleanup would rmtree OUR directory. So for
+    a live pass-1 record the present arm additionally requires
+    `_socket_served_by`: the kernel-reported peer pid of the socket inside
+    that dir must BE the recorded pid. A decoy pid is not the process serving
+    our dir's socket, so the kill and its rmtree are refused. The socket-less
+    arm (b) is untouched FOR THE KILL — its argv binding is the reason a
+    genuine socket-less orphan stays reapable — but it authorizes only the
+    candidate dir, never the sibling cleanup target: the registry-supplied
+    `settings["dir"]` rmtree is bound separately, to the present-and-owned
+    arm below (`reap()`'s cleanup loop, #4238 P1).
+
     None means "authorized". Fail closed: an unreadable/absent dir with no
-    pid binding is refused.
+    pid binding, or a live pass-1 record not served by its pid, is refused.
     """
     dbdir = record.get("dbdir") or ""
     if not dbdir:
@@ -407,10 +469,18 @@ def _kill_provenance_refusal(record: dict) -> str | None:
         # unreadable / ELOOP / etc — cannot prove provenance, fail closed
         return f"candidate dir {dbdir!r} cannot be inspected"
     if present:
-        if _dir_owned_by_euid(dbdir):
-            return None
-        return (f"candidate dir {dbdir!r} is not owned by euid "
-                f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
+        # #4238 SELECTION binding — ownership proves the TARGET is ours, not
+        # that WE selected it. A pass-1 record's dir was named by the pgrep
+        # hit's OWN argv, so a local decoy can point the record at one of our
+        # dirs while the recorded pid is the decoy's; the post-kill cleanup
+        # would then rmtree that dir. `_selection_binding_refusal` requires
+        # the recorded pid to be the process actually serving the probed
+        # socket (kernel peer credentials) and fails closed on a falsy pid,
+        # so a decoy never authorizes the kill or its cleanup. The socket has
+        # already answered two CLIENT LIST probes above, so it is connectable
+        # here (a vanished/unresponsive socket is skipped earlier, fail
+        # closed).
+        return _selection_binding_refusal(record, dbdir)
     pid = record.get("pid")
     if pid and _pid_cmdline_names_dir(pid, dbdir):
         return None
@@ -1068,6 +1138,79 @@ def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
         return "undetermined"
 
 
+# #4238: peer-credential reads for a CONNECTED AF_UNIX socket. Linux exposes
+# the peer pid in `SO_PEERCRED` (struct ucred = 3 ints: pid, uid, gid);
+# macOS/BSD exposes it as `LOCAL_PEERPID` on `SOL_LOCAL`. Both are reported by
+# the KERNEL, so the peer pid cannot be authored by an argv or by a file read
+# out of the candidate directory.
+_SO_PEERCRED = getattr(socket, "SO_PEERCRED", None)
+_SOL_LOCAL = getattr(socket, "SOL_LOCAL", 0)
+_LOCAL_PEERPID = getattr(socket, "LOCAL_PEERPID", 0x002)
+
+
+def _socket_peer_pid(sock: socket.socket) -> int | None:
+    """PID of the process at the other end of a CONNECTED AF_UNIX socket.
+
+    Returns None when the platform exposes neither `SO_PEERCRED` nor
+    `LOCAL_PEERPID`, or when the option cannot be read — so every caller
+    fails CLOSED. Never raises.
+    """
+    if _SO_PEERCRED is not None:
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            pid = struct.unpack("3i", raw)[0]
+        except (OSError, struct.error):
+            return None
+        return pid if pid > 0 else None
+    try:
+        raw = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID, struct.calcsize("i"))
+        pid = struct.unpack("i", raw)[0]
+    except (OSError, struct.error):
+        return None
+    return pid if pid > 0 else None
+
+
+def _socket_served_by(socket_path: str | None, pid: int | None) -> bool:
+    """True only when the process accepting at `socket_path` IS `pid`.
+
+    #4238 SELECTION binding. Pass-1 discovery derives BOTH the candidate dir
+    (from the pgrep hit's `argv`) and the pid (from pgrep); `argv` only
+    NAMES the dir, so a local decoy whose own command line contains
+    `--unixsocket <our-dir>/redis.socket` can point the record at one of OUR
+    directories while the recorded pid is the decoy's. #4136's ownership
+    guard proves the target dir is ours; it cannot prove WE selected it. The
+    kernel-reported peer pid of the socket INSIDE that dir can: it is the one
+    process actually serving the dir, so a mismatch is decisive.
+
+    Fail closed: any connect error, an unreadable peer credential, a missing
+    socket_path/pid, or an unsupported platform is False. Never raises.
+    """
+    if not socket_path or not pid:
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        sock.settimeout(PROBE_TIMEOUT)
+        try:
+            sock.connect(socket_path)
+        except (OSError, TypeError, ValueError):
+            # #4238 P2: a non-path `socket_path` (a crafted/erroneous record)
+            # raises TypeError/ValueError, not OSError. Refuse it here rather
+            # than let it escape into `reap()`, which has no per-record
+            # try/except and would abort the whole sweep.
+            return False
+        peer = _socket_peer_pid(sock)
+    finally:
+        try:  # noqa: SIM105
+            sock.close()
+        except OSError:
+            pass
+    return peer is not None and peer == pid
+
+
 def _probe_socket_any(socket_path: str,
                       timeout: float = PROBE_SOCKET_TIMEOUT) -> str:
     """Probe a socket path that may exceed the macOS AF_UNIX sun_path limit
@@ -1459,6 +1602,9 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         if rec is None:
             return None
         rec["pid"] = pid  # pgrep pid is authoritative for live servers
+        # #4238: marks this record as PASS-1 selected — its dir came from the
+        # pid's argv. `_kill_provenance_refusal` requires such a record's
+        # pid to be the process actually serving the socket inside that dir.
         rec["_live"] = True
         return rec
 
@@ -1554,6 +1700,11 @@ class _ScanAwareList(list):
     """
 
     complete: bool = False
+    # #6984: candidates the sweep observed to have exited ON THEIR OWN — alive
+    # at discovery, dead at kill time. Fail-safe default 0: a construction path
+    # that forgets to set it reports no natural exits, so the gate's accounting
+    # identity is NOT silently weakened (a lost pid still leaves a shortfall).
+    exited: int = 0
 
 
 def _always_match(name: str) -> bool:
@@ -2043,6 +2194,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
+    # #6984: natural exits OBSERVED by this sweep — a `candidate` whose pid was
+    # alive at discovery and is dead at kill time. See the dead-pid branch
+    # below for why this is measured here rather than derived as a complement.
+    exited = 0
     # #1642 perf: pre-probe the CLIENT LIST before-counts of every candidate
     # in PARALLEL (raw unix-socket probes are thread-safe and read-only).
     # The old per-record serial double-check made a sweep over hundreds of
@@ -2170,6 +2325,22 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
         if not record.get("pid") or not _pid_alive(record["pid"]):
+            # #6984: every record reaching here is a `candidate` (stale_socket
+            # and non-candidates already `continue`d above), so a TRUTHY pid
+            # that is now dead is a server that exited on its own between
+            # discovery and this kill attempt. It is in the pre-sweep probe's
+            # `before`, is not in `left` (gone) and is not in `reaped` (never
+            # acted) — the exact shortfall the CI orphan gate's accounting
+            # identity read as a broken sweep. Count it as an OBSERVED natural
+            # exit. It is NOT derived as `before - reaped - left`: that
+            # complement makes `reaped + exited + left >= before` a tautology
+            # (it holds for EVERY report), which would silently retire the
+            # guard while appearing to keep it. Measured here, a candidate the
+            # sweep genuinely loses (seen alive, then neither reaped nor
+            # observed dead nor alive at `left`) still leaves a shortfall.
+            # A `None` pid is not a server and is never counted.
+            if record.get("pid"):
+                exited += 1
             logger.warning("dead pid, skipping: %s",
                            record.get("socket_path"))
             continue
@@ -2260,6 +2431,19 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             acted.append(record)
             continue
 
+        # #4238 P1 — bind the CLEANUP TARGET to the SAME evidence that
+        # authorized the kill. The post-kill cleanup rmtree's a SECOND
+        # directory (the registry's `settings["dir"]`, #1642 FIX 2) that is
+        # read out of the candidate dir, so it is only as trustworthy as
+        # that dir's provenance. Evaluate the selection binding HERE, before
+        # `_kill`, while the socket is still serving: once the server is
+        # dead the peer probe cannot succeed, and a post-kill re-evaluation
+        # would refuse every `_live` record's registry dir. A candidate dir
+        # admitted by the dir-ABSENT argv arm binds only itself, so the
+        # registry-supplied `dir` a foreign decoy authored is refused below.
+        cleanup_bound = _selection_binding_refusal(
+            record, record.get("dbdir") or "") is None
+
         _kill(record["pid"], sigterm_timeout)
         # #1383 security review (Issue 1): the KILL path's tempdir cleanup
         # must honor the same containment discipline as the stale path — a
@@ -2271,10 +2455,29 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # permanent tempdir entry (observed: 32k entries). User-path data
         # dirs fail the ephemeral containment check and are preserved.
         dbdir = record.get("dbdir")
-        reg_dir = (record.get("settings") or {}).get(
-            "dir", (record.get("settings") or {}).get("dbdir", ""))
+        settings = record.get("settings") or {}
+        reg_dir = settings.get("dir", settings.get("dbdir", ""))
+        targets = [dbdir]
+        # #4238 P1 — the registry `dir` is a SIBLING rmtree target: it is a
+        # path read out of the candidate dir, so it may only be cleaned when
+        # that dir passed the present-and-owned SELECTION binding the kill
+        # rested on (`cleanup_bound`, captured before `_kill`). Otherwise a
+        # record admitted by the dir-ABSENT argv arm would let a foreign-
+        # authored `redis.config` name an arbitrary euid-owned tempdir for
+        # `_cleanup_tempdir` to delete. When `reg_dir` IS the candidate dir
+        # it is already a target (the kill was authorized against it), and
+        # `_cleanup_tempdir` re-checks ownership.
+        if reg_dir and (not dbdir or os.path.realpath(reg_dir)
+                        != os.path.realpath(dbdir)):
+            if cleanup_bound:
+                targets.append(reg_dir)
+            else:
+                logger.warning(
+                    "kill path: refusing registry dir %r — candidate dir %r "
+                    "did not pass the selection binding, so its registry is "
+                    "not an rmtree authority (#4238 P1)", reg_dir, dbdir)
         tmpdir_real = os.path.realpath(tempfile.gettempdir())
-        for d in dict.fromkeys([dbdir, reg_dir]):
+        for d in dict.fromkeys(targets):
             if not d:
                 continue
             if _is_ephemeral_dir(os.path.realpath(d), tmpdir_real):
@@ -2288,7 +2491,9 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         killed += 1
         if kill_pacing > 0:
             time.sleep(kill_pacing)  # avoid synchronized shutdown bursts (#1005)
-    return acted
+    out = _ScanAwareList(acted)
+    out.exited = exited
+    return out
 
 
 def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
@@ -3063,6 +3268,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                  kill_pacing=kill_pacing, only_safe=only_safe,
                  sigterm_timeout=sigterm_timeout, jobs=jobs,
                  deadline=deadline)
+    # #6984: carry the natural exits `reap()` observed through to the sweep
+    # summary (read before the wrap below, which copies elements only).
+    exited = getattr(acted, "exited", 0)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         quarantine = _sweep_quarantine_dirs(dry_run=dry_run)
@@ -3088,6 +3296,7 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
             logger.warning("index-pid sweep failed: %s", exc)
     out = _ScanAwareList(acted)
     out.complete = discovery_complete
+    out.exited = exited
     return out
 
 
@@ -3096,10 +3305,16 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # builder, as the single source of truth: `tests/conftest.py` imports both
 # instead of redeclaring, and the orphan-bound harness reads this assignment
 # from this file's source. Order is the order the report is built in.
-_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+#
+# #6984: `exited` is the sweep's OBSERVED natural-exit count (a `candidate`
+# alive at discovery and dead at kill time). The gate's accounting identity is
+# `reaped + exited + left >= before`; before #6984 the identity omitted
+# `exited`, so it read a server that shut itself down as a broken sweep and
+# refused green runs (before=28, reaped=16, left=11, pytest rc 0).
+_HYGIENE_REPORT_FIELDS = ("reaped", "exited", "cleared", "left", "before")
 
 
-def _hygiene_report(reaped, cleared, left, before) -> dict:
+def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
@@ -3107,12 +3322,20 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
     diagnostic flag that does not decide the gate's verdict at any measured
     count: at every count it reports whether the sweep's time budget sufficed
     — a function of runner load — not the residue.
+    ``exited`` is the sweep's OBSERVED natural-exit count (#6984): a
+    ``candidate`` alive at discovery and dead at kill time. It makes the
+    gate's accounting identity ``reaped + exited + left >= before`` account
+    for a server that shuts itself down, instead of reading it as a broken
+    sweep. Derived as a complement it would be a tautology; it is measured at
+    the dead-pid branch in :func:`reap` precisely so the identity stays
+    falsifiable.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
     round-5 pin's hole).
     """
     values = {
         "reaped": reaped,
+        "exited": exited,
         "cleared": cleared,
         "left": left,
         "before": before,
@@ -3122,7 +3345,7 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
 
 def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     """Drive discover->reap iterations until the backlog clears or the
-    deadline passes; return ``(total_acted, cleared)``.
+    deadline passes; return ``(total_acted, cleared, exited)``.
 
     ``cleared`` is the sweep's own budget/stop-condition claim, carried into
     the report for diagnosis — not a field the CI orphan gate decides its
@@ -3142,13 +3365,23 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     first record hit the deadline) as a CLEARED backlog, so the gate greened
     a residue whose entire backlog had never been examined. A spent deadline
     is not proof the backlog is clear.
+
+    ``exited`` (#6984) is the natural exits the iterations OBSERVED — a
+    ``candidate`` alive at discovery and dead at kill time — summed across
+    iterations. An ``acted`` list that carries no ``exited`` attribute (a
+    plain list from a monkeypatched ``run_one``) contributes 0.
     """
     total = 0
     cleared = False
+    exited = 0
     acted = []
     while True:
         acted = run_one()
         total += len(acted)
+        # #6984: accumulate the natural exits each iteration observed. The
+        # attribute defaults to 0 on a plain list (`_as_scan_aware` wraps a
+        # monkeypatched seam), so an un-instrumented `run_one` reports none.
+        exited += getattr(acted, "exited", 0)
         if not acted:
             # The one stop that can mean "cleared" — but only if the budget
             # remained: an empty list returned BECAUSE the deadline had
@@ -3161,7 +3394,7 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
             break
     # A partial discovery scan is never "cleared", whatever it acted on.
     cleared = cleared and bool(getattr(acted, "complete", False))
-    return total, cleared
+    return total, cleared, exited
 
 
 def live_embedded_server_count() -> int | None:
@@ -3186,12 +3419,15 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     this function directly). `probe` is called twice: the first reading is
     `before`, the second is `left`; `cleared` is threaded verbatim from
     `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
-    not decide the gate's verdict at any measured count.
+    not decide the gate's verdict at any measured count; `exited` (#6984) is
+    threaded from the same call — the natural exits the sweep observed — and
+    is what keeps the gate's identity from reading a self-shutdown as a
+    broken sweep.
     """
     before = probe()
-    reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
+    reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
     left = probe()
-    return _hygiene_report(reaped, cleared, left, before)
+    return _hygiene_report(reaped, cleared, left, before, exited)
 
 
 def _zero_client_state_read() -> dict:

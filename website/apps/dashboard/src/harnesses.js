@@ -606,15 +606,19 @@ export const HARNESS_CAPTURE_REASON = {
 //
 // `install-pending` is not in this group: it is the fall-through when NEITHER
 // per-harness STATE key (`session_capture_receipt_<h>` / `install_probe_<h>`) is
-// present, so its LABEL carries no attribution — hedging "not installed yet" as
-// agent-reported would invent a signal the server does not have. A row in this
+// present, so its LABEL carries no attribution — and, #5450, it must not assert
+// NON-installation either. "not installed yet" claimed a fact the server never
+// observed and cannot observe: the browser cannot stat the user's filesystem,
+// so the ONLY install signals are the credential-bearing beacon and the capture
+// receipt, and this state means neither arrived. The label states what was
+// observed (nothing), not a conclusion drawn from its absence. A row in this
 // state can still disclose one: a recorded per-harness FAILURE
 // (`session_capture_last_error_<h>`) is itself a per-harness signal, and
 // `harnessAttributionForHarness` attributes the row for it.
 export const HARNESS_ATTRIBUTION = 'harness reported by your agent'
 export const HARNESS_CAPTURE_STATUS_LABEL = {
   off: 'off',
-  'install-pending': 'not installed yet',
+  'install-pending': 'not yet observed',
   waiting: 'installed — waiting for first capture',
   active: 'active',
 }

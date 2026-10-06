@@ -2,12 +2,13 @@
 """drift-guard — long-lived branch drift + silent-revert gate (#1531, #4174).
 
 Fails when the current branch has drifted from origin/main: commits present
-on main but missing from the branch (the #1531 threshold arm), OR — #4174 —
-when the branch's tree SILENTLY REVERTS main's work for paths the branch
-never touched. The second arm is the conflict-free revert: main changed a
-path since the merge base, the branch still carries the pre-change state,
-and a merge of the two would therefore look additive from inside while the
-branch is deleting main's work from outside.
+on main but missing from the branch (the #1531 threshold arm), OR — #4174,
+corrected by #7455 — when a merge of the branch into main would not keep
+main's content for a path main moved since the merge base AND the merge is
+conflict-free. The second arm is the conflict-free revert: because git
+surfaces a textual conflict of its own, the clean case — where the merge
+result's blob for the path is not main's — is what a conflict check cannot
+see, so the arm reports the affected paths and line counts.
 
 WHY THE FETCH IS NOT OPTIONAL (#4174). A worktree that never fetched holds a
 STALE `origin/main`. Every read against it is self-consistent — the branch
@@ -18,11 +19,12 @@ cannot be proven fresh: a possibly-stale read is never a pass.
 
 The check's two arms are independent:
   * threshold arm (BEHIND): commits on main missing from the branch, > max;
-  * revert arm (SILENT REVERT): paths main moved since the merge base that
-    the branch did not move itself — i.e. main's newer content is absent
-    from (or superseded in) the branch's tree. This is the conflict-free
-    revert, so it fails REGARDLESS of the commit count, and it reports the
-    reverted paths and line counts.
+  * revert arm (SILENT REVERT): the paths main moved since the merge base
+    whose merged content differs from main's, where the merge is
+    conflict-free — i.e. merging the branch would not keep main's version.
+    Measured by ONE virtual merge (`git merge-tree`), so it fails
+    REGARDLESS of the commit count and cannot fire on a path only main
+    touched (which a 3-way merge preserves by construction, #7455).
 
 WHY THE PR HEAD IS MEASURED, NOT HEAD (#4396). On `pull_request`,
 `actions/checkout@v4` checks out the synthetic merge ref `refs/pull/N/merge`
@@ -240,21 +242,102 @@ def _numstat(root: Path, a: str, b: str) -> dict[str, tuple[int, int]]:
     return out
 
 
+def _merge_tree(root: Path, base: str, head: str) -> tuple[str, set[str]]:
+    """(merged tree OID, conflicted paths) for merging `head` into `base`.
+
+    Uses `git merge-tree --write-tree -z --name-only <base> <head>` (git
+    >= 2.38; `--write-tree` is the form `tools/queue_conflict_census.py`
+    already relies on, and it is the plumbing successor to `git merge-tree
+    <base> <head>`). `-z` keeps path bytes exact. The first NUL-terminated
+    field is the resulting tree's OID; the conflicted paths follow as
+    NUL-terminated fields up to the first empty field, which separates them
+    from git's informational-message section. Exit 0 = clean, 1 = conflicts.
+
+    ANY other exit is an unreadable merge and raises
+    :class:`MeasurementError` — a simulation that could not run must never be
+    mistaken for "no reverts" (fail closed, #4174). A `rc == 1` whose
+    conflicted-path list came back empty is likewise unreadable: without the
+    set, a conflicted path would be scored as a silent revert.
+    """
+    r = _git(root, "merge-tree", "--write-tree", "-z", "--name-only", base, head)
+    if r.returncode not in (0, 1):
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git merge-tree --write-tree {base} {head} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    fields = r.stdout.split("\0")
+    merged = fields[0].strip() if fields else ""
+    conflicted: set[str] = set()
+    for field in fields[1:]:
+        if field == "":
+            break
+        conflicted.add(field)
+    if not merged or (r.returncode == 1 and not conflicted):
+        raise MeasurementError(
+            f"git merge-tree --write-tree {base} {head} produced no "
+            f"{'tree' if not merged else 'conflicted paths'} (rc {r.returncode})"
+        )
+    return merged, conflicted
+
+
+def _tree_blobs(root: Path, tree: str) -> dict[str, str]:
+    """{path: entry OID} for every entry in `tree`, recursively.
+
+    Raises :class:`MeasurementError` on a failed read — a tree that could not
+    be listed must not answer "this path is unchanged".
+    """
+    r = _git(root, "ls-tree", "-r", "-z", tree)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git ls-tree -r {tree} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    blobs: dict[str, str] = {}
+    for rec in r.stdout.split("\0"):
+        if not rec:
+            continue
+        meta, _, path = rec.partition("\t")
+        parts = meta.split()
+        if path and len(parts) == 3:
+            blobs[path] = parts[2]
+    return blobs
+
+
 def silent_reverts(root: Path, mb: str, base: str, head: str) -> list[dict]:
-    """Main's post-merge-base changes the branch never took (#4174).
+    """Main's post-merge-base changes a merge of this branch would not keep.
 
-    A path is a SILENT REVERT when main moved it since the merge base but the
-    branch did not — the branch still carries the merge-base state, so main's
-    newer content is absent from (or superseded in) the branch's tree. The
-    merge of head into base is conflict-free on exactly this class: main's
-    advance does not overlap the branch's, and the branch's tree loses it.
+    A path is a SILENT REVERT when `base` (main) moved it since the merge base
+    and the merge of `head` into `base` would NOT leave main's content in
+    place (the merged blob exists and differs from main's) while the merge is
+    conflict-free. Silent is the point: a conflicted path is already visible to
+    git and to GitHub; only the clean ones go unreported.
 
-    A path the branch ALSO changed is not silent (GitHub surfaces the textual
-    conflict); a path main did not move is not a revert at all.
+    #7455 corrected the predicate. It was `moved_by_base - moved_by_head` —
+    main moved a path and the branch did not — but that set is exactly the one
+    a 3-way merge PRESERVES: with only main having moved it, ours = main's new
+    content and theirs = the merge-base content, so git takes main's side. The
+    old arm therefore flagged the COMPLEMENT of the danger set, and reddened
+    any branch at least one commit behind — including a strict ancestor of
+    main, which cannot delete its descendant's work. The danger set is the
+    overlap (paths BOTH sides moved, where the merge might not keep main's
+    version); the merge simulation below measures it directly rather than
+    approximating it from path sets.
     """
     moved_by_base = _paths_changed(root, mb, base)
-    moved_by_head = _paths_changed(root, mb, head)
-    reverted = sorted(moved_by_base - moved_by_head)
+    if not moved_by_base:
+        return []
+    # ONE virtual merge for the whole arm, not one per candidate path.
+    merged_tree, conflicted = _merge_tree(root, base, head)
+    merged_blobs = _tree_blobs(root, merged_tree)
+    base_blobs = _tree_blobs(root, base)
+    reverted = sorted(
+        p for p in moved_by_base
+        if p not in conflicted
+        and p in merged_blobs
+        and merged_blobs[p] != base_blobs.get(p)
+    )
     if not reverted:
         return []
     counts = _numstat(root, mb, base)
@@ -464,18 +547,20 @@ def main() -> int:
             f"real-backend E2E gates on 'worktree == origin/main')")
     if reverts:
         lines.append(
-            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) that "
-            f"{base_label} changed and this branch never took "
+            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) where "
+            f"merging this branch into {base_label} would not keep "
+            f"{base_label}'s content "
             f"(base {freshness}, merge-base {mb[:12]}):")
         for r in reverts[:MAX_REPORTED_PATHS]:
             lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}")
         if len(reverts) > MAX_REPORTED_PATHS:
             lines.append(f"    … and {len(reverts) - MAX_REPORTED_PATHS} more")
         lines.append(
-            f"    ({len(reverts)} file(s), {revert_lines} line(s)) — the "
-            f"conflict-free revert: from inside the branch this is invisible, "
-            f"from outside it deletes {base_label}'s newer work. Fetch and "
-            f"reconcile before this lands (#4174).")
+            f"    ({len(reverts)} file(s), {revert_lines} line(s)) — a "
+            f"conflict-free merge would change, not preserve, "
+            f"{base_label}'s version of each path, so a textual conflict "
+            f"check cannot see it. Fetch and reconcile before this lands "
+            f"(#4174, #7455).")
     return emit(report, lines, 1)
 
 

@@ -33,6 +33,7 @@ from it. Default OFF, presence-gated.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -96,6 +97,121 @@ def capture_notice_shown_path(home: Path | str | None = None) -> Path:
     return notice.with_name(notice.name + NOTICE_SHOWN_SUFFIX)
 
 
+def _open_no_follow(path: Path, flags: int) -> int | None:
+    """`os.open` with `O_NOFOLLOW` folded in; `None` on any refusal.
+
+    Never raises `OSError`: every failure (EEXIST, ELOOP, EISDIR, EACCES,
+    ENOTDIR, ENXIO …) is the "this call did not touch it" answer these helpers
+    return, because they run on a fail-closed refusal path where a bookkeeping
+    failure must not become a crash.
+
+    `O_NOFOLLOW` is folded in through `getattr` so the module still imports on a
+    platform that lacks it (CPython documents it as Unix-only), and the two other
+    Unix-only members this module uses — `O_NONBLOCK` and `os.fchmod` — are
+    guarded the same way, so on such a platform these helpers degrade to the
+    pre-#3684 behaviour (following the link, umask mode) rather than raising
+    `AttributeError` out of a helper whose callers only expect `OSError`. That
+    degradation is real and deliberate; the hardening is Unix-scoped in fact, and
+    this is where that is decided.
+    """
+    try:
+        return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        return None
+
+
+def _write_text_no_follow(path: Path, text: str, *, exclusive: bool) -> bool:
+    """Write `text` to `path` WITHOUT following a symlink, at mode 0o600.
+
+    `Path.write_text` follows symlinks and pins no mode, so a DANGLING symlink at
+    `path` defeats a `path.exists()` first-write guard: `exists()` follows the
+    link, sees nothing, and the write then creates or truncates an
+    attacker-chosen target (#3684). `O_NOFOLLOW` refuses the final-component
+    symlink instead, and `O_CREAT|O_EXCL` makes the first-write check atomic with
+    the write rather than a separate, racy `exists()` probe.
+
+    Three smaller hazards the same open closes:
+
+    * the file is opened WITHOUT `O_TRUNC` and truncated only once `fstat` shows
+      a regular file, so a FIFO or device at the path is refused rather than
+      truncated, and `O_NONBLOCK` keeps the OPEN itself from blocking on a FIFO;
+    * `fchmod` pins 0o600 outright instead of leaving it at `0o600 & ~umask`, so
+      a restrictive umask cannot leave the notice unreadable to its own owner;
+    * the fd is closed on every path, including a failure between `open` and the
+      write.
+
+    Returns True only when this call wrote the file, False when it deliberately
+    did not (the path already exists, a symlink sits at it, it is not a regular
+    file, or the open failed).
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
+    if exclusive:
+        flags |= os.O_EXCL
+    handle_fd = _open_no_follow(path, flags)
+    if handle_fd is None:
+        return False
+    try:
+        handle_stat = os.fstat(handle_fd)
+        if not stat.S_ISREG(handle_stat.st_mode):
+            return False
+        if not exclusive and handle_stat.st_nlink != 1:
+            # A HARDLINK planted at the stamp is a REGULAR file that would pass
+            # an O_TRUNC open and truncate data outside this directory.
+            # O_NOFOLLOW does not cover hardlinks; this gate does, and it is the
+            # same refusal `embedded_reaper.py` makes for its marker file. The
+            # notice path needs no gate — O_EXCL already refuses any
+            # pre-existing name.
+            return False
+        # `os.fchmod` is Unix-only (Windows gains it in 3.13), so it is guarded:
+        # on a platform without it the mode falls back to `0o600 & ~umask`, which
+        # is what the pre-#3684 code did — degraded, not a crash.
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(handle_fd, 0o600)
+        if not exclusive:
+            os.ftruncate(handle_fd, 0)
+        data = text.encode("utf-8")
+        while data:
+            data = data[os.write(handle_fd, data):]
+    finally:
+        os.close(handle_fd)
+    return True
+
+
+def _read_text_no_follow(path: Path) -> str | None:
+    """Read `path` only when it is a regular file, never through a symlink.
+
+    The READ half of the same guard (#3684): `read_text` follows links, so a
+    symlink at the notice made the caller return an ARBITRARY readable file's
+    content — which a terminal stderr then printed — and a symlink at the
+    `….shown` stamp made it look already-shown, silently SUPPRESSING the
+    migration notice. `O_NONBLOCK` keeps the open from blocking on a FIFO.
+
+    Returns None when the path is absent, is not a regular file, or is
+    unreadable — the same "nothing to say" answer the caller handles.
+    """
+    handle_fd = _open_no_follow(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    if handle_fd is None:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(handle_fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(handle_fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(handle_fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def record_capture_declined(home: Path | str | None = None) -> bool:
     """Write the durable migration notice. Returns True only on the first write.
 
@@ -106,15 +222,13 @@ def record_capture_declined(home: Path | str | None = None) -> bool:
     """
     try:
         path = capture_notice_path(home)
-        if path.exists():
-            return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        return _write_text_no_follow(
+            path,
             f"Tortoise: {CAPTURE_DECLINED_HINT}\n"
             "Capture used to follow the credential; it no longer does (#3615).\n",
-            encoding="utf-8",
+            exclusive=True,
         )
-        return True
     except (OSError, RuntimeError):
         # RuntimeError: `Path.home()` with no $HOME and no passwd entry.
         return False
@@ -133,9 +247,17 @@ def pending_capture_notice(home: Path | str | None = None) -> str | None:
     non-human caller remains a declared residual).
     """
     try:
-        if capture_notice_shown_path(home).exists():
+        # A symlink at the stamp is not a stamp (#3684): `exists()` follows the
+        # link, so a link to ANY readable file read as "already shown" and the
+        # migration notice was silently never delivered. `lstat` + `S_ISREG`
+        # counts only a real regular file.
+        try:
+            stamp_mode = os.lstat(capture_notice_shown_path(home)).st_mode
+        except OSError:
+            stamp_mode = 0
+        if stat.S_ISREG(stamp_mode):
             return None
-        text = capture_notice_path(home).read_text(encoding="utf-8").strip()
+        text = (_read_text_no_follow(capture_notice_path(home)) or "").strip()
     except (OSError, RuntimeError, UnicodeDecodeError):
         # UnicodeDecodeError is a ValueError, not an OSError: a partially
         # written notice (the body contains a multi-byte em dash, and
@@ -151,6 +273,8 @@ def mark_capture_notice_shown(home: Path | str | None = None) -> None:
     try:
         stamp = capture_notice_shown_path(home)
         stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.write_text("shown\n", encoding="utf-8")
+        # Rewritten by design, so TRUNC without EXCL — but still O_NOFOLLOW: a
+        # symlink at the stamp is not a stamp.
+        _write_text_no_follow(stamp, "shown\n", exclusive=False)
     except (OSError, RuntimeError):
         pass

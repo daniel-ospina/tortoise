@@ -789,6 +789,13 @@ _ALLOWED_OPERATOR = {
         # THIS PR's route-then-refuse NAME arm.
         'name_rows = proj.g.query( "MATCH (o:Object) " "WHERE o.name IN $names " f"{status_filter}" "RETURN o.id, o.name", params={"names": names}).result_set': 1,
         'rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names " "RETURN o.name AS nm, o.status", params={"names": sorted(names)}).result_set': 1,
+        # #4061 R1 "DISTINGUISHING probe" — owned by S3 (identity/resolver).
+        # This is the ONE read that MUST keep the name-or-id union: the
+        # resolver cannot tell "no exact match" from "the exact match is
+        # excluded", and only a name/id search over the EXCLUSION set
+        # answers the latter. Routing it through the #3633 resolver would
+        # delete the very distinction it exists to draw.
+        'rows = proj.g.query( "MATCH (o:Object) " "WHERE (o.name IN $names OR o.id IN $names) " "AND o.status IN $statuses " "RETURN o.id, o.name", params={"names": names, "statuses": sorted( _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)}).result_set': 1,
     },
     'tortoise/commit_ops.py': {
         # §B "Route" — successor-name candidate probe, S3/id-probe owned.
@@ -855,8 +862,14 @@ _ALLOWED_KEYED = {
         'result = self.g.query( "MATCH (o:Object {name:$name}) " + live, params={"name": name, **common_params})': 2,
         'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:produces]->(o)", params={"name": obj, "eid": eid}, )': 1,
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR o.status <> \'superseded\') " "SET o.status=\'in_progress\'", params={"n": _obj_name})': 1,
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR o.status <> \'superseded\') " "SET o.status=\'completed\'", params={"n": _obj_name})': 1,
+        # Refreshed for #5593: `main` rewrote both lifecycle predicates to
+        # read the SAME constant the resolver uses (`NOT (o.status IN
+        # $excluded)` + `_terminal_object_statuses()`) instead of restating
+        # the literal `'superseded'` — the two can no longer drift (#2242).
+        # The entries are updated, not dropped: the sites are still
+        # name-keyed and still owned by S3.
+        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'in_progress\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
+        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'completed\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:uses]->(o)", params={"name": use_name, "eid": eid}, )': 1,
         'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
     },

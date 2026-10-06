@@ -51,6 +51,8 @@ import struct
 from contextlib import suppress
 from datetime import datetime, timezone
 
+from .cypher_guard import tolerates_altered_numbers
+from .exceptions import UnrepresentableNumberError
 from .projection import (
     _annotator_value_ok,
     _apply_one,
@@ -65,6 +67,7 @@ from .projection import (
 from .projection.entities import (
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
     _writable_journalled_vector,
 )
 
@@ -110,7 +113,10 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "reason": "deny-listed per D4 — never a node property",
     # Recomputed / replay-owned — a pure function of the row, or a write time.
     "content_hash": "pure f(content) — RECOMPUTE (STORAGE-ARCHITECTURE §3)",
-    "updatedAt": "write time set by every writer (live and replay)",
+    "updatedAt": (
+        "excluded because the stamp is not journal-derivable for every writer "
+        "— a retraction now replays it from the record (#5048), but "
+        "pass-1a/other writers still set it from the replay clock"),
     "_nid": "replay bookkeeping",
     "_graph_id": "replay bookkeeping",
     # #5004: the embedding's IDENTITY is journal PAYLOAD metadata (`_POINT_HANDLED`)
@@ -788,7 +794,8 @@ def _fold_journal(events: list[dict]) -> dict:
     lifecycle arms `fold` does not have.
 
     `fold` is the in-memory POINT-only index. It HAS an arm for `PointRetracted`
-    (status only — no belief decay), and none for `PointPromoted`,
+    (status, the vacuity belief, and the #5048 recorded `updatedAt` — no belief
+    decay), and none for `PointPromoted`,
     `OperatorPromoted`, `PointSuperseded` or `PointInvalidated` — a documented,
     intentional scope gap its own `_NO_POINT_FOLD` names (#3692 records the same
     four). The GRAPH writer folds all of them: `apply()` for the promotions,
@@ -821,7 +828,8 @@ def _fold_journal(events: list[dict]) -> dict:
         keys the payload carries, except `content`/`is_operator`/`op_type`,
         which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
         them, and this arm pins them the same way.
-      PointRetracted  — `_retract` (`_apply_one`'s arm sets only the status):
+      PointRetracted  — `_retract` (`_apply_one`'s arm sets the same three:
+        status, `VACUITY_BELIEF`, and the #5048 recorded `updatedAt`):
         `status='retracted'` + the `decay_clause` belief decay, which is why
         this arm exists at all rather than deferring to `_apply_one`.
       PointSuperseded — `_fold_point_superseded`: requires `new_id` (a
@@ -915,6 +923,19 @@ def _fold_journal(events: list[dict]) -> dict:
             entry.update(_DECAY)
             if t == "PointRetracted":
                 entry["status"] = "retracted"
+                # #5048: `updatedAt` is RECORDED, and this is the reference
+                # fold `check_consistency` compares the graph against — its own
+                # docstring says ground truth is `_apply_one`, which now stamps
+                # this field. Same predicate as both replay arms
+                # (`_usable_instant`, NOT bare `_writable_id`, which accepts
+                # the empty string), and only "when the journal states it": a
+                # writer's wall-clock fallback states nothing, exactly as
+                # `expired_at` below. (Without this the reference disagreed
+                # with BOTH `fold()` and the rebuilt graph on the one field
+                # this change makes recorded — invisible only while the field
+                # is excluded from comparison.)
+                if _usable_instant(ev.get("ts")):
+                    entry["updatedAt"] = ev["ts"]
             elif t == "PointSuperseded":
                 entry["status"] = "superseded"
             if t in ("PointSuperseded", "PointInvalidated"):
@@ -1149,6 +1170,7 @@ def check_consistency(log_path: str, projection, *,
     }
 
 
+@tolerates_altered_numbers
 def recover_from_log(events_dir: str, projection) -> dict:
     """Rebuild a projection from a JSONL event-log dir when its graph was lost.
 
@@ -1280,8 +1302,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
                                f"{type(projection).__name__} does not "
                                "provide — refusing to replay the JSONL "
                                "alone (#2943)")}
+        #2944 L1: rebuild_all is destructive, so the caller opts in at
+        # this call site. Safe here because this branch is reached only
+        # with db_count == 0 (the early return above) — the wipe is a
+        # no-op on an empty graph, but the token is still required.
         try:
-            counts = projection.rebuild_all(events_dir)
+            counts = projection.rebuild_all(events_dir,
+                                            confirm_destructive=True)
             nodes = int(counts.get("nodes") or 0)
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)
@@ -1419,6 +1446,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # number of links actually APPLIED so a dropped record is not counted as
     # replayed.
     applied = 0
+    # #7174: a record the store's numeric domain would ALTER is not a TORN
+    # record, so it gets its own tally and its own ADDITIVE clause in `reason`.
+    # DEFENSIVE by construction: this function runs under the journal-path
+    # tolerance (see the decorator), so the param guard itself cannot raise here —
+    # the clause covers a projection that refuses DIRECTLY (an injected backend,
+    # or a future in-scope raiser). Not dead code: without it such a refusal
+    # would be counted as crash damage and reported as a skipped line.
+    refused = 0
+    first_refusal = ""
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
     # #3305: the Point lifecycle terminalizers are folded by the SHARED
@@ -1450,6 +1486,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
             else:
                 projection.apply(ev)
             applied += 1
+        except UnrepresentableNumberError as exc:
+            refused += 1
+            if not first_refusal:
+                first_refusal = str(exc)
         except Exception:
             torn += 1
     if deferred_corrects:
@@ -1468,8 +1508,19 @@ def recover_from_log(events_dir: str, projection) -> dict:
             torn += len(entity_link_events)
     after = _node_count()
     ok = applied > 0 and after is not None and after > 0
+    if refused:
+        logger.warning(
+            "recover_from_log: %d record(s) NOT replayed — the store's numeric "
+            "domain (#7174) would have altered them; first: %s",
+            refused,
+            first_refusal,
+        )
+    extra = f" ({torn} skipped)" if torn else ""
+    if refused:
+        extra += f" ({refused} refused by the numeric domain)"
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
-            "reason": f"replayed {applied} events from {files[0]}"
-            + (f" ({torn} skipped)" if torn else "") if ok
-            else "replay produced an empty graph"}
+            # The clause is ADDITIVE, so it rides BOTH branches — an `ok: False`
+            # result is exactly when a refused count matters most.
+            "reason": (f"replayed {applied} events from {files[0]}{extra}" if ok
+                       else f"replay produced an empty graph{extra}")}

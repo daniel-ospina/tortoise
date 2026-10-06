@@ -25,6 +25,26 @@ from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
 
+
+def _terminal_object_statuses() -> list:
+    """The canonical Object TERMINAL status list, for a Cypher ``excluded``
+    parameter (#3309).
+
+    ONE source of truth: ``commit_ops.OBJECT_TERMINAL_STATUSES``, which is also
+    what ``recall_state``'s default view filters on. Imported at call time to
+    keep ONE source of truth rather than restating the literal here — the defect
+    #3309 fixes. (Cycle-freedom is a property, not the motive: ``commit_ops``
+    imports only ``tortoise.live``, which never reaches ``projection``, so there
+    is no path back. The supersede fold below does the same import for the same
+    reason.)
+
+    Returned as a ``list`` because that is what the engine accepts for an ``IN``
+    parameter (a ``frozenset`` reaches it as an unserialisable type).
+    """
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+    return list(OBJECT_TERMINAL_STATUSES)
+
 # #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
 # tuple is encoded as an array); a map/dict-valued property — including an
 # array that contains one at any depth — raises on `SET n += $extra`.
@@ -60,6 +80,56 @@ def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+def _usable_instant(val) -> bool:
+    """True when a journal record states an instant a replay may write.
+
+    #5048: an instant read from a record rides as a Cypher parameter, so it
+    needs the same ``_writable_id`` gate the ``id`` does — ungated, a corrupt
+    line raises ``ResponseError: Property values can only be of primitive
+    types`` from inside a replay that has ALREADY wiped the graph, and pass-1b
+    has no per-event try/except (measured end-to-end: a ``PointRetracted``
+    carrying ``ts={"evil": 1}`` aborted ``rebuild_all`` and left the claim
+    LIVE).
+
+    The extra non-empty test is for the FALSEY half: the ``or _now_iso()``
+    this replaces treated ``""`` as "no instant stated", so an empty string
+    must keep falling back rather than become a written ``updatedAt``.
+    """
+    from tortoise.projection import _writable_id
+    return bool(val) and _writable_id(val)
+
+
+def _journal_instant(ev: dict, key: str = "ts") -> str:
+    """The record's instant when it states a usable one, else the writer's
+    clock.
+
+    Byte-identical to the ``ev.get(key) or _now_iso()`` it replaces for every
+    value that expression accepted AND that `_usable_instant` accepts: a
+    truthy, driver-writable **string**. The differing family is the TRUTHY
+    values `_usable_instant` rejects — any non-string, a string carrying a NUL
+    or lone surrogate, and an ARRAY of primitive strings (which FalkorDB would
+    have written, but which is not an instant this schema stores). A FALSY
+    value (``""``, ``None``, ``0``) is NOT a difference from the predecessor:
+    the replaced expression fell back to the clock for it too. For those the
+    difference is between this helper and ``_retract`` (see the NOTE below),
+    which is the case this PR turns on.
+
+    Also NOT covered here, and measured: a live caller that folds an event dict
+    it built itself (``commit_ops``'s ``fold_ev`` for ``ObjectSuperseded``)
+    passes no ``ts``, so the live write, the record's envelope ``ts`` and this
+    helper each hold a different read. Journal-derived values still ride
+    parameters ungated elsewhere (``valid_to``) — #7369.
+
+    NOTE the policy difference from ``_retract``, which is deliberate and not
+    an oversight: when a record states NO usable instant this helper writes the
+    clock (these arms have always stamped ``updatedAt`` as part of their SET),
+    while ``_retract`` writes no column at all, because it has a ``#330`` twin
+    in ``_apply_one`` and neither may invent a value the journal never stated.
+    """
+    val = ev.get(key)
+    return val if _usable_instant(val) else _now_iso()
 
 
 # ── #2884 D3: the belief-state value gate ─────────────────────────────────
@@ -506,6 +576,12 @@ class _EntityHandlers:
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
+        # #5024: the version-transition record's own key. It describes the
+        # TRANSITION (which version this one superseded), never a node property
+        # — it is the fact that keeps the prior version addressable from the
+        # record alone, and `_persist_extra_props` must not also write it (the
+        # #330/#3312 one-sided-property class).
+        "previousContentHash",
         # S0a/S0b (#5012): server-managed source-identity props.  They are
         # written by `_upsert_source`'s fixed SET clauses, never by the
         # open-set passthrough (which would let a payload clobber the
@@ -1366,18 +1442,20 @@ class _EntityHandlers:
 
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
-        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
-        and ``actor_user_id`` are coalesce-preserved (first writer wins,
-        mirroring the live merge), ``turn_count`` tracks the latest journaled
-        capture. Returns 1 when the node exists after the fold, 0 on a
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
+        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
+        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
+        journaled capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
-        record INLINE (no try/except) AFTER the wipe. A malformed id is a
-        NO-OP (return 0); a malformed field is OMITTED, never bound.
+        ``actor_user_id`` / ``capture_lane`` payload are each REJECTED by
+        ``_annotator_value_ok`` BEFORE the bind — a malformed id is a NO-OP
+        (return 0), a malformed field is OMITTED, never bound, so neither can
+        reach parameter parse. That matters because ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
@@ -1417,6 +1495,17 @@ class _EntityHandlers:
         if created_at is not None and _annotator_value_ok(created_at):
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
+        # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
+        # to MATCH the live capture write, which is also first-writer-wins. No
+        # producer journals this field YET: no caller passes `capture_lane` to a
+        # journaling writer (the hosted lane passes no `on_session_merged` at
+        # all; the SDK lane passes one but never a lane), so this is a GUARD for
+        # the first journaling lane (the store-sync CLI), not a parity property
+        # that holds today.
+        lane = ev.get("capture_lane")
+        if lane is not None and _annotator_value_ok(lane):
+            sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
+            params["v_capture_lane"] = lane
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
@@ -1494,7 +1583,7 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str) -> None:
+    def _retract(self, pid: str, now: str | None = None) -> None:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -1505,11 +1594,42 @@ class _EntityHandlers:
         DETACH DELETE. Points retracted before this change are irrecoverably
         lost (the content existed only in the projection, and the projection
         deleted it). Future retractions leave this tombstone.
+
+        ``now`` (#5048, recorded from #4666) is the record's own ``ts`` — the
+        instant the producer minted and wrote to the node. The fold must
+        REPLAY it, not read its own clock: ``updatedAt`` is RECORDED —
+        docs/durability-posture.md declares that for ``:Source.updatedAt``
+        ("minted once by the producer and carried on the record"), and this is
+        the same field under the same rule, not a Point row the doc already
+        carries. A rebuild that called ``_now_iso()`` here stamped the
+        rebuild's wall-clock onto every retracted point and agreed with
+        neither the live node nor the producer's record.
+
+        ``now`` is gated by ``_usable_instant`` — the SAME gate the id below
+        and the sibling folds' ``updated_at`` use. Without it a corrupt journal
+        line (a dict/list/int ``ts``) rides a Cypher parameter and aborts
+        ``rebuild_all`` AFTER the wipe, leaving the claim LIVE — the pre-fix
+        code never read ``ts`` at all, so this hole only appears with the
+        recorded instant. A record that states no USABLE instant writes NO
+        column, rather than inventing one.
+
+        RESIDUAL, measured and NOT fixed by the no-column choice: it does not
+        make the two ``#330`` engines agree for a ts-less record.
+        ``_apply_one`` keeps the value the ``PointAdded`` snapshot carried,
+        while this arm leaves whatever pass-1a's ``_upsert_point_props`` just
+        wrote — and that is the REPLAY's clock (``n.updatedAt=$now`` with
+        ``now=_now_iso()``). Closing that needs pass-1a to stop re-clocking
+        ``updatedAt``, which is the wider #5048 residual for EVERY
+        never-retracted Point, not this arm's to invent.
         """
+        stamp = ", n.updatedAt = $now" if _usable_instant(now) else ""
+        params: dict = {"id": pid}
+        if stamp:
+            params["now"] = now
         self.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now, "
+            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}, "
             f"{decay_clause('n')}",
-            params={"id": pid, "now": _now_iso()},
+            params=params,
         )
 
     def _fold_point_restamp(self, ev: dict, *,
@@ -1839,8 +1959,8 @@ class _EntityHandlers:
         # too. updatedAt mirrors the live stamp block (supersede-time now,
         # journaled on the line via the ts fallback).
         valid_to = ev.get("valid_to")
-        expired_at = ev.get("expired_at") or _now_iso()
-        updated_at = ev.get("ts") or _now_iso()
+        expired_at = _journal_instant(ev, "expired_at")
+        updated_at = _journal_instant(ev)
         # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
         # applies. Without it the trailing sweep is the id's LAST writer and
         # writes the journaled supersede ts, while the chronological apply()
@@ -1953,8 +2073,8 @@ class _EntityHandlers:
         # replayed verbatim). validTo/expiredAt fall back like supersede;
         # updatedAt reads the ts key (the emit passes ts=now).
         valid_to = ev.get("valid_to")
-        expired_at = ev.get("expired_at") or _now_iso()
-        updated_at = ev.get("ts") or _now_iso()
+        expired_at = _journal_instant(ev, "expired_at")
+        updated_at = _journal_instant(ev)
         if skip_updated_at:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
@@ -2277,7 +2397,7 @@ class _EntityHandlers:
         # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
         # drifted supersededAt to rebuild time. Live callers (apply_super-
         # sessions' fold_ev carries no ts) fall back to now.
-        superseded_at = ev.get("ts") or _now_iso()
+        superseded_at = _journal_instant(ev)
         # #2242: the exclusion tuple is imported from commit_ops at function
         # level (commit_ops has no module-level tortoise imports → no cycle;
         # single source of truth — the keep-first gate tuple).
@@ -2704,26 +2824,45 @@ class _EntityHandlers:
         # #1725: `github.issue.reopened` folds back to in_progress — a reopen
         # is a lifecycle Event whose ONLY projection is Object.status (the
         # indexer's decision table: lifecycle never mutates statement points).
-        # M3-P1 guard (#2164): the fold MATCHes only non-superseded Objects —
+        # M3-P1 guard (#2164): the fold MATCHes only NON-TERMINAL Objects —
         # a dual-tracked Object (connector work item conversationally
         # superseded via the capture fold) must NOT be silently resurrected
         # into recall_state's default view by a later connector lifecycle
         # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
-        # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
-        # still fold normally.
+        # reset superseded→live). Objects NOT in a terminal status still fold
+        # normally — that is `status IS NULL` (a bare stub created by this
+        # MERGE), the canonical `'live'` a writer sets on create, or
+        # `in_progress`/`completed`.
+        #
+        # #3309: the exclusion set is the CANONICAL Object terminal vocabulary
+        # (``commit_ops.OBJECT_TERMINAL_STATUSES`` — superseded, deprecated,
+        # archived, retracted), not the single hand-typed ``'superseded'``
+        # literal this guard carried. The narrow literal contradicted the
+        # guard's own stated purpose: it protects recall_state's DEFAULT VIEW,
+        # and that view excludes all four (``tests/test_status_projection.py``
+        # says so in `..._does_not_clobber_superseded`'s docstring). It was
+        # also wrong on the merits — #2977 makes a ``retracted`` Object a
+        # REMOVED Object (``assembly.py``: unresolvable, nothing to report), so
+        # a connector event that resurrected it to in_progress/completed made a
+        # removed Object visible again, while the same event correctly skipped
+        # only ``superseded``.
+        #
+        # Imported at function level for the same reason the supersede fold
+        # does it (#2242): no module-level cycle, and ONE source of truth —
+        # never a restated literal.
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status='in_progress'",
-                params={"n": _obj_name})
+                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status='completed'",
-                params={"n": _obj_name})
+                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
@@ -3033,7 +3172,10 @@ class _EntityHandlers:
 
         Returns the QueryResult (the caller uses ``nodes_created`` for the
         counter-authority outcome); ``proj.apply`` threads it for
-        ``create_source``'s index-path consumers.
+        ``create_source``'s index-path consumers. #5024 P1-A: the result's
+        sole row carries ``previousProps`` — the node's properties as the
+        statement found them (``null`` for a create), captured inside the
+        write so the SDK's record decision cannot use a stale snapshot.
         """
         sid = ev.get("id")
         url = ev.get("url", "")
@@ -3053,7 +3195,22 @@ class _EntityHandlers:
         canonical = normalize_source_url(raw_key)
         search_text = ev.get("_searchText") or ev.get("title")
         run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
+        # ── #5024 P1-A: the pre-write state, captured ATOMICALLY ───────────
+        # `create_source`'s record DECISION needs the state the write found,
+        # not a snapshot read before it: the ON MATCH bump below is gated on
+        # the STORED hash, so a concurrent writer between a separate pre-read
+        # and this MERGE made the decision compare against a hash the write
+        # never saw (measured: a h-1->h-0 transition suppressed as a no-op
+        # while the live node moved to h-0 — fail-OPEN toward suppression).
+        # `OPTIONAL MATCH` + `WITH` run BEFORE the `MERGE` in the SAME
+        # statement, so `_prev_props` IS the committed pre-write state and no
+        # other statement can interleave (null when the node did not exist),
+        # and the `RETURN` hands it back on the write's own QueryResult. The
+        # written node is untouched by this prefix — the ON CREATE/ON MATCH
+        # clauses are byte-identical to before.
         r = self.g.query(
+            "OPTIONAL MATCH (_prev:Source {url: $url}) "
+            "WITH _prev, properties(_prev) AS _prev_props "
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
             "              s.canonicalUrl = $cu, "
@@ -3061,7 +3218,13 @@ class _EntityHandlers:
             "              s.sourceKind = $sk, "
             "              s.contentHash = coalesce($hash, ''), "
             "              s.title = $title, "
-            "              s.ingestedAt = $now, "
+            # #5024: the RECORDED ingest instant, not the replay's clock. The
+            # payload has carried `ingestedAt` since #398, but the fold set it
+            # from `_now_iso()` at REPLAY time, so `derived = replay(journal)`
+            # was FALSE for the field (measured: live ...56.751580 vs rebuilt
+            # ...57.047168 on the same 12-instance run). `coalesce` keeps a
+            # legacy/foreign record without the key working exactly as before.
+            "              s.ingestedAt = coalesce($ingestedAt, $now), "
             "              s.version = 1, "
             "              s.externalId = $ext, "
             "              s.format = coalesce($fmt, s.format), "
@@ -3085,9 +3248,16 @@ class _EntityHandlers:
             "           s.version = CASE WHEN $hash IS NULL THEN s.version "
             "                    WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                    THEN s.version + 1 ELSE s.version END, "
+            # #5024: same rule as `ingestedAt` above — the recorded instant,
+            # never the replay clock (measured divergence: ...57.016262 live vs
+            # ...57.079810 rebuilt). A re-materialisation now emits
+            # `SourceVersioned` (which carries its own `updatedAt`), so this
+            # branch is the LEGACY path for journals written before that record
+            # existed; keeping `coalesce($updatedAt, $now)` makes both records
+            # replay to the same node.
             "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                     THEN $now ELSE s.updatedAt END, "
+            "                     THEN coalesce($updatedAt, $now) ELSE s.updatedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             "           s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
             "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
@@ -3105,7 +3275,12 @@ class _EntityHandlers:
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
-            "           s.format = coalesce($fmt, s.format)",
+            "           s.format = coalesce($fmt, s.format) "
+            # #5024 P1-A: the atomic pre-write capture above rides the write's
+            # own result. `null` (a create) is a REAL value here, not a
+            # swallowed failure — the caller no longer has a pre-read that can
+            # fail and be mistaken for "no node".
+            "RETURN _prev_props AS previousProps",
             params={
                 "url": key, "id": sid or key,
                 "cu": canonical,
@@ -3114,6 +3289,10 @@ class _EntityHandlers:
                 "hash": ev.get("contentHash"),
                 "title": ev.get("title", key),
                 "now": _now_iso(),
+                # #5024: the recorded instants (None for a legacy record —
+                # `coalesce` falls back to `$now`, the pre-#5024 behaviour).
+                "ingestedAt": ev.get("ingestedAt"),
+                "updatedAt": ev.get("updatedAt"),
                 "ext": ev.get("externalId", ""),
                 "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),
@@ -3139,3 +3318,46 @@ class _EntityHandlers:
             ev, self._SOURCE_HANDLED | self._DOC_RETIRED_KEYS,
         )
         return r
+
+    def _fold_source_versioned(self, ev: dict) -> None:
+        """#5024 — replay a `:Source` VERSION TRANSITION (T6).
+
+        THE DEFECT THIS FOLDS. `_upsert_source` bumps `updatedAt` / `version` /
+        `contentHash` on a hash-differing `ON MATCH`, and `create_source`
+        journaled a plain `SourceCreated` for **every** write. Two consequences,
+        both measured on 12 real re-materialisations before this record existed::
+
+            DIFF updatedAt: live='...57.016262' rebuilt='...57.079810'
+            DIFF ingestedAt: live='...56.751580' rebuilt='...57.047168'
+
+        (the replay's clock, not the recorded instant), and a NO-OP re-check
+        (identical hash) still appended a journal line — 12 -> 13 — which is
+        the unbounded-growth cost §9.6 requires the re-check to avoid.
+
+        The ontology's own model (`ONTOLOGY.md` v3.15 §4.6 *Versioning*, and
+        `STORAGE-ARCHITECTURE.md` §9.6) is: identity is `url`, `contentHash`
+        identifies a VERSION, **one node per url**, and *"a version transition
+        appends a journal record ... the prior version's window is a journal
+        fact, recoverable by replay"*. So the record carries
+        `previousContentHash` — which version this one superseded, the fact that
+        makes the prior version addressable once the single node has moved on.
+        The transition instant is NOT a separate ``at`` key: the record carries
+        it as its own ``updatedAt`` (minted by the producer with the same single
+        clock the live write used), and the fold reads exactly that.
+        In-place by design: a second `:Source` per version is explicitly ruled
+        out, so the history lives in the record and the node holds the CURRENT
+        version.
+
+        THE FOLD IS THE LIVE WRITER, DELIBERATELY. The first cut of this method
+        re-stated `_upsert_source`'s SET clauses by hand and drifted from it in
+        three fields — `urlAliases`, `sourcePath`, `canonicalUrl` — every one a
+        live != replay divergence, found by the review gate rather than by the
+        tests. Delegating makes apply/replay parity true **by construction**:
+        there is no second clause list to fall out of sync. It is safe because
+        `_upsert_source`'s ON MATCH is already hash-diff-gated and already reads
+        the RECORDED instants (`coalesce($updatedAt, $now)`,
+        `coalesce($ingestedAt, $now)`), and its `version` ordinal is
+        `s.version + 1` on that same gate — exactly how the live path produced
+        it — so replaying create -> transition reproduces the ordinal.
+        """
+        self._upsert_source(ev)

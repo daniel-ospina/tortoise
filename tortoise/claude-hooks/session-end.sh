@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 8
+# tortoise-hook-version: 9
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # #3615 (generation bump 3→4): the capture step now requires the explicit
@@ -71,8 +71,10 @@ _record_breadcrumb() {
   # python3 is missing — a python3-written breadcrumb could never run there.
   # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
   # keeps it distinguishable from a ``sessions import`` capture failure, which
-  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
-  # a breadcrumb write can never break the exit-0 contract.
+  # writes ``kind: capture-failure`` (#4314). #5838: the two kinds occupy
+  # SEPARATE slots, so this writer never touches the ``capture-failure`` file
+  # and cannot destroy a live quota/network refusal. Best-effort: a breadcrumb
+  # write can never break the exit-0 contract.
   local harness="$1" detail="$2"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
@@ -91,9 +93,15 @@ _record_breadcrumb() {
   esac
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-    "$harness" "$detail" "$stamp" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+  # #5919: redirect the WHOLE write block. Bash opens redirections left to
+  # right and reports a failed open of the STDOUT target BEFORE a trailing
+  # `2>/dev/null` takes effect, so an unwritable target dir leaked the shell's
+  # own error onto the hook's stderr. A block's stderr is established first.
+  {
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+      "$harness" "$detail" "$stamp" \
+      > "$crumb_dir/$harness-install.json"
+  } 2>/dev/null || true
 }
 
 # Claude Code passes SessionEnd hook metadata as JSON on stdin:
@@ -250,16 +258,23 @@ if [ "$CAPTURE_ENABLED" != "1" ]; then
   if [ -n "$LEGACY_KEY" ] || [ -f "$PWD/.tortoise" ] \
       || [ -f "${HOME:-/nonexistent}/.tortoise/credentials.json" ]; then
     NOTICE_MARKER="${HOME:-/nonexistent}/.tortoise/capture-consent-notice"
-    if [ ! -f "$NOTICE_MARKER" ]; then
+    # #3684: `-f` FOLLOWS a symlink and `>` follows it too, so a DANGLING link at
+    # the marker made `-f` false, the guard pass, and the redirect then CREATE the
+    # attacker's target at the umask (reproduced: 0644). `-L` refuses a link
+    # outright whether or not it dangles; `set -C` (noclobber) makes the create
+    # fail rather than truncate if a regular file appeared in between; `umask 077`
+    # pins 0600. `capture_consent.py` writes this same path under O_NOFOLLOW, so
+    # the two writers now agree on both the refusal and the mode.
+    if [ ! -e "$NOTICE_MARKER" ] && [ ! -L "$NOTICE_MARKER" ]; then
       mkdir -p "$(dirname "$NOTICE_MARKER")" 2>/dev/null || true
       # `2>/dev/null` MUST precede `> "$NOTICE_MARKER"`: a failed redirect
       # setup is reported to the shell's CURRENT stderr, so with the stdout
       # redirect first a non-writable ~/.tortoise leaks a raw bash error line
       # on every session close. Ordering stderr first suppresses the setup
       # failure too (`|| true` only rescues the exit status).
-      printf '%s\n' \
+      (umask 077; set -C; printf '%s\n' \
         "Tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." \
-        2>/dev/null > "$NOTICE_MARKER" || true
+        2>/dev/null > "$NOTICE_MARKER") || true
     fi
     printf '%s\n' \
       "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2 || true

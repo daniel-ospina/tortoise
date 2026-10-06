@@ -274,13 +274,21 @@ const server = createServer((req, res) => {
     // Cross-origin cookie probe. Echoes what the browser actually sent, so the
     // "is a host-only __Host- cookie sent to a sibling origin?" question is
     // answered by observation rather than by argument.
+    //
+    // No CORS headers on this route, deliberately: it has exactly ONE consumer
+    // (#3946), and that consumer reads it with a top-level navigation, which
+    // does not enforce CORS. Hardcoding an `Access-Control-Allow-Origin` would
+    // bake one consumer's origin (and its port, which that suite can override)
+    // into a mock the other auth suites load.
     if (url.pathname === "/__mock/echo-cookie") {
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "http://localhost:8993",
-        "Access-Control-Allow-Credentials": "true",
-      });
-      return res.end(JSON.stringify({ cookie: req.headers.cookie ?? null }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      // `secFetchSite` is echoed so the #3946 suite can ASSERT its premise —
+      // the sibling is same-site — on the same browser request that carries the
+      // Cookie header it asserts about, instead of assuming it.
+      return res.end(JSON.stringify({
+        cookie: req.headers.cookie ?? null,
+        secFetchSite: req.headers["sec-fetch-site"] ?? null,
+      }));
     }
 
     return json(res, 404, { error: "not_found", path: url.pathname });

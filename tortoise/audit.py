@@ -408,6 +408,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     count4 = _count(
         proj,
         f"MATCH (sup:Point) WHERE {sup4_w}\n"
+        # #6976: load-bearing. FalkorDB 6.0.0 drops the whole WHERE predicate at
+        # the re-binding MATCH below unless a `WITH` separates them, so this check
+        # returned the UNFILTERED count (measured 11508 vs the true 47).
+        "WITH sup\n"
         "MATCH (sup)<-[r:IMPL|NAND]-(active:Point) "
         "WHERE (active.status IS NULL OR active.status = 'live')\n"
         "RETURN count(DISTINCT r)",
@@ -416,6 +420,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     rows4 = _rows(
         proj,
         f"MATCH (sup:Point) WHERE {sup4_w}\n"
+        # #6976: load-bearing `WITH sup` — see the count4 note above.
+        "WITH sup\n"
         "MATCH (sup)<-[r:IMPL|NAND]-(active:Point) "
         "WHERE (active.status IS NULL OR active.status = 'live')\n"
         f"RETURN DISTINCT sup.id, sup.content, type(r), active.id LIMIT {SAMPLE_LIMIT}",

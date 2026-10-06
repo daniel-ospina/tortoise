@@ -37,25 +37,50 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     return TestClient(selfhost.app)
 
 
-def _wait_for_probe(selfhost_mod, timeout: float = 20.0):
-    """Block until the background liveness refresher has landed a verdict.
+def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = True):
+    """Block until the background liveness refresher's verdict has SETTLED.
 
     #2988: ``/health`` reads an in-memory snapshot, so a fresh process
     truthfully reports "probe has not produced a result" (→ degraded) until the
     refresher's first probe lands. Waiting for that is deterministic; sleeping
     a fixed amount is not.
+
+    #7520: for a test that needs a HEALTHY daemon, mere ARRIVAL is not enough.
+    The first probe after a cold start pays the O(graph) projection cold start
+    and the refresh cycle is ``max(health_probe_interval(), probe_duration)``
+    (documented worst case ~20 s + 10 s), so the refresher legitimately reads
+    ``ok=False`` for the early cycles — and asserting ``/health == "ok"`` on a
+    merely-arrived verdict asserts a precondition the test never established.
+    By DEFAULT we therefore wait for the ``/health`` read path's own ``ok=True``
+    verdict (``snapshot()`` — the same in-memory view ``/health`` serves). Pass
+    ``require_ok=False`` when the test DELIBERATELY drives a failing probe and
+    only needs the verdict to land.
+
+    On expiry the failure names the probe's OWN state instead of surfacing as a
+    bare ``assert 'degraded' == 'ok'``, which misreads as a product divergence.
     """
     import time
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if selfhost_mod._HEALTH_PROBE.info().get("result_age_s") is not None:
-            return
+    while True:
+        info = selfhost_mod._HEALTH_PROBE.info()
+        if info.get("result_age_s") is not None:
+            if not require_ok:
+                return
+            if selfhost_mod._HEALTH_PROBE.snapshot().get("ok") is True:
+                return
+        if time.monotonic() >= deadline:
+            if not require_ok:
+                raise AssertionError(
+                    "the selfhost liveness refresher never produced a verdict "
+                    f"within {timeout}s — probe info {info!r}"
+                )
+            raise AssertionError(
+                "the selfhost daemon never became healthy within "
+                f"{timeout}s — snapshot "
+                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}"
+            )
         time.sleep(0.02)
-    raise AssertionError(
-        "the selfhost liveness refresher never produced a verdict within "
-        f"{timeout}s — /health would report degraded forever"
-    )
 
 
 def test_embedded_banner_stderr(monkeypatch, tmp_path, capsys):
@@ -116,9 +141,10 @@ class TestHealth:
 
         seen = {"calls": 0, "setup_timeout": None}
 
-        def _spy_probe_db(sdk, setup_timeout=None):
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
             seen["calls"] += 1
             seen["setup_timeout"] = setup_timeout
+            seen["acquire"] = acquire
             return {"ok": True, "latency_ms": 0.1, "error": None}
 
         monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
@@ -129,6 +155,11 @@ class TestHealth:
             assert seen["setup_timeout"] == mon.probe_setup_timeout(), (
                 "the refresher did not pass the #3243 cold-start allowance — a "
                 f"reachable cold graph would read degraded {seen}"
+            )
+            assert seen["acquire"] is not None, (
+                "#3446: the refresher must hand its SDK lookup to probe_db as "
+                "acquire= so the phase is bounded — passing an already-acquired "
+                "sdk leaves it unbounded on this coordinator's thread"
             )
             r = tc.get("/health")
             assert r.status_code == 200
@@ -144,14 +175,15 @@ class TestHealth:
         import tortoise.monitoring as mon
         from tortoise import selfhost
 
-        def _boom_probe(sdk, setup_timeout=None):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             raise ConnectionError("NXDOMAIN")
 
         # probe_db is imported lazily from tortoise.monitoring inside the
         # refresher's probe — patch it there, not on the selfhost module.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
-            _wait_for_probe(selfhost)
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             body = r.json()
@@ -342,21 +374,31 @@ class TestHealthTruthMCP:
         import tortoise.monitoring as mon
         from tortoise import selfhost
 
-        def _boom_probe(sdk, *args, **kwargs):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             # probe_db's contract is never-raise: a dead DB is a FAILED probe
             # result, not an exception. Return the degraded shape both /health
             # and metrics() turn into status="degraded". (#3143 widened the
-            # signature with optional budget args — the stub accepts them.)
+            # signature with optional budget args, #3446 added keyword-only
+            # ``acquire=`` — the stub must accept ALL of them. This stub serves
+            # BOTH callers: selfhost._probe_db passes ``acquire=``, while
+            # metrics() passes an already-acquired ``sdk`` positionally. A
+            # signature mismatch raises a TypeError that HealthProbe._run
+            # SWALLOWS, so the test below also asserts the error MESSAGE.)
             return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
 
         # probe_db is imported lazily from tortoise.monitoring inside both
         # /health (selfhost.py) and metrics() (the MCP tool) — patch it there.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
-            _wait_for_probe(selfhost)
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             assert r.json()["status"] == "degraded"
+            assert "NXDOMAIN" in r.json()["db"]["error"], (
+                "the stub's own error must survive: a swallowed TypeError would "
+                "also produce 'degraded', so assert the MESSAGE (#3446)"
+            )
 
             r, body = _mcp_post_auth(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",

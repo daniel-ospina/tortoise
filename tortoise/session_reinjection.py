@@ -11,10 +11,15 @@ rank >= 6). This module ships the product rules as pure primitives plus
 ONE bounded graph pass:
 
 1. **SEED** — :func:`seeded_sessions`: the distinct REAL ``session_id``
-   values represented in a conservative RANK-WINDOW approximation of the
-   reader-reachable pool head (``assemble_context`` skips claim-text-less
-   hits without spending a slot, #2978 — so this under-seeds by at most
-   those skipped hits), in first-seen rank order, bounded by ``limit``. Label-free: the trigger is RANK, never
+   values represented in the reader-reachable pool head, in first-seen
+   rank order, bounded by ``limit``. The caller passes the reader's OWN
+   admission predicate (``admitted=retrieval._has_claim_text``), so a hit
+   the reader would skip for #2978 consumes no ``window`` slot either:
+   the seed tracks the reader's item slots rather than a raw prefix
+   (#3594). It is a TWO-SIDED, not one-sided, approximation — the
+   reader's budget caps are unmodelled, so a cap-dropped hit still
+   consumes a seed slot and can hide a later reader-admitted session.
+   Label-free: the trigger is RANK, never
    a stored/read-time mark (the mark-triggered variant was rejected as
    gold leakage — the product has no such mark; #2513 §1.1). The
    synthetic ``idx:N`` bucket key is dropped (it can never equal a graph
@@ -136,19 +141,21 @@ from tortoise.retrieval import (
 
 logger = logging.getLogger(__name__)
 
-#: The default seed window: a conservative rank-window approximation of
-#: the reader-reachable pool head. The eval derives the effective window
-#: from the resolved reader item cap (``eff_item_cap``) so a non-default
-#: ``TORTOISE_LME_CONTEXT_ITEMS`` cannot silently desynchronise it; this
-#: constant is the product fallback.
+#: The default seed window: how many reader-ADMITTED hits the seed walks.
+#: The eval derives the effective window from the resolved reader item cap
+#: (``eff_item_cap``) so a non-default ``TORTOISE_LME_CONTEXT_ITEMS`` cannot
+#: silently desynchronise it; this constant is the product fallback.
 #:
 #: NOT exact: ``retrieval.assemble_context`` SKIPS claim-text-less hits
 #: (#2978, decoration-only nodes such as operators) without consuming an
-#: item slot, so the reader may admit hits BELOW rank ``window``. This
-#: window can therefore under-seed — a session whose first pool appearance
-#: falls in a skipped-hit gap is reader-reachable yet unseeded. Widening it
-#: is a deliberate conservative bound, not an identity claim (tracked as a
-#: follow-up; changing it is a measurement-validity change, not a fix).
+#: item slot, so the reader may admit hits BELOW rank ``window``. #3594
+#: closed that gap: the driver passes the reader's own admission predicate
+#: (``admitted=retrieval._has_claim_text``), so ``window`` counts ADMITTED
+#: hits and this value is the fallback for when the reader item cap is
+#: unresolved. What remains is the reader's BUDGET CAPS, which are
+#: budget-dependent and unmodelled — a cap-dropped hit still consumes a
+#: seed slot, so the seed can also MISS a reader-admitted session below it.
+#: That is a TWO-SIDED approximation, not a one-sided bound.
 DEFAULT_REINJECTION_SEED_WINDOW = 40
 
 #: Distinct seeded sessions per fired question (bounded fan-out).
@@ -242,18 +249,41 @@ def seeded_sessions(pool: list[dict], *,
                     window: int = DEFAULT_REINJECTION_SEED_WINDOW,
                     limit: int = DEFAULT_REINJECTION_SEED_SESSIONS,
                     session_key: Callable[[dict], str] | None = None,
+                    admitted: Callable[[dict], bool] | None = None,
                     ) -> list[SeededSession]:
     """SEED (pure, label-free): the distinct real sessions represented in
-    ``pool[:window]``, in first-seen rank order, at most ``limit``.
+    the reader-reachable pool head, in first-seen rank order, at most
+    ``limit``.
 
     Deterministic and label-free — the only signal is the pool rank the
-    retrieval engine already produced. ``window`` is a CONSERVATIVE
-    RANK-WINDOW APPROXIMATION of the reader-reachable head (the eval
-    derives it from the resolved reader item cap), not the reader's
-    admitted set: :func:`retrieval.assemble_context` skips claim-text-less
-    hits (#2978) without spending an item slot, so the reader can admit
-    hits below this rank and a session reader-reachable only through such
-    a gap is not seeded. ``limit`` bounds the fan-out.
+    retrieval engine already produced. ``admitted`` is the reader's own
+    admission predicate: a hit failing it does not consume a ``window``
+    slot, so ``window`` counts ADMITTED hits, exactly as
+    :func:`retrieval.assemble_context` spends item slots. Callers pass
+    ``retrieval._has_claim_text`` (#2978/#3594); with ``admitted=None``
+    every hit counts and this reduces to the raw ``pool[:window]`` prefix
+    for backward compatibility.
+
+    Why the predicate matters: ``assemble_context`` SKIPS claim-text-less
+    hits without spending an item slot, so it admits hits BELOW rank
+    ``window``. Seeding from the raw prefix therefore never seeds a
+    session whose first pool appearance lands in a skipped-hit gap —
+    reader-reachable yet unseeded — which biases the A/B on exactly the
+    signal the arm measures. The predicate closes that gap while pool
+    ranks stay pool ranks.
+
+    Residual, and it is TWO-SIDED — NOT an upper bound: the token/byte caps
+    are budget-dependent and are not modelled here, and ``assemble_context``
+    drops a cap-failing hit WITHOUT spending an item slot while this loop
+    still counts that hit against ``window``. So the seed can also MISS a
+    session the reader admits BELOW a cap-dropped hit — the same
+    unseeded-but-reader-reachable bias this predicate exists to remove,
+    on the rarer cap path. Read "matches the reader" here as "matches the
+    reader MODULO the budget caps". Seeding from ``assemble_context``'s
+    returned list would be exact, but the seed runs BEFORE the reader
+    assembles (and the reader assembles ``context_candidates``, not
+    ``pool``), so that is a pipeline-order change, not a local one (#3594).
+    ``limit`` bounds the fan-out.
 
     A hit that carries no ``id`` cannot be seeded: the fetch anchors on the
     seeded hit to resolve its Session (``Session-[:CONTAINS]->hit``), so a
@@ -263,10 +293,15 @@ def seeded_sessions(pool: list[dict], *,
     if not pool or window < 1 or limit < 1:
         return []
     key = session_key if session_key is not None else session_key_of
-    win = max(1, min(window, len(pool)))
     out: list[SeededSession] = []
     seen: set[str] = set()
-    for rank, hit in enumerate(pool[:win]):
+    admitted_seen = 0
+    for rank, hit in enumerate(pool):
+        if admitted_seen >= window:
+            break
+        if admitted is not None and not admitted(hit):
+            continue
+        admitted_seen += 1
         sid = key(hit)
         pid = str(hit.get("id") or "")
         if not pid or not _is_real_session_id(sid) or sid in seen:
@@ -356,6 +391,9 @@ def source_session_chunk_pass(
     try:
         rows = proj.g.query(
             "MATCH (seed:Point) WHERE seed.id IN $seed_ids "
+            # #6976: load-bearing `WITH seed` — without it FalkorDB 6.0.0 drops
+            # the id predicate at the re-binding MATCH below (foreign rows).
+            "WITH seed "
             "MATCH (s:Session)-[:CONTAINS]->(seed) "
             # ``WITH DISTINCT s`` is a PLAN barrier, not a result change: it
             # dedups the session reached from a shared seed and forces the

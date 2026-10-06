@@ -3294,13 +3294,32 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # an already-installed copy is stale by construction. The sibling scripts carry
 # the same marker because the layout declares ONE generation
 # (`contract_version` returns None when they disagree).
+# claude 8→9 is #5838: the two breadcrumb kinds now occupy SEPARATE slots, so an
+# inert install can no longer destroy a live quota/network refusal.  The bump
+# covers the three marked layout scripts whose
+# generation the layout grades — claude's `session-start.sh`, `session-end.sh`
+# and `session-turn.sh` — so an already-installed copy must read as stale to
+# receive the new slot.  `volunteer-turn.sh` carries NO `tortoise-hook-version`
+# marker, is not a member of `HarnessLayout.scripts` and has no
+# `ARTIFACT_CONTRACTS` entry, so it is never graded and needs no marker of its
+# own; the installer registers the SHIPPED package path rather than copying the
+# file, so the slot change reaches it through the package upgrade.
+# codex/cursor are ALREADY at 3 on main (#5919, the redirection fix) and this
+# change's slot split moves no number for them — main b3c3d949c already ships
+# both seams at 3.  Their stale installed copies are caught by the file-BYTES
+# comparison (`modified-script`), which a copy carrying the old single-slot
+# writer fails.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 8, "codex": 2, "cursor": 2,
-                             "pi": 1}
+# pi 1→2 is #4897 (landed on main): `extractTurns` now marks a turn it clips
+# instead of cutting it silently, so the bytes the seam POSTs changed and every
+# installed generation-1 copy must read as stale.  The branch predates it, so
+# this number comes from main, not from #5838.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 9, "codex": 3, "cursor": 3,
+                             "pi": 2}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3318,8 +3337,17 @@ def test_shipped_install_contract_generations(harness):
     BEHAVIOUR once more (session-start.sh now RENDERS the capture breadcrumb to
     stdout, which Claude Code injects into the session context), so claude
     moved 7→8 — again the bump is what carries the new behaviour to an
-    already-installed copy.  Those numbers are a reviewed decision, not a
-    detail, so they are pinned once and explicitly.
+    already-installed copy.  #5838 changed the claude hooks' BEHAVIOUR once
+    more (the two breadcrumb kinds now occupy SEPARATE slots, so an inert
+    install cannot overwrite a live capture-failure refusal), so claude moved
+    8→9.  The codex/cursor seams take the same slot split, but their marker was
+    already at 3 on main (#5919) and this branch agreed, so NO number moved for
+    them: their stale installed copies are caught by the installed-copy byte
+    comparison (`modified-script`), not by a generation bump.  `pi` moved 1→2 on
+    main under #4897, which this branch predates, so 2 is main's number and not
+    a #5838 bump.  Those
+    numbers are a reviewed decision, not a detail, so they are pinned once and
+    explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
     contract: it ships a TypeScript extension and has no `HarnessLayout` —
@@ -3354,12 +3382,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 1`` from
+    Mutation: delete ``// tortoise-hook-version: 2`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 1
+    assert hook_install.read_hook_version(_PI_SRC) == 2
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")

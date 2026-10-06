@@ -20,17 +20,20 @@ updated: 2026-09-23
 ## 1. Initial Provisioning
 
 ### Prerequisites
+
 - Fly.io account with `flyctl` authenticated
 - Cloudflare account with `wrangler` authenticated (or dashboard access)
 - GitHub repo access with Actions secrets permission
 - `premiselabs.co` domain on Cloudflare DNS
 
 ### FalkorDB Cloud (managed database)
+
 FalkorDB runs on FalkorDB Cloud (managed) — provides AOF durability, automated
 backups, and multi-tenancy. Create the instance in the FalkorDB Cloud console,
 then set the connection string:
 
 **tortoise-api (FastAPI) on Fly.io:**
+
 ```bash
 fly apps create tortoise-y4mjjq   # or use the existing app
 fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
@@ -42,6 +45,7 @@ fly certs create api.premiselabs.co
 ```
 
 ### Cloudflare Pages (Dashboard)
+
 ```bash
 # Create project in Cloudflare dashboard: "tortoise-dashboard"
 # Deploy the React/Vite SPA (source of truth):
@@ -50,12 +54,14 @@ fly certs create api.premiselabs.co
 ```
 
 ### R2 Bucket
+
 ```bash
 wrangler r2 bucket create tortoise-backups
 # Lifecycle: delete objects older than 28 days (set in dashboard)
 ```
 
 ### DNS (Cloudflare)
+
 | Type | Name | Target |
 |------|------|--------|
 | CNAME | api | tortoise-api.fly.dev |
@@ -126,7 +132,9 @@ client-contract defect tracked by **#3805** (one canonical base URL + bounded
 fail-fast).
 
 ### GitHub Actions
+
 Set these secrets in repo Settings → Secrets and variables → Actions:
+
 - `FLY_API_TOKEN` — from `flyctl auth token`
 - `CLOUDFLARE_API_TOKEN` — from Cloudflare dashboard (Pages + R2 permissions)
 
@@ -275,7 +283,8 @@ extractor over the conversation. **A capture is stored unconditionally**:
 with no LLM provider key configured the Session + its turn Points are STORED
 and stay searchable, and only the LLM extraction into memory points is
 skipped — the receipt carries `extraction_mode: "no-provider"` plus a warning
-(#3892 owner ruling, 2026-09-18). The regex extraction loop was removed as a
+(#3892 owner ruling, 2026-09-18), or `extraction_mode: "extraction-disabled"`
+when the team turned extraction OFF in the dashboard (#4258, default ON). The regex extraction loop was removed as a
 product path (#822) and there is no fallback, so with no key no memory points
 are produced. This section is the ops contract for making sure extraction is
 enabled.
@@ -285,7 +294,7 @@ enabled.
 | Key | Provider | Default model | Notes |
 |-----|----------|---------------|-------|
 | `OPENROUTER_API_KEY` | OpenRouter (aggregator) | `deepseek/deepseek-chat` | First in priority; one key → many model families |
-| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
+| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-flash` | Cheapest-tier default, and the analyzer's model too (`analyze._LLM_PROVIDERS`). NOT `deepseek-chat`: that id is retired and the provider answers 200 while silently serving `deepseek-flash`, so naming it made the configured model differ from the model used (#4129) |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
@@ -300,7 +309,7 @@ provider/model and fails in hosted mode when the key is missing.
 
 ### Provider choice guidance
 
-- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-chat` —
+- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-flash` —
   cheapest viable tier, zero extra config.
 - **Aggregation / future model swaps:** `OPENROUTER_API_KEY` — one key covers
   many model families (`openrouter:deepseek/deepseek-chat`, …) with per-route
@@ -344,7 +353,7 @@ fail-closed upper bound.
 
 **Dollar cost:** depends on the provider's then-current pricing and the
 transcript length (5,000-char truncation per turn in `_session_llm_transcript`).
-All four default models are cheap-tier (`deepseek-chat`, `deepseek/deepseek-chat`,
+All four default models are cheap-tier (`deepseek-flash`, `deepseek/deepseek-chat`,
 `gpt-4o-mini`, `gemini-2.0-flash`). At free-tier volumes (10K write ops/month)
 per-capture cost is fractions of a cent — the quota gates above are the hard
 stop, not spend; monitor spend via the provider dashboard.
@@ -370,7 +379,7 @@ fly ssh console -a tortoise-y4mjjq -C "python -m tortoise doctor"
 curl -s https://api.premiselabs.co/health/ready    # {"status":"ok","db":"connected"}
 # POST /v1/sessions with a team token → expect 200 + "extraction_mode":"llm".
 # A 200 with "extraction_mode":"no-provider" = no key: turns stored,
-# extraction skipped.
+# extraction skipped. "extraction-disabled" = the team turned extraction OFF.
 
 # 4. Local hermetic E2E (offline — MockModel seam, exercises the full path):
 RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
@@ -703,7 +712,7 @@ the §6.0 precondition was verified (2026-09-17: `00000000:2382` and `http=200`)
 **Status: unconfirmed — treat the clamp as a hypothesis, not a fact.** The
 `hosted_api.health` docstring (`tortoise/hosted_api.py`, `@app.get("/health")`)
 claims that "Fly caps the http_check grace period at 60s", attributed to the
-#338 fix.
+\#338 fix.
 Independent research could **not** confirm this: no such cap appears in Fly's
 config reference, in `flyctl`, or in `fly-go`, and `flyd` is closed-source, so an
 undocumented server-side clamp cannot be ruled out. The honest position is
@@ -814,13 +823,23 @@ fly machine restart <id> -a tortoise-y4mjjq
 - **Rolling deploys still replace the only machine** — there is a boot-length
   window with no healthy instance. `canary`/`bluegreen` cannot fix this while a
   volume is attached; only §6.3 can.
-- **`/health` still spawns a DB probe per call** (`asyncio.to_thread`; the probe
-  is bounded at 1.5 s and abandons its worker thread on timeout —
-  `monitoring.probe_db`, via the `executor.shutdown(wait=False)` path). Under a black-holed DB, threads can accumulate
-  slowly. This no longer affects routing (the routing check is TCP), but it still
-  affects the human/operator view and any external probe that hits `/health`.
-  App-layer, tracked outside this runbook; a `wait_for` wrapper would bound the
-  request even if the probe regresses.
+- **`/health` no longer spawns a DB probe per call** — superseded by the
+  background health refresher (#2850 hosted, #2988 selfhost). Neither handler
+  performs request-path I/O: `hosted_api`'s "#2850 (P0) … collects NO I/O and
+  takes NO thread", and `selfhost`'s reads its DB verdict from the single-flight
+  coordinator (`_HEALTH_PROBE.snapshot()`) and "submits nothing to any pool, and
+  never waits on a worker". The `asyncio.to_thread` / `monitoring.probe_db` /
+  `executor.shutdown(wait=False)` shape this bullet used to describe is gone.
+  The probe now runs on the refresher, **off** the request path, which is also
+  what lets it carry the projection cold-start allowance without making the
+  deploy gate slow (#3243).
+  **Residual — SELFHOST ONLY, do not conflate the two surfaces:** selfhost's
+  `/health/ready` still awaits a real DB probe on the request path, and its
+  worker can stay parked past the answer it gave because the client read timeout
+  (10 s) exceeds its outer bound (6.0 s) — tracked as #3320. The HOSTED
+  `/health/ready` does **not** share this: its bound (`DB_PROBE_HARD_TIMEOUT` =
+  `PROBE_HARD_TIMEOUT`, 5.6 s) sits strictly above the probe's inner static bound
+  (`PROBE_DB_TOTAL_TIMEOUT`, ~3.1 s), so its worker frees itself.
 - **Nobody has replayed #2850 in staging.** The fix rests on the in-machine
   evidence and the code path, not on a reproduced failure (the issue's
   indicator list requires this).
@@ -903,7 +922,7 @@ That pairing is the signature: the loop was fine, one request was waiting.
 first request instead of by the process, and its budget was not what it claimed.
 `httpx.AsyncClient(timeout=5)` is **per phase** (connect/read/write/pool — a
 20 s sum), not a 5 s total, and one request can pay **two** fetches (TTL refresh
-+ `kid`-miss refetch). The same lesson is already recorded on the control-plane
+\+ `kid`-miss refetch). The same lesson is already recorded on the control-plane
 probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
 
 **What changed (2026-09-16).**
@@ -933,7 +952,7 @@ probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
 **What is still not app-fixable.** A **zero-byte** 503 with `server: Fly/…` and
 no body is generated by Fly's proxy *before the app sees the request*
 (`error.message="… [PR01] no known healthy instances found …"`) — that was
-#3144, and it is a **de-registration** symptom, not a fetch symptom. The app
+\#3144, and it is a **de-registration** symptom, not a fetch symptom. The app
 cannot attach a body or a `Retry-After` to it. The available lever is "the
 machine is never de-registered for an app-level reason": the in-memory `/health`
 (#3062) and the kernel-served TCP check (#3063). If you see the zero-byte shape,
@@ -1515,7 +1534,7 @@ tracked as **#5798**.
   incident is already open, the run leaves the incident open, advances **no**
   state, does **not** reach the escalation leg, and (since #5021) exits **RED**.
   Two separate reasons, stated separately because they are not the same:
-  * **Why the state is not advanced — the restart gate.**
+  - **Why the state is not advanced — the restart gate.**
     `decide_escalation`'s RUN leg reads `STATE_DOWN_RUNS`, the same counter
     `decide_restart`'s run leg reads, and `normalize_escalation_knobs` enforces
     `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So any flap that **advanced**
@@ -1526,7 +1545,7 @@ tracked as **#5798**.
     service that was answering UP moments ago is what the restart gate exists to
     bound, so the flap advances nothing. The wall-clock leg is not moved here
     either: it is anchored on the incident's server-side `created_at`.
-  * **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
+  - **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
     axis.** `last_down_ts` is the staleness input that decides whether
     `STATE_FIRST_FAILURE_TS` (the restart window's START) is reset to `now`: the
     reset fires only once the gap since the last recorded failing run exceeds
@@ -1535,7 +1554,7 @@ tracked as **#5798**.
     (or keeping armed) a restart in the wall-clock dimension, exactly what the
     shared-counter argument forbids in the run-count dimension. So a flap
     advances neither.
-  * **Why a page is not sent — scope, not impossibility.** Because
+  - **Why a page is not sent — scope, not impossibility.** Because
     `decide_escalation` is a pure function of **persisted** state, a page IS
     reachable from here without moving anything: when an incident has already
     accumulated `ESCALATE_MIN_RUNS` observed failing runs and is past its
@@ -1549,7 +1568,7 @@ tracked as **#5798**.
     flaps from creation and never records a genuine DOWN run keeps `down_runs`
     below `ESCALATE_MIN_RUNS`, so its run leg is never satisfied and it does not
     page at all.
-  * **What #5021 changed:** the run is no longer **GREEN**. The confirmation
+  - **What #5021 changed:** the run is no longer **GREEN**. The confirmation
     probe FAILED (a `DOWN` verdict exhausts all `PROBE_ATTEMPTS` attempts, while
     an `UNEXPECTED` verdict returns on its first attempt), and a run that
     observed a failure must not read as an all-clear — the same “green while
@@ -1866,9 +1885,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    `.github/scripts/fly-managed-secrets.txt` — its header contract states what
    each source token requires.
 3. Inspect the live state:
+
    ```bash
    fly secrets list -a tortoise-y4mjjq
    ```
+
 4. Resolve it by **declaring the real source**: add the propagation line to the
    workflow plus the matching probe line (§8.1), or — for a **non-secret config
    value** — record it in `fly.toml [env]`. That second route is a transition, and
@@ -1960,7 +1981,7 @@ observation can no longer decide on its own. **Do not "restore" phase 2's
 `exit 1`** — that is the #4771 defect (the #4545 invariant violated at the
 decision level, after #4545 had fixed it at the assertion level). The harness
 `.github/scripts/deploy-health-gate.test.sh` pins both halves: `db.ok` never true
-+ readiness 200 → pass, and `db.ok` never true + readiness never 200 → fail.
+\+ readiness 200 → pass, and `db.ok` never true + readiness never 200 → fail.
 
 **OVERRIDES:** the general expectation that a deploy gate should fail on **any**
 unhealthy subsystem — here the weaker `db.ok` observation *informs* and the
@@ -1995,14 +2016,16 @@ stronger one is evidence that the release is actually unready.
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
 ## Reproducibility Test
+
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
+
 - [ ] FalkorDB Cloud instance provisioned, FALKORDB_CLOUD_URI secret set
 - [ ] `fly apps create tortoise-y4mjjq` → deploys, health check passes, connects to FalkorDB Cloud
 - [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok (db: connected)
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api
 - [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
-- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"` means turns were stored but extraction was skipped)
+- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"`, or `"extraction-disabled"` for a team with extraction off, means turns were stored but extraction was skipped)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)

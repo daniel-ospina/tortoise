@@ -24,13 +24,17 @@ Design constraints (from the plan):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
 
+from tortoise._gate_memo import GateMemo
 from tortoise.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
@@ -40,23 +44,49 @@ from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718 lock-taking 
 #: The persisted-index directory (gitignored — see .gitignore).
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_index"
 
+#: Cap on the memoized indexes. Deliberately SMALLER than
+#: ``_gate_memo._MAX_GATE_MEMOS`` (64): an index entry holds a full float64
+#: ``vectors`` + ``_norm`` matrix (~0.5 MB at the current 91-kind core+pack
+#: baseline, larger as packs add kinds), where a brief/spec entry is
+#: kilobytes — so the resident set is bounded harder here.
+_MAX_MEMOIZED_INDEXES = 16
+
 #: Load-once memoized built indexes: cache_key → KindIndex.
-_INDEX_CACHE: dict[str, KindIndex] = {}
-_INDEX_LOCK = threading.Lock()
+#:
+#: BOUNDED + LRU (#5339 review): #5163 threads ``installed_namespaces`` into
+#: ``compile_kind_index_spec``, so the spec — and therefore this content-hash
+#: key — now varies per graph. Each entry holds the full float64 ``vectors`` +
+#: ``_norm`` matrices for one gate, and the key space is tenant-growable, so an
+#: uncapped memo accumulates one index per distinct installed-namespace set for
+#: the process lifetime. The shared ``GateMemo`` primitive
+#: (``tortoise/_gate_memo.py``) owns the atomic LRU evict-and-insert invariant
+#: so it lives in ONE place, not a sixth hand-rolled copy; its ``discard``
+#: covers this cache's targeted pop (the degraded-index path). Eviction drops
+#: the in-memory copy only; a later ``load`` re-reads or rebuilds it.
+#:
+#: The persisted ``data/kind_index/*.npz`` files are STILL unbounded on disk —
+#: one per distinct gate, and nothing sweeps them — tracked by #7351. Do not
+#: read this memo's cap as covering the disk.
+_INDEX_CACHE = GateMemo(maxsize=_MAX_MEMOIZED_INDEXES)
+
+
+def _memoize_index(key: str, idx: KindIndex) -> None:
+    """Memoize under the shared ``GateMemo`` (#5339 review): lock-guarded and
+    never raising, so a concurrent capture worker cannot lose a check-then-pop
+    race out of the classifier."""
+    _INDEX_CACHE.put_if_absent(key, idx)
 
 
 def _clear_index_cache() -> None:
     """Test hook — clear the memoized indexes (cross-test isolation)."""
-    with _INDEX_LOCK:
-        _INDEX_CACHE.clear()
+    _INDEX_CACHE.clear()
 
 
 def _evict_index(key: str) -> None:
     """Evict ONE memoized index (cycle-3 P2 degraded-path hook): the
     classifier drops a good-dim memo entry when the embedder goes down
     mid-process so the degraded rebuild can't be shadowed by it."""
-    with _INDEX_LOCK:
-        _INDEX_CACHE.pop(key, None)
+    _INDEX_CACHE.discard(key)
 
 
 def cache_key_for(spec: dict) -> str:
@@ -153,14 +183,13 @@ class KindIndex:
         key = cache_key_for(spec)
         memoize = encoder is None
         if memoize:
-            with _INDEX_LOCK:
-                cached = _INDEX_CACHE.get(key)
-                if cached is not None:
-                    if persist:
-                        target = KindIndex._path_for(key, cache_dir)
-                        if not target.exists():
-                            cached.persist(cache_dir=cache_dir)
-                    return cached
+            cached = _INDEX_CACHE.get(key)
+            if cached is not None:
+                if persist:
+                    target = KindIndex._path_for(key, cache_dir)
+                    if not target.exists():
+                        cached.persist(cache_dir=cache_dir)
+                return cached
         enc = encoder or _DefaultEncoder()
         kind_names = sorted(spec)
         texts = [spec[k]["text"] for k in kind_names]
@@ -169,8 +198,7 @@ class KindIndex:
         if persist:
             idx.persist(cache_dir=cache_dir)
         if memoize:
-            with _INDEX_LOCK:
-                _INDEX_CACHE[key] = idx
+            _memoize_index(key, idx)
         return idx
 
     @classmethod
@@ -185,19 +213,18 @@ class KindIndex:
         build — a recovered embedder rebuilds good, persist=True). Encoder
         is only used when building."""
         key = cache_key_for(spec)
-        with _INDEX_LOCK:
-            cached = _INDEX_CACHE.get(key)
-            if cached is not None:
-                if cached.degraded:
-                    # FIX-N: a degraded index memoized in-process (embedder
-                    # was down during its build) must NOT stick — the disk
-                    # guard below can't cover the memo path, and every
-                    # classify_items would fall back for the process
-                    # lifetime. Pop it and treat as a miss so a recovered
-                    # embedder rebuilds good (persist=True).
-                    _INDEX_CACHE.pop(key, None)
-                else:
-                    return cached
+        cached = _INDEX_CACHE.get(key)
+        if cached is not None:
+            if cached.degraded:
+                # FIX-N: a degraded index memoized in-process (embedder
+                # was down during its build) must NOT stick — the disk
+                # guard below can't cover the memo path, and every
+                # classify_items would fall back for the process
+                # lifetime. Pop it and treat as a miss so a recovered
+                # embedder rebuilds good (persist=True).
+                _INDEX_CACHE.discard(key)
+            else:
+                return cached
         path = cls._path_for(key, cache_dir)
         if not path.exists():
             return None
@@ -216,8 +243,7 @@ class KindIndex:
                 json.loads(str(data["metadata"])),
                 degraded=False,
             )
-        with _INDEX_LOCK:
-            _INDEX_CACHE[key] = idx
+        _memoize_index(key, idx)
         return idx
 
     # ── persistence ────────────────────────────────────────────────────────
@@ -228,20 +254,49 @@ class KindIndex:
 
     def persist(self, cache_dir: Path | str | None = None) -> Path:
         """Write ``data/kind_index/<key>.npz`` (content-addressed, atomic:
-        temp-file + rename so a crash mid-save never leaves a corrupt
-        index; kind_names stored as a unicode array — no pickle)."""
+        UNIQUE temp-file + rename, so a crash mid-save never leaves a corrupt
+        index, and two concurrent writers for the same key cannot collide on
+        the temp path — a fixed ``.<key>.tmp.npz`` made the loser's ``replace``
+        hit an already-renamed source and raise ``FileNotFoundError`` out of
+        ``build``; #5339 review. kind_names stored as a unicode array — no
+        pickle).
+
+        The temp is created with ``os.open(..., 0o666)``, so the KERNEL applies
+        the process umask and the persisted file keeps the mode the pre-#5339
+        ``np.savez`` produced (``0o666 & ~umask``); ``tempfile.mkstemp``'s
+        forced 0600 would have narrowed it. The umask is never read: it is
+        process-global, so an ``os.umask(0)``/restore dance on this path either
+        races across the capture pool or leaks umask 0 on an interrupt.
+        """
         key = cache_key_for(self._spec_of())
         path = self._path_for(key, cache_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.stem}.tmp.npz")  # ends in .npz (savez appends otherwise)
-        np.savez(
-            tmp,
-            kind_names=np.asarray(self.kind_names, dtype=str),
-            vectors=self.vectors,
-            metadata=json.dumps(self.metadata, default=str),
-            degraded=np.asarray(self.degraded),
-        )
-        tmp.replace(path)
+        # A per-writer unique temp in the SAME directory (so ``replace`` is
+        # atomic). ``O_EXCL`` on a uuid4 name keeps it collision-free without
+        # mkstemp (whose 0600 mode is the thing being avoided).
+        tmp_name = path.parent / (
+            f".{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npz")
+        fd = os.open(tmp_name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o666)
+        tmp = Path(tmp_name)
+        try:
+            # close cannot be retried on EINTR (PEP 475), and a close failure
+            # must still reach the unlink below.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            np.savez(
+                tmp,
+                kind_names=np.asarray(self.kind_names, dtype=str),
+                vectors=self.vectors,
+                metadata=json.dumps(self.metadata, default=str),
+                degraded=np.asarray(self.degraded),
+            )
+            tmp.replace(path)
+        finally:
+            # A failed save leaves no stray temp behind; after a successful
+            # replace ``tmp`` no longer exists.
+            if tmp.exists():
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
         return path
 
     def _spec_of(self) -> dict:

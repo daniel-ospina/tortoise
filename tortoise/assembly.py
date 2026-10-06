@@ -288,6 +288,11 @@ def extract_subject_terms(question: str,
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
 from typing import Protocol  # noqa: E402
+# #3302: the canonical OBJECT terminal vocabulary. Safe as a module-level
+# import: commit_ops' import closure does not reach assembly (verified), so
+# this edge cannot cycle — unlike projection/entities.py, which imports the
+# same set at FUNCTION level for its own reasons.
+from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES  # noqa: E402
 
 # #3317: the Object statuses the RESOLVER will not resolve — the resolver's
 # view of the Object-SEARCH exclusion boundary (deliberately NARROWER than
@@ -1338,10 +1343,33 @@ def synthesize_hits(
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
 # excluded successor as invisible -> the renderer's NAME-ONLY annotation).
-# Mirrors the canonical search_engine.TERMINAL_EXCLUDED_STATUSES tuple (P2-3:
-# an 'outdated'-status successor object is recall-excluded too).
+#
+# The OBJECT terminal vocabulary is ``commit_ops.OBJECT_TERMINAL_STATUSES``.
+# It is NOT ``search_engine``/``live``'s ``TERMINAL_EXCLUDED_STATUSES``, which
+# is the POINT vocabulary — #3302: the comment that used to sit here cited
+# that Point source for an Object set, sending a reader to the module that
+# does not own this vocabulary. Derived from the canonical set rather than
+# copied by value, because the by-value copy was the actual root: an Object
+# set that was a frozen snapshot of a source it did not reference drifts the
+# moment the canonical set moves.
+#
+# The one divergence is ``outdated``, and it is LOAD-BEARING — not dead. The
+# generic write path CAN put it on an :Object: ``create_entity("object", ...)``
+# spreads caller props over its literal defaults, and ``_update_entity`` issues
+# an unvalidated ``SET n += $props``; ``status`` is not a server-managed prop,
+# so both are reachable from the MCP surface (``tortoise_create_entity`` /
+# ``tortoise_update_entity``). Dropping the member would flip such a successor
+# from recall-excluded (NAME-ONLY annotation) to a verified link. The guard
+# that would reject the status (#2977 / PR #3326, ``OBJECT_STATUS_VALUES``) is
+# NOT on main.
+#
+# The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
+# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
+# widening of the member cannot pass unnoticed. (The canonical set itself is
+# pinned by tests/test_object_search_visibility_3301.py; the #3317 pin beside
+# it guards the RESOLVER set and is not the oracle for this one.)
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
-    {"superseded", "deprecated", "archived", "retracted", "outdated"})
+    OBJECT_TERMINAL_STATUSES | {"outdated"})
 
 
 @dataclass(frozen=True)

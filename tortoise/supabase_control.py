@@ -971,6 +971,30 @@ def _is_uuid(value: object) -> bool:
         return False
 
 
+def _same_uuid(a: object, b: object) -> bool:
+    """#4029 review P2-2: compare two uuid values BY VALUE, not as strings.
+
+    Required because the two sides are stored in different forms. A ``uuid``
+    column is returned by PostgREST in CANONICAL form (lower-case, hyphenated),
+    while the value it is compared against is whatever the JWT ``sub`` carried.
+    ``_is_uuid`` deliberately admits every form Postgres's uuid input accepts
+    (upper-case, 32-hex without hyphens, braced), so a non-canonical ``sub``
+    passes the shape gate and the ``user_id eq`` filter matches BY VALUE — but a
+    raw string comparison then never equalises it with the stored canonical
+    value, and a solely-owned org is judged shared (the account is erased
+    leaving an ownerless org ``_purge_deleted_orgs`` never selects). Both sides
+    are parsed so those accepted forms compare equal. ``None`` (the anonymous
+    agent owner anchor, ``user_id IS NULL``) and any non-uuid value compare only
+    directly, so a NULL second owner still blocks sole ownership and junk is
+    never read as a match.
+    """
+    if a is None or b is None:
+        return a is b
+    if not _is_uuid(a) or not _is_uuid(b):
+        return a == b
+    return _uuid.UUID(str(a)) == _uuid.UUID(str(b))
+
+
 def mint_target_user_for_key(cp, key_created_by, org_id: str) -> str | None:
     """#1511: the user a key's session-exchange should mint for.
 
@@ -2091,6 +2115,182 @@ def clear_github_credentials(cp, org_id: str) -> None:
     )
 
 
+# ── Connector CRUD (#2636, epic #2632) ─────────────────────────────────
+# Follows the github_credentials pattern: service-role seam reads/writes
+# credential_enc; anon/authenticated cannot access the encrypted credential.
+#
+# ⛔ TENANCY IS THE WHERE CLAUSE. Every call below runs on the service-role
+# key, which BYPASSES RLS — so the filter this seam builds is the ONLY boundary
+# between org A and org B. A helper that filtered on ``id`` alone let any
+# authenticated session in ANY org read (receiving the ciphertext), mutate, or
+# DELETE another org's connector (#2642 re-review P1, cross-tenant IDOR). Every
+# per-connector helper therefore takes BOTH ``org_id`` and ``connector_id``
+# and filters on both.
+#
+# ``_CONNECTOR_PUBLIC_SELECT`` is the column allow-list returned to API clients
+# — everything EXCEPT ``credential_enc``. A ``select``-less PostgREST read
+# returns ``*``, i.e. hands the encrypted credential back and defeats the
+# column-level grants in migration 20260922000001.
+_CONNECTOR_PUBLIC_SELECT = [
+    "id", "org_id", "source_type", "config", "sync_status",
+    "sync_cursor", "last_sync_at", "last_error",
+    "created_at", "updated_at",
+]
+# The background sync sweep is the ONE intentional reader of credential_enc —
+# it decrypts the credential to authenticate against the upstream API. It is
+# not reachable from an HTTP handler and spans every org by design.
+_CONNECTOR_SYNC_SELECT = [*_CONNECTOR_PUBLIC_SELECT, "credential_enc"]
+
+
+def connector_create(cp, *, org_id: str, source_type: str,
+                     config: dict | None = None,
+                     credential_enc: str | None = None) -> dict | None:
+    """Create a connector row. Returns the row dict or None on failure.
+
+    The POST echo is column-projected too: ``return=representation`` would
+    otherwise hand back ``credential_enc`` (NULL at create — the OAuth seam
+    sets it later) and re-expose the column this module keeps out of API
+    responses."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        method="POST",
+        json_body={
+            "org_id": org_id,
+            "source_type": source_type,
+            "config": config or {},
+            "credential_enc": credential_enc,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def connector_by_org(cp, org_id: str) -> list[dict]:
+    """List all connectors for an org (credential_enc is NULL — only the
+    service-role seam reads it)."""
+    return cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id)],
+        order="created_at",
+    )
+
+
+def connector_by_id(cp, org_id: str, connector_id: str) -> dict | None:
+    """Read a single connector, scoped to its owning org.
+
+    Filters on ``org_id`` AND ``id``: the service-role key bypasses RLS, so
+    the WHERE clause is the tenancy boundary — an id-only read returned any
+    org's row, ``credential_enc`` included. Returns None for a connector that
+    does not exist in THIS org, so the API answers 404 instead of leaking the
+    existence of another org's id."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    )
+    return rows[0] if rows else None
+
+
+def connector_update(cp, org_id: str, connector_id: str, *,
+                     config: dict | None = None,
+                     credential_enc: str | None = None,
+                     sync_status: str | None = None,
+                     sync_cursor: dict | None = None,
+                     last_sync_at: str | None = None,
+                     last_error: str | None = None) -> bool:
+    """Update connector fields, scoped to its owning org.
+
+    Returns True when a row in THIS org was updated and False when none
+    matched (foreign or absent id) — the API maps False to 404. Asking for
+    ``select=["id"]`` makes PostgREST answer ``return=representation``, which
+    is what makes the affected-row count observable; the real client and the
+    test fake both honour it.
+
+    An EMPTY body is not an error and cannot be distinguished from a miss by
+    the representation: PostgREST makes ZERO updates for an empty JSON object
+    and answers ``[]`` under ``return=representation`` regardless of whether
+    the filter matched (``spec/Feature/Query/UpdateSpec.hs``, "when patching
+    with an empty body" — ``PATCH /items?select=id`` + ``{}`` → ``[]``).
+    Inferring existence from that representation 404s the caller's own
+    connector, so existence is read FIRST here, exactly as
+    ``connector_delete`` does; the same org+id filter keeps the 404 for a
+    foreign id."""
+    body: dict = {}
+    if config is not None:
+        body["config"] = config
+    if credential_enc is not None:
+        body["credential_enc"] = credential_enc
+    if sync_status is not None:
+        body["sync_status"] = sync_status
+    if sync_cursor is not None:
+        body["sync_cursor"] = sync_cursor
+    if last_sync_at is not None:
+        body["last_sync_at"] = last_sync_at
+    if last_error is not None:
+        body["last_error"] = last_error
+    if not body:
+        return bool(cp.query(
+            "connectors",
+            select=["id"],
+            filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+        ))
+    rows = cp.query(
+        "connectors",
+        select=["id"],
+        method="PATCH",
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+        json_body=body,
+    )
+    return bool(rows)
+
+
+def connector_delete(cp, org_id: str, connector_id: str) -> bool:
+    """Delete a connector row, scoped to its owning org.
+
+    Returns True when a row in THIS org was deleted and False when none
+    exists (foreign or absent id) — the API maps False to 404. Existence is
+    read FIRST because the control-plane DELETE lane answers
+    ``Prefer: return=minimal`` (no representation), so the affected-row count
+    is otherwise unobservable; the same org+id filter is applied to the
+    DELETE itself, so no cross-org row can be reached even if one appeared
+    between the two calls."""
+    if not cp.query(
+        "connectors",
+        select=["id"],
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    ):
+        return False
+    cp.query(
+        "connectors",
+        method="DELETE",
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    )
+    return True
+
+
+def connector_list_by_sync_eligible(cp) -> list[dict]:
+    """List connectors with sync_status 'idle' or 'error' (for the background
+    sync engine). Returns credential_enc for credential usage.
+
+    Deliberately NOT org-scoped: this is the system-side sweep across every
+    org (the engine holds the service-role key and iterates all tenants), not
+    a caller-scoped read. The ``in`` filter op the query dialect does not
+    implement is expressed as two ``eq`` reads instead of a nonexistent
+    operator."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_SYNC_SELECT,
+        filters=[("sync_status", "eq", "idle")],
+    )
+    rows += cp.query(
+        "connectors",
+        select=_CONNECTOR_SYNC_SELECT,
+        filters=[("sync_status", "eq", "error")],
+    )
+    return rows
+
+
 # ── Org deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then
@@ -2111,13 +2311,132 @@ def soft_delete_org(cp, org_id: str, now: str | None = None,
     ``grace_hours`` is stored so the purge sweep and the idempotent replay
     honor the hard_delete_after the API promised at schedule time, even if
     TORTOISE_TEAM_DELETE_GRACE_HOURS changes before the sweep runs.
-    Idempotent: re-stamping an already-deleted org is a no-op PATCH.
+    Idempotent: guarded on ``deleted_at IS NULL``, so re-stamping an
+    already-deleted org is a no-op PATCH — the account-deletion cascade
+    re-runs this on every retry, and without the guard N retries retained the
+    org's content for N x its window (a retention-promise violation: the
+    advertised account ``hard_delete_after`` then preceded the org's real
+    purge). The stamp is what makes an already-claimed org idempotent.
     """
     cp.query(
         "organizations",
         method="PATCH",
-        filters=[("id", "eq", org_id)],
+        filters=[("id", "eq", org_id), ("deleted_at", "is", None)],
         json_body={"deleted_at": now or _now_iso(), "grace_hours": grace_hours},
+    )
+
+
+# ── User-account deletion ledger (#4029) ──────────────────────────────────
+#
+# The account-level twin of the org soft-delete pair above. The account is a
+# control-plane-only concept (a Supabase auth user); selfhost has none, so the
+# caller short-circuits before these seams (mirrors /v1/user/identity).
+
+
+def account_deletion_row(cp, user_id: str) -> dict | None:
+    """The account-deletion ledger row, or None (#4029).
+
+    A present row is the endpoint's retry anchor. When ``deleted_at`` is set
+    the account is delete-pending and the endpoint answers from the STORED
+    promise instead of re-cascading; when it is NULL the row is a PRIOR attempt
+    that failed mid-cascade and ``claimed_org_ids`` is the durable claim set
+    the retry replays (the cascade itself removes the membership discovery
+    reads; ``org_ids`` is only the historical intent record and never gates a
+    cascade on its own). ``created_at`` is read too (#4029 review P2-3): it is
+    what distinguishes an un-stamped anchor another request is still cascading
+    under from one a dead attempt left behind. Shape-gates user_id (#1719).
+    """
+    if not _is_uuid(user_id):
+        return None
+    rows = cp.query(
+        "account_deletions",
+        select=["user_id", "deleted_at", "grace_hours", "org_ids",
+                "claimed_org_ids", "created_at"],
+        filters=[("user_id", "eq", user_id)],
+    )
+    return rows[0] if rows else None
+
+
+def begin_account_deletion(cp, user_id: str, org_ids: list[str]) -> None:
+    """INSERT the account-deletion anchor BEFORE the cascade (#4029).
+
+    Persists ``org_ids`` (the intended set, for the record) while the orgs are
+    still discoverable — ``remove_org_memberships`` deletes the
+    ``status='active'`` owner rows ``sole_owned_org_ids`` reads, so a set
+    written after the cascade could never rediscover a partially-failed org.
+    The cascade GATE is ``claimed_org_ids``, appended per org before that
+    org's access-kill by :func:`claim_account_deletion_org`. ``deleted_at`` and
+    ``grace_hours`` are deliberately left NULL: the stamp is written LAST by
+    :func:`stamp_account_deletion`, so a partial failure leaves the account
+    un-stamped (the fail-closed ordering the per-org cascade uses).
+
+    INSERT, not upsert: a concurrent second schedule is a primary-key conflict
+    (PostgREST 409) that the caller treats as already-scheduled — a
+    first-write-wins promise. An upsert here would let the loser overwrite the
+    winner's stored window.
+    """
+    cp.query(
+        "account_deletions",
+        method="POST",
+        json_body={"user_id": user_id, "org_ids": list(org_ids),
+                   "claimed_org_ids": [],
+                   "deleted_at": None, "grace_hours": None},
+    )
+
+
+def claim_account_deletion_org(cp, user_id: str, org_id: str) -> None:
+    """Durably claim one org for THIS account deletion — atomically (#4029).
+
+    Called immediately BEFORE that org's access-kill. The claim is the replay
+    gate: a retry cascades an org only while it is still solely owned OR
+    already claimed, so an org whose cascade already began is completed
+    (idempotently) while one that merely sat in the intent ``org_ids`` and has
+    since lost sole ownership is dropped.
+
+    ONE DB-side union (RPC), never a read-then-PATCH: a blind full-column PATCH
+    writes a union computed from an earlier read, so two concurrent claims drop
+    each other's org (the reproduced cycle-2 P2). The RPC's single ``||``
+    statement makes the append atomic. Fail-closed: an RPC error raises, and
+    the caller aborts the org's cascade rather than cascading an unclaimed org.
+    """
+    cp.rpc(
+        "account_deletion_claim_org",
+        {"p_user_id": user_id, "p_org_id": str(org_id)},
+    )
+
+
+def stamp_account_deletion(cp, user_id: str, now: str | None = None,
+                           grace_hours: float = float(RESTORE_WINDOW_HOURS)) -> None:
+    """Stamp the account soft-delete — the LAST cascade step (#4029).
+
+    ``grace_hours`` is persisted so the purge sweep and the idempotent replay
+    honor the ``hard_delete_after`` promised at schedule time, even if
+    ``TORTOISE_USER_ACCOUNT_DELETE_GRACE_HOURS`` changes mid-grace — the same
+    stored-promise contract ``soft_delete_org`` (#302/#4179) implements.
+
+    PATCH guarded on ``deleted_at IS NULL`` (first-write-wins): a concurrent
+    schedule that reaches the stamp second matches no row, so the winner's
+    stored promise is never overwritten — the caller then answers from the
+    stored row.
+    """
+    cp.query(
+        "account_deletions",
+        method="PATCH",
+        filters=[("user_id", "eq", user_id), ("deleted_at", "is", None)],
+        json_body={"deleted_at": now or _now_iso(), "grace_hours": grace_hours},
+    )
+
+
+def purge_account_deletion(cp, user_id: str) -> None:
+    """Hard-delete the account ledger row — the LAST erasure step (#4029).
+
+    The row is the purge's retry anchor (see the migration header): the auth
+    user is erased first, so the sweep reaches this only after that succeeded.
+    """
+    cp.query(
+        "account_deletions",
+        method="DELETE",
+        filters=[("user_id", "eq", user_id)],
     )
 
 
@@ -2711,6 +3030,78 @@ def count_owned_free_orgs(cp, user_id: str) -> int:
     twin (``count_active_free_memberships``) for callers that only need the
     count."""
     return len(owned_free_org_ids(cp, user_id))
+
+
+def sole_owned_org_ids(cp, user_id: str) -> list[str]:
+    """#4029: ids of orgs where *user_id* is the ONLY remaining owner.
+
+    The account-deletion cascade (decision 1B, owner ruling on #4029) deletes
+    the teams a departing person ALONE owns. An org qualifies when the user
+    holds an ACTIVE ``role='owner'`` membership AND no OTHER active owner row
+    exists for it.
+
+    The other owners are read as ROWS and compared in Python, deliberately NOT
+    with a ``user_id neq <id>`` PostgREST filter: SQL ``<>`` (and therefore the
+    ``neq`` op, see the query dialect note) EXCLUDES NULL, so a second owner
+    that is the anonymous agent anchor (``user_id IS NULL``) would be invisible
+    and the user would be handed a team they are NOT solely responsible for.
+    The placeholder membership (``org_id = ''``) is never an org.
+
+    Shape-gates user_id (#1719: a non-UUID literal would 22P02 → 500).
+    """
+    if not _is_uuid(user_id):
+        return []
+    owned = cp.query(
+        "org_memberships",
+        select=["org_id"],
+        filters=[("user_id", "eq", user_id), ("role", "eq", "owner"),
+                 ("status", "eq", "active")],
+        order="created_at.asc",
+    )
+    ids: list[str] = []
+    for row in owned:
+        org_id = row.get("org_id")
+        if not org_id:
+            continue
+        owners = cp.query(
+            "org_memberships",
+            select=["user_id"],
+            filters=[("org_id", "eq", org_id), ("role", "eq", "owner"),
+                     ("status", "eq", "active")],
+        )
+        # An org reached from an active-owner row always yields >=1 owner row;
+        # `owners and` keeps a defensive empty read from reading as "sole".
+        # `_same_uuid` (P2-2), never `==`: the stored owner ids are canonical
+        # while the caller's `user_id` may be any uuid form `_is_uuid` admits.
+        if owners and all(_same_uuid(r.get("user_id"), user_id)
+                          for r in owners):
+            ids.append(org_id)
+    return ids
+
+
+def caller_membership_org_ids(cp, user_id: str) -> list[str]:
+    """#4029 cycle-3: org ids where *user_id* has a membership row — ANY status.
+
+    The account-deletion replay honours a durable claim
+    (``account_deletions.claimed_org_ids``) for orgs whose cascade already
+    began; ``remove_org_memberships`` sets those rows ``status='removed'`` but
+    never deletes them, so an active-only read cannot see them and the claim
+    is the only reach the org has. This read is therefore the CLAIM's
+    ownership gate: a claimed id is honoured only when the caller actually
+    holds a membership in the org, so a stale or malformed anchor naming a
+    stranger's org cannot drive a cascade against it (the cycle-3 cross-user
+    anchor shape).
+
+    Shape-gates user_id (#1719: a non-UUID literal would 22P02 → 500).
+    """
+    if not _is_uuid(user_id):
+        return []
+    rows = cp.query(
+        "org_memberships",
+        select=["org_id"],
+        filters=[("user_id", "eq", user_id)],
+    )
+    return [row.get("org_id") for row in rows if row.get("org_id")]
 
 
 def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,

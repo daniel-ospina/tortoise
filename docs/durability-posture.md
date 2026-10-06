@@ -180,6 +180,116 @@ property). It gets its own declared sidecar sections instead:
   re-derived by `projection`.
 <!-- config-registry:end -->
 
+### The one carried high-water mark: `:GraphEventMeta`
+
+The map above is keyed on **node classes**; this entry is a single **counter**,
+and it is carried for a different reason. The rebuild wipe destroys
+`:GraphEventMeta`, whose `last_seq` is the per-graph allocator handed to
+`event_store.next_seq` — and it is **not re-derivable**: `rebuild_all` does not
+replay `:GraphEvent` rows at all (**#4664**, consolidated into #5048, unfixed)
+and the JSONL journal carries no `seq`, so a post-replay scan reads `null`. Left
+uncarried, the next emit MERGEs a fresh counter at 1 and hands out a `seq` the
+graph already issued; because `read_after` is `seq > cursor`, every subscriber
+holding a cursor at or above the restart **silently under-counts**. That is the
+identical harm `hosted_backup._restore_event_meta` (#3902) already prevents on
+the backup/restore path.
+
+<!-- config-registry:watermark -->
+| Carried class | Carried field | Restore rule after replay |
+|---|---|---|
+| `:GraphEventMeta` | `last_seq` (high-water mark) | `max(carried, max(:GraphEvent.seq), live)` — the MAXIMUM of the pre-wipe sidecar's value, the replayed log and any counter still in the graph, which is a counter's only safe merge and the value `first_seq` is then derived from; `first_seq` is `min(:GraphEvent.seq)`, or `last_seq + 1` when the log is empty, and is raised only (never lowered). `last_seq` is bounded by `event_store.MAX_SEQ`; `first_seq` is bounded by `event_store.MAX_INT64` and may legitimately sit at `MAX_SEQ + 1` when the log comes back empty |
+
+Defect and vehicle: this entry was added by **#4653**; the durable carrier is
+the #2943 pre-wipe sidecar's `event_meta` section, re-established by
+`event_store.reestablish_watermark` after every replay pass.
+<!-- config-registry:end -->
+
+A counter node **missing** one of its two properties — the legacy shape
+`hosted_backup._restore_event_meta` (#3902) already falls back on — is
+REPAIRED, not preserved. The monotone clause is `IS NULL OR <` because a NULL
+carries no position to preserve: preserving it would report a restore that
+never happened, and a NULL `last_seq` would then make the next `next_seq`
+evaluate `null + 1`. A `last_seq` of some **other** type (a string) cannot be
+compared by Cypher's `CASE`, so it is left in place by the write and REFUSED
+loudly afterwards rather than coerced into a value the node does not hold.
+
+`first_seq` is deliberately **not** carried. On this path it is not recoverable
+from the surviving log either — the rebuild replays points, not `:GraphEvent`
+rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
+`last_seq + 1`. That is the truthful floor once the stream is truncated, and it
+makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
+parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
+would only relabel the same truncation. The pre-wipe purge floor is therefore
+LOST, which is why the backup/restore sibling
+(`hosted_backup._restore_event_meta`, #3902) does carry it: there the
+`:GraphEvent` rows are copied, so the floor is there to be carried.
+
+**The counter's domain is `0 .. MAX_SEQ`, and the ceiling is `2**53 - 1`, not
+INT64_MAX.** `ensure_event_schema` indexes `:GraphEvent.seq`, and FalkorDB
+compares numeric RANGES in double precision, where integers above `2**53` are no
+longer all representable — so `read_after`'s `WHERE e.seq > $after` **silently
+drops** rows in that range (verified on FalkorDB 4.20.4: with the index,
+`e.seq > 2**53` returns the row at `2**53 + 2` but not the one at `2**53 + 1`;
+without the index both come back). A counter in that range would re-create the
+exact #4653 harm — events that exist and are never delivered, with no 410 to
+tell the subscriber. `MAX_SEQ` is therefore the last counter value whose next
+`seq` is still compared exactly, and the bound is enforced in all three places
+that can introduce a value: the pre-wipe validator (untrusted file),
+`event_store.capture_watermark` (live counter) and
+`event_store.reestablish_watermark` (the write).
+
+**Residual — the ALLOCATOR itself has no ceiling.** `next_seq` is unchanged
+by #4653, so a graph that keeps emitting can still walk past `MAX_SEQ` (and
+would wrap negative at INT64_MAX) — reachable only at ~9e15 events. An
+out-of-domain counter is ALSO reachable without emitting anything, via an
+unbounded dump restore (`hosted_backup._restore_event_meta` writes the dump's
+value verbatim) or a hand-written node, and that state is what
+`capture_watermark` refuses: the rebuild aborts before the wipe rather than
+restoring it. Fail-closed, but not a repair; capping allocation is a separate
+change (**#5379**).
+
+**Residual — the same gap, one step out.** With the log EMPTY (today's
+state, #4664) the floor is `last_seq + 1`, so no cursor survives; but the
+moment a replay writes `:GraphEvent` rows again, the floor becomes
+`min(:GraphEvent.seq)` and a subscriber parked ABOVE the top replayed `seq` —
+served nothing, yet not below the floor — reads `[]` with no 410 while a live
+counter sits far above it.
+That starvation is the #4664 truncated-stream residual, not a regression from
+carrying the counter — the pre-fix allocator starved the same cursor — and it is
+why `first_seq` is raised, never lowered.
+
+The carrier is the durable #2943 pre-wipe sidecar (`event_meta` section),
+**not** the config registry above: this class has no identity property to key a
+node-class entry on, and snapshotting it as configuration would restore a value
+as if it were authored configuration rather than a monotonic counter. **#4653**
+is the defect.
+
+**A rescue file can carry no watermark, and the outcome is reported rather than
+assumed.** Two sidecar shapes do this: a file written before #4653 (version 1 or
+2) has no `event_meta` section at all, and a current-version file can carry an
+EMPTY one. The loader accepts both on purpose (a legacy file is still the only
+record of the graph-only nodes it holds), and the rebuild then logs one of two
+ERRORs, neither of which claims a cause the file cannot record:
+
+- **no counter anywhere** — the allocator is left absent, so it restarts at 1
+  at the next emit. That is correct for a graph that never emitted and a silent
+  under-count for one whose counter a wipe destroyed; the file records only its
+  capture-time state, so it cannot tell the two apart;
+- **a counter is present but did not come from the file** — a state-UNKNOWN
+  signal, like `legacy_sidecar_no_config_record` (#2814): the value is either the
+  one the graph already had (the window between the sidecar write and the wipe is
+  real, so nothing was lost) or one re-created after that wipe (the pre-wipe
+  position is gone).
+
+Only when the file itself carried the mark is the outcome a success.
+
+**A rebuild still requires a QUIESCED graph.** An event emitted between the
+pre-wipe capture and the `DETACH DELETE` is destroyed with the node, and because
+the journal carries no `seq` its number is lost too — so the allocator can
+re-issue that `seq` after the rebuild. The carry closes the entire post-wipe
+window and every non-racing path; it cannot close this one, which is inherent to
+replacing a graph with a full wipe+replay.
+
 <!-- config-registry:unenrolled -->
 - `:TeamMeta` — written with a bare `CREATE` and no uniqueness guarantee
   (`sdk.py`, `hosted_api.py`), so a graph can legitimately hold several and
@@ -189,16 +299,15 @@ property). It gets its own declared sidecar sections instead:
   load-bearing, not bookkeeping. Preserving an at-most-one-per-graph,
   label-wide class is its own design step — declared deliberately **not
   preserved here**, with the class as a known residual. **#5353**
-- `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
-  re-derived post-replay rather than snapshotted; today it is reset, which
-  collides the next `next_seq` with replayed sequence numbers. **#4653**
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; it enumerates the configuration classes the
-registry declares **and** the container nodes the declared sidecar sections
-preserve (`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), so an
-operator can tell what survived a rebuild. The onboarding rows are pinned by
-the doc-consistency test (a section's classes must appear here); the container
+registry declares, the container nodes the declared sidecar sections preserve
+(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), and the one
+carried counter (`:GraphEventMeta`) by the query's last leg, so an operator
+can tell what survived a rebuild and the query cannot silently under-report
+after a class is added. The onboarding rows are pinned by the
+doc-consistency test (a section's classes must appear here); the container
 rows are hand-maintained there too, but as a presence check — the test does
 not prove the list is exhaustive, and the per-Point membership edges
 (`batch_point_links`, `session_point_links`) are not enumerated here.
@@ -220,6 +329,9 @@ MATCH (n:OnboardingState) RETURN 'OnboardingState' AS cls, n.org_id AS ident
 UNION ALL
 MATCH (:OnboardingState)-[:COMPLETED_STEP]->(s:OnboardingStep)
 RETURN 'OnboardingStep' AS cls, s.org_id + '/' + s.step_id AS ident
+UNION ALL
+MATCH (m:GraphEventMeta)
+RETURN 'GraphEventMeta' AS cls, toString(m.last_seq) AS ident
 ```
 <!-- config-registry:end -->
 
@@ -264,6 +376,63 @@ the vector unmarked would trade this declared marker gap for an undeclared
 byte-level vector divergence on the LATER, journaled `promote_point` re-emit);
 a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
 incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded #785 decision (**#5068**).
+
+**R2 — `:Source`: the per-class test does not hold, so the split is per
+FIELD.** `ONTOLOGY.md` §4.7 is the reason this is written as a table rather
+than a sentence: the per-*class* claim *“append-only — rows are added, never
+updated”* was **false**, and the corrected test binds at the **write/field**
+level. `:Source` is exactly that shape. `STORAGE-ARCHITECTURE.md` §3/§9.6 gives
+its model — identity is `url`, `contentHash` identifies a **version**, there is
+**one node per `url`** (*“the prior version's window is a journal fact,
+recoverable by replay”*, §9.6; `ONTOLOGY.md` §4.6 adds that *“a version
+transition appends a journal record”*) — so a
+re-fetched Source is a **new version of the same identity**, not an in-place
+edit and not a recomputation.
+
+`:Source` is therefore **not** declared recomputable as a class. Field by
+field (**#5024**; `contentHash` is the row that makes the class-level claim
+false):
+
+<!-- source-field-split:start -->
+| `:Source` field | Disposition | Why |
+|---|---|---|
+| `url` | **RECORDED** | The merge key — the node's identity (§9.4: a canonicalised URL, never an embedding). `_upsert_source`/the fold resolve it through the shared `resolve_source_key`, so a variant spelling replays onto the ONE node. |
+| `id` | RECORDED | Identity companion. |
+| `canonicalUrl`, `urlAliases` | **RECOMPUTABLE** | Reproduced from the record sequence by the shared resolver (`normalize_source_url` + the #5012 S0b alias append), so a URL variant replays onto the ONE canonical node with the same alias list. Not *stored* — there is no separate record for them. |
+| **`contentHash`** | **RECORDED** | **The version anchor — and the reason this is not a class-level claim.** A re-fetch *changes* it by definition, so “recompute it” would recompute the thing the record is keyed on. **#3998**, still open, **proposes** raw-absent/erased as a third value on the same record. |
+| `version` | RECORDED | The live writer's own ordinal. Counting prior records instead would be a second derivation with its own failure modes. |
+| `updatedAt` | **RECORDED** | The instant the transition happened. Minted **once** by the producer and carried on the record; a replay that read `_now_iso()` diverged live vs rebuilt (measured ...57.016262 vs ...57.079810). Legacy records without it `coalesce` to the replay clock. |
+| `ingestedAt` | **RECORDED** | The pipeline-arrival instant (§4.6: the documented proxy for the evidence-age clock). Same divergence, same fix (measured ...56.751580 vs ...57.047168). |
+| `sourceKind`, `title`, `externalId`, `sourcePath` | RECORDED | Caller-asserted. `sourcePath` is the sanctioned `source_path=` route only (§4.1). |
+| `_searchText` | RECORDED | §4.6's coalesce-on-create / overwrite-on-hash-diff fold over `title`. Rides the record like every other clause. |
+| open extras (`summary`, `topics`, `sourceDate`, `is_episodic`, `credibilityTier`, `documentKind`, `format`, `sessionId`, `eventId`, …) | RECORDED | `_persist_extra_props` passthrough with `_SOURCE_HANDLED`. `tier=`/tier-form `sourceKind` mirror to `credibilityTier`. |
+| `reliability`, `reliabilityComponents`, `reliability_derived_at` | **NOT AUTHORITATIVE** | The #398 **query-time cache**. Recomputed on rebuild by design, not restored — the §3 pattern for a cache. Excluded from the replay-parity assertion for that reason, not for convenience. |
+| `validFrom`, `validTo`, `expiredAt` | **declared, never written** | `ONTOLOGY.md` §4.6/§4.7 declare them; no writer sets them today, so a replay cannot lose what no write ever wrote. The window half of §4.6's *Versioning* clause — **#3644** (the journalling half landed in **#5024**). |
+<!-- source-field-split:end -->
+
+**The replay fold IS the live writer.** `_fold_source_versioned` delegates to
+`_upsert_source` rather than restating its SET clauses. The first cut did
+restate them and drifted in three fields (`urlAliases`, `sourcePath`,
+`canonicalUrl`) — each a live != replay divergence, found by the review gate
+rather than by a test. Parity now holds **by construction**: there is no second
+clause list to fall out of sync, and the transition record's own contribution is
+the one fact the writer cannot derive — `previousContentHash`.
+
+The write path is **repeat-safe** on top of the split: a re-check that finds the
+same bytes journals **nothing** (a `SourceVersioned` only when the hash really
+transitioned, a `SourceCreated` for a create or a stub completion — a
+**hashless** re-check included, which is why "no stored hash" alone cannot
+select the create arm),
+because §9.6 bounds a version at *“three timestamps and a hash — not a copy of
+the artifact”*. The no-op test is over the payload's **own keys**, not “same
+hash”: a hash-identical call may still carry a new `summary`, and suppressing
+**that** record would trade log growth for a live ≠ replay divergence. Its
+polarity is **fail-safe toward recording** — anything it cannot prove unchanged
+is written.
+
+> **Residual, pinned not fixed:** `PointRevised`’s embedding arm (**#5046**) and
+> `_update_entity`’s Point branch (**#4094**) are the two embedding-path
+exemptions from R1; they are orthogonal to R2 and are not widened here.
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
@@ -314,7 +483,7 @@ gate in `tests/test_durability_posture.py` fails the build if a
   nothing and refuses nothing: the byte-identical unconditional wipe (which
   #2814 does **not** change, by owner decision — the surface belongs to PR
   #2996) destroys it exactly as before. The live instance is the
-  `unenrolled` list above (#5353, #4653).
+  `unenrolled` list above (#5353).
 - **#4641 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar keeps the leftover `onboarding_snapshot`
   node map and the leftover `onboarding_step_links` pairs, so a mutation made

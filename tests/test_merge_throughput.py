@@ -4144,10 +4144,23 @@ def test_docs_job_pr_path_never_interpolates_filenames():
     # Only paths that exist on disk: lychee hard-errors on a nonexistent input,
     # and under `--no-renames` a rename contributes its deleted source path.
     assert "--diff-filter ACMR" in diff_cmd, diff_cmd
-    # The tolerance, asserted ON THIS COMMAND. `docs` is a REQUIRED status
-    # check and a shallow PR checkout has no base sha, so without it git exits
-    # 128, the step aborts under `bash -e`, and every PR reds.
-    assert "|| :" in diff_cmd or diff_cmd.rstrip().endswith("|| true"), diff_cmd
+    # #2386/#5476: the diff must NOT tolerate a failure. The tolerance existed
+    # because the PR checkout was shallow (no base sha), so git exited 128 and
+    # `bash -e` would have aborted the step — and it turned that failure into an
+    # EMPTY list and a REQUIRED check that reported success having linted
+    # nothing. The PR checkout is now full-depth (fetch-depth: 0, asserted
+    # below), so the base resolves; a tolerance here would restore the silent
+    # green. Fail closed instead.
+    assert not ("|| :" in diff_cmd or diff_cmd.rstrip().endswith("|| true")), (
+        f"the PR diff must not swallow a failure (#2386): {diff_cmd!r}"
+    )
+    pr_checkout = next(
+        s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
+    )
+    assert pr_checkout.get("with", {}).get("fetch-depth") == 0, (
+        "the PR checkout must be full-depth, or pull_request.base.sha is absent "
+        "and the fail-closed diff above cannot resolve (#2386)"
+    )
     assert "$RUNNER_TEMP/pr-md.raw.nul" in diff_cmd, diff_cmd
 
     # The list is never published as step-output TEXT (a later `${{ ... }}`

@@ -419,6 +419,29 @@ jobs:
         # <1s, no dependency beyond the pyyaml installed above.
         run: python3 tools/registry_integrity.py
 
+      - name: "Required-set sync (#6144)"
+        # The required-status-check set is declared in three places — live
+        # branch protection, `.mergify.yml`'s `queue_conditions` /
+        # `merge_conditions`, and the declarative branch-protection mirror — and
+        # nothing read two of them. (The mirror is named INDIRECTLY on purpose:
+        # I11's undeclared-reader scan is a BYTE scan, so naming its path in a
+        # comment here is indistinguishable from a tool that READS it, and the
+        # fix for that is not to exempt this workflow — which would blind the
+        # scan to a real reader added to it later — but to not spell the path in
+        # prose.) `.mergify.yml` stated the invariant in a COMMENT with a
+        # hand-maintained "Last reconciled …" line; a comment cannot fail.
+        #
+        # Hosted in THIS job because it is the same class of check as the
+        # manifest drift gate beside it: a cheap, unconditional, fail-closed
+        # assertion about repo config, whose red must block a merge. It adds
+        # no new required context and no new workflow — it rides the aggregate
+        # that is already required.
+        #
+        # Offline by default (no `--live`: reading branch protection needs
+        # admin scope, and `GITHUB_TOKEN` cannot). `--live` is the owner/rail
+        # check. Exit 2 = could not measure, which is NOT a pass.
+        run: python3 .github/scripts/check-required-set.py
+
   test:
     # #880: split into parallel shards (matrix). #6135: the COUNT is
     # `config/ci-surfaces.yml::fast_shards` and the shape is the selector's
@@ -591,9 +614,14 @@ jobs:
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the full job cap.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "330"
         timeout-minutes: 6
         run: |
-          python3 tools/embedder_provision.py --attempts 3 --backoff 5
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. The assigned ports land
         # in $TORTOISE_TEST_DOCKER_PORT / $TORTOISE_TEST_LEGACY_PORT, which
@@ -1159,16 +1187,20 @@ jobs:
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest
-        # session-end sweep reports what it did ({reaped, cleared, left, before})
+        # session-end sweep reports what it did
+        # ({reaped, exited, cleared, left, before})
         # and the gate binds to that report — reading the bound from `left` and
-        # asserting the sweep's own accounting identity `reaped + left >= before`
-        # (see .github/scripts/orphan-bound.sh, #4740). #2032: the docker lane is
+        # asserting the sweep's own accounting identity
+        # `reaped + exited + left >= before`
+        # (see .github/scripts/orphan-bound.sh, #4740; `exited` is #6984 — the
+        # servers the sweep OBSERVED to exit on their own, so a self-shutdown
+        # is not read as a broken sweep). #2032: the docker lane is
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for. What this gate reds: a leak
         # that appears AFTER the sweep (COUNT > left), an accounting-identity
-        # violation (reaped + left < before), a probe_failed report above a
+        # violation (reaped + exited + left < before), a probe_failed report above a
         # measured COUNT of zero (no `left` to bind to), an error or skipped
         # report, a no_embedded_servers report above a measured COUNT of zero,
         # and an unaccounted/unreadable report. A `cleared: false` report does
@@ -1260,35 +1292,63 @@ jobs:
           #      — not by a bad split but by the eval file GROWING from its
           #      declared 855s to a measured 24.4 min while the split stayed a
           #      hand-maintained artifact. The old a/b lists were balanced when
-          #      written (#4711) and were never rechecked. They are 1.00:1 now
-          #      (2.8 min each).
+          #      written (#4711) and were never rechecked.
+          #
+          # #6137 re-cut the two rows. They are the LPT legs of
+          # `slow_files - carve_out` on the committed `durations` map — 30 and
+          # 31 files at 13.817 / 13.813 min, re-derivable with
+          # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
+          # (The first cut packed 43 files / 16.21m; eight dual-registered
+          # files returned to the fast pool — a second surface's diff would
+          # otherwise run them on NEITHER leg — so the legs were re-cut to
+          # 13.82m. See config/ci-surfaces.yml's `slow_files` exclusions.)
+          # The in-step watchdog below is sized from the heavier leg
+          # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
+          # a leg that outruns its watchdog is killed mid-suite and reports a
+          # red — the trap the #3239 budget was written for when these legs'
+          # committed weight was 2.84 min rather than 13.8.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
           # Until then, a rebalance must be redone whenever a file in this list
-          # grows, and nothing currently reds to say so.
+          # grows; `test_slow_leg_bounds_clear_the_committed_work` reds when the
+          # watchdog no longer clears the committed weight. Deriving the slow
+          # legs is #6137's design decision and is not pre-empted here.
           - half: a
             files: >-
-              test_backfill_sources test_billing test_control_plane test_dream
-              test_enumeration_surfaces test_graphcopy_boolean_index_3154
-              test_hosted_api test_index_directory test_indexes
-              test_projection test_sdk test_sdk_group3
+              eval/retrieval/test_gate_1349 eval/retrieval/test_run
+              eval/why_suite/test_why_suite_benchmark test_about_edges test_battery_setup
+              test_billing test_ci_selection test_cli_context test_consistency_divergence_5011
+              test_control_plane test_dream test_embedded_evidence test_ep_selector
+              test_epic903_fixtures test_epic903_scheduler test_event_provenance
+              test_graphcopy_boolean_index_3154 test_hosted_volunteer_context
+              test_import_endpoint test_index_cli test_index_directory test_indexes test_ingest
+              test_monitoring test_oauth_mcp test_pack_shipping_wheel test_platform_seams
+              test_search_engine_gaps test_source_inheritance_own
+              test_unjournaled_mutation_class
           - half: b
             files: >-
-              test_about_edges test_cli_context test_ep_sources
-              test_event_provenance test_index_cli test_ingest
-              test_ingest_bundle test_ingest_mode test_ingest_validation
-              test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
-              test_search_engine_gaps test_source_inheritance_own
+              eval/harness/test_harness_benchmark eval/write_path/test_write_path_runner
+              test_abuse_integration test_backfill_sources test_battery_r1_seed
+              test_capture_session test_client_surface test_commit_endpoint test_dr_endpoints
+              test_enumeration_surfaces test_ep_sources test_epic903_modes
+              test_epic903_warmstart test_extractor_v2 test_graph_diagnostics test_hosted_api
+              test_ingest_bundle test_ingest_mode test_ingest_v2_consolidation
+              test_ingest_validation test_markers test_mcp_http test_mcp_route_challenge
+              test_operator_idempotency_4971 test_projection test_relationships_bounded test_sdk
+              test_sdk_group3 test_skip_guard test_surface_manifest test_write_verb
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
-    # that fires first cancels the step and loses them. Measured 2026-09-30
-    # over the 60 newest completed runs: pytest-step max 4.70m (leg a) /
-    # 3.50m (leg b), job max 7.98m. 20m clears the observed work 2.5x; the
-    # inherited 90m cleared it 11x and let a hung leg hold the per-PR
-    # concurrency slot for the whole cap (#3239).
-    timeout-minutes: 20
+    # that fires first cancels the step and loses them. #6137 moved 43 files
+    # into these legs, taking their committed `durations` weight from 2.84m to
+    # 16.21m (13.82m after the eight dual-registered files returned to the
+    # fast pool), so
+    # the #3239 literal budget no longer clears the work: the watchdog goes to
+    # 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x). The cap
+    # still clears the watchdog, so a hung leg prints its counts before the
+    # runner cancels the step.
+    timeout-minutes: 40
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
     # families: 6379 passworded + 16379 passwordless legacy).
@@ -1347,9 +1407,14 @@ jobs:
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the full 90-min
         # job cap; a timeout now FAILS the step, which is the honest outcome.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Drift guard — legs cover slow_files minus carve-out (#1471)
         # #1471: the committed leg lists MUST stay the full slow-file set — a
         # new slow file added to config/ci-surfaces.yml `slow_files:` that
@@ -1501,10 +1566,17 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          # #3239: 10m = 2x the measured pytest step (max 4.70m leg a /
-          # 3.50m leg b) — tools/ci_selection.WATCHDOG_HEADROOM, the factor
-          # #6135 already validated for the fast shards.
-          timeout -s INT -k 10 10m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #3239: the in-step watchdog must CLEAR the leg's committed weight
+          # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
+          # shards derive their budget from. #6137 moved 43 files in, so the
+          # heavier leg now carries 13.82m and this literal is 35m, i.e. 2.53x
+          # the 2.0x minimum the headroom floor requires (27.6m); it was 10m
+          # when the legs' committed weight was 2.84m (the measured pytest step
+          # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
+          # the budget when the leg set moves is
+          # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
+          # which reds here if this literal stops clearing the committed work.
+          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1536,7 +1608,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 10m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 35m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
@@ -1701,9 +1773,14 @@ jobs:
         # 15-min cap makes a stalled download strictly worse (it would burn the
         # whole budget and cancel the run step with NO summary), so the timeout
         # now fails the step outright.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. `uri_graph` is set here
         # because this job's TORTOISE_DB_URI used to be the fixed-port literal
@@ -2029,6 +2106,45 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+        # #4387: the carve-out job runs test_longmem_runner.py, which exercises
+        # the dense leg — so it provisions the embedder OFFLINE like the `test`,
+        # `test-slow` and `test-concurrency-falkor` jobs. Its BUDGET is the two
+        # long-running siblings' (`--attempts 5 --backoff 10` under a 10-minute
+        # cap), not `test`'s tighter `--attempts 3 --backoff 5` under 6 minutes.
+        # Without the cache AND the offline pair on the pytest step, an uncached
+        # load does not fail fast: with the suite-wide egress guard installed it
+        # RETRIES against huggingface.co rather than resolving DNS, and
+        # test_longmem_runner.py re-attempts the load per test — so the shard is
+        # killed by the 15m watchdog with 0 failures (rc=124) instead of
+        # reporting a failure the merge rail can read; and a load that merely
+        # FAILS skips the dense assertion and trips the skip-guard's
+        # embedder-unavailable family (#2573). Same v2 key as the other jobs,
+        # so the cache is shared and a warm restore is a no-op.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-cache-v2-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v2-${{ runner.os }}-
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # #4387: hoisted from the `test`/`test-slow`/`test-concurrency-falkor`
+        # jobs for the same reason as the cache above — the carve-out lane runs
+        # the dense leg, so the model must be PRESENT before the offline pytest
+        # step, otherwise those assertions skip and the skip-guard reds.
+        # The command and cap are the two long-running siblings' (see above).
+        # 10 minutes, matching the two `--attempts 5 --backoff 10` siblings
+        # (test-slow, test-concurrency-falkor): five attempts sleep 100s of
+        # backoff before the final probe, which does not fit the `test` job's
+        # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
+        timeout-minutes: 10
+        run: |
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
           FILES=""
@@ -2045,6 +2161,19 @@ jobs:
         # reaper, backup-restore) must run against FalkorDBLite. junitxml +
         # -r fEs (the manifest's observed-set source); pytest-rc for the
         # guard/orphan gates.
+        env:
+          # #4387: the same deterministic-embeddings pair the four
+          # embedder-provisioning pytest steps carry (see the `test` job's step
+          # env). This job was the one PROVISIONING lane WITHOUT it — the two
+          # other lanes that carry neither are track-b and d14, and neither
+          # provisions — and that gap is why its shards died on the 15m
+          # watchdog with 0 failures (rc=124): see this job's cache step above
+          # for the mechanism. The request/backoff/test counts observed on the
+          # pre-`pytest_configure` revision are deliberately NOT restated here or
+          # in the test that guards this step — multiple copies of a measured
+          # figure in the tree is what drifts.
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
         run: |
           set +e
           FILES=""

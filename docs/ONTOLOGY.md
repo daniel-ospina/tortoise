@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.18"
+title: "Tortoise — Canonical Ontology v3.20"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-27
+updated: 2026-09-29
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.18
+# Tortoise — Canonical Ontology v3.20
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,57 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
+>
+> - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
+>   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
+>   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
+>   `(m)-[:IMPL]->(op)`) — pulled a factorless node into the run, where
+>   `_update_claim_posterior` recomputed it as `Beta(1,1)` and **discarded its prior**.
+>   The operator-mediated hops are now typed **and directed**
+>   (`(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`): only operator **inputs** are admitted,
+>   which are the relations `_affected_factors` turns into factors. **One residual
+>   remains, and it is not reached through `related`:** a factor whose participating
+>   inputs drop below two no-ops, so an *admitted* input can still be recomputed as
+>   `Beta(1,1)` (`ep.py`, the KNOWN EXCEPTION noted at the affected-factor walk). The
+>   §3.9 and §8 status notes are updated accordingly; `related` is now weight-free in
+>   fact, not only by the #5025 decision.
+> - `mitigate_operator`'s **idempotent** update branch now dirties the operator
+>   (`_mark_dirty([mid, id])`), exactly as its CREATE branch does. With the hop now
+>   factor-filtered, a mitigation-only dirty root no longer reaches the operator's
+>   factor, so a re-mitigation whose strength changed would leave downstream
+>   confidence unmoved on any graph whose `ep_dirty` flags are not journaled
+>   (#5166). The root cause is closed in `_reverse_bfs_neighbors` itself: it matches
+>   `(op)-[:IMPL|NAND]->(p)` **and** `(p)-[:IMPL|NAND]->(op)`, so a mitigation — the
+>   SOURCE of `(mit)-[:IMPL]->(op)` — finds its operator, and ANY writer of a
+>   strength reaches the operator's factor, not only the caller patched above.
+>
+> **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
+>
+> - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
+>   start both can *order*. `_supersede_window_end` resolved with a truthiness test while
+>   `_covers` gates on presence, so a stored `validFrom = 0` was a real epoch-0 start to the
+>   read path (`[epoch 0, ∞)`) but was treated as undated by the write path, which stamped the
+>   predecessor's `validTo` at the successor's `createdAt` — inside that window, so the
+>   predecessor and the successor both covered and `restore_point_at` returned a two-candidate
+>   `ambiguous` instead of the successor. The resolution now takes a present, **orderable**
+>   start (`is not None` and `_created_sort_key(...)[0] == 0`), so `0`/`0.0` becomes the
+>   predecessor's `validTo`; where it precedes the predecessor's own start the existing #4021
+>   guard refuses the write rather than persisting an inverted window.
+> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence below. The
+>   falsey-**and-unorderable** `""` still falls through to `createdAt`, so `write != read` for
+>   `""` remains. Which of the two is intended — an OPEN window start or an ABSENT one — is an
+>   owner decision over temporal semantics, not a predicate alignment, so it is left open and
+>   tracked as **#6140** (deliberately not decided here; it is NOT #3982, which ruled on
+>   date-only parsing — a different question).
+> - Supersedes the v3.13 no-kwarg sentence's scope from "the falsey case" to "the
+>   falsey-and-unorderable case", and supersedes v3.13's contrast that the **presence**
+>   predicate is "the read path's … not the resolution branch's truthiness": the resolution
+>   branch now ALSO gates on presence (plus the #5360 orderability conjunct), so that contrast no
+>   longer holds.
+>   This entry records only what the code now does. (The two v3.18 entries further below
+>   are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >
@@ -56,11 +107,14 @@ doc_status: live
 >   most general relation … can't determine what that relationship is"); and AIF's
 >   scheme node, cited as an **illustrative** analogy for relevance-on-the-operator
 >   only.
-> - Known defect on the designated operator route, **and it breaches the rule above
->   today**: **#5566** — a non-logical edge onto an operator pulls the node into the
->   affected set, where its prior is discarded (`Beta(1,1)`). The EP traversal is
->   unfiltered on relation, so `related` is not yet weight-free in fact. Owner-reserved
->   (belief model, DECISION-LEDGER §22).
+> - Known defect on the designated operator route, **as of 2026-09-27**: **#5566** — a
+>   non-logical edge onto an operator pulled the node into the affected set, where its
+>   prior was discarded (`Beta(1,1)`). The EP traversal was then unfiltered on relation,
+>   so `related` was not yet weight-free in fact. **The traversal half of this is now
+>   CLOSED** — the affected-set traversal is `IMPL`/`NAND`-filtered and direction-checked
+>   as of v3.20 above, so a `related` edge can no longer pull a node in. The
+>   belief-model half remains **owner-reserved** (DECISION-LEDGER §22), which is why
+>   #5566 stays open.
 >
 > **Changelog v3.18 (2026-09-25, issue #4021 — the inverted predecessor window is refused):**
 >
@@ -217,8 +271,12 @@ doc_status: live
 > - **Implementation status:** `#5026` (the label migration) **landed** — PR
 >   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
 >   the legacy spelling survives only as a deprecated alias whose writes route to
->   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
->   transition) and `#5038` (the version model).
+>   `:Source` keyed `url`. `#5024` **landed** — a content-changing re-fetch now
+>   journals a `SourceVersioned` record naming the superseded `contentHash`, a
+>   no-op re-fetch journals nothing, and a replay reproduces the node (the
+>   per-field split is in `docs/durability-posture.md` → R2). Still open: the
+>   version **window** `validFrom`/`validTo`/`expiredAt`, which no writer sets
+>   (**#3644**); and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 >
@@ -281,12 +339,12 @@ doc_status: live
 >   `startedAt`; Event's transaction-time start is `capturedAt`.
 > - §4.7 (correction): Point supersession is `status='superseded'` — the
 >   `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do
->   not distinguish the two. §4.7's `validFrom` start is ⚠️ (populated by the
->   date-carrying write paths — hosted commit `when`; mining W-4 session date —
->   but the legacy mining W-4 post-pass falls back to the **wall clock** when the
->   session carries no date, so a clock-stamped start is a real, reachable write;
->   **absent ⇒ open start**), and `when` documented as the occurrence-date input
->   that fills `validFrom` on the commit path, not a second slot.
+>   not distinguish the two. §4.7's `validFrom` start is ⚠️ — populated by the
+>   date-carrying write paths only (hosted commit `when`; mining W-4 session
+>   date); an **undated** session stamps no `validFrom` at all, so
+>   **absent ⇒ open/unbounded start** (#3654 — the ingest wall clock is never
+>   borrowed as a valid-time start), and `when` documented as the occurrence-date
+>   input that fills `validFrom` on the commit path, not a second slot.
 > - §4.7 (correction): the Document column carries explicit per-cell markers,
 >   not "inherits Object" — Document inheritance of the Object column is
 >   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
@@ -729,13 +787,20 @@ wasDerivedFrom
 > durability, not weight** — do not read their enforcement as the rule above being
 > true in the code.
 >
-> ⛔ **"Carries no epistemic weight" is a DECISION WITH A KNOWN BREACH — it is the
-> target, not today's behaviour.** The EP affected-set traversal is **unfiltered on
-> relation** (`ep.py:807`, `:922`, `:937`), so a `related` edge that lands on an
-> operator *does* reach `_update_claim_posterior` (`ep.py:625+`), which recomputes
-> that node as `Beta(1,1)` and **discards its prior** — **#5566**. Until that is
-> fixed, `related` **can** change a belief number. Tracked as its own defect and
-> owner-reserved (belief model, DECISION-LEDGER §22).
+> ⛔ **"Carries no epistemic weight" — the decision held, and the breach that
+> undercut it is now closed (#5566).** The EP affected-set traversal was unfiltered
+> on relation (`ep.py` `_affected_claims` / `_live_neighbors`), so a `related` edge
+> landing on an operator *did* reach `_update_claim_posterior`, which recomputed that
+> node as `Beta(1,1)` and **discarded its prior**. The operator-mediated hops are now
+> **factor-bearing-only**: typed `IMPL|NAND` *and* directed
+> (`(n)<-[r:IMPL|NAND]-(op)-[r2:IMPL|NAND]->(m)`), so only operator **inputs** — the
+> relations `_affected_factors` actually turns into factors — are admitted. Neither a
+> structural predicate (`related`, `aboutSubject`, `memberOf`, …) nor a reverse-only
+> `IMPL` (the mitigation back-link `(m)-[:IMPL]->(op)`) can admit a claim. `related`
+> therefore **cannot** change a belief number, in fact as well as by decision. Pinned
+> by `tests/test_ep_local_395.py::test_ac3_max_hops_none_both_impls_and_run_contract`.
+> *(The owner reservation on the belief model proper — DECISION-LEDGER §22 — stands;
+> this change only brings the traversal into line with the #5025 decision above.)*
 >
 > **Wiring a producer requires revisiting both sets first.** Per #2489 a predicate's
 > label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
@@ -791,7 +856,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`) falls back to the **wall clock** when the session carries no date, so a clock-stamped start is possible though not the intent; **absent ⇒ open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
+| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths only (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). Mining W-4's undated leg (`ConversationMiner._temporal_wire`, #3654) writes **no** `validFrom` — **absent ⇒ open/unbounded start** (`restore_point_at`), never a start synthesized from the write wall clock. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
 | `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). A successor whose resolved start is **parseable** and sorts **strictly before the predecessor's own parseable `validFrom`** is refused outright (`ValueError`, same measure, before any write — an inverted window is satisfiable by no query instant) (#4021). A bound that is present but **unorderable** on EITHER side is not compared: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (`_assert_window_start_not_inverted` makes the same choice for `invalidate_point`), and the orderability residual is closed on the write path (#5360) — an unorderable resolved bound is normalised to an orderable instant rather than persisted, with ONE deliberate exemption: a NUMERIC `valid_from` kwarg, which is `str()`-ed and left unorderable, so `_covers` still cannot order that window end. §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -893,7 +958,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | **Version anchor** — the digest of the content read. A differing hash on re-fetch is a **new version**, not an edit (see *Versioning* below) |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
-| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. Set **in place** on `ON MATCH` by `_upsert_source` — **unjournalled today** (`#5024`) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
@@ -931,6 +996,8 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 
 **`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
 
+**Implementation status (`#5024`, 2026-09-24).** The *version-anchor* half of this section is now implemented: a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. **The window half is still a declared gap:** the record names the superseded *version* but does not close a `validTo`/open a `validFrom`, because no writer sets those fields on the node at all (**#3644**). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
+
 ### §4.7 Temporal Model (canonical)
 
 **Every entity answers two orthogonal temporal questions, and supersession is a
@@ -943,7 +1010,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`, mining.py) falls back to the **wall clock** (`_now()`) when the session carries no `date`/`startedAt`, so a clock-stamped start is a real, reachable write — though not the intent. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg is the sole source for an undated successor **unless it names no instant** — a STRING kwarg that is unparseable falls through to the successor's `createdAt`, and that fallback itself requires an orderable value and otherwise lands on `now` (#5360). **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (and a point whose window is already unorderable is not newly hidden by the write) — the orderability residual is closed on the write path (#5360), except the deliberately-exempt NUMERIC `valid_from` kwarg (whose `str()` form `_covers` still cannot order). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
@@ -988,12 +1055,12 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`, `version`) with no journal record (`#5024`).**
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
-> paths, with the legacy mining W-4 post-pass falling back to the wall clock when
-> the session carries no date (a clock-stamped start is reachable, though not the
-> intent); an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
+> paths only; an undated session (mining W-4) stamps no `validFrom` at all
+> (#3654), so an absent `validFrom` is an **open start** and the write wall
+> clock is never borrowed as a start. `validFrom` → `createdAt`
 > is a *render* fallback (`_render_date`), not a stamp. The open start is why the
 > supersession **end** is conditional too: an undated successor contributes its
 > `createdAt` (fallback chain above), not a `validFrom`, so its overlap with the
@@ -1264,8 +1331,9 @@ edge attribute.
   synonyms:
   `extractedFrom` is structural and **does** carry weight, via the Beta prior set in
   `_apply_source_inheritance`. A predicate is neutral only when no read path traverses it
-  — see §3.9 for the breach that currently leaves `related`'s neutrality a target rather
-  than a fact (#5566).
+  — §3.9 records the breach that left `related`'s neutrality a target rather than a fact,
+  closed by **#5566** (the affected-set traversal is now `IMPL`/`NAND`-filtered **and**
+  directed, so only operator inputs are admitted).
 
 - **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
   (no operator); EP propagates over it the same way.

@@ -36,6 +36,22 @@ pytestmark = pytest.mark.skipif(
     reason="claude-hooks scripts not present")
 
 
+@pytest.fixture(autouse=True)
+def _not_consented_by_the_suite_default(monkeypatch, _capture_consent_default_on):
+    """#4276: this file's #3615 matrix asserts the gate FAILS CLOSED, so the
+    suite-wide consent default (``tests/conftest.py``) is opted BACK OUT here.
+
+    ``_run_hook`` already scrubs ``TORTOISE_CAPTURE`` from the CHILD environment
+    it builds, so the bash-side decline tests were never relying on the
+    inherited grant; this makes the intent explicit for the in-process
+    predicate calls too, and — via the dependency — guarantees the delete is
+    ordered AFTER the suite-wide grant. Each positive test re-opts-in through
+    ``extra_env``.
+    """
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    yield
+
+
 def _write_mock_tortoise(tmp_path: Path, log: Path, *, fail_capture: bool = False) -> Path:
     """A fake `tortoise` CLI: records every invocation to ``log`` and
     simulates session capture (success or failure). Placed on PATH so the
@@ -325,6 +341,66 @@ def test_session_end_notice_survives_a_marker_written_by_a_stale_hook(
     assert "session capture is OFF" in r.stderr, r.stderr
     assert marker.read_text(encoding="utf-8") == \
         "written by a stale hook's CLI refusal\n"
+
+
+def test_session_end_notice_is_written_at_mode_0600(tmp_path, transcript):
+    """#3684 — the bash writer pins 0600 with `umask 077`.
+
+    The symlink test plants a link, so it only ever exercises the REFUSE branch
+    and could never observe a write: a regression that dropped the `umask` would
+    leave it — and every other test here — green.
+    """
+    import stat
+
+    log = tmp_path / "calls.log"
+    bindir = _write_mock_tortoise(tmp_path, log)
+    marker = bindir.parent / "home" / ".tortoise" / "capture-consent-notice"
+    meta = json.dumps({"session_id": "s-mode", "transcript_path": str(transcript)})
+
+    r = _run_hook(SESSION_END, meta, bindir,
+                  extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r.returncode == 0
+    assert marker.is_file(), "the hook wrote the one-time marker"
+    mode = stat.S_IMODE(marker.stat().st_mode)
+    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    # still one-time, and the visible line still fires
+    first_mtime = marker.stat().st_mtime_ns
+    r2 = _run_hook(SESSION_END, meta, bindir,
+                   extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r2.returncode == 0
+    assert marker.stat().st_mtime_ns == first_mtime, "the marker is one-time, not per-run"
+    assert "session capture is OFF" in r2.stderr, r2.stderr
+
+
+def test_session_end_notice_does_not_follow_a_symlink_at_the_marker(
+        tmp_path, transcript):
+    """#3684 — the BASH writer of the same path, and the reason the Python fix
+    alone was not enough.
+
+    `[ ! -f "$NOTICE_MARKER" ]` follows a symlink and `> "$NOTICE_MARKER"`
+    follows it too, so a DANGLING link made `-f` false, the guard pass, and the
+    redirect then CREATE the attacker's target at the umask (reproduced: 0644) —
+    on a host where the hook writes the notice, the Python hardening was
+    therefore bypassed end to end. The hook must refuse the link, and pin 0600
+    when it does write.
+    """
+    log = tmp_path / "calls.log"
+    bindir = _write_mock_tortoise(tmp_path, log)
+    home = bindir.parent / "home"
+    marker = home / ".tortoise" / "capture-consent-notice"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    victim = home / "some-other-file"
+    marker.symlink_to(victim)
+    meta = json.dumps({"session_id": "s-symlink", "transcript_path": str(transcript)})
+
+    r = _run_hook(SESSION_END, meta, bindir,
+                  extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r.returncode == 0
+    assert not victim.exists(), "the hook wrote the notice THROUGH the symlink"
+    assert marker.is_symlink(), "the link is left alone, not replaced"
+    # the visible line is not marker-gated, so it still fires
+    assert "session capture is OFF" in r.stderr, r.stderr
 
 
 def test_session_end_notice_ignores_a_blank_legacy_credential(tmp_path, transcript):

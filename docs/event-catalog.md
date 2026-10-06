@@ -37,6 +37,18 @@ journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `projection_version`) plus the record's own fields. Several folds carry props
 that the payload does not name:
 
+- **The seal annotation (`__TornTailSealed__`, #5917) — an annotation, not a
+  record.** When `EventLog.append` finds the journal ending on a fragment — an
+  unterminated line that is not valid JSON (a writer killed mid-append), or a
+  terminated line that is not valid JSON — it terminates and/or marks the
+  fragment before writing the new record, so the new record starts on a line of
+  its own while the fragment still reaches the torn-tail classifier. `read_all`
+  never returns it and it shifts no record index. It is deliberately **not
+  JSON**: every record begins `{"`, so a sentinel no record can begin with keeps
+  a *torn seal* unambiguous — a torn record fragment is still counted and
+  classified rather than being mistaken for an annotation. The journal's grammar
+  already admits non-JSON lines (a torn fragment is one).
+
 - **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
   turn** (#5004) — the `point` snapshot now also carries the embedding, which
   is a *node* property and stays one: `embedding` (the vector as stored, or an
@@ -55,6 +67,33 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
+- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+  re-fetched source whose `contentHash` differs is a *new version of the same
+  identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
+  `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
+  `contentHash` (the NEW version), **`previousContentHash`** (the superseded
+  one — this is what makes the prior version addressable after the single
+  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
+  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  payload's own `updatedAt` (minted once by `create_source`, so the live node
+  and the record cannot disagree) is it, and the fold reads exactly that. The
+  record carries **no** recomputed ordinal — `version` is reproduced on replay
+  through the same hash-diff gate the live write used, so recording it too
+  would be a second derivation that can disagree. Folded by
+  `FalkorProjection._fold_source_versioned`, which **delegates to
+  `_upsert_source`** — the LIVE writer — so apply/replay parity holds by
+  construction rather than by a second, hand-maintained clause list (the first
+  cut kept its own clauses and drifted in `urlAliases`/`sourcePath`/
+  `canonicalUrl`, each a live != replay divergence). **JSONL-only** (not
+  in `_GRAPH_EVENT_TYPES`), in `_NO_POINT_FOLD`, and folded in **both**
+  `apply()` and `rebuild_all` pass 1b. `create_source`'s cadence is
+  per-**outcome**: this record for a real hash transition, `SourceCreated` for
+  a create or a JOINT-E2E stub completion, and **nothing at all** for a
+  re-check that found what we already hold (§9.6's cost bound — a version is
+  "three timestamps and a hash", so a no-op re-fetch must not be one). A
+  hashless re-check counts: a hashless create stores `contentHash = ''`, so
+  "no stored hash" alone must not select the create arm, or every re-ingest of
+  a hashless source would append a record.
 - **The `sourceVersionTransit` carrier on a Point snapshot** (#5256) — a Point created against a
   `:Source` with a non-blank `contentHash` records the version it was read from as a list of
   `[<raw extractedFrom ref>, <contentHash>]` pairs. It is the *transit* for the edge-authoritative
@@ -84,7 +123,11 @@ that the payload does not name:
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Four are emitted per capture, in this
   order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
-  plus `harness` / `actor_user_id` when set; (2) a trailing record written by
+  plus `harness` / `actor_user_id` when set, and `capture_lane` when a
+  journaling producer sets it (`_fold_session_recorded` already coalesces it;
+  no caller passes `capture_lane` to a journaling writer today, so nothing
+  emits it yet);
+  (2) a trailing record written by
   `sdk._write_capture_turns` right after its batched turn statement, carrying
   `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
   `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
@@ -93,7 +136,7 @@ that the payload does not name:
   Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
-  `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
+  `actor_user_id` / `capture_lane` (first writer wins) and taking `turn_count`, `harness`,
   `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
   `capture_ok` and
   `capture_extractor` from the latest record (last writer wins). Each later

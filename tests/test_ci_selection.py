@@ -302,6 +302,174 @@ def test_source_patterns_all_name_something_real():
     )
 
 
+# ── #7076: a guard that its own source's diff never SELECTS ───────────────────
+# `test_every_source_pattern_is_selectable` is the FORWARD check (entry -> runs);
+# `test_source_patterns_all_name_something_real` is entry -> exists, and its
+# docstring names the REVERSE direction (guarded path -> has an entry) as "the
+# open half of this class". These two tests are that half, for the subset where
+# the repository's own naming convention makes the pairing decidable:
+# `tests/**/test_<stem>.py` guarding `tortoise/**/<stem>.py`.
+#
+# WHY THE NAME CONVENTION IS ENOUGH. It is not a guess about intent: a
+# `test_<stem>.py` whose stem also names a real `tortoise/<stem>.py` is a
+# declaration the repository already makes, and the failure it detects is the one
+# #7076 measured — a guard registered on surface A while its source falls through
+# to surface B (#2159 first-match), so a source-only diff runs A's pool and NOT
+# the file's own test. #7076 is the instance in hand; the same shape was reached
+# before through #1349, #3332, #3616, #3950, #4171 and #5545.
+#
+# NOT CLAIMED, and stated so a reader does not over-read an entry:
+#   * pairings the convention cannot express (a guard named after the BEHAVIOUR
+#     rather than the module — most of the suite, which is why this covers 104
+#     of ~795 guards);
+#   * the slow / carve-out / on-demand legs as a *classification* question. The
+#     predicate honours those legs — a test that runs in `slow_selected`, or in
+#     the carve-out pool when that leg runs, counts as running — and a test the
+#     on-demand lane CLASSIFIES is skipped outright, because "does not gate the
+#     merge" is that lane's deliberate meaning rather than drift (the same
+#     reason `integrity()` skips it);
+#   * MARKER-selected whole-tree jobs. `test-d14-hosted-api` runs
+#     `pytest tests/ -m embedded_only` on every PR, so an individually marked
+#     param executes regardless of which surface owns its file: `test_audit.py`
+#     below is the live example (its `embedded_busy` param runs there, while
+#     none of the file is selected for a `tortoise/audit.py` diff). Membership
+#     here therefore means "NO diff-selected leg runs it", which is the property
+#     this check can decide — NOT "no line of it ever executes". Marker coverage
+#     is a whole-tree mechanism with its own pin (`tests/test_markers.py::
+#     test_ci_runs_the_embedded_only_marker_selection`).
+#
+# WHY A FROZEN DEBT LIST AND NOT 21 FIXES: each remaining pair is a per-file
+# registration decision about which surface's pool should carry that guard, and
+# every one of them edits `config/ci-surfaces.yml` (the `merge=union` file). The
+# list stops the class GROWING while it is paid down one PR at a time. It is
+# asserted in BOTH directions, so a fixed pair must be deleted from it and a new
+# pair must be added deliberately — it cannot rot into fiction.
+_SELF_GUARD_DEBT: dict[str, str] = {
+    "tests/test_abuse.py": "tortoise/abuse.py",
+    "tests/test_audit.py": "tortoise/audit.py",
+    "tests/test_audit_events.py": "tortoise/audit_events.py",
+    "tests/test_auth.py": "tortoise/auth.py",
+    "tests/test_billing.py": "tortoise/billing.py",
+    "tests/test_capture_consent.py": "tortoise/capture_consent.py",
+    "tests/test_chain_enforcer.py": "tortoise/chain_enforcer.py",
+    "tests/test_commit_schema.py": "tortoise/commit_schema.py",
+    "tests/test_github_indexer.py": "tortoise/indexer/github_indexer.py",
+    "tests/test_github_issue.py": "tortoise/github_issue.py",
+    "tests/test_github_map.py": "tortoise/github_map.py",
+    "tests/test_kind_classifier.py": "tortoise/kind_classifier.py",
+    "tests/test_kind_index.py": "tortoise/kind_index.py",
+    "tests/test_mcp_client.py": "tortoise/mcp_client.py",
+    "tests/test_sentry.py": "tortoise/sentry.py",
+    "tests/test_source_credibility.py": "tortoise/source_credibility.py",
+    "tests/test_subgraph_render.py": "tortoise/subgraph_render.py",
+    "tests/test_telegram_push.py": "tortoise/telegram_push.py",
+    "tests/test_tortoise_client.py": "tortoise/tortoise_client.py",
+    "tests/test_version_vector.py": "tortoise/version_vector.py",
+}
+
+
+def _self_guard_violations(manifest: dict, tracked: list[str]) -> dict[str, str]:
+    """{test path: its source path(s)} for every named guard its diff never SELECTS.
+
+    "Never selected" is decided as a UNION over the legs a pull_request diff can
+    schedule — the fast selection, the slow leg's diff-gate selection, and the
+    carve-out pool when that leg runs — because a guard counts as scheduled
+    wherever it is selected, and reporting a slow-lane guard as missing would be
+    a false alarm about the wrong contract.
+
+    SCOPE. A marker-selected whole-tree job (`test-d14-hosted-api`) can execute
+    an individual marked param whatever this returns, so an entry here means
+    "no diff-selected leg runs the file", not "nothing in the file executes".
+    The narrower claim is the one that is decidable from `select()`, and it is
+    the one #7076 is about.
+    """
+    sources: dict[str, list[str]] = {}
+    for path in tracked:
+        if path.startswith("tortoise/") and path.endswith(".py"):
+            sources.setdefault(Path(path).stem, []).append(path)
+    on_demand = on_demand_files(manifest)
+    carve = cs.carve_out_files(manifest)
+    violations: dict[str, str] = {}
+    for path in sorted(tracked):
+        if not path.startswith("tests/") or path.startswith("tests/e2e/"):
+            continue
+        name = Path(path).name
+        if not (name.startswith("test_") and name.endswith(".py")):
+            continue
+        if name in on_demand or path[len("tests/"):] in on_demand:
+            continue
+        srcs = sources.get(name[len("test_"):-3])
+        if not srcs:
+            continue
+        sel = select(srcs, "pull_request", manifest)
+        if sel["full"] or sel["test_files"] == "ALL":
+            continue
+        ran = set(sel["test_files"]) | set(sel.get("slow_selected") or ())
+        if sel.get("carve_out_run"):
+            ran |= carve
+        if name in ran or path in ran or path[len("tests/"):] in ran:
+            continue
+        violations[path] = ", ".join(srcs)
+    return violations
+
+
+def test_the_degraded_fallback_guard_runs_for_its_own_source():
+    """#7076, pinned as BEHAVIOUR so the fix cannot be undone by a debt entry.
+
+    tests/test_fallback_snapshot.py was registered only under `api` while
+    tortoise/fallback_snapshot.py falls through to `core`, so a
+    fallback_snapshot.py-only diff ran the `core` pool and NOT the file's own
+    test. The ratchet below would accept the pair reappearing in
+    `_SELF_GUARD_DEBT`; this asserts the selection instead of the registration.
+    """
+    sel = _sel(["tortoise/fallback_snapshot.py"])
+    assert sel["surfaces"], (
+        "tortoise/fallback_snapshot.py now selects NO surface, so its guard "
+        "would run only through the tier-1 fallback — coverage by accident, "
+        "which vanishes the moment the test leaves tier1 (#3673)"
+    )
+    assert "test_fallback_snapshot.py" in sel["test_files"], (
+        "the file's own guard is not selected by its own diff (#7076): "
+        f"{len(sel['test_files'])} files ran, test_fallback_snapshot.py was not "
+        "one of them"
+    )
+
+
+def test_every_named_guard_runs_for_its_own_source():
+    """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
+
+    Every `tests/**/test_<stem>.py` whose stem also names a tracked
+    `tortoise/**/<stem>.py` must be SELECTED for a diff of that source alone.
+    A pair that is not is the #7076 class: the file's guard does not run on its
+    own change's diff-selected legs, and the green check reads as coverage.
+
+    Scope: "selected", not "not one byte of it executes" — see
+    `_self_guard_violations` for the marker-selected whole-tree job that this
+    predicate cannot (and does not claim to) model.
+
+    Both directions are asserted. New pairs fail (the class must not grow); debt
+    entries that now pass also fail (the frozen list must stay true, so fixing a
+    pair is completed by deleting its entry).
+    """
+    root = Path(__file__).resolve().parents[1]
+    violations = _self_guard_violations(load_manifest(), _tracked_files(root))
+    new = sorted(set(violations) - set(_SELF_GUARD_DEBT))
+    fixed = sorted(set(_SELF_GUARD_DEBT) - set(violations))
+    assert not new, (
+        "guards that their own source's diff does not run (#7076 class — the "
+        "same shape as #1349/#3332/#3616/#3950/#4171/#5545). Register the test "
+        "on the surface its source selects, or the source on the test's surface, "
+        "rather than adding it to _SELF_GUARD_DEBT:\n  "
+        + "\n  ".join(f"{p} <- {violations[p]}" for p in new)
+    )
+    assert not fixed, (
+        "pairs listed in _SELF_GUARD_DEBT that now PASS, so the debt list has "
+        "gone stale — delete them (the list is asserted in both directions so "
+        "it cannot rot into fiction):\n  "
+        + "\n  ".join(f"{p} <- {_SELF_GUARD_DEBT[p]}" for p in fixed)
+    )
+
+
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
@@ -739,7 +907,14 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     r = _sel(["tools/longmem_eval/run.py"])
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
-    assert "eval/retrieval/test_run.py" in r["test_files"]
+    # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
+    # slow legs, so the witness that "eval was selected" is another eval file
+    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
+    # leg over (a relocation that dropped it instead would be a coverage loss,
+    # which is the whole thing #6137 must not do).
+    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    assert "eval/retrieval/test_run.py" not in r["test_files"]
+    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
     assert set(r["test_files"]) != _tier1()
 
 
@@ -944,6 +1119,28 @@ def test_ci_timing_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_pr_lead_time_tool_change_fails_closed_to_full():
+    # #6139: tools/pr_lead_time.py owns tests/test_pr_lead_time.py, whose guards
+    # pin the decomposition's residence rule (a zero-length Mergify run is a
+    # queue EVALUATION, not residence), its gate clamp, and its exit-code
+    # contract (an unobserved read is UNKNOWN, never 0). Same silent-drop class
+    # as the carve-outs above: the flat "tools/" NON_PYTHON_PREFIXES entry
+    # swallows a tool-only change, so without a TOOL_CARVEOUTS entry `changed`
+    # is empty and select() takes the docs-only return (surfaces=[], tier-1
+    # smoke only) — and that early return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the guard suite would
+    # never run on the PR that changes the tool. Registering the TEST under
+    # `core` in ci-surfaces.yml does NOT cover this: it applies to edits of the
+    # test file, not of the tool. No SOURCE_PATTERNS entry matches the path, so
+    # it lands in the unknown-path fail-closed branch -> FULL matrix + both
+    # legs. Mutation check: removing the TOOL_CARVEOUTS entry filters the path
+    # out (docs-only early return), failing all three asserts below.
+    r = _sel(["tools/pr_lead_time.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the
@@ -1015,6 +1212,91 @@ def test_slow_files_never_in_fast_gate_selections():
 
     ep = _sel(["tortoise/ranking.py", "tortoise/analyze.py"])
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
+
+
+def test_every_slow_file_a_second_surface_names_runs_for_that_surface():
+    """#6234: a `slow_files` entry named by a SECOND surface must still run on
+    that second surface's diff.
+
+    `classify_test_file` is FIRST-match, and `select()` keys the tier-2 slow
+    leg set on that same first match while subtracting EVERY `slow_files` entry
+    from the fast pool (`files -= slow`). So a slow file that a second surface
+    also names is dropped from the fast set and never re-added to
+    `slow_selected` when the second surface is the matched one — it runs on
+    NEITHER leg. The leg still reports green because the second surface usually
+    owns other slow files, so `slow_run` stays True: the coverage hole is
+    invisible to the drift guard, whose union check is about the committed legs
+    and not about which tier-2 diff reaches them.
+
+    The repo already excludes the two known instances
+    (`test_capture_install.py` / `test_session_verify.py`) and, after #6234,
+    eight more. The property is driven from the manifest — for EVERY slow file
+    a second surface names, not a frozen list — so relocating a
+    dual-registered file back into `slow_files` reds here with its name.
+
+    A selection that matches the second surface is the MINIMAL case: a diff
+    that also matches another surface owning the file would run it, so if the
+    minimal one does not, the hole is real. `uri_requiring` files are exempt:
+    they are deliberately kept out of every URI-less tier-2 leg (see
+    `slow_leg_by_surface`), a separate documented exclusion.
+    """
+    m = load_manifest()
+    slow = set(m["slow_files"])
+    carve = set(m["carve_out"])
+    uri = uri_requiring_files(m)
+    surfaces = m["surfaces"]
+
+    # A path whose diff selects `s` on its own. SOURCE_PATTERNS is the manifest's
+    # source->surface map; `core` and `classify` have NO entry (they are only
+    # reachable as the fallback / via a test-file change), so for those we use a
+    # registered test file that CLASSIFIES as the surface — a test-file change
+    # selects its classifying surface, which is the same path the hole is on.
+    def _probe(s: str) -> str | None:
+        pats = SOURCE_PATTERNS.get(s)
+        if pats:
+            return pats[0]
+        for member in surfaces.get(s) or []:
+            if member in slow or member in carve:
+                continue
+            if classify_test_file(member, m) == s:
+                return "tests/" + member
+        return None
+
+    offenders: list[str] = []
+    for f in sorted(slow - carve - uri):
+        owner = classify_test_file(f, m)
+        base = f.rsplit("/", 1)[-1]
+        offenders_for_f: list[str] = []
+        for s, files in surfaces.items():
+            if s == owner:
+                continue
+            if f not in (files or []) and base not in (files or []):
+                continue
+            probe = _probe(s)
+            assert probe is not None, (
+                f"no probe diff selects surface {s!r} for slow file {f}; the "
+                "probe derivation needs a SOURCE_PATTERNS entry or a "
+                "surface-classifying test file")
+            sel = select([probe], "pull_request", m)
+            assert s in sel["surfaces"], (
+                f"probe {probe!r} no longer selects surface {s!r} (got "
+                f"{sel['surfaces']}) — update `_probe` in this test")
+            ran = set(sel["test_files"]) if sel["test_files"] != "ALL" else set()
+            ran |= set(sel["slow_selected"])
+            if f not in ran:
+                offenders_for_f.append(
+                    f"{f} (owner {owner!r}, reached by a {s!r} diff)")
+        offenders.extend(offenders_for_f)
+
+    assert not offenders, (
+        "slow_files entries a SECOND surface names that the second surface's "
+        "diff would run on NEITHER leg: `classify_test_file` is first-match, so "
+        "the file is subtracted from the fast pool and never re-added to "
+        "`slow_selected`, while the second surface usually keeps `slow_run` "
+        "True so the leg still reports green. Keep them OUT of `slow_files` "
+        "(the test_capture_install.py / test_session_verify.py precedent):\n  "
+        + "\n  ".join(sorted(set(offenders)))
+    )
 
 
 def test_expensive_eval_integration_is_in_the_on_demand_lane():
@@ -1150,14 +1432,17 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    ranking.py-only PR selects exactly those (never the full committed slow-
-    leg set), and the carve-out job skips (ep owns no carve-out file)."""
+    ranking.py-only PR selects exactly those (never the full leg set), and
+    the carve-out job skips (ep owns no carve-out file). #6137 added
+    test_ep_selector to ep's slow set (it moved out of the fast pool), so
+    the expected list is pinned here as well."""
     r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
     assert r["carve_out_run"] is False
     assert r["slow_selected"] == [
-        "test_dream.py", "test_ep_sources.py", "test_source_inheritance_own.py"]
+        "test_dream.py", "test_ep_selector.py", "test_ep_sources.py",
+        "test_source_inheritance_own.py"]
 
 
 def test_tier2_carve_out_run_when_surface_owns_carve_files():
@@ -2432,6 +2717,42 @@ def test_carve_out_env_gated_inverse_of_uri():
             f"{job_name}: the run step must map TORTOISE_TEST_CARVE_OUT"
 
 
+def test_carve_out_lane_provisions_the_embedder_offline():
+    """#4387: the carve-out lane runs the dense leg, so it must provision the
+    embedder the way every other suite-running job does (cache + REQUIRED
+    provision) and run the suite OFFLINE.
+
+    Measured failure this pins: with the suite-wide egress guard installed and
+    no HF_HUB_OFFLINE on this lane, an uncached `SentenceTransformer()` load
+    RETRIES against huggingface.co instead of failing fast, and
+    test_longmem_runner.py re-attempts the load once per test — so the shard is
+    killed by the 15m watchdog with 0 failures (rc=124), leaving the merge rail
+    no failure identity to read (#6798). The request/backoff/test counts
+    observed on the pre-`pytest_configure` revision are not restated here: this
+    docstring and two comments carried three copies of them, which is what
+    drifts. A lane that
+    instead SKIPS the dense assertion trips the skip-guard's
+    embedder-unavailable family (#2573). Both outcomes are reds, so the lane
+    must be provisioned, not merely offline.
+    """
+    wf = _load_python_ci()
+    steps = wf["jobs"]["test-carve-out"]["steps"]
+    names = [s.get("name") or "" for s in steps]
+    cache_i = next(i for i, n in enumerate(names)
+                   if n.startswith("Cache HF embedding model"))
+    prov_i = next(i for i, n in enumerate(names)
+                  if n.startswith("Embedding model REQUIRED"))
+    run_i = next(i for i, n in enumerate(names)
+                 if n.startswith("Run carve-out suite"))
+    assert cache_i < prov_i < run_i, \
+        "the carve-out lane must cache + provision the embedder before the suite"
+    env = steps[run_i].get("env") or {}
+    assert env.get("HF_HUB_OFFLINE") == "1", \
+        "the carve-out suite step must set HF_HUB_OFFLINE=1"
+    assert env.get("TRANSFORMERS_OFFLINE") == "1", \
+        "the carve-out suite step must set TRANSFORMERS_OFFLINE=1"
+
+
 def test_pmv_job_carries_uri_manifest_guard():
     """Epic #1647 Task 10 Step 1a (P1-9 + cycle-2 P2-14 + cycle-4 P2-11):
     post-merge-validation is now a docker lane — job-level TORTOISE_DB_URI +
@@ -2718,6 +3039,63 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"watchdog may legitimately reach it (#6135/#3239)")
 
 
+def test_slow_leg_bounds_clear_the_committed_work():
+    """#6137/#3239: each committed `test-slow` leg must run under a watchdog
+    that clears THAT leg's committed work by the house headroom.
+
+    The slow legs are the only bounded pytest job whose budget is a LITERAL
+    while its work moves with `slow_files`, so a changed leg set can outgrow
+    the budget silently. #6137 moved 43 files in — the legs' committed
+    `durations` weight went from 2.84m to 16.21m each — and left the #3239
+    literal at 10m, so BOTH legs were killed by the 10m WATCHDOG banner on a
+    full-selection run and took the required `python-ci-gate` red with them
+    (PR #6234 run 37229875496; 739 and 1257 tests had passed before the kill).
+    `test_every_bounded_pytest_job_caps_above_its_watchdog` could not see it:
+    a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
+
+    The floor is re-derived from the committed `durations` map, so the budget
+    cannot rot past its work again without reddening here. A leg file with no
+    `durations` row FAILS this test rather than weighing 0.0 — see the guard
+    below for why the default would re-open the very hole."""
+    from tools.ci_selection import WATCHDOG_HEADROOM, _duration_weight
+    job = _load_python_ci()["jobs"]["test-slow"]
+    durations = load_manifest()["durations"]
+    watchdog = _literal_pytest_watchdog(job)
+    assert watchdog is not None, (
+        "test-slow's pytest step must carry a LITERAL watchdog — the per-leg "
+        "budget is what this test derives a floor for")
+    cap = job["timeout-minutes"]
+    assert watchdog < cap, (
+        f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
+        f"({cap}m) so a killed leg still prints its counts (#798)")
+    for row in job["strategy"]["matrix"]["include"]:
+        files = row["files"].split()
+        assert files, f"test-slow leg {row['half']!r} is empty"
+        # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
+        # weigh it ZERO, so the estimate this guard asserts against could sit
+        # arbitrarily below the leg's real work and the budget could rot past
+        # it exactly as it did in #6137 — and no other gate closes the gap:
+        # `duration_coverage_issues` covers `fast_pool()` only (these files have
+        # left it), `duration_issues` validates keys that EXIST, and the
+        # in-workflow drift guard pins the union of the two rows without
+        # reading the map at all.
+        unmeasured = [f for f in files if f + ".py" not in durations]
+        assert not unmeasured, (
+            f"test-slow leg {row['half']!r} has {len(unmeasured)} file(s) with "
+            f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
+            f"0.0 here, so the leg's estimate is not a lower bound on its work "
+            f"and this guard cannot see the budget rot it exists to catch. "
+            f"Register it in config/ci-surfaces.yml `durations`.")
+        committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
+        assert watchdog >= WATCHDOG_HEADROOM * committed, (
+            f"test-slow leg {row['half']!r}: the in-step watchdog "
+            f"({watchdog}m) no longer clears its committed estimate "
+            f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
+            f"the leg is killed mid-suite and the gate reds before pytest can "
+            f"report. Re-derive the budget (and the outer cap above it) from "
+            f"the committed `durations` map.")
+
+
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.
@@ -2739,13 +3117,21 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     job = _load_python_ci()["jobs"]["test-carve-out"]
     cap = job["timeout-minutes"]
     measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    from tools.ci_selection import _duration_weight
     manifest = load_manifest()
     idx = _carve_matrix()
     durations = manifest["durations"]
     for entry in idx["include"]:
         files = entry["files"].split()
         assert files, f"carve shard {entry['suffix']!r} is empty — a dropped leg"
-        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        # An absent row is weighed at the PACK's default (DEFAULT_FAST_WEIGHT),
+        # never 0.0: 0.0 would understate the shard's committed work against the
+        # very watchdog that has to clear it. Three carve-out files carry no row
+        # today, so the default — not a hard failure — is the honest bound here;
+        # the slow legs above fail closed because every one of their files is
+        # measured.
+        committed = sum(_duration_weight(durations.get(f + ".py"))
+                        for f in files) / 60.0
         wd = entry["watchdog_minutes"]
         assert wd >= WATCHDOG_HEADROOM * committed, (
             f"carve shard {entry['suffix']!r} watchdog ({wd}m) no longer clears "
@@ -5575,27 +5961,28 @@ def test_every_changed_set_diff_disables_rename_detection():
         the eval-drift gate — are filed as follow-ups, not covered here.
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
-      THREE: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
+      FOUR: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
       two `||`-joined diffs into one canonical merge-base diff), one on `ci.yml`'s
-      "Compute per-surface path gates (#2149)" step, and one on the dead step
-      below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
-      fall one short of it, so deleting the dead step alone leaves `checked == 2` and
-      FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
-    * The dead third command — from the "Get changed markdown files" step in
-      `ci.yml` (cited by step name, not line number, because line numbers drift)
-      — is INERT today. That step builds a lint-target list, and the `docs` job
-      checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
-      the diff fails, `|| true` leaves `FILES` empty and the consuming
-      markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above the
-      PARSED count — today 3, of which only 2 are live, so this inert step is the
-      only thing holding the floor at 3 rather than 2.
+      "Compute per-surface path gates (#2149)" step, and TWO on `ci.yml`'s two
+      "Get changed markdown files" steps (the PR path and the main-health path).
+      So a comment cannot satisfy it (and a comment mentioning the flag cannot
+      inflate it). The floor is 3 so removing one command does not require a
+      floor change; it has to come down to 2 only if a SECOND command is removed,
+      once just two remain.
+    * The PR-path command — the "Get changed markdown files" step in `ci.yml`
+      (cited by step name, not line number, because line numbers drift) — is no
+      longer inert. #2386: it WAS inert because the `docs` job checked out at
+      depth 1, so `github.event.pull_request.base.sha` was absent from the object
+      store, the three-dot diff died with `fatal: Invalid symmetric difference
+      expression`, the tolerance swallowed it, the changed list came out empty
+      and the consuming markdownlint/lychee steps were skipped (job
+      100109903325). The job now checks out at full depth (`fetch-depth: 0`) and
+      the step carries no tolerance on the diff, so the diff resolves against a
+      real base and a bad base fails the step. All FOUR parsed commands are live.
     * The same step's `--no-renames` is still deliberate and the rule applies to
-      it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
-      the DELETED source path of a `.md`->`.md` rename is tolerated —
-      `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
-      already put nonexistent paths into this list.
+      it uniformly: it IS a changed-set computation, and `--diff-filter ACMR`
+      keeps the list to paths that exist on disk, so a deleted or renamed-away
+      `.md` source never reaches markdownlint or lychee.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
       That script deliberately runs `git diff --find-renames=20% ... --name-status`
       (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
