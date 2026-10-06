@@ -986,7 +986,15 @@ def _open_construct_lock(key: str) -> int:
 
     Any OTHER failure to open does raise: redislite is about to write the RDB in
     that directory, so continuing unlocked would trade a loud failure for
-    exactly the silent two-writer divergence this guard exists to prevent.
+    exactly the silent two-writer divergence this guard exists to prevent. That
+    is the polarity `_acquire_owner_lock` deliberately does NOT take (there "no
+    lock" is only a missing optimisation); here the lock IS the fix for #4921,
+    so only the cases above and the not-usable-as-a-lock family yield -1.
+    Enumerated, because an `except OSError` that returns -1 for everything makes
+    the sentence above false: ELOOP (the `O_NOFOLLOW` refusal), ENXIO (a FIFO
+    opened without O_NONBLOCK), EISDIR and ENOTDIR (not a regular file, or a
+    broken path) are warned and swallowed; EACCES, EMFILE, ENOSPC, EROFS,
+    EPERM and ENAMETOOLONG propagate.
 
     A failure to FLOCK closes the just-opened fd before propagating — the fd
     would otherwise leak on every construction of that key.
@@ -999,10 +1007,12 @@ def _open_construct_lock(key: str) -> int:
             return -1
         raise
     except OSError as exc:
+        if exc.errno not in (errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR):
+            raise
         logger.warning(
-            "#4921: cannot take the construction lock for %s (%s) — this "
+            "#4921: %s is not usable as a construction lock (%s) — this "
             "process still serialises its own constructions on that RDB, but "
-            "not against another process", key, exc)
+            "not against another process", path, exc)
         return -1
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

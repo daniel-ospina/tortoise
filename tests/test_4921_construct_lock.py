@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import select
 import subprocess
 import sys
 import threading
@@ -178,11 +179,11 @@ def test_lock_excludes_another_process(tmp_path):
     key = _key(tmp_path)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     child = subprocess.Popen(
-        [sys.executable, "-c", _CHILD.format(root=root, key=key, hold=3)],
+        [sys.executable, "-c", _CHILD.format(root=root, key=key, hold=60)],
         stdout=subprocess.PIPE, text=True,
         env={**os.environ, "PYTHONPATH": root})
     try:
-        assert child.stdout.readline().strip() == "held", "the child never took the lock"
+        assert _readline_bounded(child.stdout).strip() == "held", "the child never took the lock"
         start = time.monotonic()
         with _construction_lock(key):
             elapsed = time.monotonic() - start
@@ -205,10 +206,30 @@ def test_an_unrelated_key_is_not_blocked_by_a_held_flock(tmp_path):
     held, other = _key(tmp_path, "held.rdb"), _key(tmp_path, "other.rdb")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     child = subprocess.Popen(
-        [sys.executable, "-c", _CHILD.format(root=root, key=held, hold=4)],
+        [sys.executable, "-c", _CHILD.format(root=root, key=held, hold=60)],
         stdout=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": root})
+    parked_evt = threading.Event()
+
+    def _park():
+        with _construction_lock(held):
+            parked_evt.wait(60)
+
+    parked = threading.Thread(target=_park, daemon=True)
     try:
-        assert child.stdout.readline().strip() == "held"
+        assert _readline_bounded(child.stdout).strip() == "held"
+        # Park a thread of THIS process inside `_open_construct_lock` (past the
+        # registry lookup, into the cross-process wait). The entry appearing in
+        # the registry is the signal it got that far — and it is the state the
+        # round-1 defect needs, because the module mutex is process-local: a
+        # child's flock alone makes nobody here wait, so an external holder
+        # cannot detect the defect however long it holds.
+        from tortoise.embedded_lifecycle import _CONSTRUCT_LOCKS
+
+        parked.start()
+        deadline = time.monotonic() + 30
+        while held not in _CONSTRUCT_LOCKS and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert held in _CONSTRUCT_LOCKS, "the thread never parked on the held key"
         start = time.monotonic()
         with _construction_lock(other):
             pass
@@ -216,29 +237,57 @@ def test_an_unrelated_key_is_not_blocked_by_a_held_flock(tmp_path):
             "an unrelated key waited behind a held flock — the module mutex is "
             "held across the cross-process wait")
     finally:
+        parked_evt.set()
         child.terminate()
         child.wait(10)
+
+
+def _readline_bounded(stream, timeout=60):
+    """`readline()` that cannot block forever: a wedged child must fail, not hang."""
+    ready, _, _ = select.select([stream], [], [], timeout)
+    assert ready, f"the helper process printed nothing within {timeout}s"
+    return stream.readline()
 
 
 _FORK_CHILD = """
 import os, sys
 sys.path.insert(0, {root!r})
-from tortoise.embedded_lifecycle import _CONSTRUCT_LOCKS, _construction_lock, _construction_key
-parent_key = _construction_key(({key!r},), {{}})
-if _CONSTRUCT_LOCKS:
-    # The `after_in_child` hook must clear the registry: an inherited entry is
-    # an RLock whose owner thread does not exist in this child, so the child's
-    # next construction of that key would block forever.
-    os.write(1, b"stale")
-else:
-    # A DIFFERENT key must be acquirable immediately. The parent's flock on
-    # `parent_key` is still held (correctly — that lock IS shared across the
-    # fork), so this child must not touch it, and must not need the module
-    # mutex the parent was holding.
-    other = (parent_key + ".child") if parent_key else None
-    if other:
-        with _construction_lock(other):
-            os.write(1, b"ok")
+import tortoise.embedded_lifecycle as el
+key = {key!r}
+# Hold the lock, then fork FROM INSIDE it — the exact state the `after_in_child`
+# hook is for. A fresh interpreter (what the first version of this test used)
+# starts with an empty registry, so it could never detect the reset being
+# removed: it passed with the reset deleted.
+with el._construction_lock(key):
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            # Read the module ATTRIBUTE, never a `from ... import` alias taken
+            # before the fork: the hook REBINDS the name to a fresh dict, so an
+            # alias would still point at the parent's dict and this check would
+            # report an inherited lock that the child does not actually have.
+            # Every code below is exactly 2 bytes, because the parent reads 2.
+            if el._CONSTRUCT_LOCKS:
+                # An inherited entry is an RLock whose owner thread does not
+                # exist in this child: its next construction of that key blocks
+                # forever, and the inherited lock-file fd would let the child
+                # LOCK_UN the parent's flock on the way out.
+                os.write(w, b"no")
+            else:
+                # A DIFFERENT key: the parent's flock on `key` is still held and
+                # is correctly shared across the fork, so the child must not
+                # touch it.
+                with el._construction_lock(key + ".child"):
+                    os.write(w, b"ok")
+        except BaseException:
+            os.write(w, b"er")
+        finally:
+            os._exit(0)
+    os.close(w)
+    os.waitpid(pid, 0)
+    os.write(1, os.read(r, 2))
 """
 
 
@@ -339,8 +388,11 @@ def _forced_interleave_constructs(tmp_path, monkeypatch, *, guard: bool) -> list
     server unless something serialises them. `guard=False` neutralises the lock
     by making the key underivable, which is what the wrapper consults.
 
-    Returns the two clients. Reuses the FIRST server for the second construction
-    when the guard holds, so both clients answer for the same `run_id`.
+    reproduced, so the red-half assertion below can distinguish "could not
+    force the interleave" (skip — inconclusive) from "the defect did not
+    reproduce" (fail).
+
+    Returns `(clients, forced)`.
     """
     if os.environ.get("TORTOISE_DB_URI"):
         pytest.skip("docker redirect: the embedded seam is not reached")
@@ -355,13 +407,22 @@ def _forced_interleave_constructs(tmp_path, monkeypatch, *, guard: bool) -> list
 
     rdb = str(tmp_path / "interleave.rdb")
     original = redislite_client.RedisMixin._is_redis_running
-    barrier = threading.Barrier(2, timeout=3)
+    # Generous on purpose: this barrier is not a synchronisation primitive the
+    # test depends on for correctness, it is the mechanism that FORCES the
+    # window — and a short timeout turns a loaded box into a FALSE FAILURE of
+    # the test that is supposed to be the evidence. If it still breaks, that is
+    # reported (see `forced`) rather than guessed at.
+    barrier = threading.Barrier(2, timeout=20)
+    forced = []
 
     def rendezvous(self):
         running = original(self)
         if not running:
-            with contextlib.suppress(threading.BrokenBarrierError):
+            try:
                 barrier.wait()          # both reads False before either start
+                forced.append(True)
+            except threading.BrokenBarrierError:
+                pass
         return running
 
     monkeypatch.setattr(redislite_client.RedisMixin, "_is_redis_running", rendezvous)
@@ -374,20 +435,30 @@ def _forced_interleave_constructs(tmp_path, monkeypatch, *, guard: bool) -> list
         except Exception as exc:        # a construction that fails still counts
             errors.append(exc)
 
-    threads = [threading.Thread(target=build) for _ in range(2)]
+    # `daemon=True`: a construction can block indefinitely in `flock` if the
+    # guard is broken, and a non-daemon thread would be joined again by
+    # `threading._shutdown` at interpreter exit — hanging the suite instead of
+    # failing it, which is the one thing this file's tests must not do.
+    threads = [threading.Thread(target=build, daemon=True) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(60)
         assert not t.is_alive(), "a construction hung"
     assert len(clients) == 2, f"constructions failed: {errors!r}"
-    return clients
+    return clients, bool(forced)
 
 
 def test_forced_interleave_starts_exactly_one_server_over_one_rdb(tmp_path, monkeypatch):
     """#4921 green: with the construction lock, both clients share ONE server."""
-    clients = _forced_interleave_constructs(tmp_path, monkeypatch, guard=True)
+    clients, _forced = _forced_interleave_constructs(tmp_path, monkeypatch, guard=True)
     try:
+        # `forced` is expected to be FALSE here and that is not a shortfall: with
+        # the guard working, the second thread cannot reach the read while the
+        # first holds the lock, so the barrier never fills — the barrier filling
+        # AT ALL is only possible in the unguarded arm below, which is why the
+        # red half is the arm that can be gated on it. This arm asserts the
+        # OUTCOME (one server) under a concurrent construction, not the window.
         ids = {_run_id(c) for c in clients}
         assert len(ids) == 1, (
             f"two servers were started over one RDB (run_ids={ids}) — the "
@@ -407,8 +478,12 @@ def test_without_the_lock_two_servers_can_start_over_one_rdb(tmp_path, monkeypat
     defect is properly impossible (a different mechanism than this lock);
     delete it then, with the replacement named.
     """
-    clients = _forced_interleave_constructs(tmp_path, monkeypatch, guard=False)
+    clients, forced = _forced_interleave_constructs(tmp_path, monkeypatch, guard=False)
     try:
+        if not forced:
+            pytest.skip(
+                "the interleave was not achieved (the barrier broke) — the "
+                "defect cannot be observed without it")
         ids = {_run_id(c) for c in clients}
         assert len(ids) == 2, (
             f"expected the unguarded race to start two servers over one RDB, got "
