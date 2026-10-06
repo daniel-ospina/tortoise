@@ -620,6 +620,11 @@ surfaces:
   # change via SOURCE_PATTERNS["sdk"] — and `tortoise/sdk.py` itself is a
   # SHARED_MODULE (full matrix). See tools/ci_selection.py.
   - test_vocab_gating_callers_5163.py
+  # #4653: the :GraphEventMeta watermark across the same wipe+replay —
+  # `:GraphEventMeta` is export-skipped by the `api` surface (hosted_api
+  # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
+  # run the pin that says export-skip is not a durability statement.
+  - test_rebuild_event_meta_watermark_4653.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1538,6 +1543,10 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
+  # watermark re-derivation, both in tortoise/projection/ (core fallback) over
+  # tortoise/event_store.py's allocator.
+  - test_rebuild_event_meta_watermark_4653.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -3229,6 +3238,7 @@ durations:
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
+  test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
