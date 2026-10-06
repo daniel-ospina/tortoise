@@ -93,7 +93,7 @@ Those are the name-level checks. The gate **additionally** fails on several serv
 evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed
 HTTP-vs-stdio serving, a registry count that no longer matches the baseline, an exemption that
 became reachable, and a missing or malformed baseline. They are listed in full in
-[`CONTRIBUTING.md`](CONTRIBUTING.md); read them there rather than inferring the gate's whole
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md); read them there rather than inferring the gate's whole
 scope from this summary.
 
 **What is not a gate failure: an added field on an existing response.** A field that is off

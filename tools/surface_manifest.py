@@ -1269,7 +1269,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed")
     add("HTTP-vs-stdio serving, a registry count that no longer matches the baseline, an exemption that")
     add("became reachable, and a missing or malformed baseline. They are listed in full in")
-    add("[`CONTRIBUTING.md`](CONTRIBUTING.md); read them there rather than inferring the gate's whole")
+    add("[`CONTRIBUTING.md`](../../CONTRIBUTING.md); read them there rather than inferring the gate's whole")
     add("scope from this summary.")
     add("")
     add("**What is not a gate failure: an added field on an existing response.** A field that is off")
