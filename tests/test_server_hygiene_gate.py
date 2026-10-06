@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -276,44 +278,32 @@ def _loaded_conftest():
     return conftest
 
 
-def _bare_conftest_key_lookups(source: str) -> int:
-    """Count real ``sys.modules["conftest"]`` SUBSCRIPTS in ``source``.
+def test_start_teardown_survives_a_nested_conftest_taking_the_bare_key(monkeypatch, tmp_path):
+    """Pin the #6269 P1 on BEHAVIOUR, not on the spelling of the lookup.
 
-    Prose is excluded deliberately: the fix's own comments and docstrings NAME
-    the trap in order to forbid it, so a substring test fires on the very
-    documentation that prevents the regression (a naive first cut of this pin
-    did exactly that, and failed on its own file).
-    """
-    hits = 0
-    for node in ast.walk(ast.parse(source)):
-        if (isinstance(node, ast.Subscript)
-                and isinstance(node.value, ast.Attribute)
-                and node.value.attr == "modules"
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id == "sys"
-                and isinstance(node.slice, ast.Constant)
-                and node.slice.value == "conftest"):
-            hits += 1
-    return hits
-
-
-def test_the_loaded_conftest_is_handed_over_not_looked_up():
-    """Pin the #6269 P1: reach the loaded conftest by handover, not by key.
-
-    ⛔ The failure this prevents is ORDER-DEPENDENT and CI-invisible: with the
-    bare-key lookup, collecting a nested conftest (``tests/e2e/auth/`` — done by
-    the default ``uv run pytest tests/`` lane, by no fast shard) makes every
-    test in this file die with ``AttributeError: ... has no attribute
-    '_ACTIVE_SUITES_DIR'``. Session-observing that needs such a collection, so
-    the lookup itself is pinned on the source contract — same reason the AST
-    pins above are source pins.
+    The defect was reaching the loaded conftest through ``sys.modules["conftest"]``
+    — a key EVERY ``__init__``-less conftest shares, and which a nested one
+    (``tests/e2e/auth/conftest.py``) TAKES OVER, leaving the loaded module in no
+    ``sys.modules`` entry at all. Reproducing that order in-process is not
+    possible, so this test MANUFACTURES the state instead: shadow the bare key
+    exactly as a nested conftest does, then drive the real consumer
+    (``_start_teardown``). It fails for EVERY spelling that depends on that key —
+    ``["conftest"]``, ``.get("conftest")``, an aliased ``sys``/``modules`` —
+    which a source-scanning pin cannot promise (an earlier version of this pin
+    caught only the first spelling).
     """
     loaded = _loaded_conftest()
     assert Path(loaded.__file__).resolve() == REPO / "tests" / "conftest.py"
     assert hasattr(loaded, "_ACTIVE_SUITES_DIR")
-    assert "_embedded_publish.LOADED_CONFTEST = sys.modules[__name__]" in \
-        (REPO / "tests" / "conftest.py").read_text()
-    assert _bare_conftest_key_lookups(Path(__file__).read_text()) == 0
+
+    shadow = types.ModuleType("conftest")
+    shadow.__file__ = str(REPO / "tests" / "e2e" / "auth" / "conftest.py")
+    assert not hasattr(shadow, "_ACTIVE_SUITES_DIR"), "fixture: shadow must be useless"
+    monkeypatch.setitem(sys.modules, "conftest", shadow)
+
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": [], "failed": []},
+                          live={"test_leak"}, journal={"test_leak"})
+    gen.close()
 
 
 def _start_teardown(monkeypatch, tmp_path, *, own, live, journal,
