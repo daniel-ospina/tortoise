@@ -440,6 +440,12 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: and the ``_graph_has_org_namespace`` probe handed to ``to_thread`` by
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
+#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here: it genuinely
+#: off-loads three calls, but its dominant graph work (``indexer.index_repo``'s
+#: projection walk) is one level down in another module's method and the two
+#: ``_update_onboarding_state`` writes are sync helpers — neither is a seam the
+#: scan sees, so membership here was a VACUOUS pass (round-4 review). It is
+#: declared in ``_KNOWN_INLINE_HELPER_RESIDUAL`` under #4709 instead.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
@@ -449,6 +455,21 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # registry legs via ``asyncio.to_thread`` (the sibling registry reads'
     # house style) and the Supabase control-plane legs via ``_cp_offload``.
     "invite_info",
+    # #3718 residual 3 — the DATA-plane seam outside the REST-converted
+    # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change
+    # off-loaded their projection attach / registry attach / graph round
+    # trips. ``commit_session`` and ``delete_session`` each had a whole
+    # no-`await` SYNC sequence and move as ONE worker hand-off, so no
+    # interleaving point is added; the other ten off-load each sync call at
+    # its own site (so they DO gain await points), and `public_demo` — the one
+    # whose check-then-act had to stay atomic — is a single hand-off too.
+    # Behavioural coverage for the lane lives in
+    # ``tests/test_dataplane_lane_loop_responsiveness.py``.
+    "_lifespan", "public_demo",
+    "commit_session", "delete_session",
+    "backups_create", "backups_restore", "backups_sweep",
+    "backups_purge", "backups_rebaseline", "backups_drill",
+    "backups_drill_scheduled",
 })
 
 #: FastAPI route handlers STILL running sync FalkorDB I/O inline. Declared,
@@ -457,13 +478,10 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
 #: `test_graph_io_is_offloaded`; a NEW inline route fails the same assertion.
 _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "provision_tenant", "register_user", "create_api_key", "revoke_api_key",
-    "toggle_api_key_enabled", "commit_session", "delete_session",
-    "delete_graph", "invite_to_org", "accept_invite", "invite_otp",
-    "resend_invite", "expire_invite", "decline_invite", "remove_member",
-    "change_member_role", "import_org", "reconcile", "agent_signup",
-    "session_key", "public_demo", "github_callback", "backups_create",
-    "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
-    "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
+    "toggle_api_key_enabled", "delete_graph", "invite_to_org", "accept_invite",
+    "invite_otp", "resend_invite", "expire_invite", "decline_invite",
+    "remove_member", "change_member_role", "import_org", "reconcile",
+    "agent_signup", "session_key", "github_callback", "webhooks_stripe",
     # #4355: the replacement-aware rotate route. Same declared residual as its
     # siblings create_api_key / revoke_api_key — its READS are off-loaded
     # (_rotatable_key_row, api_key_occupies_slot, _claim_key_revocation via
@@ -475,16 +493,29 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
 #: dependency `get_current_org` (6 sites, the single highest-traffic one), the
 #: membership/owner gates, the capture path (`_capture_session_impl`) and the
-#: lifecycle/backup helpers. Same declared residual; same burn-down. Scanned
-#: rather than ignored because a dependency body is still ON the loop.
+#: registry/backup helpers. `_lifespan` was a member until #3718 residual 3
+#: off-loaded its `_control_plane_source` resolve.
+#:
+#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because its
+#: dominant graph work is helper-mediated and therefore INVISIBLE to the scan:
+#: `indexer.index_repo` (a method in another module — its own `_get_proj()`
+#: attach + a synchronous per-item projection loop) and two
+#: `_update_onboarding_state` writes. Round-4 review found the name was a
+#: vacuous off-load declaration; it is tracked under #4709. The three calls it
+#: DOES off-load (`_make_sdk`, `backfill_legacy_closed`,
+#: `_relink_sessions_after_index`) remain on a worker.
+#:
+#: Same declared residual; same burn-down. Scanned rather than ignored because a
+#: dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
-    "_lifespan", "get_current_org", "_capture_session_impl", "_user_memberships",
+    "get_current_org", "_capture_session_impl", "_user_memberships",
     "_membership_org", "_org_node", "_count_active_free_memberships",
     "_owned_free_org_ids", "_create_org_registry_lane",
     "_apply_graph_recording_override", "_apply_graph_rename", "_graph_row_probe",
     "_rollback_restore_name_race", "_trash_name_conflict",
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
-    "_registry_accept_by_id", "_quarantine_import", "_run_indexing",
+    "_registry_accept_by_id", "_quarantine_import",
+    "_run_indexing",
     # #4355: the mint's #528 analytics actor resolution, extracted verbatim out
     # of create_api_key so the rotate route shares it (one implementation). It
     # was inline-on-the-loop before the extraction and still is — same residual,
