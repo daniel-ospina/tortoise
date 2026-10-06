@@ -29,9 +29,9 @@ three replay engines — and it already carries three sibling cross-cutting
 decisions (the #3595 operator refusal, ``_is_bulk_wipe``, the #3359 op count).
 The writability policy is now enforced THERE, at the parameter boundary, so a
 recorded field is safe BY CONSTRUCTION and a field recorded LATER cannot
-reopen the hole. The predicate is ``_annotator_value_ok`` — the policy the
-annotator dims already used — so the rule keeps ONE home rather than gaining a
-fifth copy.
+reopen the hole. The predicate is ``_annotator_value_ok`` OR ``_engine_coerces``
+— the annotator dims' policy widened by the driver's own coercion rule, so the
+rule keeps ONE home rather than gaining a fifth copy.
 
 WHY THE GATE DEGRADES TO ``None`` RATHER THAN DROPPING THE KEY
 --------------------------------------------------------------
@@ -84,7 +84,9 @@ from tortoise.projection import (
     _GuardedGraph,
     _journal_safe_params,
     _log_identity_skip,
+    _map_key_ok,
     _statement_writes,
+    _value_ok,
     _writable_at_parse,
     _writable_id,
 )
@@ -1259,3 +1261,67 @@ def test_the_gate_patterns_read_STRIPPED_text_and_the_literal_regex_is_tight():
 
     trailing_dot = type("T", (), {"__str__": lambda _s: "5."})()
     assert _engine_coerces(trailing_dot) is False
+
+
+def test_a_map_key_the_DRIVER_raises_on_is_dropped_not_forwarded():
+    """#7406 review: the driver RAISES on some map KEYS — an abort, not a degrade.
+
+    `falkordb/helpers.py::stringify_param_value` raises `ValueError` for an
+    empty key and for a key containing a backtick, BEFORE the statement is
+    sent. Reachable from the live surface (`update_point(**props)` with a
+    tenant key carrying a backtick) and from a corrupt journal record via
+    `_persist_extra_props` — on the replay path that raise lands AFTER the
+    wipe. The engine has no spelling for such a key, so the entry is DROPPED
+    and the keys that are fine are kept; nulling the whole map instead would
+    lose them.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    assert _map_key_ok("good") is True
+    assert _map_key_ok("") is False
+    assert _map_key_ok("a`b") is False
+
+    out = _journal_safe_params({"p": {"a`b": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+    out = _journal_safe_params({"p": {"": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+    # ...and inside a rows list, which the driver encodes the same way.
+    rows = "UNWIND $rows AS r RETURN count(r)"
+    assert _journal_safe_params({"rows": [{"a`b": 1, "ok": 2}]}, rows)["rows"] == [{"ok": 2}]
+
+
+def test_a_container_of_DRIVER_COERCED_leaves_is_preserved_on_a_WRITE():
+    """#7406 review: the transport fix had stopped at the SCALAR leaf.
+
+    `_annotator_value_ok` recurses an array through `_is_persistable_prop_value`
+    — a TYPE allowlist — so `[np.int64(7)]`, `[Decimal("0.25")]` and
+    `[np.bool_(True)]` made the whole array False and a WRITE nulled it, while
+    the raw engine stores `[7]`, `[0.25]`, `[true]` (measured through
+    `_GuardedGraph` against the raw handle). Silent data loss on a surface
+    `_sanitize_props` admits, and the same class as the scalar fix one level
+    down. `_value_ok` now recurses with the transport leaf predicate, which
+    ALSO carries the finiteness and NUL rules down to every leaf — so `[nan]`
+    is nulled here where the old array branch accepted it.
+    """
+    from decimal import Decimal
+
+    np = pytest.importorskip("numpy")
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for kept in ([np.int64(7)], [Decimal("0.25")], [np.bool_(True)], [1, 2]):
+        assert _value_ok(kept) is True, kept
+        assert _journal_safe_params({"p": {"v": kept}}, write)["p"]["v"] is kept
+    for nulled in ([b"x"], [float("nan")], [[Decimal("NaN")]], [{"k": 1}]):
+        assert _value_ok(nulled) is False, nulled
+        assert _journal_safe_params({"p": {"v": nulled}}, write)["p"]["v"] is None
+
+
+def test_a_SHAPE_mismatch_degrades_instead_of_being_forwarded():
+    """#7406 review: `SET n += $p` needs a MAP; anything else aborts.
+
+    The `shape` branches handle the conforming cases only, so a non-dict in a
+    spread position used to reach the leaf accept and be forwarded — the engine
+    then answers "Property values can only be of primitive types" (measured).
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for bad in ([1, 2], "abc", 7):
+        assert _journal_safe_params({"p": bad}, write)["p"] is None, bad
+    assert _journal_safe_params({"p": {"a": 1}}, write)["p"] == {"a": 1}

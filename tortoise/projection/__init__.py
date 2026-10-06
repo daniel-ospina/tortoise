@@ -2141,8 +2141,9 @@ def _journal_safe_params(params, cypher=None):
     ``$turns``, which silently skipped the capture turn upsert AND the document
     version bump — the replay completed with the right shape and the wrong
     content, which is worse than the raise it was meant to prevent. The
-    predicate is ``_annotator_value_ok``: the policy the annotator dims already
-    use, so the rule keeps ONE home.
+    predicate is ``_annotator_value_ok`` OR ``_engine_coerces``: the annotator
+    dims' policy widened by the transport rule the driver itself uses, so the
+    rule keeps ONE home.
 
     Returns ``params`` UNCHANGED (the same object) when nothing needed
     degrading, so the healthy hot path allocates nothing.
@@ -2244,6 +2245,15 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = {}
             for k, v in value.items():
+                if not _map_key_ok(k):
+                    # The DRIVER raises on this key before dispatch, so the
+                    # entry cannot be stored under ANY name. DROP it and record
+                    # it — the same "degrade the offending entry, keep the
+                    # rest" policy as a corrupt value — rather than null the
+                    # whole map and lose the keys that are fine.
+                    degraded.append(f"{path}.<key {k!r}>")
+                    changed = True
+                    continue
                 if k in merge_key_fields:
                     # A row field this statement MERGEs on: a null is refused
                     # by the engine, so leave it exactly as it is.
@@ -2269,7 +2279,15 @@ def _journal_safe_params(params, cypher=None):
                     changed = True
                 out[k] = walked
             return out if changed else value
-        if _annotator_value_ok(value) or _engine_coerces(value):
+        if shape is not None:
+            # `SET n += $p` requires a MAP and `UNWIND $rows` a LIST OF MAPS;
+            # anything else is refused by the engine ("Property values can only
+            # be of primitive types", "Type mismatch: expected Map"). Both
+            # conforming cases are handled by the branches above, so reaching
+            # here means the shape does not match — degrade, never forward.
+            degraded.append(path)
+            return None
+        if _value_ok(value):
             return value
         if is_read and isinstance(value, (dict, list, tuple)) and _writable_at_parse(value):
             # Shape-only reject on a read: the engine accepts a CONTAINER as a
@@ -3106,6 +3124,44 @@ def _engine_coerces(val) -> bool:
     return False
 
 
+def _map_key_ok(key) -> bool:
+    """False for a map key the DRIVER refuses to ENCODE — it RAISES, not degrades.
+
+    `falkordb/helpers.py::stringify_param_value` raises `ValueError` for an
+    empty key ("Cypher map key cannot be empty") and for a key containing a
+    backtick ("... cannot contain a backtick"), BEFORE the statement is sent.
+    That is an abort, not a degraded property, and on the replay path it lands
+    after the wipe. Reachable from the live surface — `update_point(**props)`
+    with a tenant key carrying a backtick — and from a corrupt journal record
+    via `_persist_extra_props`. The engine has no spelling for such a key, so
+    the ENTRY is dropped (see `_walk`), never nulled.
+    """
+    try:
+        text = str(key)
+    except Exception:
+        return False
+    return text != "" and "`" not in text
+
+
+def _value_ok(val, _depth: int = 0) -> bool:
+    """True when the engine STORES ``val`` as a property VALUE.
+
+    Arrays recurse with the TRANSPORT leaf predicate, deliberately NOT with
+    `_is_persistable_prop_value`'s type allowlist: `[np.int64(7)]`,
+    `[Decimal("0.25")]`, `[np.bool_(True)]` are all stored by the engine (raw
+    handle measured) but the allowlist refuses the LEAF, so on a WRITE the
+    whole array was nulled — silent data loss, the same class as the scalar
+    fix one level down. Recursing here instead of deferring to
+    `_annotator_value_ok`'s own array branch also carries the finiteness and
+    NUL/surrogate rules down to every leaf, which that branch does not.
+    """
+    if isinstance(val, (list, tuple)):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
+        return all(_value_ok(v, _depth + 1) for v in val)
+    return _annotator_value_ok(val) or _engine_coerces(val)
+
+
 def _writable_at_parse(val, _depth: int = 0) -> bool:
     """False only for what the engine rejects while PARSING a parameter.
 
@@ -3172,7 +3228,8 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
         if _depth >= _PERSISTABLE_MAX_DEPTH:
             return False
         return all(
-            _writable_at_parse(k, _depth + 1)
+            _map_key_ok(k)
+            and _writable_at_parse(k, _depth + 1)
             and _writable_at_parse(v, _depth + 1)
             for k, v in val.items()
         )
