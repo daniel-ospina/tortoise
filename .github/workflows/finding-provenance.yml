@@ -42,7 +42,16 @@
 # classified, because the classifier IS the repo's own tool and the checkout is
 # what provides it. That is deliberate: a pre-checkout grep would be a second
 # copy of the predicate, and two copies drift so the cheap one decides
-# silently. This is a public repo, so the hosted runner minutes are free.
+# silently.
+#
+# The job runs on a VERSION-PINNED hosted label, not `ubuntu-latest`. The
+# self-hosted runners on this repo also advertise `ubuntu-latest`
+# (`self-hosted,Linux,ARM64,ubuntu-latest`), so `ubuntu-latest` can resolve to
+# either pool. Measured 2026-10-05: among the last 100 runs of this workflow,
+# some landed on `pi-runner-vm-*` while the most recent were all on
+# `GitHub Actions <N>` — i.e. the routing is ambiguous, not fixed. A
+# version-pinned label no self-hosted runner claims removes the ambiguity.
+# Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
 #
 # WHAT THIS DOES NOT DO (#4732 hole 2): a body validated once is never
 # RE-validated as the base moves, so a body that was CURRENT when it was
@@ -82,9 +91,24 @@ permissions:
   contents: read
   issues: write
 
+# Collapse duplicate runs, keyed PER UNIT OF WORK so one issue can never cancel
+# another issue's gate. `issue_comment` is keyed by COMMENT id DELIBERATELY: the
+# comment gate annotates THAT comment (a reply carrying its `#issuecomment-<id>`
+# link), and a cancelled run posts nothing — so keying that arm by issue would
+# silently drop a verdict it would otherwise have posted (a fail-open).
+# `issues` and `workflow_dispatch` are keyed by ISSUE number, so re-running the
+# documented recovery path for one issue supersedes its own previous attempt.
+# `github.run_id` is the guaranteed-unique fallback for a dispatch with no
+# issue_number.
+concurrency:
+  group: finding-provenance-${{ github.event.comment.id || github.event.issue.number || github.event.inputs.issue_number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   provenance:
-    runs-on: ubuntu-latest
+    # Version-pinned hosted label — see the COST note above. NOT `ubuntu-latest`
+    # (the self-hosted pool advertises that too), and never `self-hosted`.
+    runs-on: ubuntu-24.04
     steps:
       # fetch-depth 0: the base-ancestry test needs full history.
       - uses: actions/checkout@v4

@@ -695,7 +695,7 @@ jobs:
           # deploy passed nothing, Fly's hand-set value survived every deploy, and
           # "the secret is absent" was indistinguishable from "deliberately using
           # the default". A GitHub secret still overrides the default when one
-          # exists. Unset on both → the per-provider default (deepseek-chat)
+          # exists. Unset on both → the per-provider default (deepseek-flash)
           # applies at runtime.
           #
           # #4259 review: the versioned default NAMES a provider, so it requires

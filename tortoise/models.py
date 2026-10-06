@@ -25,31 +25,64 @@ _logger = logging.getLogger(__name__)
 #: ``deepseek-flash``, so the configured model was not the model used and no
 #: response field was ever inspected to notice. Warn ONCE per
 #: (requested, served) pair — a long capture path may call this thousands of
-#: times, and a per-call warning would be its own defect. Never raise: a
-#: provider that legitimately normalizes an alias must not fail a capture.
+#: times, and a per-call warning would be its own defect.
+#:
+#: A dated pin of the requested id (``gpt-4o-mini`` ->
+#: ``gpt-4o-mini-2024-07-18``, the shipped ``openai`` default below) is BENIGN
+#: and the message says so — but it is deliberately NOT special-cased into
+#: silence or a lower level. No shape rule separates a harmless pin from a real
+#: version bump: ``claude-sonnet-4`` -> ``claude-sonnet-4-5`` is a DIFFERENT
+#: model with the same ``-<digits>`` form, so classifying on shape re-opens,
+#: silently, the substitution this guard exists to expose (#4129). The cost of
+#: not doing so is bounded by the once-per-pair rule.
 _substituted_models: set[tuple[str, str]] = set()
+
+#: Cap for that memo. The once-per-pair rule assumes the served id is stable,
+#: but this guard exists BECAUSE the provider may misbehave — so a provider
+#: returning a new id on every response would otherwise grow the set without
+#: bound and defeat the dedup it provides. Clearing at the cap keeps the
+#: polarity safe: the worst case is a repeated warning, never a missed one.
+_SUBSTITUTED_MEMO_CAP = 256
 
 
 def _warn_on_model_substitution(requested: str, served: object) -> None:
-    """Warn when the provider served a model other than the one requested."""
-    if (
-        not isinstance(requested, str)
-        or not isinstance(served, str)
-        or not served
-        or served == requested
-    ):
+    """Warn when the provider served a model other than the one requested.
+
+    Never raises a propagating ``Exception``. This runs inside every
+    ``complete()``, so the predicate accepts only an exact ``str`` on each side —
+    keeping a subclass with a hostile ``__eq__``/``__hash__`` away from the
+    comparison and the memo — and the emit is suppressed, because a raising log
+    handler would otherwise fail the capture and skip ``_emit_usage_sink``; that
+    seam follows the same "an observer must never flip a call outcome" rule.
+    ``BaseException`` (``KeyboardInterrupt``/``SystemExit``) still propagates, by
+    design and as it does at that seam.
+    """
+    if type(requested) is not str or type(served) is not str:
+        return
+    if not served or served == requested:
         return
     pair = (requested, served)
     if pair in _substituted_models:
         return
-    _substituted_models.add(pair)
-    _logger.warning(
-        "model substitution: requested %r but the provider served %r — the "
-        "configured model is NOT the model being used, so cost and quality "
-        "are attributed to a model nobody chose; set a served id",
-        requested,
-        served,
-    )
+    with contextlib.suppress(Exception):
+        _logger.warning(
+            "model substitution: requested %r but the provider served %r — the "
+            "provider accepted one model id and ran another. This is expected "
+            "when it pins the id to a dated build, and is otherwise the "
+            "configured model NOT being the model used, with cost and quality "
+            "attributed to a model nobody chose; if that is not intended, set "
+            "a served id",
+            requested,
+            served,
+        )
+        # Memoise only AFTER the emit. If a log handler raises, the pair must
+        # stay un-memoised so the next call reports it AGAIN — suppressing the
+        # raise must not also suppress the FINDING for the process lifetime.
+        # The polarity of the cap is chosen the same way: a repeated warning is
+        # acceptable, a missed one is not.
+        if len(_substituted_models) >= _SUBSTITUTED_MEMO_CAP:
+            _substituted_models.clear()
+        _substituted_models.add(pair)
 
 
 def _emit_usage_sink(model, usage) -> None:

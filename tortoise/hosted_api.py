@@ -163,10 +163,26 @@ from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
 # authority (tortoise/retention.py). Do not hard-code a window here — see
-# docs/retention-and-deletion.md. The user-account constant records the promise
-# for the support/email deletion path (there is no self-service deletion yet).
+# docs/retention-and-deletion.md. USER_ACCOUNT_DELETE_GRACE_HOURS is the env
+# fallback for the self-service account-deletion path (#4029, DELETE
+# /v1/user/account); the env var TORTOISE_USER_ACCOUNT_DELETE_GRACE_HOURS
+# overrides it, and a row's stored grace_hours always wins over both.
 TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
+
+# #4029 review (P2-3 / P1-4): how long an UNSTAMPED ``account_deletions`` anchor
+# may sit before it is read as a request that DIED mid-cascade rather than one
+# still in flight. The endpoint INSERTs the anchor BEFORE its cascade and stamps
+# it LAST, so between those two points the row is visible and un-stamped: a
+# second request must DEFER to it (no second cascade, no second audit), while an
+# abandoned row must still be COMPLETED. ``created_at`` is the only field that
+# separates the two. The bound is deliberately generous relative to the cascade
+# — a handful of control-plane + graph operations, seconds in practice — so
+# exceeding it means the process died (restart, deploy, unhandled fault) and the
+# row is a retry, not a live request. ONE constant, shared by the endpoint's
+# in-flight guard and the sweep's stale-anchor completion, so the two cannot
+# disagree about what "in flight" means.
+ACCOUNT_DELETION_IN_FLIGHT_SECONDS = 900.0
 
 _logger = logging.getLogger(__name__)
 
@@ -1398,6 +1414,13 @@ async def _event_retention_loop(interval: float) -> None:
             "deleted-team purge",
             functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
                               name="tortoise-boot-sweep"))
+        # #4029: erase accounts past the stored grace (same sweep cadence; sync
+        # DB/auth work off the loop). The boot path above runs the same step
+        # under the same label, so the two cannot drift apart.
+        await _guarded_step(
+            "deleted-account purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_accounts,
+                              name="tortoise-boot-sweep"))
         # #3036: GC dead OAuth rows (sync DB work off the loop)
         await _guarded_step(
             "oauth retention",
@@ -1437,6 +1460,7 @@ async def _run_boot_sweeps() -> None:
     await asyncio.sleep(0)
     for label, fn in (("event retention", _sweep_events),
                       ("deleted-team purge", _purge_deleted_orgs),
+                      ("deleted-account purge", _purge_deleted_accounts),
                       ("oauth retention", _sweep_oauth_retention)):
         # #5381: the same guard the periodic loop uses — one runner, so the
         # boot and periodic paths cannot drift apart.
@@ -1742,7 +1766,16 @@ async def _lifespan(app):
                 # staleness incidents; post-flip verification finding, #669).
                 from tortoise.supabase_control import is_supabase_enabled
 
-                org_source = _control_plane_source()
+                # #3718 round-3 review P2: `_control_plane_source` is SYNC and
+                # its registry lane constructs the registry SDK
+                # (`_registry_sdk` -> `_make_sdk` + an EAGER `_get_proj()`, with
+                # a possible `time.sleep(PROBE_RETRY_DELAY)` retry) — a blocking
+                # graph round trip and a sleep ON the loop at boot. It is
+                # INVISIBLE to the AST pin by construction (the scan walks async
+                # bodies; this is a sync helper one level down), which is
+                # exactly why it went unnoticed — so it is off-loaded at its own
+                # site. Same seam `backups_rebaseline` already uses.
+                org_source = await asyncio.to_thread(_control_plane_source)
 
                 def _sweep_orgs() -> list[str] | None:
                     from tortoise.backup_sweep import enumerate_orgs
@@ -1835,8 +1868,12 @@ async def _lifespan(app):
                         # SERVER alive, but not this handle's pooled connection —
                         # a collected SDK's close-on-GC finalizer disconnects the
                         # pool out from under a still-referenced `db`.
-                        _gc_sdk, _gc_db = _data_plane_db()
-                        _boot_gc_drill_graphs(_gc_db)
+                        # #3718 residual (DATA plane): the data-plane handle AND
+                        # the sweep are SYNC FalkorDB work — one worker hand-off
+                        # so a boot with many stale `_drill_*` graphs cannot hold
+                        # the event loop while it opens the DB and deletes them.
+                        _gc_sdk, _gc_db = await asyncio.to_thread(_data_plane_db)
+                        await asyncio.to_thread(_boot_gc_drill_graphs, _gc_db)
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -1901,7 +1938,9 @@ async def _lifespan(app):
             # #5381: the body is module-level (``_event_retention_loop``) so its
             # per-step guard is reachable by an executing TEST. As a closure the
             # only available check was a static AST pin, and an AST pin cannot
-            # observe whether a step's failure ENDS the loop.
+            # observe whether a step's failure ENDS the loop. #4029's
+            # deleted-account purge is a STEP inside that module-level loop, not
+            # a second closure here.
             _retention_task = asyncio.get_event_loop().create_task(
                 _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
@@ -6004,7 +6043,9 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     ``record_write_ops`` runs a blocking ``MERGE (m:MeteringRecord …)`` plus a
     ``MATCH``, and in Supabase mode a blocking control-plane RPC, on whatever
     thread calls it. The write handlers call it inline on the event loop (a
-    post-write residual #3773 out-scoped); off-loading it is tracked by #4451.
+    post-write residual #3773 out-scoped) — with ONE exception since #3718:
+    ``commit_session``'s call now rides inside its off-loaded commit region.
+    Off-loading the rest is tracked by #4451.
     """
     org_id = org.get("org_id", "")
     try:
@@ -6515,6 +6556,9 @@ _IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256",
 
 _SENSITIVE_OP_LIMITS = {
     "export": 20, "team_delete": 5, "import": 5, "pack_manifest": 5,
+    # #4029: the account-deletion budget matches the team-delete budget —
+    # same destructiveness, same per-IP ceiling.
+    "account_delete": 5,
 }  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 _SENSITIVE_LOCK = asyncio.Lock()
@@ -9302,6 +9346,34 @@ def _gotrue_admin_get_user(user_id: str) -> tuple[int, dict] | None:
     except ValueError:
         body = {}
     return resp.status_code, body
+
+
+def _supabase_admin_delete_user(user_id: str) -> int:
+    """#4029: erase a Supabase auth user via the GoTrue ADMIN API (DELETE).
+
+    The account-erasure leg. Returns the HTTP status; 404 means the account is
+    already gone (the purge treats it as success — the same idempotency the
+    cleanup script's ``_gotrue_delete_user`` relies on,
+    graph-scripts/2146_e2e_live_orphan_cleanup.py). Raises RuntimeError on
+    transport failure so the purge keeps its ledger row as the retry anchor
+    instead of reporting an erasure it did not achieve.
+
+    Deleting the auth user cascades the account's ``org_memberships`` rows
+    (the FK is ON DELETE CASCADE, migration 0001/0009), so the person leaves
+    every org they merely belonged to as well.
+    """
+    import httpx
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    try:
+        resp = httpx.delete(
+            f"{url}/auth/v1/admin/users/{user_id}",
+            headers={"Authorization": f"Bearer {key}", "apikey": key},
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, httpx.TimeoutException):
+        raise RuntimeError("auth-service transport failure")  # noqa: B904
+    return resp.status_code
 
 
 def _gotrue_admin_mint_session(email: str) -> dict:
@@ -14495,178 +14567,238 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    proj = sdk._get_proj()
-    store = CommitRecordStore(sdk)
+    # #3718 residual (DATA plane): everything below is SYNCHRONOUS FalkorDB
+    # socket I/O — the L1 replay read, L2 reconciliation, the :CommitRecord
+    # MERGE serialization point, the Session/Point writes and the telemetry
+    # reads. On the loop it was ONE no-`await` sequence, so a SINGLE worker
+    # hand-off keeps the ordering (a per-call hand-off would add interleaving
+    # points the original did not have) and the exception semantics identical.
+    # `_record_write_op` rides along: it is blocking too (#4451) and is
+    # strictly downstream of the write it meters.
+    #
+    # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION (the same lesson `public_demo`
+    # carries): `asyncio.to_thread` submits to the loop's SHARED pool, so two
+    # concurrent POSTs run this closure in two threads. The pre-#3718 inline
+    # sequence was accidentally atomic — the single-threaded loop serialized
+    # the record read against the write phase.
+    # The hand-off removes that accident, so the check-then-act takes an
+    # explicit per-GRAPH lock (`_acquire_commit_lock` / `_release_commit_lock`,
+    # owned by the WORKER thread so a cancelled caller cannot release it while
+    # the write is still running). Round-3 review reproduced the double apply
+    # with a two-party barrier: without the lock BOTH requests enter the write
+    # phase, both return `duplicate:false`, and the Session counters are written
+    # twice (`commit_count +1` twice, `value_nodes_created +$created` twice)
+    # while `_record_write_op` bills 2 write-ops for one payload. The lock is
+    # WHY the loser observes a `fully_written` record at [2] instead of a
+    # `partial` one mid-write. Round-4 review widened the key and moved the
+    # acquisition here and corrected the commentary above (see `_COMMIT_LOCKS`).
+    def _commit_region() -> dict:
+        proj = sdk._get_proj()
+        store = CommitRecordStore(sdk)
 
-    # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
-    # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
-    # record with status held|partial is NOT fully written (PL3).
-    record = store.get(payload.client_commit_id)
-    if record is not None and record.status == "fully_written":
-        return _commit_response(payload, duplicate=True, warnings=warnings)
-
-    # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
-    # reconciled net-new delta — computed BEFORE any write (the ceiling check
-    # must count net-new, which only the reconciliation knows).
-    state = _load_commit_graph_state(sdk, payload)
-    plan = plan_commit(payload, state, record)
-
-    # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
-    # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
-    # duplicate (if fully_written) or completes the remainder (held|partial).
-    rec, created = store.acquire(
-        payload.client_commit_id, session_id=payload.session_id,
-        status="partial", write_ops_billed=0)
-    if not created:
-        rec = store.get(payload.client_commit_id) or rec
-        if rec.status == "fully_written":
+        # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
+        # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
+        # record with status held|partial is NOT fully written (PL3).
+        record = store.get(payload.client_commit_id)
+        if record is not None and record.status == "fully_written":
             return _commit_response(payload, duplicate=True, warnings=warnings)
-        plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
-    if plan.duplicate:
-        return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
-    # unlimited for every tier, so every resolver supplies an explicit None
-    # and this call cannot 402; it remains the fail-closed presence check
-    # (#310 GAP-B) that a limits dict built without the key does not slip
-    # past. Replays already returned above: quota never gates a duplicate
-    # (zero writes).
-    _check_org_limit(org, "sessions")
-    # #4051 — the org points gate (the second half of step [4a]). The sessions
-    # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
-    #
-    # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
-    # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
-    # :Object/:Subject nodes entities mint), because `_count_resource("points")`
-    # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
-    # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
-    # n.is_episodic = false))` (tortoise/quota.py:734-736).
-    # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
-    # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
-    # lane's own commit can leave behind — the lane writes in bulk and carries
-    # no payload estimate, so a commit from just under the cap can finish past
-    # it. (The capture lane's `count + est > max_points` at :10888 IS
-    # estimate-aware; this is the pre-write form every OTHER write endpoint
-    # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
-    # asked for, NOT a new bound.)
-    # It does NOT bound the lane's total node growth and it CANNOT close the
-    # uncounted loop this issue is about: a `points: []` commit mints :Session
-    # + transcript :Source (D10 — a document is a :Source; :Document is
-    # retired) + :Event, none of which match that predicate, so the count never
-    # moves and this gate can never trip. MEASURED: four fresh-session
-    # `points: []` commits all returned 200, minting 4 Sessions + 4 Sources + 4
-    # Events while the points count stayed 0. Closing that needs `max_points`
-    # widened to include those labels (a meaning change for every existing
-    # tenant, needing a migration) or a new limit (a pricing decision) — both
-    # OWNER decisions, tracked on #4051, deliberately not taken here.
-    #
-    # What it buys: parity with every other write endpoint's points gate
-    # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
-    # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
-    # (after every replay return above) so an idempotent re-POST is never gated
-    # — a replay writes no nodes and must never 402 (#1727's lesson); the
-    # budget 402 below is unchanged. Same shipped machinery + structured
-    # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
-    # event loop via the #3773 seam (a full tenant-graph count on a billing hot
-    # path).
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+        # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
+        # reconciled net-new delta — computed BEFORE any write (the ceiling check
+        # must count net-new, which only the reconciliation knows).
+        state = _load_commit_graph_state(sdk, payload)
+        plan = plan_commit(payload, state, record)
 
-    # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
-    if plan.budget.outcome == "fail":
-        # Ceiling exceeded (>50): nothing written; the record stays partial
-        # (re-submission 402s deterministically — DE2E-7 Session B/C).
-        raise HTTPException(status_code=402, detail=plan.budget.reason)
+        # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
+        # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
+        # duplicate (if fully_written) or completes the remainder (held|partial).
+        # The MERGE only makes the WRITE atomic — it does not make the loser
+        # WAIT, and a `partial` record (the winner is mid-write) plans as
+        # `duplicate=False`, so the region needs the per-graph commit lock
+        # held around it (`_acquire_commit_lock`; #3718 round-3 review,
+        # round-4 widened key).
+        rec, created = store.acquire(
+            payload.client_commit_id, session_id=payload.session_id,
+            status="partial", write_ops_billed=0)
+        if not created:
+            rec = store.get(payload.client_commit_id) or rec
+            if rec.status == "fully_written":
+                return _commit_response(payload, duplicate=True, warnings=warnings)
+            plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
+        if plan.duplicate:
+            return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    now = datetime.now(UTC).isoformat()
-    if plan.budget.outcome == "held":
-        # >25 (first adjudication only, PL3): items NOT written — the held
-        # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
-        # the record); re-submission checks the 50-ceiling only. Bills zero
-        # write-ops (write_ops_billed: 0 on the record, PL4).
+        # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
+        # unlimited for every tier, so every resolver supplies an explicit None
+        # and this call cannot 402; it remains the fail-closed presence check
+        # (#310 GAP-B) that a limits dict built without the key does not slip
+        # past. Replays already returned above: quota never gates a duplicate
+        # (zero writes).
+        _check_org_limit(org, "sessions")
+        # #4051 — the org points gate (the second half of step [4a]). The sessions
+        # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+        #
+        # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
+        # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
+        # :Object/:Subject nodes entities mint), because `_count_resource("points")`
+        # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
+        # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
+        # n.is_episodic = false))` (tortoise/quota.py:734-736).
+        # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
+        # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
+        # lane's own commit can leave behind — the lane writes in bulk and carries
+        # no payload estimate, so a commit from just under the cap can finish past
+        # it. (The capture lane's `count + est > max_points` at :10888 IS
+        # estimate-aware; this is the pre-write form every OTHER write endpoint
+        # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
+        # asked for, NOT a new bound.)
+        # It does NOT bound the lane's total node growth and it CANNOT close the
+        # uncounted loop this issue is about: a `points: []` commit mints :Session
+        # + transcript :Source (D10 — a document is a :Source; :Document is
+        # retired) + :Event, none of which match that predicate, so the count never
+        # moves and this gate can never trip. MEASURED: four fresh-session
+        # `points: []` commits all returned 200, minting 4 Sessions + 4 Sources + 4
+        # Events while the points count stayed 0. Closing that needs `max_points`
+        # widened to include those labels (a meaning change for every existing
+        # tenant, needing a migration) or a new limit (a pricing decision) — both
+        # OWNER decisions, tracked on #4051, deliberately not taken here.
+        #
+        # What it buys: parity with every other write endpoint's points gate
+        # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
+        # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
+        # (after every replay return above) so an idempotent re-POST is never gated
+        # — a replay writes no nodes and must never 402 (#1727's lesson); the
+        # budget 402 below is unchanged. Same shipped machinery + structured
+        # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
+        # event loop via the #3773 seam (a full tenant-graph count on a billing hot
+        # path).
+        #
+        # #3718 union: the placement and the fail-closed behavior above are main's,
+        # verbatim. At THIS site the off-loop property does NOT come from
+        # `_graph_offload` (a thread hand-off from inside a thread is not
+        # available): the whole region already runs on a WORKER thread via
+        # `asyncio.to_thread(_commit_sync)`, so the count is scheduled exactly like
+        # `_load_commit_graph_state` / `_execute_commit_writes` in the same
+        # per-graph-locked region. The site (after every replay return, before the
+        # budget adjudication) is unchanged, so an idempotent re-POST is still
+        # never gated.
+        _check_org_limit(org, "points")
+
+        # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
+        if plan.budget.outcome == "fail":
+            # Ceiling exceeded (>50): nothing written; the record stays partial
+            # (re-submission 402s deterministically — DE2E-7 Session B/C).
+            raise HTTPException(status_code=402, detail=plan.budget.reason)
+
+        now = datetime.now(UTC).isoformat()
+        if plan.budget.outcome == "held":
+            # >25 (first adjudication only, PL3): items NOT written — the held
+            # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
+            # the record); re-submission checks the 50-ceiling only. Bills zero
+            # write-ops (write_ops_billed: 0 on the record, PL4).
+            proj.g.query(
+                "MERGE (s:Session {id:$sid}) "
+                "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+                "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
+                "    s.updated_at=$now",
+                params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
+                        "now": now},
+            )
+            store.update(payload.client_commit_id, status="held")
+            _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                                    warn=plan.budget.warn, plan=plan)
+            return _commit_response(
+                payload, duplicate=False, held=list(plan.budget.held_point_ids),
+                warn=plan.budget.warn, warnings=warnings)
+
+        # [5] Graph writes — fail-closed: any write error → redacted 500 (the
+        # client retries with the same client_commit_id — safe by L1; the record
+        # stays partial).
+        try:
+            _execute_commit_writes(sdk, payload, plan)
+        except HTTPException:
+            raise
+        except InvertedSupersedeWindow as exc:
+            # #5363 (A): this is a DETERMINISTIC payload refusal, not a transient
+            # write failure — the retry-advising 500 below is actively wrong for it
+            # (a same-payload retry re-raises identically). Map it to the repo's
+            # validation posture (422) and NAME the conflicting ids / window so the
+            # client can fix the payload. The per-action check in
+            # `_execute_commit_writes` keeps a PROVABLE refusal from minting the
+            # successor it would orphan, but it is not a whole-commit guarantee
+            # (the chain writes and any earlier point have already landed); this
+            # clause is also the boundary of last resort for a refusal that still
+            # escapes it (e.g. a concurrent change between check and write, or the
+            # one resolution the pre-check deliberately does not guess — see
+            # `_prevalidate_supersede_window`).
+            raise HTTPException(  # noqa: B904
+                status_code=422,
+                detail={
+                    "code": "supersede_window_inverted",
+                    "errors": [str(exc)],
+                    "superseded": exc.old_id,
+                    "supersedes_by": exc.new_id,
+                    "successor_validFrom": exc.successor_start,
+                    "predecessor_validFrom": exc.predecessor_valid_from,
+                },
+            )
+        except Exception:
+            _logger.exception(
+                "commit write failed (fail-closed 500): team=%s session=%s",
+                org["org_id"], payload.session_id)
+            raise HTTPException(  # noqa: B904
+                status_code=500,
+                detail="Commit write failed — the commit is replay-safe (retry "
+                       "with the same client_commit_id; L1 idempotency). Details "
+                       "logged server-side (fail-closed, redacted).")
+
+        # :CommitRecord → fully_written + billing (the single +1 for this logical
+        # payload — PL4) + content-free telemetry (W-7).
+        store.update(payload.client_commit_id, status="fully_written")
         proj.g.query(
-            "MERGE (s:Session {id:$sid}) "
-            "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-            "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
-            "    s.updated_at=$now",
-            params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
-                    "now": now},
+            "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+            "SET r.write_ops_billed=1",
+            params={"cid": payload.client_commit_id},
         )
-        store.update(payload.client_commit_id, status="held")
         _store_commit_telemetry(proj, payload.client_commit_id, payload,
                                 warn=plan.budget.warn, plan=plan)
-        return _commit_response(
-            payload, duplicate=False, held=list(plan.budget.held_point_ids),
-            warn=plan.budget.warn, warnings=warnings)
 
-    # [5] Graph writes — fail-closed: any write error → redacted 500 (the
-    # client retries with the same client_commit_id — safe by L1; the record
-    # stays partial).
-    try:
-        _execute_commit_writes(sdk, payload, plan)
-    except HTTPException:
-        raise
-    except InvertedSupersedeWindow as exc:
-        # #5363 (A): this is a DETERMINISTIC payload refusal, not a transient
-        # write failure — the retry-advising 500 below is actively wrong for it
-        # (a same-payload retry re-raises identically). Map it to the repo's
-        # validation posture (422) and NAME the conflicting ids / window so the
-        # client can fix the payload. The per-action check in
-        # `_execute_commit_writes` keeps a PROVABLE refusal from minting the
-        # successor it would orphan, but it is not a whole-commit guarantee
-        # (the chain writes and any earlier point have already landed); this
-        # clause is also the boundary of last resort for a refusal that still
-        # escapes it (e.g. a concurrent change between check and write, or the
-        # one resolution the pre-check deliberately does not guess — see
-        # `_prevalidate_supersede_window`).
-        raise HTTPException(  # noqa: B904
-            status_code=422,
-            detail={
-                "code": "supersede_window_inverted",
-                "errors": [str(exc)],
-                "superseded": exc.old_id,
-                "supersedes_by": exc.new_id,
-                "successor_validFrom": exc.successor_start,
-                "predecessor_validFrom": exc.predecessor_valid_from,
-            },
+        # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
+        # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
+        _record_write_op(org, nodes_written=plan.reconcile.net_new)
+
+        merged = (
+            sum(1 for pr in plan.reconcile.points if pr.action == "merge")
+            + sum(1 for er in plan.reconcile.entities if er.action == "merge")
+            + sum(1 for op in plan.reconcile.operators if op.action == "merge")
         )
-    except Exception:
-        _logger.exception(
-            "commit write failed (fail-closed 500): team=%s session=%s",
-            org["org_id"], payload.session_id)
-        raise HTTPException(  # noqa: B904
-            status_code=500,
-            detail="Commit write failed — the commit is replay-safe (retry "
-                   "with the same client_commit_id; L1 idempotency). Details "
-                   "logged server-side (fail-closed, redacted).")
+        return _commit_response(
+            payload, duplicate=False,
+            nodes_created=plan.reconcile.net_new,
+            nodes_merged=merged,
+            warn=plan.budget.warn,
+            warnings=warnings,
+        )
 
-    # :CommitRecord → fully_written + billing (the single +1 for this logical
-    # payload — PL4) + content-free telemetry (W-7).
-    store.update(payload.client_commit_id, status="fully_written")
-    proj.g.query(
-        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
-        "SET r.write_ops_billed=1",
-        params={"cid": payload.client_commit_id},
-    )
-    _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                            warn=plan.budget.warn, plan=plan)
+    def _commit_sync() -> dict:
+        # The lock is taken HERE, on the worker thread, and held across the
+        # whole read → plan → write → stamp region. Two things this ordering
+        # buys that a loop-side `async with` around the hand-off could not:
+        # (1) the second commit's `_load_commit_graph_state` runs only after
+        # the first finished writing, so its plan cannot be billed against a
+        # pre-write snapshot; (2) `asyncio.to_thread` work is not cancellable,
+        # so a cancelled caller cannot release the lock while this thread is
+        # still writing (see `_COMMIT_LOCKS`).
+        key, lock = _acquire_commit_lock(org["org_id"])
+        try:
+            with lock:
+                return _commit_region()
+        finally:
+            _release_commit_lock(key)
 
-    # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
-    # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
-    _record_write_op(org, nodes_written=plan.reconcile.net_new)
-
-    merged = (
-        sum(1 for pr in plan.reconcile.points if pr.action == "merge")
-        + sum(1 for er in plan.reconcile.entities if er.action == "merge")
-        + sum(1 for op in plan.reconcile.operators if op.action == "merge")
-    )
-    return _commit_response(
-        payload, duplicate=False,
-        nodes_created=plan.reconcile.net_new,
-        nodes_merged=merged,
-        warn=plan.budget.warn,
-        warnings=warnings,
-    )
+    # One worker hand-off of the whole synchronous region (see the note above).
+    # The lock lives inside `_commit_sync`, not around this await.
+    return await asyncio.to_thread(_commit_sync)
 
 
 @app.get("/v1/sessions")
@@ -15268,76 +15400,94 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
     mid-delete outage self-heals on the retry.
     """
     _require_scope(org, "graphs:write", "delete_session")
-    sdk = _data_sdk(org)
-    proj = sdk._get_proj()
+    # #3718 residual (DATA plane): the SDK open, the existence/provenance
+    # reads, the four DETACH DELETE statements and the receipt reconcile are
+    # all SYNCHRONOUS FalkorDB socket I/O, and on the loop they were ONE
+    # no-`await` sequence. A SINGLE worker hand-off keeps that sequence
+    # uninterleaved (a per-query hand-off would open interleaving points
+    # between the existence check and the deletes) and keeps the 404 /
+    # receipt-reconcile semantics.
+    sdk = await _data_sdk_offloaded(org)
     url = f"session:{session_id}"
+    org_id = org["org_id"]
 
-    # 1) existence (the Session node is the API-visible handle — GET detail's
-    #    404 contract: same detail string). A 404 STILL reconciles the
-    #    receipts — a re-delete after a partial prior delete must finish the
-    #    orphan cleanup the first attempt never reached.
-    sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
-        params={"sid": session_id},
-    ).result_set
-    if not sess_rows:
-        _reconcile_capture_receipts(proj, org["org_id"])
-        raise HTTPException(status_code=404, detail="Session not found")
+    def _delete_session_sync() -> dict:
+        proj = sdk._get_proj()
 
-    # 2) provenance event ids FIRST (before the Point delete below — the
-    #    sessionCaptured Event is stamped onto the extracted Points via
-    #    p.eventId, so the gather must run while the Points still exist;
-    #    the Source's own eventId is the fallback leg for the Source-absent
-    #    materialization path). A missing Event-write leaves no eventId —
-    #    nothing to match, no dangling.
-    ev_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
-        params={"sid": session_id},
-    ).result_set
-    src_rows = proj.g.query(
-        "MATCH (src:Source {url:$url}) RETURN src.eventId",
-        params={"url": url},
-    ).result_set
-    event_ids = [r[0] for r in ev_rows if r[0]]
-    if src_rows and src_rows[0][0]:
-        event_ids.append(src_rows[0][0])
-    event_ids = list(dict.fromkeys(event_ids))
+        # 1) existence (the Session node is the API-visible handle — GET detail's
+        #    404 contract: same detail string). A 404 STILL reconciles the
+        #    receipts — a re-delete after a partial prior delete must finish the
+        #    orphan cleanup the first attempt never reached.
+        sess_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
+            params={"sid": session_id},
+        ).result_set
+        if not sess_rows:
+            # #3718: the 404 STILL reconciles the receipts (see below) — the
+            # caller raises the 404 from this result, so the sequence stays
+            # inside the single worker hand-off.
+            return {"found": False,
+                    "cleaned": _reconcile_capture_receipts(proj, org_id)}
 
-    # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
-    #    DETACH DELETE also drops their aboutObject edges — the linked
-    #    WorkItem/Object entities themselves survive: deleting a transcript
-    #    never deletes the issue/entity it referenced).
-    proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
-        params={"sid": session_id},
-    )
+        # 2) provenance event ids FIRST (before the Point delete below — the
+        #    sessionCaptured Event is stamped onto the extracted Points via
+        #    p.eventId, so the gather must run while the Points still exist;
+        #    the Source's own eventId is the fallback leg for the Source-absent
+        #    materialization path). A missing Event-write leaves no eventId —
+        #    nothing to match, no dangling.
+        ev_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
+            params={"sid": session_id},
+        ).result_set
+        src_rows = proj.g.query(
+            "MATCH (src:Source {url:$url}) RETURN src.eventId",
+            params={"url": url},
+        ).result_set
+        event_ids = [r[0] for r in ev_rows if r[0]]
+        if src_rows and src_rows[0][0]:
+            event_ids.append(src_rows[0][0])
+        event_ids = list(dict.fromkeys(event_ids))
 
-    # 4) the sessionCaptured provenance Event(s) by the collected ids.
-    if event_ids:
+        # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
+        #    DETACH DELETE also drops their aboutObject edges — the linked
+        #    WorkItem/Object entities themselves survive: deleting a transcript
+        #    never deletes the issue/entity it referenced).
         proj.g.query(
-            "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
-            params={"ids": event_ids},
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+            params={"sid": session_id},
         )
 
-    # 5) the agentSession Source stub (url = session:{id}) + the Session.
-    proj.g.query(
-        "MATCH (src:Source {url:$url}) DETACH DELETE src",
-        params={"url": url},
-    )
-    proj.g.query(
-        "MATCH (s:Session {id:$sid}) DETACH DELETE s",
-        params={"sid": session_id},
-    )
+        # 4) the sessionCaptured provenance Event(s) by the collected ids.
+        if event_ids:
+            proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
+                params={"ids": event_ids},
+            )
 
-    # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
-    #    steps above are individually atomic but the SEQUENCE is not — a
-    #    failure between them leaves a partial deletion; the reconcile is
-    #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
-    #    the Session is gone and strand an orphaned receipt, and the 404
-    #    re-delete path above finishes any skipped pass.
-    cleaned = _reconcile_capture_receipts(proj, org["org_id"])
-    return {"deleted": True, "cleaned_receipts": cleaned}
+        # 5) the agentSession Source stub (url = session:{id}) + the Session.
+        proj.g.query(
+            "MATCH (src:Source {url:$url}) DETACH DELETE src",
+            params={"url": url},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) DETACH DELETE s",
+            params={"sid": session_id},
+        )
+
+        # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
+        #    steps above are individually atomic but the SEQUENCE is not — a
+        #    failure between them leaves a partial deletion; the reconcile is
+        #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
+        #    the Session is gone and strand an orphaned receipt, and the 404
+        #    re-delete path above finishes any skipped pass.
+        cleaned = _reconcile_capture_receipts(proj, org_id)
+        return {"found": True, "cleaned": cleaned}
+
+    out = await asyncio.to_thread(_delete_session_sync)
+    if not out["found"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True, "cleaned_receipts": out["cleaned"]}
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
@@ -15699,9 +15849,46 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
     # burst from a 0-free-org account cannot all read count==0 and mint
     # multiple free orgs (the count+provision must be atomic).
     from tortoise.supabase_control import (
+        account_deletion_row,
         get_control_plane,
         is_supabase_enabled,
     )
+    # #4029 review P2-6: a user whose account deletion is pending must not be
+    # able to provision a NEW org. The erasure sweep re-derives sole ownership
+    # and then deletes the auth user; a delete-pending user is still
+    # authenticated during the grace window, so an org created AFTER the sweep's
+    # discovery read and BEFORE the auth erase lands in neither the claim set
+    # nor the discovery set — the auth erase then cascades this user's
+    # memberships (FK ON DELETE CASCADE) and leaves an org with ``deleted_at IS
+    # NULL`` and NO owner, which ``_purge_deleted_orgs`` (selects on
+    # ``deleted_at``) never sees. Refusing the create closes that TOCTOU at the
+    # smallest seam. Checked BEFORE the lane branch so the Supabase and registry
+    # lanes cannot drift.
+    #
+    # FAIL-OPEN on a ledger READ failure only: an unavailable control plane must
+    # not break every user's org creation. "Row present" still refuses — that is
+    # the whole point, and it is the one outcome a read fault cannot fake.
+    try:
+        _deletion_cp = get_control_plane()
+        _pending = await asyncio.to_thread(
+            account_deletion_row, _deletion_cp, user["user_id"])
+        if _pending is not None:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_code": "account_deletion_pending",
+                    "message": (
+                        "This account is scheduled for deletion and cannot "
+                        "create organizations."
+                    ),
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.warning(
+            "account-deletion ledger read failed; allowing org create",
+            exc_info=True)
     if is_supabase_enabled():
         cp = get_control_plane()
         async with _org_create_lock(user["user_id"]):
@@ -20590,6 +20777,55 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
     )
 
 
+def _cascade_soft_delete_org_sync(org_id: str, now: str,
+                                  grace_hours: float) -> None:
+    """The ONE org soft-delete cascade, synchronous (see below).
+
+    The blocking half of :func:`_cascade_soft_delete_org`, split out so the
+    boot + hourly account-erasure sweep (a sync thread) runs the SAME sequence
+    the async endpoints do — the account purge re-derives and cascades orgs
+    before erasing the auth account, and must not reach into the event loop.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        remove_org_memberships,
+        revoke_org_api_keys,
+        revoke_org_invitations,
+        soft_delete_org,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        revoke_org_api_keys(cp, org_id, now)
+        remove_org_memberships(cp, org_id, now)
+        revoke_org_invitations(cp, org_id, now)
+        soft_delete_org(cp, org_id, now, grace_hours=grace_hours)
+    else:
+        _soft_delete_registry_org(org_id, now, grace_hours)
+
+
+async def _cascade_soft_delete_org(org_id: str, now: str,
+                                   grace_hours: float) -> None:
+    """The ONE org soft-delete cascade: access-kill FIRST, stamp LAST.
+
+    Extracted from ``delete_org`` (#4029) so the per-org endpoint and the
+    account-deletion cascade run the SAME sequence and cannot drift:
+
+    1. revoke every API key (``tt_`` auth fails closed),
+    2. mark active memberships removed (JWT-session access stops),
+    3. revoke pending invitations (no redemption into a deleted org),
+    4. stamp ``deleted_at`` + the promised ``grace_hours`` LAST.
+
+    Ordering is load-bearing (code-review P1, PR #873): a partial failure
+    leaves the org NOT marked deleted, so a retry re-runs the full cascade —
+    never a "deleted" org whose keys still authenticate. Mode-aware: Supabase
+    control plane vs the registry twin; the blocking sequence runs off the
+    loop (``to_thread``, #310 pattern) via the sync half.
+    """
+    await asyncio.to_thread(
+        _cascade_soft_delete_org_sync, org_id, now, grace_hours)
+
+
 @app.delete("/v1/organizations/{org_id}", status_code=202)
 @_deferred_sensitive_op("team_delete")
 async def delete_org(org_id: str, request: Request,
@@ -20613,9 +20849,9 @@ async def delete_org(org_id: str, request: Request,
     owner while pending → 200 already (owner membership is removed by the
     cascade, so the replay check accepts the removed-owner state); after
     the purge the org is gone → 403 (org no longer resolvable). Supabase
-    auth user accounts are NOT deleted — no auth-admin wiring exists, and
-    a user can own multiple orgs (per-org deletion must not cascade to
-    the account).
+    auth user accounts are NOT deleted by THIS endpoint — a user can own
+    multiple orgs, so per-org deletion must not cascade to the account; the
+    account-level path is the separate ``DELETE /v1/user/account`` (#4029).
     """
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
@@ -20649,28 +20885,10 @@ async def delete_org(org_id: str, request: Request,
         )
 
     now = datetime.now(UTC).isoformat()
-    from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
-        remove_org_memberships,
-        revoke_org_api_keys,
-        revoke_org_invitations,
-        soft_delete_org,
-    )
-    if is_supabase_enabled():
-        cp = get_control_plane()
-        # Access-kill first, stamp LAST (fail-closed ordering, PR #873).
-        # Sync httpx calls must not block the loop (to_thread, #310 pattern).
-        await asyncio.to_thread(revoke_org_api_keys, cp, org_id, now)
-        await asyncio.to_thread(remove_org_memberships, cp, org_id, now)
-        await asyncio.to_thread(revoke_org_invitations, cp, org_id, now)
-        await asyncio.to_thread(
-            soft_delete_org, cp, org_id, now, grace_hours=grace_hours
-        )
-    else:
-        await asyncio.to_thread(
-            _soft_delete_registry_org, org_id, now, grace_hours
-        )
+    # Access-kill first, stamp LAST (fail-closed ordering, PR #873) — the ONE
+    # cascade, shared with the account-deletion path (#4029) so they cannot
+    # drift.
+    await _cascade_soft_delete_org(org_id, now, grace_hours)
     await _async_audit(
         request, org_id, "team_delete_requested",
         resource_type="team", resource_id=org_id,
@@ -20685,6 +20903,317 @@ async def delete_org(org_id: str, request: Request,
         "note": "API keys revoked and memberships removed immediately; team "
                  "graph + control-plane rows are hard-deleted after the grace "
                  "period. Supabase auth user accounts are not deleted.",
+    }
+
+
+def _account_org_ids_from_row(row: dict | None,
+                              column: str = "org_ids") -> list[str]:
+    """A persisted org-id list of an account-deletion anchor (#4029).
+
+    ``column`` selects which set: ``org_ids`` (the intent record) or
+    ``claimed_org_ids`` (the durable cascade gate). Tolerant by design: the
+    value is ``jsonb`` (a list in the control-plane row), but a legacy/odd
+    shape must never break the retry — an unreadable set degrades to the fresh
+    membership discovery.
+    """
+    if not row:
+        return []
+    raw = row.get(column)
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            return []
+    try:
+        return [str(org_id) for org_id in raw if str(org_id)]
+    except Exception:
+        return []
+
+
+def _merge_org_ids(stored: list[str], fresh: list[str]) -> list[str]:
+    """Stored ids first, then any freshly discovered solely-owned org.
+
+    The union keeps an org the cascade already claimed (completing it stays
+    idempotent) without dropping a team the user solely owns at replay time.
+    """
+    out = list(stored)
+    seen = set(stored)
+    for org_id in fresh:
+        org_id = str(org_id)
+        if org_id and org_id not in seen:
+            seen.add(org_id)
+            out.append(org_id)
+    return out
+
+
+def _account_replay_body(row: dict, env_grace: float) -> dict:
+    """The 200-``already`` body, derived from the STORED promise (#4029).
+
+    Deliberately NOT a fresh env read: the deadline promised at schedule time
+    must not move when the env default changes mid-grace. Shared by the
+    idempotent replay and the concurrent-schedule (409) loser so the two
+    cannot disagree on the field.
+    """
+    stored_grace = row.get("grace_hours")
+    try:
+        replay_grace = (float(stored_grace) if stored_grace is not None
+                        else env_grace)
+    except Exception:
+        replay_grace = env_grace
+    deleted_at = row.get("deleted_at")
+    try:
+        hard_delete_after = (
+            datetime.fromisoformat(str(deleted_at))
+            + timedelta(hours=replay_grace)
+        ).isoformat()
+    except Exception:
+        hard_delete_after = None
+    return {
+        "status": "delete_pending", "already": True,
+        "deleted_at": deleted_at,
+        "grace_hours": replay_grace,
+        "hard_delete_after": hard_delete_after,
+        "teams_deleted": [],
+    }
+
+
+def _account_deletion_in_flight(row: dict | None, now_dt: datetime) -> bool:
+    """#4029 review P2-3: is this UNSTAMPED anchor a cascade still RUNNING?
+
+    The ledger row is visible from the moment ``begin_account_deletion``
+    INSERTs it — BEFORE the winner's cascade and its final stamp — so an
+    un-stamped row means EITHER another request is mid-cascade OR a prior
+    attempt died between the INSERT and the stamp. Only ``created_at``
+    separates them: younger than ``ACCOUNT_DELETION_IN_FLIGHT_SECONDS`` → still
+    in flight; older → the attempt died and the row is the retry anchor. A row
+    whose ``created_at`` is missing or unparseable is a RETRY (False), never
+    in-flight: a real retry must never be refused on a missing field, and the
+    retry path below is idempotent. A stamped row is never in flight.
+    """
+    if not row or row.get("deleted_at"):
+        return False
+    created = row.get("created_at")
+    if created is None:
+        return False
+    try:
+        created_dt = datetime.fromisoformat(str(created))
+    except (ValueError, TypeError):
+        return False
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=UTC)
+    return (now_dt - created_dt) < timedelta(
+        seconds=ACCOUNT_DELETION_IN_FLIGHT_SECONDS)
+
+
+@app.delete("/v1/user/account", status_code=202)
+@_deferred_sensitive_op("account_delete")
+async def delete_user_account(request: Request,
+                              user: dict = Depends(get_current_user)):  # noqa: B008
+    """#4029 — self-service personal-account deletion (soft delete → grace → erasure).
+
+    Owner ruling (2026-09-30, decision 1B): the account's SOLELY-OWNED teams
+    are deleted with it, reusing the per-org cascade above — not a second
+    implementation. A team the user does not solely own (another owner
+    remains, including an anonymous agent owner) is left untouched.
+
+    Ordering mirrors the team endpoint: the org cascades (access-kill first)
+    run BEFORE the account is stamped, and the account's ``deleted_at`` +
+    ``grace_hours`` are written LAST, so a partial failure leaves the account
+    un-stamped and a retry re-runs the full, idempotent cascade.
+
+    TWO SETS, and the difference is load-bearing (cycle-2 review of #4029):
+    ``org_ids`` is the INTENDED set (a cache of ownership, a fact that
+    changes) and ``claimed_org_ids`` is the durable CLAIM — one org appended
+    atomically immediately BEFORE its access-kill. A replay cascades an org
+    only while it is (a) still solely owned at replay time, or (b) already
+    durably claimed by THIS deletion, so completing an interrupted cascade
+    stays idempotent while an org that lost sole ownership after the anchor
+    was written is dropped rather than stamped. A claimed id is additionally
+    gated on the caller actually holding a membership row for that org (any
+    status — the cascade sets them 'removed', never deletes them), so a
+    malformed anchor naming a stranger's team cannot drive a cascade against
+    it. The cascade itself removes the
+    active-owner memberships the sole-ownership discovery reads, so the claim
+    is what keeps an org reachable after membership removal. The stored grace
+    window is the sole authority for the erasure deadline; the
+    ``TORTOISE_USER_ACCOUNT_DELETE_GRACE_HOURS`` env var is only the fallback
+    default for a row that carries no stored grace (#4179 contract).
+
+    Idempotent: a repeat request while pending → 200 ``already`` carrying the
+    STORED promise. A concurrent schedule that loses the anchor INSERT race
+    (409) defers to the winner's anchor — no second cascade, no second audit.
+    The same holds for a request that arrives while the winner is STILL
+    cascading: the winner holds the row un-stamped for that window, so a
+    request that reads an un-stamped anchor younger than
+    ``ACCOUNT_DELETION_IN_FLIGHT_SECONDS`` defers to it too (P2-3 review); an
+    un-stamped anchor OLDER than that bound is a request that died and falls
+    through to the idempotent retry below (a missing ``created_at`` opts out of
+    the guard, never refuses a real retry).
+    AuthZ: the endpoint acts on the AUTHENTICATED account and
+    there is no account id in the request, so there is no cross-account target
+    and no existence oracle to leak; every org it touches was selected either
+    by an active-owner membership or by a durable claim from this same
+    deletion, itself gated on a membership row the caller holds. The per-IP
+    sensitive-op budget uses the same DEFERRED-charge seam as the rest of the
+    sensitive-op family (``@_deferred_sensitive_op``): a 5xx passes through
+    UNCHARGED, so a control-plane fault cannot burn the caller's hourly budget
+    and 429-lock the only self-service way to delete an account (#2051).
+
+    Registry (selfhost) mode has no hosted auth accounts → ``unsupported``,
+    mirroring ``GET /v1/user/identity``. Backups are NOT deleted on this path
+    (owner ruling 2B): they age out on the existing backup cycle; the erasure
+    below removes the auth account and the deletion ledger row.
+    """
+    from tortoise.supabase_control import (
+        account_deletion_row,
+        begin_account_deletion,
+        caller_membership_org_ids,
+        claim_account_deletion_org,
+        get_control_plane,
+        is_supabase_enabled,
+        sole_owned_org_ids,
+        stamp_account_deletion,
+    )
+    if not is_supabase_enabled():
+        # 200 (not the route's declared 202): nothing was scheduled. Mirrors
+        # `GET /v1/user/identity`'s `unsupported` answer.
+        return JSONResponse(status_code=200, content={"unsupported": True})
+    cp = get_control_plane()
+    user_id = user["user_id"]
+    grace_hours = float(os.environ.get(
+        "TORTOISE_USER_ACCOUNT_DELETE_GRACE_HOURS",
+        str(USER_ACCOUNT_DELETE_GRACE_HOURS)))
+
+    existing = await asyncio.to_thread(account_deletion_row, cp, user_id)
+    if existing and existing.get("deleted_at"):
+        # Idempotent replay: already scheduled — answer from the STORED
+        # promise (never a fresh env read, which could move the deadline).
+        return JSONResponse(
+            status_code=200,
+            content=_account_replay_body(existing, grace_hours),
+        )
+
+    # The anchor is visible from its INSERT, BEFORE the winner's cascade and
+    # its LAST stamp, so an un-stamped anchor younger than the in-flight bound
+    # belongs to a request that is STILL RUNNING (P2-3 review). Defer to it
+    # exactly as the 409 loser does: answer from its stored row, with NO
+    # cascade and NO second ``account_delete_requested``. Without this guard, a
+    # second DELETE arriving mid-cascade saw a non-None ``existing`` with
+    # ``deleted_at = None``, skipped both the replay check above and the
+    # ``existing is None`` INSERT guard below, and re-ran the whole cascade +
+    # emitted a second audit — the opposite of the docstring's promise. An
+    # un-stamped anchor OLDER than the bound (or with no parseable
+    # ``created_at``) is a request that died, so it falls through to the
+    # idempotent retry below.
+    if _account_deletion_in_flight(existing, datetime.now(UTC)):
+        return JSONResponse(
+            status_code=200,
+            content=_account_replay_body(existing, grace_hours),
+        )
+
+    # The cascade set is a union of TWO independent facts, never the raw
+    # anchor (#4029 cycle-2):
+    #   (a) orgs the caller SOLELY owns right now — discovery is live, so a
+    #       team acquired between attempts reaches this cascade;
+    #   (b) orgs THIS deletion already durably CLAIMED — the claim is written
+    #       before each org's access-kill, so a cascade interrupted after
+    #       membership removal is completed idempotently on the retry.
+    # A stale ``org_ids`` entry that is neither is DROPPED: it is an org the
+    # caller no longer solely owns and this deletion never began, so stamping
+    # it would delete a team the contract says is left untouched.
+    claimed_ids = _account_org_ids_from_row(existing, "claimed_org_ids")
+    if claimed_ids:
+        # The CLAIM's ownership gate (#4029 cycle-3): honour a claimed id only
+        # for an org the caller actually held a membership in. Normal writers
+        # only ever claim the caller's own solely-owned discovery, so this is
+        # inert in practice — it closes the cross-user shape a malformed
+        # anchor could otherwise turn into a cascade against a stranger's org.
+        # Any status: ``remove_org_memberships`` leaves a 'removed' row behind,
+        # which is exactly what a post-fault replay must still complete.
+        caller_orgs = set(await asyncio.to_thread(
+            caller_membership_org_ids, cp, user_id))
+        claimed_ids = [o for o in claimed_ids if o in caller_orgs]
+    fresh_ids = await asyncio.to_thread(sole_owned_org_ids, cp, user_id)
+    org_ids = _merge_org_ids(claimed_ids, fresh_ids)
+
+    if existing is None:
+        try:
+            # Persist the intent anchor BEFORE the cascade begins (it is
+            # widened atomically per org by the claim RPC): the cascade
+            # destroys the membership rows a retry would rediscover the org by.
+            await asyncio.to_thread(
+                begin_account_deletion, cp, user_id, org_ids)
+        except RuntimeError as exc:
+            # A concurrent request won the primary-key insert (PostgREST 409):
+            # its stored promise is the one that stands, never ours. Anything
+            # else is real.
+            if "409" not in str(exc):
+                raise
+            won = await asyncio.to_thread(account_deletion_row, cp, user_id)
+            if won is None:
+                raise
+            # The winner holds the anchor from the moment it INSERTs the row —
+            # BEFORE its cascade and its stamp. So this loser must NOT
+            # re-cascade or emit a second ``account_delete_requested``; it
+            # answers 200 ``already`` from the stored row. That row may not be
+            # stamped yet (``deleted_at``/``grace_hours`` NULL while the
+            # winner is mid-cascade), in which case the honest answer is the
+            # pending shape with a NULL deadline rather than the loser's own.
+            return JSONResponse(
+                status_code=200,
+                content=_account_replay_body(won, grace_hours),
+            )
+
+    now = datetime.now(UTC).isoformat()
+    for org_id in org_ids:
+        # Claim BEFORE the access-kill: if the cascade then fails after the
+        # memberships are removed, this org is still reachable by a retry.
+        await asyncio.to_thread(
+            claim_account_deletion_org, cp, user_id, org_id)
+        await _cascade_soft_delete_org(org_id, now, grace_hours)
+    # Account stamp LAST — a partial cascade above leaves this unwritten, so a
+    # retry re-runs the whole (idempotent) cascade. First-write-wins: the seam
+    # matches only an unstamped row, so a concurrent schedule's stored promise
+    # is never overwritten.
+    await asyncio.to_thread(
+        stamp_account_deletion, cp, user_id, now, grace_hours=grace_hours)
+
+    # Answer from the STORED row (ours, or a concurrent winner's) and derive
+    # hard_delete_after from that same stamped deleted_at — never a second
+    # now(), which would advertise a deadline LATER than the purge enforces.
+    stored = await asyncio.to_thread(account_deletion_row, cp, user_id) or {}
+    deleted_at = stored.get("deleted_at") or now
+    stored_grace = stored.get("grace_hours")
+    try:
+        final_grace = (float(stored_grace) if stored_grace is not None
+                       else grace_hours)
+    except Exception:
+        final_grace = grace_hours
+    try:
+        hard_delete_after = (
+            datetime.fromisoformat(str(deleted_at))
+            + timedelta(hours=final_grace)
+        ).isoformat()
+    except Exception:
+        hard_delete_after = None
+
+    await _async_audit(
+        request, "", "account_delete_requested",
+        resource_type="account", resource_id=user_id,
+        actor_user_id=user_id,
+        detail={"teams_deleted": org_ids},
+    )
+    return {
+        "status": "delete_scheduled", "deleted_at": deleted_at,
+        "grace_hours": final_grace,
+        "hard_delete_after": hard_delete_after,
+        "teams_deleted": org_ids,
+        "note": "Teams you solely own are deleted immediately (keys revoked, "
+                 "memberships removed); your account and its data are erased "
+                 "after the grace period. Backups age out on the normal backup "
+                 "cycle.",
     }
 
 
@@ -20814,6 +21343,26 @@ def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None
     _drop_org_graph(org_id, graph_name)
 
 
+def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
+                          env_grace: float, now_dt) -> bool:
+    """#4179: the STORED grace promised at schedule time wins over the env.
+
+    Shared by the team and account purge sweeps so the two cannot decide a
+    stored promise differently. ``env_grace`` is the fallback ONLY for a row
+    that carries no stored ``grace_hours``; an unparseable stamp purges
+    (defensive — a corrupt row must not pin data forever).
+    """
+    try:
+        deleted_dt = datetime.fromisoformat(row_deleted_at)
+    except Exception:
+        return True  # unparseable stamp → purge (defensive)
+    try:
+        gh = float(row_grace_hours) if row_grace_hours is not None else env_grace
+    except Exception:
+        gh = env_grace
+    return deleted_dt + timedelta(hours=gh) <= now_dt
+
+
 def _purge_deleted_orgs() -> None:
     """Hard-delete orgs past the soft-delete grace window (#302 E2E-6-D).
 
@@ -20853,15 +21402,8 @@ def _purge_deleted_orgs() -> None:
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
-            try:
-                deleted_dt = datetime.fromisoformat(row_deleted_at)
-            except Exception:
-                return True  # unparseable stamp → purge (defensive)
-            try:
-                gh = float(row_grace_hours) if row_grace_hours is not None else env_grace
-            except Exception:
-                gh = env_grace
-            return deleted_dt + timedelta(hours=gh) <= now_dt
+            return _stored_grace_elapsed(
+                row_deleted_at, row_grace_hours, env_grace, now_dt)
 
         from tortoise.supabase_control import (
             get_control_plane,
@@ -20930,6 +21472,192 @@ def _purge_deleted_orgs() -> None:
                                 exc_info=True)
     except Exception as exc:
         _logger.warning("deleted-team purge sweep failed: %s", exc)
+
+
+def _purge_deleted_accounts() -> None:
+    """Erase user accounts past their stored soft-delete grace (#4029).
+
+    The account-level twin of :func:`_purge_deleted_orgs`, run on the SAME
+    boot + hourly schedule. A row in ``account_deletions`` means the account
+    was scheduled for deletion; once its STORED window elapses the account is
+    erased: the GoTrue auth user is DELETED (which cascades the person's
+    ``org_memberships`` rows in every org — ON DELETE CASCADE), then the
+    ledger row is removed.
+
+    Ordering is the retry-anchor contract (see the migration header): the auth
+    user goes FIRST and the ledger row LAST, so a failed GoTrue call leaves a
+    row the next sweep retries. A 404 from GoTrue is already-erased and counts
+    as success (idempotent).
+
+    TWO RETRY SHAPES (P1-4 review of #4029). A STAMPED row past its stored
+    grace is erased as above. A STALE UNSTAMPED row — the endpoint INSERTed the
+    anchor and then the process died before stamping it — is COMPLETED instead:
+    the interrupted schedule is re-derived, claimed and cascaded, then stamped,
+    and the account is left for a later sweep. It must NOT be erased early,
+    because the 7-day promise starts at the STAMP; and it must not be ignored,
+    because ``deleted_at lte now`` excludes NULL, so an un-stamped row would
+    otherwise be invisible forever — the account never erased, the ledger row
+    never cleaned, and nothing noticing.
+
+    RE-DERIVE BEFORE ERASING (cycle-2 review of #4029). Erasing the auth user
+    cascades the person's ``org_memberships`` rows — the rows the sole-ownership
+    discovery reads. A team the caller created INSIDE the grace window is in
+    neither the frozen ``org_ids`` nor any cascade the endpoint ran, so erasing
+    the account first would orphan it: its ``deleted_at`` stays NULL,
+    ``_purge_deleted_orgs`` (which selects on that stamp) never sees it, and no
+    owner is left to reach it. So the sole-ownership discovery is re-run HERE,
+    while the caller's owner rows are still active, and each such org is
+    cascaded BEFORE the auth erase. The org cascade runs in the per-row ``try``
+    with the erase: a cascade failure skips the row (leaving the auth user and
+    the ledger row for the next sweep), so a failed claim never precedes an
+    erasure.
+
+    Backup copies are NOT deleted here — the owner ruling (decision 2B on
+    #4029) leaves them to age out on the existing backup cycle. The account's
+    solely-owned orgs are stamped by the endpoint (or the re-derivation above)
+    and are hard-deleted by :func:`_purge_deleted_orgs` on their own stored
+    window.
+
+    Supabase-only: selfhost has no hosted auth accounts. Fail-safe: a per-row
+    failure is logged and skipped, never crashes the loop.
+    """
+    try:
+        from tortoise.supabase_control import (
+            caller_membership_org_ids,
+            claim_account_deletion_org,
+            get_control_plane,
+            is_supabase_enabled,
+            purge_account_deletion,
+            sole_owned_org_ids,
+            stamp_account_deletion,
+        )
+        if not is_supabase_enabled():
+            return
+        env_grace = float(os.environ.get(
+            "TORTOISE_USER_ACCOUNT_DELETE_GRACE_HOURS",
+            str(USER_ACCOUNT_DELETE_GRACE_HOURS)))
+        now_dt = datetime.now(UTC)
+        cp = get_control_plane()
+        scan_cutoff = now_dt.isoformat()
+        stale_before = (
+            now_dt - timedelta(seconds=ACCOUNT_DELETION_IN_FLIGHT_SECONDS)
+        ).isoformat()
+        # The selection must cover TWO populations (P1-4 review):
+        #   (a) STAMPED anchors past their stored grace — the erasure path; and
+        #   (b) STALE UNSTAMPED anchors — a request that died after the INSERT
+        #       and before its stamp, which SQL/PostgREST excludes from
+        #       `deleted_at lte now` (NULL never satisfies an ordered compare).
+        # Two queries rather than one PostgREST `or=`: the client's filter
+        # dialect carries no `or=` (and the test double implements none), so an
+        # `or=` here would be untestable. Dedupe by user_id — a row cannot be
+        # in both sets, but the guard keeps that an invariant of this code, not
+        # an assumption.
+        rows = list(cp.query(
+            "account_deletions",
+            select=["user_id", "deleted_at", "grace_hours",
+                    "claimed_org_ids", "created_at"],
+            filters=[("deleted_at", "lte", scan_cutoff)],
+        ))
+        _seen_users = {r.get("user_id") for r in rows}
+        rows.extend(
+            r for r in cp.query(
+                "account_deletions",
+                select=["user_id", "deleted_at", "grace_hours",
+                        "claimed_org_ids", "created_at"],
+                filters=[("deleted_at", "is", None),
+                         ("created_at", "lte", stale_before)],
+            )
+            if r.get("user_id") not in _seen_users
+        )
+        for row in rows:
+            user_id = row.get("user_id")
+            if not user_id:
+                continue
+            # An UNSTAMPED anchor still inside the in-flight bound belongs to a
+            # cascade that may be RUNNING right now (the endpoint's own guard,
+            # same constant) — leave it strictly alone.
+            if _account_deletion_in_flight(row, now_dt):
+                continue
+            unstamped = row.get("deleted_at") is None
+            if not unstamped and not _stored_grace_elapsed(
+                    row.get("deleted_at"), row.get("grace_hours"),
+                    env_grace, now_dt):
+                continue  # stored promise decides (env = fallback only)
+            try:
+                # Re-derive and cascade BEFORE erasing the account: the
+                # memberships that make the org discoverable are the ones the
+                # auth erase destroys. The org is stamped with the SAME stored
+                # promise this sweep used for the account.
+                try:
+                    org_grace = (float(row.get("grace_hours"))
+                                 if row.get("grace_hours") is not None
+                                 else env_grace)
+                except Exception:
+                    org_grace = env_grace
+                cascade_now = now_dt.isoformat()
+                # Claim BEFORE the access-kill, exactly as the endpoint does.
+                # The cascade destroys the membership rows a LATER sweep would
+                # rediscover the org by, and this sweep is the last chance to
+                # reach an org acquired inside the grace window (the endpoint
+                # early-returns once the account is stamped, so nothing else
+                # ever looks again). Without the claim, a fault after
+                # membership removal left the org un-stamped, ownerless and
+                # invisible to `_purge_deleted_orgs` while the account was
+                # erased — the cycle-1 orphan shape re-entering here (#4029
+                # cycle-3 P1). A failed claim RAISES: erasing the account
+                # without a durable reach to its orgs is the one ordering
+                # that cannot be recovered, so the sweep must skip the row
+                # and retry instead.
+                # The claim's ownership gate, applied HERE too (P2-1 review).
+                # The endpoint filters a claimed id through
+                # `caller_membership_org_ids` before honouring it; this sweep
+                # merged the RAW claimed set. A malformed or stale anchor
+                # naming a stranger's org was therefore cascaded and stamped
+                # at purge time even though the endpoint would have refused it.
+                # Any status counts (a 'removed' row is what a post-fault
+                # replay must still complete), which is why the gate is this
+                # helper and not `sole_owned_org_ids`.
+                claimed_ids = _account_org_ids_from_row(row, "claimed_org_ids")
+                if claimed_ids:
+                    caller_orgs = set(caller_membership_org_ids(cp, user_id))
+                    claimed_ids = [o for o in claimed_ids if o in caller_orgs]
+                purge_org_ids = _merge_org_ids(
+                    claimed_ids,
+                    sole_owned_org_ids(cp, user_id))
+                for org_id in purge_org_ids:
+                    claim_account_deletion_org(cp, user_id, org_id)
+                    _cascade_soft_delete_org_sync(org_id, cascade_now, org_grace)
+                if unstamped:
+                    # P1-4(b): COMPLETE the interrupted schedule, never erase
+                    # early. The cascade above is the same idempotent one the
+                    # endpoint runs; stamping starts the promised window NOW.
+                    # The account and its ledger row are left for a later
+                    # sweep, once that stored window elapses — erasing here
+                    # would shorten a retention promise the row never made.
+                    stamp_account_deletion(cp, user_id, cascade_now,
+                                           grace_hours=org_grace)
+                    continue
+                status = _supabase_admin_delete_user(user_id)
+                # Fail-closed: a successful erasure is EXACTLY 200/204 (the
+                # auth user was deleted) or 404 (already gone — idempotent).
+                # httpx.delete does NOT follow redirects, so a 301/302 (e.g. a
+                # SUPABASE_URL on http://, or a CDN/proxy redirect on the admin
+                # path) must NOT read as erased — treating it as success would
+                # drop the only retry anchor with the auth user still alive.
+                if status not in (200, 204, 404):
+                    raise RuntimeError(
+                        f"auth-service delete failed: HTTP {status}")
+                # Ledger row LAST — it is the retry anchor for a failed above.
+                purge_account_deletion(cp, user_id)
+                _audit_logger.append(
+                    "", user_id, "account_delete_purged",
+                    resource_type="account", resource_id=user_id,
+                )
+            except Exception:
+                _logger.warning("account purge failed for %s", user_id,
+                                exc_info=True)
+    except Exception as exc:
+        _logger.warning("deleted-account purge sweep failed: %s", exc)
 
 
 # ── Reconciliation sweep (D9 #576) — one job, three purposes ──
@@ -25508,27 +26236,52 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # read→write scope bypass. Demo is a default-graph org surface.
     _reject_graph_bound_org_surface(org, "demo seed")
     _require_scope(org, "graphs:write", "demo seed")
-    sdk = _make_sdk(namespace=org["org_id"])
-    proj = sdk._get_proj()
-    existing = proj.g.query(
-        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
-    ).result_set
-    if existing:
-        _update_onboarding_state(org["org_id"], demo_created=True)
+    # #3718 residual (DATA plane): every step of the seed region below is SYNC
+    # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
+    # and can open the DB), the projection attach, the sentinel read, the quota
+    # count and the ~13-Point seed. They run as ONE worker hand-off, so the
+    # region's statements stay uninterleaved WITHIN the request.
+    #
+    # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION: `asyncio.to_thread` submits to
+    # the loop's shared pool, so two concurrent POSTs run this in two threads.
+    # On the pre-#3718 code the single-threaded loop serialized them for free
+    # (one request per thread, no `await` inside the region); moving it to a
+    # worker removes that accidental serialization, so the check-then-act below
+    # needs an explicit lock — a per-org lock across the hand-off (the
+    # `_org_restore_lock` pattern; #3718 round-2 review, empirically reproduced
+    # with a two-party barrier on `_seed_demo_graph`).
+    def _seed_demo_sync() -> dict:
+        sdk = _make_sdk(namespace=org["org_id"])
+        proj = sdk._get_proj()
+        existing = proj.g.query(
+            "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        ).result_set
+        if existing:
+            return {"existing": True, "created": None}
+        # #1922: quota-gate the seed like the MCP twin
+        # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
+        # demo seed writes ~13 Points, so it must consume the points quota
+        # like any other Point-creating write — the REST surface was the
+        # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
+        # re-calls short-circuit above and skip the gate (no write).
+        _check_org_limit(org, "points")
+        # The shared demo seeder (extracted from /internal/demo) opens its own
+        # SDK and writes ~13 Points.
+        return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
+
+    async with await _demo_seed_lock(org["org_id"]):
+        out = await asyncio.to_thread(_seed_demo_sync)
+    if out["existing"]:
+        # #3718: `_update_onboarding_state` routes to the tenant graph via
+        # `_org_proj` -> `_make_sdk(...)._get_proj()` — SYNC, so it rides a
+        # worker hand-off too (the probe in the lane guard finds it otherwise).
+        await asyncio.to_thread(
+            _update_onboarding_state, org["org_id"], demo_created=True)
         await _track_onboarding_event(org, "first_memory_created",
                                       source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
-    # #1922: quota-gate the seed like the MCP twin
-    # (tortoise_onboarding_demo_create → _enforce_quota("points")). The demo
-    # seed writes ~13 Points, so it must consume the points quota like any
-    # other Point-creating write — the REST surface was the 0-quota bypass
-    # (bug-hunt 2026-08-28 server P2-13). Idempotent re-calls short-circuit
-    # above and skip the gate (no write).
-    _check_org_limit(org, "points")
-
-    # Call the shared demo seeder (extracted from /internal/demo)
-    created = _seed_demo_graph(org["org_id"])
+    created = out["created"]
 
     # #1922: meter the seed that actually ran — one write op billing 12
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
@@ -25540,7 +26293,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     if created.get("status") == "demo_created":
         _record_write_op(org, nodes_written=created.get("points", 0) + 1)
 
-    _update_onboarding_state(org["org_id"], demo_created=True)
+    await asyncio.to_thread(
+        _update_onboarding_state, org["org_id"], demo_created=True)
     return {"status": "seeded", "org_id": org["org_id"],
             "points_created": created}
 
@@ -28359,6 +29113,30 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     function ALSO aborts when it no longer owns the job entry (TTL-evicted
     / replaced by a newer run) — a stale run must never keep writing
     status or resurrect a live walk.
+
+    ⚠️ #3718 residual (#4709): this body's graph work is INLINE — the
+    dominant `indexer.index_repo` projection walk (its own `_get_proj()`
+    attach + a synchronous per-item `proj.apply`/`proj.g.query` loop in
+    another module), the `_make_sdk` construction, the one-time
+    `backfill_legacy_closed` scan (whose `org_sdk._get_proj()` attach IS a
+    seam the AST scan SEES), the `_relink_sessions_after_index` relink pass
+    and the two `_update_onboarding_state` writes. Only that direct seam is
+    visible to the scan; the rest is helper-mediated one level down and is
+    not. The body therefore MUST stay declared in
+    `_KNOWN_INLINE_HELPER_RESIDUAL`, never in `_OFFLOADED_ASYNC_BODIES`:
+    `test_graph_io_is_offloaded` computes `inline - declared`, so dropping
+    the entry REDS the guard rather than passing it.
+
+    ⚠️ The three worker hand-offs this body briefly carried were REVERTED.
+    Off-loading a BACKGROUND task's `_make_sdk` / first `_get_proj()`
+    resolves the per-test embedded DB path from a POOL thread, whose
+    inherited test-module stamp must match the main thread's CURRENT stem
+    (epic #1686) — a pool thread reused across tests resolves None, the
+    redirect takes the non-per-test path, and the job writes where the
+    test's reader never looks. Measured: with them, three tests in
+    `tests/test_github_index_lifecycle.py` fail deterministically when that
+    file runs after `tests/test_github_connector.py` (the CI shard order);
+    without them the file matches main's result exactly.
     """
     from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
     # P2: generation/owner token stamped at mint. A TTL-evicted entry
@@ -28433,6 +29211,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
             else:
+                # #4709: sync onboarding write still ON the loop (declared
+                # residual — see the `_run_indexing` docstring).
                 _update_onboarding_state(
                     org_id, github_legacy_backfill_done=True)
 
@@ -28533,6 +29313,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
             # repo processed, mirroring github_indexed's resumable-cursor
             # behavior).
             updates["github_indexed_at"] = datetime.now(UTC).isoformat()
+        # #4709: sync onboarding write still ON the loop (declared residual).
         _update_onboarding_state(org_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
@@ -29334,7 +30115,12 @@ async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  #
                     # #2823: one shared dialect-aware seam — never a hand-rolled
                     # `is_supabase_enabled()` branch (that per-caller drift is
                     # what left the sweep enumerating the empty registry).
-                    cp = _control_plane_source()
+                    # #3718: `_control_plane_source` is SYNC and its registry
+                    # lane eagerly attaches (`_make_sdk` + `_get_proj()`, plus a
+                    # possible PROBE_RETRY_DELAY sleep) — the same call the
+                    # sibling backup handlers already ride a worker for, so it
+                    # must not resolve on the loop here either.
+                    cp = await asyncio.to_thread(_control_plane_source)
                 except Exception as e:
                     _logger.warning("backups list cp unavailable: %s", e)
                     cp = None
@@ -29430,6 +30216,103 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
         return _BACKUP_RESTORE_LOCKS.setdefault(org_id, asyncio.Lock())
 
 
+#: Per-org mutual exclusion for the demo seed's check-then-act (#3718). Needed
+#: BECAUSE the seed region is off-loaded: `asyncio.to_thread` runs it on a
+#: thread from the loop's shared pool, so two concurrent POSTs no longer
+#: serialize the way the pre-#3718 inline code did — one hand-off keeps the
+#: region's statements uninterleaved WITHIN a request, but it is not mutual
+#: exclusion between requests. (Round-2 review reproduced the race with a
+#: two-party barrier on `_seed_demo_graph`.)
+_DEMO_SEED_LOCKS: dict[str, asyncio.Lock] = {}
+_DEMO_SEED_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _demo_seed_lock(org_id: str) -> asyncio.Lock:
+    async with _DEMO_SEED_LOCKS_GUARD:
+        return _DEMO_SEED_LOCKS.setdefault(org_id, asyncio.Lock())
+
+
+#: Per-GRAPH mutual exclusion for `commit_session`'s check-then-act (#3718
+#: round-3 review, reproduced with a two-party barrier: `max concurrent
+#: write-phase entries=2`, `write_ops=2`, `nodes_written=4` for ONE logical
+#: payload).
+#:
+#: WHY PER-GRAPH, not per-`(org, client_commit_id)`. Round 3 keyed by the
+#: logical payload on the argument that distinct commits do not conflict —
+#: their `coalesce(x, 0) + $n` Session-counter SETs are single atomic Cypher
+#: statements. That is correct about the ARITHMETIC and wrong about the READ:
+#: the lock must also cover the read-then-plan step, and
+#: `_load_commit_graph_state` reads GLOBAL graph state — the Session counters
+#: AND the content-addressed `Point` set, every `:Object` and every operator.
+#: Two concurrent commits on ONE session with DIFFERENT cids therefore both
+#: plan against a pre-write snapshot: both bill `net_new=1` for the same point
+#: and both apply `SET s.value_nodes_created = coalesce(…,0) + 1` (and
+#: `draft_count`), and `value_nodes_created` is the budget numerator, so the
+#: >25 held / >50 402 ceiling can be tripped early. The same global read makes
+#: cross-SESSION commits that share an entity/point conflict too, which is why
+#: the key is the GRAPH and not the session. Different orgs are different
+#: graph namespaces and never contend, so a guessed cid cannot block another
+#: tenant. Per-graph serialization is the part of the pre-#3718 single
+#: no-`await` sequence on the loop that actually mattered (a single loop
+#: serialized everything; the graph is the real conflict domain).
+#:
+#: WHY REFCOUNTED. A plain `_COMMIT_LOCKS[org] = Lock()` grows without bound
+#: as orgs are seen. The entry is dropped when its last holder releases; the
+#: increment and the drop both run under the guard, so a caller that arrives
+#: during teardown either extends the live lock or mints a fresh one — never
+#: observes a half-removed entry.
+#:
+#: WHY A `threading.Lock`, ACQUIRED INSIDE THE WORKER. `asyncio.to_thread`
+#: work is NOT cancellable: when `WaitBoundMiddleware` cancels the caller on a
+#: disconnect, the `CancelledError` lands at the `await`, and an `async with`
+#: around it would RELEASE the lock while the abandoned thread is still
+#: writing — a same-cid retry then re-enters concurrently, the exact
+#: double-apply the lock exists to prevent. A `threading.Lock` acquired and
+#: released INSIDE `_commit_sync` has the WORKER's lifetime: the `with` block
+#: exits only when the thread finishes, cancellation or not. It never blocks
+#: the event loop (the wait is on the worker thread, not the loop) — the same
+#: `_dream_lock` / `_org_mint_lock` precedent in this module.
+#:
+#: WHY A LOCK AT ALL (and not the loser re-reading the record). The loser's
+#: correctness depends on the WINNER HAVING FINISHED: after `acquire` returns
+#: `created=False` the record status is `partial` for as long as the winner is
+#: mid-write, and `plan_commit` returns `duplicate=False` for a `partial`
+#: record. So "the loser sees the winner's record" — the W-3 [2] claim — only
+#: holds if the loser WAITS. Returning `duplicate:true` on sight of `partial`
+#: would be worse: it tells the client "already committed" before the data is
+#: written, so a winner that then fails would be a silent data loss.
+_COMMIT_LOCKS: dict[str, threading.Lock] = {}
+_COMMIT_LOCKS_GUARD = threading.Lock()
+_COMMIT_LOCK_REFS: dict[str, int] = {}
+
+
+def _acquire_commit_lock(org_id: str) -> tuple[str, threading.Lock]:
+    """Refcount-acquire the graph's commit lock — WORKER-thread side.
+
+    Called from inside `_commit_sync`, never from the loop: acquiring the
+    `threading.Lock` on the loop would block the loop, and owning the lock
+    from the worker is the whole reason its lifetime survives the request
+    task's cancellation. The map guard is held only for the lookup/increment.
+    """
+    with _COMMIT_LOCKS_GUARD:
+        lock = _COMMIT_LOCKS.get(org_id)
+        if lock is None:
+            lock = _COMMIT_LOCKS[org_id] = threading.Lock()
+        _COMMIT_LOCK_REFS[org_id] = _COMMIT_LOCK_REFS.get(org_id, 0) + 1
+    return org_id, lock
+
+
+def _release_commit_lock(key: str) -> None:
+    """Drop the reference taken by `_acquire_commit_lock` (worker side)."""
+    with _COMMIT_LOCKS_GUARD:
+        remaining = _COMMIT_LOCK_REFS.get(key, 1) - 1
+        if remaining <= 0:
+            _COMMIT_LOCKS.pop(key, None)
+            _COMMIT_LOCK_REFS.pop(key, None)
+        else:
+            _COMMIT_LOCK_REFS[key] = remaining
+
+
 @app.post("/backups", status_code=201)
 @app.post("/v1/backups", status_code=201)  # #4144 BFF-reachable alias
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
@@ -29448,7 +30331,9 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
     sdk = None
     registry_sdk = None
     try:
-        sdk = _make_sdk(namespace=org_id)
+        # #3718 residual (DATA plane): `_make_sdk` probes the embedded anchor
+        # (and can open the DB) — SYNC, so it rides a worker hand-off.
+        sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
         # #669 post-flip: the backup stamp seam is dialect-aware — pass the
         # Supabase control plane in Supabase mode (the registry handle would
         # stamp the DELETED registry and auto-recreate the empty graph).
@@ -29460,8 +30345,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
             registry_sdk = None
             cp_source = get_control_plane()
         else:
-            registry_sdk = _registry_sdk()
-            cp_source = registry_sdk._get_registry()
+            # #3718 residual: `_registry_sdk()` eagerly connects to the
+            # registry graph and `_get_registry()` attaches it — both SYNC.
+            registry_sdk = await asyncio.to_thread(_registry_sdk)
+            cp_source = await asyncio.to_thread(registry_sdk._get_registry)
         # #924: graph name resolved from the control plane via the SAME seam
         # as the sweep (org_graph_name) — Supabase mode reads teams.graph_name
         # (SDK org creation names graphs org_{name}, NOT org_{id}; #768/#770),
@@ -29475,7 +30362,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
         # resolves graph_namespace=None — the `or` fallback would widen a
         # ghost key onto the org DEFAULT graph (cross-graph read dump).
         # Mirror _data_sdk: vanish → 403, never a demotion.
-        default_name = org_graph_name(cp_source, org_id)
+        # #3718: the control-plane read is blocking in BOTH lanes — a
+        # FalkorDB round trip in registry mode, a PostgREST call in Supabase.
+        default_name = await asyncio.to_thread(
+            org_graph_name, cp_source, org_id)
         if org.get("graph_id"):
             graph_name = org.get("graph_namespace")
             if not graph_name:
@@ -29497,8 +30387,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
             # hostage to namespace spelling. Unresolved (vanished) graphs
             # fail closed 403, mirroring the ghost-key guard above.
             try:
-                g_row = resolve_active_graph(cp_source, org_id,
-                                             org.get("graph_id"))
+                # #3718: same blocking control-plane read class as above.
+                g_row = await asyncio.to_thread(
+                    resolve_active_graph, cp_source, org_id,
+                    org.get("graph_id"))
             except ValueError as e:
                 raise HTTPException(
                     status_code=403,
@@ -29520,15 +30412,19 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
         from tortoise.projection import FalkorProjection
         db_uri = _os.environ.get("TORTOISE_DB_URI")
-        proj = sdk._get_proj()
+        # #3718 residual (DATA plane): the projection attach AND the URI-lane
+        # dump projection open are both SYNC connects.
+        proj = await asyncio.to_thread(sdk._get_proj)
         if db_uri:
-            dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+            dump_proj = await asyncio.to_thread(
+                FalkorProjection.from_uri, db_uri, graph_name=graph_name)
         elif getattr(proj, "_path", None):
             # Embedded: re-open the same DB on the resolved graph name.
-            dump_proj = FalkorProjection(
-                path=proj._path, graph_name=graph_name,
-                skip_health_check=True,
-            )
+            dump_proj = await asyncio.to_thread(
+                lambda: FalkorProjection(
+                    path=proj._path, graph_name=graph_name,
+                    skip_health_check=True,
+                ))
         else:
             # No path (unusual) — bind the existing db handle to the graph.
             from tortoise.projection import _GuardedGraph
@@ -29605,11 +30501,14 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
     )
     async with lock:
         try:
-            sdk = _make_sdk(namespace=org_id)
+            # #3718 residual (DATA plane): `_make_sdk` is SYNC in embedded mode.
+            sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
             if not is_supabase_enabled():
-                registry_sdk = _registry_sdk()
+                # #3718 residual: eager registry connect + graph attach — SYNC.
+                registry_sdk = await asyncio.to_thread(_registry_sdk)
             cp_source = (get_control_plane() if is_supabase_enabled()
-                         else registry_sdk._get_registry())
+                         else await asyncio.to_thread(
+                             registry_sdk._get_registry))
             # #924/#2313: resolve the restore target from the ACTIVE-graph
             # seam. The artifact's key shape names its graph: legacy flat and
             # the "default" segment are the org DEFAULT surface (the only
@@ -29632,12 +30531,17 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
                     "supported — graph-bound restore required"
                 )
             _graph_id = _parsed_graph or "default"
-            _row = resolve_active_graph(cp_source, org_id, _graph_id)
+            # #3718: the active-graph resolve is a blocking control-plane read,
+            # and `sdk._get_proj().db` used to be evaluated EAGERLY on the loop
+            # as an argument to the off-loaded `restore_backup` — it belongs
+            # inside the worker with the call it feeds.
+            _row = await asyncio.to_thread(
+                resolve_active_graph, cp_source, org_id, _graph_id)
             graph_name = _row["graph_name"]
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db, cp_source,
-                _backup_storage(),
-                body.backup_key, org_id=org_id, graph_name=graph_name,
+                lambda: restore_backup(
+                    sdk._get_proj().db, cp_source, _backup_storage(),
+                    body.backup_key, org_id=org_id, graph_name=graph_name),
             )
             # Rebuild indexes on the restored live graph (range/FTS/vector) —
             # the logical dump + GRAPH.COPY restores data, not schema. Off the
@@ -29650,17 +30554,24 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
                 db_uri = os.environ.get("TORTOISE_DB_URI")
                 if db_uri:
                     from tortoise.projection import FalkorProjection
-                    dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+                    # #3718: the URI-lane dump projection is a SYNC connect.
+                    dump_proj = await asyncio.to_thread(
+                        FalkorProjection.from_uri, db_uri,
+                        graph_name=graph_name)
                 else:
-                    proj = sdk._get_proj()
-                    if getattr(proj, "_path", None):
-                        from tortoise.projection import FalkorProjection
-                        dump_proj = FalkorProjection(
-                            path=proj._path, graph_name=graph_name,
-                            skip_health_check=True,
-                        )
-                    else:
-                        dump_proj = proj
+                    # #3718: `_get_proj()` attach + the embedded re-open are
+                    # both SYNC — one worker hand-off.
+                    def _open_embedded_proj():
+                        proj = sdk._get_proj()
+                        if getattr(proj, "_path", None):
+                            from tortoise.projection import FalkorProjection
+                            return FalkorProjection(
+                                path=proj._path, graph_name=graph_name,
+                                skip_health_check=True,
+                            )
+                        return proj
+
+                    dump_proj = await asyncio.to_thread(_open_embedded_proj)
                 await asyncio.to_thread(dump_proj._ensure_indexes)
             except Exception as e:
                 _logger.warning(
@@ -29922,10 +30833,13 @@ async def backups_sweep(request: Request):
     # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
     # post-flip graph is DELETED, so the sweep enumerated 0 orgs, reported a
     # benign `no_teams`, and backed nothing up from the flip until now.
-    registry = _control_plane_source()
+    # #3718 residual: the control-plane resolve AND the data-plane handle are
+    # SYNC FalkorDB/PostgREST work — both ride worker hand-offs so a slow
+    # control plane or a graph connect cannot hold the event loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    _data_sdk, db = _data_plane_db()
+    _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -30051,10 +30965,11 @@ async def backups_purge(request: Request):
     # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
     # orgs through the same seam — off the raw registry handle it purged 0
     # orgs in Supabase mode (expired trash never erased).
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    _data_sdk, db = _data_plane_db()
+    _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -30363,13 +31278,16 @@ async def backups_rebaseline(request: Request):
     # #2823/#2340: dialect-aware control plane — `resolve_active_graph`
     # enumerates the org's graphs through this source; the raw registry handle
     # 400s/409s ACTIVE Supabase-lane graphs.
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    _data_sdk, db = _data_plane_db()
+    _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
     try:
-        row = resolve_active_graph(registry, org_id, graph_id)
+        # #3718: the active-graph resolve is a blocking control-plane read.
+        row = await asyncio.to_thread(
+            resolve_active_graph, registry, org_id, graph_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     except RuntimeError as e:
@@ -30381,7 +31299,15 @@ async def backups_rebaseline(request: Request):
         # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
         # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
         # required check on unrelated PRs.
-        count = count_data_nodes(db, row["graph_name"])
+        # #3718 round-3 review P2: this is a BLOCKING graph round trip
+        # (`select_graph(...).query(...).result_set`) in a body declared
+        # off-loaded. It was invisible to BOTH guards by construction — the
+        # helper takes a raw `db`, not a `_get_proj()` seam, and the AST scan
+        # never walks a sync helper — so `_OFFLOADED_ASYNC_BODIES`' "no inline
+        # seam" check passed VACUOUSLY here. Off-loaded, so the declaration is
+        # true.
+        count = await asyncio.to_thread(
+            count_data_nodes, db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -30395,6 +31321,11 @@ async def backups_rebaseline(request: Request):
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
     alerts = _alert_store_from(_backup_config_safe())
+    # #3718 round-3 review P2: both resolves are blocking NETWORK round
+    # trips — a storage read plus a GitHub issue close / Telegram push — the
+    # same offload `backups_sweep` already gives `alerts.open_incident`.
+    # Grouped in one hand-off so the two stay adjacent, as they were.
+    #
     # The state write above already succeeded, so a resolve failure must NOT fail
     # the request (cycle-2 review P2: `resolve_incident` now RAISES on a failed
     # close instead of returning silently — an unguarded call here would 500 the
@@ -30405,17 +31336,21 @@ async def backups_rebaseline(request: Request):
     # incident open with no retry — the response and the log must say so rather
     # than implying a poll will retry (cycle-3 review P1). The outcome is reported
     # per kind so the operator can re-run re-baseline after GitHub recovers.
-    incidents_failed: list[str] = []
-    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
-        try:
-            alerts.resolve_incident(kind, subject)
-        except Exception:
-            incidents_failed.append(f"{kind}/{subject}")
-            _logger.warning(
-                "%s resolve failed on re-baseline of %s — the incident is STILL OPEN "
-                "and only another re-baseline (or a manual close) clears it; re-run "
-                "once the GitHub API recovers", kind, subject, exc_info=True,
-            )
+    def _resolve_incidents() -> list[str]:
+        failed: list[str] = []
+        for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+            try:
+                alerts.resolve_incident(kind, subject)
+            except Exception:
+                failed.append(f"{kind}/{subject}")
+                _logger.warning(
+                    "%s resolve failed on re-baseline of %s — the incident is STILL OPEN "
+                    "and only another re-baseline (or a manual close) clears it; re-run "
+                    "once the GitHub API recovers", kind, subject, exc_info=True,
+                )
+        return failed
+
+    incidents_failed = await asyncio.to_thread(_resolve_incidents)
     out = {"status": "rebaselined", "org_id": org_id,
            "graph_id": graph_id, "node_count": count}
     if incidents_failed:
@@ -30646,10 +31581,11 @@ async def backups_drill(request: Request):
     _LAST_DRILL_AT = _time.time()
 
     # #2823/#2340: dialect-aware control plane (see re-baseline).
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    _data_sdk, db = _data_plane_db()
+    _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -30690,10 +31626,11 @@ async def backups_drill_scheduled(request: Request):
 
     # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
     # its candidate's active graph through this source.
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    _data_sdk, db = _data_plane_db()
+    _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:
