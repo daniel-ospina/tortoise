@@ -176,13 +176,13 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
 TEST_JOB_PREFIX = "test"
 
 # The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
-# `test-slow (a)`, or a bare `test`/`test-slow`. Everything else that starts
-# with `test` is reported separately in `excluded_jobs` and contributes NOTHING
-# to `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total
-# gate execution. The per-leg reasons differ per leg and live in
-# `.github/workflows/python-ci.yml` — see `paid_vs_selected`, which deliberately
-# states the rule and not a mechanism, because two summary mechanisms were tried
-# here and both were false.
+# `test-slow (a)`, or a bare `test`/`test-slow`. Jobs that start with `test` but
+# do not match are reported in `excluded_jobs`, and a matched shard that never
+# completed is reported in `incomplete_shard_jobs`; neither contributes to
+# `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total gate
+# execution. WHY any particular leg is excluded differs per leg and is defined by
+# `.github/workflows/python-ci.yml` — read that file; do not assert a summary
+# mechanism here.
 SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
 
 
@@ -238,7 +238,7 @@ def selected_weight_s(selection: dict, durations: dict,
 
     ⛔ `ci_selection.select()` returns the STRING sentinel ``"ALL"`` for a full
     selection (push/schedule, a shared-module change, or an unclaimed path —
-    `ci_selection.py:1103`), NOT a list. Iterating it yields the three
+    produced by `_full_selection`), NOT a list. Iterating it yields the three
     characters ``A``, ``L``, ``L``, whose keys are never in `durations`, so the
     whole fast pool silently contributes `default_weight` — measured as a 4.5x
     deflation of the denominator (a 4.5x INFLATION of `ratio`) on the real
@@ -303,22 +303,12 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
     reported alongside so queue latency cannot be mistaken for execution cost.
 
     ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the counted
-    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed; every other
-    `test*` leg is returned in `excluded_jobs` and contributes NOTHING to
-    `paid_s`. **`paid_s` is therefore the COUNTED SHARDS' execution time, not
-    total gate execution — say so whenever it is quoted.**
-
-    ⛔ The PER-LEG reason a leg is excluded is deliberately NOT asserted here.
-    Each leg's file set and marker expression is defined by
-    `.github/workflows/python-ci.yml`, and they differ per leg — `test-carve-out`
-    runs the same `-m 'not track_b and not live and not integration'` as the
-    counted shards but over files `select()` subtracts from the weighted keys;
-    `test-track-b` runs `-m track_b`; `test-concurrency-falkor` runs explicit
-    nodeids with no marker at all; `test-d14-hosted-api` runs `-m embedded_only`
-    with the URI unset. READ THAT FILE before describing any of them: two earlier
-    versions of this docstring asserted a single mechanism covering all four
-    legs, and BOTH were false. That is why the rule is stated and the mechanism
-    is not.
+    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed. A `test*` job
+    that does not match `SHARD_JOB_RE` is returned in `excluded_jobs`, and a
+    matched shard that never completed is returned in `incomplete_shard_jobs`
+    (which also sets `complete=False`); neither contributes to `paid_s`.
+    **`paid_s` is therefore the COUNTED SHARDS' execution time, not total gate
+    execution — say so whenever it is quoted.**
     """
     paid = 0.0
     queue = 0.0
