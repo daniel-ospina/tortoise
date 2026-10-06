@@ -1826,9 +1826,13 @@ def rrf_fusion(
                     strategy_names[i], w,
                 )
                 w = 1.0
-        for rank, (pid, _score) in enumerate(ranked):
-            rrf_score = w / (k + rank + 1)
-            scores[pid] = scores.get(pid, 0.0) + rrf_score
+        rank = 0
+        prev_score = None
+        for i, (pid, score) in enumerate(ranked):
+            if i and score != prev_score:
+                rank = i
+            prev_score = score
+            scores[pid] = scores.get(pid, 0.0) + w / (k + rank + 1)
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

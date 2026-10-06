@@ -439,13 +439,23 @@ def temporal_leg_fusion_order(
         head=head_excl)
     if not picks or weight <= 0:
         return order_ids, []
+    # Position is encoded in the SCORE, not left implicit in the row order.
+    # `rrf_fusion` USED to rank equal scores by position, so submitting a
+    # constant `0.0` made this fusion depend on that rule: under a tie-agnostic
+    # rank every row collapses to one rank, the base order is replaced by id
+    # order, and `placement="tail"` stops keeping a pick out of the visible
+    # head (the structural no-harm property). Strictly descending scores say
+    # the same thing explicitly and hold under either rule.
+    def _leg(ids: list[str]) -> list[tuple[str, float]]:
+        n = len(ids)
+        return [(pid, float(n - i)) for i, pid in enumerate(ids)]
+
     if placement == "head":
-        leg = [(pid, 0.0) for pid in picks]
+        leg = _leg(list(picks))
     else:
-        leg = ([(c["id"], 0.0) for c in candidates[:ceiling]]
-               + [(pid, 0.0) for pid in picks])
+        leg = _leg([c["id"] for c in candidates[:ceiling]] + list(picks))
     fused = rrf_fusion(
-        [[(pid, 0.0) for pid in order_ids], leg],
+        [_leg(order_ids), leg],
         strategy_names=["semantic", "temporal"],
         weights={"temporal": weight},
     )

@@ -405,10 +405,17 @@ def test_head_boundary_is_the_candidate_index_not_the_dated_index():
 
 
 def test_empty_temporal_leg_leaves_rrf_order_byte_identical():
+    # The invariant is the NO-OP: submitting an empty temporal leg must not
+    # change the fusion. The literal `p0..p59` order this test used to assert
+    # was a PROXY for it, holding only because a constant-scored leg's position
+    # was its rank. Under a tie-agnostic rank the two calls still agree while
+    # the proxy diverges, so assert the invariant directly.
     base = [(f"p{i}", 0.0) for i in range(60)]
-    fused = rrf_fusion([base, []], strategy_names=["semantic", "temporal"],
-                       weights={"temporal": 1.0})
-    assert list(fused) == [pid for pid, _ in base]
+    with_empty = rrf_fusion([base, []], strategy_names=["semantic", "temporal"],
+                            weights={"temporal": 1.0})
+    without = rrf_fusion([base], strategy_names=["semantic"])
+    assert with_empty == without
+    assert set(with_empty) == {pid for pid, _ in base}
 
 
 def _deep_gold_candidates():
@@ -555,8 +562,15 @@ def test_deictic_only_anchors_are_dropped():
 
 
 def test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order():
+    # No-op on MEMBERSHIP (the zero-weight leg's own row is still admitted) and
+    # on ORDER (it contributes no score, so it cannot reorder the base). The
+    # base order is asserted against the base fusion itself rather than against
+    # the literal input order — see the sibling test above.
     base = [(f"p{i}", 0.0) for i in range(20)]
     fused = rrf_fusion([base, [("deep", 0.0)]],
                        strategy_names=["semantic", "temporal"],
                        weights={"temporal": 0.0})
-    assert list(fused) == [pid for pid, _ in base] + ["deep"]
+    assert set(fused) == {pid for pid, _ in base} | {"deep"}
+    assert list(fused)[-1] == "deep"  # zero weight => no score => last
+    assert [p for p in fused if p != "deep"] == list(
+        rrf_fusion([base], strategy_names=["semantic"]))
