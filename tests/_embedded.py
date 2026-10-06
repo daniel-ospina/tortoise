@@ -287,6 +287,15 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # lane. (Post-P3 reconciliations grew the set past 17 — graph-integrity,
 # eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
+    # #4921: the construct-lock pin builds TWO real embedded servers (one per
+    # arm) under a forced check-then-act interleave and skips under the docker
+    # redirect. Its stem is already in config/ci-surfaces.yml's carve-out list,
+    # so it must ALSO be here: these two registries mirror, and a stem in only
+    # one is the silent hole test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems exists to catch (carve-out
+    # routing without redirect exemption flips its embedded constructions to
+    # the server lane on an out-of-band URI run).
+    "test_4921_construct_lock",
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
