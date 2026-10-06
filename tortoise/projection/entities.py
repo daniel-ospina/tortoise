@@ -25,6 +25,26 @@ from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
 
+
+def _terminal_object_statuses() -> list:
+    """The canonical Object TERMINAL status list, for a Cypher ``excluded``
+    parameter (#3309).
+
+    ONE source of truth: ``commit_ops.OBJECT_TERMINAL_STATUSES``, which is also
+    what ``recall_state``'s default view filters on. Imported at call time to
+    keep ONE source of truth rather than restating the literal here — the defect
+    #3309 fixes. (Cycle-freedom is a property, not the motive: ``commit_ops``
+    imports only ``tortoise.live``, which never reaches ``projection``, so there
+    is no path back. The supersede fold below does the same import for the same
+    reason.)
+
+    Returned as a ``list`` because that is what the engine accepts for an ``IN``
+    parameter (a ``frozenset`` reaches it as an unserialisable type).
+    """
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+    return list(OBJECT_TERMINAL_STATUSES)
+
 # #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
 # tuple is encoded as an array); a map/dict-valued property — including an
 # array that contains one at any depth — raises on `SET n += $extra`.
@@ -1422,18 +1442,20 @@ class _EntityHandlers:
 
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
-        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
-        and ``actor_user_id`` are coalesce-preserved (first writer wins,
-        mirroring the live merge), ``turn_count`` tracks the latest journaled
-        capture. Returns 1 when the node exists after the fold, 0 on a
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
+        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
+        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
+        journaled capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
-        record INLINE (no try/except) AFTER the wipe. A malformed id is a
-        NO-OP (return 0); a malformed field is OMITTED, never bound.
+        ``actor_user_id`` / ``capture_lane`` payload are each REJECTED by
+        ``_annotator_value_ok`` BEFORE the bind — a malformed id is a NO-OP
+        (return 0), a malformed field is OMITTED, never bound, so neither can
+        reach parameter parse. That matters because ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
@@ -1473,6 +1495,17 @@ class _EntityHandlers:
         if created_at is not None and _annotator_value_ok(created_at):
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
+        # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
+        # to MATCH the live capture write, which is also first-writer-wins. No
+        # producer journals this field YET: no caller passes `capture_lane` to a
+        # journaling writer (the hosted lane passes no `on_session_merged` at
+        # all; the SDK lane passes one but never a lane), so this is a GUARD for
+        # the first journaling lane (the store-sync CLI), not a parity property
+        # that holds today.
+        lane = ev.get("capture_lane")
+        if lane is not None and _annotator_value_ok(lane):
+            sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
+            params["v_capture_lane"] = lane
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
@@ -2812,26 +2845,45 @@ class _EntityHandlers:
         # #1725: `github.issue.reopened` folds back to in_progress — a reopen
         # is a lifecycle Event whose ONLY projection is Object.status (the
         # indexer's decision table: lifecycle never mutates statement points).
-        # M3-P1 guard (#2164): the fold MATCHes only non-superseded Objects —
+        # M3-P1 guard (#2164): the fold MATCHes only NON-TERMINAL Objects —
         # a dual-tracked Object (connector work item conversationally
         # superseded via the capture fold) must NOT be silently resurrected
         # into recall_state's default view by a later connector lifecycle
         # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
-        # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
-        # still fold normally.
+        # reset superseded→live). Objects NOT in a terminal status still fold
+        # normally — that is `status IS NULL` (a bare stub created by this
+        # MERGE), the canonical `'live'` a writer sets on create, or
+        # `in_progress`/`completed`.
+        #
+        # #3309: the exclusion set is the CANONICAL Object terminal vocabulary
+        # (``commit_ops.OBJECT_TERMINAL_STATUSES`` — superseded, deprecated,
+        # archived, retracted), not the single hand-typed ``'superseded'``
+        # literal this guard carried. The narrow literal contradicted the
+        # guard's own stated purpose: it protects recall_state's DEFAULT VIEW,
+        # and that view excludes all four (``tests/test_status_projection.py``
+        # says so in `..._does_not_clobber_superseded`'s docstring). It was
+        # also wrong on the merits — #2977 makes a ``retracted`` Object a
+        # REMOVED Object (``assembly.py``: unresolvable, nothing to report), so
+        # a connector event that resurrected it to in_progress/completed made a
+        # removed Object visible again, while the same event correctly skipped
+        # only ``superseded``.
+        #
+        # Imported at function level for the same reason the supersede fold
+        # does it (#2242): no module-level cycle, and ONE source of truth —
+        # never a restated literal.
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status='in_progress'",
-                params={"n": _obj_name})
+                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status='completed'",
-                params={"n": _obj_name})
+                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:

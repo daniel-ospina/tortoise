@@ -255,7 +255,7 @@ def test_manifests_carry_provenance() -> None:
 
 
 def test_embedded_manifest_markers_are_documented_and_real() -> None:
-    """The 69 entries are TWO kinds with two different claims.
+    """The 72 entries are TWO kinds with two different claims.
 
     A `path::dotted.module` entry is pytest's synthetic module-level
     collection-abort marker, produced by `pytest.skip(..., allow_module_level=True)`

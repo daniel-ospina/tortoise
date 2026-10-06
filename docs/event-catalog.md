@@ -37,6 +37,18 @@ journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `projection_version`) plus the record's own fields. Several folds carry props
 that the payload does not name:
 
+- **The seal annotation (`__TornTailSealed__`, #5917) — an annotation, not a
+  record.** When `EventLog.append` finds the journal ending on a fragment — an
+  unterminated line that is not valid JSON (a writer killed mid-append), or a
+  terminated line that is not valid JSON — it terminates and/or marks the
+  fragment before writing the new record, so the new record starts on a line of
+  its own while the fragment still reaches the torn-tail classifier. `read_all`
+  never returns it and it shifts no record index. It is deliberately **not
+  JSON**: every record begins `{"`, so a sentinel no record can begin with keeps
+  a *torn seal* unambiguous — a torn record fragment is still counted and
+  classified rather than being mistaken for an annotation. The journal's grammar
+  already admits non-JSON lines (a torn fragment is one).
+
 - **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
   turn** (#5004) — the `point` snapshot now also carries the embedding, which
   is a *node* property and stays one: `embedding` (the vector as stored, or an
@@ -111,7 +123,11 @@ that the payload does not name:
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Four are emitted per capture, in this
   order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
-  plus `harness` / `actor_user_id` when set; (2) a trailing record written by
+  plus `harness` / `actor_user_id` when set, and `capture_lane` when a
+  journaling producer sets it (`_fold_session_recorded` already coalesces it;
+  no caller passes `capture_lane` to a journaling writer today, so nothing
+  emits it yet);
+  (2) a trailing record written by
   `sdk._write_capture_turns` right after its batched turn statement, carrying
   `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
   `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
@@ -120,7 +136,7 @@ that the payload does not name:
   Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
-  `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
+  `actor_user_id` / `capture_lane` (first writer wins) and taking `turn_count`, `harness`,
   `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
   `capture_ok` and
   `capture_extractor` from the latest record (last writer wins). Each later
