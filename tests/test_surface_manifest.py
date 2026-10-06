@@ -1948,26 +1948,43 @@ def test_the_render_asserts_no_count_when_the_baseline_is_only_partly_measured(
     assert re.search(r"\d+ of the \d+ tools we advertise", text) is None, (
         "the render printed an uncalled count over a population it never measured in full"
     )
-    assert "no such count is asserted here" in text, (
+    assert "no count of uncalled" in text and "is asserted here" in text, (
         "the render neither measured the count nor said it was not asserting one"
     )
     assert f"flag on {measured} of its {total} tool rows" in text, (
         "the render must report the measurement it actually has, not a universal"
     )
+    assert "No row" not in text and "no row" not in text, (
+        "the render claimed a universal absence while some rows DO carry a flag"
+    )
+
+
+WHOLE_PARAGRAPH_MARKER = "**The case for pinning a small advertised set.**"
+
+
+def _paragraph(text: str) -> str:
+    """The advertised-set paragraph, exactly as rendered (marker through the blank line)."""
+    start = text.index(WHOLE_PARAGRAPH_MARKER)
+    return text[start : text.index("\n\n", start)]
 
 
 def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
     tmp_path, monkeypatch
 ):
-    """With no flag anywhere, the paragraph is pinned EXACTLY — including what it omits.
+    """With no flag anywhere, the WHOLE paragraph is pinned verbatim — including what it omits.
 
-    The wording is the contract here, in three ways the previous iterations got wrong:
-    the count is gone ("Two thirds ... (0 of 82)" was a negative nobody measured); no CAUSE
-    is named for the missing flag (`observed_usage` cannot observe one — "it was cut
-    without the call log" was the same defect in new prose); and the whole is pinned by
-    equality rather than by remembered phrases, so a differently-worded unobserved claim
-    cannot slip through.
+    Three things previous iterations got wrong, each of which this pin catches wherever it
+    appears in the paragraph (a substring pin did not — a count or a cause sentence appended
+    past the pinned chunk slipped through): the count is gone ("Two thirds ... (0 of 82)"
+    was a negative nobody measured); no CAUSE is named for the missing flag
+    (`observed_usage` cannot observe one — "it was cut without the call log" was the same
+    defect in new prose); and no clause refers to flags that may not exist.
+
+    The cost is deliberate: this paragraph IS the contract, so a rewording reds and forces a
+    re-read of the diff. Keep it in step with `cmd_render`.
     """
+    import re
+
     sm = _load_manifest_tool()
     doc = _with_first_used_by_token(_manifest(), "tooling")
     tool_rows = [r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]
@@ -1980,30 +1997,64 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
 
     expected = (
         "**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`\n"
-        f"flag on 0 of its {total} tool rows, so a count of uncalled tools over all of them\n"
-        "would state a quantity over rows nobody assessed, and **no such count is asserted here.** What the\n"
-        "flags that are present do and do not say: they record calls in our own tool-call log, which is\n"
-        "evidence about our usage, not about whether a tool is useful to a customer. Mainstream clients cap\n"
-        "the tools they will show — a\n"
+        f"flag on 0 of its {total} tool rows — {total} carry none — so **no count of uncalled\n"
+        "tools is asserted here**: a count over all of them would include rows nobody assessed. A set flag records\n"
+        "a call in our own tool-call log, which is evidence about our usage, not about whether a tool is useful\n"
+        "to a customer; an unset flag records nothing about either. Mainstream clients cap the tools they will\n"
+        "show — a\n"
         f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {total}, while we\n"
-        "pay context for all of them on every turn. Every comparable we studied pins a smaller set,"
+        "pay context for all of them on every turn. Every comparable we studied pins a smaller set,\n"
+        "and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and\n"
+        f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {total} callable."
     )
-    assert expected in text, (
+    assert _paragraph(text) == expected, (
         "the no-measurement paragraph changed — it may report only the observation, name no "
         "cause, and carry no count; re-read the diff before updating this pin"
+    )
+    assert re.search(r"\d+ of the \d+ tools we advertise", text) is None, (
+        "a count reappeared in the no-measurement state"
+    )
+
+
+def test_the_render_states_nothing_about_a_surface_it_does_not_have(tmp_path, monkeypatch):
+    """A manifest with no tool rows must not describe an absent surface.
+
+    `cmd_render` does not run `check` first, and the branch split now makes emptiness explicit:
+    the earlier `if tools:` guard on ONE trailing line produced "flag on 0 of its 0 tool rows",
+    "sees at most 40 of these 0", and a paragraph that ended on the conjunction "…four modes and".
+    """
+    sm = _load_manifest_tool()
+    doc = copy.deepcopy(_manifest())
+    doc["rows"] = [r for r in doc["rows"] if str(r.get("name", "")).startswith("sdk:")]
+    assert doc["rows"], "the fixture must keep the SDK rows renderable"
+
+    text = _render_manifest(sm, doc, tmp_path, monkeypatch)
+
+    expected = (
+        "**The case for pinning a small advertised set.** This baseline carries no tool rows at all, so\n"
+        "there is no advertised set to characterise and **no count is asserted here** — neither a zero nor\n"
+        "a total."
+    )
+    assert _paragraph(text) == expected, (
+        "a tool-less baseline must produce a complete paragraph that describes no surface, "
+        "not a truncated or self-contradicting one"
+    )
+    assert "of these 0" not in text and "0 of 0" not in text, (
+        "the render described a surface of zero tools as if it were one"
     )
 
 
 def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monkeypatch):
-    """The measured branch prints the count IT read — proven on a count no literal matches.
+    """Both halves of the count are read from the baseline, proven on values no literal matches.
 
-    Reading the committed manifest would prove nothing: its count (55 of 82) can be — and
-    once was — a literal in the generator, so the assertion would pass against a hardcode.
-    So the fixture perturbs ONE `never called` row to `agents` (keeping every row measured,
-    so the measured branch is still taken) and asserts the render follows to the measured
-    count. Read from the RENDER's own output, never from the committed document: an earlier
-    form of this check asserted on `RENDERED.read_text()`, so it passed even under a guard
-    that always reported the measurement as absent.
+    Reading the committed manifest would prove nothing: its count (55 of 82) can be — and once
+    was — a literal in the generator, so the assertion passes against a hardcode. So the
+    fixture perturbs BOTH the numerator (one `never called` row flipped to `agents`) and the
+    population (one tool row dropped), keeping every remaining row measured so the measured
+    branch is still taken, and asserts the render follows to both. Read from the RENDER's own
+    output, never from the committed document: an earlier form of this check asserted on
+    `RENDERED.read_text()`, so it passed even under a guard that always reported the
+    measurement as absent.
     """
     sm = _load_manifest_tool()
     doc = _manifest()
@@ -2012,17 +2063,23 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     victim = next(r for r in tool_rows if sm.observed_usage(r) == "never called")
     rest = [p.strip() for p in (victim.get("used_by") or "").split(",") if p.strip()]
     victim["used_by"] = ", ".join(["agents", *[p for p in rest[1:] if p not in ("agents", "never called")]])
+    dropped = next(r for r in tool_rows if sm.observed_usage(r) == "in use")
+    assert dropped is not victim, "the flipped row and the dropped row must differ"
+    doc["rows"] = [r for r in doc["rows"] if r is not dropped]
 
-    total = len(tool_rows)
+    total = len(tool_rows) - 1
     never = committed_never - 1
-    assert never != committed_never and all(sm.observed_usage(r) is not None for r in tool_rows), (
-        "the perturbation must move the count WITHOUT leaving any row unmeasured"
+    assert total != len(tool_rows) and never != committed_never, (
+        "the fixture must move BOTH the numerator and the population"
+    )
+    assert all(sm.observed_usage(r) is not None for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")), (
+        "the perturbation must not leave any row unmeasured"
     )
 
     text = _render_manifest(sm, doc, tmp_path, monkeypatch)
 
     assert f"{never} of the {total} tools we advertise" in text, (
-        "the measured branch did not print the count its own baseline carries — it is "
-        "hardcoded, so it contradicts the measurement at any other count"
+        "the measured branch did not print the count its own baseline carries — a hardcoded "
+        "numerator or denominator would contradict the measurement at any other count"
     )
     assert "Two thirds" not in text, "the magnitude must be derived, not asserted"

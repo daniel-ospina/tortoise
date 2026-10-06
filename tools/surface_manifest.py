@@ -1571,20 +1571,25 @@ def cmd_render(args: argparse.Namespace) -> int:
     # unmeasured cause is the same defect this guard removes. (Residual carried from the #5456
     # draft; the stance is CONTRIBUTING.md's own — "stated as one rather than implied to be
     # automatic".)
-    if tools and len(_measured) == len(tools):
-        add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have no")
-        add("call in our own tool-call log. Mainstream clients cap the tools they will show — a")
+    if not tools:
+        add("**The case for pinning a small advertised set.** This baseline carries no tool rows at all, so")
+        add("there is no advertised set to characterise and **no count is asserted here** — neither a zero nor")
+        add("a total.")
     else:
-        add("**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`")
-        add(f"flag on {len(_measured)} of its {len(tools)} tool rows, so a count of uncalled tools over all of them")
-        add("would state a quantity over rows nobody assessed, and **no such count is asserted here.** What the")
-        add("flags that are present do and do not say: they record calls in our own tool-call log, which is")
-        add("evidence about our usage, not about whether a tool is useful to a customer. Mainstream clients cap")
-        add("the tools they will show — a")
-    add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
-    add("pay context for all of them on every turn. Every comparable we studied pins a smaller set,")
-    add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-    if tools:
+        if len(_measured) == len(tools):
+            add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have no")
+            add("call in our own tool-call log. Mainstream clients cap the tools they will show — a")
+        else:
+            _unassessed = len(tools) - len(_measured)
+            add("**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`")
+            add(f"flag on {len(_measured)} of its {len(tools)} tool rows — {_unassessed} carry none — so **no count of uncalled")
+            add("tools is asserted here**: a count over all of them would include rows nobody assessed. A set flag records")
+            add("a call in our own tool-call log, which is evidence about our usage, not about whether a tool is useful")
+            add("to a customer; an unset flag records nothing about either. Mainstream clients cap the tools they will")
+            add("show — a")
+        add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
+        add("pay context for all of them on every turn. Every comparable we studied pins a smaller set,")
+        add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
         add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
