@@ -11,6 +11,30 @@ version: 1
 # one-line, reviewable change; the labels are positional letters so an S-adding
 # diff stays a SUPERSET of main's names (a rename would refuse every merge).
 #
+# The value (recomputable from the committed `durations` map:
+# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
+# S is chosen by that formula on the committed map, and the minutes it yields
+# are deliberately NOT restated here — they move with every re-cut, which is
+# how this block went stale twice. The authoritative pins are the balance-band
+# test (`test_real_workflow_halves_are_consistent`) and the lane-parity
+# superset test below, both of which recompute from the map.
+#
+# S=9 is also what the lane-parity contract requires: main publishes
+# `test (a)`…`test (i)` and a PR may only ADD to that set, never remove from it
+# (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
+# merge rail refuses a removal).
+#
+# The 1.25x balance band is enforced by `test_real_workflow_halves_are_
+# consistent`, which recomputes the ratio from the committed map. The old
+# "single-file floor" argument is RETIRED: it rested on
+# `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
+# file — so extra shards do keep reducing max(shard). S=9 is held by the
+# lane-parity contract above, not by that argument.
+#
+# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
+# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
+# free win.
+fast_shards: 9
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
@@ -28,36 +52,6 @@ version: 1
 # level with the fast band instead of 16.9m above it. Raising this trades wall
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
-# S IS NO LONGER CAPPED BY THE FLOOR FROM THIS SIZE. #6133 split
-# `test_onboarding_state_split.py` (310.7 s), the largest fast file and therefore
-# the floor under the fast gate, into four chunks (55.8/123.5/91.6/39.8 s, which
-# sum to that file's weight and are count-apportioned seeds marked `# unmeasured`
-# below).
-#
-# NO PACK NUMBER IS RESTATED HERE, DELIBERATELY. Every max(shard) figure this
-# comment used to carry is a function of the committed `durations` map, and that
-# map is refreshed on main while a PR is open. Recompute when a number is needed:
-# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`.
-# What is stable without the map: the four chunks sum to the weight of the file
-# they replace, so the pool's total weight is unchanged, and no single fast file
-# can bind max(shard) as early as the 310.7 s one did — which is the headroom this
-# change creates for a higher shard count.
-#
-# S STAYS AT 9 — UNCHANGED FROM main, DELIBERATELY. The merge rail's lane-parity
-# compares job-NAME SETS (tools/ci_selection.py; test_ci_selection.py asserts on
-# it): a PR emitting FEWER shard jobs than main runs has legs main has that the PR
-# lacks, and is refused NOT COMPARABLE. An S-REDUCTION therefore cannot land by PR
-# at all — only an S-INCREASE stays a superset. Raising S is unblocked by this
-# change and belongs in a follow-up.
-#
-# The four split files' weights are count-apportioned seeds (55.8/123.5/91.6/39.8,
-# summing to the pre-split 310.7 s) and are marked `# unmeasured` below; the
-# durations bridge (Task 4b) refreshes both sides.
-#
-# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
-# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
-# free win.
-fast_shards: 9
 
 surfaces:
   api:
@@ -2294,6 +2288,125 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
+# ── #6137: relocate the slow tail out of the fast halves' critical path ───
+#
+# THE MEASUREMENT (leg-a/leg-b/slow-a/slow-b junit of full-selection run
+# 36430905427, merge-queue, 2026-09-28). The fast pool carried 3,219s of test
+# time over two halves (1,611 / 1,608s) and ran 31.3 / 31.9 min wall, while the
+# two slow legs carried 169 / 192s and ran 5.7 / 5.4 min. A FOUR-way-parallel
+# docker pool was split 5.5:1, so the critical path was the fast half for a
+# reason that is pure PACKING, not coverage.
+#
+# WHY `slow_files` AND NOT THE `on_demand:` LANE. This is a RELOCATION, not a
+# removal: a `slow_files` entry runs in the same docker lane the fast pool does
+# — both falkordb services, the same
+# `-m 'not track_b and not live and not integration'` marker, the same 300s
+# per-test timeout, the same junit coverage manifest — so every nodeid still
+# runs PRE-MERGE, one leg over. The `on_demand:` lane removes the pre-merge
+# guarantee, and #6137 is explicitly gated on the rail-parity question for
+# removals (agent-infra #1516): moving a merge-gate test off the gate is a
+# reviewed-removal decision this lane does not hold. Relocation across the two
+# pre-merge docker pools needs no such declaration and loses no coverage —
+# which is why it is the instrument used here.
+#
+# WHICH FILES, AND WHY THIS CUT. The cut is the list below: the files under
+# `slow_files` that the base cut did not already move (35 of them, 1,317.6s of
+# committed `durations` weight at the time of writing). Both figures are
+# recomputable from that list — quote the list, not this sentence, and note the
+# leg-union check fails closed if the two diverge. Four exclusions, all
+# load-bearing:
+#   * test_capture_install.py and test_session_verify.py are NOT moved. Each is
+#     registered under `api` while its own source's diff selects `core`, and
+#     `classify_test_file` takes the FIRST match — so with a `slow_files` home
+#     the `core` diff's `slow_selected` never contains them and the guard runs
+#     on neither leg (`test_every_named_guard_runs_for_its_own_source`, the
+#     #7076 class). They stay in the fast pool.
+#   * the same rule excludes EIGHT MORE dual-registered files: eval/write_path/
+#     test_write_path_benchmark.py, test_4314_inert_hooks.py,
+#     test_capture_loop_responsiveness.py,
+#     test_graph_write_loop_responsiveness.py, test_journal_embedding_5004.py,
+#     test_probe_reset_inflight_4608.py, test_sdk_surface.py and
+#     test_selfhost_health_probe_executor.py. Each is named by a SECOND surface
+#     (core, and for the first also ep/eval), and a diff that selects that other
+#     surface subtracts it from the fast pool (`files -= slow`) without ever
+#     re-adding it to `slow_selected` (that set is keyed by the FIRST-match
+#     classifier) — so it would run on NEITHER leg. The second surface's own
+#     slow files usually keep `slow_run` True, which is what made this silent.
+#     They stay in the fast pool too, and
+#     tests/test_ci_selection.py::test_every_slow_file_a_second_surface_names_
+#     runs_for_that_surface pins the class rather than these names.
+#   * the `onboarding` surface is EXCLUDED. A `website/*` PR selects
+#     `onboarding` and is pinned to `slow_run is False`
+#     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
+#     and_skips_slow) — the #2147/#2148/#3332 cost gates. Putting an
+#     onboarding-owned file here would make every `website/*` PR pay both slow
+#     legs; that is a real cost regression on a common PR shape, not a
+#     bookkeeping detail. (A docs-only diff is unaffected either way: it is
+#     filtered to `changed == []` and takes the dedicated early return whose
+#     result pins `slow_run` to False —
+#     ::test_docs_only_skips_slow_and_carve_out — so it can never reach the
+#     `slow_files` lookup at all.)
+#   * the `tier1` files are EXCLUDED: `slow_file_issues` fails closed on
+#     "slow file X is also in tier1 (fast gate leak)", because a file in both
+#     lists is selected by BOTH the smoke gate and the slow leg. Two of the
+#     heavier fast-pool rows (test_quota, test_writer_inventory) sit in tier1
+#     and were dropped from the first cut for exactly this — the drift guard
+#     caught it, which is the guard working.
+#   * `test_battery_corpus.py` is NOT moved: it shells out to bare `uv run` and
+#     only the fast job pre-warms uv.
+# Everything below is otherwise lane-agnostic (verified: no `uv`, no
+# TORTOISE_ASK_LLM_REGRESSION — the fast job sets it and the slow legs do not).
+#
+# THE RESIDUAL, NAMED. These legs are packed on the `durations` map, and the
+# map's slow-pool rows are themselves only as fresh as the last sweep
+# (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
+# row mis-ranks the pack. The watchdog's headroom (recomputed from the
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
+# what absorbs a ranking error; the durable fix is the scheduled refresh
+# (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
+# which ships on its own and is NOT half-fixed here.
+#
+# The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
+# LPT legs of `slow_files - carve_out` on this same `durations` map, and that
+# job's own drift-guard step fails closed if the union stops matching this list.
+# Both legs are budgeted from that weight (a 35m watchdog under a 40m cap for
+# 13.82m legs), pinned by
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
+- eval/harness/test_harness_benchmark.py
+- eval/retrieval/test_gate_1349.py
+- eval/retrieval/test_run.py
+- eval/why_suite/test_why_suite_benchmark.py
+- eval/write_path/test_write_path_runner.py
+- test_abuse_integration.py
+- test_battery_r1_seed.py
+- test_battery_setup.py
+- test_capture_session.py
+- test_ci_selection.py
+- test_client_surface.py
+- test_commit_endpoint.py
+- test_consistency_divergence_5011.py
+- test_dr_endpoints.py
+- test_embedded_evidence.py
+- test_ep_selector.py
+- test_epic903_fixtures.py
+- test_epic903_modes.py
+- test_epic903_scheduler.py
+- test_epic903_warmstart.py
+- test_extractor_v2.py
+- test_graph_diagnostics.py
+- test_hosted_volunteer_context.py
+- test_import_endpoint.py
+- test_ingest_v2_consolidation.py
+- test_markers.py
+- test_monitoring.py
+- test_oauth_mcp.py
+- test_operator_idempotency_4971.py
+- test_platform_seams.py
+- test_relationships_bounded.py
+- test_skip_guard.py
+- test_surface_manifest.py
+- test_unjournaled_mutation_class.py
+- test_write_verb.py
 # Epic #1647 Task 9 (P3): the 17-file embedded carve-out set (cycle-3 P2-12
 # count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/* are subprocess
 # scripts, not test modules, and test_smoke_embedded is already one of the 7;
@@ -3417,6 +3530,91 @@ durations:
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
+  # #6137: register the fast pool's unmeasured files. Registering them is
+  # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
+  # on its own takes it to 89.5% (624/697 of this head's fast pool), under
+  # the 90% floor, against main's 90.1% (667/740).
+  #
+  # Each value is measured from the junit of main run 37225357047
+  # (2026-10-04, fast shards a-i): the sum of `testcase/@time` over every
+  # case whose `@file` attribute names that module, rounded to 0.1s and
+  # FLOORED at 0.1s — a sub-0.1s module would otherwise register 0 and
+  # weigh nothing. Group by `@file`; never split `@classname`, whose last
+  # segment is the CLASS for a class-scoped case, so a last-segment split
+  # reports the whole file unmeasured.
+  eval/write_path/test_write_path_prescreen.py: 0.2
+  eval/write_path/test_write_path_semantic_judge.py: 0.2
+  test_2500_terminal_ep_backfill.py: 1.7
+  test_3026_oauth_boundaries.py: 0.7
+  test_3660_session_upload_identity.py: 0.1
+  test_3844_annotation_injection.py: 0.1
+  test_3982_date_only_utc.py: 0.1
+  test_4041_breadcrumb_reader.py: 2.4
+  test_4199_dense_scope_coverage.py: 0.6
+  test_4542_retract_fold_decay.py: 0.1
+  test_4647_store_representable.py: 0.3
+  test_4716_capture_operator_ref_remap.py: 1.2
+  test_4999_vector_mechanism.py: 0.1
+  test_5359_unchecked_window_writers.py: 0.6
+  test_5361_inverted_window_audit.py: 0.4
+  test_5361_inverted_window_read_path.py: 0.2
+  test_6131_operator_mutation_vocabulary.py: 0.5
+  test_7108_operator_scope_predicate.py: 6.4
+  test_backfill_ghost_members_guard.py: 0.1
+  test_backup_ledger_5062.py: 0.4
+  test_capture_consent.py: 0.4
+  test_capture_graph_ops.py: 0.8
+  test_capture_redaction_sinks_5445.py: 0.1
+  test_capture_secret_redaction_4911.py: 9.7
+  test_capture_validfrom_3945.py: 0.5
+  test_ci_last_failed.py: 1.9
+  test_ci_manifest.py: 7.2
+  test_ci_verdict.py: 0.2
+  test_compute_attribution.py: 0.6
+  test_connector_scope.py: 0.9
+  test_cypher_regex_guard_3595.py: 0.2
+  test_definite_description_backfill_5059.py: 0.3
+  test_document_source_gold.py: 0.1
+  test_egress_bytes.py: 1.1
+  test_entry_point_python_guard.py: 4.6
+  test_extractor_embed_coerce_5060.py: 0.6
+  test_graph_name_ownership.py: 0.1
+  test_graph_storage.py: 5.2
+  test_heavy_import_guard.py: 9.2
+  test_hook_run_observation.py: 5.4
+  test_hook_stderr_5919.py: 0.3
+  test_hosted_aboutobject_journal_4240.py: 4.4
+  test_id_predicate_barrier_6976.py: 0.1
+  test_invalidate_inverted_window_5358.py: 0.8
+  test_merge_throughput.py: 5.8
+  test_mergify_config_guard.py: 7.1
+  test_notify_offloop_4456.py: 1.7
+  test_pack_extraction_slots_v31.py: 0.2
+  test_pr_lead_time.py: 0.2
+  test_pytest_attribution.py: 0.3
+  test_queue_conflict_census.py: 0.5
+  test_queue_window_observe.py: 0.6
+  test_registry_integrity.py: 0.7
+  test_salience_labels_4917.py: 0.1
+  test_sdk_now_iso_single_definition.py: 0.4
+  test_secret_rule_precision_5470.py: 0.1
+  test_server_hygiene_gate.py: 0.2
+  test_session_confirm.py: 0.3
+  test_session_semantic_retrieval.py: 0.4
+  test_source_dedup_registration.py: 0.9
+  test_source_identity.py: 0.2
+  test_source_kind_runtime_registration.py: 0.3
+  test_source_version_read_wiring_5199.py: 0.6
+  test_source_version_references_5199.py: 1.1
+  test_subject_binding_1370.py: 7.1
+  test_subject_layer_read_surfaces_4889.py: 0.9
+  test_surface_guard_pin_4606.py: 0.9
+  test_uri_requiring_selection.py: 52.7
+  test_uri_username_consumed_3081.py: 0.5
+  test_validity_window_contract_5374.py: 0.8
+  test_value_gate_4899.py: 0.9
+  test_vet_gate_5005.py: 0.5
+  test_vocab_gating_by_graph.py: 5.1
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
