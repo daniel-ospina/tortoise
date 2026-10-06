@@ -551,7 +551,8 @@ call in our own tool-call log. Mainstream clients cap the tools they will show �
 reported 40 in Cursor — so a client that caps there sees at most 40 of these 82, while we
 pay context for all of them on every turn. Every comparable we studied pins a smaller set,
 and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and
-`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all 82 callable.
+`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,
+`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all 82 callable.
 
 **The case against, which is real and not a formality.** Tortoise is genuinely broader than the
 comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some

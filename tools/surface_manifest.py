@@ -1151,6 +1151,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     rows = doc["rows"]
     tools = [r for r in rows if not r["name"].startswith("sdk:")]
     sdk = [r for r in rows if r["name"].startswith("sdk:")]
+    # A TOOL-LESS BASELINE IS A RE-CUT GONE WRONG, not a document: every section below
+    # quantifies over `tools` (the surface size, the 14-of-N contrast, the uncalled count),
+    # so rendering one would publish arithmetic over a surface that does not exist — "all 0
+    # tools at once", "the other -14", "0 of 0". `check` already rejects such a baseline.
+    if not tools:
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                "the baseline carries no tool rows, so there is no advertised surface to "
+                "render — re-cut it from the registry"
+            )
+        )
 
     tools.sort(key=lambda r: (r["family_rank"], r["keyword_rank"], r["cluster"] or r["name"], 0 if r["canonical"] in (True, None) else 1, r["name"]))
 
@@ -1533,8 +1544,13 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("Letta 18). That is a fact about the field and a fact about us.")
     add("")
     add("**I first read it as contradicting a decision, and that was wrong — in the direction that is")
-    add(f"easy to miss.** I said an agent shown 14 of our tools and not told about the other "
-        f"{len(tools) - 14} is being told")
+    if len(tools) > 14:
+        add("easy to miss.** I said an agent shown 14 of our tools and not told about the other "
+            f"{len(tools) - 14} is being told")
+    else:
+        # The contrast needs a remainder to name: with a small advertised set (or none) the
+        # subtraction renders "the other -4", a quantity about no surface at all.
+        add("easy to miss.** I said an agent shown only part of our tools is being told")
     add("something \"quietly incomplete\", and dropped the candidate as one that could not be adopted at")
     add("all. But the decision I cited — *\"delete what we can · de-identify what must persist · disclose")
     add("what nobody can remove\"* — governs **promises about user data**. It says nothing about how many")
@@ -1548,49 +1564,48 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("")
     _never = [r for r in tools if observed_usage(r) == "never called"]
     _measured = [r for r in tools if observed_usage(r) is not None]
-    # THE COUNT IS A CLAIM ABOUT A MEASUREMENT, so it is made only when `tools` is non-empty
-    # AND every row carries a flag (so an empty or partly-flagged baseline takes the absence
-    # branch instead of printing "0 of 0", or a count over rows nobody assessed).
-    # `observed_usage()` reads the row's own committed `used_by`, whose first token is `agents`
-    # / `never called` only when the baseline was cut with a call log available; otherwise it
-    # returns None for the row. `any(...)` was not enough, because the denominator is ALL rows:
-    # `used_by` sits in NON_DERIVABLE_ROW_KEYS (it is excluded from the drift comparison
-    # precisely because it is machine-influenced), so a PARTIALLY flagged baseline can reach
-    # this render, and a count of flagged rows divided by every row states a quantity over
-    # rows nobody assessed. The old unconditional form was worse still: with no flag anywhere
-    # it published "Two thirds of what we advertise has never been called by anything,
-    # including us (0 of 82)" — a negative nobody measured, in the document the owner reads to
-    # decide what to cut, and self-contradicting besides. The prose also now reports the
-    # measured quantity instead of the hardcoded "Two thirds", which contradicted its own
-    # parenthetical at any other count.
+    # THE COUNT IS A CLAIM ABOUT A MEASUREMENT, so it is made only when EVERY tool row carries
+    # a flag. (A tool-less baseline never reaches here — `cmd_render` refuses it above, since
+    # every section quantifies over `tools`.)
+    # `observed_usage()` reads the row's own committed `used_by`; its first token names which
+    # of the two things the flag records — that a call appears in our own tool-call log
+    # (`agents`) or that none does (`never called`). It returns None when the row carries
+    # neither token, which is what a baseline cut with no call log available looks like.
+    # `any(...)` was not enough, because the denominator is ALL rows: `used_by` sits in
+    # NON_DERIVABLE_ROW_KEYS (it is excluded from the drift comparison precisely because it is
+    # machine-influenced), so a PARTIALLY flagged baseline can reach this render, and a count of
+    # flagged rows divided by every row states a quantity over rows nobody assessed. The old
+    # unconditional form was worse still: with no flag anywhere it published "Two thirds of what
+    # we advertise has never been called by anything, including us (0 of 82)" — a negative
+    # nobody measured, in the document the owner reads to decide what to cut, and
+    # self-contradicting besides. The prose also now reports the measured quantity instead of
+    # the hardcoded "Two thirds", which contradicted its own parenthetical at any other count.
     #
-    # The wording is SCOPED TO THE EVIDENCE in both branches: the flags record calls in OUR
+    # The wording is SCOPED TO THE EVIDENCE: the flag says whether a call appears in OUR
     # tool-call log (docs/product/mcp-sdk-surface.md's own glossary says so), which is evidence
-    # about our usage and not about whether a tool is useful to a customer. Neither branch may
+    # about our usage and not about whether a tool is useful to a customer — and it says that
+    # about the rows that carry a flag, never about the ones that do not. Neither branch may
     # name a CAUSE for a flag's absence — `observed_usage` cannot observe one, and asserting an
     # unmeasured cause is the same defect this guard removes. (Residual carried from the #5456
     # draft; the stance is CONTRIBUTING.md's own — "stated as one rather than implied to be
     # automatic".)
-    if not tools:
-        add("**The case for pinning a small advertised set.** This baseline carries no tool rows at all, so")
-        add("there is no advertised set to characterise and **no count is asserted here** — neither a zero nor")
-        add("a total.")
+    if len(_measured) == len(tools):
+        add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have no")
+        add("call in our own tool-call log. Mainstream clients cap the tools they will show — a")
     else:
-        if len(_measured) == len(tools):
-            add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have no")
-            add("call in our own tool-call log. Mainstream clients cap the tools they will show — a")
-        else:
-            _unassessed = len(tools) - len(_measured)
-            add("**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`")
-            add(f"flag on {len(_measured)} of its {len(tools)} tool rows — {_unassessed} carry none — so **no count of uncalled")
-            add("tools is asserted here**: a count over all of them would include rows nobody assessed. A set flag records")
-            add("a call in our own tool-call log, which is evidence about our usage, not about whether a tool is useful")
-            add("to a customer; an unset flag records nothing about either. Mainstream clients cap the tools they will")
-            add("show — a")
-        add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
-        add("pay context for all of them on every turn. Every comparable we studied pins a smaller set,")
-        add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-        add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
+        _unassessed = len(tools) - len(_measured)
+        add("**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`")
+        add(f"flag on {len(_measured)} of its {len(tools)} tool rows — the other {_unassessed} carry none — so **no count")
+        add("of uncalled tools is asserted here**: a count over all of them would include rows nobody assessed.")
+        add("The flag records one thing: whether a call appears in our own tool-call log (`in use`) or none")
+        add("does (`never called`) — evidence about our usage, not about whether a tool is useful to a")
+        add("customer. A row carrying no flag records neither. Mainstream clients cap the tools they will")
+        add("show — a")
+    add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
+    add("pay context for all of them on every turn. Every comparable we studied pins a smaller set,")
+    add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
+    add("`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,")
+    add(f"`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
     add("comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some")

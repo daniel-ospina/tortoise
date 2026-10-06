@@ -1936,23 +1936,32 @@ def test_the_render_asserts_no_count_when_the_baseline_is_only_partly_measured(
     sm = _load_manifest_tool()
     base = _with_first_used_by_token(_manifest(), "tooling")
     tool_rows = [r for r in base["rows"] if not str(r.get("name", "")).startswith("sdk:")]
-    total = len(tool_rows)
-    # Flag every second tool row, so the flags are genuinely partial.
+    # Flag every second tool row, so the flags are genuinely partial — AND drop one unmeasured
+    # row, so the population is not the committed 82: a hardcoded denominator, or an
+    # `_unassessed` that forgot to subtract the measured rows, would otherwise pass.
     for row in tool_rows[::2]:
         row["used_by"] = ", ".join(["agents", *[p.strip() for p in (row["used_by"] or "").split(",") if p.strip() and p.strip() != "tooling"]])
+    dropped = next(r for r in tool_rows if sm.observed_usage(r) is None)
+    base["rows"] = [r for r in base["rows"] if r is not dropped]
+    tool_rows = [r for r in base["rows"] if not str(r.get("name", "")).startswith("sdk:")]
+    total = len(tool_rows)
     measured = sum(1 for r in tool_rows if sm.observed_usage(r) is not None)
-    assert 0 < measured < total, "the fixture must leave the baseline only partly measured"
+    assert 0 < measured < total and total != 82, "the fixture must leave the baseline only partly measured, at a non-default population"
 
     text = _render_manifest(sm, base, tmp_path, monkeypatch)
 
     assert re.search(r"\d+ of the \d+ tools we advertise", text) is None, (
         "the render printed an uncalled count over a population it never measured in full"
     )
-    assert "no count of uncalled" in text and "is asserted here" in text, (
+    assert re.search(r"no count\s+of uncalled tools is asserted here", text), (
         "the render neither measured the count nor said it was not asserting one"
     )
     assert f"flag on {measured} of its {total} tool rows" in text, (
         "the render must report the measurement it actually has, not a universal"
+    )
+    assert f"the other {total - measured} carry none" in text, (
+        "the unassessed count must be derived (total minus measured), not the population "
+        "or the measured count"
     )
     assert "No row" not in text and "no row" not in text, (
         "the render claimed a universal absence while some rows DO carry a flag"
@@ -1997,15 +2006,17 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
 
     expected = (
         "**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`\n"
-        f"flag on 0 of its {total} tool rows — {total} carry none — so **no count of uncalled\n"
-        "tools is asserted here**: a count over all of them would include rows nobody assessed. A set flag records\n"
-        "a call in our own tool-call log, which is evidence about our usage, not about whether a tool is useful\n"
-        "to a customer; an unset flag records nothing about either. Mainstream clients cap the tools they will\n"
+        f"flag on 0 of its {total} tool rows — the other {total} carry none — so **no count\n"
+        "of uncalled tools is asserted here**: a count over all of them would include rows nobody assessed.\n"
+        "The flag records one thing: whether a call appears in our own tool-call log (`in use`) or none\n"
+        "does (`never called`) — evidence about our usage, not about whether a tool is useful to a\n"
+        "customer. A row carrying no flag records neither. Mainstream clients cap the tools they will\n"
         "show — a\n"
         f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {total}, while we\n"
         "pay context for all of them on every turn. Every comparable we studied pins a smaller set,\n"
         "and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and\n"
-        f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {total} callable."
+        "`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,\n"
+        "`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all " + f"{total} callable."
     )
     assert _paragraph(text) == expected, (
         "the no-measurement paragraph changed — it may report only the observation, name no "
@@ -2016,32 +2027,31 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
     )
 
 
-def test_the_render_states_nothing_about_a_surface_it_does_not_have(tmp_path, monkeypatch):
-    """A manifest with no tool rows must not describe an absent surface.
+def test_the_render_refuses_a_baseline_with_no_tool_rows(tmp_path, monkeypatch):
+    """A tool-less baseline is a re-cut gone wrong, not a document to render.
 
-    `cmd_render` does not run `check` first, and the branch split now makes emptiness explicit:
-    the earlier `if tools:` guard on ONE trailing line produced "flag on 0 of its 0 tool rows",
-    "sees at most 40 of these 0", and a paragraph that ended on the conjunction "…four modes and".
+    Every section of the rendered list quantifies over `tools` — the surface size ("all 0 tools
+    at once"), the 14-of-N contrast, the uncalled count — so rendering one publishes arithmetic
+    about a surface that does not exist. The earlier attempt to make only the usage paragraph
+    empty-safe left the rest of the document asserting "the other -14" and "all 0 tools", which
+    is why the render now refuses instead. `check` already rejects such a baseline.
     """
     sm = _load_manifest_tool()
     doc = copy.deepcopy(_manifest())
     doc["rows"] = [r for r in doc["rows"] if str(r.get("name", "")).startswith("sdk:")]
-    assert doc["rows"], "the fixture must keep the SDK rows renderable"
+    assert doc["rows"], "the fixture must keep the SDK rows"
 
-    text = _render_manifest(sm, doc, tmp_path, monkeypatch)
-
-    expected = (
-        "**The case for pinning a small advertised set.** This baseline carries no tool rows at all, so\n"
-        "there is no advertised set to characterise and **no count is asserted here** — neither a zero nor\n"
-        "a total."
-    )
-    assert _paragraph(text) == expected, (
-        "a tool-less baseline must produce a complete paragraph that describes no surface, "
-        "not a truncated or self-contradicting one"
-    )
-    assert "of these 0" not in text and "0 of 0" not in text, (
-        "the render described a surface of zero tools as if it were one"
-    )
+    path = _manifest_at(sm, doc, tmp_path)
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 1, (
+            "a baseline with no tool rows must be REFUSED, not rendered"
+        )
+        assert not out.exists(), "the refusal must not write a document"
+    finally:
+        out.unlink(missing_ok=True)
 
 
 def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monkeypatch):
@@ -2050,7 +2060,7 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     Reading the committed manifest would prove nothing: its count (55 of 82) can be — and once
     was — a literal in the generator, so the assertion passes against a hardcode. So the
     fixture perturbs BOTH the numerator (one `never called` row flipped to `agents`) and the
-    population (one tool row dropped), keeping every remaining row measured so the measured
+    population (one `in use` row dropped), keeping every remaining row measured so the measured
     branch is still taken, and asserts the render follows to both. Read from the RENDER's own
     output, never from the committed document: an earlier form of this check asserted on
     `RENDERED.read_text()`, so it passed even under a guard that always reported the
@@ -2067,12 +2077,15 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     assert dropped is not victim, "the flipped row and the dropped row must differ"
     doc["rows"] = [r for r in doc["rows"] if r is not dropped]
 
-    total = len(tool_rows) - 1
-    never = committed_never - 1
-    assert total != len(tool_rows) and never != committed_never, (
+    # Recompute from the PERTURBED document — assigning these above would make the check a
+    # tautology, which is how an earlier version of this test verified nothing.
+    remaining = [r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]
+    total = len(remaining)
+    never = sum(1 for r in remaining if sm.observed_usage(r) == "never called")
+    assert total == len(tool_rows) - 1 and never == committed_never - 1, (
         "the fixture must move BOTH the numerator and the population"
     )
-    assert all(sm.observed_usage(r) is not None for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")), (
+    assert all(sm.observed_usage(r) is not None for r in remaining), (
         "the perturbation must not leave any row unmeasured"
     )
 
