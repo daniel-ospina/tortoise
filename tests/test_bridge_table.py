@@ -794,7 +794,13 @@ def _part_d_citations() -> dict[str, str]:
         "the generated doc has no Part D — the citation corpus is unreachable, so a "
         "truncated citation is invisible to every reader"
     )
-    d1 = doc.split("### D1")[1].split("### D2")[0]
+    # Bound with the shared helper, NOT a hand-rolled double-split. A second `.split("### D2")[0]`
+    # bound is decorative: break it and `split` finds nothing, `[0]` returns the REST OF THE
+    # DOCUMENT (5 395 -> 10 820 chars, past `## Reproduce`), and every test still passes — the
+    # citation regexes happen to be D1-only in shape, so the wrong slice parses identically.
+    # `_section` asserts its anchor and bounds at the next heading of the same-or-higher level,
+    # which turns that silent-wrong-slice into a hard failure (found by #7451 review round 5).
+    d1 = _section(doc, "### D1")
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
     d1 = d1.split("**Documented hops.**")[0]
     rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
