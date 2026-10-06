@@ -139,10 +139,12 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
         Containment (cycle-5 P2) is by RESOLVED path: the repo carries committed
         symlinks (`scripts/`, `skills/` → agent-infra), so `is_file()` alone
         followed a declared path out of the repo.
+
+        PRECONDITION: `entries` is a non-empty list. Every caller checks that
+        first and emits its own message, so a container-shape guard here would
+        be unreachable (cycle-8 P2).
         """
         out: list[str] = []
-        if not isinstance(entries, list):
-            return [f"{mid}: {field} must be a list, got {type(entries).__name__}"]
         root_resolved = root.resolve()
         for rel in entries:
             if not isinstance(rel, str) or not rel:
@@ -583,6 +585,43 @@ def test_gate_fails_closed_on_a_symlink_that_launders_the_kind(tmp_path) -> None
         row[field] = bad
         errors = gate_errors([row], root=repo)
         assert errors, (field, bad, "the gate PASSED a kind-laundering symlink")
+
+
+def test_gate_fails_closed_on_a_kind_valid_directory(tmp_path) -> None:
+    """A DIRECTORY with a KIND-VALID name is still not an artifact (cycle-8 P2).
+
+    The cycle-3 directory cases used kind-invalid names (`tortoise`, `tests`),
+    so the kind check rejected them BEFORE the probe — leaving `is_file()`
+    unpinned: mutating it to `exists()` survived the whole suite.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "real.py").write_text("x = 1\n")
+    (repo / "src" / "mod.py").mkdir()  # a DIRECTORY named `mod.py`
+    (repo / "docs").mkdir()
+    (repo / "docs" / "real.md").write_text("x\n")
+    (repo / "docs" / "policy.md").mkdir()  # a DIRECTORY named `policy.md`
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_real.py").write_text("x\n")
+    (repo / "tests" / "test_dir.py").mkdir()  # a DIRECTORY named `test_dir.py`
+
+    base = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/real.md"],
+        "code": ["src/real.py"],
+        "tests": ["tests/test_real.py"],
+    }
+    for field, bad in (
+        ("declared_in", ["docs/policy.md"]),
+        ("code", ["src/mod.py"]),
+        ("tests", ["tests/test_dir.py"]),
+    ):
+        row = dict(base)
+        row[field] = bad
+        errors = gate_errors([row], root=repo)
+        assert any("does not exist" in e for e in errors), (field, errors)
 
 
 def test_gate_fails_closed_on_a_non_string_name() -> None:
