@@ -168,6 +168,12 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
 
 TEST_JOB_PREFIX = "test"
 
+# The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
+# `test-slow (a)`, or a bare `test`/`test-slow`. Everything else that starts
+# with `test` (carve-out, d14-hosted-api, concurrency-falkor, track-b) runs an
+# UNWEIGHTED file set and is reported separately — see `paid_vs_selected`.
+SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
+
 
 def job_execution_s(job: dict) -> float | None:
     """A job's EXECUTION seconds (started_at -> completed_at), or None.
@@ -181,7 +187,7 @@ def job_execution_s(job: dict) -> float | None:
     try:
         t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
         t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return None
     return max((t1 - t0).total_seconds(), 0.0)
 
@@ -198,7 +204,7 @@ def queue_wait_s(job: dict, run_created_at: str | None) -> float | None:
     try:
         t0 = datetime.fromisoformat(run_created_at.replace("Z", "+00:00"))
         t1 = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return None
     return max((t1 - t0).total_seconds(), 0.0)
 
@@ -213,13 +219,28 @@ def selected_weight_s(selection: dict, durations: dict,
                       default_weight: float = 0.0) -> float:
     """The weight of what the gate will actually RUN, in measured seconds.
 
-    Sums every selected leg's `durations` weight: the fast pool
-    (`test_files`), the slow leg (`slow_selected`) and the carve-out leg when
-    it runs. A file with no measured duration contributes `default_weight` —
-    the same "absent = not adopted" collapse `ci_selection` uses — so a
-    partially-populated map under-counts instead of crashing.
+    Sums every selected leg's `durations` weight. A file with no measured
+    duration contributes `default_weight` — the same "absent = not adopted"
+    collapse `ci_selection` uses — so a partially-populated map under-counts
+    instead of crashing.
+
+    ⛔ `ci_selection.select()` returns the STRING sentinel ``"ALL"`` for a full
+    selection (push/schedule, a shared-module change, or an unclaimed path —
+    `ci_selection.py:1103`), NOT a list. Iterating it yields the three
+    characters ``A``, ``L``, ``L``, whose keys are never in `durations`, so the
+    whole fast pool silently contributes `default_weight` — measured as a 4.5x
+    deflation of the denominator (a 4.5x INFLATION of `ratio`) on the real
+    manifest. The sentinel is handled explicitly below.
     """
-    legs: list[str] = list(selection.get("test_files") or [])
+    raw = selection.get("test_files")
+    if raw == "ALL":
+        # The whole measured pool runs, and `durations` IS that pool (including
+        # the slow leg, which `_full_selection` carries in `slow_selected`).
+        # Summing the map's own numeric values is the only arm that stays
+        # correct for the sentinel; iterating it is the defect above.
+        return sum(float(v) for v in durations.values()
+                   if isinstance(v, (int, float)))
+    legs: list[str] = list(raw or [])
     if selection.get("slow_run"):
         legs += list(selection.get("slow_selected") or [])
     total = 0.0
@@ -238,16 +259,30 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
     near 1.0, while a PR run that selects a small surface but pays a large one
     is execution inflation, not selection weight. `queue_s` is reported
     alongside so queue latency cannot be mistaken for execution cost.
+
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME LEGS. Only the shard jobs
+    whose work `test_files`/`slow_selected` actually weight (`test (a)`, …,
+    `test-slow (a)`, …) are counted. Other `test*` legs — `test-carve-out`,
+    `test-d14-hosted-api`, `test-concurrency-falkor`, `test-track-b` — run file
+    sets that `select()` EXPLICITLY SUBTRACTS from both of those keys
+    (`ci_selection.py:1231,1271`), so counting their seconds would add
+    execution with no weight and inflate the ratio by construction. They are
+    returned in `excluded_jobs` instead of being silently dropped.
     """
     paid = 0.0
     queue = 0.0
     counted: list[str] = []
+    excluded: list[str] = []
     for job in jobs:
         name = job.get("name") or ""
         if not name.startswith(TEST_JOB_PREFIX):
             continue
+        if not SHARD_JOB_RE.match(name):
+            excluded.append(name)
+            continue
         secs = job_execution_s(job)
         if secs is None:
+            excluded.append(name)
             continue
         paid += secs
         counted.append(name)
@@ -261,6 +296,7 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
         "ratio": round(paid / selected, 3) if selected > 0 else None,
         "queue_s": round(queue, 1),
         "jobs_counted": sorted(counted),
+        "excluded_jobs": sorted(excluded),
     }
 
 

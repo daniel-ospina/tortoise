@@ -1783,8 +1783,13 @@ def test_queue_wait_is_measured_from_the_run_not_the_job() -> None:
 
 
 def test_selected_weight_sums_only_the_legs_that_run() -> None:
-    """The fast pool always; the slow leg only when `slow_run`; the carve-out
-    leg never contributes here (it is not a weight-bearing leg in the map)."""
+    """The fast pool always; the slow leg only when `slow_run`.
+
+    #7537 review P1: the carve-out leg is deliberately NOT here — `select()`
+    SUBTRACTS carve-out files from both keys, so `paid_vs_selected` excludes the
+    carve-out JOB from the numerator to match. One side must not have weight the
+    other lacks.
+    """
     durations = {"tests/a.py": 100, "tests/b.py": 50, "tests/slow_c.py": 900}
     selection = {
         "test_files": ["tests/a.py", "tests/b.py"],
@@ -1823,7 +1828,10 @@ def test_the_ratio_moves_with_the_selection_not_with_the_jobs() -> None:
             for c in "abcdefghi"]                      # 9 x 600 s = 5400 s paid
     durations = {f"tests/f{i}.py": 600 for i in range(9)}
 
-    full = {"full": True, "test_files": [f"tests/f{i}.py" for i in range(9)], "slow_run": False}
+    # #7537 review P1: the REAL producer returns the string "ALL" here, not a
+    # list. A hand-built list made this test pass while the real full-selection
+    # path was 4.5x wrong.
+    full = {"full": True, "test_files": "ALL", "slow_run": False}
     tiny = {"full": False, "test_files": ["tests/f0.py"], "slow_run": False}
 
     push_like = ci_timing.paid_vs_selected(jobs, full, durations, "2026-10-06T10:00:00Z")
@@ -1876,3 +1884,100 @@ def test_the_queue_split_refutes_queue_latency_as_the_cause() -> None:
     assert out["queue_s"] == 60.0
     assert out["paid_s"] == 600.0
     assert out["paid_s"] > 5 * out["queue_s"]     # execution dominates, not queueing
+
+
+# --- regressions from the #7537 review (P1 x2) ------------------------------
+
+def test_the_ALL_sentinel_is_not_iterated_as_characters() -> None:
+    """REGRESSION (#7537 review P1, reproduced on the real manifest).
+
+    `ci_selection.select()` returns the STRING "ALL" for a full selection
+    (push/schedule, a shared-module change, or an unclaimed path). `list("ALL")`
+    is ['A','L','L'], whose keys are never in `durations`, so the ENTIRE fast
+    pool fell back to the default weight — a measured 4.5x deflation of
+    `selected_s`, i.e. a 4.5x inflation of `ratio`, on the very shape the
+    push-run calibration of 1.0 is supposed to come from.
+
+    The discriminating assertion is the second one: with a nonzero default, the
+    broken version adds exactly 3 * default (one per sentinel character).
+    """
+    durations = {"tests/a.py": 600, "tests/b.py": 300, "tests/slow_c.py": 900}
+    sel = {"full": True, "test_files": "ALL", "slow_run": True,
+           "slow_selected": ["tests/slow_c.py"]}
+    assert ci_timing.selected_weight_s(sel, durations) == 1800.0
+    assert ci_timing.selected_weight_s(sel, durations, default_weight=25.0) == 1800.0
+
+
+def test_a_real_full_selection_actually_is_the_ALL_string() -> None:
+    """Anti-drift ratchet: binds the test suite to the REAL producer.
+
+    Without this, a fixture that drifts from `ci_selection.select()`'s actual
+    return shape silently stops testing the full-selection path — which is
+    exactly how the P1 above survived a green suite.
+    """
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "tools"))
+    import ci_selection  # noqa: PLC0415
+
+    manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    selection = ci_selection.select(["tortoise/sdk.py"], "push", manifest)
+    assert selection["test_files"] == "ALL", (
+        "ci_selection.select() no longer returns the 'ALL' sentinel for a full "
+        "selection — update selected_weight_s and this ratchet together"
+    )
+
+
+def test_unweighted_test_legs_are_reported_not_counted() -> None:
+    """REGRESSION (#7537 review P1): numerator and denominator cover the SAME legs.
+
+    `test-carve-out` / `test-d14-hosted-api` / `test-concurrency-falkor` /
+    `test-track-b` run file sets that `select()` SUBTRACTS from `test_files`
+    and `slow_selected` (`ci_selection.py:1231,1271`). Counting their seconds
+    added execution with no matching weight, inflating the ratio by
+    construction — the opposite of a diagnostic. They must be REPORTED, not
+    silently dropped.
+    """
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z"),
+        _job("test-carve-out", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        _job("test-d14-hosted-api", "2026-10-06T10:00:00Z", "2026-10-06T10:03:20Z"),
+    ]
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py"], "slow_run": False}, {"tests/a.py": 600}, None)
+    assert out["paid_s"] == 600.0
+    assert out["jobs_counted"] == ["test (a)"]
+    assert out["excluded_jobs"] == ["test-carve-out", "test-d14-hosted-api"]
+
+
+def test_a_non_string_timestamp_does_not_escape_the_guard() -> None:
+    """A truthy non-string timestamp raises AttributeError on .replace(), which
+    escaped the (ValueError, TypeError) guard and aborted the whole run."""
+    assert ci_timing.job_execution_s({"name": "test (a)", "started_at": 1, "completed_at": 2}) is None
+    assert ci_timing.queue_wait_s({"name": "test (a)", "started_at": 1}, "2026-10-06T10:00:00Z") is None
+
+
+def test_the_cli_mode_is_reachable_end_to_end(monkeypatch, capsys) -> None:
+    """The capability must not be dead code (#7537 review P2)."""
+    import argparse  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parent.parent
+    monkeypatch.setattr(ci_timing, "fetch_run",
+                        lambda repo, rid: {"created_at": "2026-10-06T10:00:00Z"})
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, rid: [
+        _job("test (a)", "2026-10-06T10:01:00Z", "2026-10-06T10:11:00Z"),
+        _job("docs", "2026-10-06T10:00:00Z", "2026-10-06T10:12:00Z"),
+    ])
+    args = argparse.Namespace(run_id="1", changed_files="tools/ci_timing.py",
+                              manifest=str(root / "config" / "ci-surfaces.yml"),
+                              repo="daniel-ospina/tortoise", event="pull_request")
+    assert ci_timing.paid_vs_selected_cli(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["paid_s"] == 600.0
+    assert out["jobs_counted"] == ["test (a)"]
+    assert out["queue_s"] == 60.0
+    assert out["event"] == "pull_request"
+
+    # A missing --changed-files is a usage error (2), never a silent 0-ratio run.
+    bad = argparse.Namespace(run_id="1", changed_files="", manifest="x",
+                             repo="o/r", event="pull_request")
+    assert ci_timing.paid_vs_selected_cli(bad) == 2
