@@ -46,13 +46,32 @@ header line that *opens* with a provenance stem (``HISTORICAL``, ``ARCHIVED``,
 ``SUPERSEDED``, ``DEPRECATED``, ``FROZEN``, ``OBSOLETE``, after comment/quote
 decoration and an optional ⚠️/🚨) is a candidate. A candidate that matches no
 declared spelling is reported as ``unmatched`` and reds the check. That is what
-stops the set from silently growing a fifth.
+stops a FIFTH spelling of that shape from being silently counted.
 
 The search region is the module **header** — leading comments plus the module
 docstring, up to the first real statement — because that is where a provenance
 marker belongs. Scanning the whole file instead flagged two body identifiers
 (``superseded = […]`` in ``audit_graph.py`` / ``audit_graph_deep.py``) as
 markers, which is exactly the noise that trains a guard away.
+
+DECLARED BOUNDS — WHAT THE FAIL-CLOSED RULE DOES *NOT* CATCH
+-----------------------------------------------------------
+Stated here rather than left for a reader to discover, because each one is a
+route by which the declaration could be incomplete:
+
+* a marker whose text opens on **no** stem (``# This script is obsolete``). A
+  stem-ANYWHERE rule would catch it and was measured against the corpus — it
+  false-positives on ordinary prose (``2500_backfill_terminal_ep_vacuity.py``'s
+  "This one-shot sweep aligns those existing rows…"), and a rule that reds on
+  prose gets trained away. This is the blind spot #4830 item 2 exists to close;
+  parsing prose is what a machine-readable field removes.
+* a marker placed **outside the header** (after the first statement).
+* a **second annotation** on an already-marked file that opens on no stem —
+  e.g. ``# NOTE: this script is FROZEN, do not run``. The file is already
+  counted as marked, so the extra line is neither declared nor refused.
+
+Each bound is a limit on the DECLARATION's completeness, not a licence: a marker
+of any shape that is found is still refused unless it is declared.
 
 WHAT IS DELIBERATELY *NOT* HERE
 -------------------------------
@@ -65,11 +84,14 @@ WHAT IS DELIBERATELY *NOT* HERE
   deferred with the retrofit. The lexical price trigger below is the proxy that
   item 2 would replace.
 
-Exit codes (``--check``)
-------------------------
+Exit codes
+----------
     0  the declared contract holds
     1  at least one violation — every one is printed, never summarised away
     2  usage or environment error (``graph-scripts/`` missing)
+
+The tool has exactly one job (check the contract), so the check always runs;
+there is no opt-in flag whose absence would silently skip it.
 """
 from __future__ import annotations
 
@@ -86,8 +108,10 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GRAPH_SCRIPTS = REPO_ROOT / "graph-scripts"
@@ -109,8 +133,9 @@ MARKER_SPELLINGS: tuple[str, ...] = (
 #: Declared markerless residue — the retrofit's remaining scope, measured at
 #: #4830 (24 marked + 33 unmarked = the 57 tracked ``graph-scripts/*.py``).
 #: NOT a claim that these are live drivers: it says only that they carry no
-#: marker TODAY. A new script must pick a side (mark it, or declare it here),
-#: and the retrofit run removes entries; neither direction is silent.
+#: marker TODAY. A new script must pick a side: mark it, or add it here — and
+#: adding it is bounded by ``UNMARKED_CEILING`` below, so the residue cannot grow
+#: quietly and the retrofit's progress shows up as a shrinking count.
 UNMARKED_SCRIPTS: frozenset[str] = frozenset(
     {
         "1714_dedup_observation.py",
@@ -149,15 +174,22 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
     }
 )
 
+#: The ratchet: the markerless residue may never GROW. Raised only deliberately,
+#: in its own diff — and lowered by the retrofit as it marks files, so the count
+#: is a progress reading, not a fact that re-stales silently.
+UNMARKED_CEILING = 33
+
 #: Scripts that assert a price **of this product**. #4830's sharpest gap: both
 #: ``bp_approach_cycle3``/``cycle4`` assert non-canonical tiers as ours and
 #: already carry a marker that says nothing about pricing — stale-as-ours with a
 #: marker on it, and nothing red. ``bp_approach_cycle1`` asserts the same
-#: superseded ``$20/month`` / ``$100`` boundaries, so it is in the set too: a
-#: trigger narrowed to the two named files would have to depend on an incidental
-#: "Our premium" phrase and would leave cycle1's explicit boundary unguarded.
-#: The check also asserts this set EQUALS the lexically detected one, so a new
-#: price-bearing script cannot be silently omitted.
+#: superseded ``$20/month`` / ``$100`` boundaries, so it is in the set too: the
+#: trigger fires on the tier vocabulary (``freemium``/``premium``) that all three
+#: share, and no lexical rule separates cycle1 from the two the issue names.
+#: Narrowing the set to those two would therefore leave cycle1's explicit
+#: boundary unguarded — the hole this assertion exists to close. The check also
+#: asserts this set EQUALS the lexically detected one, so a new price-bearing
+#: script cannot be silently omitted.
 PRICE_BEARING_SCRIPTS: frozenset[str] = frozenset(
     {
         "bp_approach_cycle1.py",
@@ -167,6 +199,23 @@ PRICE_BEARING_SCRIPTS: frozenset[str] = frozenset(
 )
 
 _PROVENANCE_STEM = r"(?:HISTORICAL|ARCHIVED|SUPERSEDED|DEPRECATED|FROZEN|OBSOLETE)"
+
+#: A Python string-prefix + triple-quote docstring opener, anchored at the line
+#: start. The prefix (`r`, `b`, `rb`, …) MUST be part of the opener: matching only
+#: bare triple quotes missed an ``r"""`` module docstring entirely, so a marker
+#: inside it was neither counted nor refused (a fail-OPEN hole).
+_DOCSTRING_OPEN_RE = re.compile(r'^[rRuUbBfF]{0,2}("""|\'\'\')')
+
+
+def _closes_docstring(remainder: str, quote: str) -> bool:
+    """True when *remainder* CLOSES a docstring opened with *quote*.
+
+    The token must be at the END (optionally followed by a comment), not merely
+    present: the triple-quote token occurring inside the docstring's own text —
+    the #4731 spelling literally embeds one — would otherwise close it early and
+    re-open a phantom docstring over the rest of the header.
+    """
+    return re.search(re.escape(quote) + r"\s*(?:#.*)?$", remainder) is not None
 
 #: A header line that CLAIMS provenance — deliberately broader than the declared
 #: set, so an unrecognised spelling is FOUND and then rejected (fail-closed).
@@ -185,16 +234,10 @@ MARKER_CANDIDATE_RE = re.compile(
 #: need to parse prose; deferred with the retrofit.
 PRICE_LINE_RE = re.compile(r"(?i)^(?=.*\$\d)(?=.*\b(?:freemium|premium|our|ours)\b)")
 
-_DECLARED: tuple[tuple[str, str], ...]
-
-
 def _normalise(line: str) -> str:
     """The spelling, stripped of comment/quote decoration — not of its words."""
     stripped = line.strip()
     return re.sub(r"^[#>'\"]+", "", stripped).strip()
-
-
-_DECLARED = tuple((raw, _normalise(raw)) for raw in MARKER_SPELLINGS)
 
 
 def header_lines(source: str) -> list[tuple[int, str]]:
@@ -207,35 +250,49 @@ def header_lines(source: str) -> list[tuple[int, str]]:
     compile under this interpreter cannot break the guard.
     """
     out: list[tuple[int, str]] = []
-    in_docstring = False
+    doc_quote = ""
     for lineno, line in enumerate(source.splitlines(), 1):
         stripped = line.strip()
-        if in_docstring:
+        if doc_quote:
             out.append((lineno, line))
-            if stripped.endswith('"""') or stripped.endswith("'''"):
-                in_docstring = False
+            # The CLOSE is the token at the END of the line (optionally followed
+            # by a comment), not ``endswith``: a trailing comment after the
+            # closing quotes (`"""Doc."""  # note`) otherwise kept the docstring
+            # open and swallowed the rest of the header into the marker region
+            # (a false FAIL on a valid file).
+            if _closes_docstring(stripped, doc_quote):
+                doc_quote = ""
             continue
         if not stripped or stripped.startswith("#"):
             out.append((lineno, line))
             continue
-        if stripped.startswith('"""') or stripped.startswith("'''"):
-            quote = stripped[:3]
+        opener = _DOCSTRING_OPEN_RE.match(stripped)
+        if opener:
             out.append((lineno, line))
-            if not (len(stripped) > 3 and stripped.endswith(quote)):
-                in_docstring = True
+            quote = opener.group(1)
+            if not _closes_docstring(stripped[opener.end():], quote):
+                doc_quote = quote
             continue
         break
     return out
 
 
-def declared_spelling(line: str) -> str | None:
+def declared_spelling(
+    line: str, spellings: tuple[str, ...] = MARKER_SPELLINGS
+) -> str | None:
     """The declared spelling this header line carries, or ``None``.
 
     ``None`` is a REJECTION, never a pass: it is how an unrecognised spelling is
     refused rather than counted.
+
+    ``spellings`` defaults to THE declaration (``MARKER_SPELLINGS``) and exists
+    so a test can drive the refusal with a smaller set — otherwise the only way
+    to prove rejection works is to edit the contract by hand, which is the
+    vacuity this guard exists to avoid.
     """
     normalised = _normalise(line)
-    for raw, declared in _DECLARED:
+    for raw in spellings:
+        declared = _normalise(raw)
         if declared and normalised.startswith(declared):
             return raw
     return None
@@ -256,11 +313,16 @@ def names_canonical_source(source: str) -> bool:
 
 @dataclass(frozen=True)
 class Scan:
-    """Raw facts about a ``graph-scripts/`` directory — no declarations applied."""
+    """Raw facts about a ``graph-scripts/`` directory — no declarations applied.
+
+    ``marked`` is a read-only mapping so ``frozen=True`` states a property the
+    record actually has (a mutable ``dict`` field gave a frozen dataclass whose
+    contents could still be edited and whose generated ``__hash__`` raised).
+    """
 
     corpus: tuple[str, ...]
     #: filename -> the declared spelling it carries
-    marked: dict[str, str]
+    marked: Mapping[str, str]
     #: (file, lineno, text) for a candidate marker matching NO declared spelling
     unmatched: tuple[tuple[str, int, str], ...]
 
@@ -269,7 +331,9 @@ class Scan:
         return tuple(f for f in self.corpus if f not in self.marked)
 
 
-def scan(root: Path = GRAPH_SCRIPTS) -> Scan:
+def scan(
+    root: Path = GRAPH_SCRIPTS, spellings: tuple[str, ...] = MARKER_SPELLINGS
+) -> Scan:
     """Read every ``*.py`` in *root* and report its marker state."""
     corpus: list[str] = []
     marked: dict[str, str] = {}
@@ -280,21 +344,32 @@ def scan(root: Path = GRAPH_SCRIPTS) -> Scan:
         for lineno, line in header_lines(source):
             if not MARKER_CANDIDATE_RE.match(line):
                 continue
-            spelling = declared_spelling(line)
+            spelling = declared_spelling(line, spellings)
             if spelling is None:
                 unmatched.append((path.name, lineno, line.strip()))
             else:
                 marked.setdefault(path.name, spelling)
-    return Scan(tuple(corpus), marked, tuple(unmatched))
+    return Scan(tuple(corpus), MappingProxyType(marked), tuple(unmatched))
 
 
-def violations(root: Path = GRAPH_SCRIPTS) -> list[str]:
+def violations(
+    root: Path = GRAPH_SCRIPTS,
+    *,
+    spellings: tuple[str, ...] = MARKER_SPELLINGS,
+    unmarked: frozenset[str] = UNMARKED_SCRIPTS,
+    price_bearing: frozenset[str] = PRICE_BEARING_SCRIPTS,
+) -> list[str]:
     """Every way the declared contract fails to hold for *root*.
 
     Returns ALL violations — a guard that reports only the first sends the next
     reader round the loop once per file.
+
+    The declarations default to THE contract; they are parameters so that each
+    violation can be produced and asserted in a test without editing the real
+    corpus (#4830 review round 1: the gate itself was otherwise unexercised, and
+    a mutated ``violations()`` returning ``[]`` passed the whole suite).
     """
-    result = scan(root)
+    result = scan(root, spellings)
     problems: list[str] = []
 
     # (a) fail-closed: every provenance marker present is a DECLARED spelling.
@@ -306,17 +381,24 @@ def violations(root: Path = GRAPH_SCRIPTS) -> list[str]:
         )
 
     # The corpus is a DECLARED PARTITION: marked ∪ UNMARKED_SCRIPTS == corpus,
-    # disjoint. Both directions, so the ratchet cannot grow and a stale
-    # declaration cannot outlive its file.
+    # disjoint. Both directions, so a stale declaration cannot outlive its file
+    # and a new one cannot arrive unclassified.
     corpus = set(result.corpus)
+    if len(unmarked) > UNMARKED_CEILING:
+        problems.append(
+            f"RESIDUE GREW {len(unmarked)} > {UNMARKED_CEILING}: the "
+            f"markerless declaration is a ratchet — it may only shrink as the "
+            f"retrofit lands. Mark the file, or raise UNMARKED_CEILING in its "
+            f"own deliberate diff (#4830)."
+        )
     for name in result.corpus:
-        if name not in result.marked and name not in UNMARKED_SCRIPTS:
+        if name not in result.marked and name not in unmarked:
             problems.append(
                 f"UNCLASSIFIED {name}: carries no declared marker and is not in "
                 f"UNMARKED_SCRIPTS — mark it, or declare it as markerless "
                 f"residue (#4830)."
             )
-    for name in sorted(UNMARKED_SCRIPTS):
+    for name in sorted(unmarked):
         if name in result.marked:
             problems.append(
                 f"STALE DECLARATION {name}: declared markerless but carries "
@@ -336,20 +418,20 @@ def violations(root: Path = GRAPH_SCRIPTS) -> list[str]:
         for path in sorted(root.glob("*.py"))
         if names_a_price(path.read_text(encoding="utf-8", errors="replace"))
     }
-    for name in sorted(detected - set(PRICE_BEARING_SCRIPTS)):
+    for name in sorted(detected - set(price_bearing)):
         problems.append(
             f"UNDECLARED PRICE SCRIPT {name}: names a price of this product but "
             f"is not in PRICE_BEARING_SCRIPTS — declare it so (b) covers it "
             f"(#4830)."
         )
-    for name in sorted(set(PRICE_BEARING_SCRIPTS) - detected):
+    for name in sorted(set(price_bearing) - detected):
         problems.append(
             f"STALE PRICE DECLARATION {name}: declared price-bearing but no "
             f"product price is detected — re-derive the declaration (#4830)."
         )
 
     # (b) a price-bearing script carries a marker AND names the canonical source.
-    for name in sorted(PRICE_BEARING_SCRIPTS):
+    for name in sorted(price_bearing):
         if name not in corpus:
             problems.append(
                 f"MISSING PRICE SCRIPT {name}: declared price-bearing but not "
@@ -374,12 +456,12 @@ def violations(root: Path = GRAPH_SCRIPTS) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Check the declared contract and report every violation.
+
+    No ``--check`` flag: the tool has exactly one job, so an invocation without
+    the flag cannot silently skip the check it exists to perform.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="report every violation of the declared marker contract",
-    )
     parser.add_argument(
         "--graph-scripts",
         default=str(GRAPH_SCRIPTS),
@@ -402,7 +484,8 @@ def main(argv: list[str] | None = None) -> int:
     checked = scan(root)
     print(
         f"OK — {len(checked.marked)} marked, {len(checked.unmarked)} declared "
-        f"markerless, {len(PRICE_BEARING_SCRIPTS)} price-bearing "
+        f"markerless (ceiling {UNMARKED_CEILING}), "
+        f"{len(PRICE_BEARING_SCRIPTS)} price-bearing "
         f"({CANONICAL_PRICE_SOURCE})."
     )
     return 0
