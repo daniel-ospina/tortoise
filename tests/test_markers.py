@@ -628,6 +628,16 @@ def test_no_redirect_stems_registry_exact():
         # gate on main (the #4047/#4524 shape). Registered in all three homes:
         # ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here.
         "test_write_path_unreachable_seam_5148",
+        # #4921: the construct-lock pin builds two REAL embedded servers under
+        # a forced check-then-act interleave (one server over one RDB, plus the
+        # unguarded red half) and skips under the docker redirect, so the file
+        # belongs in the carve-out lane. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS already
+        # carried the stem (the file would otherwise flip its embedded
+        # constructions to the server lane on an out-of-band URI run) — this
+        # pin reding on the addition is the pin working as designed, so the
+        # stem is DECLARED here rather than exempted.
+        "test_4921_construct_lock",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
