@@ -2050,3 +2050,60 @@ def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
     restricted = ct.selected_weight_s(selection, durations, full_pool=run_legs)
     assert restricted < whole, "the restricted pool MUST drop the on_demand weight"
     assert restricted > 0
+
+
+# --- follow-ups recorded by review cycle 3 on #7537 ------------------------
+
+def test_the_pooled_branch_honours_the_default_weight_for_an_absent_file() -> None:
+    """The two branches must agree about absence.
+
+    The `"ALL"` arm filtered `durations` by the pool, so a pool file ABSENT from
+    the map contributed 0 there while the list-leg branch contributed
+    `default_weight` for the same absence — one docstring, two behaviours.
+    """
+    sel = {"full": True, "test_files": "ALL", "slow_run": False}
+    durations = {"tests/a.py": 600}
+    pool = {"tests/a.py", "tests/absent.py"}
+    assert ci_timing.selected_weight_s(sel, durations, full_pool=pool) == 600.0
+    assert ci_timing.selected_weight_s(
+        sel, durations, default_weight=25.0, full_pool=pool) == 625.0
+    # the list-leg branch, same absence
+    assert ci_timing.selected_weight_s(
+        {"test_files": ["tests/absent.py"], "slow_run": False}, durations,
+        default_weight=25.0) == 25.0
+
+
+def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys) -> None:
+    """`push_legs` spreads `push_extra` into the counted `test` shards, but
+    `fast_pool` does NOT include it — so omitting it put files in the numerator's
+    own jobs with no weight on the other side (the #7537 defect, sign flipped).
+
+    Differential by design: the two manifests differ ONLY by `push_extra`, so
+    the assertion cannot pass by duplicating the pool expression in the test.
+    """
+    import argparse
+
+    root = Path(__file__).resolve().parent.parent
+    base = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    with_extra = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    with_extra["push_extra"] = ["tests/extra_only.py"]
+    with_extra.setdefault("durations", {})["tests/extra_only.py"] = 1234
+
+    monkeypatch.setattr(ci_timing, "fetch_run",
+                        lambda r, i: {"created_at": "2026-10-06T10:00:00Z"})
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda r, i: [])
+
+    def run(manifest):
+        p = tmp_path / f"m{len(manifest)}.yml"
+        p.write_text(yaml.safe_dump(manifest))
+        args = argparse.Namespace(run_id="1", changed_files="tortoise/sdk.py",
+                                  manifest=str(p), repo="o/r", event="push")
+        assert ci_timing.paid_vs_selected_cli(args) == 0
+        return json.loads(capsys.readouterr().out)["selected_s"]
+
+    plain = run(base)
+    bumped = run(with_extra)
+    assert bumped - plain == 1234.0, (
+        "push_extra weight must enter the full-selection pool — otherwise the "
+        "counted shards run files the denominator omits"
+    )
