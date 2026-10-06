@@ -845,7 +845,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "are map decisions with no disposition row in the doc to cite — a net-new target, or a row",
         "that table does not carry.",
         "",
-        "#### D1 — the citation corpus",
+        "### D1 — the citation corpus",
         "",
     ]
     for (doc, quote), tools in sorted(by_quote.items()):
@@ -870,7 +870,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         f"beyond the first clause; {len(ambiguous)} sit under an ambiguous citation.** Every count",
         "here is computed from the doc, not typed.",
         "",
-        "#### D2 — citations that do NOT name their row's destination",
+        "### D2 — citations that do NOT name their row's destination",
         "",
         "**These are findings, not edits.** A row whose destination is not named by the row's own",
         "full citation is the `get_source_reliability` failure mode read one level up — the row and",
@@ -896,7 +896,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
 
     out += [
         "",
-        "#### D2b — rows whose support exists ONLY beyond the first clause",
+        "### D2b — rows whose support exists ONLY beyond the first clause",
         "",
         "These rows are **why the first-clause split is load-bearing, not decorative**. Their",
         "destination is named by the citation, but only in a clause after the first `→` — the",
@@ -916,7 +916,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
 
     out += [
         "",
-        "#### D2c — destinations the sibling SDK rename table records as WRONG",
+        "### D2c — destinations the sibling SDK rename table records as WRONG",
         "",
         "`docs/product/sdk-rename-table.md` (generated on demand) reconciles the same surface this file maps, and its",
         "§C3b finding plus its C6 fold record name a different destination for the rows below.",
@@ -937,7 +937,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
 
     out += [
         "",
-        "#### D3 — citations that name more than one target",
+        "### D3 — citations that name more than one target",
         "",
         "A citation here does not by itself determine a destination: it names several, split by",
         "prose (`; reads via …`, `where they are …`, `for annotation`). Which clause applies to",
