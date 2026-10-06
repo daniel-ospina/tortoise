@@ -756,6 +756,40 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
+    def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
+        """An OPEN PR's number is not a work item — the run must refuse (#7009).
+
+        The test above pins `CLEAN` for a TERMINAL PR, and both answers are
+        correct: a merged/closed PR is immutable history, while an OPEN PR names
+        a live work item whose ownership its own number says nothing about.
+
+        Measured 2026-10-06: with the self-match filed as a `weak` hit,
+        `collision_preflight.py <open-PR-number>` returned `CLEAN (exit 0)` for a
+        PR whose issue was held on FOUR surfaces at once. Exit 0 is this
+        protocol's instruction to DISPATCH, so the fail-closed tool was
+        authorising a dispatch onto held work — the failure the whole pre-flight
+        exists to prevent (#3061). Note the polarity history: #7009's original
+        symptom was the same input read as COLLISION (fail-CLOSED, lost
+        throughput, nothing duplicated); once the self-match was downgraded to
+        `weak` it became fail-OPEN.
+
+        Exit 2 is pinned deliberately rather than 1: it is the protocol's own
+        "could not be completed — do not start on a guess" verdict, so the
+        refusal lands in a channel lanes already know how to obey.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # Anti-vacuity: the refusal must be about THIS number, not a blanket
+        # refusal to run — the run reached the surfaces and named the object.
+        self.assertIn("#3061", out)
+
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
         # make — and on a TERMINAL PR it is still history, not in-flight work.

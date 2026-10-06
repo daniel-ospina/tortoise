@@ -523,6 +523,23 @@ _JEV_CLAIM_QUESTION = (
 )
 
 
+class NotAWorkItem(Exception):
+    """The queried number is a PULL REQUEST, not a work item (#7009).
+
+    Deliberately NOT a `SurfaceError`. Every `SurfaceError` raised while a
+    surface is scanned is caught by that surface's own handler, turned into a
+    PER-SURFACE advisory note, and leaves the verdict and the exit code
+    untouched — which is right for "this one surface could not be measured" and
+    wrong for "you asked about the wrong object". Measured: raising
+    `SurfaceError` here printed the refusal correctly and still returned
+    `VERDICT: CLEAN`, i.e. it closed nothing. This class therefore propagates
+    past every per-surface handler to `main`, which turns it into exit 2.
+
+    `EXIT_INCOMPLETE` is the protocol's existing "do not start on a guess"
+    verdict, so this needs no new exit code, flag or gate.
+    """
+
+
 class SurfaceError(Exception):
     """A surface could not be queried (INCOMPLETE — never CLEAN)."""
 
@@ -2806,8 +2823,60 @@ def scan_pr_surface(
                         "your own PR (its head branch is one of --self-branch) — "
                         "not a competing claim", "weak")
             continue
-        # 2. The PR *is* the issue: not separate in-flight work.
+        # 2. The PR *is* the issue (#7009): the caller passed a PULL REQUEST
+        #    number. A pull request number IS an issue number on GitHub, so this
+        #    is not an exotic input error — and the verdict it produces describes
+        #    the PULL REQUEST, never the work item.
+        #
+        #    Measured 2026-10-06: `collision_preflight.py 7477` returned CLEAN
+        #    (exit 0) while #7455 — the issue that PR closes — was held on FOUR
+        #    surfaces at once (open PR, local branch, remote branch, live
+        #    worktree). Exit 0 is this protocol's instruction to DISPATCH, so that
+        #    was a FAIL-OPEN on a blocking check: a lane is told to start work
+        #    that already has a lane, a branch and a worktree. The original #7009
+        #    symptom was the same input read as COLLISION (fail-CLOSED — lost
+        #    throughput, nothing duplicated); once the self-match was downgraded
+        #    to `weak` the polarity flipped and the surviving form duplicates
+        #    work, which is the failure this whole pre-flight exists to prevent.
+        #
+        #    So a self-match must REFUSE, not be filed as a `weak` hit and
+        #    forgotten. `SurfaceError` is the existing channel for "this surface
+        #    could not be measured" and already maps to exit 2 — the protocol's
+        #    own "do not start on a guess" verdict — so this needs no new exit
+        #    code, no new flag and no new gate. The refusal is placed ONLY where
+        #    the work item can be named: with no closing reference there is no
+        #    issue to redirect to, and the previous (weak) behaviour is kept.
         if str(pr.get("number")) == str(issue):
+            # TERMINAL PRs keep the old behaviour, and that is load-bearing:
+            # `test_closed_pr_own_number_is_weak_not_blocking` pins it — a number
+            # whose object is a CLOSED/MERGED PR is immutable history, not
+            # in-flight work, so CLEAN is the CORRECT answer for it. Refusing
+            # there would turn a right answer into a refusal. The hazard is
+            # entirely the NON-TERMINAL case: an OPEN PR's number names a live
+            # work item, and a verdict about the PR says nothing about it.
+            if terminal is None:
+                linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+                # The refusal is UNCONDITIONAL within the open case. It does not
+                # depend on the PR naming a linked issue, because the defect is
+                # not "we could not name the work item" — it is "the number you
+                # passed is not a work item". Gating on a closing reference left
+                # the fail-open intact for exactly the PR that exposed it: #7477
+                # references (#7455) in its TITLE (this repo's convention) and
+                # carries NO closing keyword, so its closing field is empty and a
+                # `linked`-gated refusal fell straight through (measured).
+                where = (
+                    " It closes " + ", ".join(f"#{n}" for n in linked) + "."
+                    if linked else
+                    " It names no closing issue, so resolve the work item by hand"
+                    " (this repo's convention puts it in the title as `(#N)`)."
+                )
+                raise NotAWorkItem(
+                    f"#{issue} is an OPEN PULL REQUEST, not a work item. A pull "
+                    f"request number is also an issue number, so any verdict "
+                    f"computed here describes the PR and NOT the issue it belongs "
+                    f"to — and an exit 0 would authorise a dispatch on work this "
+                    f"PR belongs to.{where} Re-run against the issue number (#7009)."
+                )
             surface.add(_pr_ref(pr),
                         f"PR number == issue ({issue}): this PR *is* the issue, "
                         "not separate in-flight work (non-blocking)", "weak")
@@ -4329,6 +4398,13 @@ def main(argv: list[str] | None = None) -> int:
             closed_pr_timeout, identity,
         )
         report, code = format_report(ordered, issue, target, title)
+    except NotAWorkItem as exc:
+        # The refusal is about the QUESTION, not about a surface, so it must not
+        # be absorbed into a per-surface note and must never become a verdict.
+        # Exit 2 is the protocol's "could not be completed — do not start on a
+        # guess" channel (#7009).
+        print(f"collision-preflight: {exc}", file=sys.stderr)
+        return EXIT_INCOMPLETE
     except RuntimeError as exc:  # partial-run guard
         print(f"collision-preflight: {exc}", file=sys.stderr)
         return EXIT_USAGE
