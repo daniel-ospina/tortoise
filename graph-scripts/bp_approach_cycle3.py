@@ -1,5 +1,7 @@
 """Cycle 3 — Validation: research top gaps, update confidence scores."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
+# Price-bearing: the tier prices below are a SUPERSEDED option set — the canonical
+# source is product/pricing.json ("status": "current", owner_confirmed 2026-08-07).
 import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
