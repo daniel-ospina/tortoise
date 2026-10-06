@@ -781,5 +781,27 @@ def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
         assert any(expected in e for e in errors), (label, expected, errors)
 
 
+def test_gate_fails_closed_on_a_descriptive_state() -> None:
+    """`descriptive` is NOT accepted until #5064 open question (c) settles.
+
+    ⚠️ The valid `tracking_issue` is load-bearing: without it the row fails on
+    the missing issue instead, so the test would pass for the wrong reason and
+    not pin `STATES`. Adding `"descriptive"` to `STATES` survived until this
+    case existed (cycle-11 P2).
+    """
+    errors = gate_errors(
+        [
+            {
+                "id": "x",
+                "name": "x",
+                "declared_in": ["config/v4-mechanisms.yml"],
+                "state": "descriptive",
+                "tracking_issue": 5006,
+            }
+        ]
+    )
+    assert any("NEITHER" in e for e in errors), errors
+
+
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
