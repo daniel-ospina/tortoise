@@ -13,6 +13,7 @@ hanging the suite.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -293,3 +294,127 @@ def test_missing_directory_yields_no_lock_instead_of_raising(tmp_path):
     """A gone dbdir is #3653's refusal to make, by name, not this guard's."""
     gone = str(tmp_path / "does-not-exist" / "db.rdb")
     assert _open_construct_lock(gone) == -1
+
+
+# ── the race itself: one server over one RDB, forced to interleave ───────
+#
+# #4921's Acceptance asks for exactly this and warns that a guard which cannot
+# be shown to fail is not evidence: "A test that fails before the lock and
+# passes after, asserting ONE LIVE SERVER OVER ONE RDB under a forced
+# interleave — not merely 'no exception'." The two tests below are that pair.
+# They construct real embedded servers, so they belong to the URI-unset
+# carve-out lane and skip under the docker redirect, where the seam under test
+# is never reached.
+
+
+def _run_id(client) -> str:
+    """The identity of the server `client` is actually talking to.
+
+    redislite's client installs a response callback that parses INFO into a
+    nested dict (`{"server": {"run_id": ...}}`), so this reads that shape and
+    falls back to the raw bulk string.
+    """
+    info = client.execute_command("INFO", "server")
+    if isinstance(info, bytes):
+        info = info.decode()
+    if isinstance(info, dict):
+        for value in info.values():
+            if isinstance(value, dict) and "run_id" in value:
+                return value["run_id"]
+        if "run_id" in info:
+            return info["run_id"]
+        raise AssertionError(f"no run_id in parsed INFO: {sorted(info)}")
+    for line in info.splitlines():
+        if line.startswith("run_id:"):
+            return line.split(":", 1)[1].strip()
+    raise AssertionError("no run_id in INFO server")
+
+
+def _forced_interleave_constructs(tmp_path, monkeypatch, *, guard: bool) -> list:
+    """Construct one RDB twice, forcing both reads to happen before either start.
+
+    The patch sits ON THE READ (`_is_redis_running`) and makes a `False` verdict
+    wait at a bounded barrier for a peer. That is the window #4921 is about: if
+    both reads return False before either construction starts, both will start a
+    server unless something serialises them. `guard=False` neutralises the lock
+    by making the key underivable, which is what the wrapper consults.
+
+    Returns the two clients. Reuses the FIRST server for the second construction
+    when the guard holds, so both clients answer for the same `run_id`.
+    """
+    if os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("docker redirect: the embedded seam is not reached")
+    redislite_client = pytest.importorskip("redislite.client")
+    from redislite import Redis
+
+    import tortoise  # noqa: F401  (arms the redislite guard installer)
+    from tortoise import embedded_lifecycle
+
+    if not guard:
+        monkeypatch.setattr(embedded_lifecycle, "_construction_key", lambda *a, **k: None)
+
+    rdb = str(tmp_path / "interleave.rdb")
+    original = redislite_client.RedisMixin._is_redis_running
+    barrier = threading.Barrier(2, timeout=3)
+
+    def rendezvous(self):
+        running = original(self)
+        if not running:
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait()          # both reads False before either start
+        return running
+
+    monkeypatch.setattr(redislite_client.RedisMixin, "_is_redis_running", rendezvous)
+
+    clients, errors = [], []
+
+    def build():
+        try:
+            clients.append(Redis(rdb))
+        except Exception as exc:        # a construction that fails still counts
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+        assert not t.is_alive(), "a construction hung"
+    assert len(clients) == 2, f"constructions failed: {errors!r}"
+    return clients
+
+
+def test_forced_interleave_starts_exactly_one_server_over_one_rdb(tmp_path, monkeypatch):
+    """#4921 green: with the construction lock, both clients share ONE server."""
+    clients = _forced_interleave_constructs(tmp_path, monkeypatch, guard=True)
+    try:
+        ids = {_run_id(c) for c in clients}
+        assert len(ids) == 1, (
+            f"two servers were started over one RDB (run_ids={ids}) — the "
+            "construction lock did not serialise the check-then-act span")
+    finally:
+        for c in clients:
+            with contextlib.suppress(Exception):
+                c.shutdown(nosave=True)
+
+
+def test_without_the_lock_two_servers_can_start_over_one_rdb(tmp_path, monkeypatch):
+    """#4921 red, kept as evidence: neutralise the guard and the bug reproduces.
+
+    This is the half that makes the pair evidence rather than assertion — if the
+    guard were somehow always in force, this test fails instead of quietly
+    passing. It pins the DEFECT, so it is expected to keep failing once the
+    defect is properly impossible (a different mechanism than this lock);
+    delete it then, with the replacement named.
+    """
+    clients = _forced_interleave_constructs(tmp_path, monkeypatch, guard=False)
+    try:
+        ids = {_run_id(c) for c in clients}
+        assert len(ids) == 2, (
+            f"expected the unguarded race to start two servers over one RDB, got "
+            f"{len(ids)} (run_ids={ids}) — either the interleave did not "
+            f"reproduce or something else now serialises constructions")
+    finally:
+        for c in clients:
+            with contextlib.suppress(Exception):
+                c.shutdown(nosave=True)
