@@ -164,15 +164,25 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
 # SELECTED" — and never separated EXECUTION from QUEUE RESIDENCY. Those are the
 # two numbers that decide where a slow gate gets fixed, and without them the
 # first wrong explanation (queue latency, or a heavy corpus file) cannot be
-# refuted. Measured 2026-10-06: push-run calibration 1.00, PR runs 2.96-4.35,
-# while queue wait was 0.2-1.5 min on EVERY job — i.e. slowdown AFTER start.
+# refuted. Measured 2026-10-06 on a real push run (37468261628): ratio 1.177
+# against the run-leg pool below, while queue wait was 0.2-1.5 min on EVERY job
+# — i.e. slowdown AFTER start, not queueing. The residual ~18% is job WALL time
+# (checkout/install/collect) that the per-file denominator does not represent,
+# so "calibrates at 1.0" was never a property of this arithmetic.
+# ⛔ Do NOT restate a PR-run band here. The earlier 2.96-4.35 figures were
+# computed with a numerator that counted every `test*` job — a different basis
+# from this tool's — and are NOT comparable to its output.
 
 TEST_JOB_PREFIX = "test"
 
 # The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
-# `test-slow (a)`, or a bare `test`/`test-slow`. Everything else that starts
-# with `test` (carve-out, d14-hosted-api, concurrency-falkor, track-b) runs an
-# UNWEIGHTED file set and is reported separately — see `paid_vs_selected`.
+# `test-slow (a)`, or a bare `test`/`test-slow`. Jobs that start with `test` but
+# do not match are reported in `excluded_jobs`, and a matched shard that never
+# completed is reported in `incomplete_shard_jobs`; neither contributes to
+# `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total gate
+# execution. WHY any particular leg is excluded differs per leg and is defined by
+# `.github/workflows/python-ci.yml` — read that file; do not assert a summary
+# mechanism here.
 SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
 
 
@@ -228,7 +238,7 @@ def selected_weight_s(selection: dict, durations: dict,
 
     ⛔ `ci_selection.select()` returns the STRING sentinel ``"ALL"`` for a full
     selection (push/schedule, a shared-module change, or an unclaimed path —
-    `ci_selection.py:1103`), NOT a list. Iterating it yields the three
+    produced by `_full_selection`), NOT a list. Iterating it yields the three
     characters ``A``, ``L``, ``L``, whose keys are never in `durations`, so the
     whole fast pool silently contributes `default_weight` — measured as a 4.5x
     deflation of the denominator (a 4.5x INFLATION of `ratio`) on the real
@@ -254,12 +264,18 @@ def selected_weight_s(selection: dict, durations: dict,
         # the numerator can cover; None keeps the whole map for callers that
         # have no manifest.
         if full_pool is None:
-            candidates = list(durations.items())
+            values = [v for _, v in durations.items()]
         else:
+            # Iterate the POOL, not the map, so a pool file ABSENT from
+            # `durations` falls back to `default_weight` exactly as the list-leg
+            # branch below does. Filtering the map instead made the two branches
+            # disagree: the same absence was 0 here and `default_weight` there.
+            # A SET, not a list: two pool members that normalise to the same key
+            # ("tests/a" and "tests/a.py") must not be summed twice.
             norm = {k if k.endswith(".py") else f"{k}.py" for k in full_pool}
-            candidates = [(k, v) for k, v in durations.items() if k in norm]
+            values = [durations.get(k) for k in sorted(norm)]
         total = 0.0
-        for _, value in candidates:
+        for value in values:
             w = _finite(value)
             total += w if w is not None else default_weight
         return total
@@ -280,19 +296,19 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
                      full_pool: set[str] | None = None) -> dict:
     """What the gate PAID against what the diff SELECTED (#7532).
 
-    `ratio` is the diagnostic: a push run selects the FULL pool and calibrates
-    near 1.0, while a PR run that selects a small surface but pays a large one
-    is execution inflation, not selection weight. `queue_s` is reported
-    alongside so queue latency cannot be mistaken for execution cost.
+    `ratio` is the diagnostic: a push run selects the FULL pool (measured 1.177
+    on run 37468261628, the residual being job wall time the per-file
+    denominator cannot see), while a PR run that selects a small surface but
+    pays a large one is execution inflation, not selection weight. `queue_s` is
+    reported alongside so queue latency cannot be mistaken for execution cost.
 
-    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME LEGS. Only the shard jobs
-    whose work `test_files`/`slow_selected` actually weight (`test (a)`, …,
-    `test-slow (a)`, …) are counted. Other `test*` legs — `test-carve-out`,
-    `test-d14-hosted-api`, `test-concurrency-falkor`, `test-track-b` — run file
-    sets that `select()` EXPLICITLY SUBTRACTS from both of those keys
-    (`ci_selection.py:1231,1271`), so counting their seconds would add
-    execution with no weight and inflate the ratio by construction. They are
-    returned in `excluded_jobs` instead of being silently dropped.
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the counted
+    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed. A `test*` job
+    that does not match `SHARD_JOB_RE` is returned in `excluded_jobs`, and a
+    matched shard that never completed is returned in `incomplete_shard_jobs`
+    (which also sets `complete=False`); neither contributes to `paid_s`.
+    **`paid_s` is therefore the COUNTED SHARDS' execution time, not total gate
+    execution — say so whenever it is quoted.**
     """
     paid = 0.0
     queue = 0.0
@@ -891,23 +907,33 @@ def paid_vs_selected_cli(args) -> int:
         print("--paid-vs-selected needs both --run-id and --changed-files",
               file=sys.stderr)
         return 2
-    import yaml  # lazy by design
-
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    manifest = yaml.safe_load(Path(args.manifest).read_text())
+    # `_manifest_of` is this module's existing seam for exactly this — it wraps
+    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
+    # `load_manifest()` does for every other consumer. Feeding the raw YAML
+    # straight to `fast_pool` would iterate a scalar surface
+    # character-by-character and raise on a None one.
+    manifest = _manifest_of(Path(args.manifest).read_text())
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
-    # #7537 cycle 2: on a full selection the gate runs the fast pool plus the
-    # slow leg MINUS the carve-out — the carve-out JOB is excluded from the
-    # numerator, so its weight must not enter the denominator either. And the
-    # `durations` map also carries `on_demand` entries python-ci never runs
-    # (eval/retrieval/test_integration.py alone is 1523.4 s of 7398.2 s), so
-    # summing the whole map would understate the ratio on the calibration path.
+    # On a full selection the denominator is the set of files the gate actually
+    # runs, not the whole `durations` map: the map also carries `on_demand`
+    # entries python-ci never runs (eval/retrieval/test_integration.py alone is
+    # 1523.4 s of 7398.2 s), so summing the whole map would understate the ratio
+    # on the calibration path. The carve-out runs as its own job whose weight is
+    # not in the numerator either — see `.github/workflows/python-ci.yml` for
+    # which job runs what.
     full_pool = None
     if selection.get("test_files") == "ALL":
         full_pool = set(ci_selection.fast_pool(manifest))
+        # `push_legs` spreads `push_extra` into the counted `test` shards, but
+        # `fast_pool` does NOT include it. Omitting it here would put files in
+        # the counted jobs with no weight on the other side. It is `[]` today,
+        # and that is exactly why the guard belongs here rather than a comment:
+        # the day it is populated is the day the ratio silently inflates.
+        full_pool |= set(manifest.get("push_extra") or [])
         full_pool |= (set(manifest.get("slow_files") or [])
                       - ci_selection.carve_out_files(manifest))
     run = fetch_run(args.repo, args.run_id)
