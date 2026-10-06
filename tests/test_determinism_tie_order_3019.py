@@ -4,8 +4,10 @@ Two determinism gaps are pinned here (the issue's parts 1 and 2; part 3 — the 
 SET flipping with wall-clock time via the embedder's negative cache — is a
 product decision and is deliberately NOT touched):
 
-  1. **Within-leg tie order.** Every leg ran ``ORDER BY score DESC`` with no
-     secondary key, so a tie fell through to DB row order. The operator FTS leg
+  1. **Within-leg tie order.** Each ordering leg carried a SINGLE key — ``score
+     DESC`` for the two FTS legs and the vector leg's brute-force scan, ``hops
+     ASC`` for the hop expansion — and the kind-scan structural leg had no
+     ``ORDER BY`` at all, so a tie fell through to DB row order. The operator FTS leg
      is the sharpest case: it returns a CONSTANT ``1.0 AS score`` for every row,
      so the entire leg is one tie *by construction* — no dependence on the
      index leg's scores.
@@ -14,11 +16,13 @@ product decision and is deliberately NOT touched):
      candidate carried only by another leg keeps a finite score, but a NaN key
      compares False against every key, so the ORDER damage is global. Tuple
      comparison against NaN is False in BOTH directions, so the ``(-score, id)``
-     key that #2952 introduced silently degraded to insertion order.
+     key that #2952 introduced silently degraded to insertion order for those
+     candidates.
 
-Every test below names (a) the value that makes it FAIL and (b) how the fixture
-reaches that value. Tests whose fixture could silently produce nothing carry an
-explicit "FIXTURE NOT REACHED" assertion, so a vacuous pass is a failure.
+Every BEHAVIOURAL test below names (a) the value that makes it FAIL and (b) how
+the fixture reaches that value. Tests whose fixture could silently produce
+nothing carry an explicit "FIXTURE NOT REACHED" assertion, so a vacuous pass is a
+failure.
 
 Runnable with:
   TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
