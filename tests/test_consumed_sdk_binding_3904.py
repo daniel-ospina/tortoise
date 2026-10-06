@@ -33,9 +33,16 @@ DRIVING THE REAL HANDLER
     duration of a call. Handlers then fail on their own argument validation —
     that is expected and FINE: the SDK read happens before it, in the very
     expression that passes the bound method to ``_safe``/``_quota_gated``. Each
-    call is wrapped in ``except BaseException`` and a handler's own exception is
+    call is wrapped in ``except Exception`` and a handler's own exception is
     NEVER allowed to fail the gate; the exception type is recorded and reported
     (also via ``record_property``), so the swallow is visible rather than silent.
+    ``Exception`` — not ``BaseException`` — is the right width: the census over
+    every vector is ``{AttributeError, TypeError, ValueError}``, all ordinary
+    handler-validation failures, so a Ctrl-C (``KeyboardInterrupt``) or a
+    ``SystemExit`` during the ~80s drive must PROPAGATE rather than be swallowed
+    as one more handler exception (it would otherwise read as a slow pass). A
+    handler that legitimately raised a non-``Exception`` ``BaseException``
+    subclass would need evidence added here before widening back.
 
     Two argument vectors are tried per handler — ``minimal`` (required params
     filled, defaults elsewhere) and ``typed`` (every param filled) — and the
@@ -270,7 +277,7 @@ def _drive_handler_cached(name: str, fn: Any) -> DriveResult:
         with _recording_seam(stub):
             try:
                 fn(*args, **kwargs)
-            except BaseException as exc:  # a handler exception must not fail the gate
+            except Exception as exc:  # a handler exception must not fail the gate; KeyboardInterrupt/SystemExit propagate
                 swallowed.append(f"{label}:{type(exc).__name__}")
         reads.extend(stub.reads)
     return DriveResult(tuple(dict.fromkeys(reads)), tuple(swallowed), tuple(labels))
@@ -360,9 +367,61 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
         (
             "mitigate",
             (),
-            {"action": "mitigate", "id": "x", "reason": "r"},  # 'x' is an unknown action → early return
+            # the generic vectors pass ``action="x"`` (the benign str sample),
+            # which is an UNKNOWN action: the handler returns the unknown-action
+            # error BEFORE reading the SDK. A real action is required to enter a
+            # branch, and this vector enters the mitigate one.
+            {"action": "mitigate", "id": "x", "reason": "r"},
+        ),
+        (
+            "annotate",
+            (),
+            # the annotate branch reads ``annotate_operator`` only when ALL FOUR
+            # dimensions are non-None (else it returns the validation error first,
+            # mcp_server.py::tortoise_operator_action), so the override must fill
+            # them; this is the second half of the recorded union.
+            {
+                "action": "annotate",
+                "id": "x",
+                "bias": 0.1,
+                "precision": 0.5,
+                "consistency": 0.5,
+                "directness": 0.5,
+            },
         ),
     ),
+}
+
+
+# ── the exact PUBLIC-read expectation (dynamic reach, closed both ways) ──────
+#
+# ``tests/tool_surface_capabilities.py`` used to pin each of these two entries'
+# exact PUBLIC reached set through ``DECLARED_BINDING_DIVERGENCES`` (it compared
+# the declared method against ``recorded.reached``). #3904 emptied that ledger
+# when both declarations were made honest (``sdk_method=""``), which also
+# dropped the only pin that:
+#   * ``tortoise_traverse`` reaches NO public SDK method (its handler reads only
+#     ``_get_proj``, an underscore/internal), and
+#   * ``tortoise_operator_action`` reaches exactly the two operator methods.
+# This gate re-establishes the property DYNAMICALLY — the reads are RECORDED off
+# the stub, not derived by AST — so a new public read either handler starts
+# reaching is a red, in EITHER direction.
+#
+# Keyed by entry name; the value is the exact set of PUBLIC SDK names the handler
+# must READ. The map is CLOSED: every listed entry is asserted exact, and a key
+# that names no callable registry entry fails at import time (see the collection
+# gate at the foot of this module).
+_EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
+    # reads only ``_get_proj``; NO public SDK method is reached. The #3904
+    # divergence was that it DECLARED ``traverse`` — a live but unrelated method,
+    # signature ``(id, relationship_type, direction)`` — which its handler never
+    # read. Pinning the empty public set keeps that declaration from returning
+    # unnoticed.
+    "tortoise_traverse": frozenset(),
+    # dispatches to ``mitigate_operator`` / ``annotate_operator``; the union is
+    # exactly what the blanked consumed declaration was made honest about (the
+    # consolidated ``operator_action`` SDK method is never reached).
+    "tortoise_operator_action": frozenset({"mitigate_operator", "annotate_operator"}),
 }
 
 
@@ -485,6 +544,43 @@ def test_entry_consumes_its_declared_sdk_binding(entry, record_property):
     record_property("swallowed_exceptions", ",".join(result.swallowed))
     record_property("vectors", ",".join(result.vectors))
     assert violation is None, _describe(violation)
+
+
+def test_declared_public_read_set_is_exact():
+    """The exact PUBLIC SDK read set is pinned for the entries this gate declares.
+
+    ``_EXPECTED_PUBLIC_READS`` is a CLOSED map, asserted in BOTH directions:
+
+      * an entry whose recorded public reads differ from its expectation fails —
+        a NEW read, a dropped read, or a changed dispatch branch (an expectation
+        that says ``unreached`` while the handler now reaches something is
+        exactly this case); and
+      * a key that names no callable registry entry fails here (and at import
+        time via the collection gate), so the map cannot grow a phantom row.
+
+    This is the dynamic replacement for the static exact-reach pin the emptied
+    ``DECLARED_BINDING_DIVERGENCES`` ledger used to carry (see the map's
+    comment): a NEW public read reached by ``tortoise_traverse`` — the case the
+    ledger removal left unflagged — is a red here.
+    """
+    registry_names = {e.name for e in TOOL_REGISTRY}
+    mismatches: list[str] = []
+    for name, expected in sorted(_EXPECTED_PUBLIC_READS.items()):
+        if name not in registry_names:
+            mismatches.append(f"{name}: expectation names no registry entry (stale map)")
+            continue
+        fn = getattr(mcp_server, name, None)
+        if not callable(fn):
+            mismatches.append(f"{name}: no callable handler to drive")
+            continue
+        result = drive_handler(name, fn)
+        observed = frozenset(r for r in result.reads if not r.startswith("_"))
+        if observed != expected:
+            mismatches.append(
+                f"{name}: expected public reads {sorted(expected)} but recorded "
+                f"{sorted(observed)} (all reads: {list(result.reads)!r})"
+            )
+    assert not mismatches, "exact public-read expectation drifted:\n  " + "\n  ".join(mismatches)
 
 
 def test_handler_served_no_read_ledger_is_exact():
@@ -634,4 +730,9 @@ _ORPHANED_OVERRIDES = sorted(set(_DRIVE_OVERRIDES) - _REGISTRY_NAMES)
 assert not _ORPHANED_OVERRIDES, (
     f"orphaned drive overrides: {_ORPHANED_OVERRIDES} — the registry renamed or removed "
     "them without re-pointing the override"
+)
+_ORPHANED_EXPECTATIONS = sorted(set(_EXPECTED_PUBLIC_READS) - _REGISTRY_NAMES)
+assert not _ORPHANED_EXPECTATIONS, (
+    f"orphaned public-read expectations: {_ORPHANED_EXPECTATIONS} — the registry renamed "
+    "or removed them without re-pointing the expectation"
 )
