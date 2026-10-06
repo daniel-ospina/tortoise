@@ -215,7 +215,7 @@ def test_llm_classify_deepseek_key_goes_to_deepseek(monkeypatch):
     # thinking explicitly disabled (a body-blind regression passes CI green).
     import json
     body = json.loads(captured["data"].decode())
-    assert body["model"] == "deepseek-v4-flash"
+    assert body["model"] == "deepseek-flash"
     assert body["thinking"] == {"type": "disabled"}
 
 
@@ -329,15 +329,34 @@ def test_llm_classify_gate_basis_flash_family_only(monkeypatch):
     _patch_urlopen(monkeypatch, captured)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds")
-    _a._LLM_PROVIDERS["DEEPSEEK_API_KEY"] = (
+    monkeypatch.setitem(_a._LLM_PROVIDERS, "DEEPSEEK_API_KEY", (
         "https://api.deepseek.com/v1/chat/completions",
-        "deepseek/deepseek-v4-flash")
+        "deepseek/deepseek-v4-flash"))
     _a.llm_classify("x")
     import json
     assert json.loads(captured["data"].decode())["thinking"] == {"type": "disabled"}
     captured.clear()
-    _a._LLM_PROVIDERS["DEEPSEEK_API_KEY"] = (
+    monkeypatch.setitem(_a._LLM_PROVIDERS, "DEEPSEEK_API_KEY", (
         "https://api.deepseek.com/v1/chat/completions",
-        "deepseek-v4-pro")
+        "deepseek-v4-pro"))
     _a.llm_classify("x")
     assert "thinking" not in json.loads(captured["data"].decode())
+
+
+def test_the_thinking_gate_tracks_the_flash_family_not_one_literal():
+    """#1790 + #4129: the thinking-disable must cover the flash FAMILY, not one
+    exact id. Pinning only the id (as the test above does) is what let a rename
+    — `deepseek-v4-flash` -> `deepseek-flash`, forced by the retired id — go
+    SILENTLY inert and re-enable hidden reasoning tokens with no failing test.
+    `deepseek-v4-pro` must still not match."""
+    from tortoise import analyze as _a
+
+    for served in ("deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-0731",
+                   "deepseek/deepseek-v4-flash", "deepseek/deepseek-flash"):
+        assert _a._is_deepseek_flash_family(served), served
+    for other in ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "gpt-4o-mini", ""):
+        assert not _a._is_deepseek_flash_family(other), other
+    # The shipped default itself must be a served flash id — the pairing that
+    # the single-literal gate used to encode implicitly.
+    _url, default_model = _a._LLM_PROVIDERS["DEEPSEEK_API_KEY"]
+    assert _a._is_deepseek_flash_family(default_model), default_model
