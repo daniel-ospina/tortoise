@@ -375,6 +375,47 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
             errors = gate_errors([row])
             assert errors, (field, bad, "the gate PASSED a fake path")
 
+    # ⚠️ The cases above are all KIND-INVALID, so `_kind_violation` rejects them
+    # before the shape guard runs — and `assert errors` cannot tell the two
+    # apart. Dropping `or ".." in p.parts` (and `p.is_absolute()`) survived the
+    # whole suite (cycle-9 P2). These are KIND-VALID, so ONLY the repo-relative
+    # guard can reject them, and the assertion names the message that must fire.
+    for field, val in (
+        ("declared_in", "config/../config/v4-mechanisms.yml"),
+        ("code", "tortoise/../tortoise/fanout.py"),
+        ("tests", "tests/../tests/test_fanout_cap.py"),
+        ("code", str(ROOT / "tortoise" / "fanout.py")),
+    ):
+        row = dict(base)
+        row[field] = [val]
+        errors = gate_errors([row])
+        assert any("repo-relative path inside the repo" in e for e in errors), (field, val, errors)
+
+
+def test_gate_accepts_the_star_test_suffix(tmp_path) -> None:
+    """`*_test.py` is a legitimate test name, not only `test_*.py` (cycle-9 P2).
+
+    The second operand of `_is_test_name` was never the DECIDING check in any
+    test, so mutating it to `or False` survived the suite — even though the repo
+    ships `*_test.py` tests (`graph-scripts/smoke_test.py`, `benchmarks/load_test.py`).
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "impl.py").write_text("x = 1\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "smoke_test.py").write_text("x\n")
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["src/impl.py"],
+        "tests": ["tests/smoke_test.py"],
+    }
+    assert gate_errors([row], root=repo) == []
+
 
 def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
     """A path the OS cannot probe is a violation, not a crash.

@@ -29,18 +29,16 @@
 # near_dup_merge, span_link), four in `STORAGE-ARCHITECTURE.md` (span_link,
 # embed_gate, sufficiency_router, fanout_cap — span_link is declared in both),
 # and one in `packs/dev/manifest.yaml` (embed_gate, its policy source). The
-# seven NAMES below come from
-# #5064's own O/I/T indicator (1), each with its declaring document and a filed
-# tracking issue. Making the set a single registry is the fix; `declared_in:`
-# records where each row's declaration actually lives.
+# seven NAMES below come from #5064's own O/I/T indicator (1), each with its
+# declaring document and a filed tracking issue. Making the set a single
+# registry is the fix; `declared_in:` records where each row's declaration
+# actually lives.
 #
-# ⛔ NOT IN SCOPE (this is #5064's bounded slice only):
-#   * indicator (2)'s "the design document is generated from the registry" —
-#     i.e. #5064's open question (a), "is the registry the SOURCE or a CHECK over
-#     the design?" — is deliberately left as a check here. #5047 chose
-#     generate-from-registry; that decision is not taken here.
-#   * the substrate refactor itself, and any change to the extraction/write-path
-#     stages. This is a registry + a gate, nothing else.
+# ⛔ NOT IN SCOPE — the substrate refactor, any change to the extraction/write
+# path, and indicator (2)'s "generate the design document from the registry"
+# (#5064's open question (a), registry-as-source vs registry-as-check). The full
+# non-scope note is stated once, in the gate's own docstring —
+# `tests/test_v4_declared_mechanisms.py` — so the two cannot drift.
 #
 # Mapping to #5064's own symptom table: #5005 vet · #5012 source dedup ·
 # #5006 near-dup MERGE · #5007 span link · #5008 embed gate · #5009 sufficiency
