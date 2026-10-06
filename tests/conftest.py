@@ -267,6 +267,21 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
+def _session_will_connect(uri: str) -> bool:
+    """Will this session actually connect to ``uri``? The SINGLE gate (#6073).
+
+    Mirrors `_assert_backend_identity`'s own predicate: a loopback target, or a
+    non-loopback one under the explicit `TORTOISE_TEST_ALLOW_REMOTE=1`
+    override. It lives here, not in `tests/_embedded.py`, so the probe and the
+    session can never disagree about whether a target is in play — and because
+    that module is inside the #4097 env-read scan surface, where a new raw
+    read would require a recorded ledger decision.
+    """
+    from tortoise.config import is_loopback_uri
+
+    return is_loopback_uri(uri) or os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") == "1"
+
+
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
 # Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
 # surface. Declared FIRST among the session fixtures so the enforcement
@@ -274,6 +289,7 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
 # helper lives in tests/_embedded.py (pinned by test_markers.py — the
 # tests.conftest import would re-execute conftest's top-level code).
 from tests._embedded import (  # noqa: E402
+    _assert_configured_db_answers,
     _assert_p4_uri_required,
     serialize_embedded_construction,
 )
@@ -287,8 +303,16 @@ def _p4_uri_required():
     TORTOISE_TEST_CARVE_OUT=1 is set (the carve-out job / tier-2 URI-less
     legs / e2e surfaces opt in). A URI-less run that is not the carve-out is
     the pre-epic shape — migrated files would construct embedded and
-    green-pass on the wrong backend."""
+    green-pass on the wrong backend.
+
+    #6073: then prove the configured DB actually ANSWERS. The URI gate above
+    is a configuration check; against a wedged runtime it passes while every
+    test below dies on its own socket timeout, which reads like a diff
+    regression. Run second so the unambiguous URI-less failure wins.
+    """
     _assert_p4_uri_required()
+    _assert_configured_db_answers(
+        will_connect=_session_will_connect(os.environ.get("TORTOISE_DB_URI", "")))
 
 
 # ── #4883: per-test isolation for the process-shared routing env vars ──────
@@ -1133,7 +1157,19 @@ def _assert_backend_identity():
     either way (never a vacuous green); the predicate split is left
     untouched because is_db_uri is the wide seam predicate.
     """
-    from tortoise.config import is_db_uri, is_loopback_uri  # shared predicates
+    # #6073: run the probe BEFORE the check that connects, so an unresponsive
+    # runtime is diagnosed instead of surfacing as a bare
+    # `redis.exceptions.TimeoutError` (which reads like a diff regression).
+    # pytest sets THIS fixture up before `_p4_uri_required` — not because of
+    # declaration order, but because conftest fixtures are registered via
+    # `dir()`, so the order is alphabetical plus dependencies.
+    #
+    # First statement of the body, deliberately: the `uri` local bound just
+    # below holds the raw URI, credential included, and pytest's
+    # `--showlocals` renders every local of every traceback frame.
+    _assert_configured_db_answers(
+        will_connect=_session_will_connect(os.environ.get("TORTOISE_DB_URI", "")))
+    from tortoise.config import is_db_uri  # shared predicate
     uri = os.environ.get("TORTOISE_DB_URI", "")
     # VGATE P2-2: EXPECT_URI must fail not only on an UNSET URI but also on
     # a set-but-unsupported-scheme URI (postgres://... or a bare path) —
@@ -1159,7 +1195,7 @@ def _assert_backend_identity():
         BACKEND_IDENTITY.uri = uri
         yield
         return
-    if not is_loopback_uri(uri) and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+    if not _session_will_connect(uri):
         pytest.fail(
             f"TORTOISE_DB_URI {uri!r} is not loopback — refusing before "
             f"any test writes (epic #1647 D-4/P0-2); set "
