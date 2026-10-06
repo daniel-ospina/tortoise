@@ -2052,7 +2052,7 @@ def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
     assert restricted > 0
 
 
-# --- follow-ups recorded by review cycle 3 on #7537 ------------------------
+# --- the two branches must agree about absence -----------------------------
 
 def test_the_pooled_branch_honours_the_default_weight_for_an_absent_file() -> None:
     """The two branches must agree about absence.
@@ -2117,9 +2117,8 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
 def test_the_pooled_branch_does_not_double_count_a_normalised_duplicate() -> None:
     """`full_pool` may carry both `tests/a` and `tests/a.py` — the same file.
 
-    Normalising into a LIST summed it twice (100 -> 200), a regression the
-    review caught in this PR's own first revision. The pool must be de-duplicated
-    after normalisation.
+    Normalising into a LIST summed it twice (100 -> 200), so the pool must be
+    de-duplicated after normalisation.
     """
     sel = {"full": True, "test_files": "ALL", "slow_run": False}
     assert ci_timing.selected_weight_s(

@@ -918,21 +918,21 @@ def paid_vs_selected_cli(args) -> int:
     manifest = _manifest_of(Path(args.manifest).read_text())
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
-    # #7537 cycle 2: on a full selection the gate runs the fast pool plus the
-    # slow leg MINUS the carve-out — the carve-out JOB is excluded from the
-    # numerator, so its weight must not enter the denominator either. And the
-    # `durations` map also carries `on_demand` entries python-ci never runs
-    # (eval/retrieval/test_integration.py alone is 1523.4 s of 7398.2 s), so
-    # summing the whole map would understate the ratio on the calibration path.
+    # On a full selection the denominator is the set of files the gate actually
+    # runs, not the whole `durations` map: the map also carries `on_demand`
+    # entries python-ci never runs (eval/retrieval/test_integration.py alone is
+    # 1523.4 s of 7398.2 s), so summing the whole map would understate the ratio
+    # on the calibration path. The carve-out runs as its own job whose weight is
+    # not in the numerator either — see `.github/workflows/python-ci.yml` for
+    # which job runs what.
     full_pool = None
     if selection.get("test_files") == "ALL":
         full_pool = set(ci_selection.fast_pool(manifest))
         # `push_legs` spreads `push_extra` into the counted `test` shards, but
         # `fast_pool` does NOT include it. Omitting it here would put files in
-        # the counted jobs with no weight on the other side — the #7537
-        # cycle-1/2 defect with the sign flipped. It is `[]` today, and that is
-        # exactly why the guard belongs here rather than a comment: the day it
-        # is populated is the day the ratio silently inflates.
+        # the counted jobs with no weight on the other side. It is `[]` today,
+        # and that is exactly why the guard belongs here rather than a comment:
+        # the day it is populated is the day the ratio silently inflates.
         full_pool |= set(manifest.get("push_extra") or [])
         full_pool |= (set(manifest.get("slow_files") or [])
                       - ci_selection.carve_out_files(manifest))
