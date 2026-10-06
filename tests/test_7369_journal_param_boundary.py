@@ -1215,3 +1215,47 @@ def test_a_SET_is_a_PARSE_reject_and_a_CYCLE_degrades():
         "UNWIND $rows AS r SET t += r.props RETURN count(t)",
     )
     assert "rows" in out  # degraded, NOT a RecursionError
+
+
+def test_a_PARSE_reject_inside_a_CONTAINER_is_nulled_on_a_READ_too():
+    """#7406 review: the read exemption handed containers to a SECOND type list.
+
+    `_writable_at_parse` enumerated the leaf classes it knew (float finiteness,
+    bytes, NUL strings, sets) and let every OTHER leaf fall through to `return
+    True`, so a container holding one — `{"k": Decimal("NaN")}`,
+    `[complex(1, 2)]` — was forwarded on a read and the engine aborted with
+    "Failed to parse query parameter": the class this predicate exists to
+    close, re-opened one level down. It now asks the SAME transport predicate
+    the boundary uses, so the two cannot disagree about a leaf. The container
+    exemption it was ADDED for (a map or array that is harmless as a bare
+    parameter) still holds — asserted here so the narrowing cannot silently
+    over-reach. Measured against the real engine.
+    """
+    from decimal import Decimal
+
+    read = "MATCH (n:Point {id:$id}) RETURN n.p AS p"
+    for bad in ({"k": Decimal("NaN")}, {"k": complex(1, 2)}, [Decimal("Infinity")]):
+        assert _writable_at_parse(bad) is False, bad
+        assert _journal_safe_params({"m": bad}, read)["m"] is None, bad
+    for good in ({"k": 1}, [1, 2], {"d": [{"n": 1}]}):
+        assert _writable_at_parse(good) is True, good
+        assert _journal_safe_params({"m": good}, read)["m"] is good, good
+
+
+def test_the_gate_patterns_read_STRIPPED_text_and_the_literal_regex_is_tight():
+    """#7406 review: two over-acceptances in the pattern layer.
+
+    The gate patterns matched the RAW statement, so a `MERGE {…}` inside a
+    STRING LITERAL false-exempted a parameter that was then never nulled —
+    measured: a NUL-bearing `bytes` value passed through untouched and the
+    engine raised "Failed to parse query parameter". They now run on the
+    literal-stripped text, exactly as `_statement_writes` does.
+
+    And `_LITERAL_NUMBER_RE` admitted a trailing dot (`"5."`), which the engine
+    rejects — so a custom `__str__` could still forward a parse reject.
+    """
+    literal_merge = "MATCH (n) WHERE n.x = 'MERGE {id: $v}' RETURN n"
+    assert _journal_safe_params({"v": b"\x00"}, literal_merge)["v"] is None
+
+    trailing_dot = type("T", (), {"__str__": lambda _s: "5."})()
+    assert _engine_coerces(trailing_dot) is False

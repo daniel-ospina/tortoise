@@ -2181,21 +2181,29 @@ def _journal_safe_params(params, cypher=None):
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
     # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
     # scalar in a property — does not match and stays a value position.
-    spread = frozenset(_GATE_SPREAD_RE.findall(statement)) | frozenset(
-        _GATE_REPLACE_RE.findall(statement)
+    # The gate patterns run on the LITERAL-STRIPPED text, exactly as
+    # `_statement_writes` does. A `MERGE {…}` or an `+= $x` inside a STRING
+    # LITERAL is text, not syntax, and matching it on the raw statement
+    # false-EXEMPTS a parameter that is then never nulled. Measured:
+    # `{"v": b"\x00"}` against
+    # `MATCH (n) WHERE n.x = 'MERGE {id: $v}' RETURN n` was forwarded untouched
+    # and the engine raised "Failed to parse query parameter 'v' value".
+    gate_text = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
+    spread = frozenset(_GATE_SPREAD_RE.findall(gate_text)) | frozenset(
+        _GATE_REPLACE_RE.findall(gate_text)
     )
     # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
-    rows = frozenset(_GATE_UNWIND_RE.findall(statement))
+    rows = frozenset(_GATE_UNWIND_RE.findall(gate_text))
     # Parameters that are MERGE KEYS: never nulled here (see the note above).
     merge_keys = frozenset(
         name
-        for group in _GATE_MERGE_KEY_RE.findall(statement)
+        for group in _GATE_MERGE_KEY_RE.findall(gate_text)
         for name in _GATE_PARAM_RE.findall(group)
     )
     # Row FIELDS used as merge keys — never nulled inside a row map either.
     merge_key_fields = frozenset(
         field
-        for group in _GATE_MERGE_KEY_RE.findall(statement)
+        for group in _GATE_MERGE_KEY_RE.findall(gate_text)
         for field in _GATE_ROW_FIELD_RE.findall(group)
     )
     # Row FIELDS a statement consumes STRUCTURALLY rather than storing as a
@@ -2206,8 +2214,8 @@ def _journal_safe_params(params, cypher=None):
     # `n += r.props` into `n += null`, and `inputs` -> None killed source
     # promotion. Every OTHER row field stays a property value and still degrades.
     structural_fields = frozenset(
-        _GATE_ROW_MERGED_RE.findall(statement)
-    ) | frozenset(_GATE_ROW_UNWOUND_RE.findall(statement))
+        _GATE_ROW_MERGED_RE.findall(gate_text)
+    ) | frozenset(_GATE_ROW_UNWOUND_RE.findall(gate_text))
     degraded: list = []
 
     def _walk(value, path, shape, _depth: int = 0):
@@ -3064,7 +3072,7 @@ def _annotator_value_ok(val) -> bool:
 # supported surface — `_sanitize_props` admits it) and `Fraction(5, 2)` (which
 # the widened `numbers.Number` test forwarded into a guaranteed parse reject).
 # Modelling the transport closes the class instead of enumerating it.
-_LITERAL_NUMBER_RE = re.compile(r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_LITERAL_NUMBER_RE = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _LITERAL_BOOLS = frozenset({"True", "False"})
 
 
@@ -3084,6 +3092,13 @@ def _engine_coerces(val) -> bool:
     forwarded: everything the engine refuses in the table above is refused
     here, and everything it accepts is preserved. `str()` is suppressed because
     a value whose own `__str__` raises is not encodable either.
+
+    Honest limit: this is an APPROXIMATION of the engine's literal grammar, not
+    the grammar — it is exact for every value this codebase can produce, and
+    only an object with a hand-written `__str__` can diverge (measured:
+    `__str__ -> "true"` and `" 7"` are nulled though the engine parses them).
+    That residual is one-directional — it DEGRADES rather than forwarding a
+    parse reject — and is not JSON-reachable, which is the safe way round.
     """
     with contextlib.suppress(Exception):
         text = str(val)
@@ -3161,7 +3176,15 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
             and _writable_at_parse(v, _depth + 1)
             for k, v in val.items()
         )
-    return True
+    # Any other LEAF: accepted exactly when the engine parses its literal — the
+    # SAME predicate the boundary uses, not a second type enumeration. The
+    # enumeration that used to be here (float finiteness, bytes, NUL strings,
+    # set) left every other leaf on `return True`, so a CONTAINER holding one —
+    # `{"k": Decimal("NaN")}`, `[complex(1, 2)]`, an `np.float32('nan')` — was
+    # forwarded on a read and the engine aborted with "Failed to parse query
+    # parameter", which is the class this predicate exists to close, re-opened
+    # one level down. Measured on the real engine.
+    return _annotator_value_ok(val) or _engine_coerces(val)
 
 
 def _writable_id(val) -> bool:
