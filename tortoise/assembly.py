@@ -1310,10 +1310,10 @@ def synthesize_hits(
 # NOT on main.
 #
 # The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
-# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — so neither a
-# canonical-set change nor a silent drop of the member can pass unnoticed.
-# (The #3317 pin beside it guards the RESOLVER set; it is not the oracle for
-# this one — its own docstring says so.)
+# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
+# widening of the member cannot pass unnoticed. (The canonical set itself is
+# pinned by tests/test_object_search_visibility_3301.py; the #3317 pin beside
+# it guards the RESOLVER set and is not the oracle for this one.)
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
     OBJECT_TERMINAL_STATUSES | {"outdated"})
 

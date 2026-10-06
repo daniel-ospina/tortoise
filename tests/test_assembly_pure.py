@@ -558,12 +558,10 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     the pinned current-state render (`test_resolver_docker_exact_and_both_halves`),
     but that is a docker-lane consequence; this pure pin is the fast one.
 
-    #3302: the recall set's OWN contents are pinned separately below. The
-    subset assertions here cannot see the recall set change at all (it may
-    drop ``outdated``, or drop a canonical member, and every assertion above
-    still holds) — verified by mutation. The equality assertion is what makes
-    the derived form safe: without it, "derived from the canonical vocabulary"
-    would be a claim about provenance that nothing checks.
+    #3302: the equality assertion at the end pins the RECALL set's own
+    contents. The subset assertions above are about the RESOLVER set and are
+    blind to four of the recall set's five members (only ``retracted`` is
+    shared), so they cannot substitute for it.
     """
     from tortoise.assembly import (
         _RECALL_OBJECT_EXCLUDED_STATUSES,
