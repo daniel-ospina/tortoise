@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import re
 import shutil
@@ -562,6 +563,183 @@ def _assert_p4_uri_required() -> None:
     pytest.fail(
         "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
         "carve-out with TORTOISE_TEST_CARVE_OUT=1")
+
+
+# ── #6073: the wedged-runtime tripwire ────────────────────────────────────
+# A set TORTOISE_DB_URI is a CONFIGURATION fact, never a liveness one:
+# `_assert_p4_uri_required` above proves a URI is configured and cannot tell
+# a healthy runtime from a wedged one. The wedge (#6073, now recurring
+# fleet-wide) still ACCEPTS the TCP connection and then never answers, so
+# every test in a docker-lane file dies on its own socket timeout and the run
+# reads like a diff regression. This probe converts that into ONE unmistakable
+# session failure instead.
+#
+# It must be a ROUND TRIP, because every cheap check passes while the runtime
+# is wedged: the TCP connect succeeds, the unix socket connects, and
+# `orb status` reports Running (#6073).
+_DB_PROBE_TIMEOUT_S = 5.0
+_DB_PROBE_ATTEMPTS = 2
+
+
+def _probe_configured_db(timeout_s: float, attempts: int) -> str | None:
+    """PING the configured URI to learn whether the runtime is up.
+
+    ``None`` unless the runtime matches a failure signature: bytes back, or a
+    connection that succeeded and then broke, both mean "not the wedge".
+    Otherwise ``"silent"`` (connected, then no reply ever came),
+    ``"unreachable"`` (the connect did not succeed — refused, DNS failure, or
+    a blackholed host that timed out), or ``"malformed"`` (non-numeric port).
+
+    ANY bytes back count as alive, even a rejection: a server answering
+    ``-NOAUTH`` is up, and calling that a wedge would send the reader after
+    the wrong root. So the probe sends an UNAUTHENTICATED PING — the password
+    is never submitted as a credential nor logged. The URI is still read from
+    the environment and parsed for host/port.
+
+    RAW SOCKET, deliberately: ``settimeout`` on a bare socket is honoured per
+    operation, whereas a client library's connect handshake is several round
+    trips and each pays the same timeout again, so a client-based probe's
+    effective bound is a multiple of the value configured. The bound is pinned
+    by ``test_probe_reports_silence_as_the_wedge``.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(os.environ.get("TORTOISE_DB_URI", ""))
+    host = parsed.hostname or "localhost"
+    try:
+        port = parsed.port or 6379
+    except ValueError:
+        # A non-numeric port. Never let this reach the tracer: the
+        # ValueError's pytest locals render the ParseResult, which carries
+        # the URI's password. Same credential class as #3039.
+        return "malformed"
+    last = "unreachable"
+    for _ in range(max(1, attempts)):
+        sock = socket.socket()
+        sock.settimeout(timeout_s)
+        try:
+            sock.connect((host, port))
+        except OSError:
+            last = "unreachable"
+            with contextlib.suppress(Exception):
+                sock.close()
+            continue
+        try:
+            sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+            sock.recv(64)
+            return None  # bytes back (PONG, -NOAUTH, ... ) → the runtime is up
+        except TimeoutError:
+            # MUST precede OSError: TimeoutError subclasses it. Connected,
+            # then silence — the wedge.
+            last = "silent"
+        except OSError:
+            # connect() already succeeded, so something IS accepting; a
+            # broken pipe is not the wedge signature.
+            return None
+        finally:
+            with contextlib.suppress(Exception):
+                sock.close()
+    return last
+
+
+def _sanitize_timeout(value: object) -> float:
+    """Coerce a probe timeout, falling back on anything unusable.
+
+    A non-positive value is the dangerous case rather than mere noise:
+    ``settimeout(0)`` is NON-BLOCKING, so a wedged server would be reported as
+    merely unreachable — the wrong-root diagnosis this probe exists to prevent
+    — and a negative one makes Python raise at session start.
+    """
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DB_PROBE_TIMEOUT_S
+    if not math.isfinite(seconds) or seconds <= 0:
+        return _DB_PROBE_TIMEOUT_S
+    return seconds
+
+
+def _probe_timeout_s() -> float:
+    """Probe timeout, overridable via TORTOISE_TEST_DB_PROBE_TIMEOUT_S.
+
+    Anything unusable falls back to the default rather than raising or being
+    passed through: this runs at session start, where a ValueError would mask
+    the very diagnostic it exists to print.
+    """
+    raw = os.environ.get("TORTOISE_TEST_DB_PROBE_TIMEOUT_S")
+    return _DB_PROBE_TIMEOUT_S if not raw else _sanitize_timeout(raw)
+
+
+def _configured_db_where() -> str | None:
+    """``'host:port'`` for the configured URI, or ``None`` on a bad port.
+
+    Returns ONLY the safe projection, so a caller that can fail does not hold
+    the raw URI (#3039).
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(os.environ.get("TORTOISE_DB_URI", ""))
+    try:
+        port = parsed.port or 6379
+    except ValueError:
+        return None
+    return f"{parsed.hostname or 'localhost'}:{port}"
+
+
+def _assert_configured_db_answers(timeout_s: float | None = None) -> None:
+    """#6073: fail the session loudly when the configured DB never answers.
+
+    Inert unless a SUPPORTED URI is set, so the embedded and carve-out lanes
+    do no network I/O here (their shapes are untouched). Named and importable
+    for the same reason as its sibling above: the autouse session fixture
+    cannot be exercised directly, and importing tests.conftest would
+    re-execute conftest's top-level code.
+    """
+    if not _uri_set_supported():
+        return
+    effective = (
+        _probe_timeout_s() if timeout_s is None else _sanitize_timeout(timeout_s)
+    )
+    reason = _probe_configured_db(effective, _DB_PROBE_ATTEMPTS)
+    if reason is None:
+        return
+    # NOTE: this frame deliberately never binds the URI or its ParseResult.
+    # `--showlocals` renders every local of every traceback frame, so a raw
+    # URI held here would leak the password the message is careful not to
+    # print. `where` is the credential-free projection (#3039).
+    where = _configured_db_where()
+    if reason == "malformed" or where is None:
+        pytest.fail(
+            "TORTOISE_DB_URI has a malformed port; expected "
+            "scheme://user:pass@host:PORT/graph. The URI is not echoed here "
+            "because it may carry a credential. THIS IS NOT YOUR DIFF."
+        )
+    if reason == "silent":
+        # The message states what was MEASURED and names the leading
+        # candidate. It deliberately does not assert that the runtime is
+        # wedged: a healthy-but-busy server (a long GRAPH.QUERY, SAVE or AOF
+        # rewrite on a runtime the whole fleet shares) can also exceed the
+        # window, and a wrong "restart it" verdict is the failure this whole
+        # issue is about — a false red read as a real one.
+        pytest.fail(
+            f"the DB runtime at {where} did not answer a PING: the "
+            f"connection was ACCEPTED and no reply came within "
+            f"{effective:.1f}s (tried {_DB_PROBE_ATTEMPTS} times). "
+            f"Every test below would fail on its own socket timeout, so "
+            f"THIS IS NOT YOUR DIFF. If the shared docker/OrbStack runtime "
+            f"is hung — `docker ps` and `docker version` hanging is the "
+            f"companion symptom — see #6073. If it is merely busy, raise "
+            f"TORTOISE_TEST_DB_PROBE_TIMEOUT_S and re-run. A port check "
+            f"passes here; so does `orb status`."
+        )
+    pytest.fail(
+        f"no TORTOISE_DB_URI database could be reached at {where} "
+        f"(connection refused, unresolvable, or timed out). The URI is "
+        f"CONFIGURED but nothing answered — start the database (or unset "
+        f"TORTOISE_DB_URI to run the embedded/carve-out lane). THIS IS NOT "
+        f"YOUR DIFF."
+    )
 
 
 # ── Epic #1647 Task 5 (D-2=A): the embedded_only marker hook ──────────────
