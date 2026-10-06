@@ -3400,8 +3400,9 @@ def _hand_built_master() -> dict:
                            "mode', 'coffee not tea'). The CHOICE is the fact; "
                            "retain it verbatim.",
         },
-        # FIXED order (agent-ops, dev, marketing, pm, product-strategy) — the
-        # golden pins THIS order; it is independent of the packs' readdir order.
+        # FIXED order (agent-ops, dev, marketing, pm, product-strategy, venture)
+        # — the golden pins THIS order; it is independent of the packs' readdir
+        # order.
         "memory_granularity": {
             "agent-ops": "Durable: the rule text, the situation that created it, "
                           "and the reasoning that supports or undermines it. "
@@ -3433,6 +3434,13 @@ def _hand_built_master() -> dict:
                                  "/ competitor / market fact is durable if it "
                                  "changes a decision. Ephemeral: ticket status, "
                                  "sprint mechanics, meeting logistics.",
+            "venture": "Durable: the current position of each stake, "
+                       "programme, asset, funding agreement, tranche, condition "
+                       "and action item; the reason it is where it is; which "
+                       "conditions are still open; who owns which action item "
+                       "and by when. Ephemeral: meeting logistics, attendance, "
+                       "scheduling, pleasantries, and superseded restatements "
+                       "of a state already recorded.",
         },
     }
 
