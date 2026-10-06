@@ -1932,7 +1932,7 @@ def test_unweighted_test_legs_are_reported_not_counted() -> None:
 
     `test-carve-out` / `test-d14-hosted-api` / `test-concurrency-falkor` /
     `test-track-b` run file sets that `select()` SUBTRACTS from `test_files`
-    and `slow_selected` (`ci_selection.py:1231,1271`). Counting their seconds
+    and `slow_selected` (`ci_selection.py:1233,1081`). Counting their seconds
     added execution with no matching weight, inflating the ratio by
     construction — the opposite of a diagnostic. They must be REPORTED, not
     silently dropped.
@@ -1957,9 +1957,10 @@ def test_a_non_string_timestamp_does_not_escape_the_guard() -> None:
 
 
 def test_the_cli_mode_is_reachable_end_to_end(monkeypatch, capsys) -> None:
-    """The capability must not be dead code (#7537 review P2)."""
-    import argparse  # noqa: PLC0415
-
+    """#7537 cycle 2 P2: the FIRST version of this test called
+    `paid_vs_selected_cli()` directly, so it still passed with the dispatch line
+    deleted from `main()` — it proved nothing about reachability. This drives
+    `main()` through argv, so removing that dispatch fails the test."""
     root = Path(__file__).resolve().parent.parent
     monkeypatch.setattr(ci_timing, "fetch_run",
                         lambda repo, rid: {"created_at": "2026-10-06T10:00:00Z"})
@@ -1967,17 +1968,85 @@ def test_the_cli_mode_is_reachable_end_to_end(monkeypatch, capsys) -> None:
         _job("test (a)", "2026-10-06T10:01:00Z", "2026-10-06T10:11:00Z"),
         _job("docs", "2026-10-06T10:00:00Z", "2026-10-06T10:12:00Z"),
     ])
-    args = argparse.Namespace(run_id="1", changed_files="tools/ci_timing.py",
-                              manifest=str(root / "config" / "ci-surfaces.yml"),
-                              repo="daniel-ospina/tortoise", event="pull_request")
-    assert ci_timing.paid_vs_selected_cli(args) == 0
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "daniel-ospina/tortoise", "--run-id", "1",
+        "--paid-vs-selected", "--changed-files", "tools/ci_timing.py",
+        "--manifest", str(root / "config" / "ci-surfaces.yml"),
+    ])
+    assert ci_timing.main() == 0
     out = json.loads(capsys.readouterr().out)
     assert out["paid_s"] == 600.0
     assert out["jobs_counted"] == ["test (a)"]
     assert out["queue_s"] == 60.0
     assert out["event"] == "pull_request"
+    assert out["complete"] is True
 
-    # A missing --changed-files is a usage error (2), never a silent 0-ratio run.
+
+def test_the_cli_refuses_a_missing_changed_files(monkeypatch, capsys) -> None:
+    """A missing --changed-files is usage error 2, never a silent 0-ratio run."""
+    import argparse  # noqa: PLC0415
+
     bad = argparse.Namespace(run_id="1", changed_files="", manifest="x",
                              repo="o/r", event="pull_request")
     assert ci_timing.paid_vs_selected_cli(bad) == 2
+
+
+def test_the_full_pool_denominator_excludes_the_on_demand_lane() -> None:
+    """REGRESSION (#7537 cycle 2 P1): the `durations` map is NOT the pool the
+    gate runs — it carries `on_demand` entries python-ci never executes
+    (`eval/retrieval/test_integration.py` alone is 1523.4 s of the 7398.2 s map).
+    Summing the whole map inflates the denominator and inverts the calibration:
+    a true 1.0 reads ~0.79. `full_pool` restricts it to the run legs."""
+    durations = {"tests/a.py": 600, "tests/b.py": 300,
+                 "eval/retrieval/test_integration.py": 1523.4}
+    sel = {"full": True, "test_files": "ALL", "slow_run": True, "slow_selected": []}
+    assert ci_timing.selected_weight_s(sel, durations, full_pool={"tests/a.py", "tests/b.py"}) == 900.0
+    # without a pool it over-counts — the defect this pins
+    assert ci_timing.selected_weight_s(sel, durations) == 2423.4
+
+
+def test_a_stalled_shard_is_reported_as_an_incomplete_run() -> None:
+    """#7537 cycle 2 P2: an incomplete shard keeps its files' full weight in the
+    denominator while adding 0 to paid_s, which LOWERS the ratio — a stalled
+    shard would read as cheaper. The run must be marked non-comparable."""
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        {"name": "test (b)", "started_at": "2026-10-06T10:00:00Z"},  # never finished
+    ]
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py", "tests/b.py"], "slow_run": False},
+        {"tests/a.py": 300, "tests/b.py": 300}, None)
+    assert out["complete"] is False
+    assert out["incomplete_shard_jobs"] == ["test (b)"]
+    assert out["ratio"] == 0.5     # flattering: full weight, half the work paid
+    assert out["jobs_counted"] == ["test (a)"]
+
+
+def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
+    """The real full selection plus the real pool must calibrate, not over-count.
+
+    This is the end-to-end binding the unit fixtures cannot give: it takes the
+    sentinel AND the denominator from the actual manifest, so the P1s in both
+    directions are pinned by the real artifacts.
+    """
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "tools"))
+    import ci_selection  # noqa: PLC0415
+    import ci_timing as ct  # noqa: PLC0415
+
+    manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    durations = ct.durations_map(manifest)
+    assert durations, "the manifest must carry a durations map for this ratchet"
+    selection = ci_selection.select(["tortoise/sdk.py"], "push", manifest)
+    assert selection["test_files"] == "ALL"
+
+    run_legs = set(ci_selection.fast_pool(manifest))
+    run_legs |= set(manifest.get("slow_files") or []) - ci_selection.carve_out_files(manifest)
+    on_demand = ci_selection.on_demand_files(manifest)
+    # The pool must exclude what the gate never runs, and the restricted sum
+    # must be strictly smaller — otherwise this ratchet is vacuous.
+    assert not (run_legs & on_demand), "on_demand files must not be run legs"
+    whole = ct.selected_weight_s(selection, durations)
+    restricted = ct.selected_weight_s(selection, durations, full_pool=run_legs)
+    assert restricted < whole, "the restricted pool MUST drop the on_demand weight"
+    assert restricted > 0

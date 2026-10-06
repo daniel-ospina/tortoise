@@ -43,6 +43,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import subprocess
@@ -216,7 +217,8 @@ def durations_map(manifest: dict) -> dict:
 
 
 def selected_weight_s(selection: dict, durations: dict,
-                      default_weight: float = 0.0) -> float:
+                      default_weight: float = 0.0,
+                      full_pool: set[str] | None = None) -> float:
     """The weight of what the gate will actually RUN, in measured seconds.
 
     Sums every selected leg's `durations` weight. A file with no measured
@@ -233,13 +235,34 @@ def selected_weight_s(selection: dict, durations: dict,
     manifest. The sentinel is handled explicitly below.
     """
     raw = selection.get("test_files")
+
+    def _finite(v) -> float | None:
+        # `bool` is an int subclass and a NaN weight would silently make `ratio`
+        # None via `selected > 0` — both are malformed, not weights.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if math.isfinite(f) else None
+
     if raw == "ALL":
-        # The whole measured pool runs, and `durations` IS that pool (including
-        # the slow leg, which `_full_selection` carries in `slow_selected`).
-        # Summing the map's own numeric values is the only arm that stays
-        # correct for the sentinel; iterating it is the defect above.
-        return sum(float(v) for v in durations.values()
-                   if isinstance(v, (int, float)))
+        # ⛔ The map is NOT the pool the gate runs. `durations` also carries
+        # `on_demand` entries — eval/retrieval/test_integration.py alone is
+        # 1523.4 s of the 7398.2 s map — which python-ci never runs (they live
+        # in evals-on-demand.yml). Summing the whole map inflates the
+        # denominator, so a true 1.0 reads ~0.79 and the calibration inverts in
+        # the other direction. `full_pool` (the run legs) restricts it to what
+        # the numerator can cover; None keeps the whole map for callers that
+        # have no manifest.
+        if full_pool is None:
+            candidates = list(durations.items())
+        else:
+            norm = {k if k.endswith(".py") else f"{k}.py" for k in full_pool}
+            candidates = [(k, v) for k, v in durations.items() if k in norm]
+        total = 0.0
+        for _, value in candidates:
+            w = _finite(value)
+            total += w if w is not None else default_weight
+        return total
     legs: list[str] = list(raw or [])
     if selection.get("slow_run"):
         legs += list(selection.get("slow_selected") or [])
@@ -247,12 +270,14 @@ def selected_weight_s(selection: dict, durations: dict,
     for name in legs:
         key = name if name.endswith(".py") else f"{name}.py"
         value = durations.get(key)
-        total += float(value) if isinstance(value, (int, float)) else default_weight
+        w = _finite(value)
+        total += w if w is not None else default_weight
     return total
 
 
 def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
-                     run_created_at: str | None = None) -> dict:
+                     run_created_at: str | None = None,
+                     full_pool: set[str] | None = None) -> dict:
     """What the gate PAID against what the diff SELECTED (#7532).
 
     `ratio` is the diagnostic: a push run selects the FULL pool and calibrates
@@ -273,6 +298,7 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
     queue = 0.0
     counted: list[str] = []
     excluded: list[str] = []
+    incomplete: list[str] = []
     for job in jobs:
         name = job.get("name") or ""
         if not name.startswith(TEST_JOB_PREFIX):
@@ -282,19 +308,25 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
             continue
         secs = job_execution_s(job)
         if secs is None:
-            excluded.append(name)
+            incomplete.append(name)
             continue
         paid += secs
         counted.append(name)
         q = queue_wait_s(job, run_created_at)
         if q is not None:
             queue += q
-    selected = selected_weight_s(selection, durations)
+    selected = selected_weight_s(selection, durations, full_pool=full_pool)
     return {
         "paid_s": round(paid, 1),
         "selected_s": round(selected, 1),
         "ratio": round(paid / selected, 3) if selected > 0 else None,
         "queue_s": round(queue, 1),
+        # ⛔ A matched shard that never completed keeps its files' FULL weight in
+        # the denominator while contributing 0 to paid_s — which LOWERS ratio,
+        # i.e. a stalled shard reads as cheaper. The flag makes such a run
+        # non-comparable instead of silently flattering it.
+        "complete": not incomplete,
+        "incomplete_shard_jobs": sorted(incomplete),
         "jobs_counted": sorted(counted),
         "excluded_jobs": sorted(excluded),
     }
@@ -867,10 +899,21 @@ def paid_vs_selected_cli(args) -> int:
     manifest = yaml.safe_load(Path(args.manifest).read_text())
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
+    # #7537 cycle 2: on a full selection the gate runs the fast pool plus the
+    # slow leg MINUS the carve-out — the carve-out JOB is excluded from the
+    # numerator, so its weight must not enter the denominator either. And the
+    # `durations` map also carries `on_demand` entries python-ci never runs
+    # (eval/retrieval/test_integration.py alone is 1523.4 s of 7398.2 s), so
+    # summing the whole map would understate the ratio on the calibration path.
+    full_pool = None
+    if selection.get("test_files") == "ALL":
+        full_pool = set(ci_selection.fast_pool(manifest))
+        full_pool |= (set(manifest.get("slow_files") or [])
+                      - ci_selection.carve_out_files(manifest))
     run = fetch_run(args.repo, args.run_id)
     result = paid_vs_selected(
         fetch_jobs(args.repo, args.run_id), selection,
-        durations_map(manifest), run.get("created_at"))
+        durations_map(manifest), run.get("created_at"), full_pool=full_pool)
     result["event"] = args.event
     result["full"] = bool(selection.get("full"))
     result["changed_files"] = len(changed)
