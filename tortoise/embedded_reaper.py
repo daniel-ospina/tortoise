@@ -377,6 +377,43 @@ def _pid_cmdline_names_dir(pid: int, dbdir: str) -> bool:
     return argv_dir == dbdir
 
 
+def _selection_binding_refusal(record: dict, dbdir: str) -> str | None:
+    """#4238: None only when `dbdir` is authorized by the SELECTION binding.
+
+    A directory is selection-bound when it is PRESENT, owned by the invoking
+    euid, and — for a pass-1 `_live` record — the kernel-reported peer pid of
+    the socket inside it IS the recorded pid (`_socket_served_by`). This is
+    the evidence a kill may rest on, AND the evidence the post-kill rmtree
+    of a directory the record's registry names may rest on: `settings` is
+    read out of the candidate dir, so it is only as trustworthy as that
+    dir's provenance.
+
+    The dir-ABSENT argv arm is deliberately excluded: "this live pid's argv
+    NAMES the dir" proves the dir belongs to the pid, not that a
+    `redis.config` read out of a possibly-foreign-authored dir names a
+    directory of OURS. `reap()`'s cleanup loop therefore consults this for
+    the registry-supplied `settings["dir"]` target (P1).
+
+    Fail closed: a missing/empty dir, a foreign-owned dir, and a live pass-1
+    record whose recorded pid is falsy or is not the socket's peer all
+    return a refusal.
+    """
+    if not dbdir:
+        return "candidate carries no directory to authorize its kill"
+    if not _dir_owned_by_euid(dbdir):
+        return (f"candidate dir {dbdir!r} is not owned by euid "
+                f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
+    pid = record.get("pid")
+    # `_socket_served_by` already refuses a falsy pid, so the check fails
+    # CLOSED for `pid in (None, 0)` — no `and pid` short-circuit (#4238 P2).
+    if record.get("_live") and not _socket_served_by(
+            record.get("socket_path"), pid):
+        return (f"candidate dir {dbdir!r} is not served by pid {pid} "
+                f"— pass-1 named it from argv only (selection binding, "
+                f"#4238)")
+    return None
+
+
 def _kill_provenance_refusal(record: dict) -> str | None:
     """Return a refusal reason when a kill is not provenance-authorized.
 
@@ -408,8 +445,11 @@ def _kill_provenance_refusal(record: dict) -> str | None:
     `_socket_served_by`: the kernel-reported peer pid of the socket inside
     that dir must BE the recorded pid. A decoy pid is not the process serving
     our dir's socket, so the kill and its rmtree are refused. The socket-less
-    arm (b) is untouched — it has no directory to rmtree, and its argv
-    binding is the reason a genuine socket-less orphan stays reapable.
+    arm (b) is untouched FOR THE KILL — its argv binding is the reason a
+    genuine socket-less orphan stays reapable — but it authorizes only the
+    candidate dir, never the sibling cleanup target: the registry-supplied
+    `settings["dir"]` rmtree is bound separately, to the present-and-owned
+    arm below (`reap()`'s cleanup loop, #4238 P1).
 
     None means "authorized". Fail closed: an unreadable/absent dir with no
     pid binding, or a live pass-1 record not served by its pid, is refused.
@@ -429,26 +469,18 @@ def _kill_provenance_refusal(record: dict) -> str | None:
         # unreadable / ELOOP / etc — cannot prove provenance, fail closed
         return f"candidate dir {dbdir!r} cannot be inspected"
     if present:
-        if _dir_owned_by_euid(dbdir):
-            # #4238 SELECTION binding — ownership proves the TARGET is ours,
-            # not that WE selected it. A pass-1 record's dir was named by the
-            # pgrep hit's OWN argv, so a local decoy can point the record at
-            # one of our dirs while the recorded pid is the decoy's; the
-            # post-kill cleanup would then rmtree that dir. Require the
-            # recorded pid to be the process actually serving the probed
-            # socket (kernel peer credentials), so a decoy never authorizes
-            # the kill or its cleanup. The socket has already answered two
-            # CLIENT LIST probes above, so it is connectable here (a
-            # vanished/unresponsive socket is skipped earlier, fail closed).
-            pid = record.get("pid")
-            if record.get("_live") and pid \
-                    and not _socket_served_by(record.get("socket_path"), pid):
-                return (f"candidate dir {dbdir!r} is not served by pid {pid} "
-                        f"— pass-1 named it from argv only (selection "
-                        f"binding, #4238)")
-            return None
-        return (f"candidate dir {dbdir!r} is not owned by euid "
-                f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
+        # #4238 SELECTION binding — ownership proves the TARGET is ours, not
+        # that WE selected it. A pass-1 record's dir was named by the pgrep
+        # hit's OWN argv, so a local decoy can point the record at one of our
+        # dirs while the recorded pid is the decoy's; the post-kill cleanup
+        # would then rmtree that dir. `_selection_binding_refusal` requires
+        # the recorded pid to be the process actually serving the probed
+        # socket (kernel peer credentials) and fails closed on a falsy pid,
+        # so a decoy never authorizes the kill or its cleanup. The socket has
+        # already answered two CLIENT LIST probes above, so it is connectable
+        # here (a vanished/unresponsive socket is skipped earlier, fail
+        # closed).
+        return _selection_binding_refusal(record, dbdir)
     pid = record.get("pid")
     if pid and _pid_cmdline_names_dir(pid, dbdir):
         return None
@@ -1164,7 +1196,11 @@ def _socket_served_by(socket_path: str | None, pid: int | None) -> bool:
         sock.settimeout(PROBE_TIMEOUT)
         try:
             sock.connect(socket_path)
-        except OSError:
+        except (OSError, TypeError, ValueError):
+            # #4238 P2: a non-path `socket_path` (a crafted/erroneous record)
+            # raises TypeError/ValueError, not OSError. Refuse it here rather
+            # than let it escape into `reap()`, which has no per-record
+            # try/except and would abort the whole sweep.
             return False
         peer = _socket_peer_pid(sock)
     finally:
@@ -2395,6 +2431,19 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             acted.append(record)
             continue
 
+        # #4238 P1 — bind the CLEANUP TARGET to the SAME evidence that
+        # authorized the kill. The post-kill cleanup rmtree's a SECOND
+        # directory (the registry's `settings["dir"]`, #1642 FIX 2) that is
+        # read out of the candidate dir, so it is only as trustworthy as
+        # that dir's provenance. Evaluate the selection binding HERE, before
+        # `_kill`, while the socket is still serving: once the server is
+        # dead the peer probe cannot succeed, and a post-kill re-evaluation
+        # would refuse every `_live` record's registry dir. A candidate dir
+        # admitted by the dir-ABSENT argv arm binds only itself, so the
+        # registry-supplied `dir` a foreign decoy authored is refused below.
+        cleanup_bound = _selection_binding_refusal(
+            record, record.get("dbdir") or "") is None
+
         _kill(record["pid"], sigterm_timeout)
         # #1383 security review (Issue 1): the KILL path's tempdir cleanup
         # must honor the same containment discipline as the stale path — a
@@ -2406,10 +2455,29 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # permanent tempdir entry (observed: 32k entries). User-path data
         # dirs fail the ephemeral containment check and are preserved.
         dbdir = record.get("dbdir")
-        reg_dir = (record.get("settings") or {}).get(
-            "dir", (record.get("settings") or {}).get("dbdir", ""))
+        settings = record.get("settings") or {}
+        reg_dir = settings.get("dir", settings.get("dbdir", ""))
+        targets = [dbdir]
+        # #4238 P1 — the registry `dir` is a SIBLING rmtree target: it is a
+        # path read out of the candidate dir, so it may only be cleaned when
+        # that dir passed the present-and-owned SELECTION binding the kill
+        # rested on (`cleanup_bound`, captured before `_kill`). Otherwise a
+        # record admitted by the dir-ABSENT argv arm would let a foreign-
+        # authored `redis.config` name an arbitrary euid-owned tempdir for
+        # `_cleanup_tempdir` to delete. When `reg_dir` IS the candidate dir
+        # it is already a target (the kill was authorized against it), and
+        # `_cleanup_tempdir` re-checks ownership.
+        if reg_dir and (not dbdir or os.path.realpath(reg_dir)
+                        != os.path.realpath(dbdir)):
+            if cleanup_bound:
+                targets.append(reg_dir)
+            else:
+                logger.warning(
+                    "kill path: refusing registry dir %r — candidate dir %r "
+                    "did not pass the selection binding, so its registry is "
+                    "not an rmtree authority (#4238 P1)", reg_dir, dbdir)
         tmpdir_real = os.path.realpath(tempfile.gettempdir())
-        for d in dict.fromkeys([dbdir, reg_dir]):
+        for d in dict.fromkeys(targets):
             if not d:
                 continue
             if _is_ephemeral_dir(os.path.realpath(d), tmpdir_real):

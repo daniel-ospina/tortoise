@@ -692,3 +692,119 @@ def test_pass1_argv_decoy_never_rmtrees_our_dir(monkeypatch):
         assert killed == [], "the decoy pid was killed"
         assert sentinel.exists() and sentinel.read_text() == "keep\n", (
             "reap() rmtree'd a directory its recorded pid does not serve")
+
+
+def test_pass1_absent_dir_never_rmtrees_a_decoy_registry_dir(monkeypatch):
+    """#4238 P1 (SIBLING cleanup target) — END-TO-END through `reap()`.
+
+    The selection binding above guards the candidate `dbdir`; the kill path
+    ALSO rmtrees the registry's `settings['dir']` (#1642 FIX 2), and that
+    dir is read out of the candidate dir — so it is only as trustworthy as
+    that dir's provenance. A pass-1 record's dir came from the pgrep hit's
+    OWN argv, which only NAMES a directory. A decoy can author a
+    `redis.config` naming a VICTIM tempdir, let its own (foreign-authored)
+    dir be deleted in the discovery-to-action window, be authorized by the
+    socket-less argv arm, and have `reap()` rmtree the victim — the exact
+    #4238 impact through a sibling cleanup target.
+
+    The cleanup target must be justified by the SAME evidence that
+    authorized the kill: the registry a record carries may only authorize an
+    rmtree when the candidate dir passed the present-and-owed selection
+    binding at action time. Here the candidate dir is GONE, so the kill is
+    admitted (argv), but the registry dir it names is not.
+    """
+    with _short_base() as base:
+        decoy = _socket_dir(base, "tmpDECOY")
+        victim = base / "tortoise_VICTIM"
+        victim.mkdir()
+        sentinel = victim / "IMPORTANT.txt"
+        sentinel.write_text("keep\n")
+        killed: list[int] = []
+        monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+        monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+        monkeypatch.setattr(R, "_pid_alive", lambda pid: pid == _DECOY_PID)
+        # The decoy's own argv names its (now deleted) dir — the SAME
+        # socket-less argv arm a genuine #1642 FIX 3 orphan uses, so the
+        # kill itself is legitimately admitted by the governance chain.
+        monkeypatch.setattr(
+            R, "_pid_cmdline_names_dir",
+            lambda pid, dbdir: os.path.realpath(dbdir)
+            == os.path.realpath(str(decoy)))
+        rec = {"classification": "candidate", "dir_missing": False,
+               "socket_path": str(decoy / R.SOCKET_MARKER),
+               "dbdir": str(decoy), "pid": _DECOY_PID,
+               "path_based": False, "_live": True,
+               "_orphan_confirmed": True,
+               "settings": {"dir": str(victim), "dbfilename": "redis.db"}}
+        # The attacker deletes its OWN decoy dir between discovery and
+        # action (it owns that dir; it does not own the victim).
+        shutil.rmtree(decoy, ignore_errors=True)
+        assert not decoy.exists(), "test setup: the decoy dir must be gone"
+        acted = R.reap([rec], dry_run=False, only_safe=False)
+        assert killed == [_DECOY_PID], (
+            "test setup: the socket-less argv arm must admit the kill")
+        assert acted, "test setup: the admitted kill must be acted on"
+        assert sentinel.exists() and sentinel.read_text() == "keep\n", (
+            "reap() rmtree'd the registry dir named by a foreign-authored "
+            "redis.config (#4238 P1)")
+
+
+def test_pass1_present_owned_dir_still_cleans_its_registry_dir(monkeypatch):
+    """POSITIVE control for the P1 fix: when the candidate dir DOES pass the
+    present-and-owned selection binding, the #1642 FIX 2 registry-dir cleanup
+    is unchanged — the fix is a provenance gate, not an inert always-refuse.
+    """
+    with _short_base() as base:
+        d = _socket_dir(base, "tmpDECOY")
+        data = base / "tortoise_DATA"
+        data.mkdir()
+        (data / "x.db.settings").write_text("{}\n")
+        srv = _live_listener(d)  # a REAL listener served by THIS process
+        killed: list[int] = []
+        monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+        monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+        try:
+            # The recorded pid IS this process, which served the socket
+            # above, so the selection binding is satisfied.
+            rec = {"classification": "candidate", "dir_missing": False,
+                   "socket_path": str(d / R.SOCKET_MARKER),
+                   "dbdir": str(d), "pid": os.getpid(),
+                   "path_based": False, "_live": True,
+                   "settings": {"dir": str(data),
+                                "dbfilename": "redis.db"}}
+            R.reap([rec], dry_run=False, only_safe=False)
+        finally:
+            srv.close()
+        assert killed == [os.getpid()], "test setup: the kill must be admitted"
+        assert not d.exists(), "the candidate's own dir must still be cleaned"
+        assert not data.exists(), (
+            "a registry dir of a selection-bound candidate must still be "
+            "cleaned (#1642 FIX 2)")
+
+
+def test_live_record_with_falsy_pid_is_refused():
+    """#4238 P2: the selection binding is the security boundary and its
+    contract is fail-closed, so a `_live` record with a FALSY pid
+    (None/0/""/False) must be REFUSED, never authorized by an `and pid`
+    short-circuit. `_socket_served_by` already refuses a falsy pid."""
+    with _short_base() as base:
+        d = _socket_dir(base, "tmpDECOY")
+        for falsy in (None, 0, "", False):
+            rec = {"classification": "candidate", "dir_missing": False,
+                   "socket_path": str(d / R.SOCKET_MARKER),
+                   "dbdir": str(d), "pid": falsy, "path_based": False,
+                   "_live": True,
+                   "settings": {"dir": str(d), "dbfilename": "redis.db"}}
+            assert R._selection_binding_refusal(rec, str(d)) is not None, falsy
+            assert R._kill_provenance_refusal(rec) is not None, falsy
+
+
+def test_socket_served_by_refuses_a_non_path_without_raising():
+    """#4238 P2: a crafted/erroneous record whose `socket_path` is not a path
+    must make the binding REFUSE, not raise. `reap()` has no per-record
+    try/except around the provenance check, so a raise here would abort the
+    whole sweep instead of skipping one record (fail closed)."""
+    assert R._socket_served_by(123, os.getpid()) is False
+    assert R._socket_served_by([1, 2], os.getpid()) is False
+    # An embedded NUL makes `connect()` raise ValueError, not OSError.
+    assert R._socket_served_by("/tmp/with\x00nul", os.getpid()) is False
