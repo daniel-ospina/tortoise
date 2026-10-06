@@ -1299,13 +1299,21 @@ def synthesize_hits(
 # set that was a frozen snapshot of a source it did not reference drifts the
 # moment the canonical set moves.
 #
-# The one DELIBERATE divergence is ``outdated``: no Object writer produces it
-# (the plan states this in (q) and in the ``_team_sweep_allowed`` rationale),
-# so the member is behaviourally dead and its retention is a decision, not an
-# accident. It is pinned as a SUBSET relation in tests/test_assembly_pure.py
-# (#3317), so a canonical-set change cannot silently drop it and a future
-# widening is a deliberate edit. Keep the divergence documented here; the pin
-# is what makes it safe.
+# The one divergence is ``outdated``, and it is LOAD-BEARING — not dead. The
+# generic write path CAN put it on an :Object: ``create_entity("object", ...)``
+# spreads caller props over its literal defaults, and ``_update_entity`` issues
+# an unvalidated ``SET n += $props``; ``status`` is not a server-managed prop,
+# so both are reachable from the MCP surface (``tortoise_create_entity`` /
+# ``tortoise_update_entity``). Dropping the member would flip such a successor
+# from recall-excluded (NAME-ONLY annotation) to a verified link. The guard
+# that would reject the status (#2977 / PR #3326, ``OBJECT_STATUS_VALUES``) is
+# NOT on main.
+#
+# The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
+# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — so neither a
+# canonical-set change nor a silent drop of the member can pass unnoticed.
+# (The #3317 pin beside it guards the RESOLVER set; it is not the oracle for
+# this one — its own docstring says so.)
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
     OBJECT_TERMINAL_STATUSES | {"outdated"})
 
