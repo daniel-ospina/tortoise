@@ -1015,8 +1015,24 @@ def test_failed_deploy_jobs_alert_out_of_band():
             f"fire on cancelled and green runs) and not a bare step (which is "
             f"ANDed with success())"
         )
-        assert "deploy-api-alert.sh" in step.get("run", ""), (
-            f"{step_name!r} must call the shared alert script"
+        run = step.get("run", "")
+        # The EXACT path, not a bare basename: `bash scripts/deploy-api-alert.sh`
+        # would resolve through the `scripts/` symlink, which does not exist on a
+        # fresh runner — the step would die with "No such file" and the alert would
+        # be silently absent.
+        assert "bash .github/scripts/deploy-api-alert.sh" in run, (
+            f"{step_name!r} must invoke `bash .github/scripts/deploy-api-alert.sh` "
+            f"by its exact path (a symlinked or basename form is not on the runner)"
+        )
+        # `--job` must name THIS job: it is half of the dedupe key AND it selects
+        # the "what a red here means" sentence, so a copy-paste neighbour would
+        # file a pack-smoke failure under `deploy-api`'s key and tell the reader
+        # the wrong consequence.
+        m = re.search(r"--job\s+(\S+)", run)
+        assert m and m.group(1) == job_name, (
+            f"{step_name!r} passes --job {m.group(1) if m else '<none>'!r}, but it lives "
+            f"in job {job_name!r} — the key and the consequence sentence would be "
+            f"another job's"
         )
 
         perms = doc["jobs"][job_name].get("permissions") or {}
@@ -1035,16 +1051,26 @@ def test_failed_deploy_jobs_alert_out_of_band():
             f"as its own owner, so the `author:app/github-actions` dedupe search "
             f"never matches and EVERY failing run files a fresh duplicate (#2706)"
         )
+        # The page leg: dropping these bindings would leave the issue as the only
+        # signal, and an issue alone has demonstrably not reached a human here (the
+        # watchdog records 11h19m of silence with one incident issue).
+        for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+            assert env.get(var) == f"${{{{ secrets.{var} }}}}", (
+                f"{step_name!r} must bind {var} (same-named secret): without it the "
+                f"page leg silently disappears and the issue is the only signal"
+            )
 
-    # Ordering: an alert must run BEFORE its job's `if: always()` gate audit, so
-    # the audit stays that job's last word on "was anything bypassed".
+    # ORDERING: the alert is the job's LAST step, so a failure of the `if:
+    # always()` gate audit is reported too. An alert placed before the audit can
+    # only see failures that already happened — an audit-only failure would then
+    # be a red run with no issue and no page, the exact shape #2240 removes.
     for job_name, step_name, _step in sites:
         names = [s.get("name") or "" for s in doc["jobs"][job_name]["steps"]]
-        audits = [i for i, n in enumerate(names) if n.startswith("Deploy gate audit")]
-        if audits:
-            assert names.index(step_name) < audits[0], (
-                f"{step_name!r} must run before {job_name}'s always() gate audit"
-            )
+        assert names[-1] == step_name, (
+            f"{step_name!r} must be the LAST step of {job_name} (it is at index "
+            f"{names.index(step_name)} of {len(names)}) — otherwise a failure of a "
+            f"later `if: always()` step is never reported"
+        )
 
 
 def test_alert_step_ids_match_the_script_and_the_workflow():

@@ -195,6 +195,41 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow ru
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "Check migration drift (fail-closed)" "the body names the failed step"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "987654321" "the body links the run (the detail lives there)"
 
+echo "── case 1b: a >6000-byte report keeps its ACTIONABLE TAIL ─────────────"
+# The gate prints its context (remote-ahead, non-conforming files, the
+# warn-class preamble) BEFORE the actionable block and ENDS with the BLOCKING
+# list and the ordered remediation. So the excerpt must be the TAIL of the
+# report: `head -c 6000` keeps the noise and drops the one thing the alert
+# exists to carry. This fixture is larger than the cap with the parts on
+# opposite sides of it, so the direction is pinned and not merely asserted.
+BIG_REPORT="$FIX/drift-report-big.txt"
+{
+  echo "check-migration-drift: repo migrations vs prod (project ybetwichurajbfswfeqa)"
+  echo "  NOISE-BEFORE-THE-CUT-MARKER"
+  i=0
+  while [ "$i" -lt 400 ]; do
+    echo "  warn-class line $i — index-only drift, non-blocking, listed for context only"
+    i=$((i + 1))
+  done
+  echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
+  echo "    - 20260926000002"
+  echo "  Remediation: apply migrations first —"
+  echo "    gh workflow run supabase-deploy.yml --ref main"
+} > "$BIG_REPORT"
+if [ "$(wc -c < "$BIG_REPORT")" -gt 6000 ]; then
+  ok "the fixture exceeds the 6000-byte cap ($(wc -c < "$BIG_REPORT") bytes) — otherwise this case is vacuous"
+else
+  bad "the fixture must exceed the cap, or head and tail are indistinguishable"
+fi
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$BIG_REPORT"
+assert_eq "$RC" "0" "the alert still succeeds on a large report"
+BIG_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$BIG_BODY" "BLOCKING repo-ahead migrations" "the ACTIONABLE block survives the cap (tail, not head)"
+assert_contains "$BIG_BODY" "gh workflow run supabase-deploy.yml --ref main" "and the ordered remediation survives — head -c drops both"
+assert_not_contains "$BIG_BODY" "NOISE-BEFORE-THE-CUT-MARKER" "the preamble is what gets truncated away"
+assert_contains "$BIG_BODY" "LAST 6000 bytes" "and the truncation is stated, so a reader knows why the head is missing"
+
 echo "── case 3: the FIRST failing step is attributed ─────────────────────"
 reset_case
 run_alert --job deploy-api \

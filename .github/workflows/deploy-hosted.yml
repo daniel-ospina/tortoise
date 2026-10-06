@@ -858,46 +858,6 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
-      # ── Out-of-band failure alert (#2240) ──────────────────────────────────
-      # WHY THIS STEP EXISTS
-      #   This job had NO failure observability: no `if: failure()` step in the
-      #   whole workflow, `post-deploy-verify` is skipped exactly when this job
-      #   fails, the availability watchdog reads a STALE build as UP (it accepts
-      #   the 401 a stale build still answers), and `deploy-api` is not a required
-      #   branch-protection context. So a fail-closed gate stopped the pipeline
-      #   silently for 4.6 days (2026-08-30 → 09-04, 22 runs, zero alerts) and a
-      #   further ~2 days (2026-09-29 → 10-01).
-      #   It is ONE notifier for the JOB, not one per gate: ≥8 steps here are
-      #   fail-closed, and a per-gate alert would leave the same silence on the
-      #   others. The step ids above are what make per-step attribution possible.
-      # ORDER
-      #   `if: failure()` (not `always()`) so it never fires on a cancelled or
-      #   green run; placed BEFORE the `if: always()` gate audit so the audit
-      #   stays the job's last word. `failure()` cannot mask the failure it
-      #   reports — the job is already red — and it cannot fail-open: the ledger
-      #   leg fails the step loudly when it cannot file.
-      # TOKEN
-      #   `GH_TOKEN` is the ACTIONS token, deliberately: the dedupe search keys
-      #   on `author:app/github-actions`, so a PAT writes as its own owner,
-      #   matches nothing, and would file a DUPLICATE issue on every failing run
-      #   (#2706). The substrate refuses a non-Actions author rather than
-      #   degenerating.
-      - name: Alert on failure (out-of-band) — deploy-api (#2240)
-        if: failure()
-        run: |
-          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
-            echo "::error::deploy-api failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
-            exit 1
-          fi
-          bash .github/scripts/deploy-api-alert.sh \
-            --job deploy-api \
-            --steps "parity=${{ steps.parity.outcome }} verify-secrets=${{ steps.verify-secrets.outcome }} provenance=${{ steps.provenance.outcome }} drift=${{ steps.drift.outcome }} fly-machines=${{ steps.fly-machines.outcome }} set-secrets=${{ steps.set-secrets.outcome }} deploy=${{ steps.deploy.outcome }}" \
-            --drift-report "$DRIFT_REPORT_FILE"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DRIFT_REPORT_FILE: ${{ runner.temp }}/migration-drift-report.txt
       - name: Deploy gate audit — deploy-api (#4759)
         # The authoritative "was anything skipped" statement for this job, and it
         # runs even when an earlier step failed (`if: always()`) — so a reader
@@ -922,6 +882,59 @@ jobs:
             --state "SKIP_FLY_MACHINES_GUARD=$FLY_MACHINES_IN/$FLY_MACHINES_VAR" \
             --state "SKIP_FLY_SECRET_PROVENANCE=$PROVENANCE_IN/$PROVENANCE_VAR"
 
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────────
+      # WHY THIS STEP EXISTS
+      #   This job had NO failure observability: no `if: failure()` step in the
+      #   whole workflow, `post-deploy-verify` is skipped exactly when this job
+      #   fails, the availability watchdog reads a STALE build as UP (it accepts
+      #   the 401 a stale build still answers), and `deploy-api` is not a required
+      #   branch-protection context. So a fail-closed gate stopped the pipeline
+      #   silently for 4.6 days (2026-08-30 → 09-04, 22 runs, zero alerts) and a
+      #   further ~2 days (2026-09-29 → 10-01).
+      #   It is ONE notifier for the JOB, not one per gate: ≥8 steps here are
+      #   fail-closed, and a per-gate alert would leave the same silence on the
+      #   others. The step ids above are what make per-step attribution possible.
+      # ORDER — LAST in the job, deliberately
+      #   `if: failure()` (not `always()`) so it never fires on a cancelled or
+      #   green run. It is the job's LAST step so a failure of the `if: always()`
+      #   gate audit ABOVE is reported too — placed before the audit it could only
+      #   see failures that had already happened, and an audit-only failure would
+      #   then be silent (a red run with no issue and no page, which is the shape
+      #   this whole change exists to remove). A red run's last act should be to
+      #   tell someone, not to file a bypass report.
+      #   `failure()` cannot mask the failure it reports — the job is already red —
+      #   and it cannot fail-open: the ledger leg fails the step loudly when it
+      #   cannot file.
+      # RESIDUAL, named rather than papered over
+      #   If `actions/checkout` fails, the script this step calls was never
+      #   fetched, so the guard below emits a named `::error::` and exits — the run
+      #   is red with a reason, but the out-of-band alert itself cannot run. Closing
+      #   that would mean a second, inline filer in the workflow (duplicated
+      #   substrate, no dedupe discipline), which is the machinery this design
+      #   deliberately avoids; a checkout failure is a platform failure, not a
+      #   deploy-gate one.
+      # TOKEN
+      #   `GH_TOKEN` is the ACTIONS token, deliberately: the dedupe search keys
+      #   on `author:app/github-actions`, so a PAT writes as its own owner,
+      #   matches nothing, and would file a DUPLICATE issue on every failing run
+      #   (#2706). The substrate refuses a non-Actions author rather than
+      #   degenerating.
+      - name: Alert on failure (out-of-band) — deploy-api (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::deploy-api failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job deploy-api \
+            --steps "parity=${{ steps.parity.outcome }} verify-secrets=${{ steps.verify-secrets.outcome }} provenance=${{ steps.provenance.outcome }} drift=${{ steps.drift.outcome }} fly-machines=${{ steps.fly-machines.outcome }} set-secrets=${{ steps.set-secrets.outcome }} deploy=${{ steps.deploy.outcome }}" \
+            --drift-report "$DRIFT_REPORT_FILE"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRIFT_REPORT_FILE: ${{ runner.temp }}/migration-drift-report.txt
   # ── Post-deploy verification (own job; #4538 decision, option b) ──────────
   #
   # WHY THIS IS A SEPARATE JOB
@@ -1071,6 +1084,18 @@ jobs:
           FLY_APP: tortoise-y4mjjq
         run: python3 .github/scripts/check-fly-machine-env.py
         shell: bash
+      - name: Deploy gate audit — post-deploy-verify (#4759)
+        # This job's only bypassable gate, stated as bypassed or not even when an
+        # earlier step failed — so "no bypass block" is never the reader's only
+        # evidence.
+        if: always()
+        env:
+          DB_HEALTH_IN: ${{ inputs.skip-db-health-gate || false }}
+          DB_HEALTH_VAR: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
+            --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"
       # ── Out-of-band failure alert (#2240) ──────────────────────────────
       # Placed BEFORE the `if: always()` gate audit so the audit stays the job's
       # last word. A red here means the release is LIVE and unhealthy, and
@@ -1091,15 +1116,3 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      - name: Deploy gate audit — post-deploy-verify (#4759)
-        # This job's only bypassable gate, stated as bypassed or not even when an
-        # earlier step failed — so "no bypass block" is never the reader's only
-        # evidence.
-        if: always()
-        env:
-          DB_HEALTH_IN: ${{ inputs.skip-db-health-gate || false }}
-          DB_HEALTH_VAR: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
-          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
-        run: |
-          bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
-            --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"
