@@ -233,6 +233,11 @@ _ABSENT = object()
 # provision or destroy keys, orgs, instances, tenants) and is therefore authored
 # and baseline-protected, not derived.
 DERIVED_CLASSES = ("agent-reachable", "eval-only", "internal", "no-caller-found")
+# The largest always-loaded tool count in the comparable research (Letta 18 · Graphiti 13 ·
+# Mem0 9 · Cognee 4). Named because the rendered paragraph compares OUR advertised count
+# against it: "Every comparable we studied pins a smaller set" is a comparison, true only
+# while we advertise more than this — below it the sentence is false (Letta pins 18).
+LARGEST_COMPARABLE = 18
 AUTHORED_CONTROL_PLANE = frozenset({"apikey_revoke", "graph_delete"})
 
 # §6.1 item 3. The catch-all clause is what makes this single-valued; the two
@@ -1601,16 +1606,24 @@ def cmd_render(args: argparse.Namespace) -> int:
         add("does (`never called`) — evidence about our usage, not about whether a tool is useful to a")
         add("customer. A row carrying no flag records neither. Mainstream clients cap the tools they will")
         add("show — a")
+    _our_set_is_larger = len(tools) > LARGEST_COMPARABLE
+    # The comparable claim is a comparison against `len(tools)`, so it is guarded like the cap
+    # clause: below the largest comparable it would be FALSE (Letta pins 18, against our N).
+    _comparable_clause = (
+        "Every comparable we studied pins a smaller set,"
+        if _our_set_is_larger
+        else f"We are not the largest: the biggest comparable, Letta, pins {LARGEST_COMPARABLE}, against our {len(tools)},"
+    )
     if len(tools) > 40:
         add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
-        add("pay context for all of them on every turn. Every comparable we studied pins a smaller set,")
+        add(f"pay context for all of them on every turn. {_comparable_clause}")
     else:
         # The cap argument needs a surface bigger than the cap: with 40 or fewer advertised tools a
         # client that caps at 40 sees ALL of them, so "at most 40 of these 10" is arithmetic over a
         # population with no 40 in it. This document argues for shrinking the surface, so the small
         # case is on the intended path, not hypothetical.
         add("reported 40 in Cursor — a cap the whole surface fits inside, so no tool is hidden by it,")
-        add(f"and we pay context for all {len(tools)} of them on every turn. Every comparable we studied pins a smaller set,")
+        add(f"and we pay context for all {len(tools)} of them on every turn. {_comparable_clause}")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
     add("`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,")
     add(f"`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all {len(tools)} callable.")
