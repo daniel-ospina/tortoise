@@ -26,9 +26,11 @@ import tortoise.oauth as oauth
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import _FAULT_CPS, ErrorControlPlane, FakeControlPlane  # noqa: RUF100
 from tests.test_oauth_mcp import (  # noqa: RUF100
+    CIMD_CLIENT_ID,
     _U1,
     _enable_supabase,
     _pkce,
+    cimd_document,
 )
 from tortoise.hosted_api import app
 from tortoise.oauth import (  # noqa: RUF100
@@ -882,23 +884,45 @@ def test_transient_503_conventions_agree_on_status():
 
 # ── Control-plane round-trip envelope (#2848) ───────────────────────────────
 #
-# #3669 made the token grant loop-SAFE (the whole grant is offloaded as a unit).
-# It did not make it FAST: the exchange is still a SERIES of PostgREST round
+# #3669 made the token grants loop-SAFE (the whole grant is offloaded as a unit).
+# It did not make them FAST: both grants are still a SERIES of PostgREST round
 # trips, so a control plane that is slow-but-alive MULTIPLIES into request
-# latency and can cross Anthropic's 10 s token budget without anything being
-# "down". These tests pin the two facts a bound would be chosen from — the
-# serial COUNT and the scaling — and deliberately assert no wall-clock SLI,
-# which would be a load-dependent flake rather than a contract.
+# latency and can cross the OAuth budget without anything being "down".
+#
+# Three legs, because the endpoint has three request shapes and they do NOT cost
+# the same (all measured, all pinned below):
+#
+#   authorization_code, registry client ........ 6 round-trips  (10 s budget)
+#   refresh_token ............................ 8 round-trips  (30 s budget)
+#   authorization_code, CIMD client, FIRST ... 8 round-trips  (10 s budget)
+#   authorization_code, CIMD client, later ... 6 round-trips
+#
+# The CIMD leg is the one this issue is actually about (#2847 added CIMD for
+# Claude connectors), and it is the most exposed: its FIRST exchange of a
+# process pays two extra round-trips to provision and re-read the client row,
+# on the SHORTER of the two budgets. The registry leg alone would have reported
+# 6 as the connector path's cost, which understates it by a third.
+#
+# These tests pin the serial COUNT and the additivity, and deliberately assert no
+# wall-clock SLI, which would be a load-dependent flake rather than a contract.
 
 
 class _RoundTripCounter:
-    """Proxy over the fake control plane: records (op, table) for every
-    round-trip and can delay each one.
+    """Proxy over the fake control plane: records ``(op, table, method)`` for
+    every round-trip the seam exposes through ``query``, ``rpc`` or
+    ``rpc_value``, and can delay each one.
 
     Answers "how many SERIAL round-trips did that request make?" — the question
-    any total-latency bound depends on. Reads that do not go through the proxy
-    (e.g. seeding writes straight to ``cp.tables``) are deliberately not
-    counted, so the count is the request's, not the test's.
+    any total-latency bound depends on. Writes the test makes straight to
+    ``cp.tables`` are deliberately not counted, so the count is the request's,
+    not the test's.
+
+    LIMIT, stated because it bounds what the assertions below can promise: only
+    those THREE entry points are intercepted. A round-trip a helper made through
+    any other attribute would be invisible to both the count and the delay. The
+    measured series is exact for the paths pinned here; a new control-plane
+    helper added to one of them must be routed through ``_trip`` (or this class
+    extended) or the guard silently stops covering it.
     """
 
     def __init__(self, inner, per_call_s: float = 0.0):
@@ -908,7 +932,8 @@ class _RoundTripCounter:
 
     def _trip(self, op, fn, *a, **k):
         table = a[0] if a and isinstance(a[0], str) else (k.get("fn") or "?")
-        self.calls.append(f"{op}:{table}")
+        method = k.get("method") or ""
+        self.calls.append(f"{op}:{table}{':' + method if method else ''}")
         if self.per_call_s:
             time.sleep(self.per_call_s)
         return fn(*a, **k)
@@ -919,11 +944,38 @@ class _RoundTripCounter:
     def rpc(self, *a, **k):
         return self._trip("rpc", self._inner.rpc, *a, **k)
 
+    def rpc_value(self, *a, **k):
+        return self._trip("rpc_value", self._inner.rpc_value, *a, **k)
+
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
 
-def test_token_exchange_is_a_serial_series_of_control_plane_round_trips():
+def _exchange_auth_code(counter, cp, code, client_id=_CLIENT_ID):
+    """One authorization-code exchange over `counter`; asserts it succeeded."""
+    body = {"grant_type": "authorization_code", "code": code,
+            "code_verifier": _seed_code(cp, code, client_id=client_id),
+            "client_id": client_id, "redirect_uri": _REDIRECT,
+            "resource": None}
+    out = oauth.exchange_auth_code(counter, body, "https://tortoise.example")
+    assert out.get("access_token"), out
+
+
+def _assert_serial_additivity(counter, t0, elapsed):
+    """The calls are SERIAL, so the cost is additive in the per-call delay.
+
+    A LOWER bound, so it is deterministic on a loaded host: each injected call
+    sleeps at least D. If the calls were concurrent the total would be ~D, not
+    N*D, so this is also the falsifier for "they are parallel".
+    """
+    n = len(counter.calls)
+    assert elapsed >= n * 0.05, (
+        f"{n} serial round-trips at 50 ms each must cost >= {n * 0.05:.2f}s; "
+        f"took {elapsed:.3f}s — the calls are NOT serial (or not all counted)")
+    return n
+
+
+def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
     """The authorization-code exchange makes SIX serial PostgREST round-trips
     (MEASURED), which is what makes Anthropic's 10 s token budget a function of
     the control plane's per-call latency rather than of our own code.
@@ -944,45 +996,120 @@ def test_token_exchange_is_a_serial_series_of_control_plane_round_trips():
     """
     cp = FakeControlPlane()
     _seed_base_tables(cp)
-    verifier = _seed_code(cp, "series-code")
     counter = _RoundTripCounter(cp)
-
-    body = {"grant_type": "authorization_code", "code": "series-code",
-            "code_verifier": verifier, "client_id": _CLIENT_ID,
-            "redirect_uri": _REDIRECT, "resource": None}
-    out = oauth.exchange_auth_code(counter, body, "https://tortoise.example")
-    assert out.get("access_token"), out
+    _exchange_auth_code(counter, cp, "series-code")
 
     # THE SERIES — each entry is one serial round-trip on the request's path.
     assert counter.calls == [
         "query:oauth_clients",         # _verify_client_auth
-        "query:oauth_codes",           # the atomic claim (consume)
+        "query:oauth_codes:PATCH",     # the atomic claim (consume)
         "query:organizations",         # _assert_org_usable
-        "query:oauth_refresh_tokens",  # _issue_tokens (1 of 2)
-        "query:oauth_access_tokens",   # _issue_tokens (2 of 2)
-        "query:oauth_codes",           # the settle
+        "query:oauth_refresh_tokens:POST",   # _issue_tokens (1 of 2)
+        "query:oauth_access_tokens:POST",    # _issue_tokens (2 of 2)
+        "query:oauth_codes:PATCH",     # the settle
     ], counter.calls
 
-    # ADDITIVITY: the exchange's latency is N x the control plane's, not 1 x.
-    # A LOWER bound, so it is deterministic on a loaded host — each injected call
-    # sleeps at least D, and the calls are serial by construction (asserted above).
-    verifier2 = _seed_code(cp, "series-code-2")
     counter.per_call_s = 0.05
     counter.calls.clear()
     t0 = time.perf_counter()
-    out2 = oauth.exchange_auth_code(
-        counter, {**body, "code": "series-code-2", "code_verifier": verifier2},
-        "https://tortoise.example")
+    _exchange_auth_code(counter, cp, "series-code-2")
     elapsed = time.perf_counter() - t0
-    assert out2.get("access_token"), out2
-
     assert counter.calls == [
-        "query:oauth_clients", "query:oauth_codes", "query:organizations",
-        "query:oauth_refresh_tokens", "query:oauth_access_tokens",
-        "query:oauth_codes",
+        "query:oauth_clients", "query:oauth_codes:PATCH", "query:organizations",
+        "query:oauth_refresh_tokens:POST", "query:oauth_access_tokens:POST",
+        "query:oauth_codes:PATCH",
     ], counter.calls
+    _assert_serial_additivity(counter, t0, elapsed)
+
+
+def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
+    """The REFRESH grant is the LONGER series on the same endpoint — MEASURED
+    here as EIGHT serial round-trips — and it is the one no test pinned at all.
+
+    It is on Anthropic's 30 s budget rather than the 10 s the code grant gets,
+    which is the only reason a series this long is tolerable; at the issue's
+    observed per-call latency it is still the closer of the two to its edge.
+    Pinned so that a round-trip ADDED here (a quota or membership read, say) is
+    visible, which is the same silent-regression failure the code-grant leg
+    exists for.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    _, token = _seed_refresh_token(cp, "series-rt")
+    counter = _RoundTripCounter(cp)
+
+    out = oauth.refresh_grant(
+        counter, {"grant_type": "refresh_token", "refresh_token": token,
+                  "client_id": _CLIENT_ID}, "https://tortoise.example")
+    assert out.get("access_token"), out
 
     n = len(counter.calls)
-    assert elapsed >= n * 0.05, (
-        f"{n} serial round-trips at 50 ms each must cost >= {n * 0.05:.2f}s; "
-        f"took {elapsed:.3f}s — the calls are NOT serial")
+    assert counter.calls == [
+        "query:oauth_clients",              # _verify_client_auth
+        "query:oauth_refresh_tokens",       # the presented token's row
+        "query:organizations",              # org still usable
+        "query:org_memberships",            # membership not lapsed
+        "query:oauth_access_tokens",        # the family it belongs to
+        "query:oauth_refresh_tokens:POST",  # mint the rotated refresh token
+        "query:oauth_access_tokens:POST",   # mint the new access token
+        "query:oauth_refresh_tokens:PATCH",  # revoke the presented token
+    ], counter.calls
+
+    counter.per_call_s = 0.05
+    counter.calls.clear()
+    legacy = _seed_refresh_token(cp, "series-rt-2")[1]
+    t0 = time.perf_counter()
+    out2 = oauth.refresh_grant(
+        counter, {"grant_type": "refresh_token", "refresh_token": legacy,
+                  "client_id": _CLIENT_ID}, "https://tortoise.example")
+    elapsed = time.perf_counter() - t0
+    assert out2.get("access_token"), out2
+    assert _assert_serial_additivity(counter, t0, elapsed) == n, (
+        f"the refresh series changed between runs: {n} then {len(counter.calls)}")
+
+
+def test_cimd_client_first_exchange_pays_more_round_trips(cimd_document):
+    """The CIMD client path — the one #2847 added FOR Claude connectors, and
+    the path this issue is actually about — pays MORE control-plane round-trips
+    on its first exchange of a process: MEASURED as 8, against 6 for a registry
+    client and 6 for itself thereafter.
+
+    The two extra are the provisioning (a MISS on `oauth_clients`, then the
+    `_persist_cimd_client` POST, then the re-read that acts as the duplicate
+    guard). The registry leg above seeds an ``oauth_clients`` row by hand, so it
+    never enters the CIMD branch; that made its count a FLOOR for the connector
+    path rather than the connector path's own count. Varying only ``client_id``
+    (an https URL, which is what routes to CIMD) isolates the difference.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    counter = _RoundTripCounter(cp)
+    _exchange_auth_code(counter, cp, "cimd-code", client_id=CIMD_CLIENT_ID)
+
+    n = len(counter.calls)
+    assert counter.calls == [
+        "query:oauth_clients",               # resolve_client: registry MISS
+        "query:oauth_clients:POST",          # ... so the CIMD row is provisioned
+        "query:oauth_clients",               # ... and re-read (the duplicate guard)
+        "query:oauth_codes:PATCH",
+        "query:organizations",
+        "query:oauth_refresh_tokens:POST",
+        "query:oauth_access_tokens:POST",
+        "query:oauth_codes:PATCH",
+    ], counter.calls
+
+    counter.per_call_s = 0.05
+    counter.calls.clear()
+    t0 = time.perf_counter()
+    _exchange_auth_code(counter, cp, "cimd-code-2", client_id=CIMD_CLIENT_ID)
+    elapsed = time.perf_counter() - t0
+
+    # Steady state: the client row now exists, so the two provisioning
+    # round-trips are gone and the CIMD series EQUALS the registry series.
+    assert counter.calls == [
+        "query:oauth_clients", "query:oauth_codes:PATCH", "query:organizations",
+        "query:oauth_refresh_tokens:POST", "query:oauth_access_tokens:POST",
+        "query:oauth_codes:PATCH",
+    ], counter.calls
+    assert n == 8, f"the first CIMD exchange changed shape: {n} calls"
+    _assert_serial_additivity(counter, t0, elapsed)
