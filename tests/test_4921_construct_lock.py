@@ -49,7 +49,7 @@ def test_key_uses_the_dbfilename_kwarg(tmp_path):
 
 
 def test_key_anchors_a_bare_name_to_the_cwd(tmp_path, monkeypatch):
-    """redislite joins a bare `dbfilename` to the cwd (client.py:441)."""
+    """redislite joins a bare `dbfilename` to the cwd (client.py:435-436)."""
     monkeypatch.chdir(tmp_path)
     assert _construction_key(("db.rdb",), {}) == os.path.realpath(
         os.path.join(str(tmp_path), "db.rdb"))
@@ -77,6 +77,23 @@ def test_key_is_none_when_no_db_file_is_named():
     assert _construction_key((), {}) is None
     assert _construction_key((None,), {}) is None
     assert _construction_key((), {"dbfilename": ""}) is None
+
+
+def test_kwarg_wins_over_the_positional(tmp_path):
+    """Review round 1: redislite overrides `args[0]` when `dbfilename` is present.
+
+    `client.py:415-428` takes the positional first and then, UNCONDITIONALLY,
+    `if 'dbfilename' in kwargs: db_filename = kwargs['dbfilename']`. Deriving the
+    key the other way round locks a file redislite never opens and takes no lock
+    on the RDB it does open — so #4921 stays open for that call shape.
+    """
+    a, b = str(tmp_path / "a.rdb"), str(tmp_path / "b.rdb")
+    assert _construction_key((a,), {"dbfilename": b}) == os.path.realpath(b)
+
+
+def test_bytes_filename_yields_no_key():
+    """A `bytes` filename aborts redislite's own join (`os.path.join(str, bytes)`)."""
+    assert _construction_key((b"/tmp/x.rdb",), {}) is None
 
 
 # ── property 1: reentrant (the constructor nests) ──────────────────────────
@@ -174,6 +191,87 @@ def test_lock_excludes_another_process(tmp_path):
     finally:
         child.terminate()
         child.wait(10)
+
+
+def test_an_unrelated_key_is_not_blocked_by_a_held_flock(tmp_path):
+    """Review round 1 P1: the module mutex must NOT be held across the flock wait.
+
+    An external holder keeps a flock for as long as it likes, so holding
+    `_CONSTRUCT_LOCKS_GUARD` across that wait serialises every OTHER key in this
+    process — the per-key property this lock exists to provide — and completes a
+    wait-for cycle with any peer's nested construction.
+    """
+    held, other = _key(tmp_path, "held.rdb"), _key(tmp_path, "other.rdb")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    child = subprocess.Popen(
+        [sys.executable, "-c", _CHILD.format(root=root, key=held, hold=4)],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": root})
+    try:
+        assert child.stdout.readline().strip() == "held"
+        start = time.monotonic()
+        with _construction_lock(other):
+            pass
+        assert time.monotonic() - start < 1.0, (
+            "an unrelated key waited behind a held flock — the module mutex is "
+            "held across the cross-process wait")
+    finally:
+        child.terminate()
+        child.wait(10)
+
+
+_FORK_CHILD = """
+import os, sys
+sys.path.insert(0, {root!r})
+from tortoise.embedded_lifecycle import _CONSTRUCT_LOCKS, _construction_lock, _construction_key
+parent_key = _construction_key(({key!r},), {{}})
+if _CONSTRUCT_LOCKS:
+    # The `after_in_child` hook must clear the registry: an inherited entry is
+    # an RLock whose owner thread does not exist in this child, so the child's
+    # next construction of that key would block forever.
+    os.write(1, b"stale")
+else:
+    # A DIFFERENT key must be acquirable immediately. The parent's flock on
+    # `parent_key` is still held (correctly — that lock IS shared across the
+    # fork), so this child must not touch it, and must not need the module
+    # mutex the parent was holding.
+    other = (parent_key + ".child") if parent_key else None
+    if other:
+        with _construction_lock(other):
+            os.write(1, b"ok")
+"""
+
+
+def test_a_forked_child_is_not_wedged_by_an_inherited_lock(tmp_path):
+    """#4926's hazard, on the third registry: a child must not inherit a held lock.
+
+    Asserts the child's INHERITED STATE rather than racing the parent for the
+    same `${key}`: the parent's flock is genuinely shared across the fork, so a
+    child that took the same key would (correctly) wait for the parent — while
+    the parent waits for the child. What the `after_in_child` hook must prevent
+    is the INHERITED-but-unreleasable state: an `RLock` whose owner thread does
+    not exist in the child, and the module mutex the parent was holding. Bounded
+    subprocess on purpose — without the reset the child blocks forever, and a
+    deadlocked test would hang the suite instead of failing it.
+    """
+    if not hasattr(os, "fork"):
+        pytest.skip("POSIX only")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    key = _key(tmp_path)
+
+    # Fork from a process that holds the lock, i.e. the exact state the hook is
+    # for. `os.fork` here is the REAL one (a plain subprocess cannot reproduce
+    # "parent holds the lock at fork time").
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _FORK_CHILD.format(root=root, key=key)],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": root})
+    try:
+        out = holder.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        holder.kill()
+        pytest.fail("the forked child hung — the `after_in_child` reset is missing")
+    assert out == "ok", (
+        f"child inherited a wedged/held construction lock (out={out!r}) — the "
+        "`after_in_child` reset is missing or incomplete")
 
 
 # ── the seam: the installer wraps the constructor that contains the gap ────

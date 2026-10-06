@@ -73,6 +73,7 @@ from __future__ import annotations  # noqa: I001
 import math
 import os
 import contextlib
+import errno
 import fcntl
 import hashlib
 import logging
@@ -846,8 +847,16 @@ def _install_missing_dbdir_guard() -> None:
 #
 # Three properties are forced by the seam, and each rules out the obvious
 # cheaper lock:
-#   * REENTRANT — the constructor nests (a construction constructs another
-#     client), so a plain `threading.Lock` self-deadlocks;
+#   * REENTRANT as stated CONTRACT, not as an observed failure — a nested
+#     acquisition must not deadlock, and a plain `threading.Lock` would break
+#     that. MEASURED: a real `tortoise.FalkorDB(path)` construction reaches
+#     depth 1, i.e. today's constructions do NOT nest through this seam (the
+#     only nesting in the vendored package is `_EmbeddedFalkorDBMixin` ->
+#     `Redis`, and `FalkorDB` is not a `RedisMixin`). The RLock is kept because
+#     the price of a wrong premise here is a deadlocked constructor and because
+#     a guard that assumes no nesting is a trap for the next caller that adds
+#     one — but nobody should read this line as "the constructor nests today";
+#     it does not (processing-weight rule: name which of the two it is);
 #   * CROSS-PROCESS — the race is between processes, so an in-process lock
 #     alone cannot close it;
 #   * PER-KEY — the file at risk is one `<dbdir>/<dbfilename>`, so a single
@@ -856,6 +865,20 @@ def _install_missing_dbdir_guard() -> None:
 # is taken only on the 0→1 depth transition because flock locks are per
 # open-file-description: a second `os.open` in the same process would block
 # against our own outer lock, a self-deadlock the RLock cannot see.
+#
+# `_CONSTRUCT_LOCKS_GUARD` is NEVER held across the flock. That wait is
+# unbounded (another PROCESS holds it), so holding this mutex across it would
+# (a) serialise every other key in this process — destroying the PER-KEY
+# property above — and (b) complete a wait-for cycle with any peer's nested
+# construction: this thread holds the guard waiting on key A, a peer inside key
+# B cannot run its release path because that path needs the same guard. The
+# entry's own `rlock` is already held at the mutation, so the guard is only
+# needed to look the entry up.
+# `_CONSTRUCT_LOCKS` is keyed on the canonical path and is never pruned: an
+# entry is one `RLock` + one int per DISTINCT `<dbdir>/<dbfilename>` for the
+# process lifetime — the same shape and the same accepted bound as
+# `_owner_refcounts` / `_own_start_cache` in this module (bounded in practice by
+# the process's own embedded DBs, i.e. its test fixtures).
 _CONSTRUCT_LOCKS: dict[str, _ConstructLock] = {}
 _CONSTRUCT_LOCKS_GUARD = threading.Lock()
 
@@ -872,48 +895,158 @@ class _ConstructLock:
         self.fd = -1
 
 
+def _requested_db_filename(args, kwargs) -> str | None:
+    """The `<dbdir>/<dbfilename>` a `RedisMixin.__init__` call will use, or None.
+
+    Mirrors redislite EXACTLY (client.py:415-441): a positional `args[0]` is the
+    db filename only while the `dbfilename` KEYWORD is ABSENT — when the keyword
+    is present redislite overrides the positional UNCONDITIONALLY — and a bare
+    name is anchored to the cwd. None means "this construction names no db
+    file": redislite then mints its own `mkdtemp()`, which no second
+    construction can share, and a `bytes` filename makes redislite's own
+    `os.path.join(str, bytes)` raise (client.py:435) and abort the construction.
+
+    SHARED with `_replay_socket_for_init` on purpose. The drift is not
+    hypothetical: `_construction_key` first derived this with the positional
+    winning, so `Redis("a.rdb", dbfilename="b.rdb")` took the #4921 lock on
+    `a.rdb` while redislite opened `b.rdb` — the intended RDB raced unlocked.
+    One derivation, two callers, no second chance to disagree.
+    """
+    if "dbfilename" in kwargs:
+        db_filename = kwargs["dbfilename"]
+    elif args:
+        db_filename = args[0]
+    else:
+        db_filename = None
+    try:
+        db_filename = os.fspath(db_filename)
+    except TypeError:
+        return None
+    if isinstance(db_filename, bytes):
+        # redislite ABORTS on a bytes filename: its registry name is built as
+        # `self.dbfilename + '.settings'` (client.py:442), and `bytes + str`
+        # raises. True for a bare name (the cwd join raises first) and for an
+        # absolute one (this join does), so there is no construction to
+        # serialise either way — and no key this function can return.
+        return None
+    if not db_filename:
+        return None
+    try:
+        if db_filename == os.path.basename(db_filename):
+            db_filename = os.path.join(os.getcwd(), db_filename)  # client.py:435-436
+    except TypeError:
+        return None
+    return db_filename
+
+
 def _construction_key(args: tuple, kwargs: dict) -> str | None:
     """#4921: the `<dbdir>/<dbfilename>` this construction will use, or None.
 
-    Mirrors redislite's own derivation (client.py:380-468) rather than reading
-    `self`: this runs BEFORE the wrapped constructor has set `self.dbdir` /
-    `self.dbfilename`, so the only honest inputs are the arguments.
+    Derived from the ARGUMENTS by `_requested_db_filename`, never from `self`:
+    this runs BEFORE the wrapped constructor has set
+    `self.dbdir`/`self.dbfilename`, so the arguments are the only honest input,
+    and the derivation is shared with `_replay_socket_for_init` so the two
+    cannot drift into disagreeing about which file a call touches.
 
-    None means "no embedded server over a shared file", in which case there is
-    nothing to serialise: `host`/`port` names a server we do not start, and a
-    construction with no db file lets redislite mint its own `mkdtemp()`, which
-    no second construction can share.
+    None means there is nothing to serialise: `host`/`port` names a server we do
+    not start, and a construction naming no db file lets redislite mint its own
+    `mkdtemp()`.
+
+    `realpath` is what makes two spellings of one file SHARE a lock — the
+    symlinked temp root this box produces is the realistic case. It is a
+    per-component `lstat` walk, which #4214 measured as expensive on a
+    leak-degraded temp root; that fix's `_resolved_tempdir()`/`_containment_pair`
+    fast path is deliberately NOT used here, because those return a
+    classification PAIR for an ephemeral-directory test, not the single
+    canonical path this key needs. Stated residual, not an oversight: the cost
+    returns only under the leak conditions #4214 describes, and correctness of
+    the key is what closes #4921.
     """
     if "host" in kwargs or "port" in kwargs:
         return None
-    db_filename = args[0] if args else kwargs.get("dbfilename")
+    db_filename = _requested_db_filename(args, kwargs)
     if not db_filename:
         return None
-    db_filename = os.fspath(db_filename)
-    if db_filename == os.path.basename(db_filename):
-        db_filename = os.path.join(os.getcwd(), db_filename)  # client.py:441
     return os.path.realpath(db_filename)
 
 
 def _open_construct_lock(key: str) -> int:
-    """Open + LOCK_EX the lock file for `key`, or -1 when its dir is already gone.
+    """Open + LOCK_EX the lock file for `key`, or -1 when no lock can be taken.
 
-    A vanished directory is not this guard's error to raise: the #3653
-    missing-dbdir guard refuses that construction by name one call later, and
-    two constructions into a directory that does not exist cannot both create
-    an RDB. Any OTHER open failure (a directory that exists but will not take
-    the file) propagates: redislite is about to write the RDB there, so
-    continuing unlocked would trade a loud failure for exactly the silent
-    two-writer divergence this guard exists to prevent.
+    Two failures deliberately yield -1 ("no lock", the caller keeps the
+    in-process RLock) rather than raising, mirroring `_acquire_owner_lock`'s
+    #4098/#4577 discipline for a lock file in a shared directory:
+
+    * a vanished db directory — that refusal belongs to #3653's missing-dbdir
+      guard one call later, and two constructions into a directory that does
+      not exist cannot both create an RDB;
+    * a planted symlink (`O_NOFOLLOW` refuses it) or a non-regular file — on
+      Linux `flock` on a FIFO SUCCEEDS, so without the `S_ISREG` check the
+      guard would "hold" a lock no reader may take.
+
+    Any OTHER failure to open does raise: redislite is about to write the RDB in
+    that directory, so continuing unlocked would trade a loud failure for
+    exactly the silent two-writer divergence this guard exists to prevent.
+
+    A failure to FLOCK closes the just-opened fd before propagating — the fd
+    would otherwise leak on every construction of that key.
     """
+    path = key + ".tortoise-construct.lock"
     try:
-        fd = os.open(key + ".tortoise-construct.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     except FileNotFoundError:
         if not os.path.isdir(os.path.dirname(key)):
             return -1
         raise
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        logger.warning(
+            "#4921: cannot take the construction lock for %s (%s) — this "
+            "process still serialises its own constructions on that RDB, but "
+            "not against another process", key, exc)
+        return -1
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            logger.warning(
+                "#4921: %s is not a regular file — not using it as a "
+                "construction lock (#4577: `flock` on a FIFO succeeds)", path)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            return -1
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno != errno.EWOULDBLOCK:
+                raise
+            # Say so BEFORE waiting. An unannounced wait in a constructor is
+            # indistinguishable from a wedged lane, and reading it costs a full
+            # debugging cycle — the diagnosis cost this module's loud branches
+            # exist to remove.
+            logger.warning(
+                "#4921: another process is constructing %s — waiting for its "
+                "server to come up rather than starting a second one over the "
+                "same RDB", key)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
     return fd
+
+
+def _release_construct_lock(entry: _ConstructLock) -> None:
+    """#4921: drop `entry`'s flock fd, never raising and never stranding it.
+
+    Every step is suppressed/ordered so that a failure cannot skip the rest: a
+    stale `fd` left at `depth == 0` breaks the `fd >= 0 <=> held` invariant and
+    would have a later construction `os.close` a descriptor the process has
+    since reused, and a skipped `RLock.release()` wedges that key for the rest
+    of the process's life.
+    """
+    fd, entry.fd = entry.fd, -1
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 
 @contextlib.contextmanager
@@ -925,21 +1058,22 @@ def _construction_lock(key: str):
             entry = _CONSTRUCT_LOCKS[key] = _ConstructLock(key)
     entry.rlock.acquire()
     try:
-        with _CONSTRUCT_LOCKS_GUARD:
-            entry.depth += 1
-            if entry.depth == 1:
-                entry.fd = _open_construct_lock(key)
+        # NOT under `_CONSTRUCT_LOCKS_GUARD`: `_open_construct_lock` blocks for
+        # as long as another process holds the flock, and `entry.rlock` is
+        # already held, so this thread is the only one that can be mutating
+        # `entry` here. See the module comment above for the two failures the
+        # naive "hold the mutex" version causes.
+        entry.depth += 1
+        if entry.depth == 1:
+            entry.fd = _open_construct_lock(key)
         yield
     finally:
-        with _CONSTRUCT_LOCKS_GUARD:
+        try:
+            if entry.depth == 1 and entry.fd >= 0:
+                _release_construct_lock(entry)
+        finally:
             entry.depth -= 1
-            if entry.depth == 0 and entry.fd >= 0:
-                try:
-                    fcntl.flock(entry.fd, fcntl.LOCK_UN)
-                finally:
-                    os.close(entry.fd)
-                    entry.fd = -1
-        entry.rlock.release()
+            entry.rlock.release()
 
 
 def _install_construct_lock_guard() -> None:
@@ -1926,6 +2060,21 @@ def _adopt_owner_records_after_fork() -> None:
     # (the claims above are cleared), so a fresh lock is the correct state.
     global _inflight_claim_lock
     _inflight_claim_lock = threading.Lock()
+    # #4921: the construction lock is the same hazard, on the third registry. A
+    # child that inherited `_CONSTRUCT_LOCKS_GUARD` held deadlocks on EVERY
+    # construction, not just one key; one that inherited an entry at
+    # `depth >= 1` deadlocks on that key, and — because the inherited fds refer
+    # to the PARENT's open file descriptions — it is not actually holding the
+    # lock it believes it holds. Drop the inherited state: closing our inherited
+    # fds does NOT release the parent's flock (the parent still has that
+    # description open), and the child starts clean.
+    global _CONSTRUCT_LOCKS, _CONSTRUCT_LOCKS_GUARD
+    for _inherited in _CONSTRUCT_LOCKS.values():
+        if _inherited.fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(_inherited.fd)
+    _CONSTRUCT_LOCKS = {}
+    _CONSTRUCT_LOCKS_GUARD = threading.Lock()
     # #4926: the ON-DISK claim is deliberately NOT retracted here. Its
     # filename names the PARENT's pid, and a claim is retracted only by the
     # construction that published it — a forked child unlinking it would drop
@@ -2220,29 +2369,10 @@ def _replay_socket_for_init(args, kwargs) -> str | None:
         return None
     if kwargs.get("unix_socket_path"):
         return None  # client.py:449 requires `not self.socket_file`
-    # Mirror redislite EXACTLY (client.py:415-428): a positional `args[0]` is
-    # the db filename only while the `dbfilename` KEYWORD is ABSENT. When the
-    # keyword is present redislite overrides the positional UNCONDITIONALLY —
-    # `if 'dbfilename' in kwargs.keys(): db_filename = kwargs['dbfilename']`
-    # — so `Redis(path, dbfilename=None)` leaves `db_filename` None, never
-    # populates `settingregistryfile`, and never replays. Falling back to
-    # `args[0]` there would register a claim for a construction that takes no
-    # replay (the F4 false positive).
-    if "dbfilename" in kwargs:
-        db_filename = kwargs["dbfilename"]
-    elif args:
-        db_filename = args[0]
-    else:
-        db_filename = None
-    try:
-        db_filename = os.fspath(db_filename)
-    except TypeError:
-        return None
+    db_filename = _requested_db_filename(args, kwargs)
     if not db_filename:
         return None
     try:
-        if db_filename == os.path.basename(db_filename):
-            db_filename = os.path.join(os.getcwd(), db_filename)
         registry = repr(os.path.join(
             os.path.dirname(db_filename),
             os.path.basename(db_filename) + ".settings")).strip("'")
@@ -3019,12 +3149,14 @@ def _install_dead_socket_guard() -> None:
             return True
         # The recorded server is confirmed dead (the RDB is released) and the
         # stale registry is gone: `__init__`'s else branch starts a clean
-        # server over the same dbdir/dbfilename. What this closes is the
+        # server over the same dbdir/dbfilename. What THIS repair closes is the
         # REGISTRY REPLAY — a proven-dead holder's stale record — and nothing
-        # wider. It does NOT make this construction the only writer: redislite
-        # still has no per-<dbdir>/<dbfilename> construction lock, so two
-        # constructions racing between this unlink and the start below can
-        # each bring up a server over one RDB (tortoise#4921).
+        # wider. The unlink-to-start window it used to leave open is closed by
+        # `_install_construct_lock_guard` (#4921), which serialises
+        # constructions of one <dbdir>/<dbfilename> across processes. What
+        # remains open is narrower and different in kind: `_save_setting_registry`
+        # still overwrites the registry unconditionally, which no construction
+        # lock can make safe against a NON-constructor writer.
         logger.warning(
             "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
             "proven holder pid %s (recorded socket %s was gone) and removed "
@@ -3042,7 +3174,13 @@ _REDISLITE_GUARDS_INSTALLED = False
 def install_redislite_guards() -> None:
     """Install all five redislite patches, once (#5386).
 
-    Order is irrelevant (the patch targets are disjoint), and each installer
+    Order is NOT arbitrary: `_install_construct_lock_guard` and
+    `_install_owner_record_patch` both wrap `RedisMixin.__init__`, so the last
+    installer is the OUTERMOST wrapper. The lock is installed first so the owner
+    patch's #4879/#4926 in-flight claim is published BEFORE the flock wait
+    rather than after it (#4921).
+
+    Apart from that pair the patch targets are disjoint, and each installer
     is itself idempotent and a no-op when redislite is absent; this wrapper
     adds the single once-only guard so a repeated or re-entrant call cannot
     re-wrap an already-wrapped seam.
@@ -3052,10 +3190,17 @@ def install_redislite_guards() -> None:
         return
     _REDISLITE_GUARDS_INSTALLED = True
     _install_partial_init_cleanup_guard()
+    # #4921: installed BEFORE the owner-record patch on purpose — both wrap
+    # `RedisMixin.__init__`, so the LAST installer is the OUTERMOST wrapper. The
+    # owner patch publishes this construction's #4879/#4926 in-flight claim
+    # before delegating; with the lock outermost, a construction blocked on the
+    # flock would publish no claim for the whole wait — exactly the invisible
+    # peer state #5481 made visible. Lock first => lock is the INNER wrapper:
+    # claim, then wait.
+    _install_construct_lock_guard()
     _install_owner_record_patch()
     _install_dead_socket_guard()
     _install_missing_dbdir_guard()
-    _install_construct_lock_guard()
 
 
 class _RedisliteGuardInstaller:
