@@ -52,7 +52,7 @@ import requests
 # #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
 # free of model_adapters — this one-way import cannot cycle).
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
-from tortoise.models import _emit_usage_sink
+from tortoise.models import _emit_usage_sink, _warn_on_model_substitution
 
 _logger = logging.getLogger("tortoise.model_adapters")
 
@@ -160,6 +160,12 @@ class OpenRouterModel:
         )
         r.raise_for_status()
         data = r.json()
+        # #4129: observe the SERVED model on THIS transport too. The guard
+        # lived only on ``OpenAICompatModel.complete``, so the OpenRouter lane
+        # — and every route built on it (Venice, DeepSeek-direct) — could not
+        # see a silent substitution at all: the provider accepts the id and
+        # serves a different model, and nothing in the response path noticed.
+        _warn_on_model_substitution(self.id, data.get("model"))
 
         # Extract usage for cost tracking
         usage = data.get('usage', {})
@@ -271,6 +277,10 @@ class DeepSeekDirectModel(OpenRouterModel):
         )
         r.raise_for_status()
         data = r.json()
+        # #4129: DeepSeekDirectModel has its OWN ``complete`` body, so the
+        # served-model observation must live here too — exactly why the #2185
+        # usage sink below is duplicated onto this path as well.
+        _warn_on_model_substitution(self.id, data.get("model"))
         usage = data.get("usage", {})
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
