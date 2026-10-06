@@ -454,10 +454,17 @@ def temporal_leg_fusion_order(
     if placement == "head":
         leg = [(pid, float(len(picks) - i)) for i, pid in enumerate(picks)]
     else:
+        # The picks must be STRICTLY WORSE than every head row, so a pick's rank
+        # is `ceiling + j` — exactly the positional rank it had under the old
+        # constant-0.0 wiring. Using a descending `len(picks) - i` here OVERLAPS
+        # the head's range (`ceiling`..1) and lets a pick tie or BEAT an interior
+        # head row, which scrambles the visible head: measured on window=9,
+        # limit=3, the picks reached rank 4 and 7 (`h0 h1 h2 h3 p0 h4 h5 p1 p2`)
+        # instead of landing below the head (`h0..h5 p0 p1 p2`). Negative scores
+        # keep them below the head's floor of 1 while staying ordered.
         head = [(c["id"], float(ceiling - i))
                 for i, c in enumerate(candidates[:ceiling])]
-        leg = head + [(pid, float(len(picks) - i))
-                      for i, pid in enumerate(picks)]
+        leg = head + [(pid, float(-i)) for i, pid in enumerate(picks)]
     fused = rrf_fusion(
         [base_leg, leg],
         strategy_names=["semantic", "temporal"],

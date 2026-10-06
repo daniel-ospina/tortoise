@@ -405,19 +405,16 @@ def test_head_boundary_is_the_candidate_index_not_the_dated_index():
 
 
 def test_empty_temporal_leg_leaves_rrf_order_byte_identical():
-    # #3019: a constant-scored leg carries no order IN ITS SCORES, and the
-    # fusion's rank is now tie-agnostic, so its tie order is the fusion's own
-    # deterministic (#2952) tie-break rather than the leg's row position. The
-    # property this test exists for is NO-OP: an empty second leg must not
-    # perturb what the base leg alone produces — so the reference is the base
-    # leg fused on its own, which is the same reference the original assertion
-    # was a hand-computed spelling of.
-    base = [(f"p{i}", 0.0) for i in range(60)]
-    alone = list(rrf_fusion([base], strategy_names=["semantic"],
-                            weights={"temporal": 1.0}))
+    # #3019: the base leg carries DISTINCT DESCENDING scores. A constant-scored
+    # leg is membership-only under the tie-agnostic fusion (identical scores
+    # collapse to one rank), so a base whose ORDER is the thing being pinned has
+    # to express that order in its scores — which is exactly what a real leg does
+    # with a real similarity. With distinct scores the original strong assertion
+    # still holds, and it still fails if the fusion reorders a ranked leg.
+    base = [(f"p{i}", float(60 - i)) for i in range(60)]
     fused = rrf_fusion([base, []], strategy_names=["semantic", "temporal"],
                        weights={"temporal": 1.0})
-    assert list(fused) == alone
+    assert list(fused) == [pid for pid, _ in base]
 
 
 def _deep_gold_candidates():
@@ -564,14 +561,10 @@ def test_deictic_only_anchors_are_dropped():
 
 
 def test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order():
-    # #3019: same no-op property as the test above — a zero-WEIGHT leg adds a
-    # member ("deep") but must not reorder the base. Its score is 0.0 against
-    # the base's positive fused score, so it lands last; the base keeps the
-    # order the base leg alone produces.
-    base = [(f"p{i}", 0.0) for i in range(20)]
-    alone = list(rrf_fusion([base], strategy_names=["semantic"],
-                            weights={"temporal": 0.0}))
+    # #3019: distinct descending base scores, as above — the no-op property is
+    # that a zero-WEIGHT leg adds its member but does not reorder a ranked base.
+    base = [(f"p{i}", float(20 - i)) for i in range(20)]
     fused = rrf_fusion([base, [("deep", 0.0)]],
                        strategy_names=["semantic", "temporal"],
                        weights={"temporal": 0.0})
-    assert list(fused) == alone + ["deep"]
+    assert list(fused) == [pid for pid, _ in base] + ["deep"]
