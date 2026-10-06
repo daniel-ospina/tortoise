@@ -1744,3 +1744,135 @@ def test_the_pre_fix_shape_swallowed_the_failure(
     proc = subprocess.run(["bash", "-e", "-c", pre_fix], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout
     assert "already open" in proc.stdout, proc.stdout
+
+
+# --- paid vs selected + queue wait (#7532) ---------------------------------
+#
+# The property under test is not "the arithmetic returns a number" — it is that
+# the ratio moves with the SELECTION and not with the jobs, because that is the
+# only reading that distinguishes execution inflation from a heavy corpus.
+
+def _job(name, start, end):
+    return {"name": name, "started_at": start, "completed_at": end}
+
+
+def test_job_execution_s_marks_an_incomplete_job_as_unknown() -> None:
+    """A queued/cancelled job has NO execution cost — None, never 0.
+
+    Returning 0 would silently deflate the ratio and make a stalled gate look
+    cheap, which is the opposite of the diagnostic.
+    """
+    assert ci_timing.job_execution_s(
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z")) == 600.0
+    assert ci_timing.job_execution_s({"name": "test (a)", "started_at": "2026-10-06T10:00:00Z"}) is None
+    assert ci_timing.job_execution_s({"name": "test (a)", "completed_at": "2026-10-06T10:10:00Z"}) is None
+    assert ci_timing.job_execution_s(
+        {"name": "test (a)", "started_at": "not-a-time", "completed_at": "nope"}) is None
+
+
+def test_queue_wait_is_measured_from_the_run_not_the_job() -> None:
+    """Queue residency = run created_at -> job started_at (#7532).
+
+    The Jobs API exposes no job-created_at, so this is the only honest reading
+    — and it is exactly the number the 'is it queue latency?' question needs.
+    """
+    job = _job("test (a)", "2026-10-06T10:00:30Z", "2026-10-06T10:10:30Z")
+    assert ci_timing.queue_wait_s(job, "2026-10-06T10:00:00Z") == 30.0
+    assert ci_timing.queue_wait_s(job, None) is None
+    assert ci_timing.queue_wait_s({"name": "test (a)"}, "2026-10-06T10:00:00Z") is None
+
+
+def test_selected_weight_sums_only_the_legs_that_run() -> None:
+    """The fast pool always; the slow leg only when `slow_run`; the carve-out
+    leg never contributes here (it is not a weight-bearing leg in the map)."""
+    durations = {"tests/a.py": 100, "tests/b.py": 50, "tests/slow_c.py": 900}
+    selection = {
+        "test_files": ["tests/a.py", "tests/b.py"],
+        "slow_run": False,
+        "slow_selected": ["tests/slow_c.py"],
+    }
+    assert ci_timing.selected_weight_s(selection, durations) == 150.0
+    selection["slow_run"] = True
+    assert ci_timing.selected_weight_s(selection, durations) == 1050.0
+
+
+def test_selected_weight_tolerates_a_partially_populated_map() -> None:
+    """An unmeasured file contributes the default, never a crash — the same
+    'absent = not adopted' collapse `ci_selection` uses."""
+    durations = {"tests/a.py": 100}
+    selection = {"test_files": ["tests/a.py", "tests/unknown.py"], "slow_run": False}
+    assert ci_timing.selected_weight_s(selection, durations) == 100.0
+    assert ci_timing.selected_weight_s(selection, durations, default_weight=25.0) == 125.0
+    # A non-numeric value falls back to the default; it is a malformed map
+    # entry, not a 0-weight file (#3407 c4). Here only a.py is malformed, so
+    # the total is unknown.py's real 5 — the default must not swallow it.
+    assert ci_timing.selected_weight_s(
+        selection, {"tests/a.py": None, "tests/unknown.py": 5}) == 5.0
+
+
+def test_the_ratio_moves_with_the_selection_not_with_the_jobs() -> None:
+    """THE discriminating property (#7532).
+
+    Identical jobs, two selections: the full (push-shaped) selection calibrates
+    near 1.0 while a tiny PR-shaped surface pays the same work for a fraction of
+    the weight. If the ratio responded to the JOBS this would be impossible —
+    and that is precisely what makes it evidence of execution inflation rather
+    than of a heavy corpus.
+    """
+    jobs = [_job(f"test ({c})", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z")
+            for c in "abcdefghi"]                      # 9 x 600 s = 5400 s paid
+    durations = {f"tests/f{i}.py": 600 for i in range(9)}
+
+    full = {"full": True, "test_files": [f"tests/f{i}.py" for i in range(9)], "slow_run": False}
+    tiny = {"full": False, "test_files": ["tests/f0.py"], "slow_run": False}
+
+    push_like = ci_timing.paid_vs_selected(jobs, full, durations, "2026-10-06T10:00:00Z")
+    pr_like = ci_timing.paid_vs_selected(jobs, tiny, durations, "2026-10-06T10:00:00Z")
+
+    assert push_like["paid_s"] == 5400.0
+    assert push_like["selected_s"] == 5400.0
+    assert push_like["ratio"] == 1.0            # the push-run calibration
+    assert pr_like["paid_s"] == 5400.0          # same work paid...
+    assert pr_like["selected_s"] == 600.0       # ...for a ninth of the weight
+    assert pr_like["ratio"] == 9.0
+    assert push_like["jobs_counted"] == sorted(f"test ({c})" for c in "abcdefghi")
+
+
+def test_non_test_jobs_and_incomplete_jobs_do_not_enter_the_ratio() -> None:
+    """`docs`/`ai-review-gate` are not shard work, and an incomplete test job
+    must not be counted as zero — both would corrupt the denominator's meaning
+    in opposite directions."""
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        _job("docs", "2026-10-06T10:00:00Z", "2026-10-06T10:09:00Z"),
+        {"name": "test (b)", "started_at": "2026-10-06T10:00:00Z"},   # never completed
+    ]
+    selection = {"test_files": ["tests/a.py"], "slow_run": False}
+    out = ci_timing.paid_vs_selected(jobs, selection, {"tests/a.py": 300}, "2026-10-06T10:00:00Z")
+    assert out["paid_s"] == 300.0
+    assert out["jobs_counted"] == ["test (a)"]
+
+
+def test_a_zero_weight_selection_reports_unknown_not_a_free_run() -> None:
+    """ratio None, never 0.0 — a zero would read as 'this gate costs nothing',
+    which is the exact opposite of the truth when the map is empty."""
+    jobs = [_job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z")]
+    out = ci_timing.paid_vs_selected(jobs, {"test_files": [], "slow_run": False}, {}, None)
+    assert out["selected_s"] == 0.0
+    assert out["ratio"] is None
+    assert out["paid_s"] == 300.0
+
+
+def test_the_queue_split_refutes_queue_latency_as_the_cause() -> None:
+    """The measured shape: 0.2-1.5 min of queue wait against 10-minute shards.
+
+    Reporting queue_s alongside the ratio is what makes 'it is queuing, not
+    running' refutable in one call rather than by a separate investigation.
+    """
+    jobs = [_job("test (a)", "2026-10-06T10:01:00Z", "2026-10-06T10:11:00Z")]  # 1 min queued, 10 run
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py"], "slow_run": False},
+        {"tests/a.py": 600}, "2026-10-06T10:00:00Z")
+    assert out["queue_s"] == 60.0
+    assert out["paid_s"] == 600.0
+    assert out["paid_s"] > 5 * out["queue_s"]     # execution dominates, not queueing

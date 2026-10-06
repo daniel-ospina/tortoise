@@ -156,6 +156,114 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+# --- paid vs selected + queue wait (#7532) ---------------------------------
+#
+# Until now this tool measured STEPS INSIDE jobs, which answers "what did the
+# gate spend" but never "was that spend proportional to what the diff
+# SELECTED" — and never separated EXECUTION from QUEUE RESIDENCY. Those are the
+# two numbers that decide where a slow gate gets fixed, and without them the
+# first wrong explanation (queue latency, or a heavy corpus file) cannot be
+# refuted. Measured 2026-10-06: push-run calibration 1.00, PR runs 2.96-4.35,
+# while queue wait was 0.2-1.5 min on EVERY job — i.e. slowdown AFTER start.
+
+TEST_JOB_PREFIX = "test"
+
+
+def job_execution_s(job: dict) -> float | None:
+    """A job's EXECUTION seconds (started_at -> completed_at), or None.
+
+    None means the job never completed (queued/cancelled). It has no execution
+    cost to attribute, and treating it as 0 would silently deflate the ratio.
+    """
+    start, end = job.get("started_at"), job.get("completed_at")
+    if not start or not end:
+        return None
+    try:
+        t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def queue_wait_s(job: dict, run_created_at: str | None) -> float | None:
+    """Seconds a job sat resident before it STARTED (run created -> job start).
+
+    Deliberately measured from the RUN's created_at, not the job's: the Jobs
+    API exposes no job-created_at. This is the run's queue residency attributed
+    to the job — which is what the "is it queue latency?" question asks.
+    """
+    if not run_created_at or not job.get("started_at"):
+        return None
+    try:
+        t0 = datetime.fromisoformat(run_created_at.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping (#3407 c4 shape)."""
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
+
+
+def selected_weight_s(selection: dict, durations: dict,
+                      default_weight: float = 0.0) -> float:
+    """The weight of what the gate will actually RUN, in measured seconds.
+
+    Sums every selected leg's `durations` weight: the fast pool
+    (`test_files`), the slow leg (`slow_selected`) and the carve-out leg when
+    it runs. A file with no measured duration contributes `default_weight` —
+    the same "absent = not adopted" collapse `ci_selection` uses — so a
+    partially-populated map under-counts instead of crashing.
+    """
+    legs: list[str] = list(selection.get("test_files") or [])
+    if selection.get("slow_run"):
+        legs += list(selection.get("slow_selected") or [])
+    total = 0.0
+    for name in legs:
+        key = name if name.endswith(".py") else f"{name}.py"
+        value = durations.get(key)
+        total += float(value) if isinstance(value, (int, float)) else default_weight
+    return total
+
+
+def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
+                     run_created_at: str | None = None) -> dict:
+    """What the gate PAID against what the diff SELECTED (#7532).
+
+    `ratio` is the diagnostic: a push run selects the FULL pool and calibrates
+    near 1.0, while a PR run that selects a small surface but pays a large one
+    is execution inflation, not selection weight. `queue_s` is reported
+    alongside so queue latency cannot be mistaken for execution cost.
+    """
+    paid = 0.0
+    queue = 0.0
+    counted: list[str] = []
+    for job in jobs:
+        name = job.get("name") or ""
+        if not name.startswith(TEST_JOB_PREFIX):
+            continue
+        secs = job_execution_s(job)
+        if secs is None:
+            continue
+        paid += secs
+        counted.append(name)
+        q = queue_wait_s(job, run_created_at)
+        if q is not None:
+            queue += q
+    selected = selected_weight_s(selection, durations)
+    return {
+        "paid_s": round(paid, 1),
+        "selected_s": round(selected, 1),
+        "ratio": round(paid / selected, 3) if selected > 0 else None,
+        "queue_s": round(queue, 1),
+        "jobs_counted": sorted(counted),
+    }
+
+
 # --- pytest log parsing -----------------------------------------------------
 
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
@@ -705,6 +813,35 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     return "\n".join(lines)
 
 
+def paid_vs_selected_cli(args) -> int:
+    """#7532: the --paid-vs-selected entry point.
+
+    PyYAML and `ci_selection` are imported HERE, not at module scope, so the
+    module keeps its stdlib-at-import contract (see the module docstring).
+    """
+    if not args.run_id or not args.changed_files:
+        print("--paid-vs-selected needs both --run-id and --changed-files",
+              file=sys.stderr)
+        return 2
+    import yaml  # noqa: PLC0415 — lazy by design
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection  # noqa: PLC0415 — lazy by design
+
+    manifest = yaml.safe_load(Path(args.manifest).read_text())
+    changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
+    selection = ci_selection.select(changed, args.event, manifest)
+    run = fetch_run(args.repo, args.run_id)
+    result = paid_vs_selected(
+        fetch_jobs(args.repo, args.run_id), selection,
+        durations_map(manifest), run.get("created_at"))
+    result["event"] = args.event
+    result["full"] = bool(selection.get("full"))
+    result["changed_files"] = len(changed)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the CI timing measurement artifact (#1477)")
     ap.add_argument("--repo", required=True, help="owner/repo (used for gh api calls)")
@@ -723,7 +860,18 @@ def main() -> int:
                     help="the selection manifest whose `durations:` map is refreshed")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --refresh-durations, render + validate but do not write")
+    ap.add_argument("--paid-vs-selected", action="store_true",
+                    help="#7532 — print what the gate PAID (test* job execution) against what "
+                         "the diff SELECTED (ci_selection weight), plus the queue-wait split; "
+                         "measurement only, writes no artifact")
+    ap.add_argument("--changed-files", default="",
+                    help="comma-separated changed paths, for --paid-vs-selected")
+    ap.add_argument("--event", default="pull_request",
+                    help="selection event for --paid-vs-selected: pull_request (default) or push")
     args = ap.parse_args()
+
+    if args.paid_vs_selected:
+        return paid_vs_selected_cli(args)
 
     if args.pick_run:
         picked = pick_run(args.repo)
