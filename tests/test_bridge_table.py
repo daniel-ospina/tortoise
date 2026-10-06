@@ -794,12 +794,19 @@ def _part_d_citations() -> dict[str, str]:
         "the generated doc has no Part D — the citation corpus is unreachable, so a "
         "truncated citation is invisible to every reader"
     )
-    # `_section` asserts the `### D1` anchor — an anchor renamed away or absent fails with a
-    # named error, not a bare IndexError. It does NOT bound this slice: the
-    # `**Documented hops.**` cut below comes before the next heading and is the real end.
+    # The slice's real end is the `**Documented hops.**` cut below, NOT `_section`'s heading
+    # bound: the marker sits inside D1 and ahead of the next heading, so the cut truncates
+    # first and the bound never determines the parse (bound, old literal, and no bound all
+    # yield the same 4 443 chars / 19 rows). Assert the marker, so a moved or renamed hop
+    # block fails here by NAME instead of silently widening the corpus past the D1 rows.
     d1 = _section(doc, "### D1")
+    hops = "**Documented hops.**"
+    assert hops in d1, (
+        f"the D1 slice contains no {hops!r} marker — the citation corpus end moved, so this "
+        "parse would run past the documented-hop block instead of stopping at the D1 rows"
+    )
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
-    d1 = d1.split("**Documented hops.**")[0]
+    d1 = d1.split(hops, 1)[0]
     rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
     quotes = re.findall(r"^  > (.+)$", d1, re.M)
     assert rows, "Part D1 rendered no citation rows — the citation guard is unarmed"
@@ -831,9 +838,19 @@ def _is_maximal(quote: str, text: str) -> bool:
 
 
 def _section(doc: str, heading: str) -> str:
-    """The body of `heading`, up to the next heading of the same-or-higher level."""
+    """The body of `heading`, up to the next heading of the same-or-higher level.
+
+    `#{2,3}` is same-or-higher than the level-3 `###` headings this is called with, so a
+    deeper `####` inside a section does not truncate it. The split is asserted to have applied:
+    without that, a section with no following heading silently returns the rest of the doc.
+    """
     assert heading in doc, f"the generated doc has no {heading!r} section"
-    return re.split(r"\n#{2,4} ", doc.split(heading)[1])[0]
+    parts = re.split(r"\n#{2,3} ", doc.split(heading)[1])
+    assert len(parts) > 1, (
+        f"no heading follows {heading!r} at level 2-3 — the section bound did not apply, so "
+        "this would return the rest of the document"
+    )
+    return parts[0]
 
 
 def _cited_findings() -> tuple[set[str], set[str], set[str]]:
