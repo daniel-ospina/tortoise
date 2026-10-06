@@ -1545,8 +1545,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("## The surface size — measured, and argued to you")
     add("")
     add(f"The comparable research measured one thing: **we advertise all {len(tools)} tools at once**, where no")
-    add("comparable agent-memory system advertises more than 18 (Cognee 4 · Mem0 9 · Graphiti 13 ·")
-    add("Letta 18). That is a fact about the field and a fact about us.")
+    add(f"comparable agent-memory system advertises more than {LARGEST_COMPARABLE} (Cognee 4 · Mem0 9 · Graphiti 13 ·")
+    add(f"Letta {LARGEST_COMPARABLE}). That is a fact about the field and a fact about us.")
     add("")
     add("**I first read it as contradicting a decision, and that was wrong — in the direction that is")
     if len(tools) > 14:

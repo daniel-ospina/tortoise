@@ -1911,7 +1911,7 @@ def test_the_render_prints_a_measured_zero_rather_than_none_at_all(tmp_path, mon
         "a MEASURED zero was suppressed — the guard keyed on the count being non-zero "
         "instead of on a signal existing"
     )
-    assert "no such count" not in text, (
+    assert "is asserted here" not in text, (
         "the render claimed it was not asserting a count while it had a measurement"
     )
 
