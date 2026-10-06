@@ -54,7 +54,7 @@ Verified against `design/2818-wsb` HEAD (`a76f98fb6`).
 | Layer-1 payload schema | `commit_schema.Point` — `tortoise/commit_schema.py:269`, `extra="forbid"` at `:272` | the **transient payload** shape, 15 fields | ✅ read |
 | Durable property table | `docs/ONTOLOGY.md` §4.1 — `:350` | the **human document** of Point graph properties (18 rows) | ✅ read |
 | Core property contract | `tortoise/projection/contract.py::POINT_PROPS` | **does not exist yet** — introduced by WS-A D1 (PR #2888, still draft) | ✅ `ls` → absent |
-| Live+replay writer | `projection/entities.py::_upsert_point_props` — `tortoise/projection/entities.py:151` | a **fixed SET list** (`:182-194`); being converted to open-set by PR #2958 (active lane, not touched here) | ✅ read |
+| Live+replay writer | `projection/entities.py::_upsert_point_props` — `tortoise/projection/entities.py:151` (line numbers at `a76f98fb6`) | the **fixed SET list** (`:182-194`) and, only after #2958 (`37d5ef00c`, merged 2026-09-17), also the open-set passthrough `_persist_extra_props` — which #2958 wired **into** this method; #2958 did **not** delete the fixed list | ✅ read |
 | Capture response projection | `sdk.py:500 _CAPTURE_PASSTHROUGH_PROPS` | a 4-field **output whitelist** — explicitly *not* a persistence declaration (`sdk.py:495-499`) | ✅ read |
 
 WS-A's §2.2 adds three more consumers that must be **diffed**, not merged: extractor
@@ -83,7 +83,7 @@ tortoise/pack_registry.py:114  })
   `ValueError(f"Invalid manifest: …")` at `:483-487`.
 - `tortoise pack validate` (`__main__.py:3857`) reuses `_validate` — "thin glue — the validator is
   the single source of truth" (`:3857-3860`).
-- The template documents the same seven keys (`packs/_template/manifest.yaml:60-80`).
+- The template documents the same seven keys (`packs/_template/manifest.yaml:55-69`).
 - **No starter pack declares any property today** — `grep -c propert packs/*/manifest.yaml` → `0`
   for all six (including `_template`). `docs/EXPANSION_PACKS.md` has **zero** occurrences of
   "propert". So there is no legacy pack vocabulary to migrate; this is a green-field key.
@@ -92,11 +92,11 @@ tortoise/pack_registry.py:114  })
 
 | Consumer | Mechanism | Verified |
 |---|---|---|
-| S1 value-brief compile | `value_extractor.compile_value_brief` (`:20`) reads only `description` + `nearMisses` per kind (`:56-60`) | ✅ read |
+| S1 value-brief compile | `value_extractor.compile_value_brief` (`:20`) builds each kind as exactly `{"description", "nearMisses"}` — at **both** kind-dict sites (`:56-60`; tenant overlay `:104-107`) — so a `props` carrier does **not** exist yet: **D8 names the change** | ✅ read |
 | Kind-classification index | `value_extractor.compile_kind_index_spec` (`:154`) reads `description`/`synonyms`/`examples`/`nearMisses` (`:252-255`); `kind_index.cache_key_for` (`:58-67`) content-addresses that spec | ✅ read |
-| Extractor prompts | `compile_value_brief` → `_build_master_from_brief` (`extractor_v2.py:311`) → `_render_master` (`:524`) / `_render_master_compact` (`:580`) / `_render_master_verbose` (`:617`); pack kinds render as `- {kind} — {description}` (`:557`, `:630`) | ✅ read |
+| Extractor prompts | `compile_value_brief` → `_build_master_from_brief` (`extractor_v2.py:311`; `_desc` returns only the `description` string, `:303-305`, stored at `:328`) → `_render_master` (`:524`) / `_render_master_compact` (`:580`) / `_render_master_verbose` (`:617`); pack kinds render as `- {kind} — {description}` (`:557`, `:630`) — **the props segment needs D8's master/render change** | ✅ read |
 | Commit door | `commit_schema.Point` `extra="forbid"` (`:269`, `:272`); the writer enumerates kwargs explicitly at `hosted_api.py:8100-8140` | ✅ read |
-| Live/replay writer | `SET n += $props` at `sdk.py:2579` (open, live) vs the fixed SET list at `entities.py:182-194` (closed, replay) | ✅ read |
+| Live/replay writer | `SET n += $props` at `sdk.py:2579` (open, live) vs the fixed core SET clauses at `entities.py:182-194` (live+replay), with #2958's open-set passthrough covering unrecognised keys on **both** | ✅ read |
 | Journal snapshot | `_emit_event` journals `properties(n)` minus `embedding` + `content_hash` (`sdk.py:2319-2324`; `get_point` returns `properties(n)` at `:6062-6075`) | ✅ read |
 
 The last row is load-bearing for D5: **any node property is already journaled**, so a
@@ -231,6 +231,15 @@ ontology:
 | `flatten` | registration, `cardinality: many` | `list` | — | stored space-joined (see below) |
 | `units` | the **bearer `quantityMinor`** of a `value_kind: quantity` binding | list of non-empty strings | — | pack-declared unit **vocabulary** (D6); unioned with WS-C's core allowlist. Declared in exactly one place per kind |
 
+**Key naming — a deliberate snake_case exception.** Prop-declaration keys are snake_case (`value_kind`,
+`replay_source`, `max_len`) rather than the camelCase of the surrounding `kindDefs` keys (`nearMisses`,
+`storeAs` — `pack_registry.py:111-114`). `max_len` and `replay_source` mirror the register's Python
+`Prop(...)` field names (`max_len` is the worked example in the table; `replay_source` is WS-A D1's
+field, D5); `value_kind` has no `Prop(...)` field and takes its spelling from the concept it names,
+WS-C's `valueKind` (D6). This is the one snake_case exception among **`kindDefs`** keys — the manifest
+already uses snake_case elsewhere (`ontology.memory_granularity`, `packs/_template/manifest.yaml:82-89`)
+— so do not normalize these to camelCase.
+
 `payload_writable` is **not a declared field** — it is **derived** from `source`
 (`payload_writable = source == "payload"`). WS-A D1 declares `payload_writable=False` on the twelve
 EP-owned props as an invariant; adding a second, independent way to set it would create a way to
@@ -341,8 +350,9 @@ adopts it verbatim, at the level where the value is actually owned:
 - **Why `journal` is the right default expectation.** The journal snapshot is `properties(n)` minus
   `embedding`/`content_hash` (`sdk.py:2319-2324`, `get_point` at `:6062-6075`), so **any node
   property is already journaled**. A pack prop is replay-durable through the *existing* mechanism —
-  no new event type, no new snapshot field. The only thing needed is WS-A D2's passthrough so the
-  replay writer stops discarding unrecognised keys.
+  no new event type, no new snapshot field. #2958's open-set passthrough (`_persist_extra_props`)
+  already preserves unrecognised keys on replay; WS-A D2's passthrough makes that same writer
+  registry-driven.
 
 ### D6 — The WS-C seam: `value_kind`, not a second type system
 
@@ -354,8 +364,8 @@ field:
   `basisPoints`(`int`), `verbatim`(`str`), `normalizationStatus`(`str`), … are core-registered
   (WS-C D12's `POINT_PROPS` fragment). Pack declarations **bind** them; they do not retype them.
 - **WS-B owns the per-kind binding.** `props: {amountMinor: {value_kind: money}, currency: {required: true}, minorUnitExponent: {required: true}}` says *this kind carries a money value*. That is exactly #2818's ask.
-- **The shared field is `value_kind`** (WS-C's `valueKind` spelling, one vocabulary — never
-  `valueType`). It is **not** the storage `type`: `money` is not a scalar, it is a shape over three
+- **The shared field is `value_kind`** (WS-C's `valueKind` concept; one vocabulary — never
+  `valueType`, and the manifest spells it `value_kind` per D2's key-naming note). It is **not** the storage `type`: `money` is not a scalar, it is a shape over three
   props (`amountMinor` + `currency` + `minorUnitExponent`). Collapsing `type` and `value_kind` into
   one field would either lose the storage type or make `money` unrepresentable. Two fields, one
   discriminator — the task's "`value_type`" is realized as `type` (storage) + `value_kind`
@@ -441,9 +451,16 @@ the typo protection it is.
 
 ### D8 — Prompt rendering, and keeping the index cache key byte-identical
 
-- **Rendering.** The declaration reaches the extractor through `compile_value_brief`
-  (`value_extractor.py:20`) → `_build_master_from_brief` (`extractor_v2.py:311`) →
-  `_render_master*` (`:524`/`:580`/`:617`). The render adds a per-kind props segment —
+- **Rendering — two named code changes, not an implication of adding the key.** The path is
+  `compile_value_brief` (`value_extractor.py:20`) → `_build_master_from_brief` (`extractor_v2.py:311`) →
+  `_render_master*` (`:524`/`:580`/`:617`), but today it **cannot carry the declaration**:
+  `compile_value_brief` builds each kind as exactly `{"description", "nearMisses"}` at **both**
+  kind-dict sites (`value_extractor.py:56-60`; the hosted tenant-overlay loop `:104-107`), and
+  `_build_master_from_brief` keeps only the description **string** (`_desc` at `:303-305`, stored at
+  `:328`). So D8 names the two changes: **(1)** both `compile_value_brief` kind-dict sites carry the
+  kind's `props` into the brief; **(2)** `_build_master_from_brief`/`_desc` carry the per-kind value as
+  a richer structure than a description string, so `_render_master*` can print the segment. The render
+  then adds a per-kind props segment —
   `- venture:fundingTranche — A tranche of a financing round [props: amountMinor(money), currency(required),
   minorUnitExponent(required), trancheLabel(str)]` — **only when the kind declares props**. An absent
   `props` key is a no-op, so **all five starter packs render byte-identically by construction** (they
@@ -468,7 +485,8 @@ the typo protection it is.
 | `contract.py::POINT_PROPS` (WS-A D1) | **Survives — the core register** | Lands with WS-A step 1 (PR #2888). Pack register is merged into it (D1). Nothing in WS-B implements this module; WS-B consumes it. |
 | `commit_schema.Point` (`:269`) | **Survives — the payload shape** | Gains the `props` carrier (D7) and the additive `_point_canonical` fold (`:1002-1023`). Stays `extra="forbid"`. Not the persistence declaration (WS-A D1). |
 | `docs/ONTOLOGY.md` §4.1 (`:350`) | **Survives — human documentation, diffed** | Becomes a **diff** against the merged registry (WS-A D7's declaration-parity row), never a third source. Gains a §4.1 note on the pack-extension mechanism; §5 stays the kind vocabulary the #2747 drift guard parses (`:483`). |
-| `projection/entities.py::_upsert_point_props` SET list (`:151`, clauses `:182-194`) | **Deleted — replaced by the registry** | WS-A D2 / PR #2958 (active lane — **not touched here**). WS-B only requires that the merged registry exposes `replay_source` so D5's subset is enforceable. |
+| Allowed-keys documentation: `packs/_template/manifest.yaml:55-69`, the `PackManifest.kind_defs` comment (`pack_registry.py:167-169`), `docs/EXPANSION_PACKS.md` | **Updated — #2818 fix direction 4** | Each gains the `props` key + its schema; #2818 names the template and `EXPANSION_PACKS.md` explicitly. Part of step 1. |
+| `projection/entities.py::_upsert_point_props` SET list (`:151`, clauses `:182-194`) | **Survives — the fixed core writer** | #2958 (`37d5ef00c`, merged 2026-09-17) did **not** delete it: it wired the existing `_persist_extra_props` helper into `_upsert_point_props`, so unrecognised keys survive live *and* replay. WS-A D2 makes the writer registry-consumed later; WS-B only requires that the merged registry exposes `replay_source` so D5's subset is enforceable. |
 | `sdk.py:500 _CAPTURE_PASSTHROUGH_PROPS` | **Survives — a separate output projection** | WS-A D1b: not merged. Its relationship to the registry is the one-directional *response ⊆ node* check (WS-A D7). |
 | `extractor_v2.OUTPUT_CONTRACT` (`:1005`) | **Diffed** | Prompt contract vs registry — asserted as a diff (WS-A §2.2). WS-B adds the per-kind props segment (D8) without rewriting `OUTPUT_CONTRACT`. |
 | `mcp_server._SERVER_MANAGED_PROPS` (`:715`) | **Kept — orthogonal** | Rejection, not persistence; it joins the **reserved** set for D4 collision checks. |
@@ -498,9 +516,9 @@ the typo protection it is.
 
 | Issue | How | Status |
 |---|---|---|
-| **#2818** — no per-kind property-declaration surface | D2 (`props` + `Prop` schema) + D8 (rendering, index-key-stable) | **closed in principle** |
+| **#2818** — no per-kind property-declaration surface | D2 (`props` + `Prop` schema) + D8 (rendering, index-key-stable) + D9 (allowed-keys documentation surfaces) | **closed in principle** |
 | **#2782** — per-kind value fields must be pack-declared | D6: packs bind WS-C's core value props per kind and declare pack units | **unblocked** (design); implementation still gated on WS-A D2 + WS-C |
-| **#2820 Pattern 2** (`Canonical ≠ consistent`) | D1/D9: five declarations collapse to two registers + diffed mirrors | **closed in principle** |
+| **#2820 Pattern 2** (`Canonical ≠ consistent`) | D1/D9: five declaration surfaces resolve to two registers + diffed mirrors; the writer survives as the fixed core writer (#2958 added an open-set passthrough, it did not delete the list) | **closed in principle** |
 | **#2820 Pattern 3** (`Promised ≠ expressible`) | D4: an undeclared/unsupported capability is an install error, not an advertisement | **closed for props**; #2766/#2787/#2781 (relations) remain |
 | **#2818 indicator 4** (no silent npz rotation) | D8: `compile_kind_index_spec` reads specific keys → cache key unchanged by construction | **closed in principle** |
 
@@ -509,9 +527,9 @@ the typo protection it is.
 | # | Step | Depends on | Risk |
 |---|---|---|---|
 | 0 | **WS-A D1** — `contract.py::POINT_PROPS` + the `Prop` type + declaration parity | — | none (no behaviour change) |
-| 1 | **D1/D2/D4** — `props` key in `VALID_KINDDEF_KEYS`, `_validate_kinddef_props`, `compile_prop_registry`, reserved/collision checks, precise messages. **No write-path change.** | 0 | low — validator + accessor only |
+| 1 | **D1/D2/D4** — `props` key in `VALID_KINDDEF_KEYS`, `_validate_kinddef_props`, `compile_prop_registry`, reserved/collision checks, precise messages; plus the allowed-keys documentation (`packs/_template/manifest.yaml`, the `PackManifest.kind_defs` comment, `docs/EXPANSION_PACKS.md` — #2818 fix direction 4). **No write-path change.** | 0 | low — validator + accessor + docs only |
 | 2 | **D9/D10 part 1** — drift guards: starter packs, index key byte-identity, malformed declarations, merged `replay_source` completeness | 1 | low |
-| 3 | **D8** — prompt rendering (`compile_value_brief` → `_render_master*`), props-less byte-identity pinned | 1 | low |
+| 3 | **D8** — prompt rendering: both `compile_value_brief` kind-dict sites carry `props`, `_build_master_from_brief`/`_desc` carry a richer value than the description string, `_render_master*` prints the segment; props-less byte-identity pinned | 1 | low |
 | 4 | **D7** — `Point.props` carrier + the additive `_point_canonical` fold + registry-driven admission at the commit door + golden-vector + props-present collision tests | 1, and WS-A step 3 (capture) | medium — `client_commit_id` coupling; the fold is a named code change, not an implication of adding the field |
 | 5 | **D8 indexed** — create range/FTS indexes for `indexed: true` pack props at projection init | 4, WS-A D2 | medium — index churn |
 | 6 | **D6 units** — pack-declared unit table wired to WS-C's `values.py` | WS-C step 1, 1 | low |
@@ -597,18 +615,3 @@ Anything not checked is marked **UNVERIFIED** and is not load-bearing.
 | `contract.py::POINT_PROPS` is **not yet in code** — it is WS-A design (draft PR #2888) | `ls tortoise/projection/contract.py` → absent; WS-A doc §3 D1 ✅ |
 | FalkorDB accepts `:`-containing property names / their index+FTD DDL | **UNVERIFIED** — and moot: D3 recommends bare names |
 | Protobuf reserved ranges; Kubernetes structural schemas; JSON-Schema open/closed; validator/loader schema split | §2.5, external sources (medium confidence) ⚠️ |
-
----
-
-**Version history.** v1 — initial design, then **six fresh-context adversarial review cycles** (all
-via `task` sub-agents with no session memory). Cycle 1: 2 findings (commit-id fold omitted from D7;
-binding `replay_source` contradiction). Cycle 2: 2 findings (`value_kind` membership undefined;
-`source: payload` + `replay_source: none` silent-durability hole). Cycle 3: 1 finding (`unit` used in
-two senses; no vocabulary declaration site). Cycle 4: 2 findings (`units` missing from D3's
-allowed-binding list; two legal `units` sites). Cycle 5: 7 findings (§2.1 heading mis-attribution;
-`quantityExponent`/`minorUnitExponent` missing from worked examples; the `_KIND_PROP_KEYS`
-"derived" claim — **a false mechanism claim, corrected**; five-vs-six pack count; two dangling
-cross-references). Cycle 6 (P0/P1-only): **NO ISSUES FOUND**. The WS-A experience (cycles 1–4
-reviewed decisions; 5–6 reviewed the v5 edit pass itself, and the v5 pass introduced more defects
-than it fixed) is why this document was held to a P0/P1 convergence bar before the owner gate: treat
-D2's field table as **code**, and update every consumer when a field changes.
