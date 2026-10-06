@@ -502,6 +502,50 @@ fi
 # PR. If either ever drifts to a different PR, the diff-match arm would
 # validate a marker against another PR's diff — the whole binding is void. The
 # stub serves whatever it is given, so only the CALL SHAPE can catch this.
+#
+# #4801: SET MEMBERSHIP, not a count floor. The floor this used to be passed a
+# call scoped to a FOREIGN repo as long as the two legitimate calls were also
+# present — and the stub routes on the diff media type BEFORE it looks at the
+# path, so a foreign diff fetch was "recognised", never reached
+# `$T/gh-unrecognised`, and left both suites green. The gate hashes whatever
+# lands in its temp file, so a foreign diff could be hashed while every drift
+# net reported success.
+#
+# TWO properties, both required, neither implying the other:
+#   SCOPE (first check) — no call may leave THIS repo and THIS PR.
+#   SHAPE (second check) — a call that IS scoped to this PR's pulls endpoint
+#     must be one of the two shapes the gate makes there (the diff fetch, or
+#     the body fetch). Scope alone admits a same-scope call to a NEW endpoint
+#     (`pulls/N/files`), and the stub would not flag it either because it
+#     matches `--jq .body` — that is #4801's "fail on any THIRD shape" arm.
+_gh_pulls_scope="repos/${REPO_NAME}/pulls/${PR_NUMBER}([^0-9]|$)"
+_gh_comments_scope="repos/${REPO_NAME}/issues/${PR_NUMBER}/comments"
+_gh_off_scope="$(grep -vE -- "${_gh_pulls_scope}|${_gh_comments_scope}" "$T/gh.log" || true)"
+if [ -z "$_gh_off_scope" ]; then
+    ok "(a) every gh call is scoped to repos/${REPO_NAME} for #${PR_NUMBER} (set membership)"
+else
+    bad "(a) gh call(s) outside this repo/PR: $(printf '%s' "$_gh_off_scope" | tr '\n' '|') (stub log: $(cat "$T/gh.log"))"
+fi
+# The two legitimate calls are the pulls RESOURCE itself — the diff fetch and
+# the body fetch — so the shape net is a SUB-RESOURCE PROHIBITION, not a marker
+# match. A marker net is blind to this: `pulls/N/files --jq .body` carries the
+# same `--jq .body` marker as the legitimate body fetch, so it satisfied the
+# old shape arm AND the count floor (`pulls/N/files` still matches the
+# number-boundary pattern). Measured: the marker form left the `/files`
+# mutation GREEN; this form is marker-blind and also catches sub-resources that
+# carry no marker at all (`pulls/N/reviews`).
+_gh_subres="repos/${REPO_NAME}/pulls/${PR_NUMBER}/"
+_gh_bad_shape="$(grep -E -- "$_gh_subres" "$T/gh.log" || true)"
+if [ -z "$_gh_bad_shape" ]; then
+    ok "(a) no gh call reaches a pulls SUB-RESOURCE (only the resource itself)"
+else
+    bad "(a) gh call reached a pulls sub-resource: $(printf '%s' "$_gh_bad_shape" | tr '\n' '|')"
+fi
+# Kept ALONGSIDE the two checks above because it asserts a THIRD property:
+# that BOTH the diff and the body fetch actually happened on this PR's pulls
+# endpoint. Neither membership check implies it — the comment channel
+# legitimately logs a non-pulls shape, so a gate that made only the diff call
+# would still satisfy both.
 if [ "$(grep -cE -- "repos/${REPO_NAME}/pulls/${PR_NUMBER}([^0-9]|$)" "$T/gh.log")" -ge 2 ]; then
     ok "(a) both gh calls target repos/${REPO_NAME}/pulls/${PR_NUMBER} (number-boundary exact)"
 else
