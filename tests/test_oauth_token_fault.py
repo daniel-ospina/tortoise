@@ -16,6 +16,7 @@ import os
 import secrets
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -877,3 +878,111 @@ def test_transient_503_conventions_agree_on_status():
     assert oauth.OAuthTemporarilyUnavailable().body() == {
         "error": "temporarily_unavailable",
         "error_description": "Temporary control-plane failure — retry."}
+
+
+# ── Control-plane round-trip envelope (#2848) ───────────────────────────────
+#
+# #3669 made the token grant loop-SAFE (the whole grant is offloaded as a unit).
+# It did not make it FAST: the exchange is still a SERIES of PostgREST round
+# trips, so a control plane that is slow-but-alive MULTIPLIES into request
+# latency and can cross Anthropic's 10 s token budget without anything being
+# "down". These tests pin the two facts a bound would be chosen from — the
+# serial COUNT and the scaling — and deliberately assert no wall-clock SLI,
+# which would be a load-dependent flake rather than a contract.
+
+
+class _RoundTripCounter:
+    """Proxy over the fake control plane: records (op, table) for every
+    round-trip and can delay each one.
+
+    Answers "how many SERIAL round-trips did that request make?" — the question
+    any total-latency bound depends on. Reads that do not go through the proxy
+    (e.g. seeding writes straight to ``cp.tables``) are deliberately not
+    counted, so the count is the request's, not the test's.
+    """
+
+    def __init__(self, inner, per_call_s: float = 0.0):
+        self._inner = inner
+        self.per_call_s = per_call_s
+        self.calls: list[str] = []
+
+    def _trip(self, op, fn, *a, **k):
+        table = a[0] if a and isinstance(a[0], str) else (k.get("fn") or "?")
+        self.calls.append(f"{op}:{table}")
+        if self.per_call_s:
+            time.sleep(self.per_call_s)
+        return fn(*a, **k)
+
+    def query(self, *a, **k):
+        return self._trip("query", self._inner.query, *a, **k)
+
+    def rpc(self, *a, **k):
+        return self._trip("rpc", self._inner.rpc, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_token_exchange_is_a_serial_series_of_control_plane_round_trips():
+    """The authorization-code exchange makes SIX serial PostgREST round-trips
+    (MEASURED), which is what makes Anthropic's 10 s token budget a function of
+    the control plane's per-call latency rather than of our own code.
+
+    #3669 offloaded the grant as a unit, which protects the event LOOP. It does
+    not reduce latency: these calls are in SERIES, so a control plane that is
+    slow-but-alive (this issue's observation #2: 12-25 s on adjacent endpoints)
+    multiplies into the request. At ~1.7 s per round-trip, six in series is
+    already past the 10 s budget with nothing actually "down".
+
+    Measured by calling ``exchange_auth_code`` DIRECTLY rather than through the
+    endpoint, deliberately: the app shares ONE control-plane client with
+    background maintenance (the retention sweep reaches ``account_deletions``),
+    so a wall-clock delay in an endpoint-level test lets that work interleave
+    and the counter then reports calls that are not this request's (observed:
+    11 vs 6). A direct call has no event loop, so the series is exactly the
+    exchange's own.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    verifier = _seed_code(cp, "series-code")
+    counter = _RoundTripCounter(cp)
+
+    body = {"grant_type": "authorization_code", "code": "series-code",
+            "code_verifier": verifier, "client_id": _CLIENT_ID,
+            "redirect_uri": _REDIRECT, "resource": None}
+    out = oauth.exchange_auth_code(counter, body, "https://tortoise.example")
+    assert out.get("access_token"), out
+
+    # THE SERIES — each entry is one serial round-trip on the request's path.
+    assert counter.calls == [
+        "query:oauth_clients",         # _verify_client_auth
+        "query:oauth_codes",           # the atomic claim (consume)
+        "query:organizations",         # _assert_org_usable
+        "query:oauth_refresh_tokens",  # _issue_tokens (1 of 2)
+        "query:oauth_access_tokens",   # _issue_tokens (2 of 2)
+        "query:oauth_codes",           # the settle
+    ], counter.calls
+
+    # ADDITIVITY: the exchange's latency is N x the control plane's, not 1 x.
+    # A LOWER bound, so it is deterministic on a loaded host — each injected call
+    # sleeps at least D, and the calls are serial by construction (asserted above).
+    verifier2 = _seed_code(cp, "series-code-2")
+    counter.per_call_s = 0.05
+    counter.calls.clear()
+    t0 = time.perf_counter()
+    out2 = oauth.exchange_auth_code(
+        counter, {**body, "code": "series-code-2", "code_verifier": verifier2},
+        "https://tortoise.example")
+    elapsed = time.perf_counter() - t0
+    assert out2.get("access_token"), out2
+
+    assert counter.calls == [
+        "query:oauth_clients", "query:oauth_codes", "query:organizations",
+        "query:oauth_refresh_tokens", "query:oauth_access_tokens",
+        "query:oauth_codes",
+    ], counter.calls
+
+    n = len(counter.calls)
+    assert elapsed >= n * 0.05, (
+        f"{n} serial round-trips at 50 ms each must cost >= {n * 0.05:.2f}s; "
+        f"took {elapsed:.3f}s — the calls are NOT serial")
