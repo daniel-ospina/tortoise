@@ -2162,12 +2162,14 @@ def _branch_terminal_state_from_prs(
         or empty-diff landing) an unguarded test would call a branch with NO
         COMMITS OF ITS OWN terminal — a live lane read as free, the dangerous
         direction,
-      * a FULL page (>= `_TARGETED_PR_PAGE` PRs) refuses: with `sort=created
-        desc` the OLDEST PR is the one that falls off it, and the merged PR this
-        function exists to find is exactly the oldest one on a busy ref.
+      * a FULL page (>= `_TARGETED_PR_PAGE` PRs) refuses, and that refusal is
+        deliberately CONSERVATIVE: with `sort=created desc` the OLDEST PR is the
+        one that falls off, the merges this function exists to find are the old
+        ones, so a full page cannot be read as "no merged PR" — even though the
+        answer may in fact be on the page.
 
-    Returns a human reason, or `None` when the ref must keep blocking. TWO
-    outcomes, and telling them apart is load-bearing:
+    Returns a human reason when the ref is terminal. For a ref that KEEPS
+    BLOCKING there are TWO outcomes, and telling them apart is load-bearing:
       * `None` — the lookup RAN and found no merged PR for this ref, or one of
         the guards above excluded it, or there is no slug/tip to ask about. The
         caller's default is BLOCKING, so this is never a demotion by itself.
@@ -2284,8 +2286,10 @@ def _branch_terminal_state_from_prs(
         # this test: `--stable` and `--unstable` both ignore whitespace, so a
         # match can call a branch merged when its content differs — a
         # FALSE-ACCEPT). A branch REUSED after its merge has moved PAST that
-        # head, so `behind` stops holding and it keeps blocking: the safe
-        # direction is preserved by the predicate's own shape.
+        # head, so the tip is no longer an ancestor of it — `compare` reports
+        # **`behind`**, the opposite of the `ahead` this arm accepts — and it
+        # keeps blocking: the safe direction is preserved by the predicate's own
+        # shape.
         if not head_sha:
             continue
         if not _tip_is_ancestor_of(gh_bin, slug, cwd, timeout, sha, head_sha):
@@ -2394,7 +2398,8 @@ def scan_branch_surface(
         # reason exists only for an EXACT tip match on a merged PR, or when
         # the tip is CONTAINED in one (ancestry) — both supplied by the caller. The
         # fail-open guards live in `_branch_terminal_state_from_prs` (NOT here):
-        # this site only forwards the two witnesses the guards need.
+        # `run_preflight` passes THAT function the witnesses, and this site only
+        # consumes the demotion it returned.
         targeted = (targeted_terminal or {}).get(ref)
         if targeted is not None:
             surface.add(
