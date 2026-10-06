@@ -48,12 +48,14 @@ _SUBSTITUTED_MEMO_CAP = 256
 def _warn_on_model_substitution(requested: str, served: object) -> None:
     """Warn when the provider served a model other than the one requested.
 
-    Never raises. This runs inside every ``complete()``, so the predicate
-    accepts only an exact ``str`` on each side — keeping a subclass with a
-    hostile ``__eq__``/``__hash__`` away from the comparison and the memo — and
-    the emit is suppressed, because a raising log handler escaping here would
-    fail the capture and skip ``_emit_usage_sink``. That seam follows the same
-    "an observer must never flip a call outcome" rule.
+    Never raises a propagating ``Exception``. This runs inside every
+    ``complete()``, so the predicate accepts only an exact ``str`` on each side —
+    keeping a subclass with a hostile ``__eq__``/``__hash__`` away from the
+    comparison and the memo — and the emit is suppressed, because a raising log
+    handler would otherwise fail the capture and skip ``_emit_usage_sink``; that
+    seam follows the same "an observer must never flip a call outcome" rule.
+    ``BaseException`` (``KeyboardInterrupt``/``SystemExit``) still propagates, by
+    design and as it does at that seam.
     """
     if type(requested) is not str or type(served) is not str:
         return
@@ -62,9 +64,6 @@ def _warn_on_model_substitution(requested: str, served: object) -> None:
     pair = (requested, served)
     if pair in _substituted_models:
         return
-    if len(_substituted_models) >= _SUBSTITUTED_MEMO_CAP:
-        _substituted_models.clear()
-    _substituted_models.add(pair)
     with contextlib.suppress(Exception):
         _logger.warning(
             "model substitution: requested %r but the provider served %r — the "
@@ -76,6 +75,14 @@ def _warn_on_model_substitution(requested: str, served: object) -> None:
             requested,
             served,
         )
+        # Memoise only AFTER the emit. If a log handler raises, the pair must
+        # stay un-memoised so the next call reports it AGAIN — suppressing the
+        # raise must not also suppress the FINDING for the process lifetime.
+        # The polarity of the cap is chosen the same way: a repeated warning is
+        # acceptable, a missed one is not.
+        if len(_substituted_models) >= _SUBSTITUTED_MEMO_CAP:
+            _substituted_models.clear()
+        _substituted_models.add(pair)
 
 
 def _emit_usage_sink(model, usage) -> None:

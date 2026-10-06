@@ -299,6 +299,36 @@ def test_a_raising_log_handler_cannot_fail_a_capture():
     print("PASS test_a_raising_log_handler_cannot_fail_a_capture")
 
 
+def test_a_failing_handler_does_not_permanently_silence_a_finding():
+    """Suppressing the handler's raise must not ALSO suppress the finding. The
+    pair is memoised only AFTER a successful emit, so a handler that raises
+    leaves it un-memoised and the next call reports it again — otherwise a
+    transient logging fault would hide that divergence for the whole process
+    lifetime."""
+    _m, handler, previous_level = _capture_substitution_warnings()
+
+    class _Boom(logging.Handler):
+        def emit(self, record):
+            raise RuntimeError("handler boom")
+
+    boom = _Boom()
+    try:
+        _m._substituted_models.clear()
+        _m._logger.addHandler(boom)
+        before = len(handler.messages)
+        _m._warn_on_model_substitution("deepseek-chat", "deepseek-flash")
+        assert ("deepseek-chat", "deepseek-flash") not in _m._substituted_models, (
+            "memoised despite the emit failing — that finding is silent forever")
+        _m._logger.removeHandler(boom)
+        _m._warn_on_model_substitution("deepseek-chat", "deepseek-flash")
+        assert len(handler.messages) == before + 2, handler.messages
+    finally:
+        if boom in _m._logger.handlers:
+            _m._logger.removeHandler(boom)
+        _release_substitution_warnings(_m, handler, previous_level)
+    print("PASS test_a_failing_handler_does_not_permanently_silence_a_finding")
+
+
 def test_the_substitution_memo_cannot_grow_without_bound():
     """The once-per-pair dedup assumes a STABLE served id, but this guard exists
     because the provider may misbehave — a provider returning a new id per
@@ -310,10 +340,15 @@ def test_the_substitution_memo_cannot_grow_without_bound():
     previous = set(_m._substituted_models)
     try:
         _m._substituted_models.clear()
+        peak = 0
         for i in range(_m._SUBSTITUTED_MEMO_CAP * 3 + 7):
             _m._warn_on_model_substitution("deepseek-chat", f"served-{i}")
-        assert len(_m._substituted_models) <= _m._SUBSTITUTED_MEMO_CAP, len(_m._substituted_models)
-        # The cap must not silence the guard altogether.
+            peak = max(peak, len(_m._substituted_models))
+        # Assert the PEAK, not the final length: a final-length sample cannot
+        # distinguish a correct cap from an off-by-one that transiently holds
+        # CAP+1 entries.
+        assert peak <= _m._SUBSTITUTED_MEMO_CAP, peak
+        # A cleared pair may warn again, but the guard must never go SILENT.
         _m._substituted_models.clear()
         _m._warn_on_model_substitution("deepseek-chat", "deepseek-flash")
         assert _m._substituted_models, "the guard went silent at the cap"
