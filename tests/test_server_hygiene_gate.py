@@ -263,7 +263,7 @@ def _loaded_conftest():
     loaded module in no ``sys.modules`` entry at all, so no lookup or scan can
     find it. conftest publishes itself (``LOADED_CONFTEST``) instead; this is
     the accessor for that handover, pinned by
-    ``test_the_loaded_conftest_is_handed_over_not_looked_up``.
+    ``test_start_teardown_survives_a_nested_conftest_taking_the_bare_key``.
     """
     from tests import _embedded as emb
 

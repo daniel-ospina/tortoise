@@ -868,17 +868,20 @@ jobs:
           # shard, on the DOCKER shape only. The decision is made HERE, at
           # the point of use, so both limits are enforced by the command that
           # actually runs — not by a comment claiming them.
-          #   * one shard — `matrix.half == "a"` ONLY. Half (b) stays serial:
-          #     it is the control leg that keeps a flake attributable, and
-          #     bounding the fan-out to one leg is what D3 admits. Plan input
-          #     (docs/plans/2026-09-26-5215-merge-throughput.md §2.2 T-I):
-          #     test (a) 38 m vs test (b) 28 m, so (a) is the half whose
-          #     reduction can move the job's wall.
-          #     HONEST LIMIT: this parallelises ONE of the fast job's two
-          #     halves, so the job's wall becomes max(half a / speedup,
-          #     half b) and the OVERALL gate wall may still be the serial
-          #     `test-slow` legs. One shard is not claimed to reach the
-          #     <10 min target on its own — it is the isolation-bounded
+          #   * one shard — `matrix.half == "a"` ONLY, of the fast job's NINE
+          #     shards (`a`..`i`; the count comes from
+          #     `tools/ci_selection.load_manifest()["fast_shards"]`, not from a
+          #     comment). The other shards stay serial: the serial legs are the
+          #     control that keeps a flake attributable, and bounding the
+          #     fan-out to ONE shard is what D3 admits. Shard (a) is the one
+          #     admitted because the plan's throughput case
+          #     (docs/plans/2026-09-26-5215-merge-throughput.md §2.2 T-I)
+          #     argued it on the longest leg.
+          #     HONEST LIMIT: this parallelises ONE of the fast job's NINE
+          #     shards, so the job's wall becomes max(shard a / speedup, the
+          #     slowest serial shard) and the OVERALL gate wall may still be
+          #     the serial `test-slow` legs. One shard is not claimed to reach
+          #     the <10 min target on its own — it is the isolation-bounded
           #     proof D3 admits, not the full throughput lever.
           #   * docker shape — TORTOISE_DB_URI non-empty. On a tier-2 PR the
           #     URI gate above leaves it empty and this SAME step runs the
