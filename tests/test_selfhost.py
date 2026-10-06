@@ -37,25 +37,50 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     return TestClient(selfhost.app)
 
 
-def _wait_for_probe(selfhost_mod, timeout: float = 20.0):
-    """Block until the background liveness refresher has landed a verdict.
+def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = True):
+    """Block until the background liveness refresher's verdict has SETTLED.
 
     #2988: ``/health`` reads an in-memory snapshot, so a fresh process
     truthfully reports "probe has not produced a result" (→ degraded) until the
     refresher's first probe lands. Waiting for that is deterministic; sleeping
     a fixed amount is not.
+
+    #7520: for a test that needs a HEALTHY daemon, mere ARRIVAL is not enough.
+    The first probe after a cold start pays the O(graph) projection cold start
+    and the refresh cycle is ``max(health_probe_interval(), probe_duration)``
+    (documented worst case ~20 s + 10 s), so the refresher legitimately reads
+    ``ok=False`` for the early cycles — and asserting ``/health == "ok"`` on a
+    merely-arrived verdict asserts a precondition the test never established.
+    By DEFAULT we therefore wait for the ``/health`` read path's own ``ok=True``
+    verdict (``snapshot()`` — the same in-memory view ``/health`` serves). Pass
+    ``require_ok=False`` when the test DELIBERATELY drives a failing probe and
+    only needs the verdict to land.
+
+    On expiry the failure names the probe's OWN state instead of surfacing as a
+    bare ``assert 'degraded' == 'ok'``, which misreads as a product divergence.
     """
     import time
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if selfhost_mod._HEALTH_PROBE.info().get("result_age_s") is not None:
-            return
+    while True:
+        info = selfhost_mod._HEALTH_PROBE.info()
+        if info.get("result_age_s") is not None:
+            if not require_ok:
+                return
+            if selfhost_mod._HEALTH_PROBE.snapshot().get("ok") is True:
+                return
+        if time.monotonic() >= deadline:
+            if not require_ok:
+                raise AssertionError(
+                    "the selfhost liveness refresher never produced a verdict "
+                    f"within {timeout}s — probe info {info!r}"
+                )
+            raise AssertionError(
+                "the selfhost daemon never became healthy within "
+                f"{timeout}s — snapshot "
+                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}"
+            )
         time.sleep(0.02)
-    raise AssertionError(
-        "the selfhost liveness refresher never produced a verdict within "
-        f"{timeout}s — /health would report degraded forever"
-    )
 
 
 def test_embedded_banner_stderr(monkeypatch, tmp_path, capsys):
@@ -157,7 +182,8 @@ class TestHealth:
         # refresher's probe — patch it there, not on the selfhost module.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
-            _wait_for_probe(selfhost)
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             body = r.json()
@@ -364,7 +390,8 @@ class TestHealthTruthMCP:
         # /health (selfhost.py) and metrics() (the MCP tool) — patch it there.
         monkeypatch.setattr(mon, "probe_db", _boom_probe)
         with tc:
-            _wait_for_probe(selfhost)
+            # Deliberately failing probe: wait only for the verdict to land.
+            _wait_for_probe(selfhost, require_ok=False)
             r = tc.get("/health")
             assert r.status_code == 200
             assert r.json()["status"] == "degraded"
