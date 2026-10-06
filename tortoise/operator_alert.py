@@ -326,18 +326,18 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
     a FILED call, so a DEDUP hit (an incident IS on record) would read as "not
     on record" and re-arm the short window. ``store`` is resolved by the caller.
 
-    The on-record rule (``outcome in {FILED, DEDUP}``, i.e. ``is not SUPPRESSED``)
-    is ALSO implemented by ``hosted_api._analytics_open_incident``, and
-    ``tests/test_operator_alert.py::test_on_record_predicate_parity`` pins the two
-    equal over every :class:`OpenOutcome` member. Extracting one shared helper is
-    deferred (filed as a follow-up).
+    The on-record rule (``outcome in {FILED, DEDUP}``) is the SHARED
+    :func:`tortoise.alert_store.incident_is_on_record`, imported lazily here for
+    the same reason this module avoids a top-level ``alert_store`` import (the
+    MCP stdio path must not pull in the hosted app). It is defined once (#4781);
+    ``hosted_api._analytics_open_incident`` routes through the same helper.
     """
     if store is None:
         return False
     try:
-        from tortoise.alert_store import OpenOutcome
-        return store.open_incident_state(kind, org_id or "", dict(detail)) in (
-            OpenOutcome.FILED, OpenOutcome.DEDUP)
+        from tortoise.alert_store import incident_is_on_record
+        return incident_is_on_record(
+            store.open_incident_state(kind, org_id or "", dict(detail)))
     except Exception:
         _logger.warning("operator incident filing failed (kind=%s)", kind,
                         exc_info=True)

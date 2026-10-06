@@ -794,21 +794,56 @@ def test_the_autouse_isolation_is_load_bearing(monkeypatch):
         "the autouse isolation must still return None here")
 
 
-def test_on_record_predicate_parity(monkeypatch):
-    """The on-record rule must match ``hosted_api._analytics_open_incident``.
+def test_on_record_predicate_has_one_source(monkeypatch):
+    """The on-record rule has ONE implementation — and both callers use it.
 
-    Both implement "``outcome in {FILED, DEDUP}``, i.e. ``is not SUPPRESSED``"
-    and must move together; a divergence on a fourth ``OpenOutcome`` member is
-    the #3820 duplicate-rule defect re-created.
+    Before #4781 the rule (``fact is not OpenOutcome.SUPPRESSED``) was written
+    twice — in ``file_operator_incident`` and ``hosted_api`` — so a parity test
+    could pin the copies equal. There is now a single implementation, and a
+    parity assertion would compare it to itself: it would pass forever and test
+    nothing (#3274). This pins the property that replaced parity:
+
+    1. the shared helper's truth table over EVERY :class:`OpenOutcome` member,
+       so the rule itself cannot drift; and
+    2. that BOTH public entry points actually route through the helper — a
+       monkeypatched helper return value must reach each caller's own result.
+
+    How it FAILS (both are real, not theoretical):
+
+    * Flip the helper's polarity/membership (``is not SUPPRESSED`` -> ``is
+      FILED``, or a fourth enum member) — the truth-table loop fails.
+    * Re-inline the rule in either caller, or call a different predicate — the
+      caller then computes its own answer and returns ``True``/``False``
+      instead of ``_sentinel``, so that routing assertion fails.
     """
+    import tortoise.alert_store as alert_store
     import tortoise.hosted_api as ha
 
+    # 1. The rule, pinned over every member. A fourth "not on record" member
+    #    must be classified false — the #3820 duplicate-rule defect.
     for fact in OpenOutcome:
-        expected = fact is not OpenOutcome.SUPPRESSED
-        assert oa.file_operator_incident(_FactStore(fact), "K", "o", {}) is expected
-        monkeypatch.setattr(ha, "_analytics_alert_store",
-                            lambda f=fact: _FactStore(f))
-        assert ha._analytics_open_incident("fallback", None) is expected
+        assert alert_store.incident_is_on_record(fact) is (
+            fact is not OpenOutcome.SUPPRESSED)
+
+    # 2. Routing. The spy returns an object that is neither True nor False, so a
+    #    caller that computed its own boolean cannot accidentally match it. Both
+    #    call sites import the helper from the module at call time, so patching
+    #    it HERE is the single point both resolve through.
+    _sentinel = object()
+    seen: list[OpenOutcome] = []
+
+    def _spy(fact):
+        seen.append(fact)
+        return _sentinel
+
+    monkeypatch.setattr(alert_store, "incident_is_on_record", _spy)
+
+    assert oa.file_operator_incident(
+        _FactStore(OpenOutcome.FILED), "K", "o", {}) is _sentinel
+    monkeypatch.setattr(ha, "_analytics_alert_store",
+                        lambda: _FactStore(OpenOutcome.FILED))
+    assert ha._analytics_open_incident("fallback", None) is _sentinel
+    assert seen == [OpenOutcome.FILED, OpenOutcome.FILED]
 
 
 #: The DECLARED residual raw builders — ``_backup_config_safe()`` /
