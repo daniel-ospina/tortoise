@@ -36,6 +36,22 @@ pytestmark = pytest.mark.skipif(
     reason="claude-hooks scripts not present")
 
 
+@pytest.fixture(autouse=True)
+def _not_consented_by_the_suite_default(monkeypatch, _capture_consent_default_on):
+    """#4276: this file's #3615 matrix asserts the gate FAILS CLOSED, so the
+    suite-wide consent default (``tests/conftest.py``) is opted BACK OUT here.
+
+    ``_run_hook`` already scrubs ``TORTOISE_CAPTURE`` from the CHILD environment
+    it builds, so the bash-side decline tests were never relying on the
+    inherited grant; this makes the intent explicit for the in-process
+    predicate calls too, and — via the dependency — guarantees the delete is
+    ordered AFTER the suite-wide grant. Each positive test re-opts-in through
+    ``extra_env``.
+    """
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    yield
+
+
 def _write_mock_tortoise(tmp_path: Path, log: Path, *, fail_capture: bool = False) -> Path:
     """A fake `tortoise` CLI: records every invocation to ``log`` and
     simulates session capture (success or failure). Placed on PATH so the
