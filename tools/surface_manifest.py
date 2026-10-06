@@ -233,6 +233,11 @@ _ABSENT = object()
 # provision or destroy keys, orgs, instances, tenants) and is therefore authored
 # and baseline-protected, not derived.
 DERIVED_CLASSES = ("agent-reachable", "eval-only", "internal", "no-caller-found")
+# The largest always-loaded tool count in the comparable research (Letta 18 · Graphiti 13 ·
+# Mem0 9 · Cognee 4). Named because the rendered paragraph compares OUR advertised count
+# against it: "Every comparable we studied pins a smaller set" is a comparison, true only
+# while we advertise more than this — below it the sentence is false (Letta pins 18).
+LARGEST_COMPARABLE = 18
 AUTHORED_CONTROL_PLANE = frozenset({"apikey_revoke", "graph_delete"})
 
 # §6.1 item 3. The catch-all clause is what makes this single-valued; the two
@@ -1151,6 +1156,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     rows = doc["rows"]
     tools = [r for r in rows if not r["name"].startswith("sdk:")]
     sdk = [r for r in rows if r["name"].startswith("sdk:")]
+    # A TOOL-LESS BASELINE IS A RE-CUT GONE WRONG, not a document: every section below
+    # quantifies over `tools` (the surface size, the 14-of-N contrast, the uncalled count),
+    # so rendering one would publish arithmetic over a surface that does not exist — "all 0
+    # tools at once", "the other -14", "0 of 0". `check` already rejects such a baseline.
+    if not tools:
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                "the baseline carries no tool rows, so there is no advertised surface to "
+                "render — re-cut it from the registry"
+            )
+        )
 
     tools.sort(key=lambda r: (r["family_rank"], r["keyword_rank"], r["cluster"] or r["name"], 0 if r["canonical"] in (True, None) else 1, r["name"]))
 
@@ -1529,12 +1545,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("## The surface size — measured, and argued to you")
     add("")
     add(f"The comparable research measured one thing: **we advertise all {len(tools)} tools at once**, where no")
-    add("comparable agent-memory system advertises more than 18 (Cognee 4 · Mem0 9 · Graphiti 13 ·")
-    add("Letta 18). That is a fact about the field and a fact about us.")
+    add(f"comparable agent-memory system advertises more than {LARGEST_COMPARABLE} (Cognee 4 · Mem0 9 · Graphiti 13 ·")
+    add(f"Letta {LARGEST_COMPARABLE}). That is a fact about the field and a fact about us.")
     add("")
     add("**I first read it as contradicting a decision, and that was wrong — in the direction that is")
-    add(f"easy to miss.** I said an agent shown 14 of our tools and not told about the other "
-        f"{len(tools) - 14} is being told")
+    if len(tools) > 14:
+        add("easy to miss.** I said an agent shown 14 of our tools and not told about the other "
+            f"{len(tools) - 14} is being told")
+    else:
+        # The contrast needs a remainder to name: with a small advertised set (or none) the
+        # subtraction renders "the other -4", a quantity about no surface at all.
+        add("easy to miss.** I said an agent shown only part of our tools is being told")
     add("something \"quietly incomplete\", and dropped the candidate as one that could not be adopted at")
     add("all. But the decision I cited — *\"delete what we can · de-identify what must persist · disclose")
     add("what nobody can remove\"* — governs **promises about user data**. It says nothing about how many")
@@ -1546,13 +1567,66 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("So this is a live question, and the honest thing is to argue it rather than drop it. Here is the")
     add("argument, both ways, with the weak parts named.")
     add("")
-    add("**The case for pinning a small advertised set.** Two thirds of what we advertise has never been")
     _never = [r for r in tools if observed_usage(r) == "never called"]
-    add(f"called by anything, including us ({len(_never)} of {len(tools)}). Mainstream clients cap the tools they will show — a")
-    add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
-    add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
+    _measured = [r for r in tools if observed_usage(r) is not None]
+    # THE COUNT IS A CLAIM ABOUT A MEASUREMENT, so it is made only when EVERY tool row carries
+    # a flag. (A tool-less baseline never reaches here — `cmd_render` refuses it above, since
+    # every section quantifies over `tools`.)
+    # `observed_usage()` reads the row's own committed `used_by`; its first token names which
+    # of the two things the flag records — that a call appears in our own tool-call log
+    # (`agents`) or that none does (`never called`). It returns None when the row carries
+    # neither token, which is what a baseline cut with no call log available looks like.
+    # `any(...)` was not enough, because the denominator is ALL rows: `used_by` sits in
+    # NON_DERIVABLE_ROW_KEYS (it is excluded from the drift comparison precisely because it is
+    # machine-influenced), so a PARTIALLY flagged baseline can reach this render, and a count of
+    # flagged rows divided by every row states a quantity over rows nobody assessed. The old
+    # unconditional form was worse still: with no flag anywhere it published "Two thirds of what
+    # we advertise has never been called by anything, including us (0 of 82)" — a negative
+    # nobody measured, in the document the owner reads to decide what to cut, and
+    # self-contradicting besides. The prose also now reports the measured quantity instead of
+    # the hardcoded "Two thirds", which contradicted its own parenthetical at any other count.
+    #
+    # The wording is SCOPED TO THE EVIDENCE: the flag says whether a call appears in OUR
+    # tool-call log (docs/product/mcp-sdk-surface.md's own glossary says so), which is evidence
+    # about our usage and not about whether a tool is useful to a customer — and it says that
+    # about the rows that carry a flag, never about the ones that do not. Neither branch may
+    # name a CAUSE for a flag's absence — `observed_usage` cannot observe one, and asserting an
+    # unmeasured cause is the same defect this guard removes. (Residual carried from the #5456
+    # draft; the stance is CONTRIBUTING.md's own — "stated as one rather than implied to be
+    # automatic".)
+    if len(_measured) == len(tools):
+        add(f"**The case for pinning a small advertised set.** {len(_never)} of the {len(tools)} tools we advertise have no")
+        add("call in our own tool-call log. Mainstream clients cap the tools they will show — a")
+    else:
+        _unassessed = len(tools) - len(_measured)
+        add("**The case for pinning a small advertised set.** This baseline carries an `in use` / `never called`")
+        add(f"flag on {len(_measured)} of its {len(tools)} tool rows — the other {_unassessed} carry none — so **no count")
+        add("of uncalled tools is asserted here**: a count over all of them would include rows nobody assessed.")
+        add("The flag records one thing: whether a call appears in our own tool-call log (`in use`) or none")
+        add("does (`never called`) — evidence about our usage, not about whether a tool is useful to a")
+        add("customer. A row carrying no flag records neither. Mainstream clients cap the tools they will")
+        add("show — a")
+    _our_set_is_larger = len(tools) > LARGEST_COMPARABLE
+    # The comparable claim is a comparison against `len(tools)`, so it is guarded like the cap
+    # clause: below the largest comparable it would be FALSE (Letta pins 18, against our N).
+    _comparable_clause = (
+        "Every comparable we studied pins a smaller set,"
+        if _our_set_is_larger
+        else f"We are not the largest: the biggest comparable, Letta, pins {LARGEST_COMPARABLE}, against our {len(tools)},"
+    )
+    if len(tools) > 40:
+        add(f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {len(tools)}, while we")
+        add(f"pay context for all of them on every turn. {_comparable_clause}")
+    else:
+        # The cap argument needs a surface bigger than the cap: with 40 or fewer advertised tools a
+        # client that caps at 40 sees ALL of them, so "at most 40 of these 10" is arithmetic over a
+        # population with no 40 in it. This document argues for shrinking the surface, so the small
+        # case is on the intended path, not hypothetical.
+        add("reported 40 in Cursor — a cap the whole surface fits inside, so no tool is hidden by it,")
+        add(f"and we pay context for all {len(tools)} of them on every turn. {_comparable_clause}")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-    add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
+    add("`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,")
+    add(f"`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
     add("comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some")
