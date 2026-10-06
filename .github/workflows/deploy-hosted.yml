@@ -188,8 +188,12 @@ jobs:
     if: ${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a failed pack smoke leaves `deploy-api` SKIPPED, so without an alert here
-    # the deploy is blocked in silence. `contents: read`/`packages: read` are
-    # unchanged and still needed (checkout; the image build's cache).
+    # the deploy is blocked in silence. `contents: read` and `packages: read` are
+    # pre-existing and untouched: `contents: read` is checkout, and `packages:
+    # read` is NOT needed here (this job never pulls from GHCR — the base image
+    # is a Docker Hub `python:3.12-slim-bookworm` and the `type=gha` cache is the
+    # Actions cache service, governed by `cache-mode`, not by the token scope).
+    # It is left in place only because removing it is out of scope for #2240.
     permissions:
       contents: read
       packages: read
@@ -906,13 +910,18 @@ jobs:
       #   and it cannot fail-open: the ledger leg fails the step loudly when it
       #   cannot file.
       # RESIDUAL, named rather than papered over
-      #   If `actions/checkout` fails, the script this step calls was never
-      #   fetched, so the guard below emits a named `::error::` and exits — the run
-      #   is red with a reason, but the out-of-band alert itself cannot run. Closing
-      #   that would mean a second, inline filer in the workflow (duplicated
+      #   This is an IN-JOB notifier, so it cannot report a job that never reached
+      #   its last step: a runner loss, a `timeout-minutes` kill or a cancellation
+      #   (`cancel-in-progress`) ends the job before `if: failure()` is evaluated.
+      #   A 4th job with `needs: [all three]` + `if: failure()` would cover those,
+      #   but cross-job `steps.*.outcome` is not available, so it would lose the
+      #   per-step attribution this design exists for — and it still would not
+      #   fire on a cancel. If `actions/checkout` fails, the script this step calls
+      #   was never fetched, so the guard below emits a named `::error::` and exits —
+      #   the run is red with a reason, but the out-of-band alert itself cannot run.
+      #   Closing that would mean a second, inline filer in the workflow (duplicated
       #   substrate, no dedupe discipline), which is the machinery this design
-      #   deliberately avoids; a checkout failure is a platform failure, not a
-      #   deploy-gate one.
+      #   deliberately avoids: these are platform failures, not deploy-gate ones.
       # TOKEN
       #   `GH_TOKEN` is the ACTIONS token, deliberately: the dedupe search keys
       #   on `author:app/github-actions`, so a PAT writes as its own owner,
@@ -1097,11 +1106,10 @@ jobs:
           bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
             --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"
       # ── Out-of-band failure alert (#2240) ──────────────────────────────
-      # Placed BEFORE the `if: always()` gate audit so the audit stays the job's
-      # last word. A red here means the release is LIVE and unhealthy, and
-      # nothing else reports that out-of-band. Same script, same substrate,
-      # per-step key; see the long note on the `deploy-api` site for the token
-      # and ordering rationale.
+      # A red here means the release is LIVE and unhealthy, and nothing else
+      # reports that out-of-band. Same script, same substrate, per-step key; see
+      # the long note on the `deploy-api` site for the token and ordering
+      # rationale — this one is LAST in its job too.
       - name: Alert on failure (out-of-band) — post-deploy-verify (#2240)
         if: failure()
         run: |

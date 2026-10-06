@@ -938,6 +938,25 @@ _ALERT_SCRIPT = (
     Path(__file__).resolve().parent.parent / ".github" / "scripts" / "deploy-api-alert.sh"
 )
 
+# Jobs that may fail alone WITHOUT an out-of-band alert, each with the reason.
+# Empty on purpose: every job here can fail alone and block the deploy, so every
+# job ends with the alert. A new job must therefore either carry the alert or be
+# added here WITH a reason — the point is that adding a silent job is a decision
+# someone makes, not an oversight (round-3 review, P2-4).
+_ALERT_EXEMPT_JOBS: dict[str, str] = {}
+
+
+def _shell_code(run: str) -> str:
+    """`run` with comment-only lines dropped.
+
+    A guard must read the COMMAND, not the prose around it: a body whose only
+    `set -o pipefail` is inside a comment (or on a commented-out branch) is not
+    armed, and would otherwise satisfy an `in run` assertion silently.
+    """
+    return "\n".join(
+        line for line in run.splitlines() if not line.lstrip().startswith("#")
+    )
+
 
 def _alert_script_text() -> str:
     assert _ALERT_SCRIPT.is_file(), f"alert script not found: {_ALERT_SCRIPT}"
@@ -1008,6 +1027,16 @@ def test_failed_deploy_jobs_alert_out_of_band():
     assert {job for job, _n, _s in sites} == set(_ALERT_JOBS), (
         f"every job that can fail while its siblings are skipped must carry the "
         f"alert; got {sorted(job for job, _n, _s in sites)}, want {sorted(_ALERT_JOBS)}"
+    )
+    # DERIVED from the workflow, not restated: every job of this workflow must
+    # either end with the alert or be an explicit, reasoned exemption. Without
+    # this, a 4th job added tomorrow can fail alone in total silence — which is
+    # the defect #2240 exists to remove (round-3 review, P2-4).
+    assert set(_jobs()) == set(_ALERT_JOBS) | set(_ALERT_EXEMPT_JOBS), (
+        f"deploy-hosted jobs {sorted(_jobs())} != alert sites "
+        f"{sorted(_ALERT_JOBS)} + exemptions {sorted(_ALERT_EXEMPT_JOBS)} — a new "
+        f"job must either carry the out-of-band alert or be added to "
+        f"_ALERT_EXEMPT_JOBS with a reason"
     )
     for job_name, step_name, step in sites:
         assert step.get("if") == "failure()", (
@@ -1156,9 +1185,25 @@ def test_drift_report_seam_carries_the_gates_own_report():
         "the gate's stdout must be teed to $DRIFT_REPORT_FILE so the alert carries "
         "the report the RUN produced"
     )
-    assert "pipefail" in run, (
-        "`set -o pipefail` is load-bearing: without it the STEP's status is tee's "
-        "(0), so a blocked deploy would read GREEN"
+    # `set -o pipefail` is what makes the STEP fail when the gate fails: without it
+    # the step's status is `tee`'s (0), so a blocked deploy reads GREEN and the
+    # alert never fires — a fail-OPEN, not merely a silence. Pinned on the COMMAND
+    # (a comment cannot arm it) and on the ORDER (armed after the pipeline is not
+    # armed), and `set +o pipefail` is refused outright.
+    code = _shell_code(run)
+    armed = re.search(r"set\s+-o\s+pipefail", code)
+    assert armed, (
+        "the drift step must run `set -o pipefail` OUTSIDE a comment: without it "
+        "the step's status is tee's (0) and a blocked deploy reads GREEN"
+    )
+    assert not re.search(r"set\s+\+o\s+pipefail", code), (
+        "`set +o pipefail` would disarm the seam it exists to arm"
+    )
+    gate_at = code.find("check-migration-drift")
+    pipeline = code.find("|", gate_at)
+    assert pipeline == -1 or armed.start() < pipeline, (
+        "`set -o pipefail` must be armed BEFORE the gate's pipeline — armed "
+        "afterwards it has no effect on it"
     )
 
     drift_path = (drift.get("env") or {}).get("DRIFT_REPORT_FILE")
