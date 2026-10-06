@@ -465,10 +465,14 @@ def test_planted_sidecar_nonprimitive_config_prop_refused_before_wipe(tmp_path):
 def test_config_registry_export_consistency():
     """`preserved ⊆ exported`, and the two facts that must NOT be inferred.
 
-    The reverse pin (export-skipped ⇒ preserved) is deliberately ABSENT:
-    export-skip is not a durability classifier — `:GraphEventMeta` is
-    export-skipped AND load-bearing (#4653) — so only the direction that holds
-    is asserted.
+    The reverse pin (`export-skipped ⇒ declared`) is deliberate NARROWER than
+    `export-skipped ⇒ preserved`, and lives in
+    `tests/test_rebuild_event_meta_watermark_4653.py`
+    (`test_export_skipped_classes_must_be_declared`): export-skip is not a
+    durability classifier — `:GraphEventMeta` is export-skipped AND
+    load-bearing (#4653) — so the direction that holds is "an export-skipped
+    class must be DECLARED somewhere in the posture doc", never "must be
+    preserved".
     """
     from tortoise import export, hosted_api
     from tortoise.projection import (
@@ -1219,9 +1223,17 @@ def test_config_registry_doc_consistency():
     assert f"`{COMPLETED_STEP_EDGE}`" in preserved_sections
     assert "#4641" in preserved_sections
     assert "TeamMeta" in unenrolled and "#5353" in unenrolled
-    assert "GraphEventMeta" in unenrolled and "#4653" in unenrolled
-    for vehicle in ("OnboardingState", "TeamMeta", "GraphEventMeta"):
+    for vehicle in ("OnboardingState", "TeamMeta"):
         assert vehicle not in label_wide
+    # #4653: `:GraphEventMeta` LEFT this block — it now has a vehicle (the
+    # pre-wipe sidecar's `event_meta` section, re-derived after replay), so
+    # calling it "unenrolled" would understate what the code actually does.
+    # It is still NOT a config-registry class (no identity property), which is
+    # why it is declared in its own block rather than in `preserved`.
+    assert "GraphEventMeta" not in unenrolled
+    watermark = _doc_block("watermark")
+    assert "GraphEventMeta" in watermark and "#4653" in watermark
+    assert "GraphEventMeta" not in label_wide
 
     # The audit query names every declared class and key (one-directional) —
     # and, since #4641, the sidecar-section classes too, or the operator query
@@ -2166,9 +2178,12 @@ def test_foreign_section_from_a_sibling_build_is_refused_before_wipe(
     """The version is a FORMAT gate, not a SECTION-SET gate.
 
     Two sibling builds can legitimately claim the same version with different
-    section sets: `3` is contested by the open #5327 (`event_meta`) and #5241
-    (`graph_identity`). This change reserved `4` so it would not join that
-    fight (its earlier revisions still claimed `3`), but that removes only ONE
+    section sets: `3` was contested by #5241 (`graph_identity`), #4641 (this
+    change) and #5327 (`event_meta`). This change reserved `4` so it would not
+    join that fight (its earlier revisions still claimed `3`), and #5327 has
+    since LANDED at `5` (see the version note in
+    `tortoise/projection/__init__.py`), so `event_meta` is now a section this
+    build DOES restore. That removes only ONE
     way for a same-version payload to arrive — a payload stamped at OUR version
     by a build whose section set differs from ours still presents the same
     version with a section we cannot read. Without a section-set check the
@@ -2180,10 +2195,10 @@ def test_foreign_section_from_a_sibling_build_is_refused_before_wipe(
     from tortoise.projection import _load_prewipe_snapshot
 
     path = tmp_path / "sibling.json"
-    _plant(path, _sidecar_payload(event_meta=[{"last_seq": 7}]))
+    _plant(path, _sidecar_payload(some_future_section=[{"id": "foreign-1"}]))
     with pytest.raises(RuntimeError) as exc:
         _load_prewipe_snapshot(str(path))
-    assert "event_meta" in str(exc.value)
+    assert "some_future_section" in str(exc.value)
     assert "cannot restore" in str(exc.value)
     assert path.exists(), "the sidecar must be KEPT for repair, not deleted"
 
@@ -2209,11 +2224,12 @@ def test_same_version_sibling_section_survives_a_real_rebuild(graph):
     _write_install(sdk, "keep-me", version="1.0.0")
     before = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
     _plant(Path(_sidecar_path(events)), _sidecar_payload(
-        event_meta=[{"last_seq": 7}], batch_snapshot=[{"id": "b1"}]))
+        some_future_section=[{"id": "foreign-1"}],
+        batch_snapshot=[{"id": "b1"}]))
 
     with pytest.raises(RuntimeError) as exc:
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-    assert "event_meta" in str(exc.value), exc.value
+    assert "some_future_section" in str(exc.value), exc.value
     after = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
     assert after == before, "the graph must be untouched by a refused rebuild"
     assert _read_install(sdk, "keep-me") is not None
