@@ -1917,6 +1917,21 @@ def _write_capture_turns(
     ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
     persists. Both lanes surface it on their capture receipt.
     """
+    # #7369 review r8: this writer holds the ONE ``UNWIND $turns`` statement,
+    # whose rows MERGE on a ROW FIELD (``MERGE (t:Point {id: turn.id})``). The
+    # parameter boundary deliberately does NOT null a row merge key — a null key
+    # is refused by the engine, so nulling it would swap one abort for another —
+    # which means the FOLD owns the skip, exactly as the top-level identity
+    # anchors do via ``_writable_id``. Every row id is derived from
+    # ``session_id`` (``_capture_turn_id`` → ``f"{session_id}_t{i}"``), so an
+    # unwritable ``session_id`` makes EVERY row id unwritable: skip the whole
+    # batch, WARN, and issue no statement. With this, no unwritable ROW merge
+    # key can reach the engine from this writer (see `tests/...boundary.py`,
+    # `test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded`).
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(session_id):
+        _log_identity_skip("capture turn batch", session_id, "session id")
+        return 0
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
     else:

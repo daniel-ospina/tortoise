@@ -3061,6 +3061,41 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
+def _log_identity_skip(what: str, value, label: str = "identity") -> None:
+    """WARN, ONCE, that an unwritable identity made a record be SKIPPED (#7369).
+
+    The boundary change turned what used to be a LOUD abort into a SKIP. The
+    folds run on replay paths whose pass-1a/1b carry no per-event
+    ``try/except``, so before the gate an unwritable identity raised AFTER
+    ``_wipe_all_nodes``; now the fold drops the record instead. A drop with no
+    log is invisible: an operator cannot tell a deliberate degrade from data
+    loss, which is precisely the risk this change exists to manage.
+
+    This is the ONE place the skip is reported, and it uses the SAME
+    ``logger.warning`` mechanism the point-id skips already use
+    (``FalkorProjection.apply`` / ``rebuild``) — the codebase keeps one way of
+    announcing a dropped record, not two. ``what`` names the record family and
+    ``label`` the identity's role (MERGE key vs property) so the message says
+    WHICH identity was refused.
+
+    An ABSENT identity (``None``/``""``) is NOT logged: the folds default
+    missing identity fields to ``""`` and skip them by design (an event with
+    no subject is ordinary, not a degrade), so logging those would spam the
+    operator with the healthy case and drown the corrupt one. Only a TRUTHY
+    value ``_writable_id`` refuses — the NUL/lone-surrogate-bearing class this
+    gate exists for — is an anomaly worth a warning.
+    """
+    if not value:
+        return
+    logger.warning(
+        "#7369: skipping %s — %s %r is not a writable identity (empty, or "
+        "NUL/lone-surrogate bearing); the record is dropped rather than "
+        "reaching FalkorDB and aborting a replay that has already wiped the "
+        "graph",
+        what, label, value,
+    )
+
+
 def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
     """Annotator dims PRESENT on a journal record, under their node-prop names.
 
@@ -4890,6 +4925,10 @@ class FalkorProjection(
             p = ev.get("point")
             if isinstance(p, dict) and _writable_id(p.get("id")):
                 self._upsert(p)
+            elif isinstance(p, dict):
+                # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
+                # the skip must be observable (see `_log_identity_skip`).
+                _log_identity_skip("PointPromoted", p.get("id"), "id")
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -6433,6 +6472,11 @@ class FalkorProjection(
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
+                elif isinstance(p, dict):
+                    # #7369: a truthy-but-unwritable id is skipped, not folded
+                    # — the skip must be observable (see `_log_identity_skip`).
+                    _log_identity_skip(
+                        "PointPromoted (rebuild)", p.get("id"), "id")
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -7004,6 +7048,7 @@ class FalkorProjection(
             # sibling onboarding/config restores), so a value the driver cannot
             # take aborts a rebuild that has already wiped the graph.
             if not _writable_id(bid):
+                _log_identity_skip("Batch", bid, "id (MERGE key)")
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(
@@ -7192,6 +7237,7 @@ class FalkorProjection(
             # #7369: `sid` is the Session MERGE key — same post-wipe exposure
             # as the Batch restore above.
             if not _writable_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(

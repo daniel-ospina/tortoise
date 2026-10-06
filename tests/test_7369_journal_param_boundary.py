@@ -71,16 +71,20 @@ Run (embedded carve-out):
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pathlib
 
 import pytest
 
 from tortoise.projection import (
-    _GuardedGraph, _flat_writable, _journal_safe_params, _writable_id,
+    _flat_writable,
+    _GuardedGraph,
+    _journal_safe_params,
+    _log_identity_skip,
+    _writable_id,
 )
 from tortoise.sdk import TortoiseSDK
-
 
 # ── a strict stand-in for the driver's own rejection ─────────────────────
 #
@@ -511,6 +515,16 @@ def test_a_ROW_FIELD_used_as_a_MERGE_key_is_not_nulled_either():
     statement: ``Cannot merge node using null property value``), so the field
     names appearing as ``<row>.<field>`` inside a MERGE map are excluded from
     the row walk. A NON-key field in the same row is still gated.
+
+    ⛔ WHAT THIS DOES **NOT** CLAIM (round-7 review, finding 3). Leaving the
+    field alone is NOT a fix for the corrupt value: it is still a parameter the
+    engine cannot PARSE, so this exemption only avoids converting one abort
+    into a SECOND one. The route is closed in the FOLD — the one writer of a
+    row-MERGE statement is ``sdk._write_capture_turns``, which skips a batch
+    whose session id (hence every row id) is unwritable and WARNs, pinned by
+    ``test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded``.
+    The assertion below pins the boundary's own contract and must not be read
+    as "a corrupt row merge key is safe here".
     """
     cy = ("UNWIND $turns AS turn MERGE (t:Point {id: turn.id}) "
           "SET t.content = turn.c")
@@ -848,3 +862,113 @@ def test_a_WRITABLE_short_stub_source_still_autocreates():
     stub_creates = [(c, p) for c, p in seen if "CREATE (s:Point" in c]
     assert len(stub_creates) == 1, seen
     assert stub_creates[0][1] == {"sid": "7"}, stub_creates[0]
+
+
+# ── 5. every identity skip is OBSERVABLE (round-7 review, finding 2) ─────
+#
+# The boundary change turned a LOUD abort into a SKIP: before it, an unwritable
+# identity raised out of pass-1a/pass-1b (no per-event try/except, so AFTER the
+# wipe); after it, the fold drops the record. A drop nobody can see is
+# indistinguishable from data loss to the operator, which is the risk this
+# whole change exists to manage. `_log_identity_skip` is the ONE reporter, and
+# these tests are what make the reporting falsifiable.
+
+def test_an_unwritable_identity_skip_is_OBSERVABLE(caplog):
+    """The reporter's contract: truthy-but-unwritable WARNs; ABSENT is silent.
+
+    Both halves matter. A skip that does not log is invisible; an ABSENT
+    identity (the folds default `name`/`subject`/`object` to `""` and skip
+    those by design) is ordinary, so logging it would drown the corrupt case.
+    """
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Subject", "bad\x00name", "name (MERGE key)")
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Subject", "", "name (MERGE key)")
+    _log_identity_skip("Subject", None, "name (MERGE key)")
+    assert caplog.text == "", (
+        "an ABSENT identity was logged as a skip — that is the healthy case "
+        f"and it would drown the corrupt one: {caplog.text!r}"
+    )
+
+
+def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog):
+    """End-to-end: the record is dropped AND an operator can see it dropped.
+
+    `test_a_corrupt_entity_key_does_not_abort_the_rebuild` proves the rebuild
+    SURVIVES; this proves the survival is not silent.
+    """
+    events, sdk, _old, _new = superseded
+    label, rec, key, val = _FAMILY_RECORDS[0]  # Subject / name
+    assert label == "Subject", label
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps(_poison_path(rec, key, val), ensure_ascii=False) + "\n"
+    )
+
+    caplog.set_level(logging.WARNING)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text
+
+
+def test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded(caplog):
+    """Finding 3: the `UNWIND $turns` row MERGE key is closed by the FOLD.
+
+    The boundary must not null a row merge key (`{id: turn.id}`) — the engine
+    refuses a null key — so forwarding it would hand the engine the same
+    unparseable parameter, i.e. the original abort by a different route.
+    `_write_capture_turns` is the ONE writer of that statement, and it skips the
+    batch when the session id (from which every row id derives) is unwritable.
+    """
+    from tortoise import sdk as sdk_mod
+
+    driver = _StrictDriver()
+    proj = type("P", (), {"g": _guarded(driver)})()
+    caplog.set_level(logging.WARNING)
+    written = sdk_mod._write_capture_turns(
+        proj, type("S", (), {})(), "bad\x00session",
+        [{"role": "user", "content": "hi"}],
+        now="2026-01-01T00:00:00+00:00",
+        turn_embs=[None],
+        texts_and_counts=(["hi"], {"user": 0}),
+    )
+    assert written == 0, written
+    assert driver.seen == [], (
+        "the turn statement was issued anyway, so an unwritable ROW merge key "
+        f"reached the engine: {driver.seen!r}"
+    )
+    assert "capture turn batch" in caplog.text, caplog.text
+
+
+def test_a_RESOLVED_source_key_is_guarded_too(monkeypatch, caplog):
+    """Finding 1: `_upsert_source` must guard the graph-RESOLVED key.
+
+    `url` is this statement's MERGE key, so `_journal_safe_params` forwards it
+    by design; `resolve_source_key` returns the STORED `s.url` read back from
+    the graph, so an unwritable stored url would reach the engine and abort
+    after the wipe. The three sibling source writers (`_mint_source_stub`,
+    `link_source_to_entity`, `_materialize_connector_source`) already guard the
+    resolved key; this pins the fourth.
+    """
+    from tortoise.projection import entities as ent_mod
+
+    monkeypatch.setattr(
+        ent_mod, "resolve_source_key", lambda g, url: "bad\x00resolved")
+
+    driver = _StrictDriver()
+    stub = type("P", (), {"g": _guarded(driver)})()
+    caplog.set_level(logging.WARNING)
+    out = ent_mod._EntityHandlers._upsert_source(
+        stub, {"type": "SourceCreated", "id": "src-7369", "url": "https://ok"})
+
+    assert out is None, out
+    assert driver.seen == [], (
+        "the Source MERGE was issued with an unwritable RESOLVED key: "
+        f"{driver.seen!r}"
+    )
+    assert "url (resolved MERGE key)" in caplog.text, caplog.text

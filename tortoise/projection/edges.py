@@ -86,8 +86,9 @@ def _mint_subject_stub(g, name: str) -> None:
     #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
     after the wipe. Skip rather than raise.
     """
-    from tortoise.projection import _writable_id
+    from tortoise.projection import _log_identity_skip, _writable_id
     if not _writable_id(name):
+        _log_identity_skip("Subject stub", name, "name (MERGE key)")
         return
     g.query(
         "MERGE (s:Subject {name:$name}) "
@@ -125,8 +126,9 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None
     # already names, so the stub path cannot mint a second :Source either.
     key = resolve_source_key(g, url)
     # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url:$url})`).
-    from tortoise.projection import _writable_id
+    from tortoise.projection import _log_identity_skip, _writable_id
     if not _writable_id(key):
+        _log_identity_skip("Source stub", key, "url (MERGE key)")
         return None
     canonical = normalize_source_url(key)
     params = {"url": key, "raw_url": url, "cu": canonical,
@@ -560,8 +562,10 @@ class _EdgeHandlers:
         # #7369: `target_name` rides as a READ parameter here, and the engine
         # parses every parameter regardless of clause — an unwritable one
         # aborts the replay after the wipe just as a write would.
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(target_name):
+            _log_identity_skip(
+                "aboutDocument edge", target_name, "name (read parameter)")
             return False
         if label == 'Source':
             r = self.g.query(
@@ -773,8 +777,9 @@ class _EdgeHandlers:
         # verbatim by `_upsert_document` — an unwritable one aborts the replay
         # after the wipe. Same gate as its three siblings (_mint_source_stub,
         # _materialize_connector_source, _upsert_source).
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(key):
+            _log_identity_skip("Source link", key, "url (MERGE key)")
             return
         canonical = normalize_source_url(key)
         self.g.query(

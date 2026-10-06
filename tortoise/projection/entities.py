@@ -1568,8 +1568,9 @@ class _EntityHandlers:
         # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
         # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
         # journal envelope — an unwritable one aborts after the wipe.
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(session_id):
+            _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
@@ -2190,8 +2191,9 @@ class _EntityHandlers:
         # a null/refused key aborts the replay. `sid` is only a property value,
         # so it is left to the parameter boundary. Function-local import — the
         # module-level cycle-avoidance pattern this file already uses.
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not sid or not _writable_id(name):
+            _log_identity_skip("Subject", name, "name (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
         embedding = None
@@ -2270,8 +2272,9 @@ class _EntityHandlers:
         oid = ev.get("id")
         name = ev.get("name", "")
         # #7369: `name` is the MERGE KEY (`MERGE (o:Object {name:$name})`).
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not oid or not _writable_id(name):
+            _log_identity_skip("Object", name, "name (MERGE key)")
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
@@ -2494,8 +2497,9 @@ class _EntityHandlers:
         did = ev.get("id")
         # #7369: `did` is the Source MERGE key (`MERGE (s:Source {url:$id})`),
         # so an unwritable one aborts the replay AFTER the wipe.
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(did):
+            _log_identity_skip("Document", did, "id (MERGE key)")
             return
         # Compute embedding from title+content for semantic search (#7845).
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
@@ -2701,8 +2705,9 @@ class _EntityHandlers:
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
         # #7369: `eid` is the MERGE KEY (`MERGE (e:Event {eventId:$eid})`).
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(eid):
+            _log_identity_skip("Event", eid, "eventId (MERGE key)")
             return
         # Embedding: the journaled EventRecorded payload carries the live
         # value (epic #900 cycle-18/19 — the sanctioned replay carrier for the
@@ -2779,8 +2784,10 @@ class _EntityHandlers:
         subj = inner.get("subject", "")
         # #7369: `subj`/`obj`/`use_name` are MERGE keys; function-local import
         # (no module-level binding — the cycle-avoidance pattern this file uses).
-        from tortoise.projection import _writable_id
-        if _writable_id(subj):
+        from tortoise.projection import _log_identity_skip, _writable_id
+        if not _writable_id(subj):
+            _log_identity_skip("Event subject", subj, "subject (MERGE key)")
+        else:
             from tortoise.ids import ulid
             stub_id = ulid()
             self.g.query(
@@ -2797,45 +2804,46 @@ class _EntityHandlers:
         obj = inner.get("object", "")
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         # #7369: `obj` becomes a Source/Object MERGE key below.
-        if _writable_id(obj):
-            if object_type == "Document":
-                # #329: the minted document id is tenant-influenced (event
-                # props passthrough) — validate it so it can never be a host
-                # path (the read side also fails closed via resolve_under_base).
-                from tortoise.security import validate_document_id
-                validate_document_id(str(obj))
-                # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
-                self.g.query(
-                    "MERGE (s:Source {url:$id}) "
-                    "ON CREATE SET s.id=$id, s.title=$id, "
-                    "              s.documentKind='transcript'",
-                    params={"id": obj},
-                )
-                self.g.query(
-                    "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "
-                    "MERGE (e)-[:produces]->(s)",
-                    params={"id": obj, "eid": eid},
-                )
-            else:
-                from tortoise.ids import ulid
-                stub_id = ulid()
-                # #1155-P1: id is written ON CREATE ONLY — the stub id is a
-                # RANDOM ulid, and a poll/webhook event may arrive before the
-                # entity path's ObjectRegistered. If this MERGE also wrote id
-                # on MATCH, a late stub would CLOBBER the canonical id
-                # (github-issue-{repo}-{n}) that _upsert_object set. The
-                # canonical id wins via _upsert_object's ON MATCH
-                # `o.id=coalesce($id, o.id)` — do not add an id write here.
-                self.g.query(
-                    "MERGE (o:Object {name:$name}) "
-                    "ON CREATE SET o.id=$id, o.objectKind='other'",
-                    params={"name": obj, "id": stub_id},
-                )
-                self.g.query(
-                    "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
-                    "MERGE (e)-[:produces]->(o)",
-                    params={"name": obj, "eid": eid},
-                )
+        if not _writable_id(obj):
+            _log_identity_skip("Event object", obj, "object (MERGE key)")
+        elif object_type == "Document":
+            # #329: the minted document id is tenant-influenced (event
+            # props passthrough) — validate it so it can never be a host
+            # path (the read side also fails closed via resolve_under_base).
+            from tortoise.security import validate_document_id
+            validate_document_id(str(obj))
+            # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
+            self.g.query(
+                "MERGE (s:Source {url:$id}) "
+                "ON CREATE SET s.id=$id, s.title=$id, "
+                "              s.documentKind='transcript'",
+                params={"id": obj},
+            )
+            self.g.query(
+                "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "
+                "MERGE (e)-[:produces]->(s)",
+                params={"id": obj, "eid": eid},
+            )
+        else:
+            from tortoise.ids import ulid
+            stub_id = ulid()
+            # #1155-P1: id is written ON CREATE ONLY — the stub id is a
+            # RANDOM ulid, and a poll/webhook event may arrive before the
+            # entity path's ObjectRegistered. If this MERGE also wrote id
+            # on MATCH, a late stub would CLOBBER the canonical id
+            # (github-issue-{repo}-{n}) that _upsert_object set. The
+            # canonical id wins via _upsert_object's ON MATCH
+            # `o.id=coalesce($id, o.id)` — do not add an id write here.
+            self.g.query(
+                "MERGE (o:Object {name:$name}) "
+                "ON CREATE SET o.id=$id, o.objectKind='other'",
+                params={"name": obj, "id": stub_id},
+            )
+            self.g.query(
+                "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                "MERGE (e)-[:produces]->(o)",
+                params={"name": obj, "eid": eid},
+            )
         # #1350: work-item status fold — GitHub/Linear lifecycle events derive
         # the Object's status (decision 2a: in_progress/completed, completed
         # stays NON-terminal — history recallable, not presented as current).
@@ -2901,7 +2909,10 @@ class _EntityHandlers:
                     use_name = str(use_item)
                     use_kind = "other"
                 # #7369: `use_name` is the Object MERGE key.
-                if _writable_id(use_name):
+                if not _writable_id(use_name):
+                    _log_identity_skip(
+                        "Event use", use_name, "name (MERGE key)")
+                else:
                     from tortoise.ids import ulid
                     stub_id = ulid()
                     self.g.query(
@@ -2988,8 +2999,9 @@ class _EntityHandlers:
         key = resolve_source_key(self.g, url)
         canonical = normalize_source_url(key)
         # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url: $url})`).
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(key):
+            _log_identity_skip("Connector source", key, "url (MERGE key)")
             return
         # #388 conf-60 direction guard: NEVER let a fallback key displace a
         # real URL. chat_getPermalink returns None on ANY exception (rate
@@ -3209,8 +3221,9 @@ class _EntityHandlers:
         # unwritable `url`/`sid` would still become it (`$id = sid or key`),
         # and the engine refuses such a key. Require at least one WRITABLE
         # identity, then make sure the truthy winner is not the unwritable one.
-        from tortoise.projection import _writable_id
+        from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(url) and not _writable_id(sid):
+            _log_identity_skip("Source", url or sid, "url/id")
             return None
         raw_key = url or sid
         if not _writable_id(raw_key):
@@ -3225,6 +3238,17 @@ class _EntityHandlers:
         # The resolver is shared with the stub/link writers (edges.py) so a
         # URL variant cannot mint a second ``:Source`` on ANY write path.
         key = resolve_source_key(self.g, raw_key)
+        # #7369 review r8: `resolve_source_key` returns the STORED ``s.url``
+        # read back from the graph, and ``url`` is this statement's MERGE key
+        # (``MERGE (s:Source {url: $url})``), so ``_journal_safe_params``
+        # deliberately forwards it — an unwritable resolved key would abort the
+        # replay AFTER the wipe. The three sibling source writers guard the
+        # resolved key exactly here (``edges.py:129`` ``_mint_source_stub``,
+        # ``edges.py:777`` ``link_source_to_entity``, ``entities.py``
+        # ``_materialize_connector_source``); this site is the fourth.
+        if not _writable_id(key):
+            _log_identity_skip("Source", key, "url (resolved MERGE key)")
+            return None
         canonical = normalize_source_url(raw_key)
         search_text = ev.get("_searchText") or ev.get("title")
         run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
