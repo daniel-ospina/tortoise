@@ -1974,7 +1974,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 # keyword only counts at clause position, which is never just after `.` or a
 # word character.
 _WRITE_CLAUSE_RE = re.compile(
-    r"(?<![.\w])(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b", re.I
+    r"(?<![\w.$:])(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b(?!\s*:)",
+    re.I,
 )
 # A write keyword can appear inside a string literal, a comment, or a backtick
 # identifier (``MATCH (n) WHERE n.s='SET' RETURN n``) — matching the raw text
@@ -1990,10 +1991,12 @@ _LITERAL_OR_COMMENT_RE = re.compile(
 # remove, and it also disables the read fast path for every such retrieval.
 # The write procedures (``db.idx.*.createNodeIndex``, ``db.idx.*.drop``, every
 # ``apoc.*`` that stores) are matched on their own name.
-_CALL_PROC_RE = re.compile(r"\bCALL\s+([A-Za-z_][A-Za-z0-9_.]*)", re.I)
+_CALL_PROC_RE = re.compile(r"\bCALL\s+`?([A-Za-z_][A-Za-z0-9_.]*)", re.I)
 _WRITE_PROC_RE = re.compile(
     r"(create|drop|delete|merge|remove|build|rebuild|refactor|periodic"
-    r"|install|update|insert|write|link|load|import|copy)",
+    r"|install|update|insert|write|link|import|copy"
+    r"|apoc\.trigger|apoc\.config|apoc\.schema|apoc\.uuid|apoc\.do|apoc\.custom"
+    r"|setConfigValue)",
     re.I,
 )
 
@@ -2009,9 +2012,16 @@ def _statement_writes(statement: str) -> bool:
     stripped = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
     if _WRITE_CLAUSE_RE.search(stripped):
         return True
+    # The procedure name is read from the RAW statement as well: a backtick -
+    # quoted name (```CALL `db.idx.fulltext.createNodeIndex`(…)```) is valid Cypher
+    # and really writes, but the identifier stripper has already removed it from
+    # `stripped`, so a RAW pass is the only way to see it.
     return any(
         _WRITE_PROC_RE.search(m.group(1))
         for m in _CALL_PROC_RE.finditer(stripped)
+    ) or any(
+        _WRITE_PROC_RE.search(m.group(1))
+        for m in _CALL_PROC_RE.finditer(statement)
     )
 _GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_REPLACE_RE = re.compile(
@@ -3027,12 +3037,20 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
     # first on the normal path but is a NO-OP under `_TOLERATE_ALTERED_NUMBERS`
     # — the replay context this gate exists for — so here the walk is the only
     # boundary, and a RecursionError would abort the rebuild AFTER the wipe.
-    # Past the bound we return False (degrade), which also terminates a cycle.
-    if _depth >= _PERSISTABLE_MAX_DEPTH:
-        return False
+    #
+    # The bound is checked INSIDE the container branches, not before them: this
+    # predicate is "False only for what the engine rejects while PARSING", and a
+    # SCALAR leaf 32 levels down is parsed exactly like one at the top. Guarding
+    # first refused a deep-but-writable container the sibling accepts — a false
+    # refusal baked into the fix. Checking on entry to a container still
+    # terminates a cycle (every hop descends).
     if isinstance(val, (list, tuple, set, frozenset)):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
         return all(_writable_at_parse(item, _depth + 1) for item in val)
     if isinstance(val, dict):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
         return all(
             _writable_at_parse(k, _depth + 1)
             and _writable_at_parse(v, _depth + 1)
