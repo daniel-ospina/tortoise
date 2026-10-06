@@ -192,9 +192,18 @@ _SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
 # provider/model choice is a product decision (deploy-time) — these are
 # cheap-tier defaults matching the analyzer's model choices (analyze.py
 # _LLM_PROVIDERS) and session_indexer's whitelist family.
+#
+# #4129: every id here must be one the provider actually SERVES, because a
+# provider answers 200 to a retired id and silently serves a different model.
+# api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
+# so naming the retired id did not fail — it silently ran a model nobody
+# configured. Verified against GET /models on 2026-10-05, which serves exactly
+# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
+# changing an id; models.OpenAICompatModel also warns at call time when the
+# served id diverges from the requested one.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
 }
@@ -1617,9 +1626,10 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
 #: `extracted_points`, `source` — so a column ADDED to the hosted detail
 #: handler reddens it too, the direction the inline columns would otherwise
 #: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
-#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
-#: because the list still uses the legacy typed filter and diverges for
-#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is pinned too
+#: — the list counts with the same non-turn predicate as the detail endpoint
+#: and the SDK read, so all three agree (#3555).
+#: Ordered as the hosted handlers append their
 #: columns: existing positions are stable and new columns go at the END, so
 #: a consumer reading positionally never shifts.
 #: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
@@ -21994,8 +22004,8 @@ class TortoiseSDK:
 
         Both counts use the DETAIL endpoint's non-turn predicate
         (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
-        are untyped, so the legacy ``IN ['decision','statement']`` filter the
-        LIST endpoint still uses would report 0 for them (#3555).
+        are untyped, and the list endpoint's legacy ``IN ['decision',
+        'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
         """
