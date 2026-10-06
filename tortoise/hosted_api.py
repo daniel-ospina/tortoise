@@ -28475,14 +28475,29 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     / replaced by a newer run) — a stale run must never keep writing
     status or resurrect a live walk.
 
-    ⚠️ #3718 residual (#4709): this body off-loads `_make_sdk`,
-    `backfill_legacy_closed` and `_relink_sessions_after_index`, but its
-    DOMINANT graph work is still ON the loop — `indexer.index_repo`'s
-    projection walk (a `_get_proj()` attach + a synchronous per-item
-    `proj.apply`/`proj.g.query` loop inside another module) and the two
-    `_update_onboarding_state` writes below. Both are helper-mediated, so the
-    AST guard cannot see them; this body is therefore declared in
-    `_KNOWN_INLINE_HELPER_RESIDUAL`, not `_OFFLOADED_ASYNC_BODIES`.
+    ⚠️ #3718 residual (#4709): this body's graph work is INLINE — the
+    dominant `indexer.index_repo` projection walk (its own `_get_proj()`
+    attach + a synchronous per-item `proj.apply`/`proj.g.query` loop in
+    another module), the `_make_sdk` construction, the one-time
+    `backfill_legacy_closed` scan (whose `org_sdk._get_proj()` attach IS a
+    seam the AST scan SEES), the `_relink_sessions_after_index` relink pass
+    and the two `_update_onboarding_state` writes. Only that direct seam is
+    visible to the scan; the rest is helper-mediated one level down and is
+    not. The body therefore MUST stay declared in
+    `_KNOWN_INLINE_HELPER_RESIDUAL`, never in `_OFFLOADED_ASYNC_BODIES`:
+    `test_graph_io_is_offloaded` computes `inline - declared`, so dropping
+    the entry REDS the guard rather than passing it.
+
+    ⚠️ The three worker hand-offs this body briefly carried were REVERTED.
+    Off-loading a BACKGROUND task's `_make_sdk` / first `_get_proj()`
+    resolves the per-test embedded DB path from a POOL thread, whose
+    inherited test-module stamp must match the main thread's CURRENT stem
+    (epic #1686) — a pool thread reused across tests resolves None, the
+    redirect takes the non-per-test path, and the job writes where the
+    test's reader never looks. Measured: with them, three tests in
+    `tests/test_github_index_lifecycle.py` fail deterministically when that
+    file runs after `tests/test_github_connector.py` (the CI shard order);
+    without them the file matches main's result exactly.
     """
     from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
     # P2: generation/owner token stamped at mint. A TTL-evicted entry
@@ -28525,12 +28540,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
               "repos_processed": 0, "errors": [], "quota_hit": False,
               "backfill_minted": 0, "cleared_truncated": False}
     try:
-        # #3718 residual (DATA plane): `_make_sdk` is not free in embedded
-        # mode — it probes the fallback anchor and can open/attach the DB.
-        # The relink pass below is its own sync graph walk with a fresh attach,
-        # so it rides a worker too (a sync helper is invisible to the AST
-        # guard, which walks async bodies).
-        org_sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
+        org_sdk = _make_sdk(namespace=org_id)
 
         # #1844: the index job writes zero non-episodic :Point nodes, so it never
         # trips the POINT arm of the "points" resource.
@@ -28556,11 +28566,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # the one-time migration forever (P2, PR #1792). ──
         if not state.get("github_legacy_backfill_done"):
             try:
-                # #3718 residual (DATA plane): `backfill_legacy_closed` walks
-                # the graph, and its `_get_proj()` attach is the first sync
-                # step — both ride one worker hand-off.
-                totals["backfill_minted"] = await asyncio.to_thread(
-                    lambda: indexer.backfill_legacy_closed(org_sdk._get_proj()))
+                totals["backfill_minted"] = indexer.backfill_legacy_closed(
+                    org_sdk._get_proj())
             except Exception as e:
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
@@ -28638,9 +28645,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # on index COMPLETION — sessions captured before their entities
         # materialized now resolve (the capture-time links were honest
         # no-matches then). Owned by the completion hook, never a separate
-        # endpoint. #3718: SYNC (`_make_sdk` + `_get_proj` + a session scan +
-        # per-session linking), so it rides a worker; best-effort, returns None.
-        await asyncio.to_thread(_relink_sessions_after_index, org_id)
+        # endpoint.
+        _relink_sessions_after_index(org_id)
     except GitHubFetchError as e:
         # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
         # status with a readable error; the cursor was NOT advanced past

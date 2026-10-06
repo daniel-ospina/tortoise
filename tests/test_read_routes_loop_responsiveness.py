@@ -440,12 +440,17 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: and the ``_graph_has_org_namespace`` probe handed to ``to_thread`` by
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
-#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here: it genuinely
-#: off-loads three calls, but its dominant graph work (``indexer.index_repo``'s
-#: projection walk) is one level down in another module's method and the two
-#: ``_update_onboarding_state`` writes are sync helpers — neither is a seam the
-#: scan sees, so membership here was a VACUOUS pass (round-4 review). It is
-#: declared in ``_KNOWN_INLINE_HELPER_RESIDUAL`` under #4709 instead.
+#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here: most of its
+#: graph work (``indexer.index_repo``'s projection walk, the ``_make_sdk``
+#: construction and the ``_update_onboarding_state`` writes) is one level down
+#: in another module or in sync helpers, so membership here was a VACUOUS pass
+#: (round-4 review). Its brief worker hand-offs were reverted too: from a
+#: background task they resolved the embedded per-test DB path from a reused
+#: pool thread and wrote to the wrong store (see the ``_run_indexing``
+#: docstring). It is declared in ``_KNOWN_INLINE_HELPER_RESIDUAL`` under #4709
+#: instead — that declaration IS what its visible seam requires: the guard
+#: computes ``inline - declared``, so membership (not the seam) keeps it green,
+#: and dropping the name REDS it.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
@@ -496,14 +501,21 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: registry/backup helpers. `_lifespan` was a member until #3718 residual 3
 #: off-loaded its `_control_plane_source` resolve.
 #:
-#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because its
-#: dominant graph work is helper-mediated and therefore INVISIBLE to the scan:
+#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because most of
+#: its graph work is helper-mediated and therefore INVISIBLE to the scan:
 #: `indexer.index_repo` (a method in another module — its own `_get_proj()`
-#: attach + a synchronous per-item projection loop) and two
-#: `_update_onboarding_state` writes. Round-4 review found the name was a
-#: vacuous off-load declaration; it is tracked under #4709. The three calls it
-#: DOES off-load (`_make_sdk`, `backfill_legacy_closed`,
-#: `_relink_sessions_after_index`) remain on a worker.
+#: attach + a synchronous per-item projection loop), the `_make_sdk`
+#: construction, the `_relink_sessions_after_index` relink pass and two
+#: `_update_onboarding_state` writes. One seam IS visible — the
+#: `org_sdk._get_proj()` passed to `backfill_legacy_closed` — and membership
+#: here is what keeps that hit declared: the guard computes
+#: `inline - declared`, so removing this name REDS it. Round-4 review found
+#: the name was a vacuous off-load declaration; it is tracked under #4709.
+#: The three calls it briefly off-loaded (`_make_sdk`,
+#: `backfill_legacy_closed`, `_relink_sessions_after_index`) were REVERTED to
+#: inline — from a background task they resolved the embedded per-test DB
+#: path from a reused pool thread and wrote to the wrong store (see the
+#: `_run_indexing` docstring).
 #:
 #: Same declared residual; same burn-down. Scanned rather than ignored because a
 #: dependency body is still ON the loop.
