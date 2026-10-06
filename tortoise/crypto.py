@@ -1,7 +1,7 @@
 """Encryption helpers for at-rest secrets (#499, #324 follow-up).
 
 Fernet (AES-128-CBC + HMAC-SHA256) symmetric encryption for OAuth tokens
-stored on the Team node. The key comes from TORTOISE_ENCRYPTION_KEY
+stored on the Org node. The key comes from TORTOISE_ENCRYPTION_KEY
 (Fly.io secret). A missing/malformed key fails loudly — silent decryption
 failure would corrupt tokens.
 """

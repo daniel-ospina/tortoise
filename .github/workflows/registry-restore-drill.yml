@@ -8,13 +8,13 @@ name: registry-restore-drill
 on:
   workflow_dispatch:
     inputs:
-      team_id:
+      org_id:
         type: string
         description: "Team whose archive to drill-restore (default: newest non-empty across teams)"
         required: false
       backup_key:
         type: string
-        description: "Explicit backup key (backups/{team}/.../dump.enc). Default: newest non-empty."
+        description: "Explicit backup key (backups/{org_id}/.../dump.enc). Default: newest non-empty."
         required: false
 
 permissions:
@@ -33,5 +33,5 @@ jobs:
       - name: Run restore drill
         run: bash .github/scripts/registry-drill.sh
         env:
-          DRILL_TEAM_ID: ${{ inputs.team_id }}
+          DRILL_ORG_ID: ${{ inputs.org_id }}
           DRILL_BACKUP_KEY: ${{ inputs.backup_key }}

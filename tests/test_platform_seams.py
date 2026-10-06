@@ -24,6 +24,7 @@ TORTOISE_DB_PATH at a per-test temp db (runs under any lane).
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
@@ -233,22 +234,37 @@ def test_install_claude_merges_preserving_existing_hooks(tmp_path):
     assert r.returncode == 0, r.stderr
     cfg = json.loads(target.read_text())
     assert len(cfg["hooks"]["PreToolUse"]) == 1  # untouched
-    ups = cfg["hooks"]["UserPromptSubmit"]
-    assert len(ups) == 1
-    inner = ups[0]["hooks"][0]
-    assert inner["command"].endswith("volunteer-turn.sh claude")
+    # #3963: TWO of our per-turn registrations share the UserPromptSubmit event
+    # — the read hook (volunteer-turn.sh) and the capture seam's spool hook
+    # (session-turn.sh).  Each must land EXACTLY once; counting the matcher
+    # GROUPS (`len(ups) == 1`) was only ever a proxy for that, and the proxy
+    # is now wrong.  The read hook must still be the registration the read
+    # half owns, and the foreign PreToolUse group above must survive.
+    commands = [h.get("command", "")
+                for e in cfg["hooks"]["UserPromptSubmit"]
+                for h in e.get("hooks", [])]
+    assert sum(c.endswith("volunteer-turn.sh claude") for c in commands) == 1, commands
+    assert sum(c.endswith(".claude/hooks/session-turn.sh")
+               for c in commands) == 1, commands
 
 
 def test_install_claude_idempotent_reinstall(tmp_path):
-    """Re-installing claude must NOT duplicate the UserPromptSubmit entry
-    (regression: the merge dedup used to miss wrapper-shaped entries)."""
+    """Re-installing claude must NOT duplicate either UserPromptSubmit
+    registration (regression: the merge dedup used to miss wrapper-shaped
+    entries; #3963: the capture seam adds a SECOND, distinct hook on the same
+    event, so the invariant is per-command, not per-group)."""
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     target = tmp_path / ".claude" / "settings.json"
     cfg = json.loads(target.read_text())
-    assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
+    commands = [h.get("command", "")
+                for e in cfg["hooks"]["UserPromptSubmit"]
+                for h in e.get("hooks", [])]
+    assert sum(c.endswith("volunteer-turn.sh claude") for c in commands) == 1, commands
+    assert sum(c.endswith(".claude/hooks/session-turn.sh")
+               for c in commands) == 1, commands
 
 
 def test_install_codex_refuses_non_object_config(tmp_path):
@@ -388,6 +404,79 @@ def _hook_run(env, harness: str, stdin: str, tmp: Path):
     )
 
 
+def _minimal_path(tmp_path) -> Path:
+    """A PATH with ONLY the tools the hook uses (plus ``python3``) — no
+    ``tortoise`` binary and no venv ``bin`` can leak in from the host."""
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    for tool, path in (("cat", "/bin/cat"), ("bash", "/bin/bash"),
+                       ("tr", "/usr/bin/tr"), ("head", "/usr/bin/head"),
+                       ("dirname", "/usr/bin/dirname"),
+                       ("grep", "/usr/bin/grep"),
+                       ("mkdir", "/bin/mkdir"), ("date", "/bin/date"),
+                       ("mktemp", "/usr/bin/mktemp"), ("rm", "/bin/rm"),
+                       ("python3", sys.executable)):
+        (utils / tool).symlink_to(path)
+    return utils
+
+
+def test_volunteer_turn_hook_resolves_the_owning_venv_for_a_wheel_layout(
+        tmp_path):
+    """#2385 item 3: a WHEEL install puts the hook in
+    ``<venv>/lib/python3.x/site-packages/tortoise/claude-hooks/``, so the
+    source-checkout ``<module>/.venv/bin/tortoise`` probe can never match and
+    the module fallback runs the AMBIENT ``python3`` — which does not have the
+    wheel's dependencies — injecting nothing while reporting success. The hook
+    must resolve the venv that OWNS the module dir (``pyvenv.cfg``) and run
+    its console script.
+
+    The fake package's ``__init__`` raises, so the ambient-interpreter module
+    fallback can never accidentally succeed: only the owning venv's console
+    script can produce the block."""
+    venv = tmp_path / "venv"
+    site = venv / "lib" / "python3.12" / "site-packages"
+    hooks = site / "tortoise" / "claude-hooks"
+    hooks.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    (site / "tortoise" / "__init__.py").write_text(
+        "raise ImportError('wheel deps are not on the ambient interpreter')\n")
+    hooked = hooks / "volunteer-turn.sh"
+    hooked.write_text(_HOOK.read_text(encoding="utf-8"), encoding="utf-8")
+    hooked.chmod(0o755)
+    (venv / "bin").mkdir()
+    console = venv / "bin" / "tortoise"
+    console.write_text(
+        "#!/bin/bash\n"
+        "cat > /dev/null\n"
+        "printf '%s\\n' '- **Wheel reflex** → point/pt_wheel123 — owning "
+        "venv'\n",
+        encoding="utf-8")
+    console.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": str(_minimal_path(tmp_path)),
+        "HOME": str(tmp_path / "home"),
+        "VIRTUAL_ENV": "",
+        "TORTOISE_SRC_DIR": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_DB_PATH": str(tmp_path / "wheel.db"),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = subprocess.run(
+        [str(hooked), "codex"],
+        input=json.dumps({"prompt": "what do we know about the wheel?"}),
+        env=env, cwd=str(tmp_path), capture_output=True, text=True,
+        timeout=180,
+    )
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "pt_wheel123" in ctx, (
+        f"the wheel hook must reach the OWNING venv's console script, got "
+        f"{ctx!r} (stderr={r.stderr!r})")
+
+
 def test_volunteer_turn_hook_codex_contract(env, tmp_path):
     """Codex/Claude UserPromptSubmit stdin JSON → hookSpecificOutput with
     additionalContext carrying the reflex block."""
@@ -447,7 +536,21 @@ def test_install_uninstall_when_absent_is_clean_noop(tmp_path):
             assert not target.exists(), harness  # cline unlinks its file
         else:
             cfg = json.loads(target.read_text())
-            assert "UserPromptSubmit" not in (cfg.get("hooks") or {}), harness
+            cmds = [h.get("command", "")
+                    for e in (cfg.get("hooks") or {}).get("UserPromptSubmit", [])
+                    for h in e.get("hooks", [])]
+            if harness == "claude":
+                # #3963: claude's capture seam registers its OWN per-turn hook
+                # (session-turn.sh) on the same event, and `--uninstall` is
+                # scoped to the read-hook registration — the command DISCLOSES
+                # that the capture seam survives.  Requiring the event KEY to
+                # be absent was only ever a proxy for "the read hook's
+                # registration is gone"; assert the real thing instead.
+                assert not any("volunteer-turn.sh" in c for c in cmds), cmds
+                assert any(c.endswith(".claude/hooks/session-turn.sh")
+                           for c in cmds), cmds
+            else:
+                assert "UserPromptSubmit" not in (cfg.get("hooks") or {}), harness
         r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
                  env)
         assert r.returncode == 0 and "nothing to remove" in r.stdout, harness
@@ -568,6 +671,273 @@ def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
     assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
 
 
+def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
+    """#2383 (weak ownership markers): ``--uninstall`` must delete ONLY
+    registrations this installer can PROVE it wrote.
+
+    The old ownership marker was a substring (``"volunteer-turn.sh" in
+    command``), so ``--uninstall`` silently DESTROYED config the install half
+    explicitly refuses to rewrite (R2):
+
+      * a user's WRAPPER of the script (firejail / venv-pinned),
+      * another product's LIVE ``volunteer-turn.sh`` at a different path,
+      * a cline hook that merely MENTIONS the script name in a comment.
+
+    MUST NEVER HAPPEN: an uninstall never removes a registration it cannot
+    prove it created.  The positive control (our own registration is still
+    removed) is the other half of the pin — a refusal that also refuses our
+    own hook would pass every survival assertion while breaking the command.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) codex: a user WRAPPER of our script survives --uninstall.
+    wrap_dir = tmp_path / "wrap"
+    wrapped = ("'/usr/local/bin/firejail' "
+               "'/opt/tortoise/volunteer-turn.sh' codex")
+    wrap_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": wrapped}]}]}}
+    (wrap_dir / ".codex").mkdir(parents=True)
+    (wrap_dir / ".codex" / "hooks.json").write_text(json.dumps(wrap_cfg))
+    r = _run(["install", "codex", "--dir", str(wrap_dir), "--uninstall"],
+             env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((wrap_dir / ".codex" / "hooks.json").read_text()) \
+        == wrap_cfg, "a user wrapper was destroyed by --uninstall"
+
+    # (b) codex: another product's LIVE hook at a different path survives.
+    biz_dir = tmp_path / "foreign"
+    foreign_dir = biz_dir / "gbrain"
+    foreign_dir.mkdir(parents=True)
+    foreign_script = foreign_dir / "volunteer-turn.sh"
+    foreign_script.write_text("#!/usr/bin/env bash\n")
+    foreign = f"'{foreign_script}' codex"
+    foreign_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": foreign}]}]}}
+    (biz_dir / ".codex").mkdir()
+    (biz_dir / ".codex" / "hooks.json").write_text(json.dumps(foreign_cfg))
+    r = _run(["install", "codex", "--dir", str(biz_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((biz_dir / ".codex" / "hooks.json").read_text()) \
+        == foreign_cfg, "another product's live hook was destroyed"
+
+    # (c) cline: a user hook that merely MENTIONS the script survives.
+    men_dir = tmp_path / "mention"
+    men_hook = men_dir / ".cline" / "hooks" / "UserPromptSubmit"
+    men_hook.parent.mkdir(parents=True)
+    user_text = ("#!/usr/bin/env bash\n"
+                 "# I also have the tortoise volunteer-turn.sh installed\n"
+                 'echo "my own logging hook"\n')
+    men_hook.write_text(user_text)
+    r = _run(["install", "cline", "--dir", str(men_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert men_hook.exists() and men_hook.read_text() == user_text, \
+        "a user cline hook was destroyed by a mention of our script name"
+
+    # (d) positive control — OUR OWN registrations are still removed.
+    own_dir = tmp_path / "own"
+    for harness in ("codex", "claude"):
+        assert _run(["install", harness, "--dir", str(own_dir)],
+                    env).returncode == 0
+        r = _run(["install", harness, "--dir", str(own_dir), "--uninstall"],
+                 env)
+        assert r.returncode == 0, (harness, r.stderr)
+    own_cfg = json.loads(
+        (own_dir / ".codex" / "hooks.json").read_text())
+    assert "UserPromptSubmit" not in (own_cfg.get("hooks") or {}), own_cfg
+    # claude keeps the capture seam's own per-turn hook (#3963) — the read
+    # half alone must be gone.
+    cl_cfg = json.loads(
+        (own_dir / ".claude" / "settings.json").read_text())
+    cmds = [h.get("command", "")
+            for e in cl_cfg.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in e.get("hooks", [])]
+    assert not any("volunteer-turn.sh" in c for c in cmds), cmds
+    own_cline = tmp_path / "own-cline"
+    assert _run(["install", "cline", "--dir", str(own_cline)],
+                env).returncode == 0
+    r = _run(["install", "cline", "--dir", str(own_cline), "--uninstall"],
+             env)
+    assert r.returncode == 0, r.stderr
+    assert not (own_cline / ".cline" / "hooks" / "UserPromptSubmit").exists()
+
+
+# ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────
+# The boundary that turns a read-half failure into a populated "Install
+# failed" refusal is a catch-all, not an exception enumeration.  The
+# raise-set is NOT closed, and an `except (A, B, ...)` tuple is refutable by
+# the next unenumerated member — which is exactly how #3987 ({"hooks": null}
+# → TypeError) and #3988 (non-UTF-8 settings.json → UnicodeDecodeError)
+# escaped the previous `(OSError, RuntimeError)`.  Each member below is raised
+# deliberately and asserted to be a refusal (exit 1, populated stderr, no
+# traceback) — a green suite that would also pass before the fix pins nothing.
+
+
+def _install_env():
+    return {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def _loop_leaf(root: Path) -> None:
+    """Two symlinks pointing at each other → ``Path.resolve()`` loops."""
+    d = root / ".claude"
+    d.mkdir(parents=True)
+    (d / "a").symlink_to("b")
+    (d / "b").symlink_to("a")
+    (d / "settings.json").symlink_to("a")
+
+
+_BOUNDARY_CASES = [
+    # UnicodeDecodeError — a non-UTF-8 settings.json.  A ValueError, so the
+    # old boundary let it escape as a traceback (#3988).  The assertion is the
+    # OBSERVABLE contract (a populated refusal, no traceback), not the class
+    # name: pinning "UnicodeDecodeError" would RED the day a local
+    # UTF-8 guard emits its own message (#4001 R32).
+    ("non-utf8-unicodedecodeerror", "claude",
+     lambda r: _write_bytes(r / ".claude" / "settings.json",
+                            b'{"hooks": {"note": "\xff\xfe"}}'),
+     ["Install failed:"]),
+    # RuntimeError — a symlink cycle, where Path.resolve() raises RuntimeError
+    # (deliberately, not OSError) on CPython.
+    ("symlink-loop-runtimeerror", "claude", _loop_leaf,
+     ["Install failed:", "RuntimeError", "Symlink loop"]),
+    # RecursionError (a RuntimeError subclass) — a deeply nested document.
+    ("deep-json-recursionerror", "claude",
+     lambda r: _write_bytes(r / ".claude" / "settings.json",
+                            b"[" * 100_000 + b"]" * 100_000),
+     ["Install failed:", "RecursionError"]),
+    # IsADirectoryError — a directory where the registration file belongs.
+    ("directory-where-file-isadirectoryerror", "codex",
+     lambda r: (r / ".codex" / "hooks.json").mkdir(parents=True),
+     ["Install failed:", "IsADirectoryError"]),
+    # FileExistsError — a regular FILE where an intermediate dir belongs.
+    ("cline-hooks-as-file-fileexistserror", "cline",
+     lambda r: ((r / ".cline").mkdir(),
+                (r / ".cline" / "hooks").write_text("x")),
+     ["Install failed:", "FileExistsError"]),
+    # NotADirectoryError — a regular FILE where a parent dir belongs.
+    ("cline-dotdir-as-file-notadirectoryerror", "cline",
+     lambda r: (r / ".cline").write_text("x"),
+     ["Install failed:", "NotADirectoryError"]),
+]
+
+
+@pytest.mark.parametrize(("case_id", "harness", "setup", "tokens"),
+                         _BOUNDARY_CASES,
+                         ids=[case[0] for case in _BOUNDARY_CASES])
+def test_read_half_boundary_refuses_every_raise_set_member(
+        tmp_path, case_id, harness, setup, tokens):
+    """One mutation-verified check per declared member of the read half's
+    raise-set: raise it deliberately; the boundary must hold — exit 1, a
+    populated "Install failed" line, and NO traceback."""
+    setup(tmp_path)
+    r = _run(["install", harness, "--dir", str(tmp_path)], _install_env())
+    assert r.returncode == 1, (case_id, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, (case_id, r.stderr)
+    for token in tokens:
+        assert token in r.stderr, (case_id, token, r.stderr)
+
+
+def test_read_half_wrong_shape_hooks_null_is_never_a_traceback(tmp_path):
+    """A valid-JSON ``{"hooks": null}`` must reach a DEFINED state — a clean
+    populated refusal OR a clean install — never an uncaught traceback.
+
+    This asserts the OBSERVABLE contract, not the internal exception class
+    (#4001 R32).  It was previously a ``_BOUNDARY_CASES`` entry asserting
+    ``"Install failed:"`` + ``TypeError``.  But the ``TypeError`` is the
+    DEFECT, not the contract: #3987's own stated fix
+    (``existing_json["hooks"] = hooks`` — write the normalized hooks back)
+    makes the read half install over ``{"hooks": null}``, exactly as
+    ``tortoise hooks upgrade`` already does, so there is no refusal and no
+    ``TypeError`` to name — and the old guard turned RED under that fix, i.e.
+    it pinned the defect (a correct fix breaks the test written to protect
+    it).  Both outcomes below satisfy the boundary's real contract; a
+    traceback never does.
+
+    Mutation: revert the read-half boundary to the old
+    ``(OSError, RuntimeError)`` tuple — the ``TypeError`` escapes as a
+    traceback and ``"Traceback" not in r.stderr`` REDs."""
+    _write_bytes(tmp_path / ".claude" / "settings.json", b'{"hooks": null}')
+    r = _run(["install", "claude", "--dir", str(tmp_path)], _install_env())
+    assert "Traceback" not in r.stderr, r.stderr
+    assert r.returncode in (0, 1), (r.returncode, r.stdout, r.stderr)
+    if r.returncode == 1:
+        assert "Install failed:" in r.stderr, r.stderr
+
+
+def test_read_half_boundary_permission_error(tmp_path):
+    """PermissionError — an unreadable settings.json is a refusal, not a
+    traceback.  Skipped as root (mode bits are not enforced)."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file mode bits")
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"hooks": {}}')
+    target.chmod(0o000)
+    try:
+        r = _run(["install", "claude", "--dir", str(tmp_path)],
+                 _install_env())
+    finally:
+        target.chmod(0o600)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Install failed:" in r.stderr, r.stderr
+    assert "PermissionError" in r.stderr, r.stderr
+
+
+def test_read_half_boundary_top_level_null_is_clean_refusal(tmp_path):
+    """`null` at the top level is the locally-handled member of the
+    raise-set: the shape guard's populated refusal, never the boundary's
+    generic message and never a traceback."""
+    (tmp_path / ".claude").mkdir(parents=True)
+    (tmp_path / ".claude" / "settings.json").write_text("null")
+    r = _run(["install", "claude", "--dir", str(tmp_path)], _install_env())
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "not a JSON object" in r.stderr, r.stderr
+
+
+def test_read_half_boundary_catches_unenumerated_exception(
+        monkeypatch, capsys):
+    """The property that makes this a CLASS fix: an exception member no
+    hand-written list would carry is STILL a refusal.  This is the mutation
+    the old `(OSError, RuntimeError)` tuple failed."""
+    import tortoise.__main__ as tmain
+
+    class _NotInAnyList(Exception):
+        pass
+
+    def _boom(_args):
+        raise _NotInAnyList("a member a hand-written list would miss")
+
+    monkeypatch.setattr(tmain, "_install_read_hook_impl", _boom)
+    rc = tmain._install_read_hook(argparse.Namespace())
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "Install failed: _NotInAnyList:" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_read_half_boundary_reraises_memory_error(monkeypatch):
+    """MemoryError is the one raise-set member a refusal is the wrong answer
+    for (the refusal message itself allocates) — it must PROPAGATE, so the
+    boundary is not silently swallowing resource exhaustion."""
+    import tortoise.__main__ as tmain
+
+    def _oom(_args):
+        raise MemoryError("pretend the process cannot allocate")
+
+    monkeypatch.setattr(tmain, "_install_read_hook_impl", _oom)
+    with pytest.raises(MemoryError):
+        tmain._install_read_hook(argparse.Namespace())
+
+
 # ── #2369 per-turn reflex trust boundary (co-sourced identity) ──────────
 # (trust-posture hardening: file-sourced keys never take their destination
 # from env; a repo .tortoise can never supply a transmitting identity; a
@@ -679,10 +1049,10 @@ class TestVolunteerTrustBoundary:
         A stored file identity (different host) must NOT win over the env
         pair for env-identity surfaces (team info reads the shared resolver)."""
         env_stub = type("EnvStub", (_RecordingStub,), {
-            "body": {"team_id": "team-e", "tier": "free", "point_count": 0},
+            "body": {"org_id": "team-e", "tier": "free", "point_count": 0},
             "hits": []})
         file_stub = type("FileStub", (_RecordingStub,), {
-            "body": {"team_id": "team-f", "tier": "free", "point_count": 0},
+            "body": {"org_id": "team-f", "tier": "free", "point_count": 0},
             "hits": []})
         with _stub_server(env_stub) as env_url, _stub_server(file_stub) as file_url:
             home = tmp_path / "home"

@@ -17,12 +17,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ── FalkorDB availability check ────────────────────────────────────────────
 # Try env URI, then common local defaults (docker://localhost:6379, :16379)
-import os as _os  # noqa: I001
+import os as _os
+
+from tests import _live_utils
+
 FALKORDB_AVAILABLE = False
 _uri_candidates = [
     _os.environ.get("TORTOISE_DB_URI"),
-    "docker://localhost:6379/tortoise_test_integration_search",
-    "docker://localhost:16379/tortoise_test_integration_search",
+    _live_utils.docker_uri(
+        "tortoise_test_integration_search", password=None),
+    _live_utils.legacy_uri(
+        "tortoise_test_integration_search", password=None),
 ]
 _old_uri = _os.environ.get("TORTOISE_DB_URI")
 

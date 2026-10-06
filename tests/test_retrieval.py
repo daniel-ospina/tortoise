@@ -287,6 +287,165 @@ def test_context_oversized_hit_skips_not_starves():
     assert len(ctx) == 2
 
 
+# ── content-less hits consume no slot (#2978) ─────────────────────────────
+
+
+def test_context_contentless_hits_consume_no_slot():
+    """#2978: a hit whose RENDERED block carries no content — an epistemic
+    operator node (``is_operator=true`` / ``op_type`` IMPL/NAND, written by
+    ``create_operator`` with NO ``content`` property) or present-but-blank
+    content — renders a prefix-only block and must NOT consume an item
+    slot. Before the fix the operator/blank hits took the first slots and
+    the reader got only ``pt1`` (measured on the real pool: 61.3% of
+    admitted slots were empty, ~4.6 real fragments under a 12-item cap).
+    Real items after the empty ones are admitted up to the cap; the pool
+    recall surface itself is untouched."""
+    pool = [
+        {"id": "pt1", "content": "point one", "point_kind": "statement",
+         "lme_session_index": 0},
+        {"id": "op1", "is_operator": True, "op_type": "IMPL",
+         "lme_session_index": 1},  # no content property
+        {"id": "ws", "content": "   \n\t ", "point_kind": "statement",
+         "lme_session_index": 2},
+        {"id": "pt2", "content": "point two", "point_kind": "statement",
+         "lme_session_index": 3},
+        {"id": "pt3", "content": "point three",
+         "point_kind": "statement", "lme_session_index": 4},
+    ]
+    ctx = assemble_context(pool, top_k=20, max_context_tokens=10**6,
+                           context_item_cap=3)
+    ids = [h["id"] for h in ctx]
+    # (a) content-less hits do not consume a slot
+    assert "op1" not in ids and "ws" not in ids
+    # (b) the real items fill the cap exactly (before the fix: pt1/op1/ws)
+    assert ids == ["pt1", "pt2", "pt3"]
+    assert len(ctx) == 3
+    # recall surface unchanged — only the reader window skips
+    assert [h["id"] for h in pool] == ["pt1", "op1", "ws", "pt2", "pt3"]
+    # the rendered context carries the three real claims and no empty block
+    text = render_context(ctx)
+    assert "point one" in text and "point two" in text \
+        and "point three" in text
+    assert "[session 1]" not in text and "[session 2]" not in text
+
+
+def test_context_empty_hits_preserve_token_accounting_invariant():
+    """#2978: skipping content-less hits keeps the assembly's accounting in
+    exact alignment with ``render_context`` — the skipped hit contributes no
+    words/bytes and never appears in the rendered text, so
+    ``context_tokens == estimate_tokens(render_context(...))`` still holds
+    and the byte cap is still a hard upper bound."""
+    pool = [
+        {"id": "pt1", "content": "point one", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10"},
+        {"id": "op1", "is_operator": True, "op_type": "NAND",
+         "lme_session_index": 1},
+        {"id": "pt2", "content": "point two", "point_kind": "statement",
+         "lme_session_index": 2, "session_date": "2025-06-12"},
+        {"id": "ws", "content": "", "lme_session_index": 3},
+    ]
+    question_date = "2025-06-15"
+    selected = assemble_context(pool, top_k=20, max_context_tokens=10**6,
+                                question_date=question_date)
+    assert [h["id"] for h in selected] == ["pt1", "pt2"]
+    text = render_context(selected, question_date=question_date)
+    # (c) the accounting invariant: assembly words == rendered words
+    header_words = len(f"Current Date: {question_date}".split())
+    block_words = sum(len(render_context([h]).split()) for h in selected)
+    assert estimate_tokens(text) == int((header_words + block_words) * 1.1)
+    # skipped hits' prefix words/dates are absent from both render and count
+    assert "[session 1]" not in text and "[session 3]" not in text
+    # exact render: header + the two admitted blocks only
+    assert text == (f"Current Date: {question_date}\n\n"
+                    + render_context([pool[0]]) + "\n\n"
+                    + render_context([pool[2]]))
+    # the byte cap is still a hard upper bound with empty hits interleaved
+    # (block bytes: header 24 + 2 + pt1 47 = 73; pt2 would need 124)
+    byte_limited = assemble_context(pool, top_k=20, max_context_tokens=10**6,
+                                    question_date=question_date, byte_cap=100)
+    ev = render_context(byte_limited, question_date=question_date)
+    assert len(ev.encode("utf-8")) <= 100
+    assert [h["id"] for h in byte_limited] == ["pt1"]
+
+
+def test_context_normal_items_render_byte_identical():
+    """#2978 OFF path: the skip keys on EMPTY RENDERED CONTENT only — never
+    on ``is_operator``/``op_type``. A normal-content pool renders
+    byte-identically, and an operator hit that DOES carry content is still
+    admitted."""
+    hits = [
+        {"id": "a", "content": "alpha", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10"},
+        {"id": "b", "content": "beta", "point_kind": "statement",
+         "speaker": "user", "lme_session_index": 1},
+        {"id": "op", "content": "IMPL(p1, p2)", "is_operator": True,
+         "op_type": "IMPL", "lme_session_index": 2},
+    ]
+    ctx = assemble_context(hits, top_k=20, max_context_tokens=10**6)
+    assert [h["id"] for h in ctx] == ["a", "b", "op"]
+    assert render_context(ctx) == "\n\n".join([
+        "[session 0] (session date 2025-06-10) alpha",
+        "[session 1] [user] beta",
+        "[session 2] IMPL(p1, p2)",
+    ])
+
+
+def test_context_contentless_hit_with_marker_text_is_kept():
+    """#2978 (FIX 1): the skip predicate is "renders no CLAIM text", NOT
+    "``content`` is empty". ``_render_block`` also emits supersession /
+    validity marker text whose source is ``superseded_by.content_snippet`` /
+    ``supersedes`` / the validity window — INDEPENDENT of ``content``. A
+    content-less hit carrying such a snippet renders reader-visible claim
+    text and must be KEPT; a plain content-less operator hit (no content, no
+    marker) is still SKIPPED."""
+    pool = [
+        {"id": "op1", "is_operator": True, "op_type": "IMPL",
+         "lme_session_index": 0},  # no content, no marker -> SKIPPED
+        {"id": "sb", "content": "", "lme_session_index": 1,
+         "superseded_by": {"id": "y",
+                           "content_snippet": "the office hours are 9-5"}},
+        {"id": "sup", "content": "   ", "lme_session_index": 2,
+         "supersedes": [{"id": "z",
+                          "content_snippet": "old hours are 8-4"}]},
+        {"id": "vf", "content": "", "lme_session_index": 3,
+         "valid_from": "2026-06-10"},
+    ]
+    ctx = assemble_context(pool, top_k=20, max_context_tokens=10**6)
+    ids = [h["id"] for h in ctx]
+    # plain content-less operator is still skipped (the #2978 win holds)
+    assert "op1" not in ids
+    # every hit whose render carries marker claim text survives
+    assert ids == ["sb", "sup", "vf"]
+    text = render_context(ctx)
+    assert "the office hours are 9-5" in text
+    assert "old hours are 8-4" in text
+    assert "[SUPERSEDED BY: the office hours are 9-5]" in text
+    assert "[SUPERSEDES: old hours are 8-4]" in text
+    # accounting invariant holds with the marker-only blocks admitted
+    # (no question_date -> no header words; ASCII text -> no CJK surcharge)
+    assert estimate_tokens(text) == int(len(text.split()) * 1.1)
+
+
+def test_context_skipped_hit_frees_budget_for_later_real_hit():
+    """#2978 (FIX 2): the skipped content-less hit frees not only its item
+    slot but also its words/bytes budget, so a later real hit can be
+    ADDITIONALLY ADMITTED — the admitted set grows, it is not merely
+    reordered. At a 26-token cap the empty hit's 2 words are decisive:
+    r1+r2 use ``int(24 * 1.1) == 26``, while keeping the empty hit's words
+    would make it ``int(26 * 1.1) == 28 > 26`` and drop r2."""
+    filler = " ".join(f"w{i}" for i in range(10))
+    pool = [
+        {"id": "e0", "is_operator": True, "op_type": "NAND",
+         "lme_session_index": 0},  # content-less -> skipped
+        {"id": "r1", "content": filler, "lme_session_index": 1},
+        {"id": "r2", "content": filler, "lme_session_index": 2},
+    ]
+    ctx = assemble_context(pool, top_k=20, max_context_tokens=26)
+    assert [h["id"] for h in ctx] == ["r1", "r2"]
+    assert estimate_tokens(render_context(ctx)) <= 26
+    assert estimate_tokens(render_context(ctx)) == int((12 + 12) * 1.1)
+
+
 def test_context_reader_alignment_invariant():
     """The alignment invariant (R1 #1540): the assembly's budget accounting
     (raw whitespace words + the once-prepended date header, 1.1 markup ONCE)

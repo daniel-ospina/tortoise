@@ -28,14 +28,14 @@ URI support: docker://, redis://, rediss:// (FalkorDB Cloud) via
 FalkorProjection.from_uri().
 
 Multi-tenant: --all-tenants queries the registry graph for team IDs and
-iterates team_{team_id} graphs. Per-tenant backfill, one team at a time.
+iterates org_{org_id} graphs. Per-tenant backfill, one team at a time.
 
 Usage:
     python3 graph-scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
         [--uri URI] [--all-tenants] [--limit N] [--batch-size N]
         [--force-re-embed] [--repair-embeddings]
 
-Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
 
 Requires the embeddings extra: pip install 'tortoise-graph[embeddings]'
 (or sentence-transformers + scikit-learn). --dry-run only reports counts and
@@ -43,12 +43,22 @@ does NOT require the model.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/backfill_embeddings.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/backfill_embeddings.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
 # Entity types to embed + their text property (what gets vectorized) and
@@ -467,9 +477,9 @@ def main(argv: list[str] | None = None) -> int:
             if not team_rows:
                 print("  No teams found in registry")
             for row in team_rows:
-                team_id = row[0]
-                graph_name = f"team_{team_id}"
-                print(f"\nTeam: {team_id} → {graph_name}")
+                org_id = row[0]
+                graph_name = f"org_{org_id}"
+                print(f"\nTeam: {org_id} → {graph_name}")
                 total, purged = _dry_run(db, graph_name, labels,
                                          force=args.force_re_embed)
                 grand_total += total
@@ -515,9 +525,9 @@ def main(argv: list[str] | None = None) -> int:
             if not team_rows:
                 print("  No teams found in registry")
             for row in team_rows:
-                team_id = row[0]
-                graph_name = f"team_{team_id}"
-                print(f"\n── Team: {team_id} → {graph_name} ──")
+                org_id = row[0]
+                graph_name = f"org_{org_id}"
+                print(f"\n── Team: {org_id} → {graph_name} ──")
                 _merge_stats(
                     stats,
                     _force_reembed_graph(db, graph_name, labels,
@@ -548,9 +558,9 @@ def main(argv: list[str] | None = None) -> int:
         if not team_rows:
             print("  No teams found in registry")
         for row in team_rows:
-            team_id = row[0]
-            graph_name = f"team_{team_id}"
-            print(f"\n── Team: {team_id} → {graph_name} ──")
+            org_id = row[0]
+            graph_name = f"org_{org_id}"
+            print(f"\n── Team: {org_id} → {graph_name} ──")
             s = _backfill_graph(db, graph_name, labels,
                                 args.limit, args.batch_size)
             grand_scanned += s["scanned"]

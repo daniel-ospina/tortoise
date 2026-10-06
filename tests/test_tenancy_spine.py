@@ -48,7 +48,7 @@ def _spine_env(tmp_path):
     sdk._get_registry().query(
         "CREATE (t:Team {id:$id, tier:'pro', max_graphs:5, "
         "max_api_keys:20, graph_name: $gn})",
-        params={"id": tid, "gn": f"team_{tid}"},
+        params={"id": tid, "gn": f"org_{tid}"},
     )
     sdk._graph_create(tid, "default", kind="default")
     # One custom graph (the per-graph keys bind here) + one point in the
@@ -71,14 +71,14 @@ def _gen(spine_env):
     return spine_env
 
 
-def _mint_key(sdk, team_id, *, scopes, graph_id=None, deleg=None):
+def _mint_key(sdk, org_id, *, scopes, graph_id=None, deleg=None):
     """Raw APIKey node (the hosted mint matrix's DB shape)."""
     token = "tk_" + uuid.uuid4().hex
     sdk._get_registry().query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
         "key_prefix:$kp, created_by:'spine', graph_id:$gid, "
         "scopes:$scopes, delegation_depth:$dd})",
-        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": team_id,
+        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": org_id,
                 "kh": hash_api_key(token), "kp": token[:10],
                 "gid": graph_id, "scopes": scopes, "dd": deleg},
     )
@@ -198,7 +198,7 @@ def test_vanished_graph_fails_closed(spine_env):
 
 def test_backup_vanished_graph_fails_closed(spine_env):
     """Final-gate P1: a graph-bound key whose graph is GONE must NOT back up
-    the team DEFAULT graph (the old 'or team_graph_name' fallback widened a
+    the team DEFAULT graph (the old 'or org_graph_name' fallback widened a
     ghost key onto the default — a cross-graph read dump). Fails closed 403
     GRAPH_NOT_FOUND (not a 500)."""
     sdk, tid, _g, tc, _def_pt = spine_env
@@ -323,10 +323,10 @@ def test_onboarding_state_rejects_graph_bound(spine_env):
 
 
 def test_github_rest_family_rejects_graph_bound(spine_env):
-    """REST github twins (status/repos/branches/connect) reject graph-bound
-    keys — the #2300 REST residual close (the MCP github tools reject after
-    #2300; github index/reindex already rejected in C5). The dashboard's
-    session flows and team-wide keys keep working."""
+    """REST github twins (status/repos/branches/connect/disconnect) reject
+    graph-bound keys — the #2300 REST residual close (the MCP github tools
+    reject after #2300; github index/reindex already rejected in C5). The
+    dashboard's session flows and team-wide keys keep working."""
     sdk, tid, g, tc, _def_pt = spine_env
     ro = _mint_key(sdk, tid, scopes=["graphs:read"],
                    graph_id=g["graph_id"], deleg=0)
@@ -347,6 +347,12 @@ def test_github_rest_family_rejects_graph_bound(spine_env):
     assert r.status_code == 403, r.text
     detail = r.json().get("detail")
     assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
+    # #4946: the disconnect route is in the same family — a per-graph key
+    # must never tear down the ORG's GitHub credential.
+    r = tc.post("/v1/onboarding/github/disconnect", headers=h_rw)
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
     # Team-wide scoped key: the authz gate passes (no credentials seeded in
     # this spine env → the endpoints report disconnected, never 403).
     wide = _mint_key(sdk, tid, scopes=["graphs:read"])
@@ -361,5 +367,9 @@ def test_github_rest_family_rejects_graph_bound(spine_env):
     r = tc.post("/v1/onboarding/github/connect", headers=h_wide, json={})
     # 503 (OAuth env unset) is PAST the authz gate — never GRAPH_SCOPED.
     assert r.status_code in (200, 503), r.text
+    # #4946: a team-wide key disconnects cleanly (no credentials seeded in
+    # this spine env → the idempotent not-connected no-op, never 403).
+    r = tc.post("/v1/onboarding/github/disconnect", headers=h_wide)
+    assert r.status_code == 200, r.text
 
 

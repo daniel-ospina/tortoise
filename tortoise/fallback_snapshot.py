@@ -148,7 +148,8 @@ def build_snapshot(proj) -> dict | None:
 
     if doc_vecs is None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718
+            TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             # Keep the sparse matrix — densify only the served slice (P2: the
             # dense 50k × vocab array is an OOM risk; csr stays lean).
@@ -191,6 +192,7 @@ def search_snapshot(
     limit: int = 10,
     kind: str | None = None,
     exclude_status: list[str] | None = None,
+    exclude_turn_echo_session: str | None = None,
     include_terminal: bool = False,
     threshold: float = 0.0,
 ) -> list[dict]:
@@ -200,7 +202,11 @@ def search_snapshot(
     SearchResult.to_dict() with match_source="tfidf"). Mirrors the legacy
     fallback semantics: ``kind`` (pointKind equality), terminal-status
     exclusion unless ``include_terminal`` (#1391), and ``exclude_status``
-    compose. When no cached vectors exist, delegates to the legacy scorer.
+    compose. ``exclude_turn_echo_session`` (#4509) drops that session's own
+    turn echoes from the CORPUS before ranking — the same pre-truncation
+    contract the primary path applies, so the degraded tier cannot leak a
+    capture's transcript as memory priors. When no cached vectors exist,
+    delegates to the legacy scorer.
     """
     import numpy as np  # noqa: I001
 
@@ -228,6 +234,16 @@ def search_snapshot(
     if exclude_status:
         _ex = set(exclude_status)
         _filter(lambda p: p["status"] not in _ex)
+    if exclude_turn_echo_session:
+        # #4509: pre-RANKING/pre-truncation, mirroring the primary path's seam.
+        # Lazy import keeps this stdlib-light leaf's import graph unchanged on
+        # the default path (the branch is not entered when not opted in).
+        from tortoise.retrieval import is_turn_echo_row
+        _echo_sid = exclude_turn_echo_session
+        _filter(lambda p: not is_turn_echo_row(
+            _echo_sid,
+            {"id": p.get("id"), "point_kind": p.get("pointKind"),
+             "content": p.get("content")}))
     if not points:
         return []
 
@@ -288,6 +304,10 @@ def search_snapshot(
             # A5 (#2070): stored evidence mark rides the snapshot hits
             # (snapshot points carry has_answer when the graph wrote it).
             has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
+            # ⛔ No ``source_ref``/``captured_at`` here — the lean snapshot
+            # projection excludes them by design, so
+            # TORTOISE_SEARCH_PROVENANCE is a no-op on this tier; see the KNOWN
+            # LIMITATION note on ``search_engine.search_provenance_enabled``.
         ).to_dict()
         for r in scored
     ]

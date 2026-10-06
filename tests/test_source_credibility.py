@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 
@@ -208,6 +209,19 @@ class TestResolveTier:
         assert SOURCE_KIND_DEFAULTS["T0"] == "T0"
         assert SOURCE_KIND_DEFAULTS["document"] is None
 
+    def test_meeting_capture_kinds_registered_neutral(self):
+        """#2726: both meeting-capture kinds resolve NEUTRAL (tier deferred).
+
+        Membership is asserted explicitly — ``.get()`` returns None for an
+        ABSENT key too, so the tier check alone cannot tell registered-NEUTRAL
+        from never-registered.
+        """
+        for kind in ("meeting_transcript", "meeting_minutes"):
+            assert kind in SOURCE_KIND_DEFAULTS
+            assert SOURCE_KIND_DEFAULTS[kind] is None
+            assert resolve_source_tier(kind) is None
+            assert resolve_tier(None, kind) is None
+
     def test_register_invalid_tier_raises(self):
         with pytest.raises(ValueError):
             register_source_kind_default("bad", "T9")
@@ -313,6 +327,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _set_source_tier_raw(sdk, url, tier, ingested_at="2024-01-01T00:00:00+00:00"):

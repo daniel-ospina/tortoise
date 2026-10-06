@@ -1,0 +1,26 @@
+# Runtime half of the platform-gate guard (#4215).
+#
+# tests/test_markers.py::PLATFORM_GATED_TESTS enumerates platform-gated files by
+# SCANNING SOURCE. Ten review cycles showed a source scan cannot close that class
+# (a new spelling is always possible), so this file asserts the property at
+# RUNTIME instead, in two halves:
+#   * COLLECTION — the file's tests must still be collected in the lane that runs
+#     it; a skip is still a <testcase>, so a gate that hides a test from
+#     collection removes it from the junit and reds here, whatever its spelling.
+#   * OUTCOME — a test that is collected and then SKIPPED never ran, and a
+#     test-level `if …: pytest.skip(…)` is exactly the shape the source scanner
+#     loses. The allowance below is how many skips this file may legitimately
+#     absorb off darwin; anything above it reds and names the nodeids.
+#
+# allow-skipped: tests/test_fork_safety_3845.py=2
+#   The two darwin-gated tests (the #3845 fix and its mutation proof) skip on the
+#   ubuntu runners BY DESIGN — PLATFORM_GATED_TESTS states the same boundary. A
+#   third skip in this file is a gate evasion, not a platform fact, so it reds.
+#   On a darwin dev machine both tests RUN, which is within this budget (0 <= 2).
+#
+# PROVENANCE: the 4 nodeids of test_fork_safety_3845.py observed in CI run 35518962357
+# (head fd23a4033), job test-d14-hosted-api — the same junit as embedded-only.txt, filtered.
+tests/test_fork_safety_3845.py::test_embedded_choke_point_runs_at_the_proven_fork_safe_level
+tests/test_fork_safety_3845.py::test_env_override_is_honoured_and_loud
+tests/test_fork_safety_3845.py::test_fork_child_does_not_hang_with_the_production_config
+tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child

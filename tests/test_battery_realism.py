@@ -31,9 +31,15 @@ def _env() -> Envelope:
 def test_envelope_events_cover_mandatory_fields():
     events = envelope_events(_env())
     validate_emitted(events)  # registry-valid — fails closed if malformed
-    fields = {e["field"] for e in events}
+    # #2740: the envelope also emits its declared `position`, which is NOT a
+    # registry scalar field (payload-only) — registry-valid and invisible to
+    # the scalar trace. Field-keyed assertions therefore use .get().
+    fields = {e.get("field") for e in events}
     assert {"stated_confidence", "stated_undecided",
             "stated_defeat_conditions"} <= fields
+    pos = [e for e in events if "position" in (e.get("payload") or {})]
+    assert len(pos) == 1 and "field" not in pos[0]
+    assert pos[0]["payload"]["position"] == "Proceed"
     # envelope carries the envelope subset of MANDATORY; the full MANDATORY
     # set is covered once the executor adds the state-terminal entries
     env_fields = {"stated_confidence", "stated_undecided",
@@ -41,7 +47,7 @@ def test_envelope_events_cover_mandatory_fields():
     assert env_fields <= MANDATORY
     all_events = events + state_events(ep_outcome="converged",
                                        decide_cycles=1)
-    assert {e["field"] for e in all_events} >= MANDATORY
+    assert {e.get("field") for e in all_events} >= MANDATORY
 
 
 def test_state_events_valid_and_typed():

@@ -37,7 +37,7 @@ from tortoise.hosted_api import app
 _SUPABASE_URL = "https://testref.supabase.co"
 _SERVICE_KEY = "test-service-role-key-123"
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs, so non-UUID user_id literals are prod-impossible.
 _U_REG_CLAIM = "9f2c1a40-0000-4a00-8000-00000000000c"
 
@@ -319,13 +319,13 @@ class TestEmailSignupClaim:
         reg_email = "reg-a@example.com"
         import hashlib
         identity = "reg-" + hashlib.sha256(reg_email.encode()).hexdigest()[:12]
-        team_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
+        org_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
         api_key = f"tt_{_uuid.uuid4().hex}"
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": identity,
-            "p_team_id": team_id, "p_team_name": f"Reg {team_id}",
+            "p_org_id": org_id, "p_org_name": f"Reg {org_id}",
             "p_api_key": api_key, "p_key_hash": _hash(api_key),
-            "p_lookup_hash": _lh(api_key), "p_graph_name": f"team_{team_id}",
+            "p_lookup_hash": _lh(api_key), "p_graph_name": f"org_{org_id}",
             "p_email": reg_email, "p_key_prefix": api_key[:10], "p_tier": "free",
             "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
             "p_graph_size_cap": 10000,
@@ -342,12 +342,12 @@ class TestEmailSignupClaim:
             json={"api_key": api_key},
         )
         assert r.status_code == 200, r.text
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
-        assert team_row.get("email") == "reg-a@example.com", (
+        org_row = next(t for t in fake.tables["organizations"] if t["id"] == org_id)
+        assert org_row.get("email") == "reg-a@example.com", (
             f"claim must NOT write teams.email — mint contact survives, "
-            f"got {team_row.get('email')}")
-        mem = next(m for m in fake.tables["team_memberships"]
-                   if m["team_id"] == team_id)
+            f"got {org_row.get('email')}")
+        mem = next(m for m in fake.tables["org_memberships"]
+                   if m["org_id"] == org_id)
         assert mem["user_id"] == _U_REG_CLAIM
         assert mem["identity"] is None
 
@@ -380,7 +380,7 @@ class TestRegisterIdempotencyReanchor:
         email = "dup-reg@example.com"
         # simulate the leftover from a first register: the reg- owner row
         # exists but the graph mint was never completed / client never
-        # finished signup — the exact case team_by_email alone misses.
+        # finished signup — the exact case org_by_email alone misses.
         identity = "reg-" + hashlib.sha256(email.lower().encode()).hexdigest()[:12]
         import uuid as _uuid
 
@@ -388,10 +388,10 @@ class TestRegisterIdempotencyReanchor:
         from tortoise.auth import hash_api_key as _hash
         from tortoise.auth import lookup_hash as _lh
         fake = sc.get_control_plane()
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": identity,
-            "p_team_id": f"team-regdup-{_uuid.uuid4().hex[:10]}",
-            "p_team_name": "RegDup", "p_api_key": f"tt_{_uuid.uuid4().hex}",
+            "p_org_id": f"team-regdup-{_uuid.uuid4().hex[:10]}",
+            "p_org_name": "RegDup", "p_api_key": f"tt_{_uuid.uuid4().hex}",
             "p_key_hash": _hash("tt_x"), "p_lookup_hash": _lh("tt_x"),
             "p_graph_name": "team_regdup", "p_email": email,
             "p_key_prefix": "tt_regdup", "p_tier": "free",

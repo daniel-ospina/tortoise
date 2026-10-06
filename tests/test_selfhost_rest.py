@@ -70,6 +70,66 @@ class TestPointsCRUD:
             r = tc.post("/v1/points", json={"content": "x", "kind": "not-a-real-kind"})
             assert r.status_code == 422  # pydantic validator rejects
 
+    def _persisted_props(self, pid: str) -> dict:
+        """Read the stored node props for `pid`.
+
+        The selfhost REST read surface (list + by-id) is deliberately
+        narrow (``PointResponse`` = id/content/kind/created_at), so it cannot
+        show arbitrary props; read them straight from the graph the route
+        wrote to (same TORTOISE_DB_PATH).
+        """
+        from tortoise import selfhost_api as _sha
+
+        sdk = _sha._sdk()
+        try:
+            return dict(sdk.get_point(pid) or {})
+        finally:
+            sdk.close()
+
+    def test_confidence_and_author_persist(self, monkeypatch, tmp_path):
+        """#4032: same silent-drop class as hosted_api — `confidence` /
+        `authoredBy` must be stored, never dropped while the write reports ok."""
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={
+                    "content": "selfhost confidence round trip",
+                    "kind": "hypothesis",
+                    "confidence": 0.8,
+                    "authoredBy": "research-skill",
+                },
+            )
+            assert r.status_code == 200, r.text
+            props = self._persisted_props(r.json()["id"])
+            assert props.get("confidence") == 0.8, props
+            assert props.get("authoredBy") == "research-skill", props
+
+    def test_confidence_zero_persists_not_dropped(self, monkeypatch, tmp_path):
+        # 0.0 is FALSY — a truthiness guard at the boundary would drop it.
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={
+                    "content": "selfhost zero confidence",
+                    "kind": "hypothesis",
+                    "confidence": 0.0,
+                },
+            )
+            assert r.status_code == 200, r.text
+            props = self._persisted_props(r.json()["id"])
+            assert props.get("confidence") == 0.0, props
+
+    def test_out_of_range_confidence_is_rejected_not_dropped(self, monkeypatch, tmp_path):
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={"content": "selfhost bad confidence", "kind": "statement", "confidence": 5},
+            )
+            assert r.status_code == 422, r.text
+
 
 class TestSearch:
     def test_search_finds_point(self, monkeypatch, tmp_path):
@@ -82,60 +142,6 @@ class TestSearch:
             assert hits
             # FTS result shape (point_kind) must map to the response kind field
             assert hits[0]["kind"] == "decision"
-
-
-class TestAsk:
-    """Self-host /v1/ask (#1987 Task 9): 200 12-field shape, canonical 400,
-    and non-ask paths keep the default error body (path-scoped handler)."""
-
-    def _install_fake_reader(self, monkeypatch, reply="selfhost answer"):
-        import tortoise.sdk as sdk_mod
-        calls = {"n": 0}
-
-        def _factory():
-            class _R:
-                last_completion_tokens = 12
-
-                def complete(self, *, system, user):
-                    calls["n"] += 1
-                    return reply
-
-                def close(self):
-                    pass
-            return _R()
-
-        monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _factory)
-        return calls
-
-    def test_ask_returns_200_shape(self, monkeypatch, tmp_path):
-        tc = _client_for_env(monkeypatch, tmp_path)
-        calls = self._install_fake_reader(monkeypatch)
-        with tc:
-            r = tc.post("/v1/ask", json={"question": "what is the schedule?"})
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert set(body) == {"answer", "abstained", "question_type",
-                                 "question_date", "evidence", "context_tokens",
-                                 "model", "provider", "route", "cost_estimate_usd",
-                                 "duration_ms", "retrieval_degraded"}
-            assert body["answer"] == "selfhost answer"
-            assert calls["n"] == 1
-
-    def test_ask_empty_question_400(self, monkeypatch, tmp_path):
-        tc = _client_for_env(monkeypatch, tmp_path)
-        with tc:
-            r = tc.post("/v1/ask", json={"question": ""})
-            assert r.status_code == 400, r.text
-            assert r.json() == {"error": {"code": "invalid_question"}}
-
-    def test_unknown_path_keeps_default_body(self, monkeypatch, tmp_path):
-        """Non-ask paths keep FastAPI's default {"detail": …} — the
-        path-scoped /v1/ask handler never touches them."""
-        tc = _client_for_env(monkeypatch, tmp_path)
-        with tc:
-            r = tc.get("/v1/points/nonexistent-id")
-            assert r.status_code == 404
-            assert "detail" in r.json()
 
 
 class TestStaticAuth:

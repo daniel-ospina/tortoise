@@ -20,9 +20,7 @@ superseded — and confidence) + points (the logic: claims connected to the
 state, the arguments that move confidence) + events (what happened, including
 the decision moment as an Event node, so the decision dimension stays
 queryable as a timeline). The graph says "this state is based on these
-reasons" — never "this decision was made because of these reasons". The
-narrative lives in the graph's content **and** its metadata; agents are the
-computational layer that reads and maintains it; semantic summaries are
+reasons". The narrative lives in the graph's content, structure, **and** its metadata; agents are the computational layer that reads and maintains it; semantic summaries are
 derived projections, never the record. Evidence stays authoritative: every
 Point keeps its quoted source span, and the graph is an auditable index over
 unrewritten evidence.
@@ -42,7 +40,7 @@ A product of [Premise Labs](https://premiselabs.co).
 
 ### 1. Install
 
-New to Tortoise? Choose a path:
+New to Tortoise? There are two ways to run it:
 
 - **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
 - **Self-hosted — durable (recommended): Docker compose.** Runs the daemon
@@ -57,14 +55,24 @@ New to Tortoise? Choose a path:
   path. For a single-agent eval without Docker, use the pip path below —
   embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
 
-- **Self-hosted — single-agent eval (no Docker):** requires **Python ≥ 3.12**:
+- **Eval substrate only — embedded, no Docker (NOT a way to run the product):**
+  This is what evals and parity runs execute on; a deployment is the compose
+  path above. Requires **Python ≥ 3.12**:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
-  uv sync                             # creates .venv from committed uv.lock (Python 3.12)
+  uv sync --extra embeddings --extra parity   # canonical dev env incl. the eval/parity extras
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
+
+  ⚠️ `uv sync` on its own gives you a **keyword-only product**
+  (`EmbeddingModel.get()` → `None`, hybrid retrieval silently degrades to
+  FTS-only). And an explicit `--extra` list is EXACT — it removes every extra
+  you leave out (`uv sync --extra embeddings` drops `parity`/pyarrow, which is
+  how a measurement run broke mid-investigation). Name every extra in ONE
+  command, or use `--all-extras`. Real measurement lanes fail closed on a
+  keyword-only env (#2985).
 
   Embedded (no Docker) is the EVAL-ONLY fallback: `tortoise init` creates
   `~/.tortoise/tortoise.db` (a bare init prints a one-line "embedded engine
@@ -83,23 +91,34 @@ One transport per setup — daemon MCP over **HTTP** for hosted + the Docker
 path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
-# Hosted
-claude mcp add tortoise https://api.premiselabs.co/mcp/
+# Hosted — export it in this shell (and in your profile for later sessions;
+# if your profile is version-controlled, use a non-committed include instead)
+export TORTOISE_API_KEY=tt_YOUR_KEY
+claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
+  --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 # Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
-claude mcp add tortoise http://localhost:8000/mcp
+claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
 
-> ℹ️ **Claude Code one-time approval:** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **⏸ Pending approval** in `claude mcp list` until
-> you approve them once — start `claude` in this project and allow the
-> prompt (or use `/mcp`). The tools stay disabled until then; this is
-> expected, not a failure. (The current `claude mcp add` default is *local*
-> scope — active immediately, no approval.)
+> ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
+> scope by default — `~/.claude.json`, under this project's entry: private to
+> you, this project only, **never committed**. It skips the project-scope
+> server approval, but no scope is approval-free: Claude Code asks permission
+> the first time it calls each MCP tool (allow it once, or pre-allow
+> `mcp__tortoise__*`). `Added …` means the entry was written, not that it
+> connected — `claude mcp list` is the check.
+>
+> **Sharing the config with the repo instead?** `--scope project` writes a
+> **committable** `.mcp.json` at the project root, approved once per machine —
+> start `claude` in the project and allow the prompt, or run `/mcp`
+> (`claude mcp reset-project-choices` resets the choice). ⛔ Re-using the hosted
+> `--header` there? **Single-quote it** (`'Authorization: Bearer
+> ${TORTOISE_API_KEY}'`) so the shell writes the reference, not your key, into a
+> file you are about to commit.
 
 ```bash
 # Codex
-codex mcp add tortoise http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
+codex mcp add tortoise --url http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
 ```
 
 Or add to `.mcp.json`:
@@ -147,8 +166,9 @@ Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000
 
 ```bash
 pip install tortoise-graph   # server package: engine + daemon + MCP server
-# from source (clone): uv sync && uv run python -m tortoise.selfhost
-#   uv sync --extra embeddings  # or: uv sync (core + dev group) — extras mirror the PyPI package
+# from source (clone): uv sync --extra embeddings --extra parity && uv run python -m tortoise.selfhost
+#   The explicit --extra list is EXACT: name every extra the env needs in ONE
+#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops parity.
 ```
 
 Full split mechanics (build, version coupling, license boundary): [docs/client-server-split.md](docs/client-server-split.md).
@@ -158,7 +178,7 @@ Full split mechanics (build, version coupling, license boundary): [docs/client-s
 | Env var | Default | Purpose |
 |---|---|---|
 | `TORTOISE_DB_URI` | — | Durable FalkorDB connection string — the recommended path (docker compose sidecar or managed Cloud); multi-writer safe |
-| `TORTOISE_DB_PATH` | `~/.tortoise/tortoise.db` | Embedded FalkorDBLite eval path — SINGLE-WRITER, eval only (concurrent writers lose data); AOF-durable to ≤1s for ONE process since #915; delete the db + `<db>-appendonlydir` to reset |
+| `TORTOISE_DB_PATH` | `~/.tortoise/tortoise.db` | Embedded FalkorDBLite eval path — SINGLE-WRITER, eval only (concurrent writers lose data); AOF is **opt-in** (`TORTOISE_EMBEDDED_AOF=1`), **default off** since #915 — without it durability is up to the next snapshot/clean close, **not ≤1s** (#2879); delete the db + `<db>-appendonlydir` to reset |
 | `TORTOISE_API_KEY` | unset | Set → `auth_mode=static` (Bearer key); unset → `auth_mode=none` — ⚠️ a non-localhost bind with no key exposes an unauthenticated engine |
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |

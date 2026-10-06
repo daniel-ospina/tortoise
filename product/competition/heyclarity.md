@@ -153,7 +153,7 @@ Clarity's confidence model is built on the **Free Energy Principle / Active Infe
 | Public customers | 1 (Mystica: +60% revenue in 90 days) |
 | Revenue | ⚠️ No public data |
 | Press | ⚠️ None found |
-| ⚠️ All traction data single-sourced from own marketing |
+| ⚠️ Caveat | All traction data single-sourced from own marketing |
 
 [Source](https://heyclarity.dev/) — retrieved 2026-07-06
 
@@ -197,7 +197,7 @@ Clarity's confidence model is built on the **Free Energy Principle / Active Infe
 |------|------|
 | Testimonial | 1 (Mystica CEO: "re-energized our entire tech stack. +60% revenue.") |
 | Third-party reviews | ⚠️ None — no G2, Capterra, Reddit mentions |
-| **Overall:** Near-zero independent sentiment. Single testimonial from only named customer. |
+| **Overall** | Near-zero independent sentiment. Single testimonial from only named customer. |
 
 *Last updated: 2026-07-06*
 

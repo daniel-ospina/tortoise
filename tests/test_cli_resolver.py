@@ -8,7 +8,7 @@ import pytest
 import tortoise.__main__ as main
 
 GLOBAL = json.dumps({"api_key": "tt_global", "api_url": "https://api.premiselabs.co",
-                     "team_id": "team-g", "device_id": "anon-g"})
+                     "org_id": "team-g", "device_id": "anon-g"})
 
 
 @pytest.fixture(autouse=True)

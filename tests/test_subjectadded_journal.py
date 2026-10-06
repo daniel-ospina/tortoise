@@ -10,7 +10,7 @@ Test classes:
 - RED (missing-line class — fail at base, no SubjectAdded exists pre-fix):
   round-trip byte-identity, re-mention, stub adoption + EventAPI-lane
   delta-1 variant, reserved props, no-log pop, probe fail-open,
-  append-fail, delete pins, EventAPI-coexistence.
+  append-fail, delete durability, EventAPI-coexistence.
 - Green-pins (pass at base BY CONSTRUCTION; discriminate a wrong/missing
   fix): duplicate-replay first-wins, falsy-name no-phantom-line.
 
@@ -123,7 +123,7 @@ class TestRoundTrip:
                 assert "is_episodic" not in line, line
             else:
                 assert line["is_episodic"] == is_episodic, line
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _subject_row(proj, name)
             assert rebuilt, "Subject must survive rebuild"
             rebuilt_props = {k: v for k, v in rebuilt[0][0].items()
@@ -167,7 +167,7 @@ class TestOnlyOnCreate:
             assert sas[0]["subject_kind"] == "core:org", (
                 "journal must hold FIRST-registration subject_kind, not the "
                 "churned live value")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _subject_row(proj, "strategy-owner", "subjectKind")
             assert rebuilt and rebuilt[0][0] == "core:org", (
                 "rebuild reverts to first-registration subjectKind "
@@ -223,7 +223,7 @@ class TestStubAdoption:
             # status PRESENT (delta-3 inversion — Subject status rides extras)
             live_props = _subject_row(proj, "connector-person")[0][0]
             assert live_props.get("status") == "live", live_props
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "connector-person", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
@@ -290,7 +290,7 @@ class TestDuplicateReplay:
                             subject_kind="core:other", createdAt=first_ts)
             sdk._emit_event("SubjectAdded", id=oid, name="race-person",
                             subject_kind="core:other", createdAt=second_ts)
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "race-person", "id", "createdAt")
             assert len(rows) == 1, "exactly one Subject node after dup replay"
             assert rows[0][0] == oid, rows[0]
@@ -329,7 +329,7 @@ class TestReservedProps:
             assert rows, "subject must exist live"
             node = rows[0][0]
             assert "point" not in node and "payload" not in node, node
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "reserved-person")
             node = rows[0][0]
             for k in ("event_id", "ts", "initiated_by", "projection_version"):
@@ -413,7 +413,7 @@ class TestFailureInjection:
                 "probe failure must fail OPEN to journaling (durable bias): "
                 f"{sas}")
             assert _subject_row(proj, "fail-open-person"), "create must succeed"
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert _subject_row(proj, "fail-open-person"), (
                 "fail-open journal must let rebuild restore the node")
         finally:
@@ -447,7 +447,7 @@ class TestFailureInjection:
             assert any("failed to append" in r.getMessage()
                        for r in caplog.records), caplog.records
             monkeypatch.setattr(EventLog, "append", orig_append)
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert not _subject_row(proj, "append-fail-person"), (
                 "accepted consequence: rebuild omits the Subject whose "
                 "registration line was lost")
@@ -455,20 +455,19 @@ class TestFailureInjection:
             sdk.close()
 
 
-# ── Tests 9a-9b (RED/green-pins): delete non-durability ────────────────────
+# ── Tests 9a-9b: delete durability (#3299) ─────────────────────────────────
 
-class TestDeleteNonDurability:
-    """Pins for the accepted delete asymmetry (#2295 plan; #2296 scope hook —
-    the durability write-surface invariant must cover deletion).
+class TestDeleteDurability:
+    """Delete durability (#3295 plan; #2296 scope hook; closed by #3299).
 
-    _delete_entity is a bare DETACH DELETE — no tombstone in the journal
-    vocabulary, so a deleted canonical Subject's SubjectAdded line still
-    replays: test 9a — deleted Subject RESURRECTS on the next rebuild_all;
-    test 9b — delete→recreate journals TWO first-registrations; replay
-    first-wins the earlier line's createdAt (≠ the live node's second).
+    #3299 journals ``_delete_entity`` as an ``EntityMutated op=delete``
+    JSONL record and replays it as a hard delete, so:
+    - test 9a — a deleted canonical Subject is ABSENT after rebuild_all;
+    - test 9b — delete→recreate journals TWO first-registrations and replay
+      reproduces the SECOND (live) incarnation, not the first.
     """
 
-    def test_deleted_subject_resurrects_on_rebuild(self, tmp_path):
+    def test_deleted_subject_absent_after_rebuild(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t9a.db"),
@@ -483,17 +482,15 @@ class TestDeleteNonDurability:
             assert sdk._delete_entity(oid) is True, "node must be deleted"
             rows = _subject_row(proj, "delete-me-A")
             assert not rows, "live node must be gone after delete"
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "delete-me-A", "createdAt")
-            assert rows, (
-                "deleted Subject resurrects on rebuild "
-                "(no delete tombstone in the journal vocabulary)")
-            assert rows[0][0] == journal[0]["createdAt"], (
-                "resurrected node carries the journaled createdAt")
+            assert not rows, (
+                "deleted Subject resurrects on rebuild — the #3299 defect "
+                "(the delete is now journaled as EntityMutated op=delete)")
         finally:
             sdk.close()
 
-    def test_delete_recreate_replays_first_incarnation(self, tmp_path):
+    def test_delete_recreate_replays_second_incarnation(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t9b.db"),
@@ -514,11 +511,11 @@ class TestDeleteNonDurability:
             live_rows = _subject_row(proj, "delete-me-B", "createdAt")
             assert live_rows and live_rows[0][0] == sas[1]["createdAt"], (
                 "live node carries the SECOND registration's createdAt")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "delete-me-B", "createdAt")
-            assert rows and rows[0][0] == sas[0]["createdAt"], (
-                "replay first-wins the FIRST registration's createdAt — "
-                "accepted delete→recreate divergence (#2296 hook)")
+            assert rows and rows[0][0] == sas[1]["createdAt"], (
+                "replay must reproduce the SECOND incarnation — the "
+                "journaled delete must not swallow the later recreate")
         finally:
             sdk.close()
 
@@ -554,7 +551,7 @@ class TestCreatedAtNoneGate:
                 f"registration, not journaled as null: {line!r}")
             rows = _subject_row(proj, "none-person", "createdAt")
             assert rows and rows[0][0] == line["createdAt"], rows
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "none-person", "createdAt")
             assert rows and rows[0][0] == line["createdAt"], (
                 "rebuilt createdAt must equal the synthesized journaled "
@@ -637,7 +634,7 @@ class TestEventAPICoexistence:
             assert live_rows[0][1] == sas[0]["createdAt"], (
                 "live createdAt must be A's (first registration)")
             # rebuild against the SDK log ONLY
-            proj.rebuild_all(str(sdk_events))
+            proj.rebuild_all(str(sdk_events), confirm_destructive=True)
             rows = _subject_row(proj, name, "id", "createdAt")
             assert rows and rows[0][0] == _entity_name_id(
                 "Subject", name), (
@@ -674,7 +671,7 @@ class TestEventAPICoexistence:
             api.add_subject(name)  # random ulid, its own createdAt
             live_rows = _subject_row(proj, name, "id", "createdAt")
             assert live_rows, "live node must exist"
-            proj.rebuild_all(str(shared))
+            proj.rebuild_all(str(shared), confirm_destructive=True)
             rows = _subject_row(proj, name, "id", "createdAt")
             assert rows, "cross-file rebuild must converge on one node"
             sdk_lines = _name_sas(

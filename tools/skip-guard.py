@@ -8,7 +8,8 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 #1382 EP regression class for days.
 
 Usage:
-  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
+  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
+                              [--scope "<space-joined files>"] [--junitxml <path>] [--manifest-only]
   python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
@@ -33,8 +34,31 @@ producer):
 
 Semantics:
   - Log missing/unreadable  -> exit 0 (no evidence, nothing to fail on)
-  - No SKIPPED lines whose reason mentions "FalkorDB" -> exit 0 (clean)
+  - No SKIPPED line matching a guarded reason family -> exit 0 (clean)
   - Any such line -> print the skipped set (nodeids) + count, exit 1
+
+Three guarded reason families (all fail-closed):
+  1. live-FalkorDB availability regressions (#1436) — reason mentions
+     "FalkorDB" and is not in an exempt availability-class family.
+  2. embedder-unavailable (#2573) — the dense-retrieval leg silently degrades
+     to FTS-only ("keyword-only") when the embedding model cannot be loaded,
+     and the suite reports green while asserting a different meaning. The
+     real skip reasons for this class mention neither FalkorDB nor a manifest
+     (tests/test_cross_lens.py, tests/test_search_engine.py, ...), so before
+     this class existed they could not trip the guard at all. An embedder
+     skip is an ANOMALY: CI provisions the model, so the expected state is
+     that these tests RUN.
+  3. module-level collection skips (#4221) — a test module aborted at
+     COLLECTION time (pytest.skip(..., allow_module_level=True)) never runs
+     ANY of its tests, yet the suite reports green. Detected STRUCTURALLY on
+     the junitxml path — pytest's constant "collection skipped" <skipped>
+     message — never by reason text: the #4221 reason ("shared_state package
+     not installed — event log tests require it") names no import at all, so
+     a reason-text match could never catch a recurrence, while "import text"
+     matching false-positives on every deliberate optional-dependency probe
+     (pytest.importorskip(...) emits "could not import 'x': No module named
+     'x'"). A per-test importorskip is an optional dependency BY
+     CONSTRUCTION and must not trip; a whole-module abort is a vacancy.
 
 Matches BOTH pytest output formats:
   -v progress:  "tests/test_ep_directional.py::TestX::test_y SKIPPED (Live FalkorDB (Docker) not available)"
@@ -60,11 +84,42 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
   --junitxml <path>                  junitxml from the same pytest run, written
                                      with -o junit_family=xunit1 so every
                                      <testcase> carries file/line attributes.
+  --manifest-only                    disable the three skip-ANOMALY reason
+                                     matchers and compare the expected nodeids
+                                     (#4207) — plus, since #4215, enforce the
+                                     manifest's `# allow-skipped:` OUTCOME budget
+                                     (a frozen nodeid that is collected and then
+                                     SKIPPED reds beyond its file's budget). The
+                                     reason matchers are calibrated for the docker
+                                     lane, where a live-FalkorDB/embedder skip is
+                                     an anomaly; in a URI-less lane those skips are
+                                     the EXPECTED state and would false-red every
+                                     e2e module. Use this where the property is
+                                     "the frozen nodeid set is still COLLECTED
+                                     (and the tests that must run, run)".
+  --scope "<space-joined files>"     restrict the frozen set to the nodeids whose
+                                     FILE is listed. The manifest is always
+                                     passed VERBATIM (never a grep-derived temp
+                                     file, which a tree could silently
+                                     redefine); only what THIS invocation must
+                                     observe shrinks — for a lane that runs one
+                                     SHARD of a repo-level frozen set. A scope
+                                     naming no frozen nodeid is a legitimate
+                                     empty requirement for a shard that owns
+                                     none, and the guard prints the filtered
+                                     count (and says so when the requirement is
+                                     empty) so a wrong scope is not silent.
+                                     Requires --manifest: with no frozen set
+                                     there is nothing to narrow, so the
+                                     combination fails closed (exit 2).
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
   vacuous early-return) -> print + exit 1. This kills the vacuous-pass class
-  (#942): on migrated halves a vanished nodeid can no longer green.
+  (#942): on migrated halves a vanished nodeid can no longer green. And in the
+  --manifest-only mode, a nodeid that is present but SKIPPED beyond its file's
+  `# allow-skipped: <file>=<n>` budget -> print + exit 1 (#4215: the outcome half
+  a test-level `pytest.skip(…)` would otherwise hide in).
 
   The junitxml is the AUTHORITATIVE observed set (lossless per-testcase nodeid
   via file+classname+name reconstruction; lossless skip reason in <skipped
@@ -98,9 +153,21 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/skip-guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/skip-guard.py`"
+    )
+
+import os
 import re
 import subprocess
-import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -116,10 +183,149 @@ _MANIFEST_MARKER_DEFAULT = "not track_b"
 # contain "::".
 _COLLECT_NODEID_RE = re.compile(r"^[^\s:]+::")
 
+# ── The collection-completion proof (#6898) ──────────────────────────────
+# pytest's exit code is NOT a reliable statement about collection. Concretely,
+# two shapes red a shard for a run that collected perfectly:
+#   * ``rc=5`` — EXIT_NOTESTSCOLLECTED: collection SUCCEEDED and matched
+#     nothing (e.g. a diff that selects files whose tests are all outside the
+#     ``-m`` marker). The tool already treats this as normal everywhere else
+#     (see the rc-in-(0, 5) assertion in tests/test_skip_guard.py).
+#   * ``rc=-6`` — the interpreter aborts AT EXIT, after the nodeid list has
+#     already been printed (issue #6898).
+# So the manifest must not be derived from the exit code at all. Instead a
+# `pytest_collection_modifyitems` hook writes it, because that hook is only
+# reached by a collection that ran to completion. But that hook is NOT
+# sufficient alone: an unimportable module yields rc=2 ("Interrupted: 1 error
+# during collection") and STILL reaches the hook with the errored module
+# dropped, so the nodeid list alone would fail OPEN on a genuine collection
+# error.
+#
+# The exit code is NOT an acceptable second half of that test (P1, PR #7072
+# review). `rc < 0` means only that the interpreter was SIGNALLED, at ANY
+# point: a shutdown SIGABRT masks a collection error just as easily as it
+# follows a clean collection. Measured: `ImportError` + an atexit SIGABRT
+# yields rc=-6 with a hook file present but EMPTY — accepted by
+# (file exists) AND (rc<0), certifying a broken collection. So the second half
+# is WITNESSED, not inferred: the hook counts pytest's own CollectReports
+# (`pytest_collectreport(report).failed`) and writes the count next to the
+# nodeids. Those reports are authoritative — a module that fails to import
+# produces a failed report BEFORE `pytest_collection_modifyitems` runs (and
+# when a conftest cannot be loaded at all, the hook never runs and no file is
+# written). Completion is therefore (file exists) AND (errors == 0). The write
+# is atomic for the same reason: a manifest that exists must be complete,
+# never half-written.
+_MANIFEST_HOOK_SOURCE = '''\
+"""Written by tools/skip-guard.py for a single --emit-manifest run (#6898)."""
+import os
+from pathlib import Path
 
-# A skip line: "SKIPPED" + a reason mentioning FalkorDB (both formats above).
+import pytest
+
+# pytest's AUTHORITATIVE collection verdict: one CollectReport per collector,
+# `failed` set when that collector raised (import error, syntax error, a
+# conftest/collector error). Counting them here — instead of inferring "no
+# collection error" from the process exit code — is what stops an at-shutdown
+# abort (rc<0) from masking a real collection error: the count is written to
+# the nodeid file during collection, so it survives the later SIGABRT.
+_collect_errors = []
+
+
+@pytest.hookimpl()
+def pytest_collectreport(report):
+    # `failed` is the documented CollectReport property; `outcome` is the
+    # field it derives from. Either marks a collector that raised.
+    if getattr(report, "failed", False) or getattr(report, "outcome", None) == "failed":
+        _collect_errors.append(getattr(report, "nodeid", ""))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    # trylast: pytest's own `-m`/`-k` filtering is a DEFAULT-priority
+    # pytest_collection_modifyitems (it is not decorated tryfirst; the tryfirst
+    # on _pytest/mark is pytest_cmdline_main). pluggy runs same-priority hooks
+    # in reverse registration order, so an untagged `-p` plugin would run
+    # BEFORE the mark plugin and snapshot the UNFILTERED items. Running last
+    # means we see the DESELECTED set — the same set the run step executes.
+    # (Verified: dropping trylast leaks the deselected nodeids into the manifest.)
+    out = os.environ.get("_FTS_MANIFEST_NODEIDS")
+    if not out:
+        return
+    tmp = out + ".part"
+    body = "\\n".join(i.nodeid for i in items)
+    Path(tmp).write_text(
+        "# collection: errors=%d\\n%s" % (len(_collect_errors), body),
+        encoding="utf-8")
+    os.replace(tmp, out)
+'''
+_COLLECT_ERROR_RC = 2
+
+# The error count the hook writes as the FIRST line of its nodeid file, e.g.
+# ``# collection: errors=0``. The leading ``#`` keeps it out of the nodeid set
+# for any consumer that filters comment lines, and its presence is the proof
+# that the count was witnessed rather than defaulted: _parse_hook_nodeids
+# fails closed (errors=None -> refuse) when the line is absent.
+_MANIFEST_ERRORS_MARK = "# collection: errors="
+
+# Written into the manifest header by _write_manifest and required by the
+# consumer before it will accept an EMPTY expected-set: the marker is only
+# ever written when collection provably completed (#6898).
+_MANIFEST_COMPLETION_MARK = "# collection: completed"
+
+
+# A skip line: "SKIPPED" + a reason (both formats above).
 _SKIPPED_MARK = "SKIPPED"
 _FALKORDB_RE = re.compile(r"FalkorDB", re.IGNORECASE)
+
+# ── Embedder-unavailable reason class (#2573) ────────────────────────────
+# The dense-retrieval leg degrades silently to keyword-only when the embedding
+# model cannot be loaded, so an embedder skip must be as loud as a FalkorDB
+# one. A reason belongs to this class when it is BOTH about the embedding model
+# (_EMBEDDER_CONTEXT_RE — the ship-config model names bge-small / all-MiniLM /
+# sentence-transformers, or the general phrases) AND availability-shaped
+# (_EMBEDDER_UNAVAILABLE_RE).
+#
+# Deliberately NOT matched: "all-MiniLM-L6-v2 not in HF cache (HF_HUB_OFFLINE
+# in CI)" (tests/test_embedder_probe.py, test_calibrate_thresholds.py,
+# tests/eval/retrieval/test_run.py). That is a collection-time offline
+# PRECONDITION on a non-shipped alternate model (`local_files_only=True`), not
+# a ship-config dense-leg degrade, and it fires by design in CI. The phrase
+# "not in HF cache" is absent from the availability set on purpose — the trip
+# class is "the model we require could not be loaded", not "some optional
+# fixture is unprovisioned".
+_EMBEDDER_CONTEXT_RE = re.compile(
+    r"bge-small|all-MiniLM|sentence-transformers|embedding model|embedder",
+    re.IGNORECASE,
+)
+_EMBEDDER_UNAVAILABLE_RE = re.compile(
+    r"unavailable|not available|not cached|cache not available|cache unavailable",
+    re.IGNORECASE,
+)
+
+# ── Module-level collection-skip class (#4221) ───────────────────────────
+# The #4221 shape is a skip that aborts a WHOLE MODULE at collection time
+# (pytest.skip(..., allow_module_level=True)): tests/test_event_log.py and
+# tests/test_crash_recovery_e2e.py imported a nonexistent top-level
+# `shared_state` package, swallowed the ModuleNotFoundError into one such
+# skip, and 26 data-integrity tests (the SHA-256 hash-chained event log +
+# crash recovery) reported green for months without ever running.
+#
+# The class is scoped to the STRUCTURAL signal and deliberately does NOT look
+# at import wording. pytest reports a collection-time module skip as a
+# <testcase> with an EMPTY classname whose <skipped> message is the CONSTANT
+# "collection skipped" (the real reason rides in the element TEXT) — verified
+# against pytest 9.1.1. That constant is the signal, and it is available ONLY
+# on the junitxml path; see find_violations for why the legacy -rs/-v line
+# matcher cannot assert this class.
+_COLLECTION_SKIP_MESSAGE = "collection skipped"
+# Deliberate, visible WHOLE-MODULE gates that are not a vacancy: the
+# docker-lane URI gates (tests/test_capabilities_endpoint.py, the onboarding
+# W3-W8 suites, tests/test_eval_ingest_cache.py …) abort their module BY
+# DESIGN on a URI-less tier-2 leg, and the guard must not red for them.
+# Substring match on the skip reason (the junitxml element text), mirroring
+# _EXEMPT_REASON_PREFIXES for the FalkorDB class. The #4221 reason names no
+# such precondition — which is exactly why the class cannot be a reason-text
+# match.
+_COLLECTION_SKIP_EXEMPT_RE = re.compile(r"TORTOISE_DB_URI", re.IGNORECASE)
 
 # Intentional availability-class reason families, exempt from the FalkorDB
 # trip. Prefix match on the raw reason (case-sensitive for these two).
@@ -167,6 +373,41 @@ def _extract_reason(line: str) -> str | None:
     return None
 
 
+def is_embedder_reason_violation(reason: str) -> bool:
+    """True when a skip reason reports the EMBEDDING MODEL being unavailable.
+
+    Both halves are required: a model/embedder context and an
+    availability-shaped phrase. That keeps the class narrow — a generic reason
+    merely containing "cache" or "model" (a LongMemEval dataset miss, a
+    fixture download) never trips it (tests/test_skip_guard.py pins this).
+
+    See the _EMBEDDER_CONTEXT_RE / _EMBEDDER_UNAVAILABLE_RE block above for
+    the deliberately-excluded offline-precondition family.
+    """
+    if not _EMBEDDER_CONTEXT_RE.search(reason):
+        return False
+    return bool(_EMBEDDER_UNAVAILABLE_RE.search(reason))
+
+
+def is_collection_skip_violation(message: str, detail: str = "") -> bool:
+    """True when a junitxml <skipped> is a whole-module collection skip.
+
+    ``message`` is the <skipped> ``message`` attribute and ``detail`` its text
+    — pytest writes the real reason into the TEXT as the repr of its
+    ``(path, lineno, 'Skipped: <reason>')`` tuple, while ``message`` is the
+    constant "collection skipped". The class is structural: that constant
+    means the module was aborted during collection, so none of its tests ran
+    (#4221).
+
+    A reason naming a recognised precondition (``TORTOISE_DB_URI`` — the
+    docker-lane module gates) is a deliberate visible gate, not a vacancy, and
+    is exempt. The #4221 reason names no precondition and is caught.
+    """
+    if message.strip() != _COLLECTION_SKIP_MESSAGE:
+        return False
+    return not _COLLECTION_SKIP_EXEMPT_RE.search(detail)
+
+
 def is_falkor_reason_violation(reason: str) -> bool:
     """True when a FalkorDB-mentioning skip reason is a REAL violation.
 
@@ -199,14 +440,28 @@ def find_violations(log_text: str) -> list[str]:
     The same reason-family exemptions as the junitxml matcher apply (epic #1647
     Task 3, cycle-7 P2-4): a tier-2 PR can route test_falkordb_compat to half a,
     where its 6399 class skip must not red the legacy matcher either.
+
+    #2573: the embedder-unavailable class is matched here too, so the legacy
+    line matcher and the junitxml matcher agree on the embedder family (half a
+    / P1 CI sees only this path). The ``_live_utils.py`` exclusion stays
+    FalkorDB-only — it exists for the live-URI gate reason family.
+
+    #4221: the module-collection-skip class is deliberately NOT asserted here.
+    A collection skip reaches the -r summary as "SKIPPED [N] file.py:line:
+    <reason>" — byte-identical to a per-test skip's summary line — and the
+    location can belong to a HELPER module (e.g. tests/_live_utils.py:37,
+    tests/_embedded.py:470) that never appears in the -v progress section, so
+    neither "the reason looks like an import failure" (the proven-wrong text
+    match) nor a "file absent from -v progress" cross-reference can separate a
+    whole-module abort from a deliberate per-test skip on this path. The
+    junitxml carries pytest's constant "collection skipped" message and IS
+    authoritative; every CI lane passes --junitxml whenever there are files to
+    run, and this legacy path is the empty-file fallback, where no collection
+    skip can occur.
     """
     violations = []
     for line in log_text.splitlines():
-        if _SKIPPED_MARK not in line or not _FALKORDB_RE.search(line):
-            continue
-        if "_live_utils.py" in line:
-            # Legacy location-based exclusion (kept for back-compat; the
-            # canonical exclusion is the reason-family prefix below).
+        if _SKIPPED_MARK not in line:
             continue
         reason = _extract_reason(line)
         if reason is None:
@@ -218,9 +473,14 @@ def find_violations(log_text: str) -> list[str]:
             # (never truncated) is the authoritative reason source; a real
             # regression skip always appears there with its reason intact.
             continue
-        if not is_falkor_reason_violation(reason):
-            continue
-        violations.append(extract_nodeid(line))
+        if is_falkor_reason_violation(reason):
+            if "_live_utils.py" in line:
+                # Legacy location-based exclusion (kept for back-compat; the
+                # canonical exclusion is the reason-family prefix above).
+                continue
+            violations.append(extract_nodeid(line))
+        elif is_embedder_reason_violation(reason):
+            violations.append(extract_nodeid(line))
     return violations
 
 
@@ -285,20 +545,39 @@ def _read_manifest(path: str) -> tuple[set[str], list[str]] | None:
     return expected, invalid
 
 
-def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
-    """Parse a junitxml (xunit1) into observed nodeids + falkor violations.
+def _read_junitxml(
+    path: str,
+) -> tuple[set[str], list[str], list[str], list[str], str | None, set[str]]:
+    """Parse a junitxml (xunit1) into observed nodeids + reason violations.
 
-    Returns (observed, falkor_violations, contract_error). Raises
-    OSError/ET.ParseError when the file is missing or malformed.
+    Returns (observed, falkor_violations, embedder_violations,
+    collection_violations, contract_error, skipped_tests).
+    Raises OSError/ET.ParseError when the file is missing or malformed.
+
+    skipped_tests (#4215's OUTCOME half): the REAL test nodeids whose <testcase>
+    carries a <skipped> child. The nodeid comparison cannot see these — a test
+    that is collected and then skips is present in the junit — so a platform gate
+    spelled as a test-level `pytest.skip(…)` is invisible to both the source scan
+    and the coverage check. Two shapes are excluded: module-level collection-abort
+    markers (pytest writes them with an empty classname, and their skip IS the
+    expected state) and `type="pytest.xfail"`, which is a test that RAN and failed
+    as expected, not one that was hidden.
+
+    The collection-skip class is STRUCTURAL (pytest's constant "collection
+    skipped" message on a whole-module <testcase>) — see
+    is_collection_skip_violation.
 
     contract_error is set (non-None) when any <testcase> lacks the file/name
     attributes nodeid reconstruction requires — i.e. the junitxml was NOT
     written with -o junit_family=xunit1. Reason extraction (<skipped
-    message>) is independent of those attrs, so falkor_violations are still
-    complete and meaningful; only the nodeid set is unusable.
+    message>) is independent of those attrs, so the reason violations are
+    still complete and meaningful; only the nodeid set is unusable.
     """
     observed: set[str] = set()
+    skipped_tests: set[str] = set()
     falkor_violations: list[str] = []
+    embedder_violations: list[str] = []
+    collection_violations: list[str] = []
     contract_error: str | None = None
     tree = ET.parse(path)
     for tc in tree.iter("testcase"):
@@ -308,14 +587,32 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
         skipped = tc.find("skipped")
         if skipped is not None:
             reason = (skipped.get("message") or "").strip()
-            if is_falkor_reason_violation(reason):
-                # Reason-level violation: report best-effort nodeid — under
-                # xunit2 there is no file attr, so fall back to class::name.
-                if file and name:
+            falkor = is_falkor_reason_violation(reason)
+            embedder = is_embedder_reason_violation(reason)
+            # The collection-skip class reads the REAL reason from the element
+            # TEXT (the repr pytest writes there), not from the constant
+            # message attr — is_collection_skip_violation owns both halves.
+            collection = is_collection_skip_violation(
+                skipped.get("message") or "", skipped.text or "")
+            if falkor or embedder or collection:
+                if collection and file:
+                    # A collection skip's <testcase> is the MODULE (empty
+                    # classname, name = dotted module path); the file is the
+                    # actionable identity. reconstruct_nodeid would append the
+                    # synthetic "::tests.test_x" nodeid below.
+                    nodeid = file
+                elif file and name:
+                    # Reason-level violation: report best-effort nodeid — under
+                    # xunit2 there is no file attr, so fall back to class::name.
                     nodeid = reconstruct_nodeid(file, classname, name)
                 else:
                     nodeid = f"{classname}::{name}".strip(":") or "<unknown>"
-                falkor_violations.append(nodeid)
+                if falkor:
+                    falkor_violations.append(nodeid)
+                if embedder:
+                    embedder_violations.append(nodeid)
+                if collection:
+                    collection_violations.append(nodeid)
         if not file or not name:
             # junit_family=xunit2 (pytest's default) emits no file/line attrs —
             # nodeid reconstruction is impossible, and a silently-mangled nodeid
@@ -326,8 +623,20 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
                 "attrs nodeid reconstruction needs only exist under xunit1)"
             )
             continue
-        observed.add(reconstruct_nodeid(file, classname, name))
-    return observed, falkor_violations, contract_error
+        nodeid = reconstruct_nodeid(file, classname, name)
+        observed.add(nodeid)
+        # `classname == ""` is pytest's module-level collection-abort marker (its
+        # <testcase> IS the module). Such a skip is a marker's expected state, so
+        # it is never an outcome violation — only a real test's skip is.
+        # And an XFAIL is not a skip that hid the test: pytest writes it as
+        # <skipped type="pytest.xfail">, and the test DID run (it failed as
+        # expected), so counting it would red a correct tree while the message
+        # ("the test did not RUN") and the only remedy (a skip allowance for a test
+        # that executes) would both be wrong (cycle-9 finding).
+        if skipped is not None and classname and (skipped.get("type") or "") != "pytest.xfail":
+            skipped_tests.add(nodeid)
+    return (observed, falkor_violations, embedder_violations,
+            collection_violations, contract_error, skipped_tests)
 
 
 def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
@@ -370,8 +679,59 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
     return log_path, manifest_path, junit_path
 
 
-def _report(violations: list[str], falkor_violations: list[str]) -> int:
-    if not violations and not falkor_violations:
+def _parse_skip_allowances(text: str) -> tuple[dict[str, int], list[str]]:
+    """Read `# allow-skipped: <repo-relative-path>=<n>` directives from a manifest.
+
+    #4215: the frozen set asserts COLLECTION, but a test-level
+    `if …: pytest.skip(…)` keeps a nodeid collected and never runs it — the shape
+    the issue names as its acceptance example. The allowance is the manifest's own
+    written record of how many skips a file legitimately absorbs (off-darwin, the
+    two #3845 fork tests), so the runtime check can red on the rest without
+    scanning source for spellings.
+
+    Returns (allowances, invalid). An unparsable directive is RETURNED, never
+    ignored: a typo must not silently leave the budget at the default (0, i.e.
+    the strict reading) while the reader believes an allowance was declared.
+    """
+    allowances: dict[str, int] = {}
+    invalid: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        body = stripped.lstrip("#").strip()
+        # The colon is OPTIONAL in the match, so a typo'd directive
+        # (`allow-skipped file=2`) is REPORTED rather than silently skipped: the
+        # promise above was false for that spelling, and a silently ignored
+        # directive leaves the strict default in force while the reader believes a
+        # budget was declared (cycle-8 finding).
+        if not body.lower().startswith("allow-skipped"):
+            continue
+        rest = body.split(":", 1)[1].strip() if ":" in body else ""
+        spec = rest.split()[0] if rest else ""
+        file, _, count = spec.rpartition("=")
+        if not file or not count.isdigit():
+            invalid.append(stripped)
+            continue
+        if file in allowances:
+            # A second directive for one file is NEVER legitimate: last-wins
+            # silently overrode the declared budget, so a copy-pasted `=3` under a
+            # documented `=2` let the OUTCOME half allow the very skip the header
+            # calls a gate evasion, with every pin green (cycle-8 finding).
+            invalid.append(f"{stripped} (duplicate: {file} is already declared)")
+            continue
+        allowances[file] = int(count)
+    return allowances, invalid
+
+
+def _report(violations: list[str], falkor_violations: list[str],
+            embedder_violations: list[str],
+            collection_violations: list[str],
+            outcome_violations: list[str] | None = None) -> int:
+    outcome_violations = outcome_violations or []
+    if (not violations and not falkor_violations
+            and not embedder_violations and not collection_violations
+            and not outcome_violations):
         return 0
 
     if violations:
@@ -392,6 +752,32 @@ def _report(violations: list[str], falkor_violations: list[str]) -> int:
             print(f"   - {nodeid}")
         print(f"{len(falkor_violations)} skip line(s) matching the live-FalkorDB "
               "reason family.")
+    if embedder_violations:
+        print("❌ embedder-unavailable tests SKIPPED in this run — the suite "
+              "would silently run keyword-only (TF-IDF-degraded) and report "
+              "green (issue #2573):")
+        for nodeid in sorted(set(embedder_violations)):
+            print(f"   - {nodeid}")
+        print(f"{len(embedder_violations)} skip line(s) matching the "
+              "embedder-unavailable reason family.")
+    if collection_violations:
+        print("❌ whole test MODULES were SKIPPED at collection — CI would be "
+              "green while every test in them never ran (issue #4221):")
+        for nodeid in sorted(set(collection_violations)):
+            print(f"   - {nodeid}")
+        print(f"{len(collection_violations)} module-level collection skip(s) "
+              "matching the vacancy class.")
+    if outcome_violations:
+        print("❌ frozen-set tests SKIPPED beyond their declared allowance — the "
+              "nodeid is still COLLECTED, so the coverage check above is "
+              "satisfied, but the test did not RUN (issue #4215):")
+        for line in outcome_violations:
+            print(f"   - {line}")
+        print("A platform gate spelled as a test-level `pytest.skip(…)` is invisible "
+              "to a source scan and to the nodeid comparison; the file's budget is "
+              "its `# allow-skipped:` directive. Raise it deliberately (and say why "
+              "in the header) — never to make this pass."
+              )
     return 1
 
 
@@ -417,6 +803,29 @@ def collect_only_nodeids(text: str) -> list[str]:
     return out
 
 
+def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
+    """Split the hook-written file into (nodeids, collect_errors).
+
+    The file's first line is the ``# collection: errors=<n>`` marker (see
+    ``_MANIFEST_ERRORS_MARK``); every other non-blank line is a nodeid. When
+    the marker is absent or unparseable, ``collect_errors`` is ``None`` — the
+    authoritative count is MISSING, which must fail closed rather than default
+    to zero (an old hook, or a truncated write, is not evidence of success).
+    """
+    errors: int | None = None
+    nodeids: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(_MANIFEST_ERRORS_MARK):
+            try:
+                errors = int(line[len(_MANIFEST_ERRORS_MARK):].strip())
+            except ValueError:
+                errors = None
+            continue
+        if line.strip():
+            nodeids.append(line)
+    return nodeids, errors
+
+
 def emit_manifest(files: list[str], marker: str, output: Path,
                   runner=None, ignores: tuple[str, ...] = ()) -> int:
     """Generate the expected-nodeid manifest for the given file list.
@@ -435,25 +844,76 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     - empty files -> exit 0, NO output file (the CI guard skips manifest
       mode on empty $FILES — a "no selected files" run writes no junitxml,
       so a manifest would false-red every expected nodeid).
-    - collect-only failure -> propagate rc, NO output file (a vanished
+    - collection did NOT complete -> propagate rc, NO output file (a vanished
       manifest must never vacuous-green; the consumer reds on it).
+
+    Completion is judged by TWO conditions together, because neither alone is
+    sufficient:
+      1. the hook-written nodeid file EXISTS — this rules out a signal that
+         killed the interpreter mid-collection; and
+      2. the hook counted ZERO failed CollectReports — pytest's own
+         authoritative collection verdict.
+    The process exit code is NOT one of those conditions. ``rc < 0`` says only
+    that the interpreter was signalled at SOME point, so a shutdown SIGABRT
+    masks a collection error as easily as it follows a clean one (P1, PR
+    #7072 review: `ImportError` + atexit SIGABRT yields rc=-6 with an EMPTY
+    hook file — accepted by a file-exists/rc<0 rule, certifying a broken
+    collection). ``rc`` survives only as a secondary signal for the positive,
+    non-normal exits (0/5 are normal; anything else positive fails closed).
+    Measured: an unimportable module yields rc=2 and STILL reaches the hook
+    (the errored module is dropped and the remaining items are collected), so
+    the file alone would fail OPEN on a genuine collection error — it is the
+    error COUNT that refuses it; and the marker matching nothing yields rc=5
+    while collecting perfectly, so rc alone would refuse a clean run.
     """
     if not files:
         print("emit-manifest: no files — no manifest written (guard skips)")
         return 0
+    nodeids_file = None
+    rc, collected, _err = None, "", ""
+    collect_errors: int | None = None
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
            *[f"--ignore={ig}" for ig in ignores]]
     if runner is None:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        rc, collected = proc.returncode, proc.stdout
-        _err = proc.stderr
+        # The hook is delivered out-of-tree via -p + PYTHONPATH so the run's
+        # own conftest is untouched and nothing is written into the repo.
+        with tempfile.TemporaryDirectory() as _td:
+            (Path(_td) / "_fts_manifest_hook.py").write_text(
+                _MANIFEST_HOOK_SOURCE, encoding="utf-8")
+            nodeids_file = str(Path(_td) / "nodeids.txt")
+            env = dict(os.environ)
+            env["_FTS_MANIFEST_NODEIDS"] = nodeids_file
+            env["PYTHONPATH"] = _td + (
+                os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            proc = subprocess.run(
+                [*cmd, "-p", "_fts_manifest_hook"],
+                capture_output=True, text=True, env=env)
+            rc, collected = proc.returncode, proc.stdout
+            _err = proc.stderr
+            # Read INSIDE the TemporaryDirectory: the completion proof is the
+            # file the hook wrote, and it must be read before it is cleaned up.
+            if Path(nodeids_file).exists():
+                nodeids, collect_errors = _parse_hook_nodeids(
+                    Path(nodeids_file).read_text(encoding="utf-8"))
+            else:
+                nodeids = None
     else:
         rc, collected = runner(cmd)
-        _err = ""
-    if rc != 0:
-        print(f"emit-manifest: collect-only failed (rc={rc}) — no manifest "
-              f"written (fail-closed)", file=sys.stderr)
+        nodeids = collect_only_nodeids(collected)
+        # The injectable runner returns only (rc, stdout) — it has no collect
+        # reports — so rc is the only available signal and any non-normal exit
+        # (including a negative one) counts as a collection failure here.
+        collect_errors = 0 if rc in (0, 5) else 1
+    if (nodeids is None or collect_errors != 0
+            or (rc >= 0 and rc not in (0, 5))):
+        if collect_errors:
+            _why = (f"collect-only reported {collect_errors} collection "
+                    f"error(s)")
+        else:
+            _why = "collect-only did not COMPLETE"
+        print(f"emit-manifest: {_why} (rc={rc}) — no manifest written "
+              f"(fail-closed)", file=sys.stderr)
         # Surface the swallowed reason — a fail-closed gate that hides WHICH
         # file failed collection turns every runner hiccup into archaeology.
         # Print the tail of pytest's captured stderr/stdout (best-effort).
@@ -463,11 +923,25 @@ def emit_manifest(files: list[str], marker: str, output: Path,
                 print(f"emit-manifest: -- {_label} tail --", file=sys.stderr)
                 for _ln in _lines[-20:]:
                     print(f"  {_ln[:300]}", file=sys.stderr)
-        return rc
-    nodeids = collect_only_nodeids(collected)
+        return rc or _COLLECT_ERROR_RC
+    nodeids = [n for n in nodeids if n.strip()]
+    return _write_manifest(nodeids, output, marker)
+
+
+def _write_manifest(nodeids: list[str], output: Path, marker: str) -> int:
+    """Write the expected-nodeid manifest, carrying its completion proof.
+
+    The `# collection: completed <n>` line is what makes an EMPTY manifest
+    trustworthy, and it is written on the only path that can reach here — the
+    one where collection provably completed (#6898). Without it a consumer
+    seeing no nodeids cannot tell "collection completed and found nothing"
+    from "the generator emitted nothing", so it must fail closed on both; with
+    it, `expected=0` is evidence rather than absence.
+    """
     lines = [
         f"# expected nodeids — epic #1647 Task 6 coverage manifest "
         f"(from the run step's verbatim $FILES x `-m {marker}` collect-only)",
+        f"{_MANIFEST_COMPLETION_MARK} {len(nodeids)}",
         *nodeids,
         "",
     ]
@@ -523,11 +997,108 @@ def _main_emit_manifest(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if "--emit-manifest" in argv:
         return _main_emit_manifest(argv)
+    # #4207: `--manifest-only` disables the three skip-ANOMALY reason matchers.
+    # They are calibrated for the docker lane, where a live-FalkorDB or embedder
+    # skip is an anomaly; in a URI-less lane (the embedded_only selection) those
+    # skips are the EXPECTED state, so applying them there false-reds on every e2e
+    # module (24 of them, measured). It does NOT assert "nothing else": the
+    # coverage comparison, and since #4215 the `# allow-skipped:` OUTCOME budget,
+    # both still run — a lane whose skips are expected owes a written budget for
+    # them (cycle-8 finding: the old wording claimed literally "NOTHING else").
+    manifest_only = "--manifest-only" in argv
+    if manifest_only:
+        argv = [a for a in argv if a != "--manifest-only"]
+    # `--scope` (#6804): restrict WHICH frozen nodeids this invocation must see.
+    # Needed because the frozen manifest is REPO-LEVEL while this job runs ONE
+    # shard of it — comparing the whole file against one shard's junitxml reds
+    # every shard that does not run its siblings (measured on the sharding PR:
+    # shards 0 and (b) reddened on a run whose pytest was green — the frozen
+    # file belongs to shard (c)).
+    #
+    # ⛔ The filter must NOT live in the manifest argument. A `--manifest` that is
+    # a grep-derived TEMP file is a set the tree can silently redefine, which is
+    # the #4207 defect this guard exists to kill; tests/test_ci_guard_invocation.py
+    # asserts `--manifest` resolves to a COMMITTED frozen path, and it is right to.
+    # So the frozen path is passed verbatim and the shard's subset is expressed
+    # here instead: `expected` stays the frozen set, and only the SUBSET required
+    # of this run shrinks. An empty scope result is legitimate (a shard owning no
+    # nodeid in the frozen set requires none) and must NOT be confused with an
+    # empty MANIFEST, which stays fail-closed below.
+    scope: set[str] | None = None
+    _stripped: list[str] = []
+    _i = 0
+    while _i < len(argv):
+        _a = argv[_i]
+        if _a.startswith("--scope="):
+            _v = _a.split("=", 1)[1]
+            _i += 1
+        elif _a == "--scope":
+            if _i + 1 >= len(argv):
+                print(f"❌ {argv[0]}: --scope requires a value", file=sys.stderr)
+                return 2
+            _v = argv[_i + 1]
+            _i += 2
+        else:
+            _stripped.append(_a)
+            _i += 1
+            continue
+        scope = {p for p in _v.split() if p}
+    if scope is not None and not scope:
+        # Fail CLOSED on an EMPTY scope, for the same reason the
+        # `--manifest-only` branch below fails closed without a manifest: the
+        # flag means "assert the frozen set is intact AND that THIS shard
+        # observed its slice", so an empty scope asserts nothing while still
+        # printing success. `--scope` is substituted from the shard matrix
+        # (`--scope "$SCOPE"` built from `${{ matrix.files }}`), so an
+        # unexpanded or empty variable arrives as `--scope ''` rather than as
+        # an absent flag — and absence is the ONLY spelling that legitimately
+        # means "no scope". This is deliberately NARROWER than the check
+        # further down: a scope that names real files which merely do not
+        # intersect the frozen set is still a legitimate pass (announced on
+        # stderr), while a scope naming NO file at all is a caller bug.
+        print("❌ --scope requires at least one file path — an empty scope "
+              "would require no frozen nodeid and report success without "
+              "asserting anything", file=sys.stderr)
+        return 2
+    if scope is not None:
+        argv = _stripped
     log_path, manifest_path, junit_path = _parse_args(argv)
+    if manifest_only and manifest_path is None:
+        # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
+        # frozen expected set", so `--manifest-only` with nothing to expect would
+        # silently skip every matcher instead of erroring (cycle-5 finding — a
+        # no-op that looks like a passing check).
+        #
+        # The check must run AFTER parsing, on the PARSED value (cycle-7 finding):
+        # `--junitxml --manifest` makes `--manifest` the junit path, so a textual
+        # scan of argv saw the flag present and let the invocation through as a
+        # silent pass — the same no-op class, one spelling over.
+        print(
+            f"❌ {argv[0]}: --manifest-only requires --manifest <expected-nodeids.txt> "
+            "— with no manifest there is nothing to compare, and silently asserting "
+            "nothing is worse than failing.",
+            file=sys.stderr,
+        )
+        return 2
+    if scope is not None and manifest_path is None:
+        # `--scope` narrows the required subset of the FROZEN set, so it has no
+        # meaning without `--manifest`. Accepting it and then silently ignoring
+        # it is the same no-op class as `--manifest-only` with no manifest
+        # (cycle-5/cycle-7 findings): the caller believes a scoped check ran
+        # when nothing was scoped at all.
+        print(
+            f"❌ {argv[0]}: --scope requires --manifest <expected-nodeids.txt> "
+            "— the flag narrows which FROZEN nodeids this run must observe, and "
+            "with no manifest there is no frozen set to narrow; silently "
+            "dropping it would report a scoped check that never happened.",
+            file=sys.stderr,
+        )
+        return 2
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
-            "[--manifest <expected-nodeids.txt>] [--junitxml <path>]\n"
+            "[--manifest <expected-nodeids.txt>] [--scope \"<space-joined files>\"] "
+            "[--junitxml <path>] [--manifest-only]\n"
             f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
             "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "
@@ -556,20 +1127,73 @@ def main(argv: list[str]) -> int:
                 print(f"   - {line!r}", file=sys.stderr)
             return 1
         if not expected:
-            print("❌ manifest contains no expected nodeids (empty or "
-                  "comment-only) — an empty expected-set must not "
-                  "vacuous-green (it would report zero missing nodeids by "
-                  "construction); the manifest generator emitted nothing.",
-                  file=sys.stderr)
-            return 1
+            # #6898: an empty expected-set has TWO meanings and only one is a
+            # bug. If the generator emitted nothing at all the expected-set is
+            # unknowable and this must stay red (which is what the check was
+            # written for). But when the manifest CARRIES the completion
+            # marker, collection provably ran to the end and genuinely matched
+            # nothing — every selected module skipped at collection, e.g. a
+            # URI-gated docker-lane module on a PR leg that runs embedded by
+            # design. Then expected=0 with 0 observed is consistent, not a
+            # vacuous green, and the run's own rc already decided whether the
+            # skips were legitimate. Same distinction the scope branch below
+            # makes: an empty required set is a legitimate pass when it is
+            # KNOWN to be empty, never when the set is merely unknowable.
+            _text = open(manifest_path, encoding="utf-8", errors="replace").read()  # noqa: SIM115
+            if _MANIFEST_COMPLETION_MARK not in _text:
+                print("❌ manifest contains no expected nodeids (empty or "
+                      "comment-only) and carries NO completion marker — an "
+                      "empty expected-set must not vacuous-green (it would "
+                      "report zero missing nodeids by construction); the "
+                      "manifest generator emitted nothing.",
+                      file=sys.stderr)
+                return 1
+            print("✅ manifest declares a COMPLETED collection with zero "
+                  "expected nodeids — every selected module skipped at "
+                  "collection, so nothing was expected and nothing is "
+                  "missing (see the run's own rc for whether those skips "
+                  "were legitimate).")
+        if scope is not None:
+            # The frozen set is intact (checked non-empty above); this only
+            # narrows what THIS run must observe. A scope naming no frozen
+            # nodeid yields an empty required set — a shard that owns none of
+            # the frozen tests — which is a legitimate pass, NOT the vacuous
+            # green the check above forbids (that check ran on the frozen set).
+            # The frozen set must never lose its owner SILENTLY. Exiting 0
+            # without a word makes a shard that required nothing
+            # indistinguishable in the CI log from one that required the whole
+            # set and passed — and that silence is what would hide a frozen
+            # nodeid whose file belongs to NO shard (every shard would happily
+            # require nothing, forever). test_ci_selection.py pins that the
+            # shard scopes COVER the frozen files; the count line below names
+            # the scope and what it filtered, and the empty case is announced
+            # on stderr.
+            frozen_count = len(expected)
+            expected = {n for n in expected
+                        if n.split("::", 1)[0] in scope}
+            print(
+                f"scope: {frozen_count - len(expected)} of {frozen_count} frozen "
+                f"nodeid(s) filtered out by --scope={sorted(scope)}; "
+                f"{len(expected)} required of this run."
+            )
+            if not expected:
+                print(f"ℹ skip-guard: --scope required none of the {frozen_count} "
+                      f"frozen nodeid(s) for this run (files: "
+                      f"{sorted(scope)}). This shard owns none of "
+                      f"{manifest_path!r} — nothing to require, asserting the "
+                      f"frozen set is unchanged is still checked above.",
+                      file=sys.stderr)
         observed: set[str] = set()
+        skipped_tests: set[str] = set()
         falkor_violations: list[str] = []
+        embedder_violations: list[str] = []
+        collection_violations: list[str] = []
         contract_error: str | None = None
         if junit_path is not None:
             try:
-                observed, falkor_violations, contract_error = _read_junitxml(
-                    junit_path
-                )
+                (observed, falkor_violations, embedder_violations,
+                 collection_violations, contract_error,
+                 skipped_tests) = _read_junitxml(junit_path)
             except (OSError, ET.ParseError) as exc:
                 print(f"❌ junitxml {junit_path!r} missing or unreadable "
                       f"({exc}) — no observed testcases, so every one of the "
@@ -580,23 +1204,70 @@ def main(argv: list[str]) -> int:
             if contract_error:
                 print(f"❌ {contract_error}", file=sys.stderr)
                 observed = set()  # reconstruction impossible → all absent
+        outcome_violations: list[str] = []
+        if manifest_only:
+            # In a lane whose skips are expected, the ONLY property asserted is
+            # that the frozen expected set is still collected (#4207) … plus
+            # #4215's OUTCOME half below. The reason matchers stay off: they are
+            # calibrated for the docker lane and would false-red every e2e module
+            # here (24, measured).
+            falkor_violations = []
+            embedder_violations = []
+            collection_violations = []
+            # The coverage comparison above cannot see a test that is collected and
+            # then SKIPPED — `expected ⊆ observed` still holds while the test never
+            # ran, and a test-level `if …: pytest.skip(…)` is invisible to a source
+            # scan of the gate's spelling. That is #4215's acceptance example, and
+            # it is why this mode (whose whole contract is "skips are expected")
+            # owes a written budget: each file's `# allow-skipped: <file>=<n>`
+            # declares how many skips it legitimately absorbs, and anything above it
+            # reds, naming the nodeids. Module-level markers are exempt by class
+            # (`_read_junitxml` never counts them), so only a real test consumes
+            # budget. Scoped to this mode because the GENERATED manifest (the
+            # docker/carve-out lane) has no allowances to declare — there the
+            # reason matchers above are live instead.
+            allowances, invalid_allowances = _parse_skip_allowances(
+                open(manifest_path, encoding="utf-8", errors="replace").read())  # noqa: SIM115
+            if invalid_allowances:
+                print(f"❌ manifest {manifest_path!r} contains an unreadable "
+                      f"`# allow-skipped:` directive {invalid_allowances} — the skip "
+                      "budget is unknowable, and an unknowable budget must not be "
+                      "defaulted to 'allow' (fail-closed).", file=sys.stderr)
+                return 1
+            skipped_per_file: dict[str, list[str]] = {}
+            for nodeid in sorted(skipped_tests & expected):
+                skipped_per_file.setdefault(nodeid.split("::", 1)[0], []).append(nodeid)
+            for file, nodeids in sorted(skipped_per_file.items()):
+                budget = allowances.get(file, 0)
+                if len(nodeids) > budget:
+                    outcome_violations.append(
+                        f"{file}: {len(nodeids)} of its frozen tests SKIPPED, declared "
+                        f"budget {budget}")
+                    outcome_violations.extend(nodeids)
         missing = sorted(expected - observed)
-        return _report(missing, falkor_violations)
+        return _report(missing, falkor_violations, embedder_violations,
+                       collection_violations, outcome_violations)
 
     if junit_path is not None:
         # ── junitxml mode without a manifest: reason matcher only ────────
         try:
-            _, falkor_violations, contract_error = _read_junitxml(junit_path)
+            (_, falkor_violations, embedder_violations,
+             collection_violations, contract_error,
+             _) = _read_junitxml(junit_path)
         except (OSError, ET.ParseError):
             falkor_violations = []
+            embedder_violations = []
+            collection_violations = []
             contract_error = None
         if contract_error:
             # Reason extraction (<skipped message>) works without file/name
-            # attrs, so a real FalkorDB skip under a non-xunit1 junitxml must
-            # still red — never swallow it (fail-open). The diagnostic names
-            # the root cause alongside any violations.
+            # attrs, so a real FalkorDB, embedder, or whole-module collection
+            # skip under a non-xunit1 junitxml must still red — never swallow
+            # it (fail-open). The diagnostic names the root cause alongside any
+            # violations.
             print(f"❌ {contract_error}", file=sys.stderr)
-        return _report([], falkor_violations)
+        return _report([], falkor_violations, embedder_violations,
+                       collection_violations)
 
     # ── Legacy line-matcher mode (back-compat) ───────────────────────────
     try:
@@ -609,11 +1280,12 @@ def main(argv: list[str]) -> int:
     if not violations:
         return 0
 
-    print("❌ live-FalkorDB tests SKIPPED in this run — CI would be green "
-          "while testing nothing (issue #1436):")
+    print("❌ guarded availability-class tests SKIPPED in this run — CI would "
+          "be green while testing nothing (live-FalkorDB #1436 / "
+          "embedder-unavailable #2573 / module-collection-skip #4221):")
     for nodeid in sorted(set(violations)):
         print(f"   - {nodeid}")
-    print(f"{len(violations)} skip line(s) matching the live-FalkorDB reason family.")
+    print(f"{len(violations)} skip line(s) matching a guarded reason family.")
     return 1
 
 

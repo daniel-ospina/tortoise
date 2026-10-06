@@ -88,12 +88,15 @@ def test_enabled_with_dsn(monkeypatch: pytest.MonkeyPatch, fake_sentry: dict[str
     assert init_kwargs["environment"] == "production"  # SENTRY_ENV unset default
     assert init_kwargs["traces_sample_rate"] == 0.0  # default: tracing off
     assert init_kwargs["send_default_pii"] is False
+    # #2863 security: sentry-sdk defaults to attaching frame LOCALS, which on the
+    # /oauth/token path hold plaintext refresh tokens / verifiers / secrets.
+    assert init_kwargs["include_local_variables"] is False
 
     # exception capture forwards the exception AND tags onto the scope
     err = RuntimeError("boom")
-    tsentry.capture_exception(err, tags={"team_id": "t1"})
+    tsentry.capture_exception(err, tags={"org_id": "t1"})
     assert fake_sentry["exc"] == [
-        {"exception": err, "tags": {"team_id": "t1"}, "scope_methods": ["set_tag"]}
+        {"exception": err, "tags": {"org_id": "t1"}, "scope_methods": ["set_tag"]}
     ]
 
     # exception capture with NO tags skips the scope.set_tag loop entirely

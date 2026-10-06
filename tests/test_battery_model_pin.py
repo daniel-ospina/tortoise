@@ -75,12 +75,14 @@ def _write_pin(cfg_dir: Path, pin: str) -> None:
          "model_pin": pin, "temperature": 0.0}]}), encoding="utf-8")
 
 
-def test_real_preflight_refuses_unpinned_or_fixed_sentinel(tmp_path,
-                                                           monkeypatch):
+def test_real_preflight_refuses_unpinned_and_accepts_concrete_pin(tmp_path,
+                                                                  monkeypatch):
     # hermetic: stub the real emission seam active (run.py round-3 pattern —
     # hermetic tests activate the seam by stubbing run._episode_log), then a
-    # real-executor request must ConfigError BEFORE attempt-dir creation on
-    # EITHER refusal branch (zero orphaned artifacts).
+    # real-executor request must ConfigError BEFORE attempt-dir creation for
+    # an unusable pin (zero orphaned artifacts) and ACCEPT a concrete pin at
+    # the resolve seam. The class-level 'fixed' sentinel is NOT a refusal
+    # branch post-Task-9 (#2746) — the arms.yaml pin wins on the instance.
     from battery.runner import run as run_mod
     run_mod._episode_log = lambda *a, **k: []        # seam "active"
     cfg_dir = _hermetic_cfg(tmp_path)
@@ -97,9 +99,10 @@ def test_real_preflight_refuses_unpinned_or_fixed_sentinel(tmp_path,
     # Branch (ii): CONCRETE pin — Task 9 parameterizes the real arm INSTANCE
     # off the class-level 'fixed' sentinel (run.py `_resolve_arm`), so a
     # concrete arms.yaml pin must be ACCEPTED and the effective pin must be
-    # the arms.yaml value. Asserted at the resolve seam (unit-level) so this
-    # test never executes live episodes — the previous shape fell through
-    # the pre-flight and made real model calls (~450 s + real spend).
+    # the arms.yaml value (the sentinel is retired by design, #2746). Asserted
+    # at the resolve seam (unit-level) so this test never executes live
+    # episodes — the previous shape fell through the pre-flight and made real
+    # model calls (~450 s + real spend).
     _write_pin(cfg_dir, "deepseek/deepseek-v4-flash")
     from battery.config.arms import load_arms, resolve_pinned_model
     arm_map = load_arms(cfg_dir / "arms.yaml")

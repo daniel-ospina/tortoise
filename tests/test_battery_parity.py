@@ -144,8 +144,15 @@ class TestNoFabricatedAccuracy:
                 f"no runner produced (#2797)")
             assert samples == 0
         record = json.loads((tmp_path / "parity_record.json").read_text())
+        # #3005 P1: memoryagentbench is pinned TWICE — the full-context
+        # baseline and the retrieved-context Tortoise lane — so the record
+        # deliberately carries two cells keyed by their pinned ids (each
+        # cell's `lane` says which arm produced it). Before the fix the
+        # Tortoise executor was registered but absent from PINNED_VERSIONS,
+        # so the CLI never dispatched it and its capability gate was inert.
         assert set(record["benchmarks"]) == {
-            "longmemeval", "locomo", "memoryarena", "memoryagentbench"}
+            "longmemeval", "locomo", "memoryarena", "memoryagentbench",
+            "memoryagentbench_tortoise"}
         for benchmark, cell in record["benchmarks"].items():
             assert cell["measured"] is False, benchmark
             assert cell["accuracy"] is None, benchmark

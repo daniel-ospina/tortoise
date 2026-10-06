@@ -1,0 +1,139 @@
+{
+  "schema": "measurement-preregistration/v1",
+  "issue": "2578",
+  "plan_doc": "docs/plans/2026-09-09-2578-temporal-measurement.md",
+  "written_before_any_arm_run": true,
+  "analysis_subset": {
+    "census_n": 133,
+    "classes": [
+      "ordering/compare",
+      "interval",
+      "current-state"
+    ],
+    "count": 55,
+    "abs_controls": [
+      "gpt4_93159ced_abs",
+      "gpt4_c27434e8_abs",
+      "gpt4_fe651585_abs"
+    ],
+    "duplicated_session_qid": {
+      "qid": "gpt4_c27434e8_abs",
+      "note": "content-identical duplicated haystack_session_id (benign data-entry artifact; runbook 1987-398) \u2014 #1785 fail-closed join-guard veto; duplicate occurrence removed (zero information loss)"
+    }
+  },
+  "arms": [
+    {
+      "id": "A-default",
+      "knobs": [],
+      "reach": "baseline 55-Q default knobs (tr_top_k=12, evidence-boost OFF, rerank OFF, rerank pool 40, per-session rerank cap 2) \u2014 the Indicator-1 denominator; no widening attempted.",
+      "isolation": "the untouched baseline every arm is compared against",
+      "indicators": [
+        "1"
+      ]
+    },
+    {
+      "id": "tr_top_k16",
+      "knobs": [
+        "--tr-top-k",
+        "16"
+      ],
+      "reach": "admits <= 16 pool ranks on TR questions, trimmed by the 8000-token budget (~19 items at median chunk) \u2014 CAN reach moderately deep gold; CANNOT reach the 41-120 band as a whole ",
+      "isolation": "flood-control cap widening only (R5 #1544 knob family)",
+      "indicators": [
+        "2(d)"
+      ]
+    },
+    {
+      "id": "tr_top_k20",
+      "knobs": [
+        "--tr-top-k",
+        "20"
+      ],
+      "reach": "admits <= 20 pool ranks, trimmed by the 8000-token budget \u2014 ~19 items at median chunk, so 20 sits AT the budget ceiling; CANNOT reach the 41-120 band as a whole.",
+      "isolation": "flood-control cap widening only",
+      "indicators": [
+        "2(d)"
+      ]
+    },
+    {
+      "id": "tr_top_k24",
+      "knobs": [
+        "--tr-top-k",
+        "24"
+      ],
+      "reach": "admits <= 24 pool ranks but the 8000-token budget trims to ~19 items at median chunk \u2014 20 vs 24 are near-duplicates, reported as a plateau.",
+      "isolation": "flood-control cap widening only (plateau check vs 20)",
+      "indicators": [
+        "2(d)"
+      ]
+    },
+    {
+      "id": "c2-on",
+      "knobs": [
+        "--evidence-boost"
+      ],
+      "reach": "position-ceiling promotion over the deduped pool; deep reach limited to answer-string-marked rows (~never on derived answers).",
+      "isolation": "C2 evidence-mark boost ON (the #1745 arm)",
+      "indicators": [
+        "2(c)"
+      ]
+    },
+    {
+      "id": "applied-rerank",
+      "knobs": [
+        "--rerank",
+        "--rerank-pool",
+        "120",
+        "--rerank-cap",
+        "3"
+      ],
+      "reach": "rerank pool 40->120 + per-session cap 2->3 + cross-encoder scorer + MMR; CONFOUNDED pool x ordering x scorer \u2014 reported with the pool-only isolation leg.",
+      "isolation": "issue arm (a)+(b) combined (the confounded applied arm)",
+      "indicators": [
+        "2(a)",
+        "2(b)"
+      ]
+    },
+    {
+      "id": "pool-only-isolation",
+      "knobs": [
+        "--rerank-pool",
+        "120"
+      ],
+      "reach": "DEPTH-CEILING CONTROL \u2014 rerank OFF + deep pool still truncates pool[:top_k] then tr_top_k (retrieve.py:1432-1433), CANNOT admit rank-25-120 gold; separates DEPTH from reranker REORDER.",
+      "isolation": "depth-only control for the applied-rerank confound",
+      "indicators": [
+        "2(a)"
+      ]
+    },
+    {
+      "id": "cap3-only",
+      "knobs": [
+        "--rerank",
+        "--rerank-cap",
+        "3"
+      ],
+      "reach": "per-session rerank cap 2->3 at pool 40 \u2014 the issue's own arm (b), stand-alone; isolates the cap from pool depth.",
+      "isolation": "cap-only control for the applied-rerank confound",
+      "indicators": [
+        "2(b)"
+      ]
+    }
+  ],
+  "reader_constancy": {
+    "note": "reader/judge/prompt identical across arms \u2014 each arm differs ONLY in retrieval knobs; the checkpoint fingerprint's reader_prompt_hash + reader_model assert constancy; stub-reader runs are pre-registered as 'conversion not measured' (ABSTAIN \u2014 never evidence)"
+  },
+  "conversion_null": "Widening lifts ADMISSION but not CONVERSION -> the reader model is the binding constraint (conversion-bound verdict). Prior: R5 committed record \u2014 9/18 TR losses were reader refusals WITH evidence admitted at sr@5=1.0 (docs/plans/2026-08-20-1544-r5-temporal.md); runbook 1987 'model is the binding constraint' + its 21/21-context-recall re-run still leaving wrongs on recency/count classes. Wrong-on-admitted on the 55-Q is dominated by reader-MODEL derivation errors (arithmetic/interval/count/recency), NOT ordering-of-admitted-evidence \u2014 the gate output does NOT claim the assembler fixes it; a qualitative pass is the named follow-up that would isolate ordering-of-admitted-evidence.",
+  "r5_rollback_guard": {
+    "trigger": "per-arm reader-refusal rate ceiling tied to context-token growth (R5: 9/18 TR losses were refusals under 40k-token floods)",
+    "action": "breach = flagged rollback-candidate arm (recorded, excluded from the attribution read until re-run clean)"
+  },
+  "refusal_classifier": {
+    "classifier": "tortoise.reader._looks_abstained",
+    "corpus": "tests/longmem_eval/_refusal_calibration.json",
+    "agreement_bars": {
+      "committed-hedge": 0.95,
+      "genuine-abstention": 0.95
+    }
+  }
+}

@@ -271,7 +271,7 @@ Plus `blog-images` storage bucket (public read, gated write). RLS: anon reads on
 ### 4.5 Admin authorization — OPEN QUESTION
 
 No `is_app_admin` exists in tortoise Supabase (ElDato had one). Options: (a) reuse
-`team_memberships.role` (owner/admin), (b) a small allowlist table, (c) a dedicated
+`org_memberships.role` (owner/admin), (b) a small allowlist table, (c) a dedicated
 `blog_reviewers` table. Needs human decision — likely (a) or (c).
 
 ### 4.6 Repo placement — the big architectural question (needs human decision)

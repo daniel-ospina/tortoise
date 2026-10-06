@@ -4,14 +4,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { SETUP_GUIDE_COUNTED, setupGuide } from './setupGuide.js'
 
-test('counted card steps are the fork-aware 4 (capture-disclosed never counted)', () => {
+test('counted card steps are the fork-aware 3 (capture-disclosed never counted)', () => {
   assert.deepEqual([...SETUP_GUIDE_COUNTED], [
     'harness-connected',
     'first-points-filed',
     'decide-completed',
-    'catalog-presented',
   ])
   assert.ok(!SETUP_GUIDE_COUNTED.includes('capture-disclosed'))
+  // #3913: catalog-presented is no longer a counted card step.
+  assert.ok(!SETUP_GUIDE_COUNTED.includes('catalog-presented'))
 })
 
 test('capture-disclosed before decide must NOT render 4 of 4 (self fork, all 4 rows done)', () => {
@@ -40,28 +41,27 @@ test('self fork shows connect/seed/decide/capture; decide missing → current st
   assert.equal(g.currentStep, 'decide-completed')
 })
 
-test('build fork swaps decide for catalog', () => {
+test('#3913: build fork renders NO extra row — the two observed acts only', () => {
   const g = setupGuide({
     status: 'active', fork: 'build', compact: false,
     completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
                       'catalog-presented'],
   })
   assert.deepEqual(g.rows.map((r) => r.id), [
-    'harness-connected', 'first-points-filed', 'catalog-presented', 'capture-disclosed',
+    'harness-connected', 'first-points-filed', 'capture-disclosed',
   ])
-  assert.equal(g.done, 3)
-  assert.equal(g.total, 3)
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 2)
   assert.equal(g.percent, 100)
 })
 
 test('build fork never counts decide', () => {
   const g = setupGuide({
     status: 'active', fork: 'build', compact: false,
-    completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
-                      'decide-completed'],
+    completed_steps: ['team-named', 'harness-connected', 'decide-completed'],
   })
-  assert.equal(g.done, 2)  // decide not in the build checklist
-  assert.equal(g.total, 3)
+  assert.equal(g.done, 1)  // decide not in the build checklist
+  assert.equal(g.total, 2)
 })
 
 test('compact shows the reduced checklist (2 counted rows)', () => {
@@ -125,6 +125,61 @@ test('fork None defaults to self (read-time J6 default)', () => {
   assert.deepEqual(g.rows.map((r) => r.id)[2], 'decide-completed')
 })
 
+test('#2407 unsure org (fork_unsure_at, fork still None) keeps the FORK QUESTION as the open counted row', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  // NOT the self checklist: decide-completed must not render as the open row
+  assert.ok(!g.rows.some((r) => r.id === 'decide-completed'))
+  const forkRow = g.rows.find((r) => r.id === 'fork')
+  assert.equal(forkRow.counted, true)
+  assert.equal(forkRow.done, false)
+  assert.equal(forkRow.label, "Choose how you'll use Tortoise")
+  assert.equal(g.total, 3)  // harness + seed + fork (capture uncounted)
+  assert.equal(g.done, 2)
+  assert.equal(g.currentStep, 'fork')  // the deferral keeps the guide open
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 unsure org with zero progress shows the fork row as a counted row (never collapsed)', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  assert.equal(g.currentStep, 'harness-connected')
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 a persisted fork wins over a stale marker — fork set renders the normal fork-aware checklist', () => {
+  // invariant: fork_unsure_at is meaningful only while fork IS NULL (the
+  // checkpoint clears it on fork-set, but reads must never trust it)
+  const g = setupGuide({
+    status: 'active', fork: 'build', fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'capture-disclosed',
+  ])
+  assert.ok(!g.rows.some((r) => r.id === 'fork'))
+  assert.equal(g.total, 2)
+})
+
+test('#2407 complete-status unsure org stays collapsed (never re-renders an active fork row)', () => {
+  const g = setupGuide({
+    status: 'complete', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: [],
+  })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
 test('unknown fork falls back to the self checklist (mirrors Python gate)', () => {
   const g = setupGuide({
     status: 'active', fork: 'bogus', compact: false,
@@ -148,14 +203,14 @@ test('unknown completed_steps ids are ignored (not counted, no crash)', () => {
   assert.equal(g.total, 3)
 })
 
-test('capture-disclosed on a BUILD fork does not inflate total 3', () => {
+test('capture-disclosed on a BUILD fork does not inflate the total', () => {
   const g = setupGuide({
     status: 'active', fork: 'build', compact: false,
     completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
                       'catalog-presented', 'capture-disclosed'],
   })
-  assert.equal(g.done, 3)
-  assert.equal(g.total, 3)
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 2)
   assert.equal(g.percent, 100)
 })
 

@@ -80,7 +80,7 @@ def test_hung_caller_fails_closed_with_spend(tmp_path):
         encoding="utf-8")
     (d / "arms.yaml").write_text(yaml.safe_dump({"arms": [
         {"arm_id": "a0", "adapter": "battery.arms.a0_plain", "config": {},
-         "price_per_1k_usd": 0.0011, "expected_tokens_per_episode": 100,
+         "price_per_1k_usd": 0.000168,  # the declared basis (#2874) "expected_tokens_per_episode": 100,
          "model_pin": "deepseek/deepseek-v4-flash", "temperature": 0.0}]}),
         encoding="utf-8")
     (d / "budget.yaml").write_text(yaml.safe_dump(

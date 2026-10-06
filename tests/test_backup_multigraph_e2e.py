@@ -25,7 +25,7 @@ import pytest
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
-    enumerate_team_graphs,
+    enumerate_org_graphs,
     read_graph_state,
     resolve_active_graph,
     run_backup_sweep,
@@ -44,16 +44,16 @@ _REGISTRY_GRAPH = (f"test_registry_{os.urandom(4).hex()}" if _DOCKER_LANE
 _TEAM_SEAM_HEX = os.urandom(4).hex() if _DOCKER_LANE else None
 
 
-def _team_graph(team_id: str) -> str:
+def _team_graph(org_id: str) -> str:
     if _DOCKER_LANE:
-        return f"test_team_{team_id}_{_TEAM_SEAM_HEX}_tortoise"
-    return f"team_{team_id}"
+        return f"test_org_{org_id}_{_TEAM_SEAM_HEX}_tortoise"
+    return f"org_{org_id}"
 
 
-def _custom_ns(team_id: str, gid: str) -> str:
+def _custom_ns(org_id: str, gid: str) -> str:
     if _DOCKER_LANE:
-        return f"test_custom_{_TEAM_SEAM_HEX}_{team_id}_{gid}_tortoise"
-    return f"team_{team_id}_{gid}"
+        return f"test_custom_{_TEAM_SEAM_HEX}_{org_id}_{gid}_tortoise"
+    return f"org_{org_id}_{gid}"
 
 
 _STREAM_KEY = b"r" * 32
@@ -91,26 +91,26 @@ def _journal_seam_graphs():
 @pytest.fixture(autouse=True)
 def _route_team_graph_name(monkeypatch):
     """Docker lane: registry-mode consumption of the team graph name (the
-    sweep's team_graph_name + the default-graph seam) must resolve to the
+    sweep's org_graph_name + the default-graph seam) must resolve to the
     docker-safe test_* names so seed and consumption agree (same pattern as
     test_backup_sweep's file-wide autouse fixture). Embedded lane: the real
-    deterministic team_{id} holds (literals agree)."""
+    deterministic org_{id} holds (literals agree)."""
     if not _DOCKER_LANE:
         return
     import tortoise.backup_sweep as bs
 
-    def _seam(source, team_id):
-        return _team_graph(team_id)
+    def _seam(source, org_id):
+        return _team_graph(org_id)
 
-    monkeypatch.setattr(bs, "team_graph_name", _seam)
+    monkeypatch.setattr(bs, "org_graph_name", _seam)
 
 
-def _seed_team(proj, team_id: str, n_default: int) -> None:
+def _seed_team(proj, org_id: str, n_default: int) -> None:
     """Team node + default-graph data + 2 active customs + 1 tombstone."""
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     reg.query("CREATE (t:Team {id:$tid, tier:'pro', backup_enabled:true})",
-              params={"tid": team_id})
-    g = proj.db.select_graph(_team_graph(team_id))
+              params={"tid": org_id})
+    g = proj.db.select_graph(_team_graph(org_id))
     for i in range(n_default):
         g.query("CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
                 params={"id": f"pt-d{i}", "c": "default"})
@@ -120,7 +120,7 @@ def _seed_team(proj, team_id: str, n_default: int) -> None:
         ("g_del", 1, "deleted"),  # tombstone — never swept/restored
     ]
     for gid, n, status in custom_rows:
-        ns = _custom_ns(team_id, gid)
+        ns = _custom_ns(org_id, gid)
         _journal(ns)
         cg = proj.db.select_graph(ns)
         for i in range(n):
@@ -128,9 +128,9 @@ def _seed_team(proj, team_id: str, n_default: int) -> None:
                 "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
                 params={"id": f"pt-{gid}-{i}", "c": f"{gid} content"})
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:$tid, name:$gid, "
+            "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, "
             "kind:'custom', namespace:$ns, status:$status})",
-            params={"gid": gid, "tid": team_id, "ns": ns, "status": status},
+            params={"gid": gid, "tid": org_id, "ns": ns, "status": status},
         )
 
 
@@ -148,8 +148,8 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
         proj = FalkorProjection(os.path.join(tmp, "t.db"))
         try:
             wipe(proj)
-            team_id = "team_mg_e2e"
-            _seed_team(proj, team_id, n_default=2)
+            org_id = "team_mg_e2e"
+            _seed_team(proj, org_id, n_default=2)
             reg = proj.db.select_graph(_REGISTRY_GRAPH)
             store = MemoryStorage()
             cfg = _config()
@@ -157,41 +157,41 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
                 db=proj.db, registry=reg, storage=store, config=cfg,
             )
             assert res["status"] == "backed_up"
-            team_res = res["results"][team_id]
-            assert team_res["status"] == "backed_up"
-            assert set(team_res["graphs"].keys()) == {"default", "g_a", "g_b"}
+            org_res = res["results"][org_id]
+            assert org_res["status"] == "backed_up"
+            assert set(org_res["graphs"].keys()) == {"default", "g_a", "g_b"}
             # tombstoned graph absent from the enumeration + sweep results
-            assert "g_del" not in team_res["graphs"]
-            assert list_backups(store, team_id, graph_id="g_del") == []
+            assert "g_del" not in org_res["graphs"]
+            assert list_backups(store, org_id, graph_id="g_del") == []
 
             # per-graph artifacts + state
             for gid, n in (("default", 2), ("g_a", 2), ("g_b", 3)):
-                ms = [m for m in list_backups(store, team_id, graph_id=gid)]
+                ms = [m for m in list_backups(store, org_id, graph_id=gid)]
                 assert len(ms) == 1, gid
                 assert ms[0]["graph_id"] == gid
                 assert ms[0]["node_count"] == n
-                st = read_graph_state(store, team_id, gid)
+                st = read_graph_state(store, org_id, gid)
                 assert st["node_count"] == n
             # every archive is graph-keyed — NO legacy team-level (4-segment)
             # manifests remain after this sweep (pre-#2313 flat objects are
             # the drain target; a fresh sweep produces none)
-            team_keys = store.list(f"backups/{team_id}/")
-            assert not [k for k in team_keys if len(k.split("/")) == 4
+            org_keys = store.list(f"backups/{org_id}/")
+            assert not [k for k in org_keys if len(k.split("/")) == 4
                         and k.endswith("manifest.json")]
 
             # ── per-graph restore: mutate g_a LIVE, restore from ITS archive ──
-            ns_a = _custom_ns(team_id, "g_a")
+            ns_a = _custom_ns(org_id, "g_a")
             live = proj.db.select_graph(ns_a)
             live.query("CREATE (x:Point {id:'pt-g_a-mut', content:'mut'})")
             live.query("MATCH (p:Point {id:'pt-g_a-0'}) SET p.content = 'corrupted'")
             g_a_archive = next(
-                k for k in store.list(f"backups/{team_id}/g_a/")
+                k for k in store.list(f"backups/{org_id}/g_a/")
                 if k.endswith("dump.enc")
             )
-            row = resolve_active_graph(reg, team_id, "g_a")
+            row = resolve_active_graph(reg, org_id, "g_a")
             result = restore_backup(
                 proj.db, reg, store, g_a_archive,
-                team_id=team_id, graph_name=row["graph_name"],
+                org_id=org_id, graph_name=row["graph_name"],
                 key=_STREAM_KEY,  # sweep archives encrypt with the stream key
             )
             assert result["restored"] == {"nodes": 2, "edges": 0}
@@ -203,18 +203,18 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
                 "MATCH (p:Point {id:'pt-g_a-0'}) RETURN p.content"
             ).result_set[0][0] == "g_a content"
             # untouched neighbors: g_b live data + default unaffected
-            ns_b = _custom_ns(team_id, "g_b")
+            ns_b = _custom_ns(org_id, "g_b")
             assert proj.db.select_graph(ns_b).query(
                 "MATCH (n) RETURN count(n)").result_set[0][0] == 3
-            assert proj.db.select_graph(_team_graph(team_id)).query(
+            assert proj.db.select_graph(_team_graph(org_id)).query(
                 "MATCH (n) RETURN count(n)").result_set[0][0] == 2
 
             # ── tombstone guard: the deleted graph's enumeration row is gone;
             # resolution (drill/restore/re-baseline target) refuses it ──
-            rows = enumerate_team_graphs(reg, team_id)
+            rows = enumerate_org_graphs(reg, org_id)
             assert all(r["graph_id"] != "g_del" for r in rows)
             with pytest.raises(ValueError):
-                resolve_active_graph(reg, team_id, "g_del")
+                resolve_active_graph(reg, org_id, "g_del")
 
             # ── per-graph prune isolation: age g_a's pool beyond retention,
             # prune ONLY g_a; g_b untouched ──
@@ -223,20 +223,20 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
             old_ts = (now - timedelta(days=30)).strftime("%Y%m%dT%H%M%S") + \
                 "000Z_00000000"
             for gid in ("g_a", "g_b"):
-                bid = f"{team_id}/{gid}/{old_ts}"
+                bid = f"{org_id}/{gid}/{old_ts}"
                 store.upload(f"backups/{bid}/dump.enc", b"old")
                 store.upload(f"backups/{bid}/manifest.json", json.dumps({
-                    "backup_id": bid, "team_id": team_id, "graph_id": gid,
-                    "graph_name": _custom_ns(team_id, gid),
+                    "backup_id": bid, "org_id": org_id, "graph_id": gid,
+                    "graph_name": _custom_ns(org_id, gid),
                     "created_at": (now - timedelta(days=30)).isoformat(),
                     "node_count": 1, "edge_count": 0, "sha256": "x",
                     "format": "tortoise-dump-v1",
                 }).encode())
             deleted = prune_backups(
-                store, team_id, keep_daily=7, keep_weekly=0, graph_id="g_a")
-            assert len(deleted) == 1 and deleted[0].startswith(f"{team_id}/g_a/")
+                store, org_id, keep_daily=7, keep_weekly=0, graph_id="g_a")
+            assert len(deleted) == 1 and deleted[0].startswith(f"{org_id}/g_a/")
             # g_a keeps only this run's fresh archive; g_b untouched entirely
-            assert len(list_backups(store, team_id, graph_id="g_a")) == 1
-            assert len(list_backups(store, team_id, graph_id="g_b")) == 2
+            assert len(list_backups(store, org_id, graph_id="g_a")) == 1
+            assert len(list_backups(store, org_id, graph_id="g_b")) == 2
         finally:
             proj.close()

@@ -252,8 +252,27 @@ def _extract_entity(question: str, trigger: str) -> str:
 # #329: provider-key pairing — a key is ONLY ever sent to the provider that
 # issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
 # POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
+#
+# #4129: `deepseek-v4-flash` is RETIRED — api.deepseek.com answers 200 to it and
+# silently serves `deepseek-flash`, so the id named was not the model that ran.
+_DEEPSEEK_FLASH_IDS: tuple[str, ...] = ("deepseek-flash", "deepseek-v4-flash")
+
+
+def _is_deepseek_flash_family(model_id: str) -> bool:
+    """True for a DeepSeek flash-family id, dated builds included.
+
+    Matched on the LAST path segment, so an OpenRouter route
+    (``deepseek/deepseek-v4-flash``) is recognised, and deliberately NOT on a
+    single literal: keying the #1790 thinking-disable on one exact id is what
+    let a rename (``deepseek-v4-flash`` -> ``deepseek-flash``) silently
+    re-enable thinking, with no failing test to say so.
+    """
+    tail = model_id.rsplit("/", 1)[-1]
+    return any(tail == i or tail.startswith(i + "-") for i in _DEEPSEEK_FLASH_IDS)
+
+
 _LLM_PROVIDERS: dict[str, tuple[str, str]] = {
-    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-v4-flash"),
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-flash"),
     "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
 }
 # Priority order when multiple keys are set (deepseek first — historical default).
@@ -289,13 +308,14 @@ def llm_classify(question: str) -> tuple[str, dict] | None:
             "messages": [{"role": "system", "content": LLM_PROMPT},
                          {"role": "user", "content": question}],
         }
-        # #1790: deepseek-v4-flash reasons by DEFAULT (thinking: high) and
-        # collapses into hidden reasoning tokens — disable thinking for the
-        # flash family ONLY (OpenAI would 400 on the unknown param). The
-        # gate is model-id based, mirroring the adapter's flash-family scope
-        # guard: a future pro entry in _LLM_PROVIDERS must NOT silently
-        # disable thinking.
-        if provider_model.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+        # #1790: the deepseek flash family reasons by DEFAULT (thinking: high)
+        # and collapses into hidden reasoning tokens — disable thinking for the
+        # flash family ONLY (OpenAI would 400 on the unknown param). Matched on
+        # the FLASH FAMILY rather than one literal id: a single-literal gate goes
+        # silently inert the moment the id is renamed (#4129), which re-enables
+        # thinking with no failing test and no log line. A future pro entry in
+        # _LLM_PROVIDERS must still NOT disable thinking.
+        if _is_deepseek_flash_family(provider_model):
             body["thinking"] = {"type": "disabled"}
         body = json.dumps(body).encode()
         req = urllib.request.Request(
@@ -444,7 +464,12 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
-            "AND (t.is_operator = false AND t.op_type IS NULL) "
+            # #3139/#3154: index-independent form — a bare `= false` is
+            # emptied by a GRAPH.COPY'd boolean index, making every operator
+            # look inert (zero live connections) and silently starving the
+            # dream selector of factors.
+            "AND (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
             f"AND {_live_only('t.status')} "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
@@ -524,8 +549,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -540,8 +568,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
                     "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
                     "RETURN DISTINCT a.id, b.id, type(r)",
@@ -616,10 +647,10 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
     opposite of the contract). This is the plan's explicit-null-scan-union
     alternative: one deterministic query instead of a union scan, at the
-    cost of not sorting on the raw indexed property (the :Point(
-    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
-    accelerate the property access and the is_operator filter on
-    docker/server).
+    cost of not sorting on the raw indexed property (the plain :Point(
+    lastDreamedAt) index still accelerates the property access; #3154
+    retired the :Point(is_operator, lastDreamedAt) composite — no engine
+    indexes the boolean property).
     """
     base = (
         "MATCH (n:Point) "

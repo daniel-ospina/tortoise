@@ -52,7 +52,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 | The dashboard already receives that data but discards all but `count` + `latest` | `[validated]` — `main.jsx:4860-4862` |
 | Only deleted (trash) graphs have a per-graph backup UI today | `[validated]` — `main.jsx:7566-7615` |
 | Custom-graph self-service restore does not exist yet | `[validated]` — #2339 open; `hosted_api.py:19488-19492` |
-| `GET /backups` is **not** tier-gated, so free users see the same empty `none` | `[validated]` — `hosted_api.py:19187` uses `get_current_team_session_ungated`, no `_require_backup_tier` |
+| `GET /backups` is **not** tier-gated, so free users see the same empty `none` | `[validated]` — `hosted_api.py:19187` uses `get_current_org_session_ungated`, no `_require_backup_tier` |
 | Production `hourly_backups` is `true` for Pro/Team | `[unverified]` — repo `pricing.json` says `"planned"` (`product/pricing.json:82,105`) |
 
 **Reverse-the-problem:** What if the dashboard showed *no* aggregate backup number at all, and instead the **Graphs tab told you per-graph protection status**? That constraint dissolves the relocation question entirely — it is the framing this brief adopts.
@@ -77,15 +77,15 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 ### 1.2 Backup API surface — exact field semantics
 
 **`GET /backups`** — `hosted_api.py:19186-19248`
-- Auth: `get_current_team_session_ungated` (`:19187`) — session JWT **or** `tt_` key; **no tier gate**. Team-scoped by `team["team_id"]` only.
+- Auth: `get_current_org_session_ungated` (`:19187`) — session JWT **or** `tt_` key; **no tier gate**. Team-scoped by `team["org_id"]` only.
 - Body: `{"backups": [ <manifest>, … ]}` (`:19241-19244`), newest-first (`hosted_backup.py:958`).
 - Each manifest is the raw `create_backup` payload (`hosted_backup.py:894-909`) **enriched** by `_manifest_graph` (`hosted_api.py:19116-19135`) with:
-  - `backup_id` — `{team_id}/{graph_id}/{ts}_{rnd}` (`hosted_backup.py:794-804`)
+  - `backup_id` — `{org_id}/{graph_id}/{ts}_{rnd}` (`hosted_backup.py:794-804`)
   - `graph_id` — canonical key segment; `"default"` for legacy flat manifests
   - `kind` — `"default"` | `"custom"`
-  - `graph_name` — resolved namespace (`team_{id}` / `team_{id}_{gid}`)
+  - `graph_name` — resolved namespace (`org_{id}` / `org_{id}_{gid}`)
   - `created_at` — dump `dumped_at` (ISO)
-  - `node_count`, `edge_count`, `sha256`, `format`, `team_id`
+  - `node_count`, `edge_count`, `sha256`, `format`, `org_id`
 - **Not pool-wide in the sense of cross-team** — it is one team's pool, but **pool-wide across that team's graphs**. Legacy flat artifacts are read-bucketed to `default` with a #2370 classification-index reverse lookup (`:19205-19238`).
 - **No freshness, no failure, no retention, no "entitled" field** in the response. The client must derive those.
 
@@ -114,7 +114,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 
 ### 1.5 Prior decisions & adjacent issues (what we already concluded)
 
-- **#2313 (closed, critical):** per-graph sweep landed — artifacts keyed `backups/{team}/{graph}/{ts}` (`backup_sweep.py:921-922`, `hosted_backup.py:794`; enumeration `backup_sweep.py:264`), per-graph state + retention, watcher per-graph freshness. Scope doc `docs/scoping-2313-per-graph-backups.md` **Q3 owner decision (2026-09-06):** *"dashboard = keep the summary Backups card + enrich GET /backups response with per-graph metadata; per-graph UI rows are a follow-up issue (not absorbed)."* **The enrichment shipped; the follow-up never did.**
+- **#2313 (closed, critical):** per-graph sweep landed — artifacts keyed `backups/{org_id}/{graph}/{ts}` (`backup_sweep.py:921-922`, `hosted_backup.py:794`; enumeration `backup_sweep.py:264`), per-graph state + retention, watcher per-graph freshness. Scope doc `docs/scoping-2313-per-graph-backups.md` **Q3 owner decision (2026-09-06):** *"dashboard = keep the summary Backups card + enrich GET /backups response with per-graph metadata; per-graph UI rows are a follow-up issue (not absorbed)."* **The enrichment shipped; the follow-up never did.**
 - **#2339 (open):** graph-bound self-service restore for custom graphs. `POST /backups/restore` refuses custom keys; no graph-bound restore endpoint exists. A wiped custom graph currently has **archives but no self-service recovery**.
 - **#2304 (closed):** trash-can semantics + 7-day window; the Inspect panel is the read-side rescue surface.
 - **#2373 / #2372:** retention labels were false (hour-bucket vs documented) and the sweep headline hid per-graph failures — both fixed; **cadence is hourly** (#2317), not nightly.

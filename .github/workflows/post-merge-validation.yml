@@ -221,10 +221,13 @@ jobs:
     # Epic #1647 Task 10 Step 1a (P4): the pmv validate job is now a docker
     # lane (same URI mechanics as the fast matrix — job-level URI + the
     # EXPECT_URI tripwire signal). The carve-out exemption is the conftest
-    # TORTOISE_TEST_NO_REDIRECT list (17 stems) — no CARVE_OUT needed (URI
+    # TORTOISE_TEST_NO_REDIRECT stem list — no CARVE_OUT needed (URI
     # is set), and the carve-out files stay embedded by exemption.
     env:
-      TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+      # #6673: TORTOISE_DB_URI is exported by the provision step in the job
+      # steps below (`uri_graph: tortoise_test_matrix`) — it cannot be a
+      # job-level literal any more because the host port is assigned at
+      # runtime.
       TORTOISE_TEST_EXPECT_URI: "1"
       # #1886: dedicated fresh-per-job docker container — journal-blind
       # team_* stray pass stays live in CI (opt-in only; the shared dev
@@ -233,33 +236,39 @@ jobs:
     # Mirror the fast matrix's two falkordb services: the passworded 6379
     # (the job URI + probe family) and the legacy passwordless 16379 (the
     # raw-client probes in test_search_engine et al.).
-    services:
-      falkordb:
-        image: falkordb/falkordb-server:latest
-        env:
-          REDIS_ARGS: "--requirepass falkordb"
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli -a falkordb ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-      falkordb-legacy:
-        image: falkordb/falkordb-server:latest
-        ports:
-          - 16379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+    # #6673: the two FalkorDB services used to be declared HERE as a `services:`
+    # block on the fixed host ports 6379:6379 / 16379:6379. They are now started
+    # by `.github/actions/falkordb-provision` (see the first FalkorDB step
+    # below) on EPHEMERAL host ports, because every self-hosted runner on this
+    # host shares ONE Docker daemon: a fixed host port is a single global
+    # namespace, so two services jobs overlapping made the second container's
+    # `docker start` fail with "Bind for 0.0.0.0:6379 failed: port is already
+    # allocated" — which aborts the RUNNER in its `initialize_containers`
+    # pre-step and reds the job in ~9s with ZERO tests run (a false red).
+    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair, the
+    # passwordless legacy lane and the health gate all moved with it. The two
+    # probe families are unchanged; the ports are now
+    # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
+    # (legacy), read by tests/_live_utils.py.
     steps:
       # #1474 review (P1): checkout MUST run unconditionally FIRST — the
       # skip-comment step requires postmerge-dedup.js from the workspace, and
       # the skip path never ran checkout before (empty runner -> MODULE_NOT_FOUND
       # -> red check + no comment on the primary path).
       - uses: actions/checkout@v4
+      # #6673: replaced this job's `services:` block. Gated on the skip path —
+      # the covered-run path never runs pytest, so it needs no service. The
+      # assigned ports land in $TORTOISE_TEST_DOCKER_PORT /
+      # $TORTOISE_TEST_LEGACY_PORT (read by tests/_live_utils.py), and
+      # `uri_graph` exports the TORTOISE_DB_URI this job used to carry as a
+      # literal. The teardown step at the end of the job removes the containers.
+      # The image pin stays this file's own (`:latest`, not python-ci's v4.20.6).
+      - name: Provision FalkorDB services on ephemeral host ports (#6673)
+        if: needs.dedup-check.outputs.skip != 'true'
+        uses: ./.github/actions/falkordb-provision
+        with:
+          image: falkordb/falkordb-server:latest
+          uri_graph: tortoise_test_matrix
       # #1474 skip path — python-ci's push run on this tree was green; only
       # comment "covered" (aggregator reports success; no second pytest run).
       - name: Skip — covered by python-ci push run (no re-run)
@@ -296,6 +305,19 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         with:
           python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
+      - uses: actions/setup-node@v4
+        # #4620: this job runs the whole fast suite, which collects
+        # tests/test_pi_capture_hooks.py (its two installed-artifact checks FAIL
+        # rather than skip when node is absent or below the default-on
+        # type-stripping floor, 22.18) and
+        # tests/test_session_bridge_fragment_retention.py (whose own node gate
+        # fails rather than skips), so provision the toolchain here instead of
+        # inheriting it from the runner image.
+        if: needs.dedup-check.outputs.skip != 'true'
+        with:
+          node-version: '22'  # `.ts` type stripping + syntax detection is DEFAULT-ON from 22.18; these checks pass no flag
+      - uses: ./.github/actions/install-cpu-torch
+        if: needs.dedup-check.outputs.skip != 'true'
       - name: Install
         if: needs.dedup-check.outputs.skip != 'true'
         run: |
@@ -343,49 +365,29 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         if: needs.dedup-check.outputs.skip != 'true'
-        # Best-effort: when the model is already cached (actions/cache
-        # restore) this is a no-op. When the download succeeds, the suite
-        # exercises the real embedding path. When it fails (HF unreachable
-        # from runner — observed: "couldn't connect to huggingface.co"),
-        # the runtime already degrades gracefully to TF-IDF fallback
-        # (embeddings.py catches load failure), so a failed download is a
-        # WARNING, never a job failure.
-        # #964: a hung HF download (stalled TCP, no error raised) would
-        # otherwise stall the step for the full job cap with no output —
-        # step-level timeout bounds it; continue-on-error turns the timeout
-        # into a warning, not a failure. #1211-class: on HF-unreachable
-        # runners, tight retries (3 × 5s backoff) fail fast so the suite
-        # falls back to TF-IDF instead of burning the watchdog budget.
-        # (#1439 parity port from python-ci's test job.)
-        continue-on-error: true
+        # #2573: this step OWNS "the embedder is required" — same contract as
+        # python-ci's three jobs (the heredoc here was the fourth copy of the
+        # block). It fails BY NAME with a ::warning::/::error:: annotation when
+        # the pinned model cannot be obtained, instead of silently running the
+        # keyword-only TF-IDF fallback and reporting a green post-merge pass.
+        # continue-on-error was deliberately REMOVED (it was `true`) — and the
+        # replaced heredoc's `del os.environ["HF_HUB_OFFLINE"]` never actually
+        # re-enabled the network (huggingface_hub latches that var at import),
+        # so its download fallback could never run. See
+        # tools/embedder_provision.py for the full account.
+        #
+        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # no error raised) that would otherwise stall the step for the job cap.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "330"
         timeout-minutes: 6
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: pinned revision (VULN-001) — matches python-ci.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 4):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/3 failed: {e}")
-                      if attempt == 3:
-                          raise
-                      time.sleep(5 * attempt)
-          EOF
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 10 Step 1a)
         # The pmv run's collect-only expected set, generated in its OWN step
         # (off the pytest step's 50m watchdog). Task 10 Step 1a (cycle-2
@@ -401,14 +403,28 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
-      # #2216: INTERMITTENT GRAPH.COPY "could not fork" — NOT a code regression.
-      # Under full-suite docker memory load on the shared runner, the dr_endpoints /
-      # writer_inventory restore tests (TestDrDrill::*, TestCreateTeam::
-      # test_backup_round_trip_dashboard_created_team) can fail with "Restore swap
-      # failed ... GRAPH.COPY failed, could not fork" — an OS fork/resource
-      # exhaustion, not a product bug. Verified: clears on isolated re-run and
-      # passes locally (docker + embedded) on the identical tree. If a PMV red
-      # shows ONLY this class, re-run instead of investigating as a regression.
+      - name: Provide rsync for the deploy-step test (#7026)
+        # This job runs the whole suite, so it selects
+        # tests/test_pages_bindings.py and needs the tool the shipped deploy
+        # step shells out to. Guarded like every other pytest-path step here:
+        # on the dedup-skip path this job deliberately runs NOTHING, so an
+        # unguarded apt-get would be the one way that no-op job could red.
+        if: needs.dedup-check.outputs.skip != 'true'
+        uses: ./.github/actions/ensure-rsync
+      # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
+      # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
+      # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail
+      # with "Restore swap failed ... GRAPH.COPY failed, could not fork".
+      # Cause (verified 2026-09-10, reproduced locally — this was previously
+      # recorded here as "OS fork/resource exhaustion", which is wrong): Redis
+      # refuses a second fork while a child is active ("Can't fork for module:
+      # File exists" — EEXIST, its single-fork-slot rule). FalkorDB's GRAPH.COPY
+      # retries 10x5ms, shorter than a BGSAVE, so a restore landing inside a
+      # periodic save window dies. The falkordb service containers now run
+      # --save '' — by the #6673 provision action (its step is above), which is
+      # where the `services:` block that used to carry it moved to — which
+      # removes the periodic BGSAVE and with it this class. If a PMV red still
+      # shows ONLY this class, it is still not a regression — re-run.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'
@@ -458,6 +474,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pmv-pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. This leg carries no nodeid
+          # grep either, so the tail was its ONLY attribution channel. Read the
+          # summary from the FULL log instead, and name the INCOMPLETE case out
+          # loud. One definition: .github/scripts/pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pmv-pytest.log --rc "$rc"
           # 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the
           # count banner must print for all three (#880).
@@ -560,6 +584,13 @@ jobs:
                 core.warning('verdict failed but no linked issue was parsed — issue flag skipped');
               }
             }
+      - name: Stop FalkorDB services (#6673)
+        # Deliberately AFTER the verdict/comment step and immediately before
+        # `Fail the check`: `always()` means the containers are gone however
+        # this job ends, including the verdict step's early exits and the
+        # final `exit 1`.
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
       - name: Fail the check
         if: steps.tests.outcome == 'failure'
         run: exit 1

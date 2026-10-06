@@ -492,20 +492,20 @@ def _provision_disabled() -> bool:
 
 
 class ProvisionRequest(BaseModel):
-    team_name: str
+    org_name: str
     user_id: str
 
 
 class ProvisionResponse(BaseModel):
-    team_id: str
-    team_name: str
+    org_id: str
+    org_name: str
     api_key: str
     graph_name: str
 
 
 @app.post("/api/provision", response_model=ProvisionResponse)
 def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
-    """Provision a new team + FalkorDB namespace + API key.
+    """Provision a new org + FalkorDB namespace + API key.
 
     Called by the Supabase Edge Function tenant-provision after user signup.
     Requires Supabase service role key for authentication.
@@ -535,28 +535,28 @@ def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
     if token != SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(401, "Unauthorized — service role key required")
 
-    # Validate team name
-    team_name = (body.team_name or "").strip()
-    if not team_name:
-        raise HTTPException(400, "team_name is required")
+    # Validate org name
+    org_name = (body.org_name or "").strip()
+    if not org_name:
+        raise HTTPException(400, "org_name is required")
 
     # Import TortoiseSDK lazily to avoid circular issues at startup
     from tortoise.sdk import TortoiseSDK
 
     try:
-        # Use registry namespace for team management
+        # Use registry namespace for org management
         sdk = TortoiseSDK(namespace=REGISTRY_GRAPH)
-        result = sdk.team_create(team_name)
+        result = sdk.org_create(org_name)
         return ProvisionResponse(
-            team_id=result["id"],
-            team_name=result["name"],
+            org_id=result["id"],
+            org_name=result["name"],
             api_key=result["api_key"],
             graph_name=result["graph_name"],
         )
     except ValueError as e:
         raise HTTPException(409, str(e))  # noqa: B904
     except Exception as e:
-        print(f"Provisioning failed for {team_name}: {e}", flush=True)
+        print(f"Provisioning failed for {org_name}: {e}", flush=True)
         raise HTTPException(500, f"Provisioning failed: {e}")  # noqa: B904
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 
 import pytest
@@ -57,8 +58,14 @@ def test_enabled_requires_valid_backup_key(monkeypatch):
     env = _good_env()
     env["TORTOISE_BACKUP_KEY"] = "not-base64!!"
     monkeypatch.setattr(os, "environ", env)
-    with pytest.raises(ConfigError, match="base64"):
+    with pytest.raises(ConfigError, match="base64") as exc:
         load_config()
+    # #2796 review (R2/R4 + test-review): the malformed value must NOT be
+    # echoed. The pre-fix code emitted raw[:8] == "not-base", so assert on THE
+    # PREFIX (asserting the full value would pass vacuously), and pin the
+    # fingerprint so a constant/placeholder also fails.
+    assert "not-base" not in str(exc.value)
+    assert hashlib.sha256(b"not-base64!!").hexdigest()[:8] in str(exc.value)
 
 
 def test_enabled_requires_32_byte_key(monkeypatch):
@@ -120,7 +127,7 @@ def test_team_sweep_enabled_flag_default_false(monkeypatch):
     env = _good_env()
     monkeypatch.setattr(os, "environ", env)
     cfg = load_config()
-    assert cfg.team_sweep_enabled is False
+    assert cfg.org_sweep_enabled is False
 
 
 def test_team_sweep_enabled_flag_true(monkeypatch):
@@ -129,7 +136,7 @@ def test_team_sweep_enabled_flag_true(monkeypatch):
     env["BACKUP_TEAM_SWEEP_ENABLED"] = "true"
     monkeypatch.setattr(os, "environ", env)
     cfg = load_config()
-    assert cfg.team_sweep_enabled is True
+    assert cfg.org_sweep_enabled is True
 
 
 def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
@@ -138,7 +145,7 @@ def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
     monkeypatch.setenv("BACKUP_TEAM_SWEEP_ENABLED", "true")
     cfg = load_config()
     assert cfg.enabled is False  # main sweep disabled
-    assert cfg.team_sweep_enabled is True  # team-sweep flag still read
+    assert cfg.org_sweep_enabled is True  # team-sweep flag still read
 
 
 def test_dead_skip_fresh_knob_removed(monkeypatch):

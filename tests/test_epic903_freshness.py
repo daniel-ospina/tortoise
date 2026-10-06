@@ -12,8 +12,10 @@ DE2E splits (verify gate, issue #1240):
   re-enters dirty roots and the next pass re-stamps (promote→_mark_dirty
   fix); zero-affected retention (draft-only dirty roots + converged
   zero-affected pass → roots remain).
-- Index: idempotent ``:Point(is_operator, lastDreamedAt)`` (embedded:
-  plain ``:Point(lastDreamedAt)``) at init — replay-safe for AOF.
+- Index: idempotent plain ``:Point(lastDreamedAt)`` at init on EVERY engine
+  (#3154 retired the docker/server ``is_operator`` composite — GRAPH.COPY can
+  copy a boolean RANGE index without its ``false`` postings) — replay-safe for
+  AOF.
 
 Hermetic embedded pattern per tests/test_epic903_fixtures.py (F2 builder +
 fresh_sdk + _make_claim); no wall-clock staleness manufacturing.
@@ -450,10 +452,11 @@ class TestDe2e4FreshnessLifecycle:
 
 class TestLastDreamedAtIndex:
     def test_index_idempotent_at_init_embedded(self):
-        """Surface 5: index creation at init is idempotent + replay-safe. On
-        embedded (hermetic harness) the plain :Point(lastDreamedAt) index is
-        created (the is_operator composite is #522-unsafe on redislite and is
-        non-embedded-only). Reopening the same DB (AOF replay context) must
+        """Surface 5: index creation at init is idempotent + replay-safe. The
+        plain :Point(lastDreamedAt) index is created on every engine (#3154:
+        no engine indexes the boolean is_operator — GRAPH.COPY can copy a
+        boolean RANGE index without its `false` postings). Reopening the same
+        DB (AOF replay context) must
         not crash and must keep the index; the #522 load-bearing is_operator
         sweep must still return the full set."""
         import tempfile
@@ -509,12 +512,14 @@ class TestLastDreamedAtIndex:
         finally:
             f.sdk.close()
 
-    def test_composite_index_created_non_embedded(self):
-        """P2-5: the composite :Point(is_operator, lastDreamedAt) is created
-        on docker/server FalkorDB (the #522-safe path). Docker-gated — the
-        embedded hermetic runner creates the plain index instead (see
-        test_index_idempotent_at_init_embedded). Mirrors the test_indexes.py
-        probe pattern."""
+    def test_staleness_index_created_non_embedded(self):
+        """P2-5/#3154: non-embedded FalkorDB creates the PLAIN
+        :Point(lastDreamedAt) staleness index and does NOT index the boolean
+        is_operator (GRAPH.COPY can copy a boolean RANGE index without its
+        `false` postings, so a graph restored from such a source would read 0
+        for `is_operator = false`). Docker-gated — the embedded hermetic
+        runner asserts the same shape in test_index_idempotent_at_init_embedded.
+        Mirrors the test_indexes.py probe pattern."""
         from tests.test_indexes import FALKORDB_AVAILABLE, _current_uri  # noqa: I001
         from urllib.parse import urlparse
 
@@ -536,15 +541,14 @@ class TestLastDreamedAtIndex:
             proj.g.query("MATCH (n) DETACH DELETE n")
             proj._ensure_indexes()
             rows = proj.g.query("CALL db.indexes()").result_set
-            composite = [
-                r for r in rows
-                if r[0] == "Point"
-                and "is_operator" in str(r[1])
-                and "lastDreamedAt" in str(r[1])
-            ]
-            assert composite, (
-                f"non-embedded must create :Point(is_operator, lastDreamedAt) "
-                f"composite index, got {rows}"
+            point_rows = [r for r in rows if r[0] == "Point"]
+            assert any("lastDreamedAt" in str(r[1]) for r in point_rows), (
+                f"non-embedded must create the plain :Point(lastDreamedAt) "
+                f"staleness index, got {rows}"
+            )
+            assert not any("is_operator" in str(r[1]) for r in point_rows), (
+                f"non-embedded must NOT index the boolean is_operator "
+                f"(#3154), got {rows}"
             )
         finally:
             proj.close()

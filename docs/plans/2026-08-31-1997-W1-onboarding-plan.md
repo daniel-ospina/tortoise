@@ -5,6 +5,8 @@
 > **Issue:** #1997 (W1 of epic #1976, agent-driven onboarding) · **Branch:** feat/1997-W1-onboarding
 > **Complexity:** standard (UX standard / Architecture low) — no plan reviewers dispatched per issue-scoping (standard tier).
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 **Goal:** Shrink the 5-step #1643 wizard to EXACTLY 5 human steps (orientation → org-create/join → fork → connect-consent → done), archive (not delete) the legacy wizard render, sweep user-facing team→Organization copy on wizard + org-create + connected surfaces, and activate the W5 T7 accept-and-drop pin (removing wizardComplete = the cross-PR ordering pin).
 
 **Team:** epistemic-team

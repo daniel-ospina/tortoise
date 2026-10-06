@@ -18,6 +18,7 @@ S7 (ranking.py scoring surface) + S8 (batch EP reads) over both rankers:
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -434,6 +435,7 @@ def ranked_sdk():
     _wipe(sdk)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:

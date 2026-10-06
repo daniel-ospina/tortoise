@@ -15,6 +15,8 @@ aboutObjects: tortoise
 > **Capstone hook:** #2008 (capstone: clickthrough verification) — fired after Decompose, before Verify.
 > **Source:** plan `06-plan.md` §8 decomposition plan + test-design #1992 surface map.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ## Issue inventory (11 created + 1 deferred)
 
 | Issue | Workstream | Complexity | Depends on | Surfaces (#1992) | DE2E targets |

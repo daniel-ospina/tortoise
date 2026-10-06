@@ -62,11 +62,21 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/e2e_live_reconcile.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/e2e_live_reconcile.py`"
+    )
+
 import argparse
 import json
 import os
 import re
-import sys
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -90,7 +100,7 @@ COUNT_KINDS = (
 # namespace); Q1 selects enough to count + report offender emails.
 TEAMS_SQL = """
     SELECT t.id, t.name, t.email, t.created_at::text AS created_at
-    FROM public.teams t
+    FROM public.organizations t
     WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
     ORDER BY t.created_at;
 """
@@ -108,17 +118,17 @@ USERS_SQL = """
 # they are counted here as a drift signal, not a cleanup target.
 CHILDREN_SQL = """
     SELECT 'api_keys' AS kind, count(*) AS n FROM public.api_keys
-      WHERE team_id IN ({ids})
-    UNION ALL SELECT 'memberships', count(*) FROM public.team_memberships
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
+    UNION ALL SELECT 'memberships', count(*) FROM public.org_memberships
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'invitations', count(*) FROM public.invitations
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'abuse', count(*) FROM public.abuse_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'analytics', count(*) FROM public.analytics_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'audit', count(*) FROM public.audit_events
-      WHERE team_id IN ({ids});
+      WHERE org_id IN ({ids});
 """
 
 

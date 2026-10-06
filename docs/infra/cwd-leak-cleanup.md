@@ -1,3 +1,15 @@
+---
+title: "CWD-Leak Orphan Cleanup (issue #176)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-23
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-embedded-reaper
+---
+
 # CWD-Leak Orphan Cleanup (issue #176)
 
 Repeatable procedure for cleaning **path-based** redis-server orphans left by
@@ -60,7 +72,7 @@ do not declare done.
 
 ## Notes
 
-- The reaper (`python -m tortoise.embedded_reaper --no-dry-run`, 5-min
+- The reaper (`python -m tortoise.embedded_reaper --no-dry-run`, 20-min
   cron) handles all FUTURE no-path orphans automatically.
 - Path-based servers with live clients are never killed — they're
   legitimate (Docker-mode, stable singleton, or in-use dev DBs).

@@ -86,6 +86,8 @@ The cut is **claim-gated**: everything needed to produce a falsifiable verdict o
 **Then:** every probe (R1–R5, L1–L6, D2–D4) is scored for all arms with no exclusions
 **And:** each metric is classified STRONG/STRUCTURAL/PARITY/WEAK with a load-bearing flag, and the verdict outcome (UNIQUE / MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE) is produced per the pre-committed rule (≥1 true differentiator AND no serious weakness)
 
+> **Trigger population (amended 2026-09-12, #3327):** the symmetric trigger is defined over the retrieval-capable comparators `{a1, a2, a2b, a3, a4}` — `a0` is excluded from the trigger and retained as its positive control; the battery spec cited above (`docs/agent-reasoning-eval-battery.md`) carries the same amendment; decision record: `docs/research/2026-09-12-matched-recall-a0-control.md` (§3.2.1/§7 of `docs/benchmarks/comparison-systems.md`).
+
 ### E2E-4: Benchmark parity leg runs on released benchmarks
 **Given:** LongMemEval, LoCoMo, MemoryArena, MemoryAgentBench runners and the arm adapters
 **When:** the parity leg executes per arm

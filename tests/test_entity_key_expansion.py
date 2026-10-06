@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 
@@ -49,7 +50,7 @@ def _falkordb_available() -> bool:
     module never captures it at import (#221 test-isolation lint)."""
     uri = os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe"
@@ -74,10 +75,10 @@ def _uri() -> str:
     """Current TORTOISE_DB_URI (or the default), read at CALL time."""
     return os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 
 pytestmark = pytest.mark.skipif(
-    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+    not FALKORDB_AVAILABLE, reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
 
 #: The question tokens (after the shared stopword drop): the sparse OR leg
 #: matches these against content ∪ search_keys.
@@ -165,6 +166,22 @@ def seeded_sdk(monkeypatch):
 
 
 # ── (a) cross-session surface: the expansion contract ─────────────────────
+
+def test_expansion_still_resolves_a_terminal_object_anchor(seeded_sdk):
+    """#3301: C2's anchor resolution is a RESOLUTION path (the anchor Object is
+    never surfaced), so a terminal Object anchor must still resolve. Without
+    the ``excluded_statuses=()`` opt-out the widened Object exclusion makes
+    the anchor unresolvable, the pass returns None, and the cross-session
+    join is silently dropped."""
+    proj = seeded_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:$n}) SET o.status='superseded'",
+                 params={"n": ENTITY_ANCHOR})
+    on_ids = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+        QUESTION, limit=20, pool_size=60, entity_key_expansion=True)]
+    assert JOIN_ID in on_ids, (
+        "a terminal Object anchor must still resolve so the key expansion "
+        "reaches the joined cross-session point")
+
 
 def test_expansion_surfaces_same_entity_point_from_other_session(seeded_sdk):
     """Plain top-k misses the same-entity point from session B (its content

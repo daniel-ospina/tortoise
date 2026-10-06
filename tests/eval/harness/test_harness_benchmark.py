@@ -237,7 +237,7 @@ def test_isolation_gate_catches_misrouted_teams(sdk_factory):
 
     def _misroute_wb_b(session_id, fixture, gold):
         if fixture.get("suite") == "write_back" and fixture.get("team") == "team_b":
-            return "team_team_a"  # only the Atlas write-back leaks across
+            return "org_team_a"  # only the Atlas write-back leaks across
         return real_cell_key(session_id, fixture, gold)
 
     report_clean = _run_all(sdk_factory)

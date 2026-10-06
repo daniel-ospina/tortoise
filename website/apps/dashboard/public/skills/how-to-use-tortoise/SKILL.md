@@ -23,7 +23,7 @@ The graph-write operations in this skill are identical for every Tortoise deploy
 
 ### Hosted (cloud)
 
-Your agent reaches the graph through the Tortoise **MCP server** at `https://api.premiselabs.co/mcp/`, authenticated with a Bearer API key (`TORTOISE_API_KEY`). If you installed the skills via the onboarding wizard, the MCP server is already wired — `claude mcp add tortoise` (or the `.mcp.json` snippet: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}`). Every operation below maps to a `tortoise_*` MCP tool. No local database, SDK, `.env`, or graph-scripts.
+Your agent reaches the graph through the Tortoise **MCP server** at `https://api.premiselabs.co/mcp/`, authenticated with a Bearer API key (`TORTOISE_API_KEY`). If you installed the skills via the onboarding wizard, the MCP server is already wired. Configuring it by hand? Use the equivalent project-scoped `.mcp.json` entry: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — that file is **committable**, so it carries the env reference, never the key. A project-scope server stays **⏸ Pending approval** until you approve it once — start `claude` in the project and allow the prompt, or run `/mcp`. Every operation below maps to a `tortoise_*` MCP tool. No local database, SDK, `.env`, or graph-scripts.
 
 ### Self-hosted
 
@@ -80,19 +80,20 @@ When a claim faces challenge, you have two tools. They address different things:
 |---|------|-------------|
 | **What it says** | "This claim is FALSE" | "This claim is TRUE but matters LESS than it seems" |
 | **Dimension** | Correctness | Relevance |
-| **Effect on EP** | Contradiction propagates through graph | Confidence reduction on the edge |
+| **Effect on EP** | Contradiction propagates through graph | Dampens the operator's weight: `w_eff = w × (1 − strength)` (#2315) |
 | **Applies to** | The argument Point directly | The operator (IMPL connection) between argument and what it supports |
 
 **The golden rule:** Relevance lives on the OPERATOR, truth lives on the POINT.
 
-> **Mitigation strength semantics (single-sourced — #2199 knock-on decision 3):**
-> `strength` (default 0.5, relevance range 0.10–0.50) means how much the
-> reason REDUCES the edge — 0 = fully neutralized, 1 = fully intact. It is
-> NOT a statement of how true the reason is, and it is NOT fused into the
-> mitigation point's belief (that would invert the meaning). Strength is
-> currently ADVISORY metadata: EP does not read `mitigation_strength` /
-> `mitigated_by` yet — the number is auditable on the mitigation point, and
-> the mitigation POINT's own calibration (Beta prior) is what EP consumes.
+> **Mitigation semantics (single source: `tortoise/weights.py` module
+> docstring, #2315):** `strength` is the graded DAMPENER of the operator's
+> effective EP weight — sanctioned band 0.10–0.50, formula
+> `w_eff = w × (1 − strength)`: a 0.30 mitigation keeps 70% of the operator's
+> weight; 0.50 keeps 50% — dampened, never refuted (a mitigated NAND stays a
+> contradiction, only weaker). EP reads `mitigation_strength` via
+> `compute_operator_weight` — it is NOT advisory metadata. It is NOT a
+> statement of how true the reason is, and it is NOT fused into the
+> mitigation point's belief (that would invert the meaning).
 > Decision parts filed through the decide tooling are born LIVE with an
 > explicit starting belief (#2199): omit `credibility=` for the system
 > starting belief medium = Beta(3,1) (provenance `system-default`), or pass
@@ -289,13 +290,13 @@ Before creating a new evidence point, search whether it already exists:
 These run against a local FalkorDB via the SDK — the self-hosted path. Hosted tenants run the identical pattern with the MCP tools (`tortoise_create_point` → `tortoise_create_operator` → `tortoise_compute_confidence`); the scripts are reference implementations of the flow, not a hosted requirement.
 
 ### `graph-scripts/file_pricing_decision.py`
-Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence.
+Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence. **⚠️ Superseded prices — this is a worked example of the flow, not our price list.** The decided tiers are **free $0 · solo $9 · pro $25 · team $149** in the tortoise repo's `product/pricing.json` (`owner_confirmed: 2026-08-07`).
 
 ### `graph-scripts/decide_licensing.py`
 Compares 3 license options (AGPLv3-dual, BSL+AGPL, SSPL) using 7 criteria and 20+ findings. Full pattern: criteria → options → findings → edges → compute_confidence → ranked output. Run as:
 
 ```bash
-TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/decide_licensing.py
+TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise uv run python graph-scripts/decide_licensing.py
 ```
 
 ### `graph-scripts/decide.py`
@@ -470,9 +471,11 @@ sdk.expand_kind("WorkItem")  # returns ["dev:issue", "pm:task", ...]
 
 **The DB target is explicit, never accidental, and local stays local.** A self-hosted/local instance is intentionally local — local tooling (MCP server, SDK, graph-scripts) targets the local FalkorDB, never a remote cloud DB. The **hosted version** is a separate product: the hosted API resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` via its entrypoint and refuses to start without it; clients reach it over HTTP with API keys.
 
+> **The committed repo-root `.mcp.json` defaults to the HOSTED endpoint and carries no DB URI.** Its `tortoise` entry is `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — the DB target is resolved **server-side** by the hosted API, and the entry has **no `env` block and no `TORTOISE_DB_URI` setting** (its `_comment` names the variable only to point at the self-hosted path below). The `TORTOISE_DB_URI` rules below describe the **self-hosted / stdio** path; to use them, point that entry's `url` back at your own daemon (`http://localhost:8000/mcp` — see `docs/quickstart-selfhosted.md`).
+
 | Source | URI resolution | Behavior when unset |
 |--------|----------------|---------------------|
-| **MCP server (local)** | `TORTOISE_DB_URI` in `.mcp.json` — defaults to local `docker://:@localhost:16379/tortoise`; a repo-root `.env` only fills keys `.mcp.json` does **not** set (useful for SDK scripts / direct launches — `.mcp.json` env always wins for the MCP server) | Fails loud on startup (exit 1) — never silently connects to an empty embedded graph (`TORTOISE_ALLOW_EMBEDDED=1` is the test-only escape hatch) |
+| **MCP server (self-hosted / stdio)** | `TORTOISE_DB_URI` on the **daemon's own environment** — a **stdio** `.mcp.json` entry sets it in its `env` block, and the compose daemon resolves it from its own env; a repo-root `.env` fills only the keys that entry does **not** set (useful for SDK scripts / direct launches — an entry's own `env` always wins). Canonical local form `docker://:falkordb@localhost:6379/tortoise` (compose publishes `127.0.0.1:6379`; `.env.example`) — code defaults still fall back to the legacy port `16379`, env-overridable | Fails loud on startup (exit 1) — never silently connects to an empty embedded graph (`TORTOISE_ALLOW_EMBEDDED=1` is the test-only escape hatch) |
 | **SDK / graph-scripts** | `os.environ["TORTOISE_DB_URI"]` (or `FalkorProjection.from_uri`) | Embedded redislite (dev/test only) |
 | **Hosted API** | `FALKORDB_CLOUD_URI` secret → `TORTOISE_DB_URI` via entrypoint | Refuses to start without it |
 
@@ -502,14 +505,14 @@ Agent: "The graph has no licensing data. I'll create evidence from scratch."
        (files 20+ duplicate points on the wrong graph)
 ```
 
-**Fix:** point local tooling at the local FalkorDB. The default in `.mcp.json` is `docker://:@localhost:16379/tortoise` (the designated local container); override in the repo-root `.env` (gitignored — never commit credentials) if your local target differs.
+**Fix:** on a **self-hosted** setup, point local tooling at the local FalkorDB — set `TORTOISE_DB_URI` on the daemon / stdio entry, or in the repo-root `.env` (gitignored — never commit credentials). The committed repo-root `.mcp.json` does **not** carry this variable: it defaults to the *hosted* endpoint (see the note above), so a self-hosted agent must first point that entry's `url` at its own daemon.
 
 ```bash
-# .env (repo root, gitignored) — LOCAL target only
-TORTOISE_DB_URI=docker://:@localhost:16379/tortoise
+# .env (repo root, gitignored) — LOCAL target only, self-hosted/stdio path
+TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise
 ```
 
-Restart the MCP server after changing the URI — the connection is resolved once at startup. Do **not** point local tooling at the hosted (cloud) instance.
+Restart the MCP server after changing the URI — the connection is resolved once at startup. Do **not** point local tooling at the hosted (cloud) instance — the committed repo-root `.mcp.json` is the deliberate hosted default described above, not local tooling re-pointed at the cloud DB.
 
 ## Self-Hosted: SDK Props Convention
 

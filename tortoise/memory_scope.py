@@ -7,8 +7,8 @@ class MemoryScope(Protocol):
     managed_by: str
     owned_by: str
 
-    def filter(self, team_id: str, memory_types: list[str]) -> dict[str, Any]:
-        """Return filtered context scoped to team and memory types.
+    def filter(self, org_id: str, memory_types: list[str]) -> dict[str, Any]:
+        """Return filtered context scoped to org and memory types.
 
         Backend adapters implement this: FalkorDB today, replaceable tomorrow.
         """

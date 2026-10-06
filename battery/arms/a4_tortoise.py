@@ -59,6 +59,11 @@ DECIDE_CYCLES_CAP = 8
 _WRITE_KINDS = frozenset({"evidence", "nand", "imply", "support", "statement"})
 #: seed-manifest marker content prefix — never surfaced as a memory.
 _SEED_MANIFEST_PREFIX = "battery:seed_manifest:"
+#: #2985/#3005 P1 — the dense retrieval leg the real-mode refusal REQUIRES.
+#: ``recall_state`` → ``tortoise_fts_query`` is hybrid RRF over FTS + vector
+#: (+ structural); a read that never submitted ``vector`` measured a
+#: keyword-only surface, not the product's retrieval.
+_GATED_LEG = "vector"
 
 
 def _is_seed_manifest(content: str) -> bool:
@@ -72,11 +77,42 @@ class A4TortoiseArm:
     model_id = "fixed"
     temperature = 0.0
 
+    #: #2985 — this arm READS through the product's HYBRID retrieval
+    #: (``recall_state`` → ``tortoise_fts_query``, FTS+vector+structural RRF).
+    #: The real runner preflights the embedder BEFORE setup/ingest for arms
+    #: carrying this flag, so a degraded environment fails closed instead of
+    #: publishing an FTS-only number under the a4 label. The explicit
+    #: ``embeddings`` extra is what makes the vector leg runnable; a plain
+    #: ``uv sync`` yields a KEYWORD-ONLY product (#2985).
+    requires_hybrid_retrieval = True
+
     def __init__(self, db_path: str | None = None, **config):
         self._db_path = db_path or os.environ.get("TORTOISE_DB_PATH") or ""
         self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
         self._active_scenario: str | None = None
+        #: #2985 — the retrieval legs this arm actually OBSERVED across its
+        #: reads (union, from the product's per-call ``leg_trace``) and the
+        #: observed degraded flag. Recorded in summary.json so a persisted a4
+        #: number carries the retrieval conditions that produced it. Named
+        #: ``observed_*`` to stay distinct from the parity lane's
+        #: ``retrieval_legs()`` capability-PROBE method (#3005).
+        self.observed_retrieval_legs: list[str] = []
+        self.observed_retrieval_degraded = False
+        #: #3005 P1 — the machine-readable result of the last observed-leg
+        #: gate evaluation (``None`` until the gate is enforced), so a
+        #: refused read carries WHAT was wrong, not just that it refused.
+        self.observed_retrieval_gate: dict | None = None
+        #: #3005 P1 — the real-mode requirement. ``False`` by default so
+        #: hermetic/equivalence tests may drive the arm in a degraded
+        #: environment; the REAL runner sets it True before setup, at which
+        #: point a read whose VECTOR leg never ran is refused (an FTS-only
+        #: number must never wear the a4 label). The flag — not the
+        #: embedder's mere absence — is what makes the refusal real-mode
+        #: specific: a successful `EmbeddingModel.get()` followed by a
+        #: query-time `encode_failed` / `breaker_open` is exactly the hole
+        #: this closes.
+        self.require_observed_hybrid = False
         #: per-scenario memo of filed records this setup (true-no-op keys:
         #: evidence = (op_kind, target, content); mitigate = content).
         self._filed_content: dict[str, set[str]] = {}
@@ -166,16 +202,23 @@ class A4TortoiseArm:
         operators for #901 mitigate routing.
 
         Raises ArmUnavailable on failure (never partial memories).
+
+        #3005 P1: when the real runner set ``require_observed_hybrid``, a
+        read whose VECTOR leg never RAN (query-time ``encode_failed`` /
+        ``breaker_open``, or a trace with no vector entry at all) is refused
+        — the availability preflight passes in exactly those cases, so the
+        observed leg trace is the only proof the hybrid surface was measured.
         """
         self.decide_cycles = 0
         sdk = self._sdk(context.scenario)
+        trace: list[dict] = []
         try:
             query = (context.user_message or "").strip()
             if not query:
                 probe = _scenario_probe_query(context.scenario)
                 query = probe or ""
             results = sdk.recall_state(
-                query=query or None, kind=None, limit=20)
+                query=query or None, kind=None, limit=20, leg_trace=trace)
             out: list[Memory] = []
             seen_op_ids: set[str] = set()
             for row in results or []:
@@ -212,9 +255,85 @@ class A4TortoiseArm:
                         out.append(Memory(
                             id=str(oid), content="", confidence=None,
                             kind="operator"))
-            return out
+        except ArmUnavailable:
+            raise
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
+        finally:
+            # #2985: record the legs the trace observed even on a failed read
+            # (a partial trace still says which leg was attempted) — the same
+            # interpreter the parity lane uses, so the two record identically.
+            # Runs BEFORE the real-mode refusal below (the fold is what makes
+            # the refusal decidable) and before an exception propagates.
+            self._record_retrieval_trace(trace)
+        self._refuse_unobserved_hybrid(trace)
+        return out
+
+    def _record_retrieval_trace(self, trace: list[dict]) -> None:
+        """Fold one read's observed leg trace into the run-level record.
+
+        Union of leg names (a leg that ran in ANY read ran in the arm) and
+        OR of the per-leg ``degraded`` flag — via the shared interpreter of
+        the product's trace shape (``retrieval_preflight.merge_leg_trace``),
+        so the a4 arm and the parity lane record identically.
+        """
+        from battery.runner.retrieval_preflight import merge_leg_trace
+        if merge_leg_trace(self.observed_retrieval_legs, trace):
+            self.observed_retrieval_degraded = True
+
+    def _observed_legs_gate(self, trace: list[dict]) -> dict:
+        """Machine-readable observed-leg gate for ONE read's trace.
+
+        Mirrors ``parity.mabench_tortoise.retrieval_capability_gate`` (the
+        same shape/verdict) so the two lanes refuse on the same condition:
+        the VECTOR leg is satisfied only when a vector entry reports
+        ``ran`` — a present-but-not-submitted entry (``encode_failed`` /
+        ``breaker_open`` / ``no_embedder``) or a missing entry both fail.
+        """
+        entries = [e for e in (trace or []) if isinstance(e, dict)]
+        vector = [e for e in entries if e.get("leg") == _GATED_LEG]
+        ran = any(bool(e.get("ran")) for e in vector)
+        reason = next((str(e.get("reason")) for e in vector
+                       if e.get("reason")), None) or "vector_leg_absent"
+        return {
+            "gated": True,
+            "vector_leg": ran,
+            "legs_seen": sorted({str(e.get("leg")) for e in entries
+                                 if e.get("leg")}),
+            "reason": reason,
+            "leg_trace": entries,
+        }
+
+    def _refuse_unobserved_hybrid(self, trace: list[dict]) -> None:
+        """Refuse a read that did not submit the VECTOR leg (real mode only).
+
+        The availability preflight (``require_hybrid_retrieval``) catches a
+        missing embedder BEFORE setup, but it cannot see a query-time leg
+        failure (``encode_failed`` / ``breaker_open``). When the real runner
+        set ``require_observed_hybrid``, the observed trace is the proof of
+        the surface; without the vector leg the read measured keyword-only
+        retrieval and the arm refuses rather than let an FTS-only number be
+        published under the a4 label. Hermetic/equivalence lanes never set
+        the flag, so the arm stays usable without the ``embeddings`` extra.
+        """
+        if not self.require_observed_hybrid:
+            return
+        gate = self._observed_legs_gate(trace)
+        self.observed_retrieval_gate = gate
+        if gate["vector_leg"]:
+            return
+        # A refusal IS a degraded observation — stamp it so the run record
+        # fails closed even when the trace carried no ``degraded`` flag.
+        self.observed_retrieval_degraded = True
+        raise ArmUnavailable(
+            f"a4 retrieval capability gate FAILED — the {_GATED_LEG} leg did "
+            f"not run (reason={gate['reason']!r}, "
+            f"legs_seen={gate['legs_seen']!r}). An FTS-only read is a "
+            f"degraded, keyword-only retrieval surface — NOT the product's "
+            f"hybrid retrieval — and must not produce an a4 number (#2985). "
+            f"Install the embeddings extra (`uv sync --extra embeddings "
+            f"--extra parity`) and re-run; the arm refuses rather than "
+            f"record a keyword-only number.")
 
     # ── ep_outcome terminal table (#2291 I-4) ───────────────────────────
     def ep_terminal_outcome(self, scenario: Scenario, *,

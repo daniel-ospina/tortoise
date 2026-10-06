@@ -87,6 +87,11 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
+    # #2944: the two embedded allow-path tests force the embedded lane so the
+    # REAL wipe+replay runs against a temp DB file — a URI redirect would
+    # fold the assertion onto a shared server graph. The delenv IS the point;
+    # the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_destructive_wipe_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
@@ -101,7 +106,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # graphs per test):
     "test_battery_lane_matrix.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # hermetic env-strip test (fixture-param monkeypatch — auto-undo)
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
+    "test_graph_storage.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #5331: embedded lane via delenv (the test_billing pattern — the fixture pins TORTOISE_DB_PATH to a tmp_path db, so the construction never rides the URI)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
+    "test_selfhost_health_probe_executor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #3331: the probe-lane behavioural tests force the EMBEDDED lane (setenv "" IS the point — the selfhost health handlers are driven without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
     "test_github_index_lifecycle.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"',
                                         r'monkeypatch\.setenv\("TORTOISE_DB_URI",\s*"docker:'],
@@ -118,11 +125,28 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                              r'monkeypatch\.setenv\(\s*$'],  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
+    "test_issue_4010_sessions_unlimited.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #4010: resolver/clearing unit tests force the embedded lane (db_path-pinned store; the delenv IS the point — no lane leak, monkeypatch auto-undo)
     "test_mcp_client.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_mcp_http.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_mcp_server_auth_modes.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # C2 #2111: tenant-mode MCP tests force the registry/embedded lane (delenv IS the point) + #2657 ask-exposure: per-test fresh-URI live probe (setenv IS the test input)
+    # #4488: the embed-metering tests force the EMBEDDED registry lane (the
+    # delenv IS the point — the local ``reg_org`` fixture pins TORTOISE_DB_PATH
+    # and drives the real writer+reader in ONE store, because ``metering._reg_sdk``
+    # resolves the registry from that path; a URI redirect would split the write
+    # from the read and the test would prove nothing). The fixture-param
+    # monkeypatch auto-restores at teardown, so no lane leaks into a later
+    # docker-lane test (the test_metering_period_window.py precedent).
+    "test_embed_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #3825: the metering-WINDOW tests force the EMBEDDED registry lane (the
+    # delenv IS the point — the fixture puts a real billing anchor on an org's
+    # `:Team` node and drives the ledger in the same store; a URI redirect
+    # would split the anchor from the ledger and the test would prove nothing
+    # about the writer). The fixture-param monkeypatch auto-restores at
+    # teardown, so no lane leaks into a later docker-lane test.
+    "test_metering_period_window.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_migration_consumers.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_onboarding_integration.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_pack_state.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
@@ -148,16 +172,34 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                               r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #7108: module-level live probe (os.environ set + restore, DELIBERATE_URI —
+    # the probe is what asserts the docker lane is reachable at all) + a per-test
+    # fresh-URI fixture (raw os.environ set + save/restore) giving each test its
+    # OWN graph, so the operator-scope assertions cannot see a neighbour's
+    # residue. No monkeypatch site is declared, because this file has none.
+    "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).
     "test_coverage_loop.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # C4 #2517: docker-lane source-session re-injection tests — module-level
+    # live probe (set + restore) + per-test fresh-graph fixture (the
+    # test_coverage_loop pattern; the monkeypatch.setenv auto-restores).
+    "test_session_reinjection.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                     r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2518 entity-key expansion: module live-FalkorDB probe (DELIBERATE_URI) + per-test docker force
+    # C6 #2520: time-aware query expansion — module-level live-FalkorDB probe
+    # (set + restore) + per-test fresh-graph fixture (the test_coverage_loop
+    # pattern; the monkeypatch.setenv auto-restores).
+    "test_time_aware_sdk_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_time_aware_eval_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    "test_time_aware_run_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_hnsw_vector_index.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -167,6 +209,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3892: the read-path status test points the endpoint at a DECLARED but
+    # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
+    # without mocking `_get_proj` — the setenv IS the test input.
+    "test_read_status.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3039: the ACL admin-client decode pin forces a docker:// URI so
+    # `_admin_client` takes the redis path; redis.Redis is stubbed, never
+    # connects. The setenv IS the test input (deliberate docker lane).
+    "test_from_uri_userinfo.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                     # :950 and :1012 write `monkeypatch.setenv(` and put the
+                                     # URI literal on the FOLLOWING line, so the site's own line
+                                     # matches only the trailing branch - the same multi-line
+                                     # shape and the same remedy as test_backup.py above.
+                                     r'monkeypatch\.setenv\(\s*$'],
     "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      r'monkeypatch\.setenv\(\s*$'],
@@ -181,6 +236,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # DELIBERATE_URI: the docker-calibrated cross-lens test (T8 D9) forces
     # the docker lane — its setenv IS the test input.
     "test_cross_lens.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #1370: the subject-binding suite's URI-mode construction case forces the
+    # docker lane so `_graph_report` takes its URI branch. The URI is
+    # DELIBERATELY unreachable (port 16610) — the test pins the construction
+    # contract (no positional db_path, namespace passed through) against a
+    # spy SDK, so it never needs a server and proves nothing about one.
+    # Fixture-param monkeypatch, so pytest auto-undoes at teardown (no lane
+    # leak into a later docker-lane test).
+    "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -199,6 +262,85 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #    the test input); the subprocess session tests pass env through
     #    subprocess env= and never mutate this process's environment ────────
     "test_tripwire.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # ── #3458 main-red reconciliation (2026-09-13): these two sites were
+    #    introduced by #3414 and #3056 and red'd every PR until declared.
+    #    Both are deliberate, but NOT both DELIBERATE_URI — see the per-entry
+    #    notes below (test_backup.py's :282 delenv is the embedded-lane case).
+    # #3414: module-level live-FalkorDB probe (set + try/finally restore)
+    # PLUS an autouse per-test isolated-graph fixture (set/restore); never
+    # leaves a mutation behind.
+    "test_3276_has_ep_measured.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #3056/#2974: the BGSAVE tests deliberately point the endpoint at a
+    # URI (never the embedded defaults) — fixture-param monkeypatch, so
+    # pytest auto-undoes every mutation at teardown. INTENT IS NOT UNIFORM
+    # within this file: the `setenv` sites toward a URI are DELIBERATE_URI,
+    # while `test_backup.py:282`'s `delenv("TORTOISE_DB_URI")` is
+    # DELIBERATE_EMBEDDED_LANE — dropping the env control to exercise the
+    # embedded-mode `"skipped:"` path IS the point of that test. The single
+    # file-level entry cannot express both labels; recorded here so the
+    # intent table is not read as claiming they are the same case. The
+    # trailing `setenv\(\s*$` branch covers the multi-line call at :209
+    # where the URI literal sits on the following line.
+    "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
+                       r'monkeypatch\.setenv\(\s*$'],
+    # #5222/#5188 + #5222's hygiene gate: both files are HERMETIC (the SDK / the
+    # reaper is faked, no server is contacted), and both force the embedded or a
+    # test-pinned lane on purpose — the delenv/setenv IS the input, so the site
+    # must not be read as riding the ambient URI.
+    #   * backfill guard: `delenv` twice, so the run cannot inherit a developer's
+    #     ambient URI and accidentally target a real graph (the guard under test
+    #     resolves the namespace, not the URI path — #5188).
+    #   * server hygiene: `setenv` points the teardown probe at the test matrix
+    #     so the reaper's own path is exercised; fixture-param monkeypatch, so
+    #     pytest auto-undoes it at teardown (no lane leak).
+    "test_backfill_ghost_members_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #4503: the edge-accounting guards control TORTOISE_DB_URI deliberately in
+    # three places, and the env control IS the input in each:
+    #   * two `delenv` sites force the EMBEDDED lane (DELIBERATE_EMBEDDED_LANE)
+    #     so that a cap count read from a SECOND, EMPTY database is
+    #     distinguishable from a legitimately-empty org. With the URI in place,
+    #     `count_org_usage` resolves the `org_<org>` URI graph and the
+    #     wrong-graph read these guards exist to catch would be invisible (both
+    #     sides would agree).
+    #   * one `setenv` + its assertion site (DELIBERATE_URI) pin that
+    #     `_open_sdk` RESTORES a caller's URI — `main()` is called in-process,
+    #     so a leaked mutation re-points the next invocation.
+    # Fixture-param monkeypatch throughout, so pytest auto-undoes every site at
+    # teardown — no lane leak.
+    "test_4503_edge_relationship_accounting.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                     # the URI literal sits on the FOLLOWING line at
+                                     # :251 (`setenv(` then the string), so the site's
+                                     # own line matches only the trailing branch — the
+                                     # same multi-line shape and the same remedy as
+                                     # `test_backup.py` above.
+                                     r'monkeypatch\.setenv\(\s*$'],
+    # #3815: the mitigation-weight-move suite runs a module-level live-FalkorDB
+    # probe (set + try/finally restore at import) PLUS an autouse per-test
+    # isolated-graph fixture whose monkeypatch.setenv IS the test input — the
+    # same shape as test_3276_has_ep_measured.py above, and it never leaves a
+    # mutation behind (the probe restores in finally, pytest undoes the fixture).
+    # DELIBERATE_URI.
+    "test_3815_mitigation_moves_weight.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #2500: main() assigns os.environ["TORTOISE_DB_URI"] before constructing the
+    # SDK, so the test pins the docker URI and restores it at teardown — the
+    # comment at the site says the restore exists precisely because otherwise it
+    # leaks a live-server URI into every later module (the sdk_factory lane flip).
+    # DELIBERATE_URI: the setenv IS the test input.
+    "test_2500_terminal_ep_backfill.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #7017: the engine-probe suite is hermetic — every probe is injected, so
+    # the URI's SOLE role is as the input to `graph_target_from_env()`, and the
+    # endpoint-resolution tests set/del it precisely to pin which endpoint
+    # `main` picks (the flag-override, TLS-refusal and malformed-port cases all
+    # turn on the URI's shape). The env control IS the test input; every site is
+    # a function-scoped `monkeypatch` call, auto-undone by pytest at teardown, so
+    # no lane flip can leak. DELIBERATE_URI.
+    "test_engine_probe.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                              r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -209,7 +351,7 @@ _EXEMPT_FROM_ENV_MUTATION_GUARD = frozenset() | {
     "test_wipe_server.py",
     "test_round_trip_parity.py",
     "test_loopback_predicate_single_source.py",
-    # documented lifecycle carve-outs (Task 9 17-file set)
+    # documented lifecycle carve-outs (Task 9 carve-out set)
     "test_embedded_lifecycle.py",
     "test_embedded_lifecycle_fast_close.py",
     "test_reaper.py",

@@ -2,7 +2,7 @@
 
 Covers both control-plane lanes:
 - Supabase lane: the count_active_free_memberships helper + the POST
-  /v1/teams gate matrix + the onboarding re-entry guard (FakeControlPlane,
+  /v1/organizations gate matrix + the onboarding re-entry guard (FakeControlPlane,
   zero network — mirrors tests/test_writer_inventory.py).
 - Registry lane: the tier='free' proxy helper + the gate ordering (429 →
   409 → 402) against the embedded registry (mirrors test_invites_http.py).
@@ -24,7 +24,21 @@ from tests.test_supabase_control import FREE_TEAM, _membership_row
 from tortoise.hosted_api import app, get_current_user
 
 _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
-_UPGRADE_MSG = "Create another team requires a paid plan"
+# #2789: the blocked payload is STRUCTURED now (the old bare "Create another
+# team requires a paid plan" string is gone). The dashboard renders the
+# three-option dialog from `code` — never from the message text.
+_CAP_CODE = "one_free_org_limit"
+_CAP_MSG = "You can only have one free organization"
+
+
+def _assert_capped(detail, *, org_id: str | None = None) -> None:
+    """Assert the #2789 one-free-org 402 payload shape."""
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == _CAP_CODE
+    assert detail["message"] == _CAP_MSG
+    assert "org_id" in detail
+    if org_id is not None:
+        assert detail["org_id"] == org_id
 
 
 def _count_free(user_id: str) -> int:
@@ -42,7 +56,7 @@ def _count_free(user_id: str) -> int:
 @pytest.fixture
 def fake() -> FakeControlPlane:
     cp = FakeControlPlane()
-    cp.seed("teams", [dict(FREE_TEAM)])
+    cp.seed("organizations", [dict(FREE_TEAM)])
     return cp
 
 
@@ -110,16 +124,16 @@ def user_client(client):
     return tc, fake
 
 
-def _seed_team(fake, team_id: str, tier: str = "free",
+def _seed_team(fake, org_id: str, tier: str = "free",
                subscription_status=None) -> None:
-    fake.seed("teams", [dict(FREE_TEAM, id=team_id, name=team_id, tier=tier,
+    fake.seed("organizations", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
                              subscription_status=subscription_status)])
 
 
-def _seed_membership(fake, team_id: str, status: str = "active",
+def _seed_membership(fake, org_id: str, status: str = "active",
                      user_id: str = _USER1) -> None:
-    fake.seed("team_memberships",
-              [_membership_row(user_id=user_id, team_id=team_id,
+    fake.seed("org_memberships",
+              [_membership_row(user_id=user_id, org_id=org_id,
                                status=status)])
 
 
@@ -169,38 +183,168 @@ class TestCountActiveFreeMemberships:
         assert count_active_free_memberships(fake, "reg-abc123") == 0
 
 
+class TestOwnedFreeOrgIds:
+    """#2789: the OWNERSHIP-scoped twin. `count_active_free_memberships`
+    (the #1877 helper) is deliberately unchanged — invite-join gates read it."""
+
+    def test_owner_of_free_org_counted(self, fake):
+        from tortoise.supabase_control import (
+            count_owned_free_orgs,
+            owned_free_org_ids,
+        )
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a")
+        assert owned_free_org_ids(fake, _USER1) == ["team-free-a"]
+        assert count_owned_free_orgs(fake, _USER1) == 1
+
+    def test_collaborator_not_counted(self, fake):
+        """THE #2789 fix: membership without ownership owns nothing."""
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-free-a")
+        fake.seed("org_memberships", [
+            _membership_row(user_id=_USER1, org_id="team-free-a",
+                            role="member")])
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_admin_not_counted(self, fake):
+        """Only `owner` counts — an org admin is not the owner of the
+        allowance-consuming org."""
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-free-a")
+        fake.seed("org_memberships", [
+            _membership_row(user_id=_USER1, org_id="team-free-a",
+                            role="admin")])
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_owner_of_paid_org_not_counted(self, fake):
+        from tortoise.supabase_control import owned_free_org_ids
+        for status in ("active", "past_due", "trialing"):
+            _seed_team(fake, f"team-{status}", tier="pro",
+                       subscription_status=status)
+            _seed_membership(fake, f"team-{status}")
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_pending_payment_excluded(self, fake):
+        """Rules table: an org in pending_payment is excluded from the count
+        (it is not real yet — no graph, no keys)."""
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-pending", subscription_status="pending_payment")
+        _seed_membership(fake, "team-pending")
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_removed_membership_excluded(self, fake):
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-removed")
+        _seed_membership(fake, "team-removed", status="removed")
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_dangling_membership_skipped(self, fake):
+        """A membership whose team row is missing (the #302 soft-delete
+        sweep) must be skipped — not counted, never a 500."""
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_membership(fake, "team-purged")
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_non_uuid_user_id_returns_empty(self, fake):
+        """#1719 shape gate: a non-UUID user_id must not 22P02 → 500."""
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a")
+        assert owned_free_org_ids(fake, "reg-abc123") == []
+
+    def test_other_users_membership_not_counted(self, fake):
+        from tortoise.supabase_control import owned_free_org_ids
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a",
+                         user_id="9f2c1a40-0000-4a00-8000-000000000099")
+        assert owned_free_org_ids(fake, _USER1) == []
+
+    def test_legacy_membership_helper_unchanged_for_collaborators(self, fake):
+        """#2789 out-of-scope guard: the invite-join gates read the
+        membership-scoped helper, so it must still count a collaborator."""
+        from tortoise.supabase_control import (
+            count_active_free_memberships,
+            owned_free_org_ids,
+        )
+        _seed_team(fake, "team-free-a")
+        fake.seed("org_memberships", [
+            _membership_row(user_id=_USER1, org_id="team-free-a",
+                            role="member")])
+        assert count_active_free_memberships(fake, _USER1) == 1
+        assert owned_free_org_ids(fake, _USER1) == []
+
+
 class TestCreateTeamEntitlement:
     def test_zero_teams_200(self, user_client):
         tc, _fake = user_client
-        r = tc.post("/v1/teams", json={"name": "first"})
+        r = tc.post("/v1/organizations", json={"name": "first"})
         assert r.status_code == 200, r.text
 
     def test_all_paid_200(self, user_client):
         tc, fake = user_client
         _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
         _seed_membership(fake, "team-paid")
-        r = tc.post("/v1/teams", json={"name": "second"})
+        r = tc.post("/v1/organizations", json={"name": "second"})
         assert r.status_code == 200, r.text  # the new team is the 1 free slot
 
     def test_one_free_402(self, user_client):
         tc, fake = user_client
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        r = tc.post("/v1/teams", json={"name": "second"})
+        r = tc.post("/v1/organizations", json={"name": "second"})
         assert r.status_code == 402
-        assert _UPGRADE_MSG in r.json()["detail"]
-        assert isinstance(r.json()["detail"], str)
+        # #2789: structured, and it names the owned free org the dialog's
+        # "Upgrade current organization" action must target.
+        _assert_capped(r.json()["detail"], org_id="team-free-a")
+
+    def test_collaborator_only_can_create(self, user_client):
+        """#2789 — THE regression that motivated the issue: a user who merely
+        accepted an invite into someone else's FREE org owns nothing, so their
+        own free org must be allowed. The pre-#2789 membership-scoped heuristic
+        blocked exactly this user."""
+        tc, fake = user_client
+        _seed_team(fake, "team-someone-elses")
+        fake.seed("org_memberships", [
+            _membership_row(user_id=_USER1, org_id="team-someone-elses",
+                            role="member")])
+        # the legacy membership-scoped helper still counts it (invite-gate
+        # semantics are deliberately unchanged — #2789 out-of-scope list)
+        from tortoise.supabase_control import count_active_free_memberships
+        assert count_active_free_memberships(fake, _USER1) == 1
+        r = tc.post("/v1/organizations", json={"name": "my-own-org"})
+        assert r.status_code == 200, r.text
+
+    def test_pending_payment_owner_can_still_create_free(self, user_client):
+        """#2789 rules table: an org in pending_payment is not real yet — it is
+        excluded from the count, so it does not consume the allowance."""
+        tc, fake = user_client
+        _seed_team(fake, "team-pending", subscription_status="pending_payment")
+        _seed_membership(fake, "team-pending")
+        r = tc.post("/v1/organizations", json={"name": "fresh"})
+        assert r.status_code == 200, r.text
+
+    def test_list_teams_carries_subscription_status(self, user_client):
+        """#2789: the client pre-check mirrors the server rule from the teams
+        list — role + subscription_status must ride every row."""
+        tc, fake = user_client
+        _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
+        _seed_membership(fake, "team-paid")
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        rows = [t for t in r.json() if t["org_id"] == "team-paid"]
+        assert rows and rows[0]["role"] == "owner"
+        assert rows[0]["subscription_status"] == "active"
 
     def test_free_plus_paid_402(self, user_client):
-        """free+paid → 402: the new team would start Free → 2 free teams."""
+        """free+paid → 402: the new team would start Free → 2 free orgs."""
         tc, fake = user_client
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
         _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
         _seed_membership(fake, "team-paid")
-        r = tc.post("/v1/teams", json={"name": "third"})
+        r = tc.post("/v1/organizations", json={"name": "third"})
         assert r.status_code == 402
-        assert _UPGRADE_MSG in r.json()["detail"]
+        _assert_capped(r.json()["detail"], org_id="team-free-a")
 
     def test_dup_name_free_capped_409_not_402(self, user_client):
         """Ordering pinned: 429 → 409 → 402 — a free-capped user creating a
@@ -208,8 +352,8 @@ class TestCreateTeamEntitlement:
         tc, fake = user_client
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        fake.seed("teams", [dict(FREE_TEAM, id="t-dup", name="acme")])
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        fake.seed("organizations", [dict(FREE_TEAM, id="t-dup", name="acme")])
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
 
@@ -218,26 +362,26 @@ class TestCreateTeamEntitlement:
         since = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
         for i in range(3):
             _seed_team(fake, f"team-{i}")
-            fake.seed("team_memberships", [
-                _membership_row(user_id=_USER1, team_id=f"team-{i}",
+            fake.seed("org_memberships", [
+                _membership_row(user_id=_USER1, org_id=f"team-{i}",
                                 role="owner", created_at=since)])
-        r = tc.post("/v1/teams", json={"name": "fourth"})
+        r = tc.post("/v1/organizations", json={"name": "fourth"})
         assert r.status_code == 429
 
     def test_onboarding_patch_cannot_reset_team_created(self, team_client_factory):
         """#1877 security P1: the re-entry guard is SERVER-authoritative —
         a PATCH resetting team_created:false must not re-open the
         unlimited-free-sub-team bypass."""
-        from tortoise.hosted_api import get_current_team_session, get_current_team_session_ungated
+        from tortoise.hosted_api import get_current_org_session, get_current_org_session_ungated
         tc, _fake = team_client_factory
-        dep = dict(FREE_TEAM, team_id="team-free-001", tier="free",
+        dep = dict(FREE_TEAM, org_id="team-free-001", tier="free",
                    session_user_id=_USER1)
-        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
-        app.dependency_overrides[get_current_team_session_ungated] = lambda: dict(dep)
+        app.dependency_overrides[get_current_org_session] = lambda: dict(dep)
+        app.dependency_overrides[get_current_org_session_ungated] = lambda: dict(dep)
         r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r1.status_code == 200, r1.text
         # attempt the client reset via the PATCH surface
-        rp = tc.patch("/v1/onboarding/state", json={"team_created": False})
+        rp = tc.patch("/v1/onboarding/state", json={"org_created": False})
         assert rp.status_code == 200, rp.text
         r2 = tc.post("/v1/onboarding/team", json={"name": "subteam2"})
         assert r2.status_code == 409, "the guard must survive a PATCH reset attempt"
@@ -248,10 +392,10 @@ class TestCreateTeamEntitlement:
         dependency (no fabricated onboarding_state — the dep dict never
         carries it) reads the PERSISTED team_created state and 409s — no
         unlimited free sub-team minting via this endpoint."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         tc, _fake = team_client_factory
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
-            FREE_TEAM, team_id="team-free-001", tier="free",
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-free-001", tier="free",
             session_user_id=_USER1)
         r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r1.status_code == 200, r1.text
@@ -263,30 +407,31 @@ class TestCreateTeamEntitlement:
         """#2323: the person-level #1877 entitlement now binds the onboarding
         lane — a free user who already holds an org (>=1 active free
         membership) cannot mint a second org through POST /v1/onboarding/team.
-        Reaches the count-402 parity of POST /v1/teams (lane-uniform)."""
-        from tortoise.hosted_api import get_current_team_session
+        Reaches the count-402 parity of POST /v1/organizations (lane-uniform)."""
+        from tortoise.hosted_api import get_current_org_session
         tc, fake = team_client_factory
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
-            FREE_TEAM, team_id="team-parent-001", tier="free",
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-parent-001", tier="free",
             session_user_id=_USER1)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 402, r.text
-        assert "paid plan" in r.json()["detail"]
+        # #2789: the onboarding-lane twin returns the SAME structured code.
+        _assert_capped(r.json()["detail"], org_id="team-free-a")
         # no mint: the lane never ran — the free-membership count is unchanged
         assert _count_free(_USER1) == 1
 
     def test_onboarding_paid_through_200(self, team_client_factory):
         """#2323: a subscriber's memberships are NOT free slots — the paid
         org-B door survives (the former 'sanctioned second team for Q5'
-        path, now entitlement-gated like POST /v1/teams)."""
-        from tortoise.hosted_api import get_current_team_session
+        path, now entitlement-gated like POST /v1/organizations)."""
+        from tortoise.hosted_api import get_current_org_session
         tc, fake = team_client_factory
         _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
         _seed_membership(fake, "team-paid")
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
-            FREE_TEAM, team_id="team-parent-001", tier="free",
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-parent-001", tier="free",
             session_user_id=_USER1)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
@@ -296,18 +441,18 @@ class TestCreateTeamEntitlement:
         free user whose one-shot marker is armed gets 409, never 402."""
         from tortoise.hosted_api import (
             _update_onboarding_state,
-            get_current_team_session,
+            get_current_org_session,
         )
         tc, fake = team_client_factory
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        dep = dict(FREE_TEAM, team_id="team-parent-001", tier="free",
+        dep = dict(FREE_TEAM, org_id="team-parent-001", tier="free",
                    session_user_id=_USER1)
         # arm the marker directly (as the lane does post-mint) — the parent
         # row must exist for the onboarding_state write to land.
         _seed_team(fake, "team-parent-001")
-        _update_onboarding_state("team-parent-001", team_created=True)
-        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
+        _update_onboarding_state("team-parent-001", org_created=True)
+        app.dependency_overrides[get_current_org_session] = lambda: dict(dep)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 409
         assert "already created" in r.json()["detail"]
@@ -350,19 +495,94 @@ def reg_client(monkeypatch):
             app.dependency_overrides.clear()
 
 
-def _reg_seed(reg, team_id: str, tier: str = "free"):
+def _reg_seed(reg, org_id: str, tier: str = "free"):
     reg.query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
-        params={"id": team_id, "tier": tier},
+        params={"id": org_id, "tier": tier},
     )
 
 
-def _reg_member(reg, team_id: str, user_id: str = _USER1):
+def _reg_member(reg, org_id: str, user_id: str = _USER1,
+                role: str = "owner"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id},
+        params={"uid": user_id, "tid": org_id, "role": role},
     )
+
+
+def _owned_ids(user_id: str) -> list[str]:
+    """#2789: the async ownership helper, wrapped for sync test callers."""
+    import asyncio as _a
+
+    from tortoise.hosted_api import _owned_free_org_ids
+    return _a.run(_owned_free_org_ids(user_id))
+
+
+class TestRegistryOwnedFreeOrgs:
+    """#2789 registry (selfhost) lane: the ownership twin over Membership/
+    Team nodes. `tier='free'` is the no-subscription proxy; a
+    `subscription_status='pending_payment'` Team node is excluded."""
+
+    def test_owner_of_free_team_counted(self, reg_client):
+        _tc, reg = reg_client
+        _reg_seed(reg, "team-free-r")
+        _reg_member(reg, "team-free-r")
+        assert _owned_ids(_USER1) == ["team-free-r"]
+
+    def test_collaborator_not_counted(self, reg_client):
+        """The motivating regression, registry lane."""
+        _tc, reg = reg_client
+        _reg_seed(reg, "team-free-r")
+        _reg_member(reg, "team-free-r", role="member")
+        assert _owned_ids(_USER1) == []
+
+    def test_member_role_does_not_block_create(self, reg_client):
+        tc, reg = reg_client
+        _reg_seed(reg, "team-free-r")
+        _reg_member(reg, "team-free-r", role="member")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _USER1, "email": "owner@example.com"}
+        try:
+            r = tc.post("/v1/organizations", json={"name": "my-own-org"})
+        finally:
+            app.dependency_overrides.clear()
+        assert r.status_code == 200, r.text
+
+    def test_owner_of_paid_team_not_counted(self, reg_client):
+        _tc, reg = reg_client
+        _reg_seed(reg, "team-pro-r", tier="pro")
+        _reg_member(reg, "team-pro-r")
+        assert _owned_ids(_USER1) == []
+
+    def test_pending_payment_excluded(self, reg_client):
+        _tc, reg = reg_client
+        _reg_seed(reg, "team-free-r")
+        reg.query("MATCH (t:Team {id:'team-free-r'}) "
+                  "SET t.subscription_status='pending_payment'")
+        _reg_member(reg, "team-free-r")
+        assert _owned_ids(_USER1) == []
+
+    def test_tierless_legacy_team_fail_closed(self, reg_client):
+        """A tier-less legacy Team node counts as free (parity with the
+        #1877 twin's `tier IS NULL` fail-closed branch)."""
+        _tc, reg = reg_client
+        reg.query("CREATE (t:Team {id:'team-legacy', name:'team-legacy'})")
+        _reg_member(reg, "team-legacy")
+        assert _owned_ids(_USER1) == ["team-legacy"]
+
+    def test_blank_org_id_placeholder_skipped(self, reg_client):
+        """A trigger placeholder membership (org_id='') is never an org."""
+        _tc, reg = reg_client
+        _reg_member(reg, "")
+        assert _owned_ids(_USER1) == []
+
+    def test_other_users_membership_not_counted(self, reg_client):
+        _tc, reg = reg_client
+        _reg_seed(reg, "team-free-r")
+        _reg_member(reg, "team-free-r",
+                    user_id="9f2c1a40-0000-4a00-8000-000000000099")
+        assert _owned_ids(_USER1) == []
 
 
 class TestRegistryEntitlement:
@@ -386,11 +606,11 @@ class TestRegistryEntitlement:
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "owner@example.com"}
         try:
-            r = tc.post("/v1/teams", json={"name": "blocked"})
+            r = tc.post("/v1/organizations", json={"name": "blocked"})
         finally:
             app.dependency_overrides.clear()
         assert r.status_code == 402
-        assert _UPGRADE_MSG in r.json()["detail"]
+        _assert_capped(r.json()["detail"], org_id="team-free-r")
         rows = reg.query("MATCH (t:Team {name:'blocked'}) RETURN count(t)").result_set
         assert rows[0][0] == 0, "no team must be minted when gated"
 
@@ -404,14 +624,14 @@ class TestRegistryEntitlement:
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "owner@example.com"}
         try:
-            r = tc.post("/v1/teams", json={"name": "acme"})
+            r = tc.post("/v1/organizations", json={"name": "acme"})
         finally:
             app.dependency_overrides.clear()
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
 
     def test_create_team_keyless_registry(self, reg_client):
-        """#1921 registry-lane parity: POST /v1/teams provisions KEYLESS
+        """#1921 registry-lane parity: POST /v1/organizations provisions KEYLESS
         (mint_key=False, the create_onboarding_team #1716 shape) — no tt_
         mint, no api_key hash on the Team node, no APIKey node. The old
         default mint persisted a hash whose plaintext was never returned
@@ -420,13 +640,13 @@ class TestRegistryEntitlement:
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "owner@example.com"}
         try:
-            r = tc.post("/v1/teams", json={"name": "keyless"})
+            r = tc.post("/v1/organizations", json={"name": "keyless"})
         finally:
             app.dependency_overrides.clear()
         assert r.status_code == 200, r.text
         body = r.json()
         assert "key" not in body  # the response never carries a key
-        tid = body["team_id"]
+        tid = body["org_id"]
         rows = reg.query(
             "MATCH (t:Team {id:$tid}) RETURN t.id, t.api_key",
             params={"tid": tid},
@@ -434,7 +654,7 @@ class TestRegistryEntitlement:
         assert len(rows) == 1
         assert rows[0][1] is None  # no dead key hash on the Team node
         n_keys = reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) RETURN count(k)",
+            "MATCH (k:APIKey {org_id:$tid}) RETURN count(k)",
             params={"tid": tid},
         ).result_set[0][0]
         assert n_keys == 0  # no APIKey node minted for the team
@@ -448,7 +668,7 @@ class TestRegistryEntitlement:
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "owner@example.com"}
         try:
-            r1 = tc.post("/v1/teams", json={"name": "first"})
+            r1 = tc.post("/v1/organizations", json={"name": "first"})
             assert r1.status_code == 200, r1.text
             # the owner membership landed (primed the gate)
             rows = reg.query(
@@ -456,7 +676,7 @@ class TestRegistryEntitlement:
                 "RETURN count(m)", params={"uid": _USER1},
             ).result_set
             assert rows[0][0] == 1, "team_create must create the owner membership"
-            r2 = tc.post("/v1/teams", json={"name": "second"})
+            r2 = tc.post("/v1/organizations", json={"name": "second"})
             assert r2.status_code == 402
         finally:
             app.dependency_overrides.clear()
@@ -478,17 +698,17 @@ def _clear_locks():
     asyncio.run loops, so clear them between tests to avoid cross-loop
     RuntimeError."""
     import tortoise.hosted_api as _ha
-    _ha._TEAM_CREATE_LOCKS.clear()
+    _ha._ORG_CREATE_LOCKS.clear()
     yield
-    _ha._TEAM_CREATE_LOCKS.clear()
+    _ha._ORG_CREATE_LOCKS.clear()
 
 
 class TestConcurrentTeamCreationTOCTOU:
     """#1954 — the "one free team" check+provision is read-then-write:
-    concurrent POST /v1/teams (or /v1/onboarding/team) requests can all
+    concurrent POST /v1/organizations (or /v1/onboarding/team) requests can all
     read count==0 (and the 429 owner-membership count sees 0 too) then all
     provision → multiple free teams. The fix is an in-process per-user
-    asyncio lock (_team_create_lock) around the check+provision in every
+    asyncio lock (_org_create_lock) around the check+provision in every
     create_team lane + the onboarding re-entry guard.
 
     NOTE (review P1, honest framing): the single-process hosted lane's
@@ -511,8 +731,8 @@ class TestConcurrentTeamCreationTOCTOU:
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://test") as ac:
                 r1, r2 = await asyncio.gather(
-                    ac.post("/v1/teams", json={"name": "alpha"}),
-                    ac.post("/v1/teams", json={"name": "beta"}),
+                    ac.post("/v1/organizations", json={"name": "alpha"}),
+                    ac.post("/v1/organizations", json={"name": "beta"}),
                 )
                 return r1, r2
 
@@ -520,13 +740,13 @@ class TestConcurrentTeamCreationTOCTOU:
         statuses = sorted((r1.status_code, r2.status_code))
         assert statuses == [200, 402], (r1.text, r2.text)
         denied = r1 if r1.status_code == 402 else r2
-        assert _UPGRADE_MSG in denied.json()["detail"]
+        _assert_capped(denied.json()["detail"])
         # exactly one team minted + exactly one owner membership (the gate
         # is primed — a third sequential create would 402 too)
-        teams = fake.query("teams")
+        teams = fake.query("organizations")
         minted = [t for t in teams if t.get("name") in ("alpha", "beta")]
         assert len(minted) == 1, f"expected exactly one minted team: {minted}"
-        mems = fake.query("team_memberships",
+        mems = fake.query("org_memberships",
                           filters=[("user_id", "eq", _USER1)])
         assert len(mems) == 1, "exactly one owner membership must exist"
 
@@ -534,7 +754,7 @@ class TestConcurrentTeamCreationTOCTOU:
         """Registry (selfhost) lane — same invariant. NOTE: the registry
         lane may run MULTI-PROCESS; the in-process lock is the single-
         process guard, DB-level enforcement is the multi-process backstop
-        (documented in _team_create_lock)."""
+        (documented in _org_create_lock)."""
         _tc, reg = reg_client
         import asyncio
 
@@ -548,8 +768,8 @@ class TestConcurrentTeamCreationTOCTOU:
                 async with httpx.AsyncClient(transport=transport,
                                              base_url="http://test") as ac:
                     r1, r2 = await asyncio.gather(
-                        ac.post("/v1/teams", json={"name": "gamma"}),
-                        ac.post("/v1/teams", json={"name": "delta"}),
+                        ac.post("/v1/organizations", json={"name": "gamma"}),
+                        ac.post("/v1/organizations", json={"name": "delta"}),
                     )
                     return r1, r2
 
@@ -559,7 +779,7 @@ class TestConcurrentTeamCreationTOCTOU:
         statuses = sorted((r1.status_code, r2.status_code))
         assert statuses == [200, 402], (r1.text, r2.text)
         denied = r1 if r1.status_code == 402 else r2
-        assert _UPGRADE_MSG in denied.json()["detail"]
+        _assert_capped(denied.json()["detail"])
         rows = reg.query(
             "MATCH (t:Team) WHERE t.name IN ['gamma','delta'] RETURN count(t)"
         ).result_set
@@ -575,10 +795,10 @@ class TestConcurrentTeamCreationTOCTOU:
         concurrent double-call must mint exactly ONE sub-team (second gets
         the 409 "Sub-team already created" — different names so the
         duplicate-name 409 cannot mask the guard)."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         _tc, fake = team_client_factory
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
-            FREE_TEAM, team_id="team-free-001", tier="free",
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-free-001", tier="free",
             session_user_id=_USER1)
         import asyncio
 
@@ -605,7 +825,7 @@ class TestConcurrentTeamCreationTOCTOU:
         denied = r1 if r1.status_code == 409 else r2
         assert "already created" in denied.json()["detail"]
         # exactly one sub-team minted (main team-free-001 + one sub-team row)
-        teams = fake.query("teams")
+        teams = fake.query("organizations")
         minted = [t for t in teams
                   if t.get("name") in ("subalpha", "subbeta")]
         assert len(minted) == 1, f"expected exactly one sub-team: {minted}"
@@ -615,10 +835,10 @@ class TestConcurrentTeamCreationTOCTOU:
         same user's concurrent check+provision calls serialize; different
         users do NOT share a lock (a single global lock would serialize
         every tenant's team creation)."""
-        from tortoise.hosted_api import _team_create_lock
-        same_a = _team_create_lock("user-a")
-        same_b = _team_create_lock("user-a")
-        other = _team_create_lock("user-b")
+        from tortoise.hosted_api import _org_create_lock
+        same_a = _org_create_lock("user-a")
+        same_b = _org_create_lock("user-a")
+        other = _org_create_lock("user-b")
         assert same_a is same_b, "same user must share the lock"
         assert same_a is not other, "different users must not share a lock"
 
@@ -630,10 +850,10 @@ class TestConcurrentTeamCreationTOCTOU:
         while the first is still inside, and the strict ordering fails."""
         import asyncio
 
-        from tortoise.hosted_api import _team_create_lock
+        from tortoise.hosted_api import _org_create_lock
 
         async def _run():
-            lock = _team_create_lock(_USER1)
+            lock = _org_create_lock(_USER1)
             order = []
 
             async def holder():

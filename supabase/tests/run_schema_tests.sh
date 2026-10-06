@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # run_schema_tests.sh — SQL-level RLS + constraint tests for migrations
-# 0006–0009 (issue #769): teams, api_keys, invitations, team_memberships
+# 0006–0009 (issue #769): organizations, api_keys, invitations, org_memberships
 # extension, audit_events.actor_user_id → TEXT, column-level protection.
 #
 # What it does:

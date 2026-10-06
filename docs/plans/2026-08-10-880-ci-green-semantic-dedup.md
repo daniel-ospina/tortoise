@@ -271,17 +271,17 @@ Roundtrip test (replaces the bare `result_set[0][0]` at line ~634):
     # iteration opens a FRESH SDK handle: a cached projection would reload
     # the RDB only at server start, so re-querying the same handle can never
     # see a key written after boot (inert poll — verifier finding, 2026-08-10).
-    team_id = None
+    org_id = None
     for _ in range(10):
         probe = TortoiseSDK(namespace="registry")
         rows = probe._get_registry().query(
-            "MATCH (k:APIKey) RETURN k.team_id").result_set
+            "MATCH (k:APIKey) RETURN k.org_id").result_set
         probe.close()
         if rows:
-            team_id = rows[0][0]
+            org_id = rows[0][0]
             break
         time.sleep(1.0)
-    assert team_id is not None, "registry key not visible after 10s (cross-process handoff)"
+    assert org_id is not None, "registry key not visible after 10s (cross-process handoff)"
     sdk = TortoiseSDK(namespace="registry")
 ```
 

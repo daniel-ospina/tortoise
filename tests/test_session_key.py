@@ -3,7 +3,7 @@
 Epic: 2026-08-07-tortoise-user-journeys · Issue: #570 (D3)
 Plan §6.2 E1 + §6.6 APIKey extension: bootstrap (24h, cap-exempt, 3-active
 backstop) vs recovery (persistent, revocable, counts against max_api_keys,
-auto-revoke-oldest at cap). get_current_team rejects expired keys.
+auto-revoke-oldest at cap). get_current_org rejects expired keys.
 """
 from __future__ import annotations
 
@@ -34,12 +34,12 @@ def sdk():
 
 class TestE1SessionKey:
     def test_recovery_key_persistent_and_counts_against_cap(self, sdk):
-        team = sdk.team_create("recovery-team")
+        team = sdk.org_create("recovery-team")
         # (E1 endpoint itself is FastAPI-level; here we verify the APIKey node
         # schema supports expires_at/created_via that E1 writes, and that the
         # tier cap is readable so E1 can enforce it)
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:'e1test', team_id:$tid, key_hash:'h', key_prefix:'tt_', "
+            "CREATE (k:APIKey {id:'e1test', org_id:$tid, key_hash:'h', key_prefix:'tt_', "
             "created_by:'u', created_at:'2026-08-07', revoked_at:null, "
             "expires_at:null, created_via:'recovery'})",
             params={"tid": team["id"]},
@@ -51,9 +51,9 @@ class TestE1SessionKey:
         assert rows[0][1] == "recovery"
 
     def test_bootstrap_key_carries_expiry(self, sdk):
-        team = sdk.team_create("boot-team")
+        team = sdk.org_create("boot-team")
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:'boot1', team_id:$tid, key_hash:'h', key_prefix:'tt_', "
+            "CREATE (k:APIKey {id:'boot1', org_id:$tid, key_hash:'h', key_prefix:'tt_', "
             "created_by:'u', created_at:'2026-08-07', revoked_at:null, "
             "expires_at:'2026-08-08T00:00:00+00:00', created_via:'bootstrap'})",
             params={"tid": team["id"]},
@@ -68,4 +68,4 @@ class TestE1SessionKey:
         # E1 reads tier_limits to enforce recovery-key cap
         lim = pricing.tier_limits("free")
         assert lim["max_api_keys"] == 2
-        assert pricing.has_overage("pro") and not pricing.has_overage("solo")
+        assert pricing.has_overage("pro") and pricing.has_overage("solo")

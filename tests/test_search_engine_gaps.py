@@ -18,6 +18,7 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
@@ -93,8 +94,8 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
 
 _uri_candidates = [
     os.environ.get("TORTOISE_DB_URI"),
-    "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-    "docker://:@localhost:16379/tortoise_test_fts125",
+    _live_utils.docker_uri("tortoise_test_fts125"),
+    _live_utils.legacy_uri("tortoise_test_fts125"),
 ]
 FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb(_uri_candidates)
 
@@ -107,7 +108,8 @@ def _current_uri() -> str:
     per-test isolation. Falls back to the module-probe _WORKING_URI only if
     the env var is unset.
     """
-    return os.environ.get("TORTOISE_DB_URI") or (_WORKING_URI or "docker://localhost:6379/tortoise_test_fts125")
+    return os.environ.get("TORTOISE_DB_URI") or (_WORKING_URI or _live_utils.docker_uri(
+        "tortoise_test_fts125", password=None))
 
 
 # ── Mock helpers ────────────────────────────────────────────────────────────
@@ -213,8 +215,8 @@ class TestProbeFalkordb:
         try:
             candidates = [
                 os.environ.get("TORTOISE_DB_URI"),
-                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-                "docker://:@localhost:16379/tortoise_test_fts125",
+                _live_utils.docker_uri("tortoise_test_fts125"),
+                _live_utils.legacy_uri("tortoise_test_fts125"),
             ]
             available, working_uri = _probe_falkordb(candidates)
             assert available is True
@@ -231,8 +233,8 @@ class TestProbeFalkordb:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         candidates = [
             None,  # os.environ.get returns None
-            "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-            "docker://:@localhost:16379/tortoise_test_fts125",
+            _live_utils.docker_uri("tortoise_test_fts125"),
+            _live_utils.legacy_uri("tortoise_test_fts125"),
         ]
         available, working_uri = _probe_falkordb(candidates)
         # Either available (if a localhost FalkorDB is running) or not —
@@ -268,8 +270,8 @@ class TestProbeFalkordb:
         try:
             candidates = [
                 os.environ.get("TORTOISE_DB_URI"),
-                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-                "docker://:@localhost:16379/tortoise_test_fts125",
+                _live_utils.docker_uri("tortoise_test_fts125"),
+                _live_utils.legacy_uri("tortoise_test_fts125"),
             ]
             available, working_uri = _probe_falkordb(candidates)
             assert available is False
@@ -355,6 +357,57 @@ class TestFallbackTfidf:
         with mock.patch("tortoise.embeddings.search_points", return_value=mock_results) as sp:
             fallback_tfidf("query", points, limit=3)
             sp.assert_called_once_with("query", points, threshold=0.0, limit=3)
+
+    def test_heavy_imports_are_serialized(self, monkeypatch):
+        """#5718: the sparse sklearn import and the embedder's torch import
+        cannot overlap.
+
+        scipy's array-API dispatch peeks ``sys.modules['torch']`` and then does
+        an UNGUARDED ``getattr(mod, 'Tensor')``, so a torch that is mid-import
+        in another thread breaks a *cold* sklearn import with
+        ``AttributeError: partially initialized module 'torch' ...`` — which
+        ``fallback_tfidf`` then swallows, returning no hits. Both heavy imports
+        take the one lock in ``tortoise.heavy_imports``; this pins that the
+        sparse side AND the load side actually do, which is what closes the
+        race. The lock itself has a single home in that leaf module; the two
+        helpers ``embeddings`` itself calls stay importable from ``embeddings``,
+        and the cross-encoder helper is taken from the leaf.
+        """
+        import sys as _sys
+        import threading as _threading
+        import types as _types
+
+        from tortoise import embeddings as _emb
+        from tortoise import heavy_imports as _hi
+
+        acquired: list[str] = []
+
+        class _SpyLock:
+            def __enter__(self):
+                acquired.append(_threading.current_thread().name)
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        # Keep the load-side call fast and deterministic — only the LOCK
+        # behaviour is pinned here, not the import itself.
+        fake_st = _types.ModuleType("sentence_transformers")
+        fake_st.SentenceTransformer = object
+        fake_st.CrossEncoder = object
+        monkeypatch.setitem(_sys.modules, "sentence_transformers", fake_st)
+        # Patch the LOCK AT ITS ONE HOME (the leaf module): the helpers read
+        # ``heavy_imports._HEAVY_IMPORT_LOCK`` at call time.
+        monkeypatch.setattr(_hi, "_HEAVY_IMPORT_LOCK", _SpyLock())
+
+        assert _emb.import_tfidf_vectorizer() is not None
+        assert _emb.import_sentence_transformer() is fake_st.SentenceTransformer
+        assert _hi.import_cross_encoder() is fake_st.CrossEncoder
+
+        assert acquired == [_threading.current_thread().name] * 3, (
+            "a heavy import ran outside the shared heavy-import lock — the "
+            "cold-sklearn vs mid-import-torch race is open again"
+        )
 
 
 # ── degradation_chain ───────────────────────────────────────────────────────
@@ -599,12 +652,15 @@ class TestRunVectorQuery:
         graph = MultiCallGraph([
             (None, Exception(
                 "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
-            ([("a", 0.95), ("b", 0.8)], None),
+            # Sig B's rows carry the engine's DISTANCE (#5583), so these are
+            # distances: 0.05 is a near row, 0.8 a far one.
+            ([("a", 0.05), ("b", 0.8)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("a", 0.95), ("b", 0.8)]
+        assert [pid for pid, _ in result] == ["a", "b"]
+        assert [s for _, s in result] == pytest.approx([0.95, 0.2])
         assert len(graph.query_calls) == 2
         sig_b = graph.query_calls[1][0]
         assert "YIELD node, score" in sig_b
@@ -612,16 +668,25 @@ class TestRunVectorQuery:
         assert "vec.euclideanDistance" not in sig_b
 
     def test_docker_mode_signature_b_scores_clamped_to_non_negative(self):
-        """#1359: engine-native cosine scores outside [0, 1] are clamped
-        so RRF/single-strategy ordering stays sane."""
+        """#1359 / #5583: sig B's engine value is a DISTANCE, and the
+        similarity derived from it is clamped to [0, 1] so RRF and
+        single-strategy ordering stay sane.
+
+        A cosine distance lives in [0, 2]: 0.0 is a perfect match
+        (similarity 1.0), and 1.0 or beyond is unrelated or opposed
+        (similarity 0.0). The clamp therefore bites at the FAR end. The
+        pre-#5583 fixture used ``-0.2``, which is not a distance at all — it
+        was written against the (unmeasured) belief that the engine returns a
+        similarity.
+        """
         graph = MultiCallGraph([
             (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 1.4), ("b", -0.2)], None),
+            ([("a", 2.4), ("b", 0.0)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("a", 1.0), ("b", 0.0)]
+        assert result == [("a", 0.0), ("b", 1.0)]
 
     def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
         """#1359: sig A 'not registered' AND sig B fails → brute-force is
@@ -645,13 +710,14 @@ class TestRunVectorQuery:
         graph = MultiCallGraph([
             (None, Exception(
                 "Procedure `db.idx.vector.queryNodes` is not registered")),
-            ([("evt-1", 0.9)], None),
+            ([("evt-1", 0.9)], None),      # a DISTANCE (#5583)
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, entity_type="event", is_embedded=False)
 
-        assert result == [("evt-1", 0.9)]
+        assert [pid for pid, _ in result] == ["evt-1"]
+        assert [s for _, s in result] == pytest.approx([0.1])
         assert len(graph.query_calls) == 2
         assert "queryNodes('Event'," in graph.query_calls[0][0]
         assert "queryNodes('Event'," in graph.query_calls[1][0]
@@ -662,13 +728,14 @@ class TestRunVectorQuery:
         """vector_index_api='cypher' → sig B attempted directly; sig A is
         NOT attempted (index creation recorded the Cypher-native API — the
         failed sig-A round trip is skipped)."""
-        graph = SimpleMockGraph(result_set=[("a", 0.95), ("b", 0.8)])
+        graph = SimpleMockGraph(result_set=[("a", 0.05), ("b", 0.8)])  # distances (#5583)
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="cypher")
 
-        assert result == [("a", 0.95), ("b", 0.8)]
+        assert [pid for pid, _ in result] == ["a", "b"]
+        assert [s for _, s in result] == pytest.approx([0.95, 0.2])
         assert len(graph.query_calls) == 1  # no failed sig-A attempt
         only = graph.query_calls[0][0]
         assert "YIELD node, score" in only
@@ -708,18 +775,21 @@ class TestRunVectorQuery:
 
     def test_none_api_keeps_probe_behavior(self):
         """vector_index_api=None → sig A first, retry sig B on signature
-        failure (historical probe behavior)."""
+        failure (historical probe behavior).
+
+        Sig B's rows are DISTANCES and come back as similarities (#5583).
+        """
         graph = MultiCallGraph([
             (None, Exception(
                 "Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 1.4), ("b", -0.2)], None),
+            ([("a", 2.4), ("b", 0.0)], None),
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api=None)
 
-        assert result == [("a", 1.0), ("b", 0.0)]
+        assert result == [("a", 0.0), ("b", 1.0)]
         assert len(graph.query_calls) == 2
 
     def test_docker_mode_generic_error_falls_back_to_brute_force(self):
@@ -960,8 +1030,9 @@ class TestRunFtsQuery:
 
         assert result == []
 
-    def test_entity_type_document_uses_document_label(self):
-        """#193: entity_type='document' → queryNodes('Document') + node.id."""
+    def test_entity_type_document_uses_source_label_and_url(self):
+        """D10 (#5026): a document is a :Source, so entity_type='document'
+        queries queryNodes('Source') and returns node.url."""
         graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
 
         result = run_fts_query(graph, "test", entity_type="document")
@@ -969,8 +1040,8 @@ class TestRunFtsQuery:
         assert len(result) == 1
         assert result[0][0] == "doc-1"
         cypher = graph.query_calls[0][0]
-        assert "queryNodes('Document'" in cypher
-        assert "node.id" in cypher
+        assert "queryNodes('Source'" in cypher
+        assert "node.url" in cypher
 
     def test_entity_type_object_uses_object_label(self):
         """#193: entity_type='object' → queryNodes('Object') + node.id."""
@@ -1456,7 +1527,9 @@ class TestFilterByTraversalPredicateEntityType:
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_index_created():
-    """#125: Document._searchText FTS index exists after projection init."""
+    """#125 / D10: the document _searchText FTS index exists after projection
+    init. D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg
+    rides the Source label (the :Document label is retired)."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
@@ -1464,24 +1537,28 @@ def test_document_fts_index_created():
     proj._ensure_indexes()
     # db.indexes() output: [label, properties, ...] — label is col 0, props col 1
     rows = proj.g.query("CALL db.indexes()").result_set
-    found = any(r[0] == "Document" and "_searchText" in r[1] for r in rows)
+    found = any(r[0] == "Source" and "_searchText" in r[1] for r in rows)
     proj.close()
-    assert found, f"Document _searchText FTS index missing: {rows[:3]}"
+    assert found, f"Source _searchText FTS index missing: {rows[:3]}"
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_backfill_document_search_text():
-    """#125: backfill sets _searchText=title on pre-existing Documents."""
+    """#125 / D10: backfill sets _searchText=title on pre-existing document
+    Sources. D10 (ONTOLOGY v3.15 §4.4): the document node is a :Source keyed
+    ``url``, so the fixture creates a doc Source and the backfill (which
+    targets Sources with ``documentKind IS NOT NULL``) picks it up."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
-    # Create a Document WITHOUT _searchText (simulating pre-125)
+    # Create a document Source WITHOUT _searchText (simulating pre-125)
     proj.g.query(
-        "CREATE (d:Document {id:'old-1', title:'Old Doc', documentKind:'transcript'})"
+        "CREATE (s:Source {url:'old-1', id:'old-1', title:'Old Doc', "
+        "documentKind:'transcript'})"
     )
     n = proj.backfill_document_search_text()
-    rows = proj.g.query("MATCH (d:Document {id:'old-1'}) RETURN d._searchText").result_set
+    rows = proj.g.query("MATCH (s:Source {url:'old-1'}) RETURN s._searchText").result_set
     proj.close()
     assert n >= 1, f"backfill returned {n}"
     assert rows and rows[0][0] == "Old Doc", rows
@@ -1489,7 +1566,10 @@ def test_backfill_document_search_text():
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_search_by_topic():
-    """#125: Document FTS on _searchText returns sessions matching a topic."""
+    """#125 / D10: document FTS on _searchText returns docs matching a topic.
+    D10 (ONTOLOGY v3.15 §4.4): the document node is a :Source keyed ``url``,
+    so the fixture creates a doc Source; the ``document`` entity_type is still
+    the surface under test (a document is a Source, not a separate label)."""
     from tortoise.projection import FalkorProjection  # noqa: I001
     import tortoise.search_engine as se
     proj = FalkorProjection.from_uri(
@@ -1497,7 +1577,7 @@ def test_document_fts_search_by_topic():
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     proj.g.query(
-        "CREATE (d:Document {id:'doc-t1', title:'Licensing Talk', "
+        "CREATE (s:Source {url:'doc-t1', id:'doc-t1', title:'Licensing Talk', "
         "documentKind:'transcript', _searchText:'Licensing Talk Compared AGPL licenses'})"
     )
     try:
@@ -1514,17 +1594,17 @@ def test_document_fts_search_by_topic():
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_structural_topic_any():
-    """#125: any() list filter matches topics on Document nodes."""
+    """#125 + D10 (#5026): any() list filter matches topics on document Sources."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.g.query(
-        "CREATE (d:Document {id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
+        "CREATE (d:Source {url:'doc-a', id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
     )
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE any(t IN d.topics WHERE t = 'licensing') RETURN d.id"
+            "MATCH (d:Source) WHERE any(t IN d.topics WHERE t = 'licensing') RETURN d.url"
         ).result_set
         assert any(r[0] == "doc-a" for r in rows), rows
     finally:
@@ -1878,3 +1958,402 @@ class TestBreakerProbeRecovery:
         for _ in range(5):
             assert run_vector_query(no_emb, self.QUERY_VEC, is_embedded=True) == []
         assert not _breaker("vector").is_open()
+
+
+# ── #5026 D10: document/source partition on EVERY retrieval leg ────────────
+
+class TestSourceDocumentDiscriminator:
+    """D10 (#5026): a document IS a :Source, and TWO :Source shapes coexist —
+    the document node (``documentKind`` non-NULL) and the corpus/provenance
+    Source (``documentKind`` NULL, ``sourceKind`` set). The three retrieval
+    legs must agree on the partition:
+
+        entity_type="document" ⟺ ``documentKind IS NOT NULL``
+        entity_type="source"   ⟺ ``documentKind IS NULL``
+
+    — the same axis as quota.py's ``documents`` meter and
+    ``sdk.list_sources()``. Without the predicate the FTS leg (Source
+    ``_searchText`` index) and the vector leg (Source label) return BOTH
+    shapes, so a non-document Source consumes a pool slot before LIMIT."""
+
+    QUERY_VEC = [0.1] * 384
+
+    # ── FTS leg ──────────────────────────────────────────────────────
+
+    def test_fts_document_discriminates(self):
+        """entity_type='document' → node.documentKind IS NOT NULL, ahead of LIMIT."""
+        graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="document")
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NOT NULL" in cypher
+        # retrieval layer: the predicate is composed ahead of the LIMIT (a
+        # post-filter after the limit would leave the pool slot consumed).
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_fts_source_discriminates(self):
+        """entity_type='source' → node.documentKind IS NULL, ahead of LIMIT."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="source")
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_fts_point_leg_unchanged(self):
+        """The discriminator is scoped to the Source label — Point untouched."""
+        graph = SimpleMockGraph(result_set=[("p1", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="point")
+        assert "documentKind" not in graph.query_calls[0][0]
+
+    # ── Vector leg (brute-force + HNSW signatures) ───────────────────
+
+    def test_vector_brute_force_document_discriminates(self):
+        """Brute-force document query → n.documentKind IS NOT NULL before the LIMIT."""
+        graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="document",
+                         is_embedded=True)
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NOT NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_brute_force_source_discriminates(self):
+        """Brute-force source query → n.documentKind IS NULL before the LIMIT."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md", 0.9)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="source",
+                         is_embedded=True)
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_hnsw_document_discriminates(self):
+        """HNSW document query → node.documentKind IS NOT NULL after YIELD."""
+        graph = SimpleMockGraph(result_set=[("doc-1",)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="document",
+                         is_embedded=False)
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NOT NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_hnsw_source_discriminates(self):
+        """HNSW source query → node.documentKind IS NULL after YIELD."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="source",
+                         is_embedded=False)
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    # ── Structural leg ───────────────────────────────────────────────
+
+    def test_structural_source_discriminates(self):
+        """entity_type='source' → n.documentKind IS NULL joins the WHERE."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        run_structural_query(graph, kind="agentSession", entity_type="source")
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_structural_document_arm_discriminates_via_kind_field(self):
+        """The document arm's kind_field IS documentKind — `n.documentKind =
+        $kind` is already a non-NULL discriminator (never :Document)."""
+        graph = SimpleMockGraph(result_set=[("doc-1",)])
+        run_structural_query(graph, kind="brief", entity_type="document")
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind = $kind" in cypher
+        assert ":Document" not in cypher
+
+    def test_structural_source_without_kind_still_early_returns(self):
+        """The discriminator must never become the SOLE condition that fires
+        a full-label scan — a kind-less structural call keeps main's [] return."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        assert run_structural_query(
+            graph, kind=None, entity_type="source") == []
+        assert graph.query_calls == []
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+def test_source_document_partition_every_leg():
+    """#5026 D10 regression (the escape test). On a graph holding ONE
+    document Source (``documentKind`` non-NULL) AND ONE provenance Source
+    (``documentKind`` NULL, ``sourceKind`` set), every retrieval leg
+    partitions the two shapes:
+
+        entity_type="document" -> the document ONLY (never the provenance)
+        entity_type="source"   -> the provenance ONLY (never the document)
+
+    Both nodes carry ``_searchText`` AND an embedding, so the pre-fix FTS and
+    vector legs return BOTH — the ``provenance NOT returned for document``
+    assertion is what fails without the fix."""
+    from tortoise.projection import FalkorProjection  # noqa: I001
+    import tortoise.search_engine as se
+
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_d10_{os.urandom(4).hex()}")
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+
+    DOC_URL = "doc-licensing"
+    PROV_URL = "corpus://x/licensing.md"
+    _VEC = [0.1, 0.1, 0.1, 0.1]
+    proj.g.query(
+        "CREATE (d:Source {url:$url, id:$url, title:'Licensing Brief', "
+        "documentKind:'brief', _searchText:'Licensing Brief'}) "
+        "SET d.embedding = vecf32($v)",
+        params={"url": DOC_URL, "v": _VEC},
+    )
+    proj.g.query(
+        "CREATE (s:Source {url:$url, id:'prov-1', title:'Licensing Corpus', "
+        "sourceKind:'agentSession', _searchText:'Licensing Corpus'}) "
+        "SET s.embedding = vecf32($v)",
+        params={"url": PROV_URL, "v": _VEC},
+    )
+    try:
+        reset_circuit_breakers()
+
+        # ── FTS leg ──
+        doc_hits = se.run_fts_query(
+            proj.g, "licensing", entity_type="document")
+        doc_ids = [h[0] for h in doc_hits]
+        assert doc_ids == [DOC_URL], doc_hits
+        # ESCAPE assertion — the provenance Source must NOT surface here.
+        assert PROV_URL not in doc_ids, doc_hits
+
+        src_hits = se.run_fts_query(
+            proj.g, "licensing", entity_type="source")
+        src_ids = [h[0] for h in src_hits]
+        assert src_ids == [PROV_URL], src_hits
+        assert DOC_URL not in src_ids, src_hits
+
+        # ── Vector leg (brute-force: the embedded lane) ──
+        v_doc = se.run_vector_query(
+            proj.g, _VEC, entity_type="document", is_embedded=True, limit=20)
+        assert [h[0] for h in v_doc] == [DOC_URL], v_doc
+        v_src = se.run_vector_query(
+            proj.g, _VEC, entity_type="source", is_embedded=True, limit=20)
+        assert [h[0] for h in v_src] == [PROV_URL], v_src
+
+        # ── Structural leg + the "document with kind" happy path ──
+        s_doc = se.run_structural_query(
+            proj.g, kind="brief", entity_type="document")
+        assert [h[0] for h in s_doc] == [DOC_URL], s_doc
+        s_src = se.run_structural_query(
+            proj.g, kind="agentSession", entity_type="source")
+        assert [h[0] for h in s_src] == [PROV_URL], s_src
+    finally:
+        proj.close()
+
+
+# ── #H05: the FTS creation FORM is engine-version-dependent ────────────────
+# FalkorDB 6.0.0 (what `falkordb-server:latest` resolves to, module ver 60000)
+# rejects the historical multi-field procedure:
+#     Received 3 arguments to procedure 'db.idx.fulltext.createNodeIndex',
+#     expected at most 1
+# and the old code swallowed that into a WARNING and continued — the index was
+# simply absent and full-text search degraded silently (observed on PR #6266,
+# run 36517265610, job test-slow (b)). `CREATE FULLTEXT INDEX FOR (n:Label)
+# ON (n.f1, n.f2)` is accepted by 4.16.7 / 4.20.4 / 4.20.6 / 6.0.0, so it is
+# the primary form and the procedure stays as the fallback. These are DB-free
+# guards for that order and for the reporting level.
+
+
+class _FakeProjection:
+    """Just enough projection for the index-creation helpers."""
+
+    def __init__(self, graph):
+        self.g = graph
+
+
+class TestFulltextIndexCreationForm:
+    """#H05: DDL-first, procedure-fallback, and no silent skip."""
+
+    @staticmethod
+    def _proj(graph):
+        from tortoise.projection import FalkorProjection
+        return FalkorProjection, _FakeProjection(graph)
+
+    def test_ddl_form_is_tried_first(self):
+        proj_cls, proj = self._proj(MultiCallGraph([([], None)]))
+        proj_cls._create_fulltext_index(proj, "Point", ["content", "search_keys"])
+        assert [c[0] for c in proj.g.query_calls] == [
+            "CREATE FULLTEXT INDEX FOR (n:Point) ON (n.content, n.search_keys)",
+        ]
+
+    def test_procedure_fallback_on_the_6_0_arity_rejection(self):
+        """6.0.0's exact error must fall back to the procedure form."""
+        arity = Exception(
+            "Received 3 arguments to procedure "
+            "'db.idx.fulltext.createNodeIndex', expected at most 1")
+        proj_cls, proj = self._proj(MultiCallGraph([([], arity), ([], None)]))
+        proj_cls._create_fulltext_index(proj, "Event", ["subject", "name"])
+        assert [c[0] for c in proj.g.query_calls] == [
+            "CREATE FULLTEXT INDEX FOR (n:Event) ON (n.subject, n.name)",
+            "CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')",
+        ]
+
+    def test_already_indexed_re_raises_verbatim_and_skips_fallback(self):
+        """The one-time migration branches match on the 'already' text."""
+        already = Exception("Attribute 'content' is already indexed")
+        proj_cls, proj = self._proj(MultiCallGraph([([], already)]))
+        with pytest.raises(Exception, match="already indexed"):
+            proj_cls._create_fulltext_index(
+                proj, "Point", ["content", "search_keys"])
+        assert len(proj.g.query_calls) == 1
+
+    def test_both_forms_failing_raises_with_both_causes(self):
+        proj_cls, proj = self._proj(MultiCallGraph([
+            ([], Exception("Invalid input 'CREATE FULLTEXT'")),
+            ([], Exception("Unknown function 'db.idx.fulltext.createNodeIndex'")),
+        ]))
+        with pytest.raises(RuntimeError) as ei:
+            proj_cls._create_fulltext_index(proj, "Source", ["_searchText"])
+        msg = str(ei.value)
+        assert "no supported FULLTEXT index creation form" in msg
+        # BOTH causes must survive: the RuntimeError carries the per-form
+        # errors so an operator can tell which engine failed and how.
+        assert "Invalid input" in msg, msg
+        assert "Unknown function" in msg, msg
+
+    def test_failure_is_reported_at_error_not_warning(self, caplog):
+        """#H05: the swallow was a WARNING; it must be an ERROR naming the
+        consequence, so a missing index is visible at the point of failure."""
+        from tortoise.projection import FalkorProjection
+        with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+            FalkorProjection._report_fulltext_index_failure(
+                "Source", ["_searchText"], RuntimeError("no such procedure"))
+        records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert records, caplog.records
+        message = records[0].getMessage()
+        assert "Source" in message and "DEGRADED" in message
+        # The CONSEQUENCE is the part an operator acts on, so bind it too --
+        # the presentation was previously unasserted, which is how a wrong
+        # one survived a suite run.
+        assert "empty_results" in message, message
+
+    def test_ensure_indexes_reports_at_the_call_site(self, caplog):
+        """#H05 review: exercising the helper directly is NOT proof that the
+        CALL SITE reports.
+
+        Regression guard for the gap the reviewer found: revert
+        ``_ensure_indexes``'s non-`already` branch to the old WARNING and THIS
+        test reds, while every other test in this class stays green (they only
+        ever call ``_create_fulltext_index`` / ``_report_...`` directly). Drives
+        the real ``_ensure_indexes`` with a graph whose BOTH creation forms fail
+        for the Source label, i.e. the branch that decides whether a missing
+        index is visible at the point of failure.
+        """
+        from tortoise.projection import FalkorProjection
+        graph = StrategyControlledGraph({
+            # The DDL is tried first and the procedure second because
+            # _create_fulltext_index iterates its OWN `forms` tuple in that
+            # order -- NOT because of this dict's ordering: each query below
+            # contains exactly one key, so map order is irrelevant here.
+            # (2nd review: the earlier comment credited first-match-wins,
+            # which would mislead a maintainer into thinking reordering this
+            # dict changes the production order.)
+            "CREATE FULLTEXT INDEX": (
+                [], RuntimeError("Invalid input 'CREATE FULLTEXT'")),
+            "db.idx.fulltext.createNodeIndex": (
+                [], RuntimeError("Unknown function 'db.idx.fulltext.createNodeIndex'")),
+        })
+        proj = object.__new__(FalkorProjection)
+        proj.g = graph
+        proj._falkordb_version = (6, 0, 0)
+        proj._is_embedded = False
+        with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+            proj._ensure_indexes()
+        messages = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.ERROR]
+        assert any("Source" in m and "DEGRADED" in m for m in messages), messages
+
+    def test_migration_without_a_drop_procedure_warns_not_errors(self, caplog):
+        """#H05 2nd review: the migration branch has TWO outcomes and they are
+        not equivalent, so they must not share a level.
+
+        When the drop procedure is absent (embedded FalkorDBLite -- the case
+        the drop loop's own comment calls covered), the legacy content-only
+        index REMAINS and nothing is degraded; logging that as ERROR on every
+        boot would dilute the very #H05 signal this PR exists to sharpen. It
+        must be a WARNING, and the ERROR arm must NOT fire.
+        """
+        from tortoise.projection import FalkorProjection
+        already = RuntimeError("Attribute 'content' is already indexed")
+        graph = StrategyControlledGraph({
+            # both drop forms fail -> `dropped` stays False
+            "CALL db.idx.fulltext.drop": ([], RuntimeError("unknown procedure")),
+            # the DDL re-raises 'already' verbatim (no fallback attempted),
+            # which is what routes into the migration branch at all
+            "CREATE FULLTEXT INDEX": ([], already),
+        })
+        proj = object.__new__(FalkorProjection)
+        proj.g = graph
+        proj._falkordb_version = (6, 0, 0)
+        proj._is_embedded = True
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+            proj._ensure_indexes()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("MIGRATION could not run for Point" in m for m in msgs), msgs
+        assert not any(
+            "MIGRATION for Point" in m and "DROPPED" in m for m in msgs
+        ), msgs
+        # ...and the LEVEL is what this test is actually about: the benign
+        # path must not be ERROR. Asserting the message text alone is not
+        # enough -- caplog captures ERROR records under the same text, so the
+        # text assertion survives a warning->error mutation (proved).
+        skipped = [r for r in caplog.records
+                   if "MIGRATION could not run for Point" in r.getMessage()]
+        assert skipped, msgs
+        assert all(r.levelno == logging.WARNING for r in skipped), [
+            (r.levelno, r.getMessage()) for r in skipped
+        ]
+
+    @pytest.mark.parametrize(
+        "created,dropped,exc,level,fragment",
+        [
+            # The index IS in place; only the one-time marker failed to
+            # persist. Reporting this at ERROR would dilute the signal.
+            (
+                True, True, RuntimeError("marker write failed"),
+                logging.WARNING, "the index IS in place",
+            ),
+            # The drop reported success, yet the recreate still answers
+            # "already": an index EXISTS, just not the intended form. The
+            # engine's own words refute an absence claim here.
+            (
+                False, True,
+                RuntimeError("Attribute 'content' is already indexed"),
+                logging.WARNING, "an index IS present, but NOT the intended",
+            ),
+            # The ONLY case where the label is genuinely left without the
+            # intended index: the drop returned without error, the recreate
+            # failed. (The message must not claim more: `dropped` records that
+            # the drop call did not raise, not that it removed anything.)
+            (
+                False, True, RuntimeError("boom"),
+                logging.ERROR, "is left without the intended",
+            ),
+            # The drop never ran at all -> the legacy index REMAINS. Note
+            # the cause here is a marker-read failure, NOT a missing drop
+            # procedure, so the message must not blame the drop procedure.
+            (
+                False, False, RuntimeError("marker read failed"),
+                logging.WARNING, "legacy content-only index REMAINS",
+            ),
+        ],
+    )
+    def test_classify_fts_migration_failure_levels(
+        self, created, dropped, exc, level, fragment
+    ):
+        """#H05 3rd review: the migration report must state what is TRUE.
+
+        The drop -> recreate -> marker sequence produces four distinct
+        outcomes; the round-2 code keyed the level on `dropped` alone and so
+        asserted "NO full-text index" even when the recreate had succeeded
+        and only the marker write failed (reproduced by that review), and
+        blamed a missing drop procedure even when the failure preceded the
+        drop loop. The decision is pure, so all four arms are asserted here.
+        """
+        from tortoise.projection import FalkorProjection
+        got_level, msg = FalkorProjection._classify_fts_migration_failure(
+            "Point", created, dropped, exc
+        )
+        assert got_level == level, (got_level, msg)
+        assert fragment in msg, msg

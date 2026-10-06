@@ -123,7 +123,11 @@ def decode_key(raw: str, *, env_name: str | None = None) -> bytes:
     try:
         key = base64.b64decode(raw.strip(), validate=True)
     except Exception as e:
-        raise KeyStoreError(f"{label} must be base64-encoded (got {raw[:8]!r}...): {e}") from e
+        # #2796 review (R2/R4): never echo the raw value — a malformed key is
+        # still secret material. Fingerprints are the ONLY key identity that may
+        # reach logs (see key_fingerprint).
+        got = sha256(raw.strip().encode()).hexdigest()[:_FP_HEX]
+        raise KeyStoreError(f"{label} must be base64-encoded (got <{got}>...): {e}") from e
     if len(key) != _AES_KEY_SIZE:
         raise KeyStoreError(f"{label} must decode to {_AES_KEY_SIZE} bytes (got {len(key)})")
     return key

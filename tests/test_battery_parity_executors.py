@@ -153,6 +153,17 @@ class TestCliExecutionSeam:
                                 revision="xiaowu0162/longmemeval-cleaned@s#abc")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _fake_executor)
+        # #3005 P1: the memoryagentbench family now has TWO pinned cells
+        # (full-context + retrieved-context). Stub both to explicit
+        # unavailability: this test is about the CLI execution seam for
+        # longmemeval, and the real lanes would otherwise attempt paid
+        # reader calls (network/spend) — hermetic by construction.
+        def _no_runner(*, mock=False, limit=None, out_dir=None):
+            raise ExecutorUnavailable("hermetic test: no real runner")
+
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench", _no_runner)
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise",
+                            _no_runner)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
                        "--out", str(tmp_path), "--execute", "--allow-spend",
                        "--limit", "5"])
@@ -199,6 +210,11 @@ class TestCliExecutionSeam:
             raise ExecutorUnavailable("longmemeval: no dataset here")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
+        # #3005 P1: stub the second (retrieved-context) memoryagentbench
+        # cell too — it is now dispatched by the pinned loop and would
+        # otherwise run the real lane (network/spend).
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise",
+                            _unavailable)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
                        "--out", str(tmp_path), "--execute", "--allow-spend"])
         assert rc == 0, "an unavailable executor must not crash the leg"
@@ -209,6 +225,78 @@ class TestCliExecutionSeam:
 
     def test_registry_contains_longmemeval(self):
         assert "longmemeval" in EXECUTORS
+
+    def test_execute_persists_the_measured_spend_and_its_basis(
+            self, tmp_path, monkeypatch):
+        """#2919 — the measured spend AND how it was derived survive into
+        ``parity_record.json``.
+
+        Driven through the shipped CLI + the shipped MemoryAgentBench
+        Tortoise mock executor (only the pinned corpus loader and the reader
+        are stubbed): the assertion is on the persisted values, so a record
+        that dropped ``detail`` fails here. A spend figure is meaningless
+        without its basis, so both are asserted together.
+        """
+        import battery.cli as cli
+        import battery.parity.executors as ex
+        import battery.parity.mabench as mabench_mod
+        from battery.parity.mabench import CrConfig, CrItem
+
+        pool = ("Here is a list of facts:\n"
+                "0. Thomas Kyd was born in the city of London.\n"
+                "306. Thomas Kyd was born in the city of Leeds.")
+        items = tuple(
+            CrItem(qa_pair_id=f"q{i}", config="c",
+                   question="Where was Thomas Kyd born?",
+                   accepted=("Leeds",))
+            for i in range(3))
+        monkeypatch.setattr(
+            mabench_mod, "load_cr",
+            lambda config, path=None: CrConfig(config=config, context=pool,
+                                               items=items))
+
+        class _MeteredReader:
+            """The shipped mock reader with the usage contract filled in.
+            The executor derives spend/basis from these, so the record can
+            only carry the values if they travelled the shipped path."""
+
+            PROMPT_TOKENS = 1000
+            COMPLETION_TOKENS = 100
+            #: Deliberately NOT the token-basis price, so "provider-reported"
+            #: and "estimated" can never be confused by a passing test.
+            PROVIDER_COST = 0.0009
+
+            last_prompt_tokens = PROMPT_TOKENS
+            last_completion_tokens = COMPLETION_TOKENS
+            last_cost_usd = PROVIDER_COST
+
+            def call(self, *, prompt):
+                return "Answer: unknown"
+
+        monkeypatch.setattr(ex, "_MockReader", _MeteredReader)
+        # The released LongMemEval runner would hit the network; this test is
+        # about detail persistence, so it stays explicitly unavailable.
+        def _unavailable(*, mock=False, limit=None, out_dir=None):
+            raise ExecutorUnavailable("hermetic test: no real runner")
+
+        monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
+
+        rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
+                       "--out", str(tmp_path), "--execute", "--mock",
+                       "--limit", "3"])
+        assert rc == 0
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        cell = record["benchmarks"]["memoryagentbench_tortoise"]
+        assert cell["measured"] is True, "three questions were asked"
+        assert cell["spend_usd"] == pytest.approx(
+            _MeteredReader.PROVIDER_COST * 3)
+        assert cell["cost_basis"] == "provider_reported", (
+            "the provider's own charge was used — the record must say so")
+        assert cell["calls"] == 3
+        assert cell["config"] == "factconsolidation_sh_6k"
+        # A benchmark with no executed cell records absence, never a 0.0.
+        assert record["benchmarks"]["locomo"]["spend_usd"] is None
+        assert record["benchmarks"]["locomo"]["cost_basis"] is None
 
 
 def _touch(p: Path) -> Path:

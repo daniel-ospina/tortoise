@@ -8,8 +8,9 @@ Usage:
 
 Runs against EVERY graph namespace that could carry the edge: the URI-default
 graph (derived exactly as sdk.py does — ``urlparse(uri).path.lstrip('/') or
-"tortoise"``), plus ``*_tortoise`` (registry/selfhost) and ``team_*`` (hosted
-tenant) graphs from ``list_graphs()``. ``--graphs`` overrides the filter with
+"tortoise"``), plus ``*_tortoise`` (registry/selfhost) and the hosted-tenant
+namespace form — ``org_*`` since #3543, ``team_*`` before it — from
+``list_graphs()``. ``--graphs`` overrides the filter with
 an explicit list. Dry-run selects and counts only; live mode converts per
 graph with per-graph try/except so one graph's failure leaves others intact.
 Re-running is safe: after a live run every graph reports zero remaining
@@ -17,9 +18,19 @@ INSTANTIATES edges.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/migrate_instantiates_to_about.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/migrate_instantiates_to_about.py`"
+    )
+
 import argparse
 import os
-import sys
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -51,7 +62,10 @@ def target_graphs(uri: str, explicit: list[str] | None) -> tuple[list[str], list
     targets = []
     excluded = []
     for g in all_graphs:
-        if g == uri_graph or g.endswith("_tortoise") or g.startswith("team_"):
+        # #3543: tenant graphs are `org_*` post-rename and `team_*` before
+        # it (no data migration rewrites the namespace) — target both.
+        if (g == uri_graph or g.endswith("_tortoise")
+                or g.startswith(("org_", "team_"))):
             targets.append(g)
         else:
             excluded.append(g)

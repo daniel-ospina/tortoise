@@ -42,6 +42,11 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GH_REPO: daniel-ospina/tortoise
+      # Review finding (Config/R2b): Actions does NOT export GITHUB_TOKEN into
+      # step envs — the `permissions: issues: write` grant was dead because the
+      # driver read an empty GH_TOKEN and every incident POST/close 401'd, so
+      # the "loud" channel silently filed nothing.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BACKUP_STALE_THRESHOLD_MIN: "90"
       BACKUP_DRIVER_DOWN_THRESHOLD_MIN: "240"
     steps:

@@ -83,7 +83,7 @@ def _cell_key(session_id: str, fixture: dict, gold: dict) -> str:
     """
     team = fixture.get("team")
     if team:
-        return f"team_{team}"
+        return f"org_{team}"
     if fixture.get("suite") == "continuity" or gold.get("suite") == "continuity":
         spec = (gold.get("continuity") or {})
         writer = spec.get("writer_session") or session_id
@@ -327,9 +327,12 @@ def cell_points(sdk) -> list[dict]:
     (team B content written into team A's graph still stamps team B's
     eventId), so the isolation pass reads the whole cell."""
     proj = sdk._get_proj()
+    # Share write_path's projection — cell_points reads the WHOLE cell (no eids
+    # filter) but must never re-declare the column list: a private copy drifted
+    # to 9 columns when is_operator landed and broke every isolation pass
+    # (ValueError: not enough values to unpack (expected 10, got 9)).
     rows = proj.g.query(
-        "MATCH (p:Point) RETURN p.id, p.content, p.eventId, p.extractedFrom, "
-        "p.status, p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic"
+        f"MATCH (p:Point) RETURN {wp.MEMORY_ROW_COLUMNS}"
     ).result_set
     points: list[dict] = []
     for row in rows:
@@ -651,9 +654,9 @@ def run_benchmark(
         })
         graded_teams: set[str] = set()
         for key in sorted(cells):
-            if not key.startswith("team_"):
+            if not key.startswith("org_"):
                 continue
-            team = key[len("team_"):]
+            team = key[len("org_"):]
             if team not in iso_teams:
                 continue
             sid = iso_sids_for(ordered, root, team)

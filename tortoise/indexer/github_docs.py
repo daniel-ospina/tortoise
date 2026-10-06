@@ -12,8 +12,8 @@ circuits the whole walk), per-path **blob-sha dedup** (only changed blobs
 are fetched — ``GET /repos/{repo}/git/blobs/{sha}``, base64 → UTF-8).
 
 Phase 2 (stage): changed blobs are written under
-``{TORTOISE_INGEST_BASE_DIR}/{team_id}/{repo}/...`` (team-partitioned —
-team A blobs are never picked up by team B, T2-P2b). The staged corpus is
+``{TORTOISE_INGEST_BASE_DIR}/{org_id}/{repo}/...`` (org-partitioned —
+org A blobs are never picked up by org B, T2-P2b). The staged corpus is
 then ingested by the deterministic corpus pipeline (``index_directory`` —
 ``compute_file_hash`` dedup, ``derive_document_id``, classification), so an
 unchanged re-ingest produces 0 new nodes (falsification (f)).
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # never trips on a file this fetcher staged.
 MAX_DOCS_BLOB_BYTES = 1024 * 1024  # 1 MiB
 
-# Path-segment validation for server-owned staging: team_id / repo
+# Path-segment validation for server-owned staging: org_id / repo
 # segments must be conservative safe tokens (no traversal, no slashes).
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -117,35 +117,35 @@ class GitHubDocsIndexer(GitHubIndexer):
         return os.path.realpath(os.path.expanduser(raw))
 
     @classmethod
-    def team_root(cls, team_id: str) -> Path:
-        """{base}/{team_id} — the team-partitioned ingest root.
+    def org_root(cls, org_id: str) -> Path:
+        """{base}/{org_id} — the org-partitioned ingest root.
 
         This is the CORPUS ROOT for the deterministic ingest: rel-paths
         embed ``{owner}/{repo}/docs/...`` so doc ids are REPO-UNIQUE (two
         repos with identical docs paths never share a Document node — the
         derive_document_id path-collision edge)."""
         base = cls._ingest_base()
-        return Path(base) / _safe_segment(team_id, "team_id")
+        return Path(base) / _safe_segment(org_id, "org_id")
 
     @classmethod
-    def _team_paths(cls, team_id: str, repo: str,
+    def _org_paths(cls, org_id: str, repo: str,
                     branch_label: str) -> tuple[Path, Path]:
-        """(corpus_dir, manifest_path) under the team partition.
+        """(corpus_dir, manifest_path) under the org partition.
 
         #1845 (review P2-2): ALWAYS branch-qualified by the RESOLVED branch
         (branch_used after the main→master fallback). corpus_dir =
-        {base}/{team_id}/{owner}/{repo}/{branch} — files at
+        {base}/{org_id}/{owner}/{repo}/{branch} — files at
         corpus_dir/docs/...; doc ids embed the branch so two branches with
         the same docs/ path never share a Document node, and a default walk
         vs "all branches" re-index of the same repo NEVER duplicates (same
         content → same resolved branch → same doc id). There is no legacy
         unqualified layout.
 
-        manifest = {base}/{team_id}/.manifest/{owner}/{name}/{branch}.json
+        manifest = {base}/{org_id}/.manifest/{owner}/{name}/{branch}.json
         (server-owned meta, OUTSIDE the indexed file set — non-md, ignored
         by the walk).
         """
-        team = cls.team_root(team_id)
+        org = cls.org_root(org_id)
         parts = repo.split("/", 1)
         if len(parts) != 2:
             raise GitHubFetchError(f"invalid repo full-name {repo!r}")
@@ -163,8 +163,8 @@ class GitHubDocsIndexer(GitHubIndexer):
             safe_branch = re.sub(
                 r"[^A-Za-z0-9._-]", "_", branch_label)
             safe_branch = f"{safe_branch}-{hashlib.sha1(branch_label.encode('utf-8')).hexdigest()[:8]}"
-        return (team / owner / name / safe_branch,
-                team / ".manifest" / owner / name / f"{safe_branch}.json")
+        return (org / owner / name / safe_branch,
+                org / ".manifest" / owner / name / f"{safe_branch}.json")
 
     @staticmethod
     def _load_manifest(manifest_path: Path) -> dict:
@@ -285,9 +285,9 @@ class GitHubDocsIndexer(GitHubIndexer):
 
     # ── top-level entry ────────────────────────────────────────────
 
-    async def walk_repo(self, team_id: str, repo: str, *,
+    async def walk_repo(self, org_id: str, repo: str, *,
                         branch: str = "main") -> dict:
-        """Fetch + stage ONE repo's ``docs/`` under the team partition.
+        """Fetch + stage ONE repo's ``docs/`` under the org partition.
 
         #1845: the corpus + manifest are ALWAYS branch-qualified by the
         RESOLVED branch (branch_used after the main→master fallback), so
@@ -296,7 +296,7 @@ class GitHubDocsIndexer(GitHubIndexer):
         → same branch label → same doc id). Review P2-2: there is no legacy
         unqualified layout — the one-time re-derivation is safe because no
         docs were ever indexed before this shipped (github_docs_indexed was
-        false for every connected team; the old connect bug 404'd every
+        false for every connected org; the old connect bug 404'd every
         org-scoped walk).
 
         Returns stats (see the module docstring for the guard semantics).
@@ -323,8 +323,8 @@ class GitHubDocsIndexer(GitHubIndexer):
             stats["tree_sha"] = tree.get("sha")
             # #1845: branch-qualified paths keyed on the RESOLVED branch
             # (see the docstring — always qualified, no legacy layout).
-            corpus_dir, manifest_path = self._team_paths(
-                team_id, repo, branch_label=branch_used)
+            corpus_dir, manifest_path = self._org_paths(
+                org_id, repo, branch_label=branch_used)
             stats["staged_corpus"] = str(corpus_dir)
             manifest = self._load_manifest(manifest_path)
             stats["tree_truncated"] = bool(tree.get("truncated"))

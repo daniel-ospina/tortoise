@@ -55,10 +55,18 @@ class _SpendMeter:
     reserve_usd: float | None = None
     total_usd: float = 0.0
     calls: int = 0
+    #: #2906 — how the priced calls got their cost (review #2915 P2: the judge
+    #: spend figure was the one persisted number with no provenance label).
+    provider_calls: int = 0
+    estimated_calls: int = 0
 
     def record(self, call: JudgeCall) -> None:
         self.total_usd += float(call.cost_usd or 0.0)
         self.calls += 1
+        if getattr(call, "cost_basis", "estimated") == "provider_reported":
+            self.provider_calls += 1
+        else:
+            self.estimated_calls += 1
         if self.reserve_usd is not None and self.total_usd > self.reserve_usd:
             raise ConfigError(
                 f"judge-leg reserve exceeded: ${self.total_usd:.4f} spent > "
@@ -250,4 +258,11 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
 
 
 def meter_report(meter: _SpendMeter) -> dict:
-    return {"judge_calls": meter.calls, "judge_spend_usd": meter.total_usd}
+    return {"judge_calls": meter.calls, "judge_spend_usd": meter.total_usd,
+            # Never asserts provenance with nothing behind it: a run that
+            # priced no calls reads "estimated", matching the recorder and
+            # probe manifest rules.
+            "cost_basis": (
+                "estimated" if not (meter.provider_calls or meter.estimated_calls)
+                else "provider_reported" if not meter.estimated_calls
+                else "mixed" if meter.provider_calls else "estimated")}

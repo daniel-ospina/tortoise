@@ -41,7 +41,7 @@ Edge cases covered: empty corpus (harness refuses, CLI exit 5, §6); arm API dow
 | Workflow | Steps | Automation | Manual trigger | Surfaces |
 |---|---|---|---|---|
 | W1 Battery execution | corpus load (refuse if empty) → arm isolation init → Tier-1 probes (matched pairs) → Tier-2 streams → Tier-3 sweep → artifacts | Full run automation, pinned seeds | Launch command | S1–S4, S7, S8 |
-| W2 Matched-recall pre-pass | factual probe subset → top-K F1 (K=5) per arm → symmetric trigger (any arm ≥0.10 F1 below corpus-best) → balanced subset or INCONCLUSIVE (<50%) | Automatic before reasoning battery | None (pre-committed) | S4, S5, S8 |
+| W2 Matched-recall pre-pass | factual probe subset → top-K F1 (K=5) per arm → symmetric trigger (any arm ≥0.10 F1 below corpus-best) → balanced subset or INCONCLUSIVE (<50%) — *“any arm” is now read as `trigger_population` (`{a1, a2, a2b, a3, a4}`; `a0` excluded — amended 2026-09-12, #3327; original wording preserved; see §3.2.1/§7 of `docs/benchmarks/comparison-systems.md`)* | Automatic before reasoning battery | None (pre-committed) | S4, S5, S8 |
 | W3 Judge validation | per-rubric AB+BA (p<0.05), chance-corrected reliability (≥0.7), IRT item-infit (0.7–1.3), stress set (single-anchor, all-identical anchors, contradictory anchors) → pass/block; validation record → run artifact | Automatic gate before scoring; mid-stream re-validation on rubric change | Analyst triggers on rubric change | S6 |
 | W4 Verdict assembly | aggregate profile → classify metrics → apply verdict rule (all 4 branches) → mitigation paths → artifacts list; missing metric → report-incomplete flag (never fabricated) | Automatic from run artifacts | PO sign-off on claim wording | S6, S7 |
 | W5 Weakness mitigation loop | pick WEAK → engineer implements → re-run battery → compare profile | Re-run automated | Engineer per weakness | S1–S8 |
@@ -97,6 +97,14 @@ Verdict: MECHANISM-NOT-UNIQUE (no empirically-contested STRONG on load-bearing a
 Differentiators: none contested — R1/R4 structural only
 Weaknesses: R5 PARITY (mitigation: EP damping re-calibration, re-run in loop)
 Matched recall: F1 0.91 all arms (K=5, corpus-best 0.92, no trigger)
+      (AMENDMENT 2026-09-13, #3346: ILLUSTRATIVE MOCK OUTPUT — the line above is
+      reproduced verbatim from the plan-time mock and is NOT a contract
+      statement. "F1 0.91 all arms" is not literally producible: a0's recall is
+      0.0 by construction (`battery/arms/a0_plain.py:26-27`), so "all arms"
+      cannot share one F1, and a0 is excluded from the trigger population
+      `{a1, a2, a2b, a3, a4}` (amended 2026-09-12, #3327 — see §3.2.1/§7 of
+      `docs/benchmarks/comparison-systems.md`). The real matched-recall block
+      lands with #1416's real run.)
 Artifacts changed on non-UNIQUE: positioning copy, product-success-eval claim section, graph-as-memory annex
 ```
 
@@ -244,7 +252,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **Assert:** contamination detected; run flagged as run-level error; affected deltas excluded; no silent inclusion (S4 flag).
 
 **E2E-3.7 — INCONCLUSIVE driven branch**
-**Setup:** arms with divergent recall F1 (one arm ≥0.10 F1 below corpus-best → trigger fires; balanced subset <50%).
+**Setup:** arms with divergent recall F1 (one arm ≥0.10 F1 below corpus-best → trigger fires; balanced subset <50%). — *“one arm” is now read as `trigger_population` (`{a1, a2, a2b, a3, a4}`; `a0` excluded — amended 2026-09-12, #3327; original wording preserved; see §3.2.1/§7 of `docs/benchmarks/comparison-systems.md`). This fixture is the decision record's a0-driven positive control: a0's recall is 0.0 by construction (`battery/arms/a0_plain.py:26-27`), so a0 is the arm that keeps the matched-recall detector tested; the trigger-population wiring this fixture exercises is tracked by #3327. — ⚠️ **ADDENDUM 2026-09-13, #3346 (annotation above preserved verbatim):** the wiring it calls "tracked by #3327" has since **landed** (PR #3439). `TRIGGER_POPULATION: tuple[str, ...] = ("a1", "a2", "a2b", "a3", "a4")` (`battery/recall/matcher.py:49`) is now the default of `match_recall`'s keyword-only `population` parameter (`matcher.py:206`), and `battery/recall/prepass.py` / `battery/runner/run.py` wire it into the run path. The a0-positive-control reading above still holds and now rests on an explicit surface: `population` is **caller-overridable**, so a0's control role remains expressible as a test-local population (`population=("a0", "a4")`), while the run-level default is the five comparators. The earlier belief that "no `trigger_population` constant exists" (recorded in #3437) is stale/false on current `main`; its two doc copies are corrected at `docs/agent-reasoning-eval-battery.md` and `docs/benchmarks/comparison-systems.md` §3.2.1/§7.*
 **Assert:** profile.json carries matched_recall.trigger_fired=true, subset_pct<50%; verdict=INCONCLUSIVE; report does not fabricate classifications; claim-not-shipped consequence documented (AC-D1 outcome d).
 
 ### Parity + gates (scope E2E-4, E2E-5)

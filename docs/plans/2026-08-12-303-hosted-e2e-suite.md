@@ -32,9 +32,9 @@ Skipped — zero new third-party deps. Everything used is in-repo or already in 
 | Billing | `/v1/billing/checkout`, `/webhooks/stripe` | HTTP + signed payloads | 3-D, 5-D, 8-D | sig verify (tampered → 400), idempotent apply, checkout unconfigured → 503, webhook unconfigured → 500 |
 | Tenant isolation | points/keys/sessions across 2 tenants | HTTP | 4-D | foreign-key 401, empty foreign reads |
 | Backup/restore | `/backups`, `/backups/restore` | HTTP (memory storage seam) | 5-D | 402 free gate, confirm guard, integrity |
-| Export/delete | `/v1/teams/{id}/export`, `DELETE /v1/teams/{id}` | HTTP (session JWT) | 6-D | 403 non-owner, 401 no-auth, 202 grace |
+| Export/delete | `/v1/organizations/{id}/export`, `DELETE /v1/organizations/{id}` | HTTP (session JWT) | 6-D | 403 non-owner, 401 no-auth, 202 grace |
 | Security baseline | auth matrix, `/health/security`, headers | HTTP | 7-D | 401 matrix, HSTS, pepper/hash posture |
-| Multi-team | `/v1/teams`, `/v1/invites`, members | HTTP (session JWT) | 8-D | RBAC 403, 409 dup invite |
+| Multi-team | `/v1/organizations`, `/v1/invites`, members | HTTP (session JWT) | 8-D | RBAC 403, 409 dup invite |
 | GitHub | `/v1/onboarding/github/*`, `/v1/index/github` | HTTP | 9-D | 503 unconfigured, 404 bad state |
 | Sessions | `/v1/sessions` | HTTP | 10-D | turn cap 400, quota 402 |
 | MCP | `/mcp` JSON-RPC over HTTP/SSE | HTTP | 11-D | 401 unauth, tool scoping |
@@ -76,7 +76,7 @@ Skipped — zero new third-party deps. Everything used is in-repo or already in 
 | E2E-5-D backup→restore | Pro tenant (webhook bump; pricing fixture `daily_backups:true`): POST /backups 201 → GET /backups lists → mutate graph → restore(confirm=true) → original content back | free tenant → 402; restore without confirm → 400; restore unknown backup_key → 400 |
 | E2E-6-D export+delete | tenant provisioned via `/internal/provision` (Team+APIKey+owner Membership, `created_by` = JWT sub — register creates NO Membership, so export's `_require_owner` would 403 otherwise); points written with the tt_ key; session-JWT owner export returns schema_version payload incl. points; DELETE team → 202 + grace semantics (subsequent reads 410/degraded) | export without JWT → 401; API-key (non-session) export → 401; foreign-owner JWT → 403 |
 | E2E-7-D security baseline | `/health/security` posture ok; HSTS header on responses; valid key → 200 | auth matrix: missing header/empty bearer/wrong prefix/invalid key → 401 (4 legs); `/internal/provision` without internal key → 401 |
-| E2E-8-D multi-team membership | session user creates two teams via POST /v1/teams (owner membership each); GET /v1/teams lists both; team bumped to `team` tier via signed webhook (STRIPE_PRICE_IDS has a team price) → invite → accept (JWT) → member listed; `/v1/session/key` mints a tt_ key for a session-created team | non-owner member cannot list/remove members (403); foreign-team key revocation → 403 ("Not your API key"); duplicate invite → 409; bad invite token → 400 |
+| E2E-8-D multi-team membership | session user creates two teams via POST /v1/organizations (owner membership each); GET /v1/organizations lists both; team bumped to `team` tier via signed webhook (STRIPE_PRICE_IDS has a team price) → invite → accept (JWT) → member listed; `/v1/session/key` mints a tt_ key for a session-created team | non-owner member cannot list/remove members (403); foreign-team key revocation → 403 ("Not your API key"); duplicate invite → 409; bad invite token → 400 |
 | E2E-9-D GitHub integration | connect (fake GITHUB_CLIENT_ID set) → auth_url + state; status → not-connected cleanly | connect on bare server (no GITHUB_CLIENT_ID) → 503; callback bad state → 404; index/github without connection → 400 |
 | E2E-10-D session capture | POST /v1/sessions (LLM mock mode) → session stored; GET /v1/sessions(+/{id}) shows turns→Points extraction | turn cap exceeded → 400; oversized turn content → 422; unauthenticated → 401 |
 | E2E-11-D MCP connect | initialize → tools/list (tortoise_* visible) → tools/call create_point → point readable via REST | no token → 401; non-tt_ token → 401; unknown tool → JSON-RPC error |
@@ -192,6 +192,6 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 ---
 
 <!-- plan-review: cycles=2 status=clean tier=standard reviewers=structural+integration+efficiency
-cycle-1: structural 5×P1 (membership gap→/internal/provision+POST /v1/teams path; e2e_small tier spec; team price id; bare server for unconfigured negatives; unknown-price semantics) + integration 4×P1 (invites team-tier gate; register-no-membership; cryptography NOT in .[test] closure; webhook unknown-price=200) + 8×P2/P3 — all fixed in doc
+cycle-1: structural 5×P1 (membership gap→/internal/provision+POST /v1/organizations path; e2e_small tier spec; team price id; bare server for unconfigured negatives; unknown-price semantics) + integration 4×P1 (invites team-tier gate; register-no-membership; cryptography NOT in .[test] closure; webhook unknown-price=200) + 8×P2/P3 — all fixed in doc
 cycle-2: efficiency P1 (TORTOISE_DB_URI scrub) + P2 (crash detection) + 2×P3 — fixed above
 -->

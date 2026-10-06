@@ -1,0 +1,535 @@
+{
+  "n_points": 533,
+  "queries": 12,
+  "phase_table": {
+    "query_encode": {
+      "n": 12,
+      "p50": 37.842,
+      "p95": 51.339,
+      "max": 51.339,
+      "mean": 34.543
+    },
+    "classify": {
+      "n": 12,
+      "p50": 0.001,
+      "p95": 0.003,
+      "max": 0.003,
+      "mean": 0.001
+    },
+    "detect_qtype": {
+      "n": 12,
+      "p50": 0.026,
+      "p95": 0.053,
+      "max": 0.053,
+      "mean": 0.029
+    },
+    "legs_wave": {
+      "n": 12,
+      "p50": 5.385,
+      "p95": 39.555,
+      "max": 39.555,
+      "mean": 12.788
+    },
+    "leg_fts": {
+      "n": 12,
+      "p50": 3.422,
+      "p95": 26.344,
+      "max": 26.344,
+      "mean": 7.354
+    },
+    "leg_vector": {
+      "n": 12,
+      "p50": 4.627,
+      "p95": 31.732,
+      "max": 31.732,
+      "mean": 10.771
+    },
+    "leg_structural": {
+      "n": 12,
+      "p50": 0.011,
+      "p95": 0.018,
+      "max": 0.018,
+      "mean": 0.012
+    },
+    "prf_expansion": {
+      "n": 12,
+      "p50": 0.716,
+      "p95": 2.0,
+      "max": 2.0,
+      "mean": 0.895
+    },
+    "fusion": {
+      "n": 1,
+      "p50": 0.0,
+      "p95": 0.0,
+      "max": 0.0,
+      "mean": 0.0
+    },
+    "post_ep_annotate": {
+      "n": 12,
+      "p50": 2.679,
+      "p95": 4.425,
+      "max": 4.425,
+      "mean": 2.915
+    },
+    "post_relationships": {
+      "n": 12,
+      "p50": 3.126,
+      "p95": 10.539,
+      "max": 10.539,
+      "mean": 3.873
+    },
+    "post_epistemic_state": {
+      "n": 12,
+      "p50": 3.529,
+      "p95": 14.89,
+      "max": 14.89,
+      "mean": 4.74
+    },
+    "post_ask_annotate": {
+      "n": 12,
+      "p50": 2.582,
+      "p95": 8.975,
+      "max": 8.975,
+      "mean": 3.203
+    },
+    "dedup": {
+      "n": 12,
+      "p50": 0.008,
+      "p95": 0.012,
+      "max": 0.012,
+      "mean": 0.008
+    },
+    "evidence_boost": {
+      "n": 12,
+      "p50": 0.209,
+      "p95": 0.235,
+      "max": 0.235,
+      "mean": 0.208
+    },
+    "assemble": {
+      "n": 12,
+      "p50": 0.536,
+      "p95": 0.839,
+      "max": 0.839,
+      "mean": 0.516
+    },
+    "render": {
+      "n": 12,
+      "p50": 0.098,
+      "p95": 0.112,
+      "max": 0.112,
+      "mean": 0.094
+    },
+    "token_estimate": {
+      "n": 12,
+      "p50": 8.903,
+      "p95": 10.101,
+      "max": 10.101,
+      "mean": 7.296
+    },
+    "rerank": {
+      "n": 12,
+      "p50": 0.007,
+      "p95": 0.014,
+      "max": 0.014,
+      "mean": 0.007
+    },
+    "reader": {
+      "n": 12,
+      "p50": 0.014,
+      "p95": 0.017,
+      "max": 0.017,
+      "mean": 0.014
+    }
+  },
+  "ask_total_stub": {
+    "n": 12,
+    "p50": 80.12,
+    "p95": 108.347,
+    "max": 108.347,
+    "mean": 76.124
+  },
+  "round_trips_per_query": {
+    "n": 12,
+    "p50": 10.0,
+    "p95": 10.0,
+    "max": 10.0,
+    "mean": 10.0
+  },
+  "by_caller": {
+    "run_vector_query": {
+      "n": 24,
+      "p50": 2.112,
+      "p95": 24.602,
+      "max": 29.554,
+      "mean": 5.365
+    },
+    "run_fts_query": {
+      "n": 12,
+      "p50": 3.321,
+      "p95": 26.256,
+      "max": 26.256,
+      "mean": 7.267
+    },
+    "_search_keys_prf_expansion": {
+      "n": 12,
+      "p50": 0.7,
+      "p95": 1.981,
+      "max": 1.981,
+      "mean": 0.879
+    },
+    "annotate_ep_batch": {
+      "n": 12,
+      "p50": 2.479,
+      "p95": 4.265,
+      "max": 4.265,
+      "mean": 2.741
+    },
+    "tortoise_fts_query": {
+      "n": 12,
+      "p50": 2.265,
+      "p95": 9.435,
+      "max": 9.435,
+      "mean": 3.802
+    },
+    "get_relationships_bounded": {
+      "n": 24,
+      "p50": 1.517,
+      "p95": 4.956,
+      "max": 8.156,
+      "mean": 1.864
+    },
+    "fetch_point_epistemic_state": {
+      "n": 12,
+      "p50": 3.474,
+      "p95": 14.825,
+      "max": 14.825,
+      "mean": 4.676
+    },
+    "annotate_ask_hits": {
+      "n": 12,
+      "p50": 2.428,
+      "p95": 8.787,
+      "max": 8.787,
+      "mean": 3.044
+    }
+  },
+  "post_retrieval_chain_ms": {
+    "n": 12,
+    "p50": 12.544,
+    "p95": 27.748,
+    "max": 27.748,
+    "mean": 14.188
+  },
+  "post_retrieval_chain_incl_entity_fetch_ms": {
+    "n": 12,
+    "p50": 17.547,
+    "p95": 29.733,
+    "max": 29.733,
+    "mean": 17.99
+  },
+  "real_reader": null,
+  "raw_per_query": [
+    {
+      "total_ms": 45.806167006958276,
+      "phases": {
+        "classify": 0.001333013642579317,
+        "query_encode": 18.217708013253286,
+        "leg_structural": 0.010666990419849753,
+        "leg_fts": 2.4444159935228527,
+        "leg_vector": 2.52604199340567,
+        "legs_wave": 3.1374170212075114,
+        "prf_expansion": 0.700041011441499,
+        "post_ep_annotate": 2.353792020585388,
+        "post_relationships": 2.398624987108633,
+        "post_epistemic_state": 2.92958298814483,
+        "post_ask_annotate": 2.51558399759233,
+        "dedup": 0.012250005966052413,
+        "evidence_boost": 0.23545799194835126,
+        "rerank": 0.01391599653288722,
+        "assemble": 0.6917920254636556,
+        "detect_qtype": 0.026583991711959243,
+        "render": 0.09945902274921536,
+        "token_estimate": 9.324209007900208,
+        "reader": 0.012459000572562218
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 86.48037500097416,
+      "phases": {
+        "classify": 0.0008750066626816988,
+        "query_encode": 40.65316601190716,
+        "leg_structural": 0.011124997399747372,
+        "leg_fts": 16.508583998074755,
+        "leg_vector": 16.202625003643334,
+        "legs_wave": 21.26325000426732,
+        "prf_expansion": 0.6674159958492965,
+        "post_ep_annotate": 4.424832994118333,
+        "post_relationships": 2.1737499919254333,
+        "post_epistemic_state": 2.863542002160102,
+        "post_ask_annotate": 2.5465000071562827,
+        "dedup": 0.006874994141981006,
+        "evidence_boost": 0.20987499738112092,
+        "rerank": 0.006084010237827897,
+        "assemble": 0.40950000402517617,
+        "detect_qtype": 0.048874993808567524,
+        "render": 0.08595900726504624,
+        "token_estimate": 8.02187598310411,
+        "reader": 0.016582984244450927
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 62.1757909830194,
+      "phases": {
+        "classify": 0.0019579892978072166,
+        "query_encode": 38.30383301828988,
+        "leg_structural": 0.011083000572398305,
+        "leg_fts": 2.7358329971320927,
+        "leg_vector": 2.586582995718345,
+        "legs_wave": 3.1231670000124723,
+        "prf_expansion": 0.5583330057561398,
+        "post_ep_annotate": 2.6786670205183327,
+        "post_relationships": 3.125957999145612,
+        "post_epistemic_state": 3.1205409904941916,
+        "post_ask_annotate": 2.348958980292082,
+        "dedup": 0.0072499969974160194,
+        "evidence_boost": 0.19949997658841312,
+        "rerank": 0.00662502134218812,
+        "assemble": 0.34324999433010817,
+        "detect_qtype": 0.026374997105449438,
+        "render": 0.09091699030250311,
+        "token_estimate": 4.846041032578796,
+        "reader": 0.013334007235243917
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 86.28270798362792,
+      "phases": {
+        "classify": 0.001374981366097927,
+        "query_encode": 43.65495897945948,
+        "leg_structural": 0.010457995813339949,
+        "leg_fts": 3.421957982936874,
+        "leg_vector": 13.182292022975162,
+        "legs_wave": 14.014166983542964,
+        "prf_expansion": 0.7164579874370247,
+        "post_ep_annotate": 2.7776659990195185,
+        "post_relationships": 2.781207993393764,
+        "post_epistemic_state": 3.356792003614828,
+        "post_ask_annotate": 2.9502079996746033,
+        "dedup": 0.007874972652643919,
+        "evidence_boost": 0.21516598644666374,
+        "rerank": 0.008458999218419194,
+        "assemble": 0.5361250077839941,
+        "detect_qtype": 0.052916002459824085,
+        "render": 0.11154200183227658,
+        "token_estimate": 6.628248986089602,
+        "reader": 0.014582998119294643
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 72.17400000081398,
+      "phases": {
+        "classify": 0.0012499804142862558,
+        "query_encode": 20.950542006175965,
+        "leg_structural": 0.010749994544312358,
+        "leg_fts": 16.883958014659584,
+        "leg_vector": 17.373832990415394,
+        "legs_wave": 17.96908298274502,
+        "prf_expansion": 0.608458009082824,
+        "post_ep_annotate": 2.432125009363517,
+        "post_relationships": 10.539209004491568,
+        "post_epistemic_state": 3.5788750101346523,
+        "post_ask_annotate": 2.3373340081889182,
+        "dedup": 0.007915979949757457,
+        "evidence_boost": 0.19970801076851785,
+        "rerank": 0.006375019438564777,
+        "assemble": 0.7079170027282089,
+        "detect_qtype": 0.02158299321308732,
+        "render": 0.09787501767277718,
+        "token_estimate": 8.902789966668934,
+        "reader": 0.014040997484698892
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 95.25625000242144,
+      "phases": {
+        "classify": 0.0017920101527124643,
+        "query_encode": 24.064666009508073,
+        "leg_structural": 0.017874990589916706,
+        "leg_fts": 26.34404198033735,
+        "leg_vector": 27.521457988768816,
+        "legs_wave": 39.55470799701288,
+        "prf_expansion": 2.000167005462572,
+        "post_ep_annotate": 2.565333998063579,
+        "post_relationships": 7.5515839853324,
+        "post_epistemic_state": 3.5294170083943754,
+        "post_ask_annotate": 2.412083005765453,
+        "dedup": 0.007333001121878624,
+        "evidence_boost": 0.20229199435561895,
+        "rerank": 0.006499991286545992,
+        "assemble": 0.6835419917479157,
+        "detect_qtype": 0.021791987819597125,
+        "render": 0.07487498805858195,
+        "token_estimate": 9.383039956446737,
+        "reader": 0.016125006368383765
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 108.34729199996218,
+      "phases": {
+        "classify": 0.0011659867595881224,
+        "query_encode": 37.84166698460467,
+        "leg_structural": 0.012042000889778137,
+        "leg_fts": 2.882333006709814,
+        "leg_vector": 31.731708004372194,
+        "legs_wave": 32.72545800427906,
+        "prf_expansion": 1.0712080111261457,
+        "post_ep_annotate": 3.82700000773184,
+        "post_relationships": 3.708208998432383,
+        "post_epistemic_state": 5.60070900246501,
+        "post_ask_annotate": 2.5817500136327,
+        "dedup": 0.007833994459360838,
+        "evidence_boost": 0.20058400696143508,
+        "rerank": 0.006375019438564777,
+        "assemble": 0.839374988572672,
+        "detect_qtype": 0.021374988136813045,
+        "render": 0.11220801388844848,
+        "token_estimate": 9.236166981281713,
+        "reader": 0.01262497971765697
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 64.78295801207423,
+      "phases": {
+        "classify": 0.00104197533801198,
+        "query_encode": 43.46154097584076,
+        "leg_structural": 0.011249998351559043,
+        "leg_fts": 2.7674169978126884,
+        "leg_vector": 3.18079098360613,
+        "legs_wave": 4.007791983895004,
+        "prf_expansion": 0.7658330141566694,
+        "post_ep_annotate": 2.2928329999558628,
+        "post_relationships": 2.2271249908953905,
+        "post_epistemic_state": 3.032666980288923,
+        "post_ask_annotate": 2.7731249865610152,
+        "dedup": 0.0075410061981529,
+        "evidence_boost": 0.19962500664405525,
+        "rerank": 0.006457994459196925,
+        "assemble": 0.22441698820330203,
+        "detect_qtype": 0.02058298559859395,
+        "render": 0.0813750084489584,
+        "token_estimate": 3.024250007001683,
+        "reader": 0.014165998436510563
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 52.60979200829752,
+      "phases": {
+        "classify": 0.0013750104699283838,
+        "query_encode": 22.599583986448124,
+        "leg_structural": 0.010042014764621854,
+        "leg_fts": 4.2432500049471855,
+        "leg_vector": 4.051166994031519,
+        "legs_wave": 4.753416986204684,
+        "prf_expansion": 0.9432079968973994,
+        "post_ep_annotate": 2.61520899948664,
+        "post_relationships": 4.034416982904077,
+        "post_epistemic_state": 3.6800420202780515,
+        "post_ask_annotate": 2.7344170084688812,
+        "dedup": 0.007916998583823442,
+        "evidence_boost": 0.2022499975282699,
+        "rerank": 0.006915972335264087,
+        "assemble": 0.447750004241243,
+        "detect_qtype": 0.017999991541728377,
+        "render": 0.10304199531674385,
+        "token_estimate": 5.95637402147986,
+        "reader": 0.011916999937966466
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 84.2193329881411,
+      "phases": {
+        "classify": 0.0010830117389559746,
+        "query_encode": 37.43674998986535,
+        "leg_structural": 0.009666982805356383,
+        "leg_fts": 3.1046659860294312,
+        "leg_vector": 2.967125008581206,
+        "legs_wave": 3.618457994889468,
+        "prf_expansion": 0.6796249945182353,
+        "post_ep_annotate": 2.3950409959070385,
+        "post_relationships": 2.0180419960524887,
+        "post_epistemic_state": 14.889874990331009,
+        "post_ask_annotate": 8.97479199920781,
+        "dedup": 0.008167000487446785,
+        "evidence_boost": 0.2125409955624491,
+        "rerank": 0.006832997314631939,
+        "assemble": 0.4974160110577941,
+        "detect_qtype": 0.03420800203457475,
+        "render": 0.08783300290815532,
+        "token_estimate": 10.10133302770555,
+        "reader": 0.015458994312211871
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 75.2320830069948,
+      "phases": {
+        "classify": 0.001834006980061531,
+        "query_encode": 51.338500023121014,
+        "leg_structural": 0.011416996130719781,
+        "leg_fts": 4.152667010203004,
+        "leg_vector": 4.627332993550226,
+        "legs_wave": 5.385249998653308,
+        "prf_expansion": 0.6996669981162995,
+        "post_ep_annotate": 2.762332995189354,
+        "post_relationships": 2.138541982276365,
+        "post_epistemic_state": 3.262416983488947,
+        "post_ask_annotate": 2.461249998304993,
+        "dedup": 0.008292001439258456,
+        "evidence_boost": 0.20933299674652517,
+        "rerank": 0.006999995093792677,
+        "assemble": 0.2319169871043414,
+        "detect_qtype": 0.028999987989664078,
+        "render": 0.07879198528826237,
+        "token_estimate": 3.1044580100569874,
+        "reader": 0.014416989870369434
+      },
+      "round_trips": 10
+    },
+    {
+      "total_ms": 80.1197079999838,
+      "phases": {
+        "classify": 0.0027909991331398487,
+        "query_encode": 35.98741700989194,
+        "leg_structural": 0.011708005331456661,
+        "leg_fts": 2.764416014542803,
+        "leg_vector": 3.3050420170184225,
+        "legs_wave": 3.908707993105054,
+        "prf_expansion": 1.3271250063553452,
+        "post_ep_annotate": 3.8510419835802168,
+        "post_relationships": 3.783624997595325,
+        "post_epistemic_state": 7.03754200367257,
+        "post_ask_annotate": 3.796375007368624,
+        "dedup": 0.007916009053587914,
+        "evidence_boost": 0.2120420103892684,
+        "rerank": 0.007458002073690295,
+        "assemble": 0.5803749954793602,
+        "detect_qtype": 0.024625012883916497,
+        "render": 0.10299999848939478,
+        "token_estimate": 9.025625011418015,
+        "reader": 0.01591601176187396
+      },
+      "round_trips": 10
+    }
+  ]
+}

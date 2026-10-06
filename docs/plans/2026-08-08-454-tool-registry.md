@@ -441,7 +441,7 @@ class TestFastAPIRouterAdapter:
         app = FastAPI()
         router = APIRouter()
         adapter = FastAPIRouterAdapter(router)
-        adapter.register_all(TOOL_REGISTRY, sdk_getter=lambda team_id: None)
+        adapter.register_all(TOOL_REGISTRY, sdk_getter=lambda org_id: None)
 
         app.include_router(router)
         routes = [(r.methods, r.path) for r in app.routes if hasattr(r, 'methods')]

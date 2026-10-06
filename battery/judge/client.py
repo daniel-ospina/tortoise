@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
+from battery.config.prices import RATES_PER_1M_USD
 from battery.enums import ModelCallOutcome
 from battery.exceptions import ConfigError
 
@@ -35,6 +36,11 @@ class JudgeCall:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    #: #2906 — how this call's cost was priced ("provider_reported" when the
+    #: response carried `usage.cost`, else "estimated" from the fallback
+    #: table). Persisted so a judge spend figure never implies provenance it
+    #: does not have (review #2915 P2).
+    cost_basis: str = "estimated"
 
 
 class JudgeClient:
@@ -89,7 +95,8 @@ class JudgeClient:
                          prompt_tokens=int(out.get("prompt_tokens", 0) or 0),
                          completion_tokens=int(
                              out.get("completion_tokens", 0) or 0),
-                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0))
+                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0),
+                         cost_basis=str(out.get("cost_basis", "estimated")))
 
     def _mock_judge(self, prompt: str) -> dict:
         """Deterministic mock: seeds from the prompt hash so validation
@@ -129,13 +136,24 @@ class JudgeClient:
                 "usage)")
         pt = int(usage.get("prompt_tokens", 0) or 0)
         ct = int(usage.get("completion_tokens", 0) or 0)
-        cost = float(usage.get("cost", 0.0)
-                     or _openrouter_cost(data.get("model", ""), pt, ct))
+        # #2906: `usage["cost"]` is the provider's authoritative charge and a
+        # genuine 0.0 (a free/zero-priced call) is a VALUE, not an absence —
+        # `or` would silently re-price it from the fallback table. Check for
+        # None explicitly; the fallback is only for a provider that reports no
+        # cost at all.
+        reported = usage.get("cost")
+        cost = (float(reported) if reported is not None
+                else _openrouter_cost(data.get("model", ""), pt, ct))
         try:
             parsed = json.loads(content)
             parsed.setdefault("prompt_tokens", pt)
             parsed.setdefault("completion_tokens", ct)
             parsed.setdefault("cost_usd", cost)
+            # #2906: the label travels with the number — provider-reported
+            # only when the response itself carried the charge.
+            parsed.setdefault(
+                "cost_basis",
+                "provider_reported" if reported is not None else "estimated")
             return parsed
         except json.JSONDecodeError:
             return {"verdict": content.strip(), "confidence": 0.5,
@@ -167,7 +185,9 @@ def _openrouter_cost(model: str, pt: int, ct: int) -> float:
     prices = {
         "gpt-4o": (2.50, 10.00), "gpt-4o-2024-08-06": (2.50, 10.00),
         "opus": (15.00, 75.00), "claude": (3.00, 15.00),
-        "deepseek": (0.27, 1.10),
+        # #2874: the ONE declared basis (battery/config/prices.py) — this row
+        # used to be a local copy that had drifted from every real price.
+        "deepseek": RATES_PER_1M_USD,
     }
     p_in, p_out = (15.00, 75.00)  # fail-closed default: the table MAX — an
     # unknown judge model is NEVER unmetered (a 0-cost fallback would let an

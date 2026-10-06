@@ -35,7 +35,7 @@ C amends issue O/I-T **Indicators 1-2** and **Targets 2-3** — the issue as wri
 | TOCTOU | No pre-check-then-mint on the MINT path (team mint occurs only on the no-token path; token rows are unique-constrained inserts inside the atomic provision_team RPC; recovery never creates a team). The recovery path's check-then-mint gap (resolve → recover) is closed by `recover_team_key`'s `SELECT ... FOR UPDATE` row lock — `resolve_signup_token` itself is NOT FOR UPDATE; a concurrent revoke/delete between resolve and recover fails CLOSED on the zero-row lock (uniform 422) |
 | reg- collision oracle | Impossible — no client-supplied string is ever used as an identity; nothing can collide with `reg-{sha256(email)[:12]}` (hosted_api.py:2993) |
 | Keyless recovery | Token IS the recovery credential: `POST /v1/agent/recover {signup_token}` → verifies hash → mints a NEW key on the SAME team (created_via='recovery', already admitted by the 0007 CHECK enum) — no 409 dead-end |
-| Post-claim survival | `agent_signup_tokens` is team-scoped and claim (20260813000004) touches only team_memberships + teams.email → the token survives claim; recovery keeps working post-claim |
+| Post-claim survival | `agent_signup_tokens` is team-scoped and claim (20260813000004) touches only org_memberships + teams.email → the token survives claim; recovery keeps working post-claim |
 | Concurrency E2E | Parallel token-present calls → 1 team (≤2 keys, within free cap, mirroring #750.10 revoke-oldest-other semantics). Parallel no-token mints → N teams (== today, IP-bounded 2/24h) |
 | Broken phantom-key precedent (sdk.py:10792) | Never copied: recovery returns a PERSISTED key minted through the real api_keys insert path; no "existing" path fabricates a key |
 | Registry lane parity | SignupToken node (token_hash unique) + APIKey node gains created_via/expires_at + `apikey_verify` gains expires_at filtering (sdk.py:11299 — currently ignores it) |
@@ -46,7 +46,7 @@ The recovery story assumes an out-of-band human save-point ("type YES you saved 
 
 ### What the user experiences
 
-- **First mint** — `tortoise signup` → `{key, signup_token, team_id, team_name, graph_name, tier}`; CLI persists both to `~/.tortoise/credentials.json` (0600) and prints "RECOVERY TOKEN — save this: it is the only way back into this team if your key is lost" (confirm-prompt UX; the token is the single save point, mirroring the key's shown-once contract).
+- **First mint** — `tortoise signup` → `{key, signup_token, org_id, org_name, graph_name, tier}`; CLI persists both to `~/.tortoise/credentials.json` (0600) and prints "RECOVERY TOKEN — save this: it is the only way back into this team if your key is lost" (confirm-prompt UX; the token is the single save point, mirroring the key's shown-once contract).
 - **Config intact, key revoked/expired** — re-signup presents the stored token → recovery mints a fresh key on the same team; CLI rewrites config. No support, no 409.
 - **Config lost, token saved** — `tortoise recover --token st_...` → new key for the same team (data intact).
 - **Claimed team, token saved** — token survives claim; recovery still rotates a key; dashboard session-key path remains the alternative.
@@ -66,12 +66,12 @@ The recovery story assumes an out-of-band human save-point ("type YES you saved 
 ```sql
 CREATE TABLE public.agent_signup_tokens (
     token_hash   text PRIMARY KEY,          -- SHA-256(PEPPER + token), computed in tortoise/auth.py (never in SQL)
-    team_id      text NOT NULL,
+    org_id      text NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
     last_used_at timestamptz,
     revoked_at   timestamptz
 );
-CREATE UNIQUE INDEX uq_agent_signup_tokens_team ON public.agent_signup_tokens (team_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX uq_agent_signup_tokens_team ON public.agent_signup_tokens (org_id) WHERE revoked_at IS NULL;
 REVOKE ALL ON public.agent_signup_tokens FROM public, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 
@@ -83,8 +83,8 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 --                                    ... p_graph_size_cap => ...);  -- NAMED-ARG notation:
 --                                    immune to param reordering (all 15, verified in 0010)
 --       IF p_signup_token_hash IS NOT NULL THEN
---         INSERT INTO public.agent_signup_tokens (token_hash, team_id)
---         VALUES (p_signup_token_hash, p_team_id)
+--         INSERT INTO public.agent_signup_tokens (token_hash, org_id)
+--         VALUES (p_signup_token_hash, p_org_id)
 --         ON CONFLICT (token_hash) DO NOTHING;
 --       END IF;
 --     END;  -- exception in either statement rolls back the WHOLE mint (1 team + 1 token atomic)
@@ -96,17 +96,17 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 
 -- (2) resolve_signup_token(p_token_hash text) RETURNS text — SECURITY DEFINER, SET search_path='',
 --     service_role ONLY:
---     SELECT team_id FROM public.agent_signup_tokens
+--     SELECT org_id FROM public.agent_signup_tokens
 --     WHERE token_hash = p_token_hash AND revoked_at IS NULL;
 --     UPDATE public.agent_signup_tokens SET last_used_at = now()
 --     WHERE token_hash = p_token_hash;
 --     (single tx: token-verify + last_used_at touch atomic; caller checks team suspended/deleted after)
 
--- (3) recover_team_key(p_token_hash text, p_team_id text, p_api_key text, p_key_hash text,
+-- (3) recover_team_key(p_token_hash text, p_org_id text, p_api_key text, p_key_hash text,
 --                      p_lookup_hash text, p_key_prefix text)
 --     RETURNS text — SECURITY DEFINER, SET search_path='', service_role ONLY, ONE transaction:
---     - SELECT team_id FROM public.agent_signup_tokens WHERE token_hash = p_token_hash
---       AND revoked_at IS NULL AND team_id = p_team_id FOR UPDATE;   -- ⛔ row lock: serializes
+--     - SELECT org_id FROM public.agent_signup_tokens WHERE token_hash = p_token_hash
+--       AND revoked_at IS NULL AND org_id = p_org_id FOR UPDATE;   -- ⛔ row lock: serializes
 --       concurrent recoveries for the same token (READ COMMITTED check-then-insert race closed)
 --       ⛔ IF NO ROWS RETURNED → RAISE EXCEPTION (revoke-race or team-mismatch — fail closed;
 --       caller maps to the uniform 422). Never mint on a zero-row lock.
@@ -121,7 +121,7 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 --       The E2E contract (non-bootstrap ≤ max_api_keys) is authoritative.
 --     - INSERT INTO public.api_keys (..., created_via='recovery',
 --       created_by='st_' || left(p_token_hash, 12))   -- derived INSIDE the RPC (not caller-supplied)
---     - RETURN p_team_id
+--     - RETURN p_org_id
 
 -- ⛔ Grant hygiene for ALL THREE new functions (Supabase's ALTER DEFAULT PRIVILEGES grants
 -- ALL ON FUNCTIONS to anon/authenticated — an anon-executable resolve_signup_token is a direct
@@ -141,7 +141,7 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - **Rate-limit ordering (solution-verify P1):** the 2/24h mint limiter (hosted_api.py:2060) currently runs pre-parse at :6876. The mint bucket must bound **minting only** — parse the body first and apply `_check_signup_ip_rate_limit` ONLY on the no-token path. A token-present request is a recovery (possession-authenticated), never a mint, and must not consume or be blocked by the mint bucket. ⛔ **But the token-present branch gets a COMPENSATING recovery limiter (Cycle-2 P1):** it performs the same `recover_team_key` mint as `/v1/agent/recover`, so it SHARES the recovery rate limiter (per-IP bucket + per-token attempt cap + recovery-velocity feed) via the same `_check_recovery_rate_limit` helper — a stolen token must not enable unbounded mint/revoke churn on that surface. Lock test: an IP over the recovery per-IP cap is 429'd on token-present signup too.
 - **Token present:** validate format (`st_` + 64 hex), hash, `resolve_signup_token` (RPC):
   - *Design note (second-model):* the canonical recovery surface is `/v1/agent/recover`; the token-present signup branch exists ONLY as an orphan-prevention safety net for legacy/buggy clients that re-signup while holding a token (recover instead of orphaning the team). Both call the same RPCs + shared limiter.
-  - found + not revoked + team not deleted/suspended → **keyless recovery** via `recover_team_key` RPC (FOR-UPDATE serialized cap-check + key insert + #750.10 revoke-oldest-non-bootstrap in ONE transaction; `created_by` derived inside the RPC as `'st_' || left(token_hash, 12)`) → return `{key, team_id, team_name, graph_name, tier}`. Token-authenticated → team echo is possession-based, NOT an oracle; the CLI config write needs team_id. (O/I-T reconciliation: this response contains a NEWLY MINTED key, not a dedupe-hit replay — "dedupe-hit contains no key" means no fabricated/unpersisted key and no key to unauthenticated parties; a token-holder's key is a recovery mint.)
+  - found + not revoked + team not deleted/suspended → **keyless recovery** via `recover_team_key` RPC (FOR-UPDATE serialized cap-check + key insert + #750.10 revoke-oldest-non-bootstrap in ONE transaction; `created_by` derived inside the RPC as `'st_' || left(token_hash, 12)`) → return `{key, org_id, org_name, graph_name, tier}`. Token-authenticated → team echo is possession-based, NOT an oracle; the CLI config write needs org_id. (O/I-T reconciliation: this response contains a NEWLY MINTED key, not a dedupe-hit replay — "dedupe-hit contains no key" means no fabricated/unpersisted key and no key to unauthenticated parties; a token-holder's key is a recovery mint.)
   - **suspended team (valid token)** → **403 `_suspended_detail()`** — possession-authenticated (the presenter's valid token already proves the team exists, so 403 adds no oracle), and consistent with the platform convention (hosted_api.py:7485); the CLI fails closed (exit 1, no fresh mint).
   - not found / revoked / malformed / **team soft-deleted** → **uniform 422** `{"error_code": "invalid_signup_token"}` (identical body for all four — no existence signal; a deleted team is indistinguishable from never-existed, so 422 is correct there).
   - Success feed: token-present recovery fires the **recovery-velocity feed** (NOT `record_signup` — ops metrics must not conflate recoveries with mints).
@@ -149,13 +149,13 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - Response-shape note (contract hygiene): mint returns `identity`; token-present recovery omits it. Documented, harmless (CLI doesn't consume `identity`); kept minimal.
 
 ### 3. New endpoint — `POST /v1/agent/recover` (hosted_api.py, alongside agent_signup)
-- Body `{signup_token}`; same verification as the token-present signup path (shared helper `_resolve_signup_token(cp, token) -> team_id | None` wrapping the RPC).
+- Body `{signup_token}`; same verification as the token-present signup path (shared helper `_resolve_signup_token(cp, token) -> org_id | None` wrapping the RPC).
 - **Rate limiting — its own bucket, NOT the 2/24h signup bucket:** shared `_check_recovery_rate_limit` helper used by BOTH `/v1/agent/recover` AND the token-present signup branch: per-IP bucket (e.g., 5/24h, `_RECOVER_BUCKETS` pattern) + per-token attempt cap (e.g., 10/h, keyed on the token **hash**, not the raw token) + recovery-velocity feed (mirror SignupVelocityTracker at abuse.py:678; ops email + dashboard alert parity). Precision (Cycle-3 P4): bucket counts **attempts** (invalid-token probes burn the per-IP bucket — acceptable given the uniform 422, but decided); 429 body error_code = `over_recovery_ip_rate_limit` (mirrors `over_signup_ip_rate_limit`); **IP extraction is IDENTICAL to `_check_signup_ip_rate_limit`** (`request.state.client_ip` fallback chain — otherwise the shared bucket splits into two half-caps; unit test asserts the same key from both endpoints).
-- Returns `{key, team_id, team_name, graph_name, tier}`; CLI writes config. Registry lane: same flow against the SignupToken node (sdk.py `signup_token_lookup` / `signup_token_recover` methods).
+- Returns `{key, org_id, org_name, graph_name, tier}`; CLI writes config. Registry lane: same flow against the SignupToken node (sdk.py `signup_token_lookup` / `signup_token_recover` methods).
 - **Token revocation lifecycle (solution-verify P1 + Cycle-2 P2/Cycle-3 P3):** `revoked_at` is written by the **support runbook only** — documented steps: (1) verify ownership via audit_events detail JSONB (claim/IP history) + `appeal_url()` channel; (2) audited SQL revoke of the token; (3) **revoke keys minted via this token** — `created_via='recovery' AND created_by = 'st_'||left(token_hash,12)`, correlated with audit_events timestamps (keys minted after the last owner-confirmed mint / after the reported compromise); note `created_by` is **token-attributable by design** — it identifies the token, not the human, so the correlation is timestamp-based, not owner-based; (4) **re-credential the verified owner** — mechanism MUST be chosen: (a) an internal audit-gated support tool (app context, has the pepper) that generates a fresh token + key and writes both rows, or (b) explicitly out of the floor: "post-revoke the owner must fresh-signup (new team, old data orphaned) or restore from backup" — the pepper lives in app code, NOT SQL, so plain SQL cannot mint a fresh token/key; pick one in the plan; (5) confirm. Registry lane (selfhost): `MATCH (s:SignupToken {token_hash}) SET s.revoked_at = $now` — operator DB access (documented). A leaked token is the same compromise class as a leaked key (0600 file, hash-only at rest) and the runbook closes it. Token rotation on recovery (mint a fresh token each recovery, revoke the old) is REJECTED: the lost-response window would strand a user whose rotated token never arrived. A user-facing revoke action (post-claim dashboard/CLI "revoke recovery token") is a follow-up issue.
 
 ### 4. Registry lane parity (selfhost, FalkorDB)
-- Mint path (hosted_api.py:6980-7000): add `CREATE (:SignupToken {token_hash, team_id, created_at})` + APIKey node gains `created_via: 'provisioned'` and `expires_at: NULL` props (parity with Supabase lane — owned by THIS issue per the task brief). ⛔ **The SignupToken node creation MUST be added to the #741(c) rollback block** (hosted_api.py:7010-7020 DETACH DELETE Team/APIKey/Membership + graph drop) — a failed registry mint must not leave an orphan SignupToken pointing at a deleted team. Test the partial-failure case.
+- Mint path (hosted_api.py:6980-7000): add `CREATE (:SignupToken {token_hash, org_id, created_at})` + APIKey node gains `created_via: 'provisioned'` and `expires_at: NULL` props (parity with Supabase lane — owned by THIS issue per the task brief). ⛔ **The SignupToken node creation MUST be added to the #741(c) rollback block** (hosted_api.py:7010-7020 DETACH DELETE Team/APIKey/Membership + graph drop) — a failed registry mint must not leave an orphan SignupToken pointing at a deleted team. Test the partial-failure case.
 - `sdk.py apikey_verify` (:11299-11315): add `expires_at` filtering with **NULL-as-never-expires semantics** — `expires_at IS NULL OR expires_at > now` — mirroring the REST path (hosted_api.py:1214-1225). Without the NULL clause, every legacy selfhost key (no expires_at prop) would stop authenticating. Add a legacy-node test.
 - Existing legacy APIKey nodes lack created_via/expires_at → display fallback: created_via NULL → "legacy", expires_at NULL → "never" (dashboard heuristic); AC-7 pins the NEW-key behavior only. A one-shot backfill pass is optional/out of scope.
 - Recovery: `signup_token_lookup` + `signup_token_recover` sdk methods against the SignupToken node (reuse the `_verify_hashed_lookup("Invitation", ...)` precedent at sdk.py:11394). Concurrency: token rows are new nodes (no pre-existing duplicate ambiguity — unlike identity-based dedupe, which would need a reconciliation pass over the 14-key incident history).
@@ -169,23 +169,23 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 
 ### 6. Testing
 - `tests/test_agent_signup.py`:
-  - Mint returns `signup_token` (starts `st_`, 64+ chars); re-signup with token → same team_id, NEW key, no second team (sequential).
+  - Mint returns `signup_token` (starts `st_`, 64+ chars); re-signup with token → same org_id, NEW key, no second team (sequential).
   - **Uniform 422 across FOUR cases** (assert identical body): malformed, unknown, revoked, and valid-token-but-team-soft-deleted — the oracle-free contract. **Suspended team is a distinct 403** `_suspended_detail()` (possession-authenticated; platform convention).
   - **Token-present recovery bypasses the mint limiter** (an IP at the 2/24h limit can still recover with a valid token) **AND is bound by the recovery limiter** (an IP over the recovery per-IP cap is 429'd on token-present signup too — the compensating control lock).
   - `test_client_identity_ignored` and the rest of the #741(a) suite **unchanged** (C preserves them byte-for-byte — the deliverable proof that no reversal happened).
   - Registry-lane variants (default lane — no TORTOISE_CONTROL_PLANE set).
-- **Concurrency E2E (new — none exists today):** REAL parallel dispatch via `asyncio.gather` of N client POSTs (the `_UniqueViolation` pattern at test_writer_inventory.py:468 is a FakeControlPlane error-mapping SEAM, not a concurrency mechanism — cite it only for the fake's atomic token-insert emulation). Assertions: same-token parallel → exactly 1 team, all responses share team_id, **active non-bootstrap keys ≤ max_api_keys (2 on free)** — the FOR-UPDATE row lock in `recover_team_key` serializes concurrent recoveries so the cap cannot overshoot; an over-cap recovery revokes the oldest non-bootstrap key and mints (402 only in the bootstrap-only edge). Parallel no-token mints → N teams (documented = today's behavior).
+- **Concurrency E2E (new — none exists today):** REAL parallel dispatch via `asyncio.gather` of N client POSTs (the `_UniqueViolation` pattern at test_writer_inventory.py:468 is a FakeControlPlane error-mapping SEAM, not a concurrency mechanism — cite it only for the fake's atomic token-insert emulation). Assertions: same-token parallel → exactly 1 team, all responses share org_id, **active non-bootstrap keys ≤ max_api_keys (2 on free)** — the FOR-UPDATE row lock in `recover_team_key` serializes concurrent recoveries so the cap cannot overshoot; an over-cap recovery revokes the oldest non-bootstrap key and mints (402 only in the bootstrap-only edge). Parallel no-token mints → N teams (documented = today's behavior).
 - `tests/fake_control_plane.py`: extend `rpc()` for `p_signup_token_hash` (insert token row in the same emulated transaction) + `resolve_signup_token` + `recover_team_key` (atomic cap-check + insert).
 - `tests/test_writer_inventory.py`: pin the new rpc params (rpc_calls[0]) for agent_signup.
 - CLI tests (`tests/test_cli_signup.py`): token persisted; 422 → warning + confirm before clear+re-mint; `recover` subcommand happy path (mock urlopen).
-- SQL (PGlite harness): token insert atomic with provision (a FAILED provision → NO token row); unique token_hash; unique team_id; resolve/recover RPC semantics (cap + revoke-oldest-non-bootstrap; FOR-UPDATE zero-row → error); **grant assertions via `has_function_privilege`: anon/authenticated DENIED EXECUTE on all three RPCs, service_role granted, table REVOKE'd from anon/authenticated** (ALTER DEFAULT PRIVILEGES in the harness grants EXECUTE to anon/authenticated — validate.mjs:30 — so this must be asserted explicitly). Add the new migration to `supabase/tests/pglite/validate.mjs` files list.
+- SQL (PGlite harness): token insert atomic with provision (a FAILED provision → NO token row); unique token_hash; unique org_id; resolve/recover RPC semantics (cap + revoke-oldest-non-bootstrap; FOR-UPDATE zero-row → error); **grant assertions via `has_function_privilege`: anon/authenticated DENIED EXECUTE on all three RPCs, service_role granted, table REVOKE'd from anon/authenticated** (ALTER DEFAULT PRIVILEGES in the harness grants EXECUTE to anon/authenticated — validate.mjs:30 — so this must be asserted explicitly). Add the new migration to `supabase/tests/pglite/validate.mjs` files list.
 - Recovery rate limiter unit tests (per-IP bucket + per-token cap; identical IP key across both surfaces).
 - Concurrency E2E N stays BELOW the per-token attempt cap (10/h) so the burst does not trip the limiter mid-assertion.
 - Registry legacy-node test: APIKey node without expires_at prop still verifies (NULL-as-never-expires).
 
 ### Acceptance Criteria (E2E)
 1. `tortoise signup` twice, same machine/config: 2nd run reuses (no call, #1708) OR re-presents token → **1 team total, key rotated, 0 new teams**.
-2. Parallel POSTs, same signup_token → **1 team, 1 graph**; responses resolve to the same team_id.
+2. Parallel POSTs, same signup_token → **1 team, 1 graph**; responses resolve to the same org_id.
 3. Config lost, token saved → `tortoise recover --token st_...` → new key, same team, memories intact (Supabase + registry lanes).
 4. Invalid token → 422, body identical to not-found and malformed (no oracle).
 5. `test_client_identity_ignored` (and all #741(a) tests) pass **without modification**.
@@ -278,7 +278,7 @@ VALIDATED by #1708's gates (2 fresh-context verifiers) — not re-run per the ta
 
 ### Axis Research
 - **Architecture (high) — idempotency patterns:** Stripe Idempotency-Key = client-chosen key, server stores key→stored-response, retry replays the SAME response (canonical; bytebytego, algomaster, dzone). Pitfalls confirmed: reusing a user ID as an idempotency key, short TTLs, non-atomic reservation. Postgres insert-or-fetch: `ON CONFLICT DO UPDATE + RETURNING` is the atomic form; plain `DO NOTHING + RETURNING` returns nothing for the conflict row (postgres docs; dba.stackexchange concurrency caveat) — our design avoids the pre-check-then-mint entirely (token-path never creates a team). [canonical + pitfalls]
-- **Ontology (medium) — one-anchor-per-resource:** in-repo precedent `tenant-provision/index.ts:335-352` (deterministic team_id = SHA-256(user_id)[:26] + upsert = idempotent re-invocation) and `uq_teams_name`/`uq_teams_email`/`uq_member_owner` partial unique indexes with pre-check-as-fast-path + constraint-as-authoritative (POST /v1/teams at hosted_api.py:5170). [precedent]
+- **Ontology (medium) — one-anchor-per-resource:** in-repo precedent `tenant-provision/index.ts:335-352` (deterministic org_id = SHA-256(user_id)[:26] + upsert = idempotent re-invocation) and `uq_teams_name`/`uq_teams_email`/`uq_member_owner` partial unique indexes with pre-check-as-fast-path + constraint-as-authoritative (POST /v1/organizations at hosted_api.py:5170). [precedent]
 - **UX (low) — keyless recovery:** industry mitigants for anonymous recovery: backup/recovery codes + registered multiple auth methods (Twilio MFA recovery), device-bound tokens + trusted-device management (Keyless), FIDO2 recovery evaluation (arXiv 2105.12477); honest finding: no-multifactor anon recovery is impossible without a second credential or runbook — our single saved token + support runbook floor matches the standard posture. [competitor-precedent + pitfalls]
 
 ### Integration Docs

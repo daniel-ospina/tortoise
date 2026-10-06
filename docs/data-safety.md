@@ -12,6 +12,8 @@ related:
 
 # Data Safety — Encryption in Transit and at Rest
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md` (this document covers encryption only).
+
 > **Claim-accuracy discipline:** every statement below is code- or deployment-verifiable,
 > consistent with the verified claim set in `docs/scoping/2026-08-13-309-security-page-scoping.md`.
 > Do not strengthen claims without updating both this doc and the #309 spec.

@@ -1,22 +1,29 @@
-"""Per-team write-op metering for overage billing (#681).
+"""Per-org write-op metering for overage billing (#681).
 
 Design
 ~~~~~~
 Metering records live as ``:MeteringRecord`` nodes in the FalkorDB **registry**
-namespace (not team-specific graphs), keyed by ``(team_id, billing_period)``
-where ``billing_period`` is a calendar-month string ``"YYYY-MM"``.
+namespace (not org-specific graphs), keyed by ``(org_id, period_start)``, where
+the row expresses a half-open window ``[period_start, period_end)`` (#3825).
+The window is the **subscription's own billing period** (D10, adopted), or —
+for an org with no subscription — **the calendar month in UTC** (D13,
+adopted). ``period`` survives as a DERIVED ``"YYYY-MM"`` aggregation label; it
+is never the row key and never the meter window (D10 permits a month as an
+aggregation sub-period, never as the invoice window).
 
 Why the registry graph?
-- All billing state (Team nodes, subscription fields, WebhookEvent) already
+- All billing state (Org nodes, subscription fields, WebhookEvent) already
   lives in the registry — metering is billing infrastructure, not user data.
 - Lift-and-shift to Supabase (#669) is straightforward: one node label →
   one table.
 - No cross-namespace queries needed — a single ``MERGE … SET …`` writes the
   record, and the dashboard/usage endpoint reads from the same namespace.
 
-Period rollover is **lazy** (no cron): when a write arrives in a new month,
+Period rollover is **lazy** (no cron): when a write arrives in a new window,
 the period key changes → a new ``:MeteringRecord`` is MERGEd and incremented.
-Previous-period records are frozen (no further increments). This avoids a
+Previous-period records are frozen (no further increments). A Stripe renewal
+advances the subscription anchor, so the next write opens a NEW row and leaves
+the prior one byte-identical — history is never rewritten. This avoids a
 scheduler dependency while keeping the write path simple.
 
 Increment semantics
@@ -27,16 +34,39 @@ created — a ``create_point`` that internally creates 1 node and a
 matches the pricing page's "$5 per additional 10k write ops" — a write op
 is one API call, not one graph element.
 
+⚠️ KNOWN DISCREPANCY — ``write_ops`` is NOT a graph-operation count (#3359)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The billed unit named "write op" is an **API call**, but the same name is
+what the pricing decision needs to be about **physical graph operations**,
+and the two differ by a large factor for ``capture_session``. A measured
+capture (``tortoise/graph_ops.py`` counts every ``_GuardedGraph.query``)
+issues a **median ~441 FalkorDB operations** (range 354-523) while the meter
+records **1 write op** — an under-count of roughly **440x** for capture.
+Measured phase split: extraction graph search ~56%, belief propagation ~28%,
+commit ~10%, session store ~6% (session store is ``2 x turns + ~12``;
+commit is ~9-12 ops per extracted claim; belief propagation grows with the
+tenant's accumulated graph, so it rises as a customer's memory grows).
+
+**This meter is deliberately left unchanged**: what it counts feeds billing,
+so redefining it to count graph operations would be a silent breaking change
+to live invoices. The physical per-session figure now lives continuously in
+the ``capture_graph_ops`` analytics row (``hosted_api._capture_session_impl``),
+attributed per capture phase and readable via
+``graph_ops.capture_graph_ops_distribution()``. Replacing the billed unit is a
+**pricing decision for the owner**, not something an agent changes here.
+
 Storage
 ~~~~~~~
 ::
 
     (:MeteringRecord {
-        team_id:   "team_abc123",
-        period:    "2026-08",
-        write_ops: 42,
+        org_id:       "org_abc123",
+        period_start: "2026-08-03T00:00:00+00:00",  -- row KEY: window [start,end)
+        period_end:   "2026-09-03T00:00:00+00:00",  -- EXCLUSIVE upper bound
+        period:       "2026-08",                    -- derived label, NOT the key
+        write_ops:    42,
         nodes_written: 12,
-        updated_at: "2026-08-09T14:31:00.123Z"
+        updated_at:   "2026-08-09T14:31:00.123Z"
     })
 
 ``nodes_written`` is the value-first commit cost driver (epic #909 §4.4/
@@ -45,76 +75,666 @@ supersede-only deltas exempt — R-14). It prevents the 25x per-node arbitrage
 vs ``create_point`` while the billed unit stays ``write_ops`` (a commit call
 is billed exactly once — PL4).
 
+Unmetered increments (#4779)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The ledger's identity IS the window — ``(org_id, period_start)``, both bounds
+``NOT NULL`` — so an increment whose window CANNOT be resolved is not
+representable in it at all. Dropped increments (an unresolvable window, or an unconfirmed increment
+write with the window known) are therefore recorded on a SEPARATE surface,
+keyed by things that exist when the window does not::
+
+    (:MeteringUnmeteredIncrement {
+        org_id:            "org_abc123",
+        lane:              "write_op",               -- site or writer
+        drop_class:        "window_unresolvable",     -- DECLARED vocabulary
+        increments:        47,                       -- a COUNT, never dollars
+        last_error_type:   "QuotaCheckError",
+        first_observed_at: "2026-09-27T08:00:00+00:00",
+        last_observed_at:  "2026-09-27T09:31:00+00:00"
+    })
+
+A count is NOT spend: ``get_cohort_spend_usd`` / ``metering_cohort_spend`` read
+only ``ask_cost_usd + capture_cost_usd`` from ``metering_records`` and are
+deliberately untouched (#4779 constraint 1). Read the two ALONGSIDE with
+``get_unmetered_increments`` / ``get_unmetered_increment_total``.
+
+The count is an UPPER BOUND on the loss, not a measured figure: the
+``increment_write_unconfirmed`` class records writes that RAISED, and a raise
+does not prove the increment was not written (#925's lost-response case). The
+class is named for what the code knows rather than for what it assumes.
+
 Atomic increment via FalkorDB Cypher::
 
-    MERGE (m:MeteringRecord {team_id: $tid, period: $period})
-    SET m.write_ops = coalesce(m.write_ops, 0) + $n,
+    MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart})
+    SET m.period = $label, m.period_end = $pend,
+        m.write_ops = coalesce(m.write_ops, 0) + $n,
         m.updated_at = $now
 
 Threshold events
 ~~~~~~~~~~~~~~~~
-When a team crosses 80% or 100% of its ``included_write_ops_per_month``
+When an org crosses 80% or 100% of its ``included_write_ops_per_month``
 (from ``product/pricing.json``), a structured log event is emitted at
 WARNING (80%) or ERROR (100%). This feeds into the existing alerting
 pipeline (Resend + Telegram — see #310 billing notifications).
 
-Thresholds are checked **post-increment** on every write for teams on
-overage-eligible tiers (pro, team). Free and Solo tiers have no overage
-and never trigger threshold events — they simply hit the hard quota limit.
+Thresholds are checked **post-increment** on every write for orgs on
+overage-eligible tiers. WHICH tiers those are is deliberately not restated
+here: it is read from ``product/pricing.json::billing.overage_tiers`` via
+``tortoise.pricing.has_overage()``, so an enumeration in this docstring
+could only go stale (#4815 taught solo, previously a "hard-cap" tier, is
+metered).
 
 Usage exposure
 ~~~~~~~~~~~~~~
-``get_current_usage(team_id)`` returns ``{write_ops_used, write_ops_limit,
-period, overage_eligible}`` for the current billing period. Wired into
-``GET /v1/team`` (see ``TeamInfoResponse`` extension).
+``get_current_usage(org_id)`` returns ``{write_ops_used, write_ops_limit,
+period, period_start, period_end, overage_eligible}`` for the org's current
+metering window (``period`` stays the derived ``"YYYY-MM"`` label so the
+``/v1/team`` contract is unchanged). Wired into ``GET /v1/team`` (see
+``OrgInfoResponse`` extension).
 
 MCP writes
 ~~~~~~~~~~
 MCP write tools call ``_safe`` which runs the write inside a try/except.
 Metering is recorded **after** a successful write (no exception) and only
 for quota-gated tools (the ``_QUOTA_GATED`` set). Stdio/selfhost mode
-(with no team context) skips metering entirely.
+(with no org context) skips metering entirely.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import os
 import tempfile
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 
 _logger = logging.getLogger(__name__)
 
-#: #1987 Task 6: per-team increment serialization — the MERGE+coalesce
+#: #1987 Task 6: per-org increment serialization — the MERGE+coalesce
 #: increment is atomic per statement on server-mode FalkorDB, but embedded
 #: FalkorDBLite connections race the read-modify-write (the pre-existing
 #: write-op path has the same shape); the ask meter closes it in-process
-#: with a per-team lock (cross-process races remain possible and are
+#: with a per-org lock (cross-process races remain possible and are
 #: documented best-effort, mirroring the per-process budget bucket).
 import threading as _threading  # noqa: E402
 from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
 
-#: Per-team increment-serialization lock registry — BOUNDED by construction:
+# #3665: the cohort spend reader drives a spend CEILING, so its failures must
+# carry the quota classification (#686) rather than surfacing as an
+# unclassified 500. ``tortoise.quota`` is stdlib-only at module level (safe to
+# import eagerly — same reason the REST adapter imports it at the top).
+from tortoise.quota import QuotaCheckError  # noqa: E402
+
+#: Per-org increment-serialization lock registry — BOUNDED by construction:
 #: a WeakValueDictionary keeps each lock alive only while some thread holds
-#: it (a released lock with no holder is GC'd), so a fresh team id never leaks
+#: it (a released lock with no holder is GC'd), so a fresh org id never leaks
 #: a permanent registry entry (the ask build-lock finding's mirror).
 _ask_meter_locks: _WeakValueDictionary = _WeakValueDictionary()
 _ask_meter_locks_guard = _threading.Lock()
 
 
-def _ask_meter_lock(team_id: str) -> _threading.Lock:
+def _ask_meter_lock(org_id: str) -> _threading.Lock:
     with _ask_meter_locks_guard:
-        lock = _ask_meter_locks.get(team_id)
+        lock = _ask_meter_locks.get(org_id)
         if lock is None:
             lock = _threading.Lock()
-            _ask_meter_locks[team_id] = lock
+            _ask_meter_locks[org_id] = lock
         return lock
 
-# ── Period helpers ───────────────────────────────────────────────────────────
+# ── Period helpers (#3825 / D10 + D13) ──────────────────────────────────────
+#
+# The meter's window is the SUBSCRIPTION'S OWN BILLING PERIOD, anchored to
+# ``organizations.subscription_id`` — not a calendar month, not a rolling 30
+# days. That is the convergent standard Stripe's own metering product
+# implements: usage is totalled over the billing period so the meter
+# reconciles exactly with the invoice line.
+#
+# D13 closes the gap D10 left open: ``subscription_id`` is nullable
+# (``0006_teams.sql:32``), so every free/anon org — precisely the beta cohort
+# the spend cap targets — has no anchor at all. The adopted fallback for that
+# case is the CALENDAR MONTH IN UTC.
+#
+# Every window is HALF-OPEN ``[start, end)``: an instant exactly at ``end``
+# belongs to the NEXT period, so a renewal boundary can neither double-count
+# nor drop the boundary instant.
 
-def _current_period() -> str:
-    """Calendar month as ``"YYYY-MM"`` in UTC."""
-    now = datetime.now(timezone.utc)  # noqa: UP017
-    return f"{now.year}-{now.month:02d}"
+
+@dataclass(frozen=True)
+class MeteringPeriod:
+    """One metering window — half-open ``[start, end)``, tz-aware UTC."""
+
+    start: datetime
+    end: datetime
+
+    @property
+    def start_iso(self) -> str:
+        """The ledger row KEY (``metering_records.period_start``)."""
+        return self.start.isoformat()
+
+    @property
+    def end_iso(self) -> str:
+        """The EXCLUSIVE upper bound (``metering_records.period_end``)."""
+        return self.end.isoformat()
+
+    @property
+    def label(self) -> str:
+        """``"YYYY-MM"`` derived from ``start`` — an AGGREGATION sub-period.
+
+        D10 permits a month as an aggregation label, never as the invoice
+        window. It is a PURE FUNCTION of ``start``, so it can never drift from
+        the key it labels; the ledger's identity is ``(org_id, period_start)``.
+        """
+        return f"{self.start.year}-{self.start.month:02d}"
+
+
+def _calendar_month_period(now: datetime | None = None) -> MeteringPeriod:
+    """The calendar month in UTC containing *now* — the D13 fallback window.
+
+    Anchored to 00:00:00 UTC on the 1st. GitHub Copilot ("00:00:00 UTC on the
+    first day of each calendar month"), LangSmith and PymtHouse document
+    exactly this split: a contract period when a subscription exists, the
+    calendar month in UTC otherwise.
+
+    Used ONLY for an org that carries no subscription — never as a FAILURE
+    fallback. An unresolvable paid anchor RAISES (see ``_current_period``):
+    metering a paying org on a month bucket would put its spend on a row the
+    cap's window read never looks at, which is the "configured but not
+    enforced" false PASS this lane exists to prevent.
+    """
+    now = now if now is not None else datetime.now(timezone.utc)  # noqa: UP017
+    first = now.astimezone(UTC).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0)
+    nxt = (first + timedelta(days=32)).replace(day=1)
+    return MeteringPeriod(start=first, end=nxt)
+
+
+def _anchor_instant(value: object) -> datetime | None:
+    """Parse a stored period instant, or ``None`` when it is not unambiguous.
+
+    Three storage shapes must all work. The control plane returns a
+    ``timestamptz`` as an ISO-8601 string via PostgREST; the REGISTRY lane
+    stores whatever the Stripe webhook wrote — a Unix EPOCH INT
+    (``hosted_api`` sets ``updates["current_period_end"] = data[...]``
+    verbatim, and ``billing.mirror_subscription`` does the same); and a
+    hand-built dict may carry a real ``datetime``.
+
+    A NAIVE (offset-less) value is REJECTED, not assumed UTC: the whole ledger
+    is UTC, so an ambiguous instant must never be silently coerced. A ``bool``
+    is rejected too (it is an ``int`` subclass, and ``True`` is not 1970).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _metering_anchor(org_id: str) -> dict:
+    """The org's billing anchor: ``subscription_id`` + period start/end.
+
+    Supabase mode reads the ``organizations`` row; otherwise the registry twin,
+    matching a bare ``:Organization`` (production/URI lane) or ``:Team`` (the
+    embedded lane's label) — the same id resolution ``cohort_cost.
+    cohort_org_ids`` uses.
+
+    An org with NO matching row returns ``{}``, which resolves to the D13
+    calendar-month window (an unknown org has no subscription). A READ FAILURE
+    raises instead — the caller must not spell "I could not find out" the same
+    way as "this org has no subscription".
+    """
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, org_metering_anchor,
+        )
+        return dict(org_metering_anchor(get_control_plane(), org_id) or {})
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (o) WHERE (o:Organization OR o:Team) AND o.id = $id "
+        "RETURN o.subscription_id, o.current_period_start, "
+        "       o.current_period_end",
+        params={"id": org_id},
+    ).result_set
+    if not rows:
+        return {}
+    row = rows[0]
+    return {"subscription_id": row[0],
+            "current_period_start": row[1],
+            "current_period_end": row[2]}
+
+
+def _current_period(org_id: str) -> MeteringPeriod:
+    """The metering window for *org_id* (#3825 / D10 + D13).
+
+    Subscription present → the subscription's own billing period. No
+    subscription → the calendar month in UTC (D13).
+
+    Deliberately NOT tolerant of a half-known anchor. An org that carries a
+    ``subscription_id`` but whose period cannot be resolved (missing,
+    unparseable, naive, or inverted) RAISES
+    :class:`~tortoise.quota.QuotaCheckError` rather than falling back to the
+    calendar month. A read failure raises too.
+
+    WHAT THAT RAISE IS (#3981). It is a **SIGNAL, not enforcement**: every
+    production caller absorbs it, alerts the operator and serves the request.
+    On the **write** path (the three ``record_*`` writers, via
+    ``_require_period``) the increment is dropped and reported
+    (``report_unmetered_increment``). On the **read** path
+    (``cohort_cost.enforce_cohort_cost_cap``) the pre-spend cap CANNOT be
+    enforced for that org, so it serves too and reports via
+    ``cohort_cost.report_unenforceable_cap`` — refusing a paying org over our
+    own bookkeeping fault is exactly what the #3981 ruling forbids. A raise
+    nobody re-raises refuses nothing; the ONLY user-facing refusal on this
+    lane is the gate's 402 for a window that RESOLVES and a cohort at/over
+    the cap.
+
+    ``org_id`` is REQUIRED — the previous zero-argument form was structurally
+    incapable of resolving a per-subscription anchor, which is how the whole
+    ledger ended up month-keyed.
+    """
+    try:
+        anchor = _metering_anchor(org_id)
+    except Exception as e:
+        raise QuotaCheckError(
+            f"metering window unresolvable for org {org_id!r}: the billing "
+            f"anchor read failed ({e}) — refusing to fall back to a calendar "
+            f"month (no calendar-month fallback)"
+        ) from e
+    sub_id = anchor.get("subscription_id")
+    if sub_id is None or not str(sub_id).strip():
+        return _calendar_month_period()  # D13 — no subscription to anchor to
+    start = _anchor_instant(anchor.get("current_period_start"))
+    end = _anchor_instant(anchor.get("current_period_end"))
+    if start is None or end is None or start >= end:
+        raise QuotaCheckError(
+            f"metering window unresolvable for org {org_id!r}: it carries "
+            f"subscription {sub_id!r} but its billing period is not a usable "
+            f"half-open interval (start={anchor.get('current_period_start')!r}, "
+            f"end={anchor.get('current_period_end')!r}) — refusing to meter a "
+            f"subscription org on a calendar month (no calendar-month fallback)"
+        )
+    return MeteringPeriod(start=start, end=end)
+
+
+def _require_period(org_id: str, what: str) -> MeteringPeriod:
+    """Window resolution for the write paths — a raised SIGNAL (#3825/#3981).
+
+    This was ``_resolve_period_or_none``: it DROPPED the increment and returned
+    None, on the long-standing best-effort contract (#681/#923). #3825 replaced
+    the silent drop with a raise, on the reasoning that a dropped increment
+    leaves the ledger SHORT, so the cohort SUM undercounts and the cap fires
+    LATE — spending real money past the cap. That reasoning is sound; what
+    shipped with it did not hold end-to-end.
+
+    WHAT THIS IS, AND WHAT IT IS NOT (#3981): this is a **SIGNAL**. It is NOT
+    enforcement. An unresolvable window RAISES
+    :class:`~tortoise.quota.QuotaCheckError`, but every production caller of
+    the three ``record_*`` writers wraps the call in a broad ``except`` and
+    absorbs the raise: the request is served and the increment is dropped,
+    exactly as before #3825. A raise nobody re-raises refuses nothing. The
+    user-facing refusal, where one exists, lives at the **pre-spend admission
+    gate** (``cohort_cost.enforce_cohort_cost_cap``, reached from the hosted
+    capture path BEFORE any spend). That gate refuses (402) only when the
+    window RESOLVES and the cohort is at/over the cap; an unresolvable window
+    it absorbs and reports (``cohort_cost.report_unenforceable_cap``), per the
+    #3981 ruling. Nothing here adds or removes either behaviour.
+
+    So the callers report the drop to the OPERATOR — never silently, and never
+    to the user: a bookkeeping fault of ours must never hand a user a 500
+    (``report_unmetered_increment``, one lane per swallow site). What was
+    recoverable about the old behaviour was the *silence*, which is why the
+    request is still served and the drop is still announced.
+
+    Scope: the TWO drop paths are both represented (#4779). This function
+    covers window resolution. A failure of the increment RPC itself stays
+    non-fatal inside each writer — logged at WARNING and dropped, not retried
+    at any call site — and is represented THERE, as
+    ``drop_class="increment_write_unconfirmed"`` (UNCONFIRMED, not failed: a
+    raise does not prove the increment was not written, so that count is an
+    upper bound — see the class's declaration). Both land on
+    ``metering_unmetered_increments``, the sibling surface keyed by
+    org + lane + class — three things that exist when the window does not (see
+    ``record_unmetered_increment``).
+
+    #3824 does NOT represent either. Its ``unattributed`` counter rides the
+    capture-cost MEASUREMENT row, keyed to a capture session: a different
+    surface, answering "a capture made provider calls but no roll-up survived",
+    not "the ledger could not hold this increment". The pointers that said
+    otherwise were wrong and are corrected.
+    """
+    try:
+        return _current_period(org_id)
+    except Exception as e:
+        _logger.error(
+            "%s: the org's metering window is unresolvable (no calendar-month "
+            "fallback) — the increment will be DROPPED and the caller reports "
+            "it to the operator. This raise is a SIGNAL, not a refusal "
+            "(#3981): team=%s error=%s",
+            what, org_id, e,
+        )
+        raise
+
+
+def report_unmetered_increment(lane: str, org_id: str | None,
+                               error: BaseException) -> None:
+    """Operator alert: an increment the ledger will NOT contain (#3981).
+
+    Call this from the ``except`` handler that absorbs a failed ``record_*``
+    writer. Under the recorded #3825/#3981 ruling the request is SERVED — a
+    bookkeeping fault of ours must never become a user-facing refusal — and the
+    increment is therefore gone. That is the defect the silent
+    ``except Exception: pass`` left behind: a ledger that reads short with no
+    trace anywhere. This is the trace.
+
+    ``lane`` names the swallow site (one stable token per site) so an alert is
+    attributable to the handler that dropped the increment rather than to
+    "metering failed somewhere". The seven lanes are ``write_op``,
+    ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
+    ``mcp_write_op``, ``ask_ledger`` and ``embed``.
+
+    Never raises: the alert itself must not become a new failure path (a signal
+    that can raise is a refusal by another name). The incident — a GitHub issue
+    plus Telegram, deduped per (kind, org) — is the durable operator signal; the
+    ERROR record below is the local one.
+
+    LEG 2 (#4779) RIDES HERE, and its order is deliberate. After dispatching
+    the alert this also writes the durable representation
+    (``record_unmetered_increment`` with ``drop_class="window_unresolvable"``)
+    on the sibling ``metering_unmetered_increments`` surface — so the drop is
+    not merely announced, it is RECORDED, with a count and an observation
+    window. The alert cannot carry that: it is deduped per (kind, org), it is
+    resolvable, and its body is a create-once artifact a changing count would
+    freeze stale.
+
+    WHY THE ALERT GOES FIRST: its channel (R2 + GitHub + Telegram) is
+    independent of the control plane, and the control plane is the usual cause
+    of a window-unresolvable drop — so a control-plane round trip must not
+    delay, or be able to pre-empt, the one signal that still works. The
+    representation is also outside the ``suppress`` on purpose:
+    ``record_unmetered_increment`` never raises, and an exception raised here
+    would have skipped the alert entirely.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        _logger.error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s — the "
+            "request was served and the ledger will read short for this "
+            "window; the pre-spend admission gate is the only enforcement "
+            "point on this lane",
+            lane, org_id or "<none>", type(error).__name__, error,
+            exc_info=error,
+        )
+        from tortoise.operator_alert import alert_unmetered_increment
+
+        alert_unmetered_increment(lane, org_id, error)
+
+    # LEG 2 — after the alert, and outside the suppress: this never raises (a
+    # representation, not a refusal), so it cannot take the alert down with it.
+    record_unmetered_increment(
+        lane, org_id, DROP_CLASS_WINDOW_UNRESOLVABLE, error)
+
+
+# ── #4779 / leg 2 of #3981: the UNMETERED-increment representation ───────────
+#
+# Leg 1 (the request proceeds) and leg 3 (an operator alert fires) are above.
+# LEG 2 — "the increment is recorded as explicitly unmeterable" — is THIS
+# block: a durable record of the drop, on a surface keyed by things that exist
+# when the window does not.
+#
+# WHY A SIBLING SURFACE. ``metering_records``' identity IS the window
+# (``PRIMARY KEY (org_id, period_start)`` with both bounds NOT NULL —
+# 20260918000001:138,141,133,134). A window-unresolvable increment is therefore
+# not representable there WITHOUT INVENTING A WINDOW, which is the exact thing
+# #3825 exists to forbid (a substituted bucket attributes spend to a row the
+# cap may never read). A sentinel window is worse than unrepresentable: it
+# lands INSIDE the cap's overlap read and entangles the two representations.
+# So the drop gets its own rows — ``(org_id, lane, drop_class)``, plus
+# ``first_observed_at``/``last_observed_at`` as the window-free substitute for
+# period attribution (since-when, and whether it is still happening).
+#
+# NOT A CAP INPUT. ``metering_cohort_spend`` / ``get_cohort_spend_usd`` are
+# untouched and read ONLY ``ask_cost_usd + capture_cost_usd`` from
+# ``metering_records``. A count is not spend, and feeding a spend ceiling an
+# unattributable figure is a behaviour change (#4779 constraint 1).
+#
+# NOT DOLLARS. ``increments`` is a COUNT: the write-op lane carries no cost at
+# all, so a cross-lane "dropped dollars" figure would be a partial sum presented
+# as a total — worse than an honest count.
+#
+# A STATED LIMIT. Both drop causes are CONTROL-PLANE failures (a failed anchor
+# read, a raised increment write), so a CP-wide outage drops the increment AND
+# blocks THIS write — the representation is best-effort by construction. For
+# the ``window_unresolvable`` class the leg-3 alert (R2 + GitHub + Telegram,
+# not the CP) is the backstop. For ``increment_write_unconfirmed`` there is NO
+# alert: that class is represented-but-not-alerted, deliberately — its lane is a
+# writer, not a swallow site, and the six swallow sites named by
+# ``tests/test_metering_window_admission.py`` are the alerted inventory. The
+# asymmetry is declared in the runbook's ``UNMETERED_INCREMENT`` row. Either
+# way the writer logs and never raises.
+
+#: #4779: the DECLARED drop vocabulary, mirrored by the CHECK constraint on
+#: ``metering_unmetered_increments.drop_class`` (migration 20260927000001). An
+#: ad-hoc string here would re-create the re-derivation defect at the
+#: representation layer, so adding a class is a migration on purpose.
+DROP_CLASS_WINDOW_UNRESOLVABLE = "window_unresolvable"
+#: The increment WRITE raised. Named for what the code KNOWS, not for what it
+#: does not: a raise does not prove the increment was not written —
+#: ``metering_increment``'s lost-response case is explicit about this (#925:
+#: "if the response is lost the write may still have committed"), and the
+#: embedded lane's MERGE can fail after applying. A name claiming the write had
+#: FAILED would have been that false claim made DURABLE; this class says the
+#: write is UNCONFIRMED, so the count is an UPPER BOUND on the loss.
+DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED = "increment_write_unconfirmed"
+
+_DROP_CLASSES = frozenset({
+    DROP_CLASS_WINDOW_UNRESOLVABLE, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED,
+})
+
+
+def record_unmetered_increment(lane: str, org_id: str | None,
+                               drop_class: str,
+                               error: BaseException,
+                               n: int = 1) -> int | None:
+    """Durably represent *n* increments the metering ledger could NOT hold.
+
+    Leg 2 of the #3981 ruling; ``report_unmetered_increment`` is leg 3 (the
+    alert). Without this record a dropped increment is simply ABSENT from every
+    durable surface, so nothing can tell an unmeterable org apart from an org
+    that genuinely spent zero — and the pre-spend cap reads exactly that ledger.
+
+    ``(org_id, lane, drop_class)`` is the record's identity. ``drop_class`` is
+    one of the two DECLARED classes above; the SQL lane enforces that with a
+    CHECK, so the registry lane validates it here to keep the two modes
+    behaviourally equal. ``lane`` is unconstrained on purpose — the swallow-site
+    inventory is enumerated from source by
+    ``tests/test_metering_window_admission.py``, and a second hand-maintained
+    copy of it here is the drift this repo keeps removing.
+
+    ``n`` is the BATCH the caller lost. A batch-aware writer passes its own
+    ``n``/``calls`` (``record_write_ops(n=…)``, ``record_ask_usage(calls=…)``,
+    ``record_capture_usage(calls=…)``); recording 1 per failed batch would
+    understate the loss by the batch factor, which is the one number this
+    surface exists to report. Floored at 1 — a zero-count record is the state
+    the surface exists to distinguish, and the SQL lane refuses it.
+
+    Returns the new cumulative count, or ``None`` when nothing was written (no
+    org context, a blank lane, an undeclared class, or a write failure). NEVER
+    raises: it is called from handlers whose whole contract is that metering
+    cannot block a request, and from a ``report_unmetered_increment`` that must
+    not either. A failed representation is logged at WARNING — never silent —
+    and the leg-3 alert remains the backstop.
+    """
+    # ``org_id``/``lane`` are refused when BLANK, not only when falsy — and the
+    # blank test is Python's OWN whitespace set (bare ``strip()``), mirrored
+    # EXACTLY by the SQL lane so the two deployment modes agree on which records
+    # exist. The mirror is ``blank_chars`` in the migration, copied verbatim from
+    # ``20260919000001`` (the set that mirrors ``_current_period``); a
+    # cross-language contract test asserts it equals ``str.isspace()``, so the
+    # copy cannot drift.
+    #
+    # Why exactness matters HERE: a bare SQL ``btrim(x)`` removes ASCII spaces
+    # only, so a TAB-only lane was refused on the embedded lane and WRITTEN on
+    # the Supabase lane — two modes disagreeing about whether the record exists,
+    # which is the defect this guard closes (and unmetered rows are also read
+    # back by org).
+    if (not org_id or not str(org_id).strip()
+            or not lane or not str(lane).strip()
+            or drop_class not in _DROP_CLASSES):
+        return None
+    try:
+        n = max(1, int(n))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is NOT hypothetical: ``int(float('inf'))`` raises it, and
+        # the three writers pass caller-supplied ``n``/``calls``. This floor sits
+        # outside the write ``try``, so an uncaught OverflowError here would
+        # escape a function whose whole contract is that it never raises.
+        n = 1
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_record_unmetered,
+            )
+            return metering_record_unmetered(
+                get_control_plane(), str(org_id), lane, drop_class,
+                type(error).__name__, n)
+        now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        reg = _reg_sdk()._get_registry()
+        # ``coalesce`` rather than ``ON CREATE SET``, mirroring the writers
+        # above: ``first_observed_at`` is the since-when of the episode and must
+        # survive every subsequent drop (the SQL lane preserves it the same way).
+        reg.query(
+            "MERGE (u:MeteringUnmeteredIncrement "
+            "{org_id: $tid, lane: $lane, drop_class: $cls}) "
+            "SET u.increments = coalesce(u.increments, 0) + $n, "
+            "    u.last_error_type = $etype, "
+            "    u.last_observed_at = $now, "
+            "    u.first_observed_at = coalesce(u.first_observed_at, $now)",
+            params={"tid": str(org_id), "lane": lane, "cls": drop_class,
+                    "etype": type(error).__name__, "now": now_iso, "n": n},
+        )
+        rows = reg.query(
+            "MATCH (u:MeteringUnmeteredIncrement "
+            "{org_id: $tid, lane: $lane, drop_class: $cls}) "
+            "RETURN u.increments",
+            params={"tid": str(org_id), "lane": lane, "cls": drop_class},
+        ).result_set
+        return int(rows[0][0]) if rows else None
+    except Exception as e:
+        _logger.warning(
+            "unmetered-increment representation failed (non-fatal): lane=%s "
+            "team=%s class=%s error=%s — the drop is still alerted, but no "
+            "durable record of it exists",
+            lane, org_id, drop_class, e,
+        )
+        return None
+
+
+def get_unmetered_increments(org_id: str) -> list[dict]:
+    """Every unmetered-increment record for ONE org (#4779) — the triage read.
+
+    Returns ``[{lane, drop_class, increments, last_error_type,
+    first_observed_at, last_observed_at}, ...]`` ordered by
+    ``(lane, drop_class)``. An org with no drops returns ``[]`` — a legitimate
+    POSITIVE statement ("never unmeterable"), not a degraded view. This is the
+    read the ``UNMETERED_INCREMENT`` runbook row triages with: ``increments``
+    says how many were lost, ``first_observed_at`` since when, and
+    ``last_observed_at`` whether it is still happening (it stops advancing once
+    the org is repaired).
+
+    ROW COUNT: bounded in practice by the lane inventory, NOT by the schema.
+    ``lane`` is deliberately unconstrained (see ``record_unmetered_increment``),
+    so the table can hold one row per distinct lane the callers ever write — six
+    swallow sites x the two declared classes for this code. That is why a row
+    LIST is safe to read here and a cohort-wide row list is not (the cohort read
+    is the scalar ``get_unmetered_increment_total``): PostgREST's row-list cap
+    could not truncate a set this small, but it is a property of the callers,
+    not a constraint the database enforces.
+
+    FAIL-CLOSED: a read FAILURE raises; it does NOT return ``[]``. Returning
+    the empty list on failure would manufacture exactly the false zero this
+    surface exists to remove — the reader could not then tell "no drops" from
+    "could not read". Mirrors ``get_cohort_spend_usd``, the sibling fail-closed
+    read. Never use this as a degrade-to-zero view on a customer path.
+    """
+    if not org_id:
+        return []
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_unmetered_for_org,
+        )
+        return metering_unmetered_for_org(get_control_plane(), str(org_id))
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (u:MeteringUnmeteredIncrement {org_id: $tid}) "
+        "RETURN u.lane, u.drop_class, u.increments, u.last_error_type, "
+        "u.first_observed_at, u.last_observed_at "
+        "ORDER BY u.lane, u.drop_class",
+        params={"tid": str(org_id)},
+    ).result_set
+    return [
+        {"lane": r[0], "drop_class": r[1], "increments": int(r[2] or 0),
+         "last_error_type": r[3], "first_observed_at": r[4],
+         "last_observed_at": r[5]}
+        for r in rows
+    ]
+
+
+def get_unmetered_increment_total(org_ids: list[str]) -> int:
+    """Increments a COHORT could not record (#4779) — ONE scalar.
+
+    Read this ALONGSIDE ``get_cohort_spend_usd``, never inside it: the spend
+    ceiling keeps reading only ``ask_cost_usd + capture_cost_usd``, so a cohort
+    can read ``spend=0.0`` and ``unmetered=47`` at the same time — which is
+    precisely the distinction the old ledger could not express. Folding the
+    count into the ceiling is the behaviour change #4779 declares out of scope.
+
+    ONE scalar by construction, so a silently short row list cannot understate
+    how long a cohort has been unmeterable (the reason ``metering_cohort_spend``
+    is an RPC — 20260917000001). FAIL-CLOSED on a read failure, like
+    ``get_cohort_spend_usd``: an unreadable cohort must not read as zero drops.
+
+    ``increments`` SUMS the represented events; for the
+    ``increment_write_unconfirmed`` class the true loss is unknowable (the write
+    may have landed), so this figure is an UPPER BOUND on that part — see the
+    class's declaration.
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_unmetered_total,
+        )
+        return metering_unmetered_total(get_control_plane(), wanted)
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (u:MeteringUnmeteredIncrement) WHERE u.org_id IN $ids "
+        "RETURN coalesce(sum(u.increments), 0)",
+        params={"ids": wanted},
+    ).result_set
+    return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+
+def _display_period_label() -> str:
+    """A calendar-month label for DISPLAY-ONLY degrade paths.
+
+    ``get_current_usage``/``get_ask_usage`` never 500 (#923) — they degrade to
+    a zero view. When the WINDOW itself is unresolvable there is no honest
+    label for a row that was never read, so these paths render the current
+    calendar month as a placeholder and log loudly.
+
+    This NEVER supplies a ledger key: the key is only ever ``_current_period``'s
+    ``start_iso``, and a bare month label can no longer address a row at all.
+    """
+    return _calendar_month_period().label
 
 
 # ── Pricing integration ─────────────────────────────────────────────────────
@@ -163,12 +783,12 @@ def _reg_sdk():
 
 # ── Core increment ──────────────────────────────────────────────────────────
 
-def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
+def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
                      nodes_written: int = 0) -> dict | None:
-    """Increment the write-op counter for *team_id* in the current billing period.
+    """Increment the write-op counter for *org_id* in the current billing period.
 
     Args:
-        team_id: Team identifier (required).
+        org_id: Org identifier (required).
         tier: Team tier — used to determine overage eligibility and allowance
             for threshold events. If None, threshold checks are skipped (e.g.
             when called from a context where tier isn't readily available).
@@ -180,15 +800,29 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
 
     Returns:
         ``{write_ops, nodes_written, period, ops_allowance, overage_eligible}``
-        for threshold checking, or None if the registry is unreachable
-        (non-fatal — metering failures never block the write).
+        for threshold checking, or None if the increment could not be WRITTEN
+        (non-fatal — the window is known; the write is logged at WARNING and not
+        retried at any call site). Since #4779 that write is also REPRESENTED
+        durably, on the sibling ``metering_unmetered_increments`` surface with
+        ``drop_class="increment_write_unconfirmed"``: a WARNING line on an
+        ephemeral Fly rootfs is not a record (#3677). The class says
+        UNCONFIRMED, not failed — a raise does not prove the increment was not
+        written (#925's lost-response case), so the represented count is an
+        upper bound on the loss. #3824 does NOT represent it — that counter
+        rides the capture-cost MEASUREMENT row, a different surface.
 
     Raises:
-        Nothing — metering is best-effort. Failures are logged and swallowed.
+        QuotaCheckError: the org's metering window is unresolvable. This is a
+            SIGNAL, not enforcement (#3981): this writer's callers absorb the
+            raise, alert the operator and serve the request, so it refuses no
+            user request. Enforcement -- where a refusal exists -- lives at the
+            pre-spend admission gate. Only window resolution raises; a failure
+            of the increment write itself is still logged and swallowed (the
+            window is known, but the increment is dropped — see Returns).
     """
-    if not team_id:
+    if not org_id:
         return None
-    period = _current_period()
+    period = _require_period(org_id, "write-op metering increment")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     try:
         if _supabase_mode():
@@ -196,51 +830,103 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
                 get_control_plane, metering_increment,
             )
             write_ops = metering_increment(
-                get_control_plane(), team_id, period, n,
-                nodes_written=nodes_written)
-            result = {
-                "write_ops": write_ops,
-                "nodes_written": nodes_written,
-                "period": period,
-                "ops_allowance": _ops_allowance(tier) if tier else 0,
-                "overage_eligible": _overage_eligible(tier) if tier else False,
-            }
-            _check_thresholds(team_id, tier, result, n)
-            return result
-        sdk = _reg_sdk()
-        reg = sdk._get_registry()
-        reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
-            "SET m.write_ops = coalesce(m.write_ops, 0) + $n, "
-            "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
-            "    m.updated_at = $now",
-            params={"tid": team_id, "period": period, "n": n,
-                    "nw": nodes_written, "now": now_iso},
-        )
-        rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
-            "RETURN m.write_ops, m.nodes_written",
-            params={"tid": team_id, "period": period},
-        ).result_set
-        write_ops = int(rows[0][0]) if rows else n
-        nodes_written_total = int(rows[0][1]) if rows else nodes_written
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                n, nodes_written=nodes_written)
+            nodes_written_total = nodes_written
+        else:
+            sdk = _reg_sdk()
+            reg = sdk._get_registry()
+            reg.query(
+                "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+                "SET m.period = $label, m.period_end = $pend, "
+                "    m.write_ops = coalesce(m.write_ops, 0) + $n, "
+                "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
+                "    m.updated_at = $now",
+                params={"tid": org_id, "pstart": period.start_iso,
+                        "pend": period.end_iso, "label": period.label, "n": n,
+                        "nw": nodes_written, "now": now_iso},
+            )
+            # #925 parity: the MERGE has COMMITTED, so the read-back is the only
+            # best-effort step. Keeping it inside this ``try`` is the sibling of
+            # the defect #925 fixed on the Supabase lane — a read-back blip
+            # would raise into the handler below and be REPRESENTED as an
+            # unmeterable increment that had in fact landed, which #4779 makes
+            # durable. Fall back to the known delta instead.
+            write_ops = n
+            nodes_written_total = nodes_written
+            try:
+                rows = reg.query(
+                    "MATCH (m:MeteringRecord "
+                    "{org_id: $tid, period_start: $pstart}) "
+                    "RETURN m.write_ops, m.nodes_written",
+                    params={"tid": org_id, "pstart": period.start_iso},
+                ).result_set
+                if rows:
+                    write_ops = int(rows[0][0])
+                    nodes_written_total = int(rows[0][1])
+            except Exception as e:
+                _logger.warning(
+                    "metering read-back failed after a committed increment "
+                    "(non-fatal, and NOT a dropped increment): team=%s "
+                    "period=%s error=%s", org_id, period.label, e,
+                )
     except Exception as e:
         _logger.warning(
             "metering increment failed (non-fatal): team=%s period=%s error=%s",
-            team_id, period, e,
+            org_id, period.label, e,
         )
+        # #4779 leg 2: the increment write did not CONFIRM, and until this call
+        # that was visible only as the WARNING above. The window IS known here —
+        # it is the write that failed — so this is a different ``drop_class``
+        # from the window-unresolvable one, and the operator needs to tell them
+        # apart. Never raises (it is a representation, and this is already a
+        # handler).
+        #
+        # COST, STATED: this is one further blocking control-plane attempt on a
+        # path that is ALREADY synchronous (the increment call above), and that
+        # whole shape is the #4451 residual this writer does not own. The budget
+        # is deliberately NOT shortened: a shorter one would silently lose the
+        # record in the one class that has no alert, and the attempt costs
+        # nothing next to a control plane that is already failing.
+        record_unmetered_increment(
+            "write_op", org_id, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED, e, n)
         return None
 
-    result = {
-        "write_ops": write_ops,
-        "nodes_written": nodes_written_total,
-        "period": period,
-        "ops_allowance": _ops_allowance(tier) if tier else 0,
-        "overage_eligible": _overage_eligible(tier) if tier else False,
-    }
-
-    # Threshold events
-    _check_thresholds(team_id, tier, result, n)
+    # The increment HAS landed. The allowance/threshold work below is DERIVED,
+    # observability-only bookkeeping: a failure there is NOT a dropped increment
+    # and must never be represented as one. It used to sit inside the
+    # increment's ``try``, where a pricing-config drift (``_ops_allowance``
+    # raises KeyError on a missing required key — pricing.py:63) made this writer
+    # report ``None``, i.e. claim a drop for an increment that had committed.
+    # #4779's representation would have made that false claim DURABLE, so the
+    # derived work is separated out and guarded on its own here.
+    try:
+        result = {
+            "write_ops": write_ops,
+            "nodes_written": nodes_written_total,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+            "ops_allowance": _ops_allowance(tier) if tier else 0,
+            "overage_eligible": _overage_eligible(tier) if tier else False,
+        }
+        # Threshold events
+        _check_thresholds(org_id, tier, result, n)
+    except Exception as e:
+        _logger.warning(
+            "metering threshold bookkeeping failed (non-fatal, and NOT a "
+            "dropped increment — the increment LANDED): team=%s period=%s "
+            "error=%s", org_id, period.label, e,
+        )
+        return {
+            "write_ops": write_ops,
+            "nodes_written": nodes_written_total,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+            "ops_allowance": 0,
+            "overage_eligible": False,
+        }
 
     return result
 
@@ -256,15 +942,18 @@ _thresholds_fired: set[tuple[str, str, int]] = set()
 
 
 def _check_thresholds(
-    team_id: str,
+    org_id: str,
     tier: str | None,
     result: dict,
     n: int = 1,
 ) -> None:
     """Emit log events if write_ops crossed an 80% or 100% threshold.
 
-    Only fires for overage-eligible tiers (pro, team). Each threshold fires
-    at most once per (team_id, period, pct) per process lifetime.
+    Only fires for overage-eligible tiers — the set is
+    ``product/pricing.json::billing.overage_tiers``, read through
+    ``tortoise.pricing.has_overage()``; it is not restated here. Each
+    threshold fires at most once per (org_id, period, pct) per process
+    lifetime.
     """
     if not tier or not result.get("overage_eligible"):
         return
@@ -281,7 +970,11 @@ def _check_thresholds(
         # threshold (e.g. 0 → 105 with n=105) still fires the event.
         previous = write_ops - max(n, 1)
         if previous < threshold <= write_ops:
-            key = (team_id, period, pct)
+            # Deduped per WINDOW, not per month label (#3825): two different
+            # billing periods of one org can share a "YYYY-MM" label (e.g.
+            # Sep-03→Oct-03 and Sep-15→Oct-15), so keying on the label would
+            # suppress a legitimate alert for the second period.
+            key = (org_id, result.get("period_start") or period, pct)
             if key in _thresholds_fired:
                 continue
             _thresholds_fired.add(key)
@@ -289,7 +982,7 @@ def _check_thresholds(
             _logger.log(
                 level,
                 "write-op threshold %d%% reached: team=%s period=%s count=%d/%d",
-                pct, team_id, period, write_ops, allowance,
+                pct, org_id, period, write_ops, allowance,
             )
 
 
@@ -364,154 +1057,673 @@ def estimate_ask_cost_usd(tokens_in: int, tokens_out: int,
 def _selfhost_transport_active() -> bool:
     """True while a selfhost HTTP MCP transport is serving the request — the
     transport-keyed exemption channel (tortoise/transport.py; the value
-    "selfhost" is NEVER the exemption key — a hosted team with the raw id
+    "selfhost" is NEVER the exemption key — a hosted org with the raw id
     "selfhost" is legal and MUST record usage, P1-4)."""
     from tortoise.transport import _selfhost_transport
     return _selfhost_transport.get()
 
 
-def record_ask_usage(team_id: str | None, tier: str | None = None, *,
+def record_ask_usage(org_id: str | None, tier: str | None = None, *,
                      calls: int = 1, tokens_in: int = 0, tokens_out: int = 0,
                      cost_usd: float = 0.0,
                      _selfhost_transport: bool = False) -> dict | None:
     """Record a per-query ask usage increment (#1987 Task 6).
 
-    Best-effort, non-fatal (metering failures never block the answer).
+    Window resolution RAISES on an unresolvable anchor (#3825) rather than
+    keying the row to a calendar month. That raise is a SIGNAL, not a refusal
+    (#3981): the caller (``sdk.ask``) absorbs it, serves the answer and reports
+    the dropped increment to the operator. A failure of the increment write
+    itself stays non-fatal — logged at WARNING and dropped, not retried at any
+    call site — and is REPRESENTED durably since #4779, on the sibling
+    ``metering_unmetered_increments`` surface with
+    ``drop_class="increment_write_unconfirmed"``. #3824 does NOT represent it:
+    that counter rides the capture-cost MEASUREMENT row — a different surface,
+    keyed to a capture session.
     Extends the ``:MeteringRecord`` (registry) with additive fields
     ``ask_calls``/``ask_tokens_in``/``ask_tokens_out``/``ask_cost_usd`` via
     the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
     routes through the ``metering_increment_ask`` seam.
 
-    Exemptions (no record, zero writes): ``not team_id`` (stdio/None) OR the
+    Exemptions (no record, zero writes): ``not org_id`` (stdio/None) OR the
     selfhost-transport ContextVar (``_selfhost_transport`` — set True ONLY
-    by the selfhost HTTP MCP transport; the SELFHOST_TEAM_ID value is never
+    by the selfhost HTTP MCP transport; the SELFHOST_ORG_ID value is never
     the exemption key). ``tier`` stays None for the ask lane (tier-based ask
     budgets are OUT of v1).
 
     Returns a dict summary or None (exempt/no-op/failure).
     """
-    if not team_id or _selfhost_transport or _selfhost_transport_active():
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
         return None
-    period = _current_period()
+    period = _require_period(org_id, "ask metering increment")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-    with _ask_meter_lock(team_id):
-        return _record_ask_usage_locked(team_id, period, now_iso,
-                                        calls=calls, tokens_in=tokens_in,
-                                        tokens_out=tokens_out,
-                                        cost_usd=cost_usd)
+    # #4779 review: the drop is represented AFTER the lock is released. The
+    # locked body hands its failure back instead of doing the control-plane
+    # round trip itself — otherwise a blocking write inside the per-org
+    # critical section would serialize every other ask increment for this org
+    # behind a control plane that is already failing.
+    pending: list[BaseException] = []
+    with _ask_meter_lock(org_id):
+        result = _record_ask_usage_locked(org_id, period, now_iso,
+                                         calls=calls, tokens_in=tokens_in,
+                                         tokens_out=tokens_out,
+                                         cost_usd=cost_usd,
+                                         pending=pending)
+    for failure in pending:
+        record_unmetered_increment(
+            "ask_ledger", org_id, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED,
+            failure, calls)
+    return result
 
 
-def _record_ask_usage_locked(team_id: str, period: str, now_iso: str, *,
+def _record_ask_usage_locked(org_id: str, period: MeteringPeriod,
+                             now_iso: str, *,
                              calls: int, tokens_in: int, tokens_out: int,
-                             cost_usd: float) -> dict | None:
-    """The serialized increment body (under the per-team lock — embedded
-    concurrency-safe)."""
+                             cost_usd: float,
+                             pending: list[BaseException]) -> dict | None:
+    """The serialized increment body (under the per-org lock — embedded
+    concurrency-safe). A failure is appended to ``pending`` and represented by
+    the CALLER, after the lock is released (#4779 review). """
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_increment_ask,
             )
-            metering_increment_ask(get_control_plane(), team_id, period,
+            metering_increment_ask(get_control_plane(), org_id,
+                                   period.start_iso, period.end_iso,
                                    calls=calls, tokens_in=tokens_in,
                                    tokens_out=tokens_out, cost_usd=cost_usd)
-            return {"period": period, "ask_calls": calls,
+            return {"period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso,
+                    "ask_calls": calls,
                     "ask_tokens_in": tokens_in,
                     "ask_tokens_out": tokens_out,
                     "ask_cost_usd": cost_usd}
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
-            "SET m.ask_calls = coalesce(m.ask_calls, 0) + $calls, "
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.ask_calls = coalesce(m.ask_calls, 0) + $calls, "
             "    m.ask_tokens_in = coalesce(m.ask_tokens_in, 0) + $tin, "
             "    m.ask_tokens_out = coalesce(m.ask_tokens_out, 0) + $tout, "
             "    m.ask_cost_usd = coalesce(m.ask_cost_usd, 0) + $cost, "
             "    m.updated_at = $now",
-            params={"tid": team_id, "period": period, "calls": calls,
-                    "tin": tokens_in, "tout": tokens_out, "cost": cost_usd,
-                    "now": now_iso},
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "calls": calls, "tin": tokens_in, "tout": tokens_out,
+                    "cost": cost_usd, "now": now_iso},
         )
-        return {"period": period, "ask_calls": calls,
+        return {"period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
+                "ask_calls": calls,
                 "ask_tokens_in": tokens_in, "ask_tokens_out": tokens_out,
                 "ask_cost_usd": cost_usd}
     except Exception as e:
         _logger.warning(
             "ask metering increment failed (non-fatal): team=%s period=%s "
-            "error=%s", team_id, period, e,
+            "error=%s", org_id, period.label, e,
         )
+        # #4779 leg 2: the window IS known here (it is the WRITE that did not
+        # confirm), so this is a distinct ``drop_class``. Handed to the caller,
+        # which represents it AFTER the per-org lock is released (never raises).
+        pending.append(e)
         return None
 
 
-def get_ask_usage(team_id: str) -> dict:
-    """Ask usage for *team_id* in the current billing period (#1987 Task 6).
+def get_ask_usage(org_id: str) -> dict:
+    """Ask usage for *org_id* in the current billing period (#1987 Task 6).
 
     Returns ``{ask_calls, ask_tokens_in, ask_tokens_out, ask_cost_usd}`` for
-    the team's current period — ZEROS for a team with no ask records yet (a
+    the org's current period — ZEROS for an org with no ask records yet (a
     successful read returning NO row is not an error; the MERGE only creates
     the record on the first write — P2-14). Read failures degrade to the
     zero-usage view (never 500).
     """
-    period = _current_period()
     zeros = {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
              "ask_cost_usd": 0.0}
-    if not team_id:
-        return {**zeros, "period": period}
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        # #923: this read never raises. An unresolvable WINDOW has no row to
+        # read, so the degradation is the zero view — never a month key.
+        _logger.warning(
+            "ask usage query failed (degrading to zero view): team=%s "
+            "error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_get_usage,
             )
-            row = metering_get_usage(get_control_plane(), team_id, period)
+            row = metering_get_usage(get_control_plane(), org_id,
+                                     period.start_iso)
             return {**zeros, **{k: row.get(k, 0) for k in zeros},
-                    "period": period}
+                    "period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso}
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
             "RETURN m.ask_calls, m.ask_tokens_in, m.ask_tokens_out, "
             "m.ask_cost_usd",
-            params={"tid": team_id, "period": period},
+            params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
         if not rows:
-            return {**zeros, "period": period}
+            return _zero_view(period.label, period)
         return {
             "ask_calls": int(rows[0][0] or 0),
             "ask_tokens_in": int(rows[0][1] or 0),
             "ask_tokens_out": int(rows[0][2] or 0),
             "ask_cost_usd": float(rows[0][3] or 0.0),
-            "period": period,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
         }
     except Exception as e:
         _logger.warning(
             "ask usage query failed (degrading to zero view): team=%s "
-            "period=%s error=%s", team_id, period, e,
+            "period=%s error=%s", org_id, period.label, e,
         )
-        return {**zeros, "period": period}
+        return _zero_view(period.label, period)
+
+
+# ── Embed lane: per-org ENCODE workload (#4488) ─────────────────────────────
+#
+# WHY. The ask/capture lanes record LLM PROVIDER work, which has a billable
+# token count. A local `sentence-transformers` encode consumes CPU seconds and
+# RAM and produces no such count, so embedding work was invisible to every
+# existing figure. These two functions put that workload on the SAME durable
+# per-period row, so the reading needs no new store and no new read path.
+#
+# NOT a billing change (#4488 is explicit): nothing here prices, caps, throttles
+# or bills. The columns are WORKLOAD, and `get_cohort_spend_usd` does not read
+# them — the spend ceiling is untouched by construction.
+
+
+def record_embedding_usage(org_id: str | None, *, calls: int = 0,
+                           texts: int = 0, chars: int = 0,
+                           wall_ms: float = 0.0, skipped: int = 0,
+                           model: str | None = None,
+                           revision: str | None = None,
+                           identity_mixed: bool = False,
+                           _selfhost_transport: bool = False) -> dict | None:
+    """Record one batch of embedding-encode WORKLOAD for *org_id* (#4488).
+
+    Window resolution RAISES on an unresolvable anchor (#3825), exactly like the
+    other writers. That raise is a SIGNAL, not a refusal (#3981): the caller
+    (``embed_metering.flush_tally``) absorbs it, the write is served, and the
+    dropped increment is reported to the operator on the ``embed`` lane. A
+    failure of the increment RPC itself stays non-fatal — logged at WARNING and
+    dropped, not retried at any call site (representing that increment is
+    #3824, the same residual as the other lanes).
+
+    ``model``/``revision`` are the identity of the encoder that did the work
+    (``embeddings.embedding_identity()``): they travel WITH the figure so a
+    reading cannot be silently attributed to an encoder that did not run.
+    ``identity_mixed`` latches once a second, DIFFERENT identity is seen in the
+    same window (see the MERGE below). ``skipped`` counts encode attempts that
+    ran NO model work (embedder unavailable) — recorded so a zero cannot be
+    read as "the embedder ran and produced nothing".
+
+    Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or the
+    selfhost-transport ContextVar (the value ``selfhost`` is NEVER the key).
+
+    A NON-FINITE ``wall_ms`` is dropped to 0.0 (with a warning): the value is
+    summed into a figure an operator reads, and a ``nan`` would poison it.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not math.isfinite(wall_ms):
+        _logger.warning(
+            "embed metering dropped a non-finite wall_ms (team=%s wall_ms=%r) "
+            "— recording 0.0 rather than poisoning the figure",
+            org_id, wall_ms,
+        )
+        wall_ms = 0.0
+    period = _require_period(org_id, "embed metering increment")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_embedding_usage_locked(
+            org_id, period, now_iso, calls=calls, texts=texts, chars=chars,
+            wall_ms=wall_ms, skipped=skipped, model=model, revision=revision,
+            identity_mixed=identity_mixed,
+        )
+
+
+def _record_embedding_usage_locked(org_id: str, period: MeteringPeriod,
+                                   now_iso: str, *, calls: int, texts: int,
+                                   chars: int, wall_ms: float, skipped: int,
+                                   model: str | None, revision: str | None,
+                                   identity_mixed: bool) -> dict | None:
+    """The serialized embed increment body.
+
+    THE MIXED FLAG IS STICKY, PAIRED, AND SKIP-SAFE. It is computed in its own
+    SET clause, BEFORE the identity is assigned, from the STORED identity — so
+    the flag reflects the change that was observed, not the value we are about
+    to write. ``coalesce($model, m.embed_model)`` makes a skipped-only flush
+    (``model=NULL``) leave the stored identity INTACT and the flag UNCHANGED: a
+    tally that ran no model work must never erase the identity of the encoder
+    the window actually used, nor claim a swap that did not happen. And because
+    the term latching a swap requires ``$model IS NOT NULL``, a skip-only row
+    cannot flip it either.
+    """
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_embedding,
+            )
+            metering_increment_embedding(
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                calls=calls, texts=texts, chars=chars, wall_ms=wall_ms,
+                skipped=skipped, model=model, revision=revision,
+                identity_mixed=identity_mixed,
+            )
+            return {"period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso,
+                    "embed_calls": calls, "embed_texts": texts,
+                    "embed_chars": chars, "embed_wall_ms": wall_ms,
+                    "embed_skipped": skipped, "embed_model": model,
+                    "embed_revision": revision,
+                    "embed_identity_mixed": identity_mixed}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.embed_identity_mixed = "
+            "        coalesce(m.embed_identity_mixed, false) OR $mixed "
+            "        OR (m.embed_model IS NOT NULL AND $model IS NOT NULL "
+            "            AND (coalesce(m.embed_model, '') <> $model "
+            "                 OR coalesce(m.embed_revision, '') "
+            "                    <> coalesce($revision, ''))) "
+            "SET m.embed_model = coalesce($model, m.embed_model), "
+            "    m.embed_revision = coalesce($revision, m.embed_revision), "
+            "    m.embed_calls = coalesce(m.embed_calls, 0) + $calls, "
+            "    m.embed_texts = coalesce(m.embed_texts, 0) + $texts, "
+            "    m.embed_chars = coalesce(m.embed_chars, 0) + $chars, "
+            "    m.embed_wall_ms = coalesce(m.embed_wall_ms, 0.0) + $wall_ms, "
+            "    m.embed_skipped = coalesce(m.embed_skipped, 0) + $skipped, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "calls": calls, "texts": texts, "chars": chars,
+                    "wall_ms": wall_ms, "skipped": skipped,
+                    "model": model, "revision": revision,
+                    "mixed": identity_mixed, "now": now_iso},
+        )
+        return {"period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
+                "embed_calls": calls, "embed_texts": texts,
+                "embed_chars": chars, "embed_wall_ms": wall_ms,
+                "embed_skipped": skipped, "embed_model": model,
+                "embed_revision": revision,
+                "embed_identity_mixed": identity_mixed}
+    except Exception as e:
+        _logger.warning(
+            "embed metering increment failed (non-fatal): team=%s period=%s "
+            "error=%s", org_id, period.label, e,
+        )
+        return None
+
+
+def get_embedding_usage(org_id: str) -> dict:
+    """Embedding-encode workload for *org_id* in the current period (#4488).
+
+    Returns the ``embed_*`` fields for the org's current window — ZEROS (and a
+    ``None`` identity) for an org with no embed records yet: a successful read
+    returning NO row is not an error (the MERGE only creates the record on the
+    first write, P2-14). Read failures degrade to the zero view (never 500,
+    #923), including an unresolvable window.
+    """
+    zeros: dict = {"embed_calls": 0, "embed_texts": 0, "embed_chars": 0,
+                   "embed_wall_ms": 0.0, "embed_skipped": 0,
+                   "embed_model": None, "embed_revision": None,
+                   "embed_identity_mixed": False}
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "embed usage query failed (degrading to zero view): team=%s "
+            "error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_embed_usage,
+            )
+            row = metering_get_embed_usage(get_control_plane(), org_id,
+                                           period.start_iso)
+            out = {**zeros}
+            out.update({k: row.get(k) for k in zeros if k in row})
+            out.update({"period": period.label,
+                        "period_start": period.start_iso,
+                        "period_end": period.end_iso})
+            return out
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.embed_calls, m.embed_texts, m.embed_chars, "
+            "m.embed_wall_ms, m.embed_skipped, m.embed_model, "
+            "m.embed_revision, m.embed_identity_mixed",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _zero_view(period.label, period)
+        r = rows[0]
+        return {
+            "embed_calls": int(r[0] or 0),
+            "embed_texts": int(r[1] or 0),
+            "embed_chars": int(r[2] or 0),
+            "embed_wall_ms": float(r[3] or 0.0),
+            "embed_skipped": int(r[4] or 0),
+            "embed_model": r[5],
+            "embed_revision": r[6],
+            "embed_identity_mixed": bool(r[7]) if r[7] is not None else False,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+        }
+    except Exception as e:
+        _logger.warning(
+            "embed usage query failed (degrading to zero view): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return _zero_view(period.label, period)
+
+
+# ── Capture lane: measured per-session extraction cost (#3665 / #3359) ──────
+#
+# #3359 made the hosted capture path MEASURE per-session LLM cost (provider-
+# authoritative ``last_cost_usd`` rolled up by ``extractor_v2._rollup_llm``)
+# and emit it as an ``analytics_events`` row. That is a measurement, not a
+# ledger — nothing keyed by org+period, so a spend CEILING cannot read it
+# without scanning every capture row in the period. These two functions put
+# the SAME measurement on the durable per-period ``:MeteringRecord`` (columns
+# from migration 20260917000001) so that a pre-spend gate can answer "what has
+# this cohort spent this period?" in one row-per-org read. No parallel system:
+# it is exactly the ``record_ask_usage`` shape.
+
+
+def record_capture_usage(org_id: str | None, *, calls: int = 1,
+                         cost_usd: float = 0.0,
+                         tokens_in: int = 0, tokens_out: int = 0,
+                         _selfhost_transport: bool = False) -> dict | None:
+    """Record the MEASURED cost and TOKEN WORKLOAD of one capture extraction
+    attempt.
+
+    Window resolution RAISES on an unresolvable anchor (#3825) rather than
+    keying the row to a calendar month. That raise is a SIGNAL, not a refusal
+    (#3981): the caller absorbs it, the capture is served and the dropped
+    increment is reported to the operator. A failure of the increment write
+    itself stays non-fatal — logged at WARNING and dropped, not retried at any
+    call site — and is REPRESENTED durably since #4779, on the sibling
+    ``metering_unmetered_increments`` surface with
+    ``drop_class="increment_write_unconfirmed"``. #3824 does NOT represent it:
+    that counter rides the capture-cost MEASUREMENT row — a different surface,
+    keyed to a capture session.
+    Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or
+    the selfhost-transport ContextVar (``_selfhost_transport``).
+
+    Records a row even when ``cost_usd == 0.0`` — ``capture_calls`` is the
+    denominator that keeps a genuinely-free capture distinguishable from a
+    capture whose cost was never measured (#3359's silent-zero lesson).
+
+    ``tokens_in``/``tokens_out`` are the extraction prompt/completion token
+    counts the caller ALREADY measured (``hosted_api._capture_cost_props``
+    reads them from ``meta["stats"]["llm"]``); they are carried verbatim onto
+    the same row, never re-derived from cost (#5045). They are WORKLOAD, never
+    price: nothing on the spend ceiling reads them.
+
+    A NON-FINITE ``cost_usd`` is dropped to 0.0 (with a warning) before it can
+    reach the ledger. This is the spend ceiling's own substrate: a ``nan`` on
+    the row would poison the cohort ``SUM`` and make ``spent >= cap``
+    permanently False — a silently disarmed ceiling (#3665 review, the
+    ``math.isfinite`` trap ``cohort_cost.resolve_cohort_cost_cap`` guards too).
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not math.isfinite(cost_usd):
+        _logger.warning(
+            "capture metering dropped a non-finite cost (team=%s cost=%r) — "
+            "recording 0.0 for the call rather than poisoning the cohort SUM",
+            org_id, cost_usd,
+        )
+        cost_usd = 0.0
+    period = _require_period(org_id, "capture metering increment")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    # #4779 review: represented AFTER the lock is released — see the same note
+    # in ``record_ask_usage``.
+    pending: list[BaseException] = []
+    with _ask_meter_lock(org_id):
+        result = _record_capture_usage_locked(org_id, period, now_iso,
+                                              calls=calls, cost_usd=cost_usd,
+                                              tokens_in=tokens_in,
+                                              tokens_out=tokens_out,
+                                              pending=pending)
+    for failure in pending:
+        record_unmetered_increment(
+            "capture_ledger", org_id, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED,
+            failure, calls)
+    return result
+
+
+def _record_capture_usage_locked(org_id: str, period: MeteringPeriod,
+                                 now_iso: str, *,
+                                 calls: int, cost_usd: float,
+                                 tokens_in: int = 0,
+                                 tokens_out: int = 0,
+                                 pending: list[BaseException]) -> dict | None:
+    """The serialized capture increment body (under the per-org lock).
+    A failure is appended to ``pending`` and represented by the CALLER, after
+    the lock is released (#4779 review)."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_capture_cost,
+            )
+            metering_increment_capture_cost(get_control_plane(), org_id,
+                                            period.start_iso, period.end_iso,
+                                            calls=calls,
+                                            tokens_in=tokens_in,
+                                            tokens_out=tokens_out,
+                                            cost_usd=cost_usd)
+            return {"period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso,
+                    "capture_calls": calls,
+                    "capture_tokens_in": tokens_in,
+                    "capture_tokens_out": tokens_out,
+                    "capture_cost_usd": cost_usd}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.capture_calls = coalesce(m.capture_calls, 0) + $calls, "
+            "    m.capture_tokens_in = coalesce(m.capture_tokens_in, 0) + $tin, "
+            "    m.capture_tokens_out = coalesce(m.capture_tokens_out, 0) + $tout, "
+            "    m.capture_cost_usd = coalesce(m.capture_cost_usd, 0) + $cost, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "calls": calls, "tin": tokens_in, "tout": tokens_out,
+                    "cost": cost_usd, "now": now_iso},
+        )
+        return {"period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
+                "capture_calls": calls,
+                "capture_tokens_in": tokens_in,
+                "capture_tokens_out": tokens_out,
+                "capture_cost_usd": cost_usd}
+    except Exception as e:
+        _logger.warning(
+            "capture metering increment failed (non-fatal): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        # #4779 leg 2: the window IS known here (it is the WRITE that did not
+        # confirm), so this is a distinct ``drop_class``. Handed to the caller,
+        # which represents it AFTER the per-org lock is released (never raises).
+        pending.append(e)
+        return None
+
+
+def get_cohort_spend_usd(org_ids: list[str],
+                         period: MeteringPeriod) -> float:
+    """Measured LLM spend for a COHORT over ONE metering window (#3665/#3825).
+
+    The cohort is a set of org ids (``cohort_cost.cohort_org_ids`` — there is
+    no cohort column; the only FK-enforced key to spend is
+    ``organizations.id``). Spend is the durable ledger's cost columns for
+    those orgs, over the supplied window: ``SUM(ask_cost_usd +
+    capture_cost_usd)``.
+
+    ``period`` is REQUIRED (#3825). It used to default to a calendar month,
+    which made "the cohort's spend this period" depend on a bucket no caller
+    had chosen — the exact ambiguity the ledger could not express. The caller
+    (``cohort_cost.enforce_cohort_cost_cap``) resolves it from the org being
+    gated, so the window is the SUBSCRIPTION'S billing period (D10) — never a
+    month.
+
+    The window is applied as an OVERLAP test (``period_start < end AND
+    period_end > start``), so a cohort row straddling an edge is counted. The
+    alternative — rows whose ``period_start`` falls inside the window —
+    UNDER-reads every org whose period began earlier, and on a spend CEILING
+    an under-read is fail-OPEN. An over-read can only fire the cap EARLIER.
+
+    Both cost columns are MEASURED metres, never billing estimates: the ask
+    lane's serving-lane rates and the capture lane's provider-authoritative
+    charge. A cohort with no ledger row reads as ``0.0`` (the MERGE only
+    creates the row on the first write).
+
+    FAIL-CLOSED, deliberately unlike ``get_ask_usage``: this READER drives a
+    spend ceiling, so a query failure RAISES rather than degrading to a zero
+    view. Degrading here would read as "the cohort has spent nothing" — a
+    fail-open the cap could never recover from (#686's discipline; the
+    caller maps the raise to a 500, never a silent pass).
+    """
+    ids = [str(i) for i in (org_ids or []) if i]
+    if not ids:
+        return 0.0
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_cohort_spend,
+        )
+        try:
+            return metering_cohort_spend(get_control_plane(), ids,
+                                         period.start_iso, period.end_iso)
+        except QuotaCheckError:
+            raise
+        except Exception as e:
+            # #686's fail-closed quota contract: a counting failure is a
+            # QuotaCheckError (→ 500 carrying the quota classification),
+            # never an unclassified 500 and never a silent pass. The
+            # control-plane read raises RuntimeError; classifying it here is
+            # what makes the gate's own ``except QuotaCheckError`` clause (and
+            # MCP's ERR_QUOTA_SERVER) actually fire. code-review cycle 1, P2.
+            raise QuotaCheckError(
+                f"cohort spend read failed for {len(ids)} org(s), window "
+                f"[{period.start_iso}, {period.end_iso}): {e}"
+            ) from e
+    sdk = _reg_sdk()
+    rows = sdk._get_registry().query(
+        "MATCH (m:MeteringRecord) "
+        "WHERE m.org_id IN $ids "
+        "  AND m.period_start < $pend AND m.period_end > $pstart "
+        "RETURN sum(coalesce(m.ask_cost_usd, 0.0) "
+        "         + coalesce(m.capture_cost_usd, 0.0))",
+        params={"ids": ids, "pstart": period.start_iso,
+                "pend": period.end_iso},
+    ).result_set
+    return float(rows[0][0] or 0.0) if rows else 0.0
 
 
 # ── Usage query ─────────────────────────────────────────────────────────────
 
-def get_current_usage(team_id: str) -> dict:
-    """Return write-op usage for *team_id* in the current billing period.
+def get_current_usage(org_id: str) -> dict:
+    """Return write-op usage for *org_id* in its current metering window.
 
     Returns:
         ``{write_ops_used: int, write_ops_limit: int, period: str,
+           period_start: str | None, period_end: str | None,
            overage_eligible: bool, overage_cost_usd: float | None}``
+
+    ``period`` stays the DERIVED ``"YYYY-MM"`` label so the ``/v1/team``
+    contract is unchanged (#3825); ``period_start``/``period_end`` expose the
+    window the figure was actually read from.
 
     ``overage_cost_usd`` is the cost of ops BEYOND the included allowance
     (rounded up to the nearest 10k block, $5/block). None if under allowance
     or not eligible.
+
+    DEGRADES, never raises (#923). An unresolvable WINDOW has no row to read,
+    so it renders the zero view — with a placeholder label, never a month KEY.
+
+    NOTE (#3825): this view follows the org's metering window, so for a
+    subscription org it is its BILLING period, while ``pricing.json`` prices
+    write-op overage per month (``included_write_ops_per_month``). Reconciling
+    a non-monthly meter window against a monthly price is a separate open item,
+    out of this change's scope.
     """
-    period = _current_period()
+    try:
+        period: MeteringPeriod | None = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "metering window unresolvable (usage view degrades to zeros): "
+            "team=%s error=%s", org_id, e,
+        )
+        period = None
+
+    def _view(ops_used: int, ops_limit: int, eligible: bool,
+              overage_cost: float | None) -> dict:
+        return {
+            "write_ops_used": ops_used,
+            "write_ops_limit": ops_limit,
+            "period": period.label if period else _display_period_label(),
+            "period_start": period.start_iso if period else None,
+            "period_end": period.end_iso if period else None,
+            "overage_eligible": eligible,
+            "overage_cost_usd": overage_cost,
+        }
+
+    if period is None:
+        return _view(0, _ops_allowance("free"), False, None)
+
     ops_used = 0
     if _supabase_mode():
         from tortoise.supabase_control import (  # noqa: I001
-            get_control_plane, metering_get, team_tier,
+            get_control_plane, metering_get, org_tier,
         )
         try:
             cp = get_control_plane()
-            ops_used = metering_get(cp, team_id, period)
-            tier = team_tier(cp, team_id) or "free"
+            ops_used = metering_get(cp, org_id, period.start_iso)
+            tier = org_tier(cp, org_id) or "free"
             ops_limit = _ops_allowance(tier)
             eligible = _overage_eligible(tier)
             overage_cost = None
@@ -519,51 +1731,39 @@ def get_current_usage(team_id: str) -> dict:
                 from tortoise.pricing import overage_price_per_10k
                 overage_units = (ops_used - ops_limit + 9999) // 10000
                 overage_cost = overage_units * overage_price_per_10k()
-            return {
-                "write_ops_used": ops_used,
-                "write_ops_limit": ops_limit,
-                "period": period,
-                "overage_eligible": eligible,
-                "overage_cost_usd": overage_cost,
-            }
+            return _view(ops_used, ops_limit, eligible, overage_cost)
         except Exception as e:
             # Metering is best-effort by contract — a control-plane blip must
             # never 500 the /v1/team hot path (#923). Degrade to the
             # free-tier zero-usage view, mirroring the registry path below.
             _logger.warning(
                 "metering usage query failed: team=%s period=%s error=%s",
-                team_id, period, e,
+                org_id, period.label, e,
             )
-            return {
-                "write_ops_used": 0,
-                "write_ops_limit": _ops_allowance("free"),
-                "period": period,
-                "overage_eligible": False,
-                "overage_cost_usd": None,
-            }
+            return _view(0, _ops_allowance("free"), False, None)
     try:
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
             "RETURN m.write_ops",
-            params={"tid": team_id, "period": period},
+            params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
-        if rows:
+        if rows and rows[0][0] is not None:
             ops_used = int(rows[0][0])
     except Exception as e:
         _logger.warning(
             "metering usage query failed: team=%s period=%s error=%s",
-            team_id, period, e,
+            org_id, period.label, e,
         )
 
-    # Determine tier from the Team node for allowance
+    # Determine tier from the Org node for allowance
     try:
         sdk2 = _reg_sdk()
         reg2 = sdk2._get_registry()
         trows = reg2.query(
             "MATCH (t:Team {id: $tid}) RETURN t.tier",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         tier = trows[0][0] if trows else "free"
     except Exception:
@@ -578,10 +1778,407 @@ def get_current_usage(team_id: str) -> dict:
         overage_units = (ops_used - ops_limit + 9999) // 10000
         overage_cost = overage_units * overage_price_per_10k()
 
+    return _view(ops_used, ops_limit, eligible, overage_cost)
+
+
+def measure_write_ops(org_id: str) -> int:
+    """FAIL-CLOSED read of one org's write-ops for its CURRENT metering window.
+
+    #4493: deliberately unlike :func:`get_current_usage`, which DEGRADES an
+    unreadable window or a failed read to a **zero view** (#923). A cost
+    ALLOCATION must never read "the read failed" as "this org consumed
+    nothing": that silently redistributes the org's share of a fixed cost to
+    every other org, and the redistribution is invisible. So every failure path
+    here RAISES and the caller reports the line ``unavailable``.
+
+    The distinction this function exists to preserve:
+
+    * **no row for the window** — a genuine, MEASURED zero (the org simply
+      wrote nothing this period) → returns ``0``;
+    * **a row whose ``write_ops`` is unset** — also a MEASURED zero, and NOT a
+      read failure. A ``MeteringRecord`` says nothing about *which* lane wrote
+      it: in the registry lane the ask, embed and graph-storage writers MERGE
+      their own row and set only their own columns, so an org whose FIRST event
+      in the window was an ask/embed call carries a row with no ``write_ops``
+      property at all. Reading that as a failure would freeze the whole
+      allocation snapshot on the most ordinary multi-lane org;
+    * **the window or the read failed** — unreadable → raises, never ``0``.
+
+    ``get_current_usage`` cannot express that distinction: its read-failure
+    path logs and falls through with ``ops_used = 0`` while ``period`` is a
+    perfectly valid window, so ``period_start is None`` does NOT identify it.
+
+    Returns a non-negative int. Raises whatever the underlying seam raised
+    (plus ``ValueError`` for a negative count, which is corruption, not a
+    measurement).
+    """
+    period = _current_period(org_id)  # raises on an unusable anchor/window
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane, metering_get
+        ops_used = metering_get(get_control_plane(), org_id, period.start_iso)
+    else:
+        rows = _reg_sdk()._get_registry().query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.write_ops",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        ops_used = int(rows[0][0]) if rows and rows[0][0] is not None else 0
+    if int(ops_used) < 0:
+        raise ValueError(
+            f"negative write_ops for org={org_id} period={period.label}: {ops_used}")
+    return int(ops_used)
+
+
+# ── Graph storage lane: per-org GRAPH.MEMORY USAGE gauge (#5331) ─────────────
+#
+# WHY. The owner ruling (2026-09-26) is that storage is counted in MB/GB, not
+# nodes. The graph MB figure comes from ``GRAPH.MEMORY USAGE``
+# (``tortoise/graph_storage.py``), which is a SAMPLING ESTIMATE that excludes
+# per-graph/Redis-key overhead. This lane puts the reading on the SAME durable
+# per-(org, period) ledger the ask/capture lanes use, so the figure needs no
+# new store and no new read path.
+#
+# A GAUGE, NOT AN INCREMENT. The other lanes are cumulative workload; graph
+# storage is a current-state measurement. This lane OVERWRITES its columns (the
+# latest reading in the window wins) instead of summing them — adding two
+# readings of the same graph would double-count the same bytes. The point
+# estimate, the observed range and the SAMPLES/repeats used are stored together
+# so the reading's own precision travels with it.
+#
+# NOT A BILLING CHANGE (#5331 is measurement only): nothing here prices, caps,
+# throttles or refuses, and ``get_cohort_spend_usd`` reads only ``ask_cost_usd``
+# + ``capture_cost_usd``, so the spend ceiling cannot see these columns by
+# construction.
+
+
+def _finite_or(value, default: float) -> float:
+    """Coerce to a finite float, else *default* — one NaN guard per float.
+
+    Catches ``OverflowError`` as well as ``(TypeError, ValueError)``: a helper
+    whose whole job is to answer "is this finite" must not raise before it can
+    answer, and ``float(10**400)`` raises ``OverflowError: int too large to
+    convert to float`` rather than returning a non-finite value.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _is_finite(value) -> bool:
+    """True only for a value that coerces to a finite float.
+
+    ``OverflowError`` is caught for the same reason as in ``_finite_or``: an
+    un-coercible magnitude is not finite, and must answer ``False`` rather than
+    propagate a raise out of the fail-soft ledger write.
+    """
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
+                                 indices_mb: float | None = None,
+                                 samples: int | None = None,
+                                 repeats: int = 1,
+                                 min_mb: float | None = None,
+                                 max_mb: float | None = None,
+                                 spread_mb: float = 0.0,
+                                 measured_at: str | None = None,
+                                 _selfhost_transport: bool = False
+                                 ) -> dict | None:
+    """SET the org's graph-storage GAUGE for the current window (#5331).
+
+    A gauge, not an increment: the latest reading in the window wins (see the
+    lane note above). Window resolution RAISES on an unresolvable anchor
+    (#3825); that raise is a SIGNAL, not a refusal (#3981) — the caller
+    (``graph_storage.record_graph_storage``) absorbs it and the request is
+    served. A failure of the write RPC itself stays non-fatal (WARNING,
+    dropped) — the shared #3824 residual.
+
+    NON-FINITE ``total_mb`` DROPS the write (returns None) rather than
+    coercing it: this is a GAUGE, and overwriting a real reading with a
+    fabricated ``0.0`` is the false-zero the meter's contract forbids. A
+    non-integer ``samples``/``repeats`` is dropped the same way (the stored
+    figure would misstate its own precision). Non-finite min/max/indices are
+    coerced to a safe value — they are context for a finite total, never the
+    headline figure.
+
+    Exemptions mirror ``record_ask_usage``: no org, or the selfhost transport.
+
+    ⚠️ ``samples``/``repeats`` default here to the meter's own defaults, but a
+    real caller always passes the reading's values — a stored 0 would claim a
+    precision the reading did not have. The defaults exist only so the writer
+    is callable in isolation.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not _is_finite(total_mb):
+        # A non-finite total is NOT a zero-byte graph — it is an unusable
+        # measurement. DROP the write rather than coerce it to 0.0: a gauge
+        # OVERWRITE of 0.0 would clobber a real prior reading with a fabricated
+        # zero (the honesty contract ``graph_storage.record_graph_storage``
+        # states — a failed measurement must not appear on the ledger).
+        _logger.warning(
+            "graph storage metering dropped a non-finite total_mb "
+            "(team=%s total_mb=%r) — keeping the last good reading rather "
+            "than writing a fabricated 0.0", org_id, total_mb)
+        return None
+    total = float(total_mb)
+    # ⛔ DELEGATE to the meter's own validators, so the two paths CANNOT drift.
+    # A round-6 review found this boundary still flooring a finite non-integer
+    # (``int(5.9) == 5``) and applying NO bounds (a stored ``samples=0``, a huge
+    # unclamped count) — the identical defect the same PR had just fixed in
+    # ``graph_storage._resolve_samples/_resolve_repeats``, and exactly the
+    # source/ledger asymmetry its own commit set out to close. Re-implementing
+    # the rule here is what let them diverge, so this calls the ONE
+    # implementation: it rejects a non-finite or fractional count, rejects a
+    # non-integer, and clamps to [1, MAX] with a warning.
+    from tortoise.graph_storage import (
+        REPEATS_MAX,
+        SAMPLES_DEFAULT,
+        SAMPLES_MAX,
+        _resolve_repeats,
+        _resolve_samples,
+    )
+    if samples is None:
+        samples = SAMPLES_DEFAULT
+    try:
+        # Distinct messages per parameter, because the two have different
+        # documented ranges (SAMPLES is the engine's knob with an engine max;
+        # repeats is this module's own bound).
+        samples = _resolve_samples(samples)
+    except ValueError as e:
+        _logger.warning(
+            "graph storage metering dropped an unusable samples (team=%s "
+            "samples=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, samples, e)
+        return None
+    try:
+        repeats = _resolve_repeats(repeats)
+    except ValueError as e:
+        _logger.warning(
+            "graph storage metering dropped an unusable repeats (team=%s "
+            "repeats=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, repeats, e)
+        return None
+    assert 1 <= samples <= SAMPLES_MAX and 1 <= repeats <= REPEATS_MAX
+    # Repair the RELATIONAL invariants at the boundary, mirroring the source:
+    # the migration defines ``graph_storage_spread_mb`` as "max_mb - min_mb — the
+    # OBSERVED spread" and the reader relies on ``min <= total <= max``, so a
+    # caller passing a contradictory trio must not have it persisted verbatim.
+    # Measured before this: ``min=9, total=5, max=1`` was written as-is.
+    safe_min = _finite_or(min_mb, total) if min_mb is not None else total
+    safe_max = _finite_or(max_mb, total) if max_mb is not None else total
+    safe_min, safe_max = min(safe_min, total), max(safe_max, total)
+    # ``spread`` is COMPUTED, not trusted: a caller-supplied spread that does not
+    # equal ``max - min`` would contradict the row it is stored beside. The
+    # parameter is still READ, as a cross-check, so a disagreeing caller is told
+    # rather than silently overridden.
+    safe_spread = safe_max - safe_min
+    if not math.isfinite(safe_spread):
+        # ⛔ The DERIVED spread needs its own guard — the per-input finiteness
+        # checks do NOT provide it, because subtracting two individually finite
+        # extremes can overflow to inf (min=-1e308, max=1e308). Measured before
+        # this: the Supabase lane STORED ``spread_mb = inf`` and a strict encoder
+        # then rejected the row, while the embedded lane dropped the write — the
+        # two substrates disagreed on the same input. This is the identical
+        # defect the meter guards at the source (``measure_graph_storage`` fails
+        # the reading rather than publish an infinite spread), so the boundary
+        # DROPS the write, exactly as it already does for a non-finite total:
+        # keeping the last good reading beats persisting an unusable one.
+        _logger.warning(
+            "graph storage metering dropped a non-finite DERIVED spread "
+            "(team=%s min=%r max=%r total=%r) — not writing an inf spread",
+            org_id, safe_min, safe_max, total)
+        return None
+    if spread_mb is not None and _is_finite(spread_mb):
+        supplied = float(spread_mb)
+        if abs(supplied - safe_spread) > 1e-9:
+            _logger.warning(
+                "graph storage metering: supplied spread %r disagrees with "
+                "max-min (%r) for team=%s — storing the DERIVED value, so the "
+                "row cannot contradict itself", supplied, safe_spread, org_id)
+    # A non-finite index share is ABSENT, not zero (review finding):
+    # ``graph_storage_indices_mb`` is nullable precisely so "the engine did not
+    # report an index share" stays distinguishable from "reported as 0" — the
+    # distinction this meter exists to keep. Defaulting a NaN to 0.0 would write
+    # a fabricated clean figure, which is the one thing a measurement must not do.
+    # A share LARGER than the total is dropped for the same reason: it is not a
+    # usable part-of-whole, and the source drops it too.
+    safe_indices = None
+    if indices_mb is not None and _is_finite(indices_mb):
+        candidate = float(indices_mb)
+        if candidate <= total:
+            safe_indices = candidate
+    period = _require_period(org_id, "graph storage metering")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_graph_storage_reading_locked(
+            org_id, period, now_iso,
+            total=total,
+            indices=safe_indices,
+            samples=samples,
+            repeats=repeats,
+            min_mb=safe_min,
+            max_mb=safe_max,
+            spread=safe_spread,
+            measured_at=measured_at,
+        )
+
+
+def _record_graph_storage_reading_locked(org_id: str, period: MeteringPeriod,
+                                         now_iso: str, *, total: float,
+                                         indices: float | None, samples: int,
+                                         repeats: int, min_mb: float,
+                                         max_mb: float, spread: float,
+                                         measured_at: str | None
+                                         ) -> dict | None:
+    """The serialized graph-storage gauge write."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_set_graph_storage,
+            )
+            metering_set_graph_storage(
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                total_mb=total, indices_mb=indices, samples=samples,
+                repeats=repeats, min_mb=min_mb, max_mb=max_mb,
+                spread_mb=spread, measured_at=measured_at)
+            return _graph_storage_row(period, total, indices, samples, repeats,
+                                      min_mb, max_mb, spread, measured_at)
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.graph_storage_mb = $total, "
+            "    m.graph_storage_indices_mb = $indices, "
+            "    m.graph_storage_samples = $samples, "
+            "    m.graph_storage_repeats = $repeats, "
+            "    m.graph_storage_min_mb = $min_mb, "
+            "    m.graph_storage_max_mb = $max_mb, "
+            "    m.graph_storage_spread_mb = $spread, "
+            "    m.graph_storage_measured_at = $measured, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "total": total, "indices": indices, "samples": samples,
+                    "repeats": repeats, "min_mb": min_mb, "max_mb": max_mb,
+                    "spread": spread, "measured": measured_at,
+                    "now": now_iso},
+        )
+        return _graph_storage_row(period, total, indices, samples, repeats,
+                                  min_mb, max_mb, spread, measured_at)
+    except Exception as e:
+        _logger.warning(
+            "graph storage metering write failed (non-fatal): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return None
+
+
+def _graph_storage_row(period: MeteringPeriod, total: float,
+                       indices: float | None, samples: int, repeats: int,
+                       min_mb: float, max_mb: float, spread: float,
+                       measured_at: str | None) -> dict:
+    """The writer's return shape — the same keys the reader returns."""
     return {
-        "write_ops_used": ops_used,
-        "write_ops_limit": ops_limit,
-        "period": period,
-        "overage_eligible": eligible,
-        "overage_cost_usd": overage_cost,
+        "period": period.label,
+        "period_start": period.start_iso,
+        "period_end": period.end_iso,
+        "graph_storage_mb": total,
+        "graph_storage_indices_mb": indices,
+        "graph_storage_samples": samples,
+        "graph_storage_repeats": repeats,
+        "graph_storage_min_mb": min_mb,
+        "graph_storage_max_mb": max_mb,
+        "graph_storage_spread_mb": spread,
+        "graph_storage_measured_at": measured_at,
     }
+
+
+def get_graph_storage_reading(org_id: str) -> dict:
+    """The org's last graph-storage reading in the current window (#5331).
+
+    Returns the ``graph_storage_*`` fields plus the window. ZEROS (and a
+    ``None`` timestamp) for an org with no reading yet: a successful read
+    returning NO row is not an error (the MERGE only creates the row on the
+    first write). Read failures degrade to the zero view (never 500, #923),
+    including an unresolvable window.
+    """
+    zeros: dict = {
+        "graph_storage_mb": 0.0,
+        "graph_storage_indices_mb": None,
+        "graph_storage_samples": 0,
+        "graph_storage_repeats": 0,
+        "graph_storage_min_mb": 0.0,
+        "graph_storage_max_mb": 0.0,
+        "graph_storage_spread_mb": 0.0,
+        "graph_storage_measured_at": None,
+    }
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "graph storage usage query failed (degrading to zero view): "
+            "team=%s error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_graph_storage,
+            )
+            row = metering_get_graph_storage(get_control_plane(), org_id,
+                                             period.start_iso)
+            out = {**zeros}
+            out.update({k: row.get(k) for k in zeros if k in row})
+            out.update({"period": period.label,
+                        "period_start": period.start_iso,
+                        "period_end": period.end_iso})
+            return out
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.graph_storage_mb, m.graph_storage_indices_mb, "
+            "m.graph_storage_samples, m.graph_storage_repeats, "
+            "m.graph_storage_min_mb, m.graph_storage_max_mb, "
+            "m.graph_storage_spread_mb, m.graph_storage_measured_at",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _zero_view(period.label, period)
+        r = rows[0]
+        return {
+            "graph_storage_mb": float(r[0] or 0.0),
+            "graph_storage_indices_mb": (float(r[1])
+                                         if r[1] is not None else None),
+            "graph_storage_samples": int(r[2] or 0),
+            "graph_storage_repeats": int(r[3] or 0),
+            "graph_storage_min_mb": float(r[4] or 0.0),
+            "graph_storage_max_mb": float(r[5] or 0.0),
+            "graph_storage_spread_mb": float(r[6] or 0.0),
+            "graph_storage_measured_at": r[7],
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+        }
+    except Exception as e:
+        _logger.warning(
+            "graph storage usage query failed (degrading to zero view): "
+            "team=%s period=%s error=%s", org_id, period.label, e,
+        )
+        return _zero_view(period.label, period)

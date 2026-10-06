@@ -124,7 +124,8 @@ class TestRunLoop:
                                 prompt_tokens=1000, completion_tokens=100)
         _, calls, cost = answer_items(ITEMS, caller, context=CTX)
         assert calls == 3
-        expected = 3 * (1000 * 0.27 + 100 * 1.10) / 1_000_000
+        from battery.config.prices import cost_usd
+        expected = 3 * cost_usd(1000, 100)
         assert cost == pytest.approx(expected)
 
     def test_the_knowledge_pool_is_IN_the_prompt(self):

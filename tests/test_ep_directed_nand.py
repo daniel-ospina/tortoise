@@ -217,9 +217,9 @@ def test_mcp_tool_honors_direction(sdk, tmp_path, monkeypatch):
     # TORTOISE_DB_PATH (embedded store) on BOTH lanes.
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     os.environ["TORTOISE_DB_PATH"] = str(tmp_path / "t.db")  # align tool SDK with fixture
-    from tortoise.mcp_auth import _current_team_id, _transport_mode
+    from tortoise.mcp_auth import _current_org_id, _transport_mode
     tok_mode = _transport_mode.set("stdio")
-    tok_team = _current_team_id.set(None)
+    tok_team = _current_org_id.set(None)
     try:
         from tortoise.mcp_server import tortoise_create_operator
         a = make_point(sdk, "a")
@@ -239,7 +239,7 @@ def test_mcp_tool_honors_direction(sdk, tmp_path, monkeypatch):
         assert d_dir == "unidirectional", "explicit directed must be honored"
     finally:
         _transport_mode.reset(tok_mode)
-        _current_team_id.reset(tok_team)
+        _current_org_id.reset(tok_team)
         import tortoise.mcp_server as _mcp
         _mcp._sdk = None  # clear module-level SDK cache (bound to this test's DB)
         if _prev_db is None:

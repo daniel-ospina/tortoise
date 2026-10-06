@@ -1,0 +1,66 @@
+{
+ "kind": "BLOCKER EVIDENCE \u2014 NOT A MEASUREMENT",
+ "issue": 2513,
+ "date": "2026-09-22",
+ "what": "A 2-question feasibility probe of the #2513 eval re-run. It is recorded here ONLY as evidence for the dense-leg pre-flight blocker in docs/scoping/2026-09-17-2513-guard-reach.md \u00a75. It is NOT a result: the probe ran keyword-only (vector_strategy='unavailable'), so its numbers are not comparable to the sealed hybrid receipt and must not be quoted as a measurement.",
+ "command": "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m tools.longmem_eval.run --data <2-question cohort> --split s --retrieval-only --mock --db redis://:falkordb@localhost:6391 --session-reinjection --output /tmp/probe2_on.json --checkpoint /tmp/probe2_on.cp.json",
+ "substrate": {
+  "graph": "dedicated docker FalkorDB, falkordb/falkordb@sha256:adbddd418916... (same image as the sealed receipt), 127.0.0.1:6391",
+  "ingest_mode": "deterministic",
+  "retriever": "hybrid"
+ },
+ "runtime_observed": {
+  "wall_s_for_2_questions": 769.75,
+  "mean_s_per_question": 384.9,
+  "git_sha": "73acefddf496df97d72ac5c1ec571bfade6edbce",
+  "load_at_probe": "~175 (10 CPUs)"
+ },
+ "preflight_embedder": {
+  "mode": "--mock (warn-and-continue)",
+  "load_timeout_s": 30,
+  "status": {
+   "available": false,
+   "reason": "no_embedder"
+  },
+  "direct_reprobe_3x": [
+   {
+    "ok": false,
+    "s": 30.1
+   },
+   {
+    "ok": false,
+    "s": 30.0
+   },
+   {
+    "ok": false,
+    "s": 30.0
+   }
+  ],
+  "log_line": "[longmem_eval] WARNING: embedder unavailable (reason=no_embedder) \u2014 the vector/dense leg is DISABLED for this run",
+  "load_at_reprobe": "~250 (10 CPUs)"
+ },
+ "measured_knobs": {
+  "vector_strategy": "unavailable",
+  "session_reinjection": true,
+  "session_reinjection_guard": true,
+  "session_reinjection_total_cap": 10
+ },
+ "per_question": [
+  {
+   "question_id": "d905b33f",
+   "pool_size": 757,
+   "ingest_latency_ms": 53148.69,
+   "retrieval_latency_ms": 404.43,
+   "session_recall@5": 0.0
+  },
+  {
+   "question_id": "078150f1",
+   "pool_size": 828,
+   "ingest_latency_ms": 650676.38,
+   "retrieval_latency_ms": 1251.85,
+   "session_recall@5": 0.5
+  }
+ ],
+ "hosted_api_contacted": false,
+ "note": "A valid re-run additionally requires the embedder to load inside the pre-flight window; under load 250 it did not. Per #2985 a keyword-only read is NOT hybrid retrieval and must not be published as a product measurement."
+}

@@ -18,7 +18,7 @@ import shutil
 
 import pytest
 
-from tests.eval.write_path import corpus, runner, schema
+from tests.eval.write_path import corpus, generate_corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
 
 
@@ -56,12 +56,16 @@ def _tmp_corpus(tmp_path) -> object:
 def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     fixture = corpus.load_fixture(session_id)
     conversation = fixture["conversation"]
-    parsed = runner.parse_roundtrip(
+    runner.parse_roundtrip(
         session_id, conversation, fixture["harness"], workdir=tmp_path
     )
-    assert parsed == conversation
-    assert [t["role"] for t in parsed] == ["user", "assistant"] or True  # roles kept
-    assert all(t["content"] for t in parsed)
+    # The round-trip guard is `parse_roundtrip`'s RunError on any drift — it
+    # never returns a drifted list, so a deep-equality/role/content assert
+    # here would be dead (the drift case is covered by
+    # test_parse_roundtrip_drift_raises). What this test CAN still fail on is
+    # the fixture SHAPE: a turn growing a key the round-trip contract does not
+    # cover would slip past parse_roundtrip undetected.
+    assert {k for t in conversation for k in t} == {"role", "content"}
 
 
 def test_parse_roundtrip_drift_raises(tmp_path):
@@ -357,6 +361,195 @@ def test_runner_error_when_session_unknown(tmp_path):
     assert "unknown sessions" in report["log"][-1]
 
 
+def test_failed_run_surfaces_its_log_on_stdout(capsys):
+    """#4860: a failed run states WHY on stdout, not only inside the receipt.
+
+    The 7/7 capture failure was undiagnosable for nine days because the
+    per-session stage errors existed ONLY in the receipt, and the invocation
+    wrote that receipt to ``/tmp`` — which was then reaped. Every paid retry
+    reproduced the failure and destroyed the same evidence. stdio is the one
+    channel that survives independently of ``--out``, so the cause must
+    reach it.
+    """
+    exit_code = runner._main([
+        "run", "--root", str(corpus.WRITE_PATH_DIR), "--session", "nope_1",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == runner.EXIT_RUNNER_ERROR
+    assert "failure_origin=runner_error" in out
+    # The CAUSE, not merely the status: this line lives in report["log"],
+    # which previously reached stdout only under the opt-in --json flag.
+    assert "unknown sessions" in out
+
+
+def test_completed_run_is_not_echoed():
+    """Polarity guard: a completed run's artifact is the receipt, so its log
+    is NOT dumped to stdout — the echo exists for FAILED runs only."""
+    assert runner.failed_run_diagnostics(
+        {"run_status": "completed", "log": ["metrics: {}"]}
+    ) == []
+
+
+def test_failed_run_diagnostics_tolerates_a_log_less_report():
+    """A failure path that produced no log must not crash the echo — losing
+    the run to an AttributeError/TypeError would be strictly worse than the
+    bare headline this exists to replace."""
+    assert runner.failed_run_diagnostics({"run_status": "failed"}) == []
+
+
+def test_capture_failure_detail_carries_the_raw_diagnostic():
+    """#4860 (P1): the recorded detail must hold the CAUSE, not the headline.
+
+    ``errors`` is the customer-facing contract and is deliberately generic;
+    the raw ``S<t>: <TypeName>: <message>`` string rides ``diagnostics``.  A
+    detail built from ``errors`` alone is why nine days of receipts said
+    "Retry the capture" and named nothing.
+    """
+    from tortoise.sdk import _capture_resp_error_split
+
+    raw = (
+        "S1 chunk failed: HTTPError: 403 Client Error: Forbidden for url: "
+        "https://openrouter.ai/api/v1/chat/completions"
+    )
+    headline, diagnostics = _capture_resp_error_split([raw])
+    # The contract this depends on — assert it rather than assume it: the
+    # headline is NOT the cause, so a detail carrying only `errors` is blind.
+    assert "403" not in headline[0]
+    assert "Retry the capture" in headline[0]
+    assert diagnostics == [raw]
+
+    detail = runner.capture_failure_detail(
+        "wp01_quarry_debug", {"errors": headline, "diagnostics": diagnostics}
+    )
+    assert "403 Client Error: Forbidden" in detail, (
+        "the raw cause must reach the log, not only the headline"
+    )
+
+
+def test_failed_report_log_carries_the_raw_stage_error():
+    """The report's log must hold the RAW stage error, not the headline — it
+    is the log that reaches stdout, so a headline-only log is still blind."""
+    report = runner.summary_failed_report(
+        "w2b-test", "2026-10-03", "deadbeef", "hash", {"posture": "llm"},
+        [
+            runner.capture_failure_detail(
+                "wp02_lumen_refactor",
+                {
+                    "errors": [
+                        "The first pass of extraction failed partway through. "
+                        "Retry the capture — the retry will re-attempt it."
+                    ],
+                    "diagnostics": ["S2 failed: HTTPError: 403 limit exceeded"],
+                },
+            )
+        ],
+        origin="runner_error", label="runner_errors",
+    )
+    lines = runner.failed_run_diagnostics(report)
+    assert any("S2 failed: HTTPError: 403 limit exceeded" in ln for ln in lines), (
+        "the raw stage error must reach stdout, where a reaped receipt cannot"
+    )
+
+
+def test_run_benchmark_records_the_raw_capture_diagnostic(monkeypatch):
+    """THE CALL SITE, not just the helper: a capture that fails must record
+    the RAW diagnostic, not only the customer-facing headline.
+
+    Without this the one line this issue exists for — the runner reading
+    ``capture["diagnostics"]`` — has no regression guard: reverting it to
+    ``errors`` alone leaves every other test green while the receipts go back
+    to saying "Retry the capture" and naming no cause.
+    """
+    raw = "S1 chunk failed: HTTPError: 403 Client Error: Forbidden"
+    headline = (
+        "Part of the extraction failed partway through. "
+        "Retry the capture — the retry will re-attempt it."
+    )
+
+    class _FakeCaptureSDK:
+        def capture_session(self, conversation, session_id=None, harness=None):
+            return {
+                "ok": False,
+                "errors": [headline],
+                "diagnostics": [raw],
+                "telemetry": {"llm_cost_usd": 0.0},
+            }
+
+    # The graph read is not what this test is about; stub the snapshot so the
+    # run reaches the capture-failure path with no DB.
+    monkeypatch.setattr(
+        runner, "snapshot_session",
+        lambda sdk, sid: {
+            "points": [], "rephrase_edges": [], "turn_ids": [],
+            "operator_counts": {},
+        },
+    )
+    report = runner.run_benchmark(
+        root=corpus.WRITE_PATH_DIR,
+        session_ids=["wp01_quarry_debug"],
+        sdk=_FakeCaptureSDK(),
+        ep_pass=False,
+        run_id="w2b-4860-test",
+    )
+    assert report["run_status"] == "failed"
+    assert raw in "\n".join(report["log"]), (
+        "the raw cause must be RECORDED, not only the headline"
+    )
+    # ...and it reaches stdout via the echo that makes it survive a reaped --out.
+    assert any(raw in ln for ln in runner.failed_run_diagnostics(report))
+
+
+def test_capture_failure_detail_keeps_the_error_key():
+    """Lighter ``ok=False`` shapes put their message under ``error`` alone
+    (``capture_session`` always sets ``diagnostics``, other seams do not), so
+    a detail that reads only ``errors``/``diagnostics`` would be blind there.
+    """
+    detail = runner.capture_failure_detail("wp03_ember_design", {
+        "error": "HTTPError: 403 limit exceeded",
+    })
+    assert "HTTPError: 403 limit exceeded" in detail
+
+
+def test_summary_failed_report_carries_the_overflow_in_its_log():
+    """The WIRING, not just the helper: the report a caller actually builds
+    must carry items past the summary bound in its log, or a run with more
+    failures than the bound loses their causes entirely.
+
+    This drives the same function both run_benchmark failure paths call, so a
+    deleted/renamed tail (or a summary slice that drifts from the helper's
+    default) fails here rather than silently truncating.
+    """
+    errors = [
+        f"s{i}: capture ok=False (diagnostics=['S1 failed: E{i}'])"
+        for i in range(runner.SUMMARY_BOUND + 4)
+    ]
+    report = runner.summary_failed_report(
+        "w2b-test", "2026-10-03", "deadbeef", "hash", {"posture": "llm"},
+        errors, origin="runner_error", label="runner_errors",
+    )
+    # The summary is bounded: it holds the last item INSIDE the bound and none
+    # of the first item past it.
+    summary = report["log"][-2]
+    assert f"E{runner.SUMMARY_BOUND - 1}" in summary
+    assert f"E{runner.SUMMARY_BOUND}" not in summary
+    # ...and the tail past it is present in the log, which is what reaches stdout.
+    overflow = report["log"][-1]
+    assert f"all {len(errors)}" in overflow
+    assert errors[-1] in overflow
+    assert any(errors[-1] in ln for ln in runner.failed_run_diagnostics(report))
+
+
+def test_summary_overflow_line_is_silent_within_the_bound():
+    """The bound is not a floor: at or under it there is no overflow line, so
+    an ordinary failed run's log stays exactly as long as it was."""
+    assert runner.summary_overflow_line([], label="x") == []
+    at_bound = [f"e{i}" for i in range(runner.SUMMARY_BOUND)]
+    assert runner.summary_overflow_line(at_bound, label="x") == []
+    assert runner.summary_overflow_line(
+        [*at_bound, "overflow"], label="x"
+    ) == [f"x (all {runner.SUMMARY_BOUND + 1}): overflow"]
+
+
 def test_cli_corpus_bless_refreshes_published_baseline(tmp_path, capsys):
     """REVIEW-FIX (PR #2183 finding 2): --corpus-bless accepts an INTENTIONAL
     corpus regeneration against a PUBLISHED baseline — re-pins the new hash,
@@ -448,6 +641,12 @@ def test_run_rejects_config_posture_contradicting_env(tmp_path, monkeypatch):
     report = runner.run_benchmark(root=root)  # no env m2 → llm default
     assert report["run_status"] == "completed"
     assert report["resolved_config"]["extractor_posture"] == "llm"
+    # #2552 (end-to-end falsifier, free — this llm run already happens): the
+    # llm lane's receipt must NOT carry the m2 structural excuse. On the
+    # pre-fix code this assertion fails, so it gates the fix at zero added
+    # bench cost.
+    assert "m2 echo lane has no product relation extraction" not in "\n".join(
+        report.get("notes", []))
 
 
 def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypatch):
@@ -465,6 +664,108 @@ def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypat
     assert "VACUOUS" in notes and "quote_spans_total=0" in notes
     assert "cost not tracked" in notes
     assert report["cost_usd"] == 0.0
+
+
+def test_operator_audit_m2_clause_is_posture_scoped():
+    """#2552/#4807 honesty: the m2-echo-lane caveat ("no product relation
+    extraction, so its edge score is not comparable with the llm lane's") must
+    appear ONLY in an m2-lane report. On the llm lane a 0 is a behavioural
+    signal; printing the structural excuse in that receipt frames the
+    behavioural result as a non-result in the very artifact a reader consults
+    (the pre-fix behaviour, reported on #2552).
+
+    Pure posture-gate check — no bench run, no graph.
+    """
+    audit = {"planted": 4, "edge_correct": 0, "content_ok": 1,
+             "operators_total": 10, "operators_provenanced": 10}
+
+    llm_notes = runner.operator_audit_notes(audit, "llm")
+    llm_text = "\n".join(llm_notes)
+    assert "operator-edge audit (#2514): 0/4" in llm_text
+    assert "operator persistence (#2552): 10/10" in llm_text
+    assert "m2 echo lane has no product relation extraction" not in llm_text
+
+    m2_text = "\n".join(runner.operator_audit_notes(audit, "m2"))
+    assert "m2 echo lane has no product relation extraction" in m2_text
+    # The persistence assertion rides BOTH lanes (write-path property).
+    assert "operator persistence (#2552): 10/10" in m2_text
+
+    # EXACT-STRING goldens. The m2 note's prose is DERIVED — no hardcoded `0`
+    # and no "no relation extraction" claim (#4807) — and pinned
+    # character-for-character: a substring assert cannot hold the wording (both
+    # separator defects found while rebasing #4806 passed every substring
+    # assert). The committed m2 receipt keeps the OLD text; no test reads the
+    # receipts and no baseline carries `notes`, so the source change reaches no
+    # hashed surface (#4807 verification).
+    m2 = runner.operator_audit_notes(audit, "m2")
+    llm = runner.operator_audit_notes(audit, "llm")
+    assert m2[0] == (
+        "operator-edge audit (#2514): 0/4 planted operator edges graded "
+        "edge_correct (audit dimension only — not yet a gated metric); "
+        "the m2 echo lane has no product relation extraction, so its "
+        "edge score is not comparable with the llm lane's and is never a "
+        "bar. #2552: endpoint anchors + mitigation reasons grade "
+        "verbatim-first with the #2405-style paraphrase band — a "
+        "correctly wired edge whose endpoint claim was distilled still "
+        "grades edge_correct"
+    )
+    assert llm[0] == (
+        "operator-edge audit (#2514): 0/4 planted operator edges graded "
+        "edge_correct (audit dimension only — not yet a gated metric). "
+        "#2552: endpoint anchors + mitigation reasons grade verbatim-first "
+        "with the #2405-style paraphrase band — a correctly wired edge whose "
+        "endpoint claim was distilled still grades edge_correct"
+    )
+    assert m2[1] == llm[1] == (
+        "operator persistence (#2552): 10/10 reified operator Points entered "
+        "the retrievable memory layer (eventId-stamped) — a lower numerator "
+        "is the structural drop the layer-2 WIRE fix closed"
+    )
+    # Count and order are part of the contract: edge note first, then the
+    # persistence note, and nothing else (a third note would go unnoticed).
+    assert len(m2) == len(llm) == 2
+
+    # A third posture takes the llm-shaped note (documented behaviour: only
+    # "m2" earns the caveat, never "anything not llm").
+    assert "m2 echo lane" not in "\n".join(
+        runner.operator_audit_notes(audit, "futurelane"))
+
+    # Empty denominator: no edge note, persistence still rides. A None audit
+    # yields nothing.
+    empty = runner.operator_audit_notes(
+        {"planted": 0, "edge_correct": 0, "operators_total": 3,
+         "operators_provenanced": 3}, "llm")
+    assert not any("operator-edge audit" in n for n in empty)
+    assert any("operator persistence (#2552)" in n for n in empty)
+    assert runner.operator_audit_notes(None, "llm") == []
+
+
+def test_operator_audit_m2_note_agrees_with_any_numerator():
+    """#4807: the m2 note's prose is DERIVED from the interpolated
+    ``{edge_correct}/{planted}`` numerator, so it must stay true for ANY value
+    — including the 2/15 the committed receipt grades, and any future m2 lane
+    beyond it. The pre-fix text hardcoded "so 0 is structural there" three
+    words after the number, so 2/15 printed as a self-contradiction.
+
+    Two independent properties, both pinned over the whole numerator range:
+      * the printed numerator matches the audit it was built from, and
+      * no constant-"0" structural clause and no "no relation extraction"
+        mechanism claim survives at any numerator (the false half that a
+        number-only fix would have left standing).
+    """
+    den = 15
+    for num in (0, 1, 2, 7, 15):
+        note = runner.operator_audit_notes(
+            {"planted": den, "edge_correct": num, "content_ok": 1,
+             "operators_total": 1, "operators_provenanced": 1}, "m2")[0]
+        assert f"{num}/{den} planted operator edges" in note
+        assert "0 is structural" not in note
+        assert "so 0" not in note
+        # The false mechanism cannot reappear: "has no relation extraction" is
+        # NOT a substring of the corrected "has no product relation
+        # extraction".
+        assert "has no relation extraction" not in note
+        assert "has no product relation extraction" in note
 
 
 def test_cli_protocol_bless_repins_judge_bump(tmp_path):
@@ -572,9 +873,22 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     """#2514: every completed run carries the planted-operator (layer-2)
     audit — the corpus-wide mechanical grade of whether the extractor wired
     the RIGHT operator edge between the anchored claims. On the deterministic
-    m2 echo lane the numbers are structural (no relation extraction ⇒ 0/4
-    edges, 3/4 endpoint-anchor pairs content-present), recorded as an
-    additive audit dimension + note + receipt field — never a gated metric."""
+    m2 echo lane the operator EDGES do not match the planted semantics (the
+    M2 MockModel relation stage is a cue-word heuristic, not the product
+    extractor) — only a few edges match, endpoint-anchor pairs largely
+    content-present — recorded as an additive audit dimension + note +
+    receipt field, never a gated metric.
+
+    #2552 (layer-2 WIRE): the m2 lane DOES commit operators; the structural
+    fix makes them retrievable — every committed operator node carries the
+    sessionCaptured eventId and enters the eventId-keyed memory layer
+    (``operators_provenanced == operators_total``). The pre-fix signature was
+    ``operators_total == 0`` on the retrievable surface with a silently empty
+    ``operator_counts``.
+
+    #2552 (measurement power): the gold grew 4 -> 15 planted edges across all
+    seven sessions, so this asserts the count rather than a magic 4.
+    """
     root = _tmp_corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -582,23 +896,99 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert report["run_status"] == "completed", report.get("log")
     audit = report["operator_audit"]
     assert audit is not None
-    assert audit["planted"] == 4  # wp06 (1) + wp07 (3) seeded operator edges
-    assert audit["edge_correct"] == 0  # structural: the echo lane writes no operators
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so a grown corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
+    assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert audit["planted"] == corpus.planted_operator_count()
+    assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
     assert 1 <= audit["content_ok"] <= audit["planted"]
+    # #2552: the committed operator topology entered the retrievable layer.
+    assert audit["operators_total"] > 0
+    assert audit["operators_provenanced"] == audit["operators_total"]
+    # Pin the receipt's own posture LABEL as well as the note text: the
+    # call-site half of the posture gate rests on this run genuinely being m2.
+    assert report["resolved_config"]["extractor_posture"] == "m2"
     notes = "\n".join(report.get("notes", []))
     assert "operator-edge audit (#2514)" in notes
+    assert "operator persistence (#2552)" in notes
+    # #2552: this is an m2 run, so its receipt MUST carry the m2 caveat. This is
+    # the call-site half of the posture gate: without it, a call site passing
+    # the wrong posture leaves every other test green while the blessed m2
+    # receipt silently loses its caveat — the property this assertion protects.
+    assert "m2 echo lane has no product relation extraction" in notes
     # Per-session detail rides the owning session's result (the cross-session
     # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
     owned_by = {
         r["session_id"]: r.get("planted_operators", []) for r in report["session_results"]
     }
-    assert len(owned_by["wp06_quarry_rollout"]) == 1
-    assert len(owned_by["wp07_bluepeak_followup"]) == 3
-    supersede = owned_by["wp07_bluepeak_followup"][2]
-    assert supersede["expected_kind"] == "SUPERSEDE"
-    assert supersede["to_session"] == "wp06_quarry_rollout"
-    # The receipt carries the audit (audit trail for the sealed run).
+    # Locate the cross-session SUPERSEDE by KIND, never by a positional or
+    # per-session literal: `len(...) == 1` / `== 3` / `[2]` were hardcoded
+    # operator counts that the #2552 gold growth only happened to leave valid
+    # (it added edges to wp01-wp05) — the same hardcoded-denominator class the
+    # rest of this file no longer contains.
+    assert sum(len(v) for v in owned_by.values()) == \
+        corpus.planted_operator_count()
+    supersedes = [
+        op for ops in owned_by.values() for op in ops
+        if op.get("expected_kind") == "SUPERSEDE"
+    ]
+    # Lower-bounded by the corpus's OWN declared SUPERSEDE floor, never a magic
+    # `1` — a second encoding of ``MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]``
+    # would keep accepting a corpus that violates the declared floor.
+    assert len(supersedes) >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]
+    # Scope the TARGET assertion to the CROSS-SESSION SUPERSEDE. A second
+    # planted SUPERSEDE is a legitimate measurement-power extension (see
+    # ``MIN_PLANTED_OPERATOR_KINDS``), and one whose ``to`` is its own session
+    # — the schema's default — carries ``to_session == owner_session``, so
+    # "every SUPERSEDE targets wp06" would be the same hardcoded-corpus-shape
+    # defect the rest of this commit removes.
+    cross_session_supersedes = [
+        op for op in supersedes
+        if op.get("from_session") != op.get("to_session")
+    ]
+    assert cross_session_supersedes, supersedes
+    # …and assert the PROPERTY that makes a cross-session CORRECTS possible at
+    # all: the superseded claim must already be in the graph, so the TARGET's
+    # session is captured BEFORE the owning one. Never pin the target to a
+    # session NAME — a second genuine cross-session SUPERSEDE (wp03 -> wp01,
+    # say) is a legitimate extension and a name pin would redden this lane for
+    # no regression; the ordering property holds for every such edge.
+    session_order = {
+        r["session_id"]: i for i, r in enumerate(report["session_results"])
+    }
+    assert all(
+        session_order[op["to_session"]] < session_order[op["from_session"]]
+        for op in cross_session_supersedes
+    ), cross_session_supersedes
+    # The cross-session SUPERSEDE's detail needs no owner-name pin here, and must
+    # not get one: ``runner.run_benchmark`` buckets each detail by its OWN
+    # ``owner_session``, so a bucket assertion would be a TAUTOLOGY (a
+    # cannot-fail guard, the #4261/#4222 family) rather than a check, while a
+    # session-name pin would redden for no regression the moment a cross-session
+    # SUPERSEDE is planted in another session. The exactly-once sum above already
+    # proves this edge — like every other planted edge — landed in exactly one
+    # bucket; its capture-order precondition is asserted just above.
+    # The receipt must CARRY the audit block (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
-    assert receipt["operator_audit"]["planted"] == 4
-    assert receipt["operator_audit"]["edge_correct"] == 0
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
+    assert (receipt["operator_audit"]["edge_correct"]
+            < receipt["operator_audit"]["planted"])
+    assert (receipt["operator_audit"]["operators_provenanced"]
+            == receipt["operator_audit"]["operators_total"] > 0)

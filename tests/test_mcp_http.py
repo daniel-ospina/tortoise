@@ -15,8 +15,11 @@ import os
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import asyncio
+import json
 import tempfile  # noqa: F401
-import time  # noqa: F401
+import threading
+import time
 
 import pytest
 
@@ -53,7 +56,7 @@ def seeded_registry_sdk(tmp_path):
     """
     db_path = str(tmp_path / "reg.db")
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-    team = sdk.team_create("test-team")
+    team = sdk.org_create("test-team")
     key_info = sdk.apikey_create(team["id"], "test-fixture")
     return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
 
@@ -61,8 +64,12 @@ def seeded_registry_sdk(tmp_path):
 def _mounted_test_client(app):
     """Wrap the MCP app in a Starlette Mount at /mcp (mirrors hosted_api).
 
-    The MCP sub-app routes live at / (http_app(path="/")); the parent strips
-    the mount prefix, so /mcp → sub-app / — same as production mounting.
+    The MCP sub-app routes live at / (http_app(path="/")). Starlette's Mount
+    leaves the prefix on ``scope["path"]`` and records it in ``root_path``
+    (measured: a POST to /mcp arrives as path '/mcp/' with root_path '/mcp');
+    the router strips it while matching, so the sub-app route is / -- same as
+    production mounting. ``mcp_server._routed_path`` does the same strip for the
+    #3656 admission guard, which is why the guard works when mounted here.
     Composes the MCP app's lifespan into the parent (Starlette Mount does NOT
     auto-run sub-app lifespans — same fix as hosted_api._lifespan).
     Returns a TestClient; enter with `with` to trigger lifespan.
@@ -115,24 +122,24 @@ class TestContextVarsAndSdk:
         # Isolate: no URI → embedded mode; reset module global for identity check
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         ma.sdk = None
-        token = ma._current_team_id.set(None)
+        token = ma._current_org_id.set(None)
         try:
-            assert ma._get_team_sdk() is ma._get_base_sdk()
+            assert ma._get_org_sdk() is ma._get_base_sdk()
         finally:
-            ma._current_team_id.reset(token)
+            ma._current_org_id.reset(token)
             ma.sdk = None
 
     def test_team_sdk_returns_team_scoped_when_set(self):
-        from tortoise.mcp_auth import _current_team_id, _get_team_sdk
-        token = _current_team_id.set("team-abc")
+        from tortoise.mcp_auth import _current_org_id, _get_org_sdk
+        token = _current_org_id.set("team-abc")
         try:
-            assert isinstance(_get_team_sdk(), TortoiseSDK)
+            assert isinstance(_get_org_sdk(), TortoiseSDK)
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
 
     def test_http_allowed_populated_default_deny(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
-        assert "tortoise_team_create" not in HTTP_ALLOWED
+        assert "tortoise_org_create" not in HTTP_ALLOWED
         assert "tortoise_backfill_v25" not in HTTP_ALLOWED
         assert "tortoise_ingest_corpus" not in HTTP_ALLOWED
         assert "tortoise_create_point" in HTTP_ALLOWED
@@ -195,15 +202,15 @@ class TestAuthPreLeak:
             def apikey_verify(self, token):
                 raise ConnectionError("Connection refused")
 
-        orig_init = ma.TeamResolutionMiddleware._get_registry_sdk
-        ma.TeamResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
+        orig_init = ma.OrgResolutionMiddleware._get_registry_sdk
+        ma.OrgResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
         try:
             r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert r.status_code == 503
             body = _parse_sse_json(r)
             assert body is not None and "error" in body
         finally:
-            ma.TeamResolutionMiddleware._get_registry_sdk = orig_init
+            ma.OrgResolutionMiddleware._get_registry_sdk = orig_init
 
     def test_revoked_key_fails_after_cache_expiry(self, tmp_path):
         """Revoked key works ≤60s (cache hit), fails after cache expiry (fresh cache → 401)."""
@@ -212,7 +219,7 @@ class TestAuthPreLeak:
 
         db_path = str(tmp_path / "rev.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rev-team")
+        team = reg_sdk.org_create("rev-team")
         key_info = reg_sdk.apikey_create(team["id"], "t")
         key = key_info["api_key"]
         headers = {"Authorization": f"Bearer {key}",
@@ -242,6 +249,253 @@ class TestAuthPreLeak:
             assert r.status_code == 401
 
 
+# ── #3144 / #3812: the auth-plane 503's Retry-After contract, EXECUTED ──────
+
+class TestAuthRetryAfterContract:
+    """#3144 / #3812 — the idle → first-request path, executed end to end.
+
+    #3144's reported symptom is the **MCP startup connect**: a client connects
+    eagerly at session start (Pi's ``mcp-client``: a 15s connect budget and NO
+    retry), a single ``503`` during org resolution is logged, and the whole
+    session runs with **zero** Tortoise tools. The app-side lever is therefore
+    the response CONTRACT on the auth-plane 503: a retryable failure a client
+    can act on, not a bodyless rejection it cannot distinguish from an outage.
+
+    #3812's acceptance is that the contract is asserted by EXECUTING the path:
+    a header assertion pinned to source text cannot fail and is not evidence.
+    These tests drive the real mounted MCP ASGI app through the real sequence
+    (warm resolution → idle past the 60s cache TTL → cold re-resolve → retry),
+    so removing the ``Retry-After`` header makes them red.
+    """
+
+    @pytest.fixture
+    def idle_mcp_client(self, tmp_path, monkeypatch):
+        """Mounted MCP app plus a handle on its OrgResolutionMiddleware.
+
+        The middleware instance owns the per-token 60s resolution cache, so
+        holding a reference to it is how the test reaches the
+        idle → first-request path deterministically (no real 60s sleep).
+        """
+        import tortoise.mcp_auth as ma
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "retry.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.org_create("retry-team")
+        key = reg_sdk.apikey_create(team["id"], "retry")["api_key"]
+
+        made: list = []
+        orig_init = ma.OrgResolutionMiddleware.__init__
+
+        def _capture(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            made.append(self)
+
+        monkeypatch.setattr(ma.OrgResolutionMiddleware, "__init__", _capture)
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            yield tc, key, made, reg_sdk
+
+    @staticmethod
+    def _warm_and_age_idle_cache(idle_mcp_client):
+        """Warm the token→org cache, then age it past the 60s TTL.
+
+        Returns the live middleware, whose cache entry is now stale — the
+        state the process is in for the first request after an idle period,
+        which forces a fresh control-plane resolution: the cold path #3144
+        reports. (The middleware is instantiated lazily on the warm request,
+        as it is in production.)
+        """
+        tc, key, made, _reg_sdk = idle_mcp_client
+        # 1) A warm request resolves and caches the token → org mapping.
+        warm, _ = _mcp_post(tc, {"jsonrpc": "2.0", "method": "tools/list",
+                                 "id": 1})
+        assert warm.status_code == 200, warm.text
+        assert made, "OrgResolutionMiddleware was never instantiated"
+        middleware = made[0]
+        assert key in middleware._cache, "the warm request did not cache"
+        # 2) Idle: age the cached resolution past the middleware's 60s TTL.
+        ts, org, limits = middleware._cache[key]
+        middleware._cache[key] = (ts - 61.0, org, limits)
+        return middleware
+
+    @staticmethod
+    def _first_503_after_idle(tc, monkeypatch, rid: int, configured):
+        """Drive the idle→first-request path once; return ``(raw, seconds)``.
+
+        ``configured is None`` DELETES ``TORTOISE_MCP_AUTH_RETRY_AFTER`` —
+        the production default — so the unset path is proven on the WIRE and
+        not only against the resolver unit test. Without this a change that
+        emits the header only when the knob is explicitly set stays green
+        while the common deployment advertises no back-off at all (#3144).
+
+        Re-armed for each call: the failed resolution does NOT write the
+        cache, so the seeded stale entry is still stale and every request
+        here takes the cold re-resolve path.
+        """
+        import tortoise.mcp_auth as ma
+        if configured is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", configured)
+        resp, body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": rid})
+        assert resp.status_code == 503, resp.text
+        # A real HTTP response with a JSON-RPC body — the zero-byte shape
+        # in #3144's field report is proxy-generated, never app-side
+        # (#3709).
+        assert resp.content, "zero-byte 503 body"
+        assert body is not None and body["error"]["code"] == ma.ERR_REGISTRY, body
+        raw = resp.headers.get("Retry-After")
+        assert raw is not None, (
+            "the auth-plane 503 carries no Retry-After — an MCP client "
+            "has no instruction to back off and gives up on the startup "
+            "connect")
+        # int() raises on an HTTP-date or garbage → not parseable.
+        seconds = int(raw)
+        return raw, seconds
+
+    def test_idle_first_request_503_is_retryable_and_the_retry_resolves(
+            self, idle_mcp_client, monkeypatch):
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        # 3) The control plane / registry is cold or unreachable on the
+        #    re-resolve (twice: it recovers for the retry leg).
+        calls = {"n": 0}
+        real_verify = reg_sdk.apikey_verify
+
+        def _cold_then_healthy(token):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("control plane cold / connection refused")
+            return real_verify(token)
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _cold_then_healthy)
+
+        # 4) The contract: a parseable Retry-After in a sane range, pinned to
+        #    the CONFIGURED value. Removing the header makes this RED (#3812's
+        #    acceptance). The value is read back off the wire and slept below
+        #    — the test honours what the SERVER advertised, not a number it
+        #    chose itself. (The clamp itself is proven separately, on the
+        #    wire, in test_default_and_out_of_range_knobs_reach_the_wire.)
+        _, first = self._first_503_after_idle(tc, monkeypatch, 2, "3")
+        assert 1 <= first <= 3600, f"Retry-After out of sane range: {first}"
+        # PIN the advertised value. A range check alone would let a hardcoded
+        # in-range literal pass — and a value at the 3600s ceiling would hang
+        # the `time.sleep` below for an hour.
+        assert first == 3, (
+            f"the 503 advertised {first}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=3 — the knob is not wired to the wire")
+        assert calls["n"] == 1, (
+            "the stale cache entry was served — this is not the idle path")
+
+        # A SECOND configured value: together with the first this pins the
+        # knob→wire wiring against ANY hardcoded literal (no single literal can
+        # satisfy both 3 and 2), which a one-value pin cannot.
+        _, advertised = self._first_503_after_idle(tc, monkeypatch, 3, "2")
+        assert advertised == 2, (
+            f"the 503 advertised {advertised}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=2 — the value is not read at CALL time")
+        assert calls["n"] == 2, "the second request did not re-resolve"
+
+        # 5) The retry leg, after EXACTLY the advertised delay: the dependency
+        #    has recovered, and the request must RESOLVE — not be served a
+        #    mocked back-off acknowledgement, and not be answered from a
+        #    refreshed stale cache without re-consulting the dependency.
+        time.sleep(advertised)
+        retry, retry_body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": 4})
+        assert retry.status_code == 200, retry.text
+        assert retry_body is not None and "result" in retry_body, retry_body
+        assert retry_body["result"]["tools"], "tools/list resolved empty"
+        assert calls["n"] == 3, (
+            "the retry did not re-consult the recovered dependency — it was "
+            "served from cache, so this proves no resolution")
+
+    def test_default_and_out_of_range_knobs_reach_the_wire(
+            self, idle_mcp_client, monkeypatch):
+        """The UNSET default and the CLAMP must be proven ON THE WIRE.
+
+        Two regressions the configured-value test above cannot see:
+
+        * **unset** — the production default. If the header is emitted only
+          when the knob is explicitly set, the common deployment advertises
+          NO ``Retry-After``: exactly the defect #3144 removes.
+        * **out of range** — the resolver clamps, but nothing above ties the
+          value actually emitted to it. A raw ``os.environ.get(..., "5")``
+          keeps every configured-value assertion green while the server
+          advertises ``Retry-After: 0`` (a busy-retry hammer against a down
+          dependency) or an absurd ``99999``.
+
+        No sleep on the advertised delay here — this asserts the bytes the
+        server hands a client, it does not wait them out.
+        """
+        import tortoise.mcp_auth as ma
+
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        calls = {"n": 0}
+
+        def _always_cold(token):
+            calls["n"] += 1
+            raise ConnectionError("control plane cold / connection refused")
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _always_cold)
+
+        # (a) UNSET → the production default, on the wire.
+        raw, seconds = self._first_503_after_idle(tc, monkeypatch, 2, None)
+        assert raw == "5", (
+            f"with TORTOISE_MCP_AUTH_RETRY_AFTER unset the 503 advertised "
+            f"{raw!r}, not the default 5 — the header is emitted only when the "
+            "knob is explicitly set, so a default deployment advertises no "
+            "back-off at all (#3144)")
+        assert seconds == 5
+
+        # (b) Below the floor: never advertise 0 (a busy-retry hammer).
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 3, "0")
+        assert raw == "1", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=0 reached the wire as {raw!r} — "
+            "the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+
+        # (c) Above the ceiling: never advertise an absurd window.
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 4, "99999")
+        assert raw == "3600", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=99999 reached the wire as {raw!r} "
+            "— the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+        assert calls["n"] == 3, "a request did not take the cold re-resolve path"
+
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 5),        # unset → default
+        ("1", 1),        # floor is allowed (a 1s back-off is honest)
+        ("45", 45),
+        ("0", 1),         # never advertise 0 (a busy-retry hammer)
+        ("-9", 1),
+        ("99999", 3600),  # never advertise an absurd window
+        ("nonsense", 5),  # unparseable → default
+    ])
+    def test_auth_retry_after_resolver_clamps_to_a_sane_range(
+            self, monkeypatch, raw, expected):
+        import tortoise.mcp_auth as ma
+        if raw is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raw)
+        assert ma._resolve_auth_retry_after_s() == expected
+
+
 # ── #2202: tortoise_health truth on the hosted surface ────────────────
 
 class TestTortoiseHealthTruth:
@@ -260,8 +514,11 @@ class TestTortoiseHealthTruth:
         depending on the FastMCP call path — handle both."""
         result = body.get("result", {}) if body else {}
         if isinstance(result, dict) and "content" in result:
+            # A RETIRED tool's result carries an extra trailing block with the #3883
+            # warning; it is not part of the payload and is skipped here.
             text = "".join(c.get("text", "") for c in result["content"]
-                           if isinstance(c, dict))
+                           if isinstance(c, dict)
+                           and not c.get("text", "").startswith("RETIRED TOOL"))
             if text:
                 import json
                 try:
@@ -281,7 +538,7 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("health-truth-team")
+        team = reg.org_create("health-truth-team")
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -320,8 +577,8 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("health-truth-team")
-        reg.team_update(team["id"], max_points=1000)
+        team = reg.org_create("health-truth-team")
+        reg.org_update(team["id"], max_points=1000)
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -391,9 +648,9 @@ class TestTeamIsolation:
 
         db_path = str(tmp_path / "iso.db")
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = sdk.team_create("tenant-a")
+        team_a = sdk.org_create("tenant-a")
         ka = sdk.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = sdk.team_create("tenant-b")
+        team_b = sdk.org_create("tenant-b")
         kb = sdk.apikey_create(team_b["id"], "t")["api_key"]
 
         app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
@@ -433,7 +690,7 @@ class TestTeamIsolation:
 class TestComputeConfidenceHTTP:
     """AC7 — the no-arg HTTP disable-contract (#395 delta C).
 
-    The request-scoped SDK (mcp_auth.py _get_team_sdk) has empty in-memory
+    The request-scoped SDK (mcp_auth.py _get_org_sdk) has empty in-memory
     dirty state over HTTP, so the SDK no-arg path would silently return {}
     where today it runs whole-graph EP (the #7288 timeout surface). The
     transport-aware branch lives in the handler: no-arg over HTTP →
@@ -488,7 +745,7 @@ class TestComputeConfidenceHTTP:
             sdk = TortoiseSDK(os.path.join(
                 _tf.mkdtemp(prefix="tt_395_http_"), "http.db"))
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _fresh_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _fresh_sdk)
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call",
                                   "id": 1,
                                   "params": {"name": "tortoise_compute_confidence",
@@ -517,7 +774,7 @@ class TestComputeConfidenceHTTP:
             orig_cc = lambda *a, **k: seen.update(max_hops=k.get("max_hops")) or {}  # noqa: E731
             sdk.compute_confidence = orig_cc
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _spy_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _spy_sdk)
         monkeypatch.setattr(ms, "_parse", lambda x: x)
         token = _transport_mode.set("http")
         try:
@@ -543,7 +800,7 @@ class TestRateLimit:
         # Fresh registry + app with rate limiting enabled
         db_path = str(tmp_path / "rl.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rl-team")
+        team = reg_sdk.org_create("rl-team")
         key = reg_sdk.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
         tc = _mounted_test_client(app)
@@ -559,6 +816,197 @@ class TestRateLimit:
             assert sum(1 for s in statuses if s == 429) >= 1
 
 
+# ── #2050: pack_install consumes the pack_manifest budget ──────────────────
+
+class TestPackInstallRateBudget:
+    """#2050: ``tortoise_pack_install`` must consume the pack_manifest op
+    budget, exactly as its REST twin ``POST /v1/packs/manifests`` does.
+
+    #2038 added a ``pack_manifest`` entry to ``_SENSITIVE_OP_LIMITS`` and
+    charged it on the REST endpoint. The MCP tool reaches
+    ``upsert_tenant_manifest`` in-process (no HTTP), so it consumed NOTHING —
+    bounded only by the generic 100/min per-key middleware, a ~1200x looser
+    bound on the same expensive operation. These tests drive the MCP transport
+    end to end and pin the refusal.
+    """
+
+    #: A manifest the shared registry validator + tenant policy both accept
+    #: (mirrors tests/test_pack_manifest_store.py::VALID_MANIFEST).
+    MANIFEST = (
+        "namespace: tenant-ops\n"
+        "name: Tenant Operations\n"
+        "version: 0.1.0\n"
+        "tier: free\n"
+        "ontology:\n"
+        "  extends: core\n"
+        "  objectKinds:\n"
+        "  - contract\n"
+    )
+
+    @staticmethod
+    def _env(tmp_path, monkeypatch, name, limit):
+        """Registry + team default graph + mounted MCP app, limiter ENABLED.
+
+        ``RATE_LIMIT_DISABLED`` is set process-wide by conftest and read at
+        middleware CONSTRUCTION time, so it must be cleared before the app is
+        built (mirrors TestRateLimit.test_101st_post_429).
+        """
+        import tortoise.hosted_api as _ha  # the deployment gate + shared store
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(_ha._SENSITIVE_OP_LIMITS, "pack_manifest", limit)
+        _ha._SENSITIVE_BUCKETS.clear()
+
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create(name)
+        reg._graph_create(team["id"], "default", kind="default")
+        key = reg.apikey_create(team["id"], "#2050")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        return reg, team["id"], key, _mounted_test_client(app)
+
+    @classmethod
+    def _install(cls, tc, key):
+        """One ``tools/call tortoise_pack_install``; returns (result, text)."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                 "params": {"name": "tortoise_pack_install",
+                            "arguments": {"manifest_yaml": cls.MANIFEST}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        result = body.get("result") or {}
+        text = "".join(c.get("text", "") for c in result.get("content", [])
+                       if isinstance(c, dict))
+        return result, text
+
+    def test_install_refused_once_budget_exhausted(self, tmp_path, monkeypatch):
+        """The (N+1)th install over MCP HTTP is REFUSED — not merely counted.
+
+        Fails before the #2050 fix: the MCP path consumed no budget, so every
+        call was admitted and the refusal assertion below never fired.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, _tid, key, tc = self._env(tmp_path, monkeypatch, "pi-budget", 2)
+        try:
+            with tc:
+                for _ in range(2):
+                    result, text = self._install(tc, key)
+                    assert result.get("isError") is not True, text
+                    assert '"installed":true' in text, text
+                result, text = self._install(tc, key)
+                assert result.get("isError") is True, (
+                    "pack install was still ADMITTED after the pack_manifest "
+                    f"budget was exhausted (no refusal returned): {text}")
+                assert "Rate limit exceeded for pack_manifest" in text, text
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_install_charges_the_shared_sensitive_bucket(self, tmp_path,
+                                                         monkeypatch):
+        """The install charges the SHARED store under ``(team_id, op)``.
+
+        Pins the mechanism, not just the behaviour: a fork into a private MCP
+        store would leave this bucket empty while the refusal test above could
+        still pass against that fork's own counter.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, tid, key, tc = self._env(tmp_path, monkeypatch, "pi-bucket", 5)
+        try:
+            with tc:
+                result, text = self._install(tc, key)
+                assert result.get("isError") is not True, text
+            assert ha_mod._SENSITIVE_BUCKETS.get((tid, "pack_manifest")), (
+                "the MCP install consumed no entry in the shared "
+                f"_SENSITIVE_BUCKETS store: {dict(ha_mod._SENSITIVE_BUCKETS)}")
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_budget_is_team_scoped_not_ip_scoped(self, tmp_path, monkeypatch):
+        """Two teams on the SAME client address have INDEPENDENT budgets.
+
+        An MCP caller is an authenticated agent server, frequently sharing one
+        egress address with unrelated tenants — a per-IP bucket would let one
+        tenant exhaust another's install allowance.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, tid_a, key_a, tc = self._env(tmp_path, monkeypatch, "pi-team-a", 1)
+        try:
+            with tc:
+                # second tenant in the SAME registry, same TestClient (one IP)
+                team_b = _reg.org_create("pi-team-b")
+                _reg._graph_create(team_b["id"], "default", kind="default")
+                key_b = _reg.apikey_create(team_b["id"], "#2050")["api_key"]
+
+                result, text = self._install(tc, key_a)
+                assert result.get("isError") is not True, text
+                # team A is now exhausted...
+                result, text = self._install(tc, key_a)
+                assert result.get("isError") is True, text
+                # ...but team B, on the SAME IP, still has its own budget
+                result, text = self._install(tc, key_b)
+                assert result.get("isError") is not True, (
+                    "team B was refused by team A's exhausted budget — the "
+                    f"bucket is not team-scoped: {text}")
+                assert (team_b["id"], "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
+                assert (tid_a, "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_clientless_request_still_returns_with_an_explicit_key(
+            self, monkeypatch):
+        """#5397 review: the widening for the Request-FREE arm must not widen
+        the HTTP callers that already pass a Request.
+
+        The pre-#2050 guard (``not request.client``) is restored FIRST, so a
+        client-less Request charges NOTHING whether or not an explicit ``key``
+        is supplied. Pinned on the reviewer's worst case: the per-IP dimension
+        of ``invite-accept`` collapsing into one shared
+        ``("invite-accept", "ip", None)`` bucket across unrelated tokens.
+        The Request-free arm keeps enforcing on the SAME store, so the guard
+        cannot be dropped without failing this test's second half.
+        """
+        from collections import defaultdict
+
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        store = defaultdict(list)
+        lock = asyncio.Lock()
+        req = Request({"type": "http", "method": "POST",
+                       "path": "/invites/accept", "headers": [],
+                       "query_string": b"", "client": None})
+
+        async def _scenario():
+            kw = {"buckets": store, "lock": lock, "limit": 1,
+                  "window_s": 3600, "detail": "rate limited",
+                  "retry_after_s": None}
+            # A client-less Request: both attempts ADMITTED, nothing charged.
+            for _ in range(2):
+                await ha_mod._check_ip_bucket_rate_limit(
+                    req, key=("invite-accept", "ip", None), **kw)
+            assert store == {}, (
+                "a client-less Request charged an explicit key — an existing "
+                f"caller now enforces where it used to return: {dict(store)}")
+            # The Request-free arm charges the SAME store and refuses at limit.
+            await ha_mod._check_ip_bucket_rate_limit(
+                None, key=("team-x", "pack_manifest"), **kw)
+            with pytest.raises(HTTPException) as exc:
+                await ha_mod._check_ip_bucket_rate_limit(
+                    None, key=("team-x", "pack_manifest"), **kw)
+            assert exc.value.status_code == 429
+
+        asyncio.run(_scenario())
+
+
 # ── Excluded tools ──────────────────────────────────────────────────────────
 
 class TestExcludedTools:
@@ -567,14 +1015,14 @@ class TestExcludedTools:
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200
         names = [t["name"] for t in _parse_sse_json(r)["result"]["tools"]]
-        assert "tortoise_team_create" not in names
+        assert "tortoise_org_create" not in names
         assert "tortoise_backfill_v25" not in names
         assert "tortoise_ingest_corpus" not in names
 
     def test_excluded_call_errors(self, mcp_client):
         tc, _ = mcp_client
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                                  "params": {"name": "tortoise_team_create",
+                                  "params": {"name": "tortoise_org_create",
                                              "arguments": {"name": "x"}}})
         assert r.status_code == 200  # JSON-RPC error inside result, not HTTP error
         body = _parse_sse_json(r)
@@ -611,16 +1059,16 @@ class TestOnboardingToolGating:
         assert r.status_code == 200, r.text
         return {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
 
-    def _build_client(self, tmp_path, monkeypatch, team_name):
+    def _build_client(self, tmp_path, monkeypatch, org_name):
         """Registry on TORTOISE_DB_PATH (so hosted_api onboarding-state reads
         hit the same graph the middleware authenticates against) + MCP app."""
         import os as _os  # noqa: F401, I001
         from tortoise.mcp_server import create_http_app
-        db_path = str(tmp_path / f"{team_name}.db")
+        db_path = str(tmp_path / f"{org_name}.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(team_name)
+        team = reg.org_create(org_name)
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
@@ -635,7 +1083,7 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create("seedteam")
+        team = reg.org_create("seedteam")
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -664,7 +1112,7 @@ class TestOnboardingToolGating:
     def test_onboarding_tools_hidden_after_completion(self, tmp_path, monkeypatch):
         from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
         from tortoise import mcp_server
-        tc, key, team_id = self._build_client(tmp_path, monkeypatch, "onb-team")
+        tc, key, org_id = self._build_client(tmp_path, monkeypatch, "onb-team")
         with tc:
             # Onboarding incomplete → onboarding tools ARE listed
             names = self._list_names(tc, key)
@@ -673,7 +1121,7 @@ class TestOnboardingToolGating:
                 f"{self.ONBOARDING_TOOLS - names}")
             # Complete onboarding through the canonical state writer, then
             # clear the 60s per-team gate cache so the next list re-reads.
-            _update_onboarding_state(team_id, onboarding_complete=True)
+            _update_onboarding_state(org_id, onboarding_complete=True)
             mcp_server._onboarding_state_cache.clear()
             # Onboarding complete → onboarding tools retired from the listing
             names2 = self._list_names(tc, key)
@@ -693,9 +1141,9 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = reg.team_create("team-a")
+        team_a = reg.org_create("team-a")
         key_a = reg.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = reg.team_create("team-b")
+        team_b = reg.org_create("team-b")
         key_b = reg.apikey_create(team_b["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -713,7 +1161,7 @@ class TestOnboardingToolGating:
     def test_fail_open_when_onboarding_state_unreadable(self, tmp_path, monkeypatch):
         """A control-plane read failure must NOT hide onboarding tools — a
         transient outage must not strand a team mid-onboarding (fail-open)."""
-        def _boom(team_id):
+        def _boom(org_id):
             raise RuntimeError("control plane down")
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _boom)
         from tortoise import mcp_server
@@ -730,19 +1178,33 @@ class TestOnboardingToolGating:
         fix (previously 100% untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
-        def _state(team_id):
-            calls["n"] += 1
+        # Counted PER ORG: ``_org_onboarding_complete`` now awaits an offloaded
+        # read on a PROCESS-lifetime pool, so a read submitted by an earlier
+        # test can land inside this test's window. Org names are per-test
+        # unique, and the TTL assertion is about THIS org's reads.
+        #
+        # Stub the SYNC projection (not ``_get_onboarding_state``): its graph leg
+        # intermittently reports 'unavailable' when the shared embedded DB is
+        # contended, which makes the real return an env-dependent fail-open
+        # ``False`` — a PRE-EXISTING flake (``origin/main``'s own version of this
+        # test asserts ``is True`` off the same stub and the same unchanged
+        # ``_get_onboarding_projection``; measured 1 failure in 5 runs here). The
+        # claim under test is the CACHE, so the offload seam stays in play while
+        # the environment dependency is removed.
+        calls = []
+        def _state(org_id):
+            calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("cache-team")
+        tok = mcp_auth._current_org_id.set("cache-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True  # cached
-            assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True  # cached
+            assert calls.count("cache-team") == 1, (
+                f"re-fetched within TTL: {calls.count('cache-team')} reads")
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_cache_ttl_expiry_refetches(self, monkeypatch):
@@ -750,20 +1212,24 @@ class TestOnboardingToolGating:
         plane (staleness window is bounded, not sticky-forever)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
-        def _state(team_id):
-            calls["n"] += 1
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
+        def _state(org_id):
+            calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        # Sync projection stubbed, not ``_get_onboarding_state`` — same
+        # pre-existing embedded-DB flake as above; this test asserts the TTL,
+        # not the projection.
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("ttl-team")
+        tok = mcp_auth._current_org_id.set("ttl-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True
-            assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert calls.count("ttl-team") == 2, (
+                f"TTL=0 must refetch: {calls.count('ttl-team')} reads")
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_failed_read_not_cached(self, monkeypatch):
@@ -772,25 +1238,269 @@ class TestOnboardingToolGating:
         never gets pinned into the cache (previously untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
-        def _state(team_id):
-            calls["n"] += 1
-            if calls["n"] == 1:
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
+        def _state(org_id):
+            calls.append(org_id)
+            if calls.count("retry-team") == 1:
                 raise RuntimeError("transient")
             return {"onboarding_complete": False}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("retry-team")
+        tok = mcp_auth._current_org_id.set("retry-team")
         try:
-            assert mcp_server._team_onboarding_complete() is False  # fail-open
-            assert mcp_server._team_onboarding_complete() is False  # retried read
-            assert calls["n"] == 2, "failed read must not be cached"
+            # fail-open
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            # retried read
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, "failed read must not be cached"
             # and the successful False WAS cached now
-            assert mcp_server._team_onboarding_complete() is False
-            assert calls["n"] == 2, "successful read should now be cached"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, (
+                "successful read should now be cached")
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
+
+    def test_gate_read_runs_off_the_event_loop(self, monkeypatch):
+        """#2924: the gate's MISS read must not run ON the event loop.
+
+        The regression this pins: ``_org_onboarding_complete`` called the
+        SYNCHRONOUS ``_get_onboarding_projection`` inline from ``async def
+        list_tools`` — a PostgREST round trip over ``httpx.Client`` AND a fresh
+        FalkorDB client construction (``ssl.create_default_context`` → TLS →
+        ``Is_Sentinel``) on the single loop. ``py-spy`` caught the loop parked
+        in exactly that chain while ``GET /health`` stalled 1.08 s on
+        production, and the app's own heartbeat recorded ``loop_lag_max_ms`` =
+        2033 ms; loopback ``/health`` answered in ~4 ms across 178 probes while
+        10 of them stalled 0.9–2.2 s.
+
+        Two signals, because they fail for different reasons: the observed
+        thread name is the DIRECT falsifier (a blocking read on ``MainThread``),
+        and the tick count is the INVARIANT a user feels (``/health`` keeps
+        answering while the read is in flight). The tick assertion is kept WEAK
+        on purpose — see its comment.
+        """
+        from tortoise import mcp_auth, mcp_server
+
+        stall_s = 1.0
+        seen = {}
+
+        def _blocking_projection(org_id):
+            # A plain blocking sleep: ON the loop this freezes everything for
+            # stall_s, which is what the ticker below detects. Handed to a
+            # worker it costs the loop nothing.
+            seen["thread"] = threading.current_thread().name
+            time.sleep(stall_s)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection",
+                            _blocking_projection)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("loop-team")
+
+        async def _scenario():
+            ticks = 0
+            stop = False
+
+            async def _ticker():
+                nonlocal ticks
+                while not stop:
+                    ticks += 1
+                    await asyncio.sleep(0.02)
+
+            task = asyncio.ensure_future(_ticker())
+            await asyncio.sleep(0)
+            # Reset AFTER the ticker has spun once: scheduled-then-yielded means
+            # `ticks` is already 1 before the gate is entered, so counting from
+            # zero here is what makes the assertion below measure the READ (a
+            # faithful simulated revert measured TICKS=1 at this point, and
+            # `assert ticks >= 1` on the un-reset counter therefore passed).
+            ticks = 0
+            try:
+                verdict = await mcp_server._org_onboarding_complete()
+            finally:
+                stop = True
+                await task
+            return verdict, ticks
+
+        try:
+            verdict, ticks = asyncio.run(_scenario())
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+
+        assert verdict is True
+        assert seen["thread"] != "MainThread", (
+            "the onboarding gate read ran on the event loop — a blocking "
+            "PostgREST + graph read on the tools/list hot path (#2924): "
+            f"thread={seen['thread']!r}"
+        )
+        expected = int(stall_s / 0.02)
+        # Counted DURING the read (reset above): a free loop yields ~expected; a
+        # gate back ON the loop — and therefore every tick here — yields 0, which
+        # is the regression. Floor of 1, not a fraction of `expected`: on this box
+        # at loadavg ~140 the read itself still managed 2 ticks, while
+        # in-process GIL starvation stretched 20 ms wake-ups ~25-fold and a
+        # `expected // 10` floor false-redded a correctly-offloaded gate.
+        assert ticks >= 1, (
+            f"the loop never ticked during a {stall_s}s gate read (a free loop "
+            f"yields ~{expected}) — the gate is back ON the event loop; route "
+            "it through _graph_offload (#2924)"
+        )
+
+    def test_gate_fails_open_when_the_offload_itself_fails(self, monkeypatch):
+        """#2924: an OFFLOAD failure must fail OPEN, not 503 ``tools/list``.
+
+        The new failure surface this change introduces is the seam itself:
+        ``_graph_offload`` maps a saturated pool or a missed wait bound to
+        ``_graph_unavailable()`` (an ``HTTPException(503)``). The gate is
+        surface cosmetics — its documented contract is fail-open, and the
+        onboarding tools must stay listable during a graph-capacity blip. The
+        pre-existing e2e guard raises a ``RuntimeError`` from the helper, which
+        exercises the *propagation* path, not this mapping; without this case a
+        future narrowing of the gate's ``except`` would turn a saturated graph
+        pool into a 503 for the whole ``tools/list`` request.
+        """
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        async def _refused(org_id):
+            raise HTTPException(status_code=503, detail="graph_unavailable")
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection_off_loop", _refused)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("offload-fail-team")
+        try:
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+        assert "offload-fail-team" not in mcp_server._onboarding_state_cache, (
+            "a failed offload must not be cached as False"
+        )
+
+    def test_gate_offload_uses_the_request_bound_not_the_lane_bound(self, monkeypatch):
+        """#2924: the gate buys a SHORT bound, not the graph lane's cold-start one.
+
+        ``_graph_offload``'s default bound is ``probe_setup_timeout()`` + a
+        margin (~30 s) because a cold projection is a legitimate ~28-round-trip
+        phase for a WRITE lane. The gate vetoes nothing when it fails — it only
+        keeps the onboarding tools visible — so parking a graph worker (and the
+        ``tools/list`` response) for that long to avoid a harmless false-open is
+        the wrong trade. Pin the override so it cannot silently revert.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import monitoring
+
+        # The bound must be resolved at CALL time. Patch it to a value that is
+        # distinguishable from its default: an import-time capture would report
+        # the default, so asserting the default cannot tell the two apart —
+        # which is how the round-2 import-time defect survived this test.
+        SENTINEL_BOUND = 3.75
+        monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", SENTINEL_BOUND)
+        assert monitoring.graph_offload_timeout_s() > SENTINEL_BOUND
+
+        seen = {}
+
+        async def _fake_graph_offload(fn, *, op, timeout=None):
+            seen["timeout"] = timeout
+            seen["op"] = op
+            return {"onboarding_complete": True}
+
+        original = ha._graph_offload
+        ha._graph_offload = _fake_graph_offload
+        try:
+            result = asyncio.run(ha._get_onboarding_projection_off_loop("bound-team"))
+        finally:
+            ha._graph_offload = original
+
+        assert result == {"onboarding_complete": True}
+        assert seen["op"] == "onboarding_projection"
+        assert seen["timeout"] == SENTINEL_BOUND, (
+            "the gate did not resolve CONTROL_PLANE_OFFLOAD_TIMEOUT_S at call time"
+        )
+        assert seen["timeout"] < monitoring.graph_offload_timeout_s(), (
+            "the gate fell back to the graph lane's cold-projection bound"
+        )
+
+    def test_concurrent_gate_misses_share_one_resolution(self, monkeypatch):
+        """#2924 review: concurrent misses for ONE org must not STAMPEDE.
+
+        Making the gate ``async`` introduced a window that the old synchronous
+        call did not have: the gate now awaits BETWEEN the cache lookup and the
+        cache fill, so N concurrent ``tools/list`` requests (one per MCP client
+        session) all miss and each submit its own graph-pool read. The pool is
+        small and also carries graph WRITES, and the stampede lands exactly when
+        the read is slow — a fail-open cosmetics gate must not be able to
+        occupy it. The in-flight map must make 8 concurrent misses one read.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        calls = []
+        release = threading.Event()
+
+        def _slow_projection(org_id):
+            calls.append(org_id)
+            release.wait(10)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection", _slow_projection)
+        mcp_server._onboarding_state_cache.clear()
+        mcp_server._onboarding_gate_inflight.clear()
+        tok = mcp_auth._current_org_id.set("stampede-team")
+
+        async def _scenario():
+            tasks = [
+                asyncio.ensure_future(mcp_server._org_onboarding_complete())
+                for _ in range(8)
+            ]
+            # Let whoever gets there first SUBMIT; the other 7 must join it
+            # rather than submit their own.
+            await asyncio.sleep(0.3)
+            release.set()
+            return await asyncio.gather(*tasks)
+
+        try:
+            results = asyncio.run(_scenario())
+        finally:
+            release.set()
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+            mcp_server._onboarding_gate_inflight.clear()
+
+        assert results == [True] * 8
+        assert calls == ["stampede-team"], (
+            f"8 concurrent gate misses performed {len(calls)} reads ({calls}) "
+            "— concurrent callers must share ONE resolution (#2924)"
+        )
+
+    def test_inflight_cleanup_does_not_evict_a_live_replacement(self):
+        """#2924 review: evicting a settled task must check IDENTITY.
+
+        The failed-read path leaves no cache entry, so the next caller can
+        install a replacement while the settled task's done-callbacks are still
+        queued. A bare ``pop(org_id, None)`` then removes the LIVE replacement,
+        and the caller after that starts a duplicate read — two resolutions in
+        flight for one org, on the blip the single-flight exists to absorb. This
+        is a direct unit falsifier: it fails against a bare pop and passes
+        against the identity check.
+        """
+        from tortoise import mcp_server
+
+        settled, replacement = object(), object()
+        mcp_server._onboarding_gate_inflight.clear()
+        mcp_server._onboarding_gate_inflight["evict-team"] = replacement
+        try:
+            mcp_server._drop_gate_inflight("evict-team", settled)
+            assert mcp_server._onboarding_gate_inflight.get("evict-team") is replacement, (
+                "a settled task's cleanup evicted the LIVE task registered under "
+                "the same org — the next caller starts a duplicate read (#2924)"
+            )
+        finally:
+            mcp_server._onboarding_gate_inflight.clear()
 
 
 # ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────
@@ -821,7 +1531,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
         from tortoise.auth import hash_api_key
         token = "tk_" + _uuid.uuid4().hex
         reg._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:'#2300', graph_id:$gid, "
             "scopes:$scopes, delegation_depth:$dd})",
             params={"id": f"k-{_uuid.uuid4().hex[:8]}", "tid": tid,
@@ -833,13 +1543,13 @@ class TestGraphBoundKeyTeamSurfaceReject:
     def _env(self, tmp_path, monkeypatch, name):
         """Registry on TORTOISE_DB_PATH + team + default graph + one custom
         graph (the per-graph keys bind here) + mounted MCP app. Returns
-        (reg, team_id, graph_id, tc)."""
+        (reg, org_id, graph_id, tc)."""
         from tortoise.mcp_server import create_http_app
         db_path = str(tmp_path / f"{name}.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(name)
+        team = reg.org_create(name)
         reg._graph_create(team["id"], "default", kind="default")
         g = reg._graph_create(team["id"], "bound-g", kind="custom")
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
@@ -956,7 +1666,7 @@ class TestAdvertisedToolsAllServed:
         the module-bottom register_all resolves a handler for every registry
         entry (its 'no handler — skipped' warning must never fire). Uses the
         RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
-        which intentionally hides HTTP-excluded/ask-gated tools)."""
+        which intentionally hides HTTP-excluded/curation-group-scoped tools)."""
         import asyncio
 
         from tortoise import mcp_server
@@ -1085,7 +1795,7 @@ class TestContextVarNoLeak:
         assert r.status_code == 401
         # After the request completes, ContextVar should be back to None
         # (fresh asyncio task per request — contextvars copy-on-write).
-        assert ma._current_team_id.get() is None
+        assert ma._current_org_id.get() is None
 
 
 class TestInputCaps:
@@ -1110,7 +1820,7 @@ class TestQuotaEnforcement:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
         db = str(tmp_path / "quota.db")
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("quota-team")
+        team = reg.org_create("quota-team")
         key_info = reg.apikey_create(team["id"], "quota-fixture")
         yield reg, key_info["api_key"], team["id"], db
         reg.close()
@@ -1130,8 +1840,8 @@ class TestQuotaEnforcement:
         with tc:
             yield tc, reg, key, tid
 
-    def _set_max_points(self, reg_sdk, team_id, value):
-        reg_sdk.team_update(team_id, max_points=value)
+    def _set_max_points(self, reg_sdk, org_id, value):
+        reg_sdk.org_update(org_id, max_points=value)
 
     def test_create_point_blocked_at_cap(self, quota_client):
         """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
@@ -1179,7 +1889,7 @@ class TestQuotaEnforcement:
     def test_cross_team_isolation(self, quota_client):
         """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        team_b = reg_sdk.team_create("quota-team-b")
+        team_b = reg_sdk.org_create("quota-team-b")
         key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
         self._set_max_points(reg_sdk, tid, 0)  # team A at cap
 
@@ -1311,7 +2021,7 @@ class TestQuotaEnforcement:
             graphs = _j.loads(text)
         except Exception:
             graphs = []
-        assert all(g.startswith("team_") for g in graphs), f"foreign graphs leaked: {graphs}"
+        assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
         assert "registry" not in graphs
 
 
@@ -1381,7 +2091,7 @@ class TestIntrospectiveQuotaCompleteness:
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
         for excluded in ("tortoise_ingest_corpus", "tortoise_index_sessions",
                          "tortoise_index_files", "tortoise_backfill_v25",
-                         "tortoise_team_create"):
+                         "tortoise_org_create"):
             assert excluded not in names, f"{excluded} must stay HTTP-excluded"
 
 
@@ -1421,15 +2131,16 @@ class TestSC5IndexFilesSurface:
             "index_files creates nodes AND edges — must be quota-gated")
 
     def test_legacy_tools_deprecation_markers(self):
-        """Both legacy tools carry the MCP tool-description DEPRECATED marker
-        naming the replacement (plan §6.3 — behavior unchanged, SC4)."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        by_name = {t.name: t for t in TOOL_REGISTRY}
+        """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
+        description naming the replacement, and stay http-excluded."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
             assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
+            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
         """E2E-17(e) structural half: the filesystem-walk tool is not
@@ -1487,7 +2198,7 @@ class TestGraphSetRecordingHTTP:
         db = str(tmp_path / "rec.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("rec-http-team")
+        team = reg.org_create("rec-http-team")
         reg._graph_create(team["id"], "default", kind="default")
         key = reg.apikey_create(team["id"], "r")["api_key"]
 
@@ -1528,8 +2239,745 @@ class TestGraphSetRecordingHTTP:
             result = self._unwrap(body)
             assert result.get("recording") is None, body
             rows = reg._get_registry().query(
-                "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+                "MATCH (g:Graph {org_id:$tid, kind:'default'}) "
                 "RETURN g.recording",
                 params={"tid": team["id"]},
             ).result_set
             assert rows and rows[0][0] is None, rows
+
+
+# ── #3656: the tools/call admission boundary, named ────────────────────────
+
+class TestToolCallAdmissionBoundary:
+    """#3656 observed ``tools/call`` answered with ``-32602 "Invalid request
+    parameters"`` (empty ``data``) for every tool and every token, for ~1 minute.
+
+    WHAT THIS PINS, and why it is a boundary test rather than a race test: on the
+    hosted surface the SDK session starts ``Initialized`` (``stateless_http`` is
+    on), so ``ServerSession._received_request``'s "before initialization was
+    complete" arm cannot fire. The reported signature has exactly ONE producer --
+    the blanket ``except Exception`` in ``BaseSession._receive_loop`` -- but that
+    ``except`` has TWO arms: (a) ``ClientRequest.model_validate`` rejecting the
+    envelope, and (b) anything escaping ``ServerSession._handle_incoming``, which
+    for a WELL-FORMED request is answered with the identical ``-32602`` /
+    ``data: ""``. Arm (a) is what these tests bound, end to end; arm (b) is
+    pinned at the session level by
+    ``test_second_arm_of_the_signature_is_a_broken_incoming_stream`` and is
+    REPORTED rather than fixed (there is no member to name in it, and the fix
+    for it is the SDK's).
+
+    So the invariant is exact: ``/mcp`` answers ``-32602`` for a ``tools/call``
+    **iff the transport would dispatch it AND** the SDK's own ``JSONRPCMessage``
+    + ``JSONRPCRequest`` + ``ClientRequest`` checks reject it -- and when it does,
+    the reason names the rejected member. The equivalence is pinned against a
+    REAL ``ServerSession`` driven with the raw body
+    (``_sdk_session_verdict``) -- not a re-statement of the SDK's expressions --
+    so a change to either expression makes that test disagree with the SDK
+    instead of silently drifting. The HTTP-level decision matrix separately
+    asserts the middleware fires where those same expressions reject. See
+    ``mcp_server._tools_call_rejection``.
+
+    Dispatched calls use ``tortoise_list_namespaces`` deliberately: these tests
+    bound ADMISSION, and a tool that computes embeddings would drag the
+    (unrelated, environment-dependent) embedder into a boundary test.
+    """
+
+    # The request verbatim from #3656.
+    ISSUE_REQUEST = {  # noqa: RUF012
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "tortoise_create_point",
+                   "arguments": {"kind": "statement",
+                                 "content": "vgate-ab-probe"}},
+    }
+    CHEAP_TOOL = "tortoise_list_namespaces"
+
+    @classmethod
+    def _client(cls, tmp_path, monkeypatch, name="admission"):
+        """Registry on TORTOISE_DB_PATH (same graph the middleware verifies
+        against) + the MCP app, mirroring TestOnboardingToolGating."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create(name)
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        return tc
+
+    def test_issue_reproducer_malformed_call_names_the_rejected_member(
+            self, tmp_path, monkeypatch):
+        """The deterministic reproducer of #3656's exact wire signature.
+
+        Pre-fix the body is ``{"code": -32602, "message": "Invalid request
+        parameters", "data": ""}`` -- unactionable, and indistinguishable from
+        an internal fault. Post-fix the same code carries the rejected member.
+        """
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            # #3656's request with `name` dropped -- well-formed JSON, invalid
+            # `tools/call`. No tool is dispatched either way.
+            payload = {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {"kind": "statement",
+                                         "content": "vgate-ab-probe"}},
+            }
+            r, body = _mcp_post(tc, payload)
+            assert r.status_code == 200, r.text
+            err = body["error"]
+            assert err["code"] == -32602, body
+            # The client matches the reply to its request by id; a null here
+            # would leave a real SDK client waiting forever.
+            assert body["id"] == 1, body
+            # The member the SDK rejected is named, on the wire.
+            assert "params.name" in err["message"], body
+            assert err["data"]["method"] == "tools/call", body
+            assert ["params", "name"] in [e["loc"] for e in err["data"]["errors"]], body
+
+    @pytest.mark.parametrize("request_id", [1, "abc-def", 9007199254740993])
+    def test_the_error_frame_echoes_the_request_id(self, tmp_path, monkeypatch,
+                                                   request_id):
+        """The id is copied from the request, not defaulted: an error a client
+        cannot match to its request is the failure this whole surface avoids.
+        """
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"id-{str(request_id)[:6]}")
+        with tc:
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 200, r.text
+            assert body["error"]["code"] == -32602, body
+            assert body["id"] == request_id, body
+
+    # ── the oracle: a REAL ServerSession, driven with the raw body ─────────
+
+    @staticmethod
+    def _sdk_session_verdict(raw, *, timeout=0.5):
+        """What a real ``ServerSession`` does with ``raw``.
+
+        Returns the parsed JSON-RPC message the session writes back, or None
+        when it admits the message (nothing is written). The session's incoming
+        consumer is absent, so an ADMITTED request blocks on
+        ``_handle_incoming`` and times out -- which is itself the "admitted"
+        signal; a REJECTED one is written immediately by the receive loop.
+
+        This is the SDK's own code path, not a copy of it: it is what makes the
+        guard's equivalence claim falsifiable rather than self-referential.
+        """
+        import anyio
+        from mcp.server.models import InitializationOptions
+        from mcp.server.session import ServerSession
+        from mcp.shared.message import SessionMessage
+        from mcp.types import JSONRPCMessage, ServerCapabilities
+
+        async def ask():
+            read_send, read_recv = anyio.create_memory_object_stream(8)
+            write_send, write_recv = anyio.create_memory_object_stream(8)
+            session = ServerSession(
+                read_recv, write_send,
+                InitializationOptions(
+                    server_name="admission-oracle", server_version="1",
+                    capabilities=ServerCapabilities(), instructions=None),
+                stateless=True)
+            async with session:
+                await read_send.send(SessionMessage(
+                    message=JSONRPCMessage.model_validate(raw)))
+                try:
+                    with anyio.fail_after(timeout):
+                        return await write_recv.receive()
+                except TimeoutError:
+                    return None
+
+        got = anyio.run(ask)
+        if got is None:
+            return None
+        return json.loads(got.message.model_dump_json(by_alias=True))
+
+    def test_guard_verdict_equals_a_real_sdk_session(self, caplog):
+        """The guard must decide exactly what the SDK's OWN session decides.
+
+        Both directions matter: rejecting a request the SDK serves (over-strict,
+        breaks a working caller) and accepting one it rejects (silently widens
+        what ``/mcp`` admits while the opaque error remains).
+        """
+        import logging
+
+        from tortoise.mcp_server import _tools_call_rejection
+
+        caplog.set_level(logging.ERROR)  # the SDK logs a 30-error dump per reject
+        cheap = self.CHEAP_TOOL
+        shapes = [
+            self.ISSUE_REQUEST,  # #3656's request: admitted (no tool dispatch)
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {"bogus": 1}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": None, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": 7, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": ["x"]}},
+        ]
+        for raw in shapes:
+            live = self._sdk_session_verdict(raw)
+            sdk_rejected = (live is not None
+                            and live.get("error", {}).get("code") == -32602)
+            guard_rejected = _tools_call_rejection(raw) is not None
+            assert guard_rejected == sdk_rejected, (
+                f"guard and the SDK's own session disagree on {raw}: "
+                f"guard={guard_rejected} sdk={sdk_rejected} ({live})")
+
+    def test_second_arm_of_the_signature_is_a_broken_incoming_stream(self, caplog):
+        """Measures #3656's OTHER producer -- the one this change does NOT fix.
+
+        The same ``except Exception`` in ``BaseSession._receive_loop`` answers a
+        WELL-FORMED request with the identical ``-32602`` / ``data: ""`` when
+        anything escapes ``_handle_incoming``. Here the session's incoming
+        consumer is gone (the stream is closed) while the session and its write
+        stream are alive, so the request is admitted and the failure is written
+        back to the client as "Invalid request parameters".
+
+        This is why the fix is a MESSAGE fix and not a fix for the reported
+        transient: there is no member to name in this arm, and no request-side
+        guard can reach it (the envelope IS valid -- the envelope is not what
+        failed). Whether the hosted surface can enter this state is not
+        established here; what is established is that the signature has a second,
+        request-agnostic producer, so the module comment says so instead of
+        claiming the parameter case is the only one.
+
+        The wire form asserted below is the SDK's, not ours. An upstream release
+        that reports this arm correctly must not redden this repo, so the exact
+        code/message/data form is pinned only while it holds: the test xfails
+        (with the reason) at runtime rather than failing. A change of SHAPE --
+        the arm no longer answering with an error at all -- still fails, and
+        that is deliberate: it would invalidate the claim in mcp_server.
+        """
+        import logging
+
+        import anyio
+        from mcp.server.models import InitializationOptions
+        from mcp.server.session import ServerSession
+        from mcp.shared.message import SessionMessage
+        from mcp.types import JSONRPCMessage, ServerCapabilities
+
+        from tortoise.mcp_server import _tools_call_rejection
+
+        # The SDK logs a 30-error dump here; keep the test output readable
+        # without a process-wide logging switch (caplog restores the level).
+        caplog.set_level(logging.CRITICAL)
+        raw = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+               "params": {"name": self.CHEAP_TOOL, "arguments": {}}}
+        # The request-side guard sees nothing wrong: the envelope is valid.
+        assert _tools_call_rejection(raw) is None, raw
+
+        async def ask():
+            read_send, read_recv = anyio.create_memory_object_stream(8)
+            write_send, write_recv = anyio.create_memory_object_stream(8)
+            session = ServerSession(
+                read_recv, write_send,
+                InitializationOptions(
+                    server_name="admission-oracle", server_version="1",
+                    capabilities=ServerCapabilities(), instructions=None),
+                stateless=True)
+            async with session:
+                await session.incoming_messages.aclose()
+                await read_send.send(SessionMessage(
+                    message=JSONRPCMessage.model_validate(raw)))
+                try:
+                    with anyio.fail_after(2.0):
+                        return await write_recv.receive()
+                except TimeoutError:
+                    return None
+
+        got = anyio.run(ask)
+        assert got is not None, "expected the SDK to answer"
+        body = json.loads(got.message.model_dump_json(by_alias=True))
+        # Stable across an upstream fix: this arm answers an ERROR for a
+        # well-formed request instead of dispatching it.
+        assert "error" in body, body
+        if (body["error"].get("code") != -32602
+                or body["error"].get("message") != "Invalid request parameters"
+                or body["error"].get("data") != ""):
+            pytest.xfail(
+                "upstream mcp no longer answers this arm with INVALID_PARAMS/"
+                f"data='' (got {body['error']!r}); the arm itself still exists, "
+                "which is what the claim in mcp_server rests on -- update the "
+                "module comment rather than this test")
+
+    def test_issue_request_envelope_is_accepted(self):
+        """#3656's request is well-formed, so no request-side guard can be the
+        source of the reported ``-32602``.
+
+        Asserted against BOTH the guard and a real SDK session, which is what
+        makes it evidence rather than a restatement. No HTTP call: the verbatim
+        payload names a point-creating tool, and dispatching it would drag the
+        embedder into a boundary test.
+        """
+        from tortoise.mcp_server import _tools_call_rejection
+        assert _tools_call_rejection(self.ISSUE_REQUEST) is None
+        assert self._sdk_session_verdict(self.ISSUE_REQUEST) is None
+
+    def test_a_hidden_onboarding_tool_is_not_an_admission_error(
+            self, tmp_path, monkeypatch):
+        """#3656's third hypothesis, MEASURED: a tool that disappears from
+        ``tools/list`` once onboarding completes still dispatches -- the
+        89 -> 82 shrink is a listing change, not an admission rejection.
+
+        The hidden state is entered, not assumed: onboarding is completed
+        through the canonical state writer, the 60s gate cache is cleared, and
+        the listing is asserted to have dropped the tool BEFORE it is called.
+        """
+        from tortoise import mcp_server
+        from tortoise.hosted_api import _update_onboarding_state
+        from tortoise.mcp_server import create_http_app
+
+        hidden = "tortoise_onboarding_state"
+        db_path = str(tmp_path / "hidden.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create("hidden-team")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            assert hidden in self._list_names(tc, key)  # visible first
+            _update_onboarding_state(team["id"], onboarding_complete=True)
+            mcp_server._onboarding_state_cache.clear()
+            assert hidden not in self._list_names(tc, key), (
+                "the fixture did not enter the hidden state")
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": hidden, "arguments": {}}})
+            assert r.status_code == 200, r.text
+            # Dispatched normally: a tool RESULT, not an admission rejection.
+            assert "result" in body, body
+            assert body.get("error", {}).get("code") != -32602, body
+
+    @staticmethod
+    def _list_names(tc, key):
+        """The gated ``tools/list`` names, as the onboarding tests read them."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        return {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
+
+    def test_the_named_error_is_uncacheable_and_unbuffered(self, tmp_path,
+                                                           monkeypatch):
+        """The intercepted error must carry the transport's own cache/buffer
+        headers (``Cache-Control: no-cache, no-transform``,
+        ``X-Accel-Buffering: no``), as a real client and its proxies rely on
+        them; the rest of the frame is asserted by the reproducer test.
+        """
+        tc = self._client(tmp_path, monkeypatch, name="headers")
+        with tc:
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 200, r.text
+            assert body["error"]["code"] == -32602, body
+            # A real MCP client dispatches on the media type; a JSON body here
+            # would take its "unexpected content type" path.
+            assert r.headers["content-type"].startswith("text/event-stream"), \
+                dict(r.headers)
+            assert r.headers.get("cache-control") == "no-cache, no-transform", \
+                dict(r.headers)
+            assert r.headers.get("x-accel-buffering") == "no", dict(r.headers)
+
+    @pytest.mark.parametrize("params,member", [
+        (None, ["params"]),
+        ({"arguments": {}}, ["params", "name"]),
+        ({"name": 7, "arguments": {}}, ["params", "name"]),
+        ({"name": CHEAP_TOOL, "arguments": ["x"]}, ["params", "arguments"]),
+    ])
+    def test_each_rejected_member_is_named(self, tmp_path, monkeypatch,
+                                           params, member):
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"adm-{member[-1]}-{len(str(params))}")
+        with tc:
+            payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call"}
+            if params is not None:
+                payload["params"] = params
+            r, body = _mcp_post(tc, payload)
+            assert r.status_code == 200, r.text
+            err = body["error"]
+            assert err["code"] == -32602, body
+            assert ".".join(member) in err["message"], body
+            assert member in [e["loc"] for e in err["data"]["errors"]], body
+
+    def test_wellformed_tools_call_is_never_answered_with_invalid_params(
+            self, tmp_path, monkeypatch):
+        """Every well-formed variant: the surface answers with a RESULT (never a
+        JSON-RPC error). Whether the tool then succeeds or reports isError is
+        irrelevant here -- the admission boundary is what this pins."""
+        tc = self._client(tmp_path, monkeypatch)
+        wellformed = [
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": None}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {},
+                        "_meta": {"progressToken": "t"}}},
+            # Hidden from tools/list once onboarding completes, still callable.
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "tortoise_onboarding_state", "arguments": {}}},
+            # Unregistered name: a tool outcome, not an admission rejection.
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "tortoise_nonexistent_xyz", "arguments": {}}},
+            # Tool-argument failures are FastMCP's, surfaced as isError results.
+            {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {"bogus": 1}}},
+        ]
+        with tc:
+            for payload in wellformed:
+                r, body = _mcp_post(tc, payload)
+                assert r.status_code == 200, (payload, r.text)
+                assert "error" not in body, (
+                    f"well-formed {payload.get('params')!r} was rejected: {body}")
+                assert "result" in body, body
+
+    def test_genuinely_invalid_tools_call_still_returns_invalid_params(
+            self, tmp_path, monkeypatch):
+        """Bar: the fix must not blanket-accept. An invalid envelope keeps the
+        SDK's own code (-32602) -- only the reason is added."""
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            for payload in (
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": 7, "arguments": {}}},
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": self.CHEAP_TOOL, "arguments": ["x"]}},
+            ):
+                r, body = _mcp_post(tc, payload)
+                assert r.status_code == 200, r.text
+                assert body["error"]["code"] == -32602, body
+
+    def test_http_admission_decision_tracks_the_sdk_expressions(
+            self, tmp_path, monkeypatch):
+        """The anti-widening matrix, at the HTTP boundary.
+
+        For every shape below, the surface's accept/reject decision must match
+        the SDK's two admission expressions, evaluated here. This is an
+        INTEGRATION check against a re-statement of those expressions -- it pins
+        that the middleware fires where they reject, and cannot detect the guard
+        drifting from the SDK (both sides run the same models). That drift is
+        what the real-``ServerSession`` oracle above is for; this matrix exists
+        to cover the many shapes at the wire level, including the naive
+        "widen the validator" fix for #3656.
+        """
+        from mcp.types import ClientRequest, JSONRPCMessage
+
+        def sdk_rejects(raw) -> bool:
+            try:
+                message = JSONRPCMessage.model_validate(raw)
+                dumped = message.root.model_dump(by_alias=True, mode="json",
+                                                 exclude_none=True)
+                ClientRequest.model_validate(dumped)
+            except Exception:
+                return True
+            return False
+
+        cheap = self.CHEAP_TOOL
+        shapes = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": None, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": 7, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": ["x"]}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": "x"}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": None}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {"bogus": 1}}},
+        ]
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            for raw in shapes:
+                expected = sdk_rejects(raw)
+                r, body = _mcp_post(tc, dict(raw))
+                assert r.status_code == 200, (raw, r.text)
+                if "error" in body:
+                    assert body["error"]["code"] == -32602, (raw, body)
+                    assert expected, (
+                        "the surface rejected a request the SDK accepts "
+                        f"(over-strict): {raw} -> {body}")
+                else:
+                    assert not expected, (
+                        "the surface accepted a request the SDK rejects "
+                        f"(widened): {raw} -> {body}")
+
+    @pytest.mark.parametrize("raw", [
+        # A non-REQUEST root: the transport answers 202, not "invalid params".
+        {"jsonrpc": "2.0", "id": 1, "result": {}},
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": 1, "message": "m"}},
+        # A tools/call NOTIFICATION (no id): the SDK only logs these.
+        {"jsonrpc": "2.0", "method": "tools/call", "params": {}},
+        # `method` AND `error` in one body: the union resolves this to a
+        # JSONRPCError, so the transport answers 202. This is the shape the
+        # root-type gate exists for -- remove it and the guard answers -32602
+        # for a request the SDK dispatches as a response.
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "error": {"code": 1, "message": "m"}},
+        # A batch array and a non-object body are the transport's business.
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call"}],
+        "not-an-object",
+        # A malformed ``jsonrpc`` field: gate-1 JSONRPCMessage rejection, and the
+        # transport's own 400 -32602 -- not the MCP-Protocol-Version header,
+        # which has its own row below.
+        {"jsonrpc": "1.0", "id": 1, "method": "tools/call", "params": {}},
+    ])
+    def test_bodies_the_transport_does_not_dispatch_are_never_named(self, raw):
+        """The over-strict direction: a body the transport does NOT dispatch as a
+        request must pass through, never acquire a named ``-32602`` from here.
+
+        The transport answers a non-request root with 202, so answering it with
+        an "invalid params" error would replace the SDK's answer for a working
+        caller.
+        """
+        from tortoise.mcp_server import _tools_call_rejection
+        assert _tools_call_rejection(raw) is None, raw
+
+    def test_a_response_shaped_body_still_gets_the_transports_202(
+            self, tmp_path, monkeypatch):
+        """The root-type gate (gate 2), at the HTTP boundary: a body with
+        ``method`` AND ``error`` resolves to a JSONRPCError, which the transport
+        answers ``202`` -- the middleware must not turn that into a ``-32602``.
+
+        The guard-level test above pins the predicate; this pins that the
+        middleware honours it, which is the shape gate 2 was added for.
+        """
+        tc = self._client(tmp_path, monkeypatch, name="resp-shape")
+        with tc:
+            r = tc.post("/mcp", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "error": {"code": 1, "message": "m"}})
+            assert r.status_code == 202, (r.status_code, r.text)
+            assert "params.name" not in r.text, r.text
+
+    @pytest.mark.parametrize("headers,expected_status", [
+        # `application/jsonx` must stay the transport's 415 -- an exact part
+        # match, not a substring (`_check_content_type`).
+        ({"Content-Type": "application/jsonx"}, 415),
+        # ... while a value that does not START with application/json is the
+        # security middleware's 400 (`_validate_content_type`) -- a stricter,
+        # earlier gate that an exact-part check alone would sail past.
+        ({"Content-Type": "text/plain, application/json"}, 400),
+        # SSE mode requires BOTH media types in Accept
+        # (`_validate_accept_header` -> `_check_accept_headers`).
+        ({"Accept": "application/json"}, 406),
+        # An unsupported protocol version is `_validate_protocol_version`'s 400.
+        ({"MCP-Protocol-Version": "1999-01-01"}, 400),
+        # ... and so is a PRESENT but EMPTY one: the SDK substitutes the default
+        # only when the header is absent (`is None`), not when it is "".
+        ({"MCP-Protocol-Version": ""}, 400),
+        # A declared body over the app's cap: the OUTER
+        # `mcp_auth.RequestBodySizeMiddleware` (1 MB) owns this 413, and the
+        # guard must neither buffer it nor answer for it. The SDK's own 4 MiB
+        # limit is behind that and unreachable here.
+        ({"Content-Length": str(8 * 1024 * 1024)}, 413),
+    ])
+    def test_gates_the_transport_owns_are_not_pre_empted(self, tmp_path,
+                                                         monkeypatch, headers,
+                                                         expected_status):
+        """A request the transport would refuse for its own reasons must reach it
+        and keep the transport's status -- the guard speaks only about a request
+        the SDK actually parsed and dispatched.
+
+        Each case here was a real divergence: the guard answered ``200`` with a
+        named ``-32602`` where the transport answers 400/406/413/415. The status
+        is the assertion; the body is asserted only to be free of the guard's
+        named message, because WHICH layer produces 400/413 differs by case and
+        that layering is not this test's subject.
+        """
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"gate-{expected_status}")
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"arguments": {}}})
+        with tc:
+            r = tc.post("/mcp", content=payload, headers=headers)
+            assert r.status_code == expected_status, r.text
+            assert "params.name" not in r.text, r.text
+
+    def test_a_path_the_transport_does_not_route_stays_a_404(self, tmp_path,
+                                                             monkeypatch):
+        """The guard wraps the ROUTER, so without a route check it answers
+        ``200 -32602`` for a POST no endpoint ever saw -- replacing the 404."""
+        tc = self._client(tmp_path, monkeypatch, name="route")
+        with tc:
+            r = tc.post("/mcp/bogus", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 404, r.text
+            assert "params.name" not in r.text, r.text
+
+    @pytest.mark.parametrize("headers,expected_status", [
+        ({"Origin": "https://evil.example"}, 403),
+        ({"Host": "evil.example"}, 421),
+    ])
+    def test_origin_and_host_refusals_still_precede_the_guard(
+            self, tmp_path, monkeypatch, headers, expected_status):
+        """DNS-rebinding protection runs OUTSIDE this middleware, so a refused
+        Origin/Host must still be refused -- the guard must not answer 200 for a
+        request the outer guard rejected.
+
+        Measured for the same reason as the header gates: the SDK transport's
+        own host/origin branch is DISABLED here (`create_http_app` builds the
+        transport without security settings, so DNS-rebinding protection
+        defaults off inside it), which makes the outer
+        `HostOriginGuardMiddleware` the ONLY host/origin check -- so this
+        middleware must sit behind it and must not answer for a request it
+        refused. Posted to ``/mcp/`` (the mount root, trailing slash): from
+        ``/mcp`` Starlette redirects, and httpx drops ``Authorization`` on a
+        redirect to a different Host -- which would make this measure the test
+        client, not the guard.
+        """
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / "origin.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create("originteam")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              allowed_hosts=["mcp.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            r = tc.post("/mcp/", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}},
+                headers={"Authorization": f"Bearer {key}",
+                         "Accept": "application/json, text/event-stream",
+                         "Content-Type": "application/json", **headers})
+            assert r.status_code == expected_status, r.text
+            assert "params.name" not in r.text, r.text
+
+    def test_a_chunked_body_is_left_to_the_sdk_byte_counting_limiter(
+            self, tmp_path, monkeypatch):
+        """A chunked POST declares no length, so the guard passes it through
+        rather than buffering an unbounded body ahead of the SDK's streaming
+        4 MiB check (the 413 must stay the limiter's, and the buffer bounded)."""
+        tc = self._client(tmp_path, monkeypatch, name="chunked")
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"arguments": {}}}).encode()
+
+        def stream():
+            # 5 MiB, in chunks, with no Content-Length.
+            yield body
+            for _ in range(5):
+                yield b"x" * (1024 * 1024)
+
+        with tc:
+            r = tc.post("/mcp", content=stream(), headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"})
+            assert r.status_code == 413, r.text
+            assert "params.name" not in r.text, r.text
+
+    def test_other_methods_are_not_intercepted(self, tmp_path, monkeypatch):
+        """The guard is scoped to `tools/call` requests: `initialize`,
+        `tools/list` and notifications keep their existing responses."""
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/list"})
+            assert r.status_code == 200 and "result" in body, body
+            assert "tools" in body["result"], body
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18",
+                           "capabilities": {},
+                           "clientInfo": {"name": "p", "version": "1"}}})
+            assert r.status_code == 200 and "result" in body, body
+            r = tc.post("/mcp", json={"jsonrpc": "2.0",
+                                      "method": "notifications/initialized"})
+            assert r.status_code in (200, 202), r.text
+
+    def test_interleaved_calls_and_listings_keep_the_admission_boundary(
+            self, tmp_path, monkeypatch):
+        """#3656's transient was reported under concurrency. What this
+        demonstrates is narrow and stated as such: a 4-thread interleaving of
+        valid `tools/call` traffic with the gated `tools/list` yields a result
+        for every call and no error envelope. It is not evidence about the
+        unreproduced transient, and a single-`TestClient` smoke test cannot
+        establish a concurrency property.
+        """
+        import threading
+
+        tc = self._client(tmp_path, monkeypatch)
+        failures: list = []
+        lock = threading.Lock()
+
+        def worker(wid):
+            try:
+                for i in range(3):
+                    payload = {"jsonrpc": "2.0", "id": 100 + wid * 10 + i,
+                               "method": "tools/call",
+                               "params": {"name": self.CHEAP_TOOL,
+                                          "arguments": {}}}
+                    r = tc.post("/mcp", json=payload)
+                    body = _parse_sse_json(r)
+                    # Every call must come back a RESULT: a status other than
+                    # 200, a body that is not an object, or one without a
+                    # `result` are all failures, not just an `error` envelope.
+                    if r.status_code != 200 or not (
+                            isinstance(body, dict) and "result" in body):
+                        with lock:
+                            failures.append((wid, i, r.status_code, body))
+                    if i == 0:
+                        tc.post("/mcp", json={"jsonrpc": "2.0",
+                                              "id": 200 + wid,
+                                              "method": "tools/list"})
+            except Exception as exc:
+                with lock:
+                    failures.append((wid, "EXC", f"{type(exc).__name__}: {exc}"))
+
+        with tc:
+            threads = [threading.Thread(target=worker, args=(w,))
+                       for w in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert not failures, f"concurrent traffic produced errors: {failures}"

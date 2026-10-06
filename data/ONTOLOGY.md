@@ -1,1 +1,0 @@
-/Users/home/eldato/docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY_v2.5.md

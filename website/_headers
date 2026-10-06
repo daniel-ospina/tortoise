@@ -1,5 +1,30 @@
 # Security headers — premiselabs.co + tortoise.premiselabs.co (Cloudflare Pages, premise-labs project)
 # HSTS (#1003 §1): matches the API's value (tortoise/hosted_api.py) — max-age=31536000; includeSubDomains.
 # No `preload` yet — soak first, per #1003 §1.
+#
+# CSP (#3525): every page on this origin is a pre-#3501 static page (or the blog
+# SSR, which also renders inline style + JSON-LD), so one relaxed policy covers
+# them all. `'unsafe-inline'` in script-src is a DECLARED, TEMPORARY concession —
+# #3501 deletes the inline handlers, after which this is tightened to match the
+# dashboard's STRICT_CSP. The value must stay byte-identical to
+# `website/apps/dashboard/functions/_shared/security-headers.ts::RELAXED_CSP` and
+# to `website/functions/_shared/security-headers.ts::RELAXED_CSP`;
+# `website/apps/dashboard/src/securityHeaders.test.js` fails CI if it drifts.
+#
+# `https://static.cloudflareinsights.com` is NOT ours: Cloudflare Web Analytics is
+# enabled for this zone, so the EDGE injects its SRI-pinned beacon
+# (`…/beacon.min.js/<version>`) into responses whose REQUEST carries
+# `Accept: text/html` — not a User-Agent test, and not something a local
+# `wrangler pages dev` preview ever shows. Verify any policy change against the
+# DEPLOYED host with:
+#     curl -sH 'Accept: text/html' https://premiselabs.co/ | grep -c cloudflareinsights
+# Omitting the origin blocks the tag on a live page (a console error, analytics
+# lost); it is listed here, with `https://cloudflareinsights.com` in connect-src
+# for its RUM endpoint, and the guard fails if either is dropped again.
+#
+# `_headers` does NOT apply to Pages Functions responses (Cloudflare docs), so the
+# marketing Functions stamp the same value themselves — see
+# `website/functions/_middleware.ts` and `website/functions/blog/_lib.ts`.
 /*
   Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'

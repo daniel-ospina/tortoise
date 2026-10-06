@@ -1,0 +1,3111 @@
+{
+ "arm": "cap3-only",
+ "methodology": {
+  "aggregative_flag": false,
+  "chunk_turns": 2,
+  "context_item_cap": 40,
+  "context_token_cap": 8000,
+  "dataset_fingerprint": "8fe66c98e0d71ef7",
+  "judge_model": "openai/gpt-4o-2024-08-06",
+  "judge_rubric_id_hash": "82d07b0de05daa48",
+  "reader_model": "deepseek/deepseek-v4-flash",
+  "reader_model_spec": "openrouter:deepseek/deepseek-v4-flash",
+  "reader_prompt_hash": "fda476721fe0ae86",
+  "retrieval_arm": "hybrid RRF (FTS+vector+structural, TF-IDF fallback) over graph turn points + raw session transcripts",
+  "tr_top_k": 12,
+  "applied_knobs": {
+   "knobs": [
+    "--rerank",
+    "--rerank-cap",
+    "3"
+   ],
+   "isolation": "cap-only control for the applied-rerank confound"
+  }
+ },
+ "n_outcomes": 55,
+ "outcomes": [
+  {
+   "question_id": "gpt4_59149c77",
+   "label": false,
+   "hypothesis": "I do not know — the memory context contains no mention of your visit to the Museum of Modern Art (MoMA).",
+   "context_tokens": 1123,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_fa19884c",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 309,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_4929293a",
+   "label": false,
+   "hypothesis": "The context does not mention your cousin's wedding, so I cannot determine which event happened first.",
+   "context_tokens": 511,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 75,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 55,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 75,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_1d4ab0c9",
+   "label": true,
+   "hypothesis": "24 days passed.",
+   "context_tokens": 1555,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "0db4c65d",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context. The context does not mention attending a book reading event at a local library, nor the author of 'The Silent Patient' discussing a thriller novel.",
+   "context_tokens": 531,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_1916e0ea",
+   "label": false,
+   "hypothesis": "The context does not mention any date for online grocery shopping from Instacart, so I cannot calculate the number of days.",
+   "context_tokens": 368,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_7a0daae1",
+   "label": false,
+   "hypothesis": "I don't know — the memory doesn't include when you received the tennis racket, only that you bought it online on 2023-03-10.",
+   "context_tokens": 595,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_1e4a8aeb",
+   "label": false,
+   "hypothesis": "I don't know. The memory context does not mention any gardening workshop, so I cannot compute the days between that event and the planting of the tomato saplings.",
+   "context_tokens": 544,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_4fc4f797",
+   "label": false,
+   "hypothesis": "",
+   "context_tokens": 1833,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_4fc4f797:s21:t10"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "4dfccbf7",
+   "label": false,
+   "hypothesis": "The context does not mention when you decided to take your acoustic guitar to the guitar tech for servicing.",
+   "context_tokens": 687,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_61e13b3c",
+   "label": false,
+   "hypothesis": "I don't know — the context does not mention the Spring Fling Market, so I cannot determine the time between that event and the Farmers' Market sale.",
+   "context_tokens": 611,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_4ef30696",
+   "label": false,
+   "hypothesis": "I don't know. The memory context contains no information about when you finished reading 'The Nightingale'.",
+   "context_tokens": 143,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_4ef30696:s39:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_8e165409",
+   "label": false,
+   "hypothesis": "I don't know — the context does not mention when you repotted the previous spider plant, so I cannot calculate the number of days between that event and giving cuttings to Mrs. Johnson.",
+   "context_tokens": 579,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_8e165409:s30:t8"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_74aed68e",
+   "label": false,
+   "hypothesis": "I don't know — the context does not mention when you replaced your spark plugs.",
+   "context_tokens": 176,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_74aed68e:s32:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_21adecb5",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any mention of when you completed your undergraduate degree.",
+   "context_tokens": 721,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_98f46fc6",
+   "label": false,
+   "hypothesis": "I don't know — the context mentions a charity bake sale but does not mention a charity gala, so I cannot compare which event you participated in first.",
+   "context_tokens": 2136,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 76,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 56,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 76,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_68e94287",
+   "label": false,
+   "hypothesis": "I don't know because the memory context contains no mention of your participation in the #PlankChallenge. It only shows that you shared a vegan chili recipe on 2023-03-09 (the day before the session where you mentioned posting it \"yesterday\").",
+   "context_tokens": 502,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_e414231e",
+   "label": false,
+   "hypothesis": "The memory context does not contain any mention of fixing a mountain bike, so I cannot determine the day it occurred.",
+   "context_tokens": 671,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_2487a7cb",
+   "label": true,
+   "hypothesis": "The 'Data Analysis using Python' webinar occurred first, approximately two months ago, while the 'Effective Time Management' workshop was last Saturday.",
+   "context_tokens": 778,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_2487a7cb:s20:t2",
+     "lme:gpt4_2487a7cb:s40:t10"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_2312f94c",
+   "label": false,
+   "hypothesis": "I don't know. The context provides the arrival date of the Dell XPS 13 (February 25th) but does not mention when the Samsung Galaxy S22 was obtained, so I cannot determine which device was received first.",
+   "context_tokens": 909,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_2312f94c:s7:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "08f4fc43",
+   "label": false,
+   "hypothesis": "The context does not mention a Sunday mass at St. Mary's Church, so I cannot determine the number of days.",
+   "context_tokens": 176,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "2c63a862",
+   "label": false,
+   "hypothesis": "The asked information is absent from the context. The context shows you mentioned working with real estate agent Rachel and seeking neighborhood advice, but it does not contain any statement about finding a house you loved after starting to work with her.",
+   "context_tokens": 363,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 76,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 56,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 76,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_385a5000",
+   "label": false,
+   "hypothesis": "The context only says the marigold seeds arrived on March 3rd and were started then; it doesn't mention when any tomato seeds were started, so the comparison isn't available.",
+   "context_tokens": 425,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "2a1811e2",
+   "label": false,
+   "hypothesis": "I don't know — the context mentions the Hindu festival of Holi on February 26th, but there is no information about a Sunday mass at St. Mary's Church.",
+   "context_tokens": 283,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_0b2f1d21",
+   "label": false,
+   "hypothesis": "I don’t know.",
+   "context_tokens": 156,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "f0853d11",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 149,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:f0853d11:s22:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_6ed717ea",
+   "label": false,
+   "hypothesis": "The context does not mention purchasing a dog bed for Max, so I cannot determine which item was purchased first.",
+   "context_tokens": 151,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_6ed717ea:s20:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 1.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_70e84552",
+   "label": false,
+   "hypothesis": "The context does not mention trimming the goats' hooves, so I cannot determine which task was completed first.",
+   "context_tokens": 608,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "a3838d2b",
+   "label": false,
+   "hypothesis": "The context does not contain information about any charity events you participated in before the 'Run for the Cure' event.",
+   "context_tokens": 1808,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 5,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 5,
+     "marked_points_total": 6,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.16666666666666666,
+      "20": 0.3333333333333333,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_93159ced",
+   "label": false,
+   "hypothesis": "I don't know how long you worked before starting at NovaTech. The memory only mentions that you've been at NovaTech for about 4 years and 3 months, but no prior work history is recorded.",
+   "context_tokens": 510,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_93159ced:s0:t10",
+     "lme:gpt4_93159ced:s0:t4"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_2d58bcd6",
+   "label": true,
+   "hypothesis": "The Hate U Give.",
+   "context_tokens": 1273,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_2d58bcd6:s43:t0",
+     "lme:gpt4_2d58bcd6:s4:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_65aabe59",
+   "label": false,
+   "hypothesis": "The context does not mention a mesh network system, so I don't know which device was set up first.",
+   "context_tokens": 650,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 3,
+     "pool_size": 76,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 56,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 76,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_483dd43c",
+   "label": false,
+   "hypothesis": "",
+   "context_tokens": 1131,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_483dd43c:s39:t0",
+     "lme:gpt4_483dd43c:s19:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "dcfa8644",
+   "label": false,
+   "hypothesis": "The context does not contain any information about when you bought your Adidas running shoes. It does mention that a shoelace on your old Converse sneakers broke on January 24th, but without the Adidas purchase date, I cannot calculate the number of days.",
+   "context_tokens": 652,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:dcfa8644:s15:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 76,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 56,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 76,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_b4a80587",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not mention a road trip to the coast or the arrival of a new prime lens.",
+   "context_tokens": 438,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_8c8961ae",
+   "label": false,
+   "hypothesis": "I don't know — the context mentions a family trip to Europe but does not mention any solo trip to Thailand.",
+   "context_tokens": 877,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_8c8961ae:s5:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_d9af6064",
+   "label": false,
+   "hypothesis": "The context mentions setting up a smart thermostat, but does not mention setting up a new router. Therefore, I do not know whether the smart thermostat or the new router was set up first.",
+   "context_tokens": 418,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_7de946e7",
+   "label": false,
+   "hypothesis": "The context does not mention a persistent cough, so I do not know which health issue you dealt with first.",
+   "context_tokens": 630,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_d31cdae3",
+   "label": true,
+   "hypothesis": "The narrator took the family road trip across the American Southwest first.",
+   "context_tokens": 647,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_cd90e484",
+   "label": false,
+   "hypothesis": "",
+   "context_tokens": 280,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_cd90e484:s33:t4",
+     "lme:gpt4_cd90e484:s38:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 76,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 56,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 76,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_88806d6e",
+   "label": false,
+   "hypothesis": "The context doesn't mention Tom at all, so I can't compare who you met first. It does mention that you met Mark and Sarah on a beach trip about a month ago.",
+   "context_tokens": 346,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_88806d6e:s9:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_93f6379c",
+   "label": true,
+   "hypothesis": "Page Turners — you joined it \"last week,\" while Marketing Professionals was joined only yesterday.",
+   "context_tokens": 1303,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_93f6379c:s3:t0",
+     "lme:gpt4_93f6379c:s36:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.3333333333333333,
+      "20": 0.6666666666666666,
+      "5": 0.3333333333333333
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_78cf46a3",
+   "label": false,
+   "hypothesis": "The context does not mention the narrator receiving a new phone case, so I cannot determine which event happened first.",
+   "context_tokens": 117,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_78cf46a3:s44:t6"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_0a05b494",
+   "label": false,
+   "hypothesis": "I do not have any information about meeting a woman selling jam at a farmer's market, so I cannot compare who you met first. I only know that you met a tourist from Australia last Thursday on the subway.",
+   "context_tokens": 655,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_1a1dc16d",
+   "label": false,
+   "hypothesis": "The meeting with Rachel is not mentioned in the available memory, so I cannot determine which happened first. The pride parade is noted as having occurred on May 1st.",
+   "context_tokens": 619,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_2f584639",
+   "label": false,
+   "hypothesis": "I don't know; the context does not mention a necklace for your sister.",
+   "context_tokens": 530,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 75,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 55,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 1.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 75,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_213fd887",
+   "label": false,
+   "hypothesis": "The context does not mention a volleyball league event, so I cannot determine which event you participated in first.",
+   "context_tokens": 1194,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_213fd887:s7:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_5438fa52",
+   "label": false,
+   "hypothesis": "I don't know—the provided memory contains no information about the start of your Spanish classes, so I cannot determine which event happened first.",
+   "context_tokens": 355,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 1.0,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_c27434e8",
+   "label": false,
+   "hypothesis": "I do not know. The context indicates the Japanese Zero fighter plane was started about a month",
+   "context_tokens": 991,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_c27434e8:s27:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 75,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 55,
+    "lambda_": 0.7,
+    "max_session_chunks": 3,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 75,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_fe651585",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context; Rachel is not mentioned.",
+   "context_tokens": 151,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "8c18457d",
+   "label": false,
+   "hypothesis": "The context contains no mention of buying a birthday gift for a best friend, so I cannot determine the number of days between that event and the brother's graduation gift purchase on March 8.",
+   "context_tokens": 137,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:8c18457d:s30:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 79,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 59,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 79,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_93159ced_abs",
+   "label": true,
+   "hypothesis": "The context does not contain any information about a job at Google or how long you worked before starting there.",
+   "context_tokens": 150,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 0,
+     "marked_points_total": 0,
+     "pool_size": 80,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 60,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.0
+     },
+     "turn": {
+      "10": null,
+      "20": null,
+      "5": null
+     }
+    },
+    "pool_size": 80,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_fe651585_abs",
+   "label": true,
+   "hypothesis": "The context contains no information about Tom, so it is not possible to determine who became a parent first.",
+   "context_tokens": 157,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 77,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 57,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 77,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_76048e76",
+   "label": false,
+   "hypothesis": "The context mentions bike repairs in mid-February but does not mention any car care in February, so I cannot determine which was taken care of first.",
+   "context_tokens": 148,
+   "measure_facts": {
+    "gold_admitted_ids": [
+     "lme:gpt4_76048e76:s19:t0"
+    ],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": true
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 1,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.0,
+      "20": 1.0,
+      "5": 0.0
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  },
+  {
+   "question_id": "gpt4_c27434e8_abs",
+   "label": true,
+   "hypothesis": "The context only mentions the Ferrari 288 GTO model project; there is no information about a Porsche 991 Turbo S model project, so I cannot determine which was started first.",
+   "context_tokens": 666,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 78,
+     "requested": 40
+    },
+    "reader_refusal": false
+   },
+   "rerank_pass": {
+    "applied": true,
+    "dropped": 58,
+    "lambda_": 0.7,
+    "max_session_chunks": 2,
+    "moved": 20,
+    "per_session_cap": 3,
+    "pool_recall@k": {
+     "chunk_evidence": {
+      "10": null,
+      "20": null,
+      "5": null
+     },
+     "evidence": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     },
+     "session": {
+      "10": 0.5,
+      "20": 0.5,
+      "5": 0.5
+     },
+     "turn": {
+      "10": 0.0,
+      "20": 0.0,
+      "5": 0.0
+     }
+    },
+    "pool_size": 78,
+    "selected_count": 20
+   }
+  }
+ ],
+ "integrity": {
+  "criterion": "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND (invalid_rate <= threshold) AND (outcome-derived attempted set non-empty whenever any entry was excluded or dropped — a fully excluded/dropped run never certifies; failures do not count as attempts for this guard); hard = fatal_*/ingest/unknown census classes + non-census error strings with an EMPTY census (mixed recoverable+structural grades recoverable — #1746 lane) + permanent eval failures + malformed inputs (present non-bool valid flag, non-iterable, non-str, or falsy-but-present NON-CONTAINER error_classes — 0/\"\"/False/PRESENT-null; empty dict/list are the legitimate no-census shapes and grade clean) fail closed to hard + excluded outcomes (shape-broken dicts / breaker_open drops) with a hard census still veto (n_excluded_hard); recoverable = parse_error/truncated/truncated_parse_error/partial_parse/transient_*/s1_chunk_summary census classes + reader/judge/ingest:retries_exhausted eval failures (rate-limited, not vetoed)",
+  "invalid_rate": 0.0,
+  "n_excluded": 0,
+  "n_excluded_hard": 0,
+  "n_failed": 0,
+  "n_hard_invalid": 0,
+  "threshold": 0.0,
+  "valid": true
+ }
+}

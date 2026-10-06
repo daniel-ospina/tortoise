@@ -87,6 +87,7 @@ class KindClassifier:
         encoder=None,
         index=None,
         model=None,
+        installed_namespaces=None,
         sim_floor: float = SIM_FLOOR,
         margin: float = MARGIN,
         lam: float = LAMBDA,
@@ -97,12 +98,21 @@ class KindClassifier:
         production defaults are the EmbeddingModel-singleton encoder, the
         content-addressed ``KindIndex``, and the session's LLM adapter for
         the adjudication tail. ``llm_tail=False`` runs the deterministic
-        kNN/rerank path only (offline eval)."""
+        kNN/rerank path only (offline eval).
+
+        ``installed_namespaces`` (#5163) gates the index's PACK candidate
+        set to the graph's installed packs — the same
+        ``compile_value_brief``/``compile_vocab`` gate, so the classifier
+        can never assign a kind the graph does not install (a 422 the
+        prompt never offered). ``None`` = no gate (the catalog union — the
+        back-compat path for a graph with no ``:PackInstall`` records).
+        Ignored when ``index`` is injected (the caller supplied its own)."""
         self.encoder = encoder if encoder is not None else _default_encoder()
         # Pass the RAW constructor arg: None (the production default path)
         # → load-then-build with persist+memoize; an injected stub encoder
         # → stub build (never memoized — the vector space differs).
-        self.index = index if index is not None else self._build_index(encoder)
+        self.index = index if index is not None else self._build_index(
+            encoder, installed_namespaces)
         self.model = model
         self.sim_floor = sim_floor
         self.margin = margin
@@ -112,7 +122,7 @@ class KindClassifier:
         self._restrict_cache: dict[str, set[str]] = {}
 
     @staticmethod
-    def _build_index(encoder=None):
+    def _build_index(encoder=None, installed_namespaces=None):
         """The index for the classification candidate set.
 
         Production (``encoder is None``): the content-addressed npz is
@@ -135,7 +145,7 @@ class KindClassifier:
         import tortoise.kind_index as ki
         from tortoise.value_extractor import compile_kind_index_spec
 
-        spec = compile_kind_index_spec()
+        spec = compile_kind_index_spec(installed_namespaces=installed_namespaces)
         if encoder is None:
             from tortoise.embeddings import EmbeddingModel
             if EmbeddingModel.get() is None:
@@ -340,8 +350,13 @@ class KindClassifier:
         any exception → kNN top-1 fallback + ``classify_error`` census.
 
         Returns ``(calls, usage)`` — ``usage`` is the accumulated LLM spend
-        across batches (``{"calls", "attempts", "retries", "truncated"}``,
-        rollable into the session llm_stats via ``_rollup_llm``), so the
+        across batches (``{"calls", "attempts", "retries", "truncated",
+        "deadline_aborts"}`` plus ``"cost"`` — the ``#3359`` per-route
+        cost accumulator merged in by ``_merge_cost_accumulator``, carrying
+        ``by_route`` lanes with prompt/completion tokens, the provider's own
+        reported charge, and the ``calls_without_cost`` /
+        ``calls_without_usage`` disclosures). The whole dict is rollable
+        into the session llm_stats via ``_rollup_llm``, so the
         adjudication tail's cost is never invisible to the A/B gate.
         ``usage["calls"]`` is the BATCH count (one per adjudication call),
         ``usage["attempts"]`` the total adapter-call attempts across
@@ -354,11 +369,13 @@ class KindClassifier:
             for iid, _item, top in tail:
                 stats["assigned_knn"] += 1
                 assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
-            return 0, {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
-        from tortoise.extractor_v2 import _complete_parsed
+            return 0, {"calls": 0, "attempts": 0, "retries": 0,
+                       "truncated": False}
+        from tortoise.extractor_v2 import _complete_parsed, _merge_cost_accumulator
 
         calls = 0
-        usage = {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
+        usage = {"calls": 0, "attempts": 0, "retries": 0,
+                 "truncated": False}
         try:
             batch_size = max(1, min(int(self.batch_size), 50))  # plan: 25-50/call
         except (TypeError, ValueError):  # caller passed junk — bounded default
@@ -443,6 +460,14 @@ class KindClassifier:
                 # here would silently undercount deadline-killed spend.
                 usage["deadline_aborts"] = usage.get("deadline_aborts", 0) + \
                     batch_stats.get("deadline_aborts", 0)
+                # #3359: merge the batch's cost accumulator (tokens + the
+                # provider's own reported charge, per-route) into the
+                # adjudication accumulator. Merging rather than snapshotting
+                # keeps every call of a multi-call batch, and the per-route
+                # buckets keep a mid-batch failover attributed to the lane
+                # that actually served it. The failed-batch case is included
+                # deliberately — the calls were made, so the spend is real.
+                _merge_cost_accumulator(usage, batch_stats)
             if not isinstance(parsed, dict):
                 warnings.append("adjudication returned a non-object — kNN top-1 fallback")
                 stats["classify_errors"] += 1

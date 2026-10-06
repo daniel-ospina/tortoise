@@ -78,6 +78,58 @@ def is_db_uri(uri: str | None) -> bool:
     return scheme in SUPPORTED_URI_SCHEMES
 
 
+def raw_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
+    """Return a URI's ``(username, password)`` in the percent-ENCODED form.
+
+    The RAW counterparts of :func:`parse_uri_userinfo` — exactly what
+    ``urlparse`` yields, with no :func:`unquote`. Consumers that must compare or
+    scrub the credential *as the URI wrote it* (a log redactor covering a client
+    that echoes its DSN in either form) need this pair alongside the decoded one.
+
+    It lives here, beside the decoding rule, so a module that also CONSTRUCTS a
+    client can obtain the raw pair WITHOUT earning a raw-userinfo exemption from
+    the #3039 source guard: the guard's ``continue`` is file-wide, so exempting
+    such a module would blind it to the very bug class it exists to catch
+    (#3067). This module is already the one sanctioned reader.
+
+    Absent/empty components stay ``None`` (the client-default sentinel), the same
+    shape as :func:`parse_uri_userinfo`. ``urlparse`` yields ``''`` for an empty
+    userinfo component (``docker://:pw@host`` — the canonical credentialed form
+    in this repo), so the fields are normalised with ``or None`` here.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    return parsed.username or None, parsed.password or None
+
+
+def parse_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
+    """Return a connection URI's ``(username, password)``, percent-DECODED.
+
+    The SINGLE decoding rule for URI credentials (#3039).
+    ``urllib.parse.urlparse`` does NOT percent-decode userinfo, while
+    ``redis.from_url`` DOES (it applies :func:`unquote` to both fields).
+    Any code that hands a credential from a ``urlparse`` result to a client
+    constructor must decode here: otherwise a password needing
+    percent-encoding (``@``, ``:``, ``/``, ``?``, ``#``, ``%`` …) reaches
+    the client as a literal ``%XX`` and authentication fails with a
+    misleading "invalid username-password pair" error.
+
+    ``unquote`` — NOT ``unquote_plus``: in the RFC 3986 userinfo component
+    a ``+`` is a literal plus, not an encoded space.
+
+    Absent or empty components return ``None`` (the client-default
+    sentinel): ``docker://:pw@host`` carries an anonymous (empty) username
+    and ``docker://host`` carries no userinfo at all — both stay ``None``
+    so callers keep the ``or None`` semantics they had.
+    """
+    from urllib.parse import unquote
+    username, password = raw_uri_userinfo(uri)
+    return (
+        unquote(username) if username else None,
+        unquote(password) if password else None,
+    )
+
+
 def resolve_db_path(explicit: str | None = None) -> str:
     """Resolve the canonical embedded DB path with explicit precedence.
 

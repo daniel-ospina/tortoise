@@ -2,8 +2,8 @@
 """2146 — drop e2e-live orphan FalkorDB graphs (companion to the Supabase cleanup).
 
 Issue: daniel-ospina/tortoise#2146. Each red-window welcome-mode provisioning
-mint seeded a FalkorDB graph `team_{team_id}` where
-team_id = sha256(user_id).hexdigest()[:26] (see supabase/functions/
+mint seeded a FalkorDB graph `org_{org_id}` where
+org_id = sha256(user_id).hexdigest()[:26] (see supabase/functions/
 tenant-provision/index.ts). The Supabase side is cleaned by
 2146_e2e_live_orphan_cleanup.py; THIS script drops the graphs for the teams in
 the manifest.
@@ -39,10 +39,20 @@ of their existence — keep it before executing.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/2146_falkordb_graph_cleanup.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/2146_falkordb_graph_cleanup.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 
 
 class OpError(Exception):
@@ -85,11 +95,16 @@ def main() -> int:
     if not target_graphs:
         print("[falkordb] manifest has no graph_name entries — nothing to do")
         return 0
-    # Guard: every target must be exactly team_<26 hex> (mint convention).
+    # Guard: every target must be exactly <prefix>_<26 hex> (mint convention).
+    # #3543: the prefix is `org_` for graphs minted after the rename and
+    # `team_` for those minted before it — the manifest may legitimately
+    # carry either, and the pattern stays fully anchored for both.
     import re
-    bad = [g for g in target_graphs if not re.fullmatch(r"team_[0-9a-f]{26}", g)]
+    bad = [g for g in target_graphs
+           if not re.fullmatch(r"(?:org|team)_[0-9a-f]{26}", g)]
     if bad:
-        raise OpError(f"GUARD FAIL — manifest graphs not team_<26hex> shape: {bad[:5]}")
+        raise OpError(
+            f"GUARD FAIL — manifest graphs not <org|team>_<26hex> shape: {bad[:5]}")
 
     db = _get_db()
     try:

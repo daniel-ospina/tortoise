@@ -26,7 +26,7 @@ subjects.team: epistemic-team
 **Team:** epistemic-team
 **Role:** (not set)
 
-**Architecture:** A single SDK emit hook (all surfaces — MCP, hosted REST, local — route through `TortoiseSDK`) writes `:GraphEvent` nodes `{seq, ts, type, payload, event_id}` — **no `team_id` property (plan-review P2)** — into the team's existing FalkorDB graph namespace (durability from FalkorDB Cloud AOF+backups; zero relationships so the nodes are invisible graph islands to domain queries, traversals, and EP; the per-team graph namespace IS the partition — isolation comes from `_make_sdk(namespace=team_id)`, never from a property). Claim state vocabulary becomes `draft → live → retracted → superseded` (plus `outdated`/`archived`; `challenged` stays edge-derived), retraction tombstones instead of hard-deleting in the projection, and a cursor-based poll surface (`GET /v1/events` + MCP `tortoise_events_poll`) reads the stream with at-least-once + event_id dedup, opaque cursors, 410 expiry, and 30-day retention.
+**Architecture:** A single SDK emit hook (all surfaces — MCP, hosted REST, local — route through `TortoiseSDK`) writes `:GraphEvent` nodes `{seq, ts, type, payload, event_id}` — **no `org_id` property (plan-review P2)** — into the team's existing FalkorDB graph namespace (durability from FalkorDB Cloud AOF+backups; zero relationships so the nodes are invisible graph islands to domain queries, traversals, and EP; the per-team graph namespace IS the partition — isolation comes from `_make_sdk(namespace=org_id)`, never from a property). Claim state vocabulary becomes `draft → live → retracted → superseded` (plus `outdated`/`archived`; `challenged` stays edge-derived), retraction tombstones instead of hard-deleting in the projection, and a cursor-based poll surface (`GET /v1/events` + MCP `tortoise_events_poll`) reads the stream with at-least-once + event_id dedup, opaque cursors, 410 expiry, and 30-day retention.
 
 ---
 
@@ -49,7 +49,7 @@ The issue's indicator 3 ("integrate with shared_state event infra") is half-righ
 
 1. **Claim-state model** — extend `POINT_STATUS_VALUES` to `{draft, live, retracted, superseded, outdated, archived}` (**NO `challenged` — it is a DERIVED condition**, emerging from NAND-operator-edge presence on a live point, per user decision 2026-08-08); add `sdk.retract_point`; transition guards in `update_point`/`retract_point`/`supersede_point`; EventAPI parity (`_point` default live→draft).
 2. **Retraction tombstone** — `_apply_one` keeps the point with `status:'retracted'` instead of `points.pop`; audit retraction-as-absence consumers (`split`, query filters, `list_points`).
-3. **Durable event emission (the root-cause fix)** — a single SDK emit hook on `create_point`/`create_operator`/`retract_point`/`supersede_point`/`annotate_operator` writes **`:GraphEvent` nodes** `{seq, ts, type, payload, event_id}` — **no `team_id` property** (the per-team graph namespace IS the partition) — into the team's graph namespace (FalkorDB Cloud durability — AOF + backups), **zero relationships** (graph islands — invisible to label-scoped queries, traversals, EP), unique constraint on `event_id` (storage-layer dedup), plain index on `seq` (cursor reads), append-before-mutation, per-graph monotonic `seq` (atomic in-graph counter). EventAPI/EventLog JSONL path stays as-is.
+3. **Durable event emission (the root-cause fix)** — a single SDK emit hook on `create_point`/`create_operator`/`retract_point`/`supersede_point`/`annotate_operator` writes **`:GraphEvent` nodes** `{seq, ts, type, payload, event_id}` — **no `org_id` property** (the per-team graph namespace IS the partition) — into the team's graph namespace (FalkorDB Cloud durability — AOF + backups), **zero relationships** (graph islands — invisible to label-scoped queries, traversals, EP), unique constraint on `event_id` (storage-layer dedup), plain index on `seq` (cursor reads), append-before-mutation, per-graph monotonic `seq` (atomic in-graph counter). EventAPI/EventLog JSONL path stays as-is.
 4. **EventCodec registration** of claim event types (`PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated`) — **registration now, codec encode/decode wiring deferred** to the task that ships the first real upcaster (Task 4). `ClaimStateChanged` is **DROPPED (plan-review P1)**: no code path emits it — every claim transition is observable via one of the five emit hooks.
 5. **Subscription surface** — REST `GET /v1/events?after=<cursor>&types=<filter>` (team-scoped auth) returning `{events[], next_cursor}`; opaque cursor encoding `seq`; at-least-once + event_id dedup (unique constraint + `recovery.dedup_events`); expired cursor → **410 "replay from tail"**.
 6. **MCP tool** `tortoise_events_poll` (readOnlyHint, registered in `tool_registry.py` with `http_policy=True` → auto-included in `HTTP_ALLOWED`).
@@ -93,11 +93,11 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 | 1 | `POINT_STATUS_VALUES` + transition guards (`update_point`/`retract_point`/`supersede_point`, sdk.py) | State mutation | Internal | Unit | `{draft,live,retracted,superseded,outdated,archived}`; illegal transition → `ValueError`; retracted terminal | live→draft guard; unknown status; supersede keeps `outdated=true` back-compat |
 | 2 | Projection `_apply_one` PointRetracted tombstone (`fold`/rebuild) | State mutation | Internal | Unit | retracted point kept with `status:'retracted'`; **re-folding a pre-change log under new code yields TOMBSTONES** (intended, tested behavior change — Task 2); `PointsMerged` + retract interaction pinned by test | old-log re-fold semantics; `PointsMerged` + retract interaction |
 | 3 | Retraction-as-absence consumers (`split` projection/__init__.py:140, `query`/`paginated_query` sdk.py:933, `list_points` hosted_api.py:829) | State | Read | Unit + Integration | retracted excluded by default, queryable with filter (`include_retracted`/`status=` where feasible) | `split` returns retracted statements; `/v1/points` leaks retracted; `check_structure` orphaned_draft unaffected |
-| 4 | SDK emit hook → `:GraphEvent` nodes | DB write (FalkorDB) | Out | Integration (FalkorDBLite) | node `{seq, ts, type, payload, event_id}` (**no `team_id` — graph namespace is the partition**); **zero relationships**; append-before-mutation; dedup=true create returns existing point **without** emitting; duplicate `event_id` append → caught+skipped (client-retry artifact) | append failure → missing event; seq race; phantom event on failed mutation; duplicate event on client retry |
+| 4 | SDK emit hook → `:GraphEvent` nodes | DB write (FalkorDB) | Out | Integration (FalkorDBLite) | node `{seq, ts, type, payload, event_id}` (**no `org_id` — graph namespace is the partition**); **zero relationships**; append-before-mutation; dedup=true create returns existing point **without** emitting; duplicate `event_id` append → caught+skipped (client-retry artifact) | append failure → missing event; seq race; phantom event on failed mutation; duplicate event on client retry |
 | 5 | `:GraphEvent` schema (exact-match index + unique constraint on `event_id`; plain index on `seq`) | DB schema | — | Integration | idempotent creation; index-before-constraint ordering; `db.constraints` verification | constraint-requires-index error; FalkorDB #664 crash; FalkorDBLite gaps |
 | 6 | `shared_state/events.py` registration (five claim event types — **no `ClaimStateChanged`**) + upcasters | Event infra | In/Out | Unit | registration + `EventCodec.encode/decode` round-trip at codec level; **encode/decode wiring deferred** to first-upcaster task | unregistered type raises; upcaster ordering |
-| 7 | REST `GET /v1/events` (team-scoped auth, `get_current_team`) | API + Auth | In | Integration (hosted test client) | `{events[], next_cursor}`; 410 on expired cursor; **tenant isolation (team A can't read team B)** | cross-team leak; expired cursor; empty graph; types filter; limit bounds |
-| 8 | MCP `tortoise_events_poll` (stdio + HTTP) + `tortoise_retract_point` (HTTP_ALLOWED, readOnly/destructive hints) | API + Auth | In | Integration (MCP client stdio + HTTP) | readOnlyHint on poll; `http_policy=True` in registry → auto `HTTP_ALLOWED`; stdio+HTTP parity; team scoping via `_get_team_sdk` | tool excluded from HTTP; hint missing; introspective quota test (test_mcp_http.py:606) drift |
+| 7 | REST `GET /v1/events` (team-scoped auth, `get_current_org`) | API + Auth | In | Integration (hosted test client) | `{events[], next_cursor}`; 410 on expired cursor; **tenant isolation (team A can't read team B)** | cross-team leak; expired cursor; empty graph; types filter; limit bounds |
+| 8 | MCP `tortoise_events_poll` (stdio + HTTP) + `tortoise_retract_point` (HTTP_ALLOWED, readOnly/destructive hints) | API + Auth | In | Integration (MCP client stdio + HTTP) | readOnlyHint on poll; `http_policy=True` in registry → auto `HTTP_ALLOWED`; stdio+HTTP parity; team scoping via `_get_org_sdk` | tool excluded from HTTP; hint missing; introspective quota test (test_mcp_http.py:606) drift |
 | 9 | Retention purge (Cypher DELETE, boot + interval, config-driven) | DB write | Out | Integration | events older than `TORTOISE_EVENT_RETENTION_DAYS` deleted; size cap; idempotent | purge races poll; cap triggers cursor expiry mid-page |
 | 10 | EventAPI parity (`_point` default live→draft, api.py:67) | State | Internal | Unit + regression | parity with SDK default; CLI/ingest blast radius checked | existing EventAPI tests/consumers break |
 
@@ -419,11 +419,11 @@ def test_query_excludes_retracted_by_default(sdk_factory, tmp_path):
 **Intent:** THE root-cause fix (scoping confirmed problem): every SDK claim/graph mutation emits a durable, team-scoped event. All three surfaces route through `TortoiseSDK` (mcp_server.py:14, hosted_api.py:45) — one hook covers MCP, REST, and local. Replaces the GAP-07 TODO (sdk.py:2168). EventAPI/EventLog JSONL path stays as-is.
 
 **Acceptance:**
-- New `tortoise/event_store.py`: `ensure_event_schema(proj)`, `next_seq(proj)`, `append_event(proj, seq, type, payload, event_id, ts=None)`, `read_after(proj, after_seq, types=None, limit=100)` — **no `team_id` parameter anywhere (plan-review P2)**; the SDK writes into its own graph namespace and the namespace IS the partition. `ts` is optional (defaults to now; tests backdate it for retention).
+- New `tortoise/event_store.py`: `ensure_event_schema(proj)`, `next_seq(proj)`, `append_event(proj, seq, type, payload, event_id, ts=None)`, `read_after(proj, after_seq, types=None, limit=100)` — **no `org_id` parameter anywhere (plan-review P2)**; the SDK writes into its own graph namespace and the namespace IS the partition. `ts` is optional (defaults to now; tests backdate it for retention).
 - **Duplicate `event_id` append (plan-review P1):** `append_event` catches the unique-constraint violation, logs a warning, and **skips** (no-op / returns the existing event) — `event_id` is a server-side ULID, so a collision is a client-retry artifact, never legitimate. The read path additionally dedups (defense in depth; see the direct-Cypher dedup test).
-- Schema (idempotent, try/except — mirror sdk.py:336): exact-match index on `event_id` FIRST, then `GRAPH.CONSTRAINT CREATE <key> UNIQUE NODE GraphEvent PROPERTIES 1 event_id` (constraint requires the index first — Pattern Research); **plain** index `CREATE INDEX FOR (n:GraphEvent) ON (n.seq)` (per-graph = per-team; no `team_id` property to index — plan-review P2).
-- `seq` is a per-graph (= per-team) monotonic integer from an atomic in-graph counter — one `GraphEventMeta` node per graph, **no `team_id` property**: `MERGE (m:GraphEventMeta) ON CREATE SET m.last_seq = 1 ON MATCH SET m.last_seq = m.last_seq + 1 RETURN m.last_seq` (single GRAPH.QUERY — atomic per graph; **verify atomicity against the deployed FalkorDB version** in Open Items).
-- SDK `_emit_event(type_, payload)` calls `append_event` with **no team parameter** — events land in the SDK's own graph namespace (**server-derived — namespace is set by mcp_auth `_get_team_sdk`/hosted `_make_sdk`, never client-supplied** — mirrors the graph_name guard mcp_server.py:531). Isolation is the namespace, not a property (plan-review P2).
+- Schema (idempotent, try/except — mirror sdk.py:336): exact-match index on `event_id` FIRST, then `GRAPH.CONSTRAINT CREATE <key> UNIQUE NODE GraphEvent PROPERTIES 1 event_id` (constraint requires the index first — Pattern Research); **plain** index `CREATE INDEX FOR (n:GraphEvent) ON (n.seq)` (per-graph = per-team; no `org_id` property to index — plan-review P2).
+- `seq` is a per-graph (= per-team) monotonic integer from an atomic in-graph counter — one `GraphEventMeta` node per graph, **no `org_id` property**: `MERGE (m:GraphEventMeta) ON CREATE SET m.last_seq = 1 ON MATCH SET m.last_seq = m.last_seq + 1 RETURN m.last_seq` (single GRAPH.QUERY — atomic per graph; **verify atomicity against the deployed FalkorDB version** in Open Items).
+- SDK `_emit_event(type_, payload)` calls `append_event` with **no team parameter** — events land in the SDK's own graph namespace (**server-derived — namespace is set by mcp_auth `_get_org_sdk`/hosted `_make_sdk`, never client-supplied** — mirrors the graph_name guard mcp_server.py:531). Isolation is the namespace, not a property (plan-review P2).
 - Emit hooks fire on: `create_point` (only when a NEW point is created — dedup=True returning an existing point does NOT emit), `create_operator` (after the promote-to-live), `retract_point`, `supersede_point`, `annotate_operator`. Event types: `PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated`. **Content edits (`update_point` non-status props) emit NOTHING** (plan-review P1) — the emit set is exactly these five hooks; every claim transition maps to exactly one.
 - **Append-before-mutation** (EventAPI pattern api.py:48-51): event_id/seq/pid are computed first, event appended, then the graph mutation runs. Documented tradeoff: a failed mutation leaves a phantom event (at-least-once favors over-notification; consumers tolerate via `get_point` miss).
 - **Zero-relationship guard:** event nodes (and the `GraphEventMeta` counter node) carry NO edges. Tests assert: `MATCH (e:GraphEvent)-[r]-() RETURN count(r)` == 0; `:GraphEvent` nodes invisible to `MATCH (n:Point ...)`, `sdk.get_point(<event_id>)` returns `{}` (the SDK's missing-point contract), `tortoise_fts_query` never returns an event node (search scans Points only), and a domain-label count `MATCH (n) WHERE NOT (n:GraphEvent) AND NOT (n:GraphEventMeta) RETURN count(n)` excludes the event nodes (plan-review P2).
@@ -442,7 +442,7 @@ import json
 
 
 def _events(proj):
-    # plan-review P2: no team_id property — the graph namespace IS the partition
+    # plan-review P2: no org_id property — the graph namespace IS the partition
     rows = proj.g.query(
         "MATCH (e:GraphEvent) RETURN properties(e) ORDER BY e.seq").result_set
     return [r[0] for r in rows]
@@ -623,16 +623,16 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
 
 ### Task 5: Subscription read surface — REST `GET /v1/events` + cursor + 410
 
-**Intent:** Indicator 2 — a tenant polls graph/claim changes without full-graph polling. Built on the Task 3 stream, not the CLI EventLog (related: #488 tracks the EventLog primitive separately). Team scoping comes from auth (`get_current_team`) + SDK namespace — never client input.
+**Intent:** Indicator 2 — a tenant polls graph/claim changes without full-graph polling. Built on the Task 3 stream, not the CLI EventLog (related: #488 tracks the EventLog primitive separately). Team scoping comes from auth (`get_current_org`) + SDK namespace — never client input.
 
 **Acceptance:**
 - `TortoiseSDK.events_poll(after: str | None = None, types: list[str] | None = None, limit: int = 100) -> dict` returns `{"events": [...], "next_cursor": str}` where events are **payload dicts (JSON-parsed bare domain payloads; codec decode deferred to the first-upcaster task — Task 4)** ordered by seq, dedup'd via `recovery.dedup_events`, and `next_cursor` is an **opaque** token encoding `{v:1, seq:last_seq}` (base64url JSON). `after=None` → tail (oldest retained). **The empty-graph cursor uses the SAME format** — `b64url({"v":1,"seq":0})` (plan-review P2; the plan's earlier `"v1:0"` string is unparseable by `_decode_cursor` and is removed).
-- `GET /v1/events?after=<cursor>&types=a,b&limit=100` (hosted_api) — auth `Depends(get_current_team)`; team SDK `_make_sdk(namespace=team["team_id"])`; responds `{"events": [...], "next_cursor": "..."}`.
-- **Expired cursor → HTTP 410** with body `{"detail": "cursor expired — replay from tail (after= omitted)"}`. **SDK-level (plan-review P2):** `events_poll` raises `ValueError("cursor expired — replay from tail")` when `after_seq < min(seq)` (query `MATCH (n:GraphEvent) RETURN min(n.seq)` — per-graph = per-team, no `team_id` filter); `_safe` (MCP) converts that to a structured error, and the REST route maps it to 410. **Empty graph:** `after` never expires; poll returns an empty batch with the same opaque cursor format encoding `{v:1, seq:0}`.
+- `GET /v1/events?after=<cursor>&types=a,b&limit=100` (hosted_api) — auth `Depends(get_current_org)`; team SDK `_make_sdk(namespace=team["org_id"])`; responds `{"events": [...], "next_cursor": "..."}`.
+- **Expired cursor → HTTP 410** with body `{"detail": "cursor expired — replay from tail (after= omitted)"}`. **SDK-level (plan-review P2):** `events_poll` raises `ValueError("cursor expired — replay from tail")` when `after_seq < min(seq)` (query `MATCH (n:GraphEvent) RETURN min(n.seq)` — per-graph = per-team, no `org_id` filter); `_safe` (MCP) converts that to a structured error, and the REST route maps it to 410. **Empty graph:** `after` never expires; poll returns an empty batch with the same opaque cursor format encoding `{v:1, seq:0}`.
 - **Cursor round-trip test (plan-review P2):** `_encode_cursor({v:1, seq:0})` (empty graph) decodes back to `{v:1, seq:0}` via `_decode_cursor` — one format for every cursor.
 - Malformed cursor → 400 (`detail: "invalid cursor"`).
 - `types` filter validates against registered event types; unknown type → 400.
-- **Tenant isolation:** events live in per-team graph namespaces (`_make_sdk(namespace=team["team_id"])`); the REST test asserts team A's poll never contains team B's events (plan-review P2: isolation by namespace, not property).
+- **Tenant isolation:** events live in per-team graph namespaces (`_make_sdk(namespace=team["org_id"])`); the REST test asserts team A's poll never contains team B's events (plan-review P2: isolation by namespace, not property).
 - At-least-once contract documented in the endpoint docstring: clients must be idempotent on replay.
 
 **Files:**
@@ -729,7 +729,7 @@ class TestEventsPoll:
         client.post("/v1/points", json={"kind": "statement", "content": "old"})
         from tortoise import event_store
         from tortoise.hosted_api import _make_sdk
-        # namespace = the authenticated team's graph (TEST_TEAM_ID)
+        # namespace = the authenticated team's graph (TEST_ORG_ID)
         sdk = _make_sdk(namespace="test-team-001")
         proj = sdk._get_proj()
         stale = sdk.events_poll()["next_cursor"]
@@ -752,17 +752,17 @@ class TestEventsPoll:
         # Same pattern as TestCrossTenantIsolation.test_team_isolation
         # (provision_test_user in conftest is the fixture-based equivalent;
         # the hosted suite's established pattern is /internal/provision).
-        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        from tortoise.hosted_api import _make_sdk, app, get_current_org
         from tests.test_hosted_api import TEST_TEAM
         for tid in ("iso-evt-a", "iso-evt-b"):
             r = internal_client.post("/internal/provision", json={
-                "team_id": tid, "team_name": f"Team {tid}",
+                "org_id": tid, "org_name": f"Team {tid}",
                 "api_key_hash": f"hash-{tid}", "created_by": "tester"},
                 headers={"Authorization": f"Bearer {_INTERNAL_KEY}"})
             assert r.status_code == 200, f"provision failed: {r.text}"
         _make_sdk(namespace="iso-evt-a").create_point(content="TEAM_A_EVT", kind="statement")
         _make_sdk(namespace="iso-evt-b").create_point(content="TEAM_B_EVT", kind="statement")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id="iso-evt-a")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id="iso-evt-a")
         try:
             r = client.get("/v1/events")
             bodies = [e["payload"].get("content", "") if isinstance(e["payload"], dict)
@@ -775,7 +775,7 @@ class TestEventsPoll:
 
 **Step 2: Run — expect FAIL** (`events_poll` missing, route missing).
 
-**Step 3: Implement** — SDK `events_poll` + cursor helpers (opaque base64url `{v:1, seq}` — one format for tail AND empty graph), `read_after` integration with `dedup_events`; `events_poll` raises `ValueError("cursor expired — replay from tail")` on `after_seq < min(seq)`; hosted route with `get_current_team` + 400 (malformed cursor / unknown type) and **410 mapping (catch the SDK `ValueError` → `HTTPException(status_code=410, detail="cursor expired — replay from tail (after= omitted)")`)**; MCP `_safe` surfaces the same ValueError as a structured error.
+**Step 3: Implement** — SDK `events_poll` + cursor helpers (opaque base64url `{v:1, seq}` — one format for tail AND empty graph), `read_after` integration with `dedup_events`; `events_poll` raises `ValueError("cursor expired — replay from tail")` on `after_seq < min(seq)`; hosted route with `get_current_org` + 400 (malformed cursor / unknown type) and **410 mapping (catch the SDK `ValueError` → `HTTPException(status_code=410, detail="cursor expired — replay from tail (after= omitted)")`)**; MCP `_safe` surfaces the same ValueError as a structured error.
 
 **Step 4: Run** — `python -m pytest tests/test_subscriptions.py tests/test_hosted_api.py -v` PASS.
 
@@ -788,9 +788,9 @@ class TestEventsPoll:
 **Intent:** Expose the subscription surface to MCP/pi agents (stdio + Streamable HTTP) and make tombstone retraction tenant-reachable (the SDK method from Task 1 has no tenant surface otherwise — EventAPI retract is CLI-only). Tool registry is the single source of truth — `http_policy=True` auto-includes tools in `HTTP_ALLOWED` (mcp_auth.py:70 ← tool_registry).
 
 **Acceptance:**
-- `tortoise_events_poll(after: str | None = None, types: list[str] | None = None, limit: int = 100) -> dict` wraps `_safe(_get_team_sdk().events_poll, ...)`; registered in `tool_registry.py` with `annotations=_ro()` (readOnlyHint), `http_policy=True`, `sdk_method="events_poll"`. **readOnlyHint vs lazy-purge DELETE (plan-review P2):** the Task 7 lazy purge inside `events_poll` is **gated by `TORTOISE_EVENT_RETENTION_INTERVAL`** (purge at most once per interval per process), so polls are read-only in steady state; the rare maintenance DELETE is documented in the tool docstring (readOnlyHint covers user-visible state — the poll never mutates user content). The introspective quota test scans for CREATE/MERGE patterns only, so the DELETE does not trip `_QUOTA_GATED` enforcement.
-- `tortoise_retract_point(id: str) -> dict` wraps `_safe(_quota_gated(_get_team_sdk().retract_point, "points"), id)`; registered with `annotations=_rw()` (destructiveHint), `http_policy=True`, `sdk_method="retract_point"`, and added to `_QUOTA_GATED` (mcp_server.py:145 set) — it is a status-mutating write like `tortoise_update_point`. **Add `.retract_point` to the `scan_patterns` tuple** in `TestIntrospectiveQuotaCompleteness.test_every_node_creating_tool_is_quota_gated` (tests/test_mcp_http.py:614) — it currently omits `retract_point`, so the test cannot enforce its gating (plan-review P2).
-- HTTP-mode team scoping: `_get_team_sdk()` (mcp_auth.py:58) already returns `TortoiseSDK(namespace=team_id)` from the request-scoped ContextVar — poll/retract inherit isolation; stdio mode uses namespace `None` → `"default"` team.
+- `tortoise_events_poll(after: str | None = None, types: list[str] | None = None, limit: int = 100) -> dict` wraps `_safe(_get_org_sdk().events_poll, ...)`; registered in `tool_registry.py` with `annotations=_ro()` (readOnlyHint), `http_policy=True`, `sdk_method="events_poll"`. **readOnlyHint vs lazy-purge DELETE (plan-review P2):** the Task 7 lazy purge inside `events_poll` is **gated by `TORTOISE_EVENT_RETENTION_INTERVAL`** (purge at most once per interval per process), so polls are read-only in steady state; the rare maintenance DELETE is documented in the tool docstring (readOnlyHint covers user-visible state — the poll never mutates user content). The introspective quota test scans for CREATE/MERGE patterns only, so the DELETE does not trip `_QUOTA_GATED` enforcement.
+- `tortoise_retract_point(id: str) -> dict` wraps `_safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)`; registered with `annotations=_rw()` (destructiveHint), `http_policy=True`, `sdk_method="retract_point"`, and added to `_QUOTA_GATED` (mcp_server.py:145 set) — it is a status-mutating write like `tortoise_update_point`. **Add `.retract_point` to the `scan_patterns` tuple** in `TestIntrospectiveQuotaCompleteness.test_every_node_creating_tool_is_quota_gated` (tests/test_mcp_http.py:614) — it currently omits `retract_point`, so the test cannot enforce its gating (plan-review P2).
+- HTTP-mode team scoping: `_get_org_sdk()` (mcp_auth.py:58) already returns `TortoiseSDK(namespace=org_id)` from the request-scoped ContextVar — poll/retract inherit isolation; stdio mode uses namespace `None` → `"default"` team.
 - Stdio + HTTP parity tested; poll works when `_transport_mode` is stdio (dev mode) and http (auth'd).
 - The introspective quota-completeness test (`tests/test_mcp_http.py:606`) still passes — poll body makes no node/edge-creating calls; retract is registered in `_QUOTA_GATED` and covered by `scan_patterns`.
 - **Hosted tombstone contract (plan-review P2):** hosted-client test — create + retract a point via the team SDK, then assert `GET /v1/points` excludes it while `GET /v1/points/{point_id}` still returns it with `status:'retracted'` (tombstone contract — not a 404).
@@ -817,7 +817,7 @@ class TestEventsPoll:
 **Intent:** Bound `:GraphEvent` growth in the in-memory graph (FalkorDB Cloud bills by memory). Cursor expiry semantics already handle purged history (Task 5 410). Config-driven so ops can tune without code change.
 
 **Acceptance:**
-- `event_store.purge_expired(proj, retention_days)` deletes `MATCH (n:GraphEvent) WHERE n.ts < $cutoff DELETE n` (cutoff = ISO8601 UTC now − retention; per-graph = per-team — no `team_id` filter, plan-review P2).
+- `event_store.purge_expired(proj, retention_days)` deletes `MATCH (n:GraphEvent) WHERE n.ts < $cutoff DELETE n` (cutoff = ISO8601 UTC now − retention; per-graph = per-team — no `org_id` filter, plan-review P2).
 - `event_store.purge_overflow(proj, max_events)` — if `count(n:GraphEvent) > max_events`, delete oldest by `ORDER BY n.seq ASC LIMIT <overflow>` (size cap; default from config).
 - Config: `TORTOISE_EVENT_RETENTION_DAYS` (default `30`), `TORTOISE_EVENT_MAX_PER_TEAM` (default `500_000`), `TORTOISE_EVENT_RETENTION_INTERVAL` (default `3600`s) — read via `os.environ` with defaults (no config-file change; Verification Plan Config=skip).
 - Purge runs: (a) at hosted boot (`_lifespan` / after schema ensure), (b) on an asyncio interval task in hosted_api lifespan (loop with `asyncio.sleep(interval)`), (c) lazily before `read_after` in embedded/stdio mode — **gated by `TORTOISE_EVENT_RETENTION_INTERVAL` (at most once per interval per process)** so polls stay read-only in steady state (resolves the MCP readOnlyHint tension, Task 6 — plan-review P2).
@@ -848,7 +848,7 @@ class TestEventsPoll:
 
 **Acceptance:**
 - `docs/ONTOLOGY.md` §4.1 Point `status` row + §5 reflect: `{draft, live, retracted, superseded, outdated, archived}`; `challenged` derived from NAND-operator-edge presence on a live point; retraction = tombstone (status change, not deletion).
-- New `docs/event-catalog.md`: event types table (name, version, emitted-by, payload fields, producer surface) for `PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated` (**no `ClaimStateChanged` — dropped, plan-review P1**); delivery contract (at-least-once, event_id dedup, 30-day retention, opaque cursor, 410 expiry); `:GraphEvent` node schema `{seq, ts, type, payload, event_id}` (**no `team_id` — the graph namespace is the partition, plan-review P2**) + zero-relationship guard.
+- New `docs/event-catalog.md`: event types table (name, version, emitted-by, payload fields, producer surface) for `PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated` (**no `ClaimStateChanged` — dropped, plan-review P1**); delivery contract (at-least-once, event_id dedup, 30-day retention, opaque cursor, 410 expiry); `:GraphEvent` node schema `{seq, ts, type, payload, event_id}` (**no `org_id` — the graph namespace is the partition, plan-review P2**) + zero-relationship guard.
 - Register `docs/event-catalog.md` in `docs/04_platform/wiki/index.md` (or `docs/00_index.md` if present).
 - `docs/plans/` gets nothing else; scoping + research docs already filed.
 
@@ -914,7 +914,7 @@ class TestEventsPoll:
   - **P2-3:** retract_point collapsed to one atomic conditional query (terminal set = retracted/superseded/archived; `deleted` dropped); boundary test for archived; update_point guard folded into the WHERE clause.
   - **P2-4:** Task 2 re-fold semantics — re-folding an old log yields TOMBSTONES (intended, tested; not version-gated; #689 remediation out of scope).
   - **P2-5:** `PointsMerged` + `PointRetracted` interaction test added (no-op for merged-away ids).
-  - **P2-6:** `team_id` dropped from `:GraphEvent` schema and all event_store signatures (namespace = partition); plain `seq` index replaces `(team_id, seq)` composite.
+  - **P2-6:** `org_id` dropped from `:GraphEvent` schema and all event_store signatures (namespace = partition); plain `seq` index replaces `(org_id, seq)` composite.
   - **P2-7:** Task 4 scoped to registration-only; codec encode/decode wiring deferred to the first real upcaster; bare domain payload stored (node-level type/event_id/ts canonical).
   - **P2-8:** empty-graph cursor uses the same opaque `b64url({"v":1,"seq":0})` format (round-trip test); SDK `ValueError("cursor expired…")` → MCP structured error / REST 410; real REST tests (410/400/isolation) written, no stubs.
   - **P2-9:** `.retract_point` added to the introspective quota test's `scan_patterns`; readOnlyHint vs lazy-purge tension resolved by interval-gated purge + docstring note.
