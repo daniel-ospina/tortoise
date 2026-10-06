@@ -863,11 +863,15 @@ _ALLOWED_KEYED = {
         'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:produces]->(o)", params={"name": obj, "eid": eid}, )': 1,
         # Refreshed for #5593: `main` rewrote both lifecycle predicates to
-        # read the SAME constant the resolver uses (`NOT (o.status IN
-        # $excluded)` + `_terminal_object_statuses()`) instead of restating
-        # the literal `'superseded'` — the two can no longer drift (#2242).
-        # The entries are updated, not dropped: the sites are still
-        # name-keyed and still owned by S3.
+        # read the shared OBJECT vocabulary (`NOT (o.status IN $excluded)` +
+        # `_terminal_object_statuses()` -> `commit_ops.OBJECT_TERMINAL_STATUSES`)
+        # instead of restating the literal `'superseded'`.
+        # The entries are updated to the new source text, NOT dropped: the
+        # sites are still name-keyed and still owned by S3.
+        # NOTE: this is the OBJECT vocabulary; it is deliberately NOT the set
+        # `live` uses for Points (`TERMINAL_EXCLUDED_STATUSES` also carries
+        # `outdated`), so it does not make this predicate drift-free against
+        # the resolver. Do not restate it as "the same constant".
         'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'in_progress\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
         'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'completed\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:uses]->(o)", params={"name": use_name, "eid": eid}, )': 1,

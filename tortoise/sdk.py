@@ -25153,7 +25153,8 @@ class TortoiseSDK:
         resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
         r = proj.g.query(
             # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
-            # id/name predicate at the re-binding MATCH below (foreign rows).
+            # id predicate at the re-binding MATCH below (foreign rows).
+            # (#3633 removed the name arm that made this an id/name predicate.)
             "MATCH (s:Subject) WHERE s.id = $sid "
             "WITH s "
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
