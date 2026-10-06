@@ -794,10 +794,9 @@ def _part_d_citations() -> dict[str, str]:
         "the generated doc has no Part D — the citation corpus is unreachable, so a "
         "truncated citation is invisible to every reader"
     )
-    # `_section` asserts the `### D1` anchor — a renamed or absent heading fails with a named
-    # error instead of a bare IndexError. It does NOT bound this slice: the `**Documented
-    # hops.**` cut below lands at line 300, ahead of the next heading, so that cut is the real
-    # end. Removing the hop-cut fails 4 tests; removing `_section`'s bound fails none.
+    # `_section` asserts the `### D1` anchor — an anchor renamed away or absent fails with a
+    # named error, not a bare IndexError. It does NOT bound this slice: the
+    # `**Documented hops.**` cut below comes before the next heading and is the real end.
     d1 = _section(doc, "### D1")
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
     d1 = d1.split("**Documented hops.**")[0]
