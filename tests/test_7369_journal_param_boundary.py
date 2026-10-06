@@ -1068,3 +1068,44 @@ def test_the_clause_classifier_PINS_each_round7_and_8_fix():
     # With the guard on ENTRY this was False — the off-by-one: the scalar call at
     # depth 32 refused a leaf the engine parses like any other.
     assert _writable_at_parse([deep]) is False  # ...one more and the bound bites
+
+
+def test_a_MERGED_or_UNWOUND_row_field_is_not_a_property_value():
+    """#7406: the batch setup's two STRUCTURAL row fields — a regression I caused.
+
+    The walker judged every nested container by `_annotator_value_ok`, so a row
+    field the statement MERGES (`n += r.props` — the map-of-properties form the
+    engine ACCEPTS) or UNWINDS (`UNWIND r.inputs AS inp`, a list of dicts never
+    stored at all) was nulled. Measured on the real engine: `props` -> None
+    turned every `n += r.props` into `n += null`, and `inputs` -> None killed
+    source promotion — reddening tests/test_battery_setup.py with "Property
+    values can only be of primitive types or arrays of primitive types", a test
+    that PASSES on main. A PLAIN row field is still a property value and must
+    still degrade, which is what keeps this from being a blanket exemption.
+    """
+    merged = (
+        "UNWIND $rows AS r MERGE (n:Point {id: r.id}) "
+        "ON CREATE SET n += {a: 1}, n += r.props "
+        "SET n.embedding = vecf32(r.embedding)"
+    )
+    out = _journal_safe_params(
+        {"rows": [{"id": "p", "props": {"a": 1}, "other": {"x": 1}}]}, merged,
+    )
+    assert out["rows"][0]["props"] == {"a": 1}  # merged: structural, preserved
+    assert out["rows"][0]["other"] is None  # plain: a property value, degraded
+
+    unwound = (
+        "UNWIND $rows AS r MERGE (o:Point {id: r.id}) "
+        "ON CREATE SET o.is_operator = true "
+        "WITH o, r UNWIND r.inputs AS inp RETURN count(inp)"
+    )
+    out2 = _journal_safe_params(
+        {
+            "rows": [
+                {"id": "o", "inputs": [{"id": "a", "idx": 0}], "junk": {"x": 1}}
+            ]
+        },
+        unwound,
+    )
+    assert out2["rows"][0]["inputs"] == [{"id": "a", "idx": 0}]
+    assert out2["rows"][0]["junk"] is None

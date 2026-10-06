@@ -2027,6 +2027,15 @@ _GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_REPLACE_RE = re.compile(
     r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_UNWIND_RE = re.compile(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", re.I)
+# A row field consumed STRUCTURALLY rather than stored as a property value:
+# `n += r.props` (a map-of-properties the engine ACCEPTS) or
+# `UNWIND r.inputs AS inp` (a list of dicts never stored at all).
+_GATE_ROW_MERGED_RE = re.compile(
+    r"\+= *[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)"
+)
+_GATE_ROW_UNWOUND_RE = re.compile(
+    r"UNWIND +[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)", re.I
+)
 # A MERGE matches its node on the keys in the pattern's property map. A null
 # there is NOT a safe degrade — FalkorDB REFUSES it ("Cannot merge node using
 # null property value"), so nulling such a parameter converts one abort into
@@ -2189,6 +2198,16 @@ def _journal_safe_params(params, cypher=None):
         for group in _GATE_MERGE_KEY_RE.findall(statement)
         for field in _GATE_ROW_FIELD_RE.findall(group)
     )
+    # Row FIELDS a statement consumes STRUCTURALLY rather than storing as a
+    # property: `n += r.props` (a map-of-properties the engine ACCEPTS) and
+    # `UNWIND r.inputs AS inp` (a list of dicts never stored at all). If one of
+    # these is judged by `_annotator_value_ok` it is nulled, and both shapes are
+    # legitimate: measured on #7406, `props` -> None turned every
+    # `n += r.props` into `n += null`, and `inputs` -> None killed source
+    # promotion. Every OTHER row field stays a property value and still degrades.
+    structural_fields = frozenset(
+        _GATE_ROW_MERGED_RE.findall(statement)
+    ) | frozenset(_GATE_ROW_UNWOUND_RE.findall(statement))
     degraded: list = []
 
     def _walk(value, path, shape):
@@ -2210,7 +2229,21 @@ def _journal_safe_params(params, cypher=None):
                     # by the engine, so leave it exactly as it is.
                     out[k] = v
                     continue
-                walked = _walk(v, f"{path}.{k}", None)
+                walked = _walk(
+                    v,
+                    f"{path}.{k}",
+                    # A row field the statement merges or unwinds is STRUCTURAL:
+                    # a container there is a map-of-properties or a rows list,
+                    # never a stored property value, so walk it instead of
+                    # judging it. A plain field keeps the value-position rule.
+                    (
+                        "map"
+                        if isinstance(v, dict)
+                        else ("rows" if isinstance(v, (list, tuple)) else None)
+                    )
+                    if k in structural_fields
+                    else None,
+                )
                 if walked is not v:
                     changed = True
                 out[k] = walked
