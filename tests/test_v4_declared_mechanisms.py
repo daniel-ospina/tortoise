@@ -90,8 +90,8 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     seen: set[str] = set()
 
-    # A non-iterable registry is a violation, not a crash (cycle-4 P2):
-    # `yaml.safe_load("mechanisms:\n")` is `None`.
+    # A non-iterable registry is a violation, not a crash (cycle-4 P2): the
+    # `mechanisms` value of `yaml.safe_load("mechanisms:\n")` is `None`.
     if not isinstance(mechanisms, list):
         return [f"mechanisms must be a list, got {type(mechanisms).__name__}"]
 
@@ -105,6 +105,19 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             (name.startswith("test_") and name.endswith(".py"))
             or name.endswith("_test.py")
         )
+
+    #: The KIND rule for ONE artifact name, or ``None`` when it is the right
+    #: kind. Applied to BOTH the declared name and the RESOLVED name (cycle-7
+    #: P1): a committed symlink named `fake_code.py` -> `docs/design.md`
+    #: satisfied a name-only check while no `.py` was ever named.
+    def _kind_violation(field: str, kind: str, name: str) -> str | None:
+        if kind == "test" and not _is_test_name(name):
+            return f"{field} entry is not a test file (expected `test_*.py` or `*_test.py`)"
+        if kind == "code" and (Path(name).suffix != ".py" or _is_test_name(name)):
+            return f"{field} entry is not production source (expected a non-test `.py`)"
+        if kind == "doc" and Path(name).suffix not in (".md", ".yaml", ".yml"):
+            return f"{field} entry is not a declaring document (expected `.md`/`.yaml`/`.yml`)"
+        return None
 
     def _path_violations(mid: str, field: str, entries: object, root: Path,
                          kind: str) -> list[str]:
@@ -142,23 +155,9 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"the repo: {rel!r}"
                 )
                 continue
-            if kind == "test" and not _is_test_name(p.name):
-                out.append(
-                    f"{mid}: {field} entry is not a test file (expected "
-                    f"`test_*.py` or `*_test.py`): {rel!r}"
-                )
-                continue
-            if kind == "code" and (p.suffix != ".py" or _is_test_name(p.name)):
-                out.append(
-                    f"{mid}: {field} entry is not production source (expected "
-                    f"a non-test `.py`): {rel!r}"
-                )
-                continue
-            if kind == "doc" and p.suffix not in (".md", ".yaml", ".yml"):
-                out.append(
-                    f"{mid}: {field} entry is not a declaring document "
-                    f"(expected `.md`/`.yaml`/`.yml`): {rel!r}"
-                )
+            bad = _kind_violation(field, kind, p.name)
+            if bad is not None:
+                out.append(f"{mid}: {bad}: {rel!r}")
                 continue
             # `is_file()`, not `exists()`: a DIRECTORY satisfied an exists-only
             # check (cycle-3 P2). The probe is wrapped because a declared path
@@ -173,6 +172,14 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 present = False
             if not present:
                 out.append(f"{mid}: declared path does not exist: {rel}")
+                continue
+            # The KIND must hold for the RESOLVED target too — otherwise the
+            # kind is a property of the NAME, and a symlink launders it.
+            bad = _kind_violation(field, kind, resolved.name)
+            if bad is not None:
+                out.append(
+                    f"{mid}: {bad}, but {rel!r} resolves to {resolved.name!r}"
+                )
         return out
 
     for row in mechanisms:
@@ -188,7 +195,7 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             errors.append(f"{mid}: duplicate id — one row per mechanism")
         seen.add(mid)
 
-        if not row.get("name"):
+        if not isinstance(row.get("name"), str) or not row.get("name").strip():
             errors.append(f"{mid}: declares no name")
 
         # "Declared" must itself be checkable: a row that names no declaring
@@ -539,6 +546,57 @@ def test_gate_fails_closed_on_a_path_outside_the_repo_via_symlink(tmp_path) -> N
     }
     errors = gate_errors([row], root=repo)
     assert any("does not exist" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_symlink_that_launders_the_kind(tmp_path) -> None:
+    """A symlink's KIND is the TARGET's, not its name (cycle-7 P1).
+
+    `fake_code.py -> docs/design.md` passed a name-only kind check, so a row
+    could be `implemented` with no `.py` ever named — the existence probe
+    resolved while the kind check did not.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("x\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "impl.py").write_text("x = 1\n")
+    (repo / "fake_code.py").symlink_to(repo / "docs" / "design.md")
+    (repo / "test_fake.py").symlink_to(repo / "docs" / "design.md")
+    (repo / "fake_doc.md").symlink_to(repo / "src" / "impl.py")
+
+    base = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["src/impl.py"],
+        "tests": ["tests/test_x.py"],
+    }
+    for field, bad in (
+        ("code", ["fake_code.py"]),
+        ("tests", ["test_fake.py"]),
+        ("declared_in", ["fake_doc.md"]),
+    ):
+        row = dict(base)
+        row[field] = bad
+        errors = gate_errors([row], root=repo)
+        assert errors, (field, bad, "the gate PASSED a kind-laundering symlink")
+
+
+def test_gate_fails_closed_on_a_non_string_name() -> None:
+    """`name` must be a non-blank string, like `id` (cycle-7 P2)."""
+    for bad in (True, float("nan"), " ", 7, None):
+        row = {
+            "id": "x",
+            "name": bad,
+            "state": "not-implemented",
+            "declared_in": ["config/v4-mechanisms.yml"],
+            "tracking_issue": 5006,
+        }
+        errors = gate_errors([row])
+        assert any("declares no name" in e for e in errors), (bad, errors)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
