@@ -43,10 +43,18 @@ description: >
 
   The pin MUST track `uv.lock`'s `torch` pin (currently 2.13.0): the point is to
   swap the BUILD, not the release. `uv.lock` is unaffected by this action (`uv
-  sync --frozen` installs the dev group, which has no torch). The guard below
-  makes that copy fail loudly instead of drifting — if the lock's torch moved
-  ahead of the pin, the extras install would put PyPI's CUDA wheel back ON TOP of
-  the CPU one and CI would stay green with the 3.2 GB restored.
+  sync --frozen` installs the dev group, which has no torch). Two guards keep the
+  copy from drifting, because both halves of the hole are real:
+
+    * the extras install is a LATER step and resolves torch from the live index
+      (not the lock), so a transitive floor rise there could put PyPI's CUDA
+      wheel back on top of this one. This action therefore exports
+      `PIP_CONSTRAINT`, which applies to every subsequent pip invocation in the
+      job — that makes the override impossible BY CONSTRUCTION rather than
+      merely detectable after the fact;
+    * the lock can move ahead of the pin. The action reads uv.lock's torch
+      version and fails loudly on a mismatch, and asserts `torch.version.cuda is
+      None` right after installing, so a CUDA torch can never pass unnoticed.
 
 runs:
   using: composite
@@ -56,7 +64,11 @@ runs:
       run: |
         set -euo pipefail
         pin='2.13.0'
-        locked=$(python - <<'PY'
+        # Not bare `python`: this must also work where only `python3` is on PATH
+        # (the runners' setup-python shims are an accident of the workflow, not a
+        # property of this action).
+        py=$(command -v python3 || command -v python)
+        locked=$("$py" - <<'PY'
         import pathlib, re
         text = pathlib.Path('uv.lock').read_text(encoding='utf-8')
         m = re.search(r'\[\[package\]\]\nname = "torch"\nversion = "([^"]+)"', text)
@@ -68,4 +80,14 @@ runs:
           exit 1
         fi
         pip install --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
-        python -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
+        "$py" -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
+
+        # Close the other half of the hole: the extras install is a LATER step and
+        # resolves torch from the live index (not the lock), so a transitive floor
+        # rise there would install PyPI's CUDA wheel on top of this one and CI
+        # would stay green. PIP_CONSTRAINT applies to every subsequent pip
+        # invocation in the job, so the override cannot happen at all.
+        constraint="${RUNNER_TEMP:-/tmp}/torch-cpu-constraint.txt"
+        printf 'torch==%s+cpu\n' "$pin" > "$constraint"
+        echo "PIP_CONSTRAINT=${constraint}" >> "${GITHUB_ENV:?GITHUB_ENV is unset - this action only runs inside GitHub Actions}"
+        echo "Pinned torch==${pin}+cpu for the rest of this job (PIP_CONSTRAINT=${constraint})"
