@@ -359,6 +359,12 @@ jobs:
                   # #4759: the bypass reporter / expiry helper and the scheduled
                   # check that ages every SKIP_* lane left set.
                   startswith(".github/scripts/deploy-bypass"),
+                  # #2240: the out-of-band failure alert for a failed hosted
+                  # deploy, and the SHARED shell Telegram sender it nudges
+                  # through (#4574 item 1 — the contract the watchdog migrated
+                  # onto, so its harness must re-run when the sender changes).
+                  startswith(".github/scripts/deploy-api-alert"),
+                  startswith(".github/scripts/telegram-send"),
                   isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/availability-liveness.yml"),
@@ -945,6 +951,18 @@ jobs:
         # once, comments `Recurrence #N` after that, refuses to file on a failed
         # search, and never adopts a forged/exact-mismatched look-alike title.
         run: bash .github/scripts/auto-file-issue.test.sh
+      - name: Deploy failure alert (#2240)
+        # The out-of-band alert #2240 exists for: per-step attribution from the
+        # workflow's step ids, ONE issue per failing step with `Recurrence #N` on
+        # every later occurrence, the gate's OWN report carried into the body,
+        # fail-closed on a failed search OR the PAT trap, and the nudge sent
+        # only AFTER the record exists.
+        run: bash .github/scripts/deploy-api-alert.test.sh
+      - name: Shared shell Telegram sender (#4574 item 1)
+        # The delivery contract — transport success AND the API's own `ok:true` —
+        # plus the token redaction that keeps the bot token out of a PUBLIC log,
+        # and the caller hooks the watchdog's own logger/redactor ride on.
+        run: bash .github/scripts/telegram-send.test.sh
 
   availability-record:
     needs: changes

@@ -911,3 +911,176 @@ def test_bypass_values_are_env_bound_never_interpolated_into_shell():
         # env binding (and the gate it belongs to) by `_lane` / `_assert_lane` —
         # the generic per-site association check, of which the old `*_SET_AT`-only
         # loop was one case.
+
+
+# ── #2240: the deploy job's out-of-band failure alert ──────────────────────
+#
+# `deploy-api` had NO failure observability: no `if: failure()` step anywhere in
+# the workflow, `post-deploy-verify` skipped exactly when the deploy fails, the
+# availability watchdog reads a stale build as UP (a stale build still answers
+# 401), and `deploy-api` is not a required context. Measured cost: 4.6 days of a
+# dead deploy lane (2026-08-30 → 09-04, 22 runs) with zero notifications, and
+# again ~2 days (2026-09-29 → 10-01).
+#
+# These three guards are deliberately DERIVED, never restated: the step-id map
+# lives in the alert script and the labels live in the workflow, so a rename on
+# either side has to fail here rather than silently file an alert under a stale
+# key (or a key with no step behind it).
+
+_ALERT_STEP = "Alert on failure (out-of-band) — deploy-api (#2240)"
+_ALERT_SCRIPT = (
+    Path(__file__).resolve().parent.parent / ".github" / "scripts" / "deploy-api-alert.sh"
+)
+
+
+def _alert_script_text() -> str:
+    assert _ALERT_SCRIPT.is_file(), f"alert script not found: {_ALERT_SCRIPT}"
+    return _ALERT_SCRIPT.read_text(encoding="utf-8")
+
+
+def _step_label_map() -> dict[str, str]:
+    """`id -> human label` as the ALERT SCRIPT declares it (the source of truth)."""
+    text = _alert_script_text()
+    body = _region(text, "step_label() {", "\n}\n")
+    return dict(re.findall(r"^\s{4}([a-z][a-z-]*)\)\s+printf '%s' '(.*)' ;;$", body, re.M))
+
+
+def _workflow_step_ids() -> dict[str, str]:
+    """`id -> name` for every step in the workflow that declares an `id`."""
+    return {s["id"]: n for n, s in _steps().items() if "id" in s}
+
+
+def _alert_passed_ids(run: str) -> list[str]:
+    """The step ids the alert step passes, in order.
+
+    Parsed as `<id>=${{ … }}` pairs, NOT by whitespace: the outcome interpolation
+    contains spaces (`${{ steps.drift.outcome }}`), so a naive `.split()` reads
+    `steps.drift.outcome` and `}}` as ids. Pinning the `${{` shape here is also
+    what the `steps.<id>.outcome` assertion below relies on.
+    """
+    m = re.search(r"--steps\s+\"([^\"]*)\"", run)
+    assert m, "the alert step must pass --steps (the per-step attribution)"
+    return re.findall(r"([A-Za-z][\w-]*)=\$\{\{", m.group(1))
+
+
+def test_failed_deploy_job_alerts_out_of_band():
+    """#2240 — `deploy-api` ends with a failure-only out-of-band alert.
+
+    The three things that must hold TOGETHER, and each of which alone is
+    insufficient: the step exists on `failure()`; the job may actually write the
+    issue (`issues: write` + the spelled-out `contents: read`, because declaring
+    ANY permission sets the unspelled ones to `none`); and it uses the ACTIONS
+    token, never a PAT — a PAT writes as its own owner, the dedupe search keys
+    on `author:app/github-actions`, and every failing run would file a duplicate
+    (#2706), silently.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    job = doc["jobs"]["deploy-api"]
+    step = _steps()[_ALERT_STEP]
+
+    assert step.get("if") == "failure()", (
+        "the alert must be `if: failure()` — not `always()` (which would fire on "
+        "cancelled and green runs) and not a bare step (which is ANDed with success())"
+    )
+    assert "deploy-api-alert.sh" in step.get("run", ""), "the alert step must call the alert script"
+
+    perms = job.get("permissions") or {}
+    assert perms.get("issues") == "write", (
+        "deploy-api must declare `issues: write` — the repo's default workflow "
+        "permission is read, and the substrate files an issue"
+    )
+    assert perms.get("contents") == "read", (
+        "`contents: read` must be spelled out: specifying ANY permission sets "
+        "every unspecified one to `none`, which would strip the token "
+        "actions/checkout and the job's `gh` reads rely on"
+    )
+
+    env = step.get("env") or {}
+    assert env.get("GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}", (
+        "the alert must write with the ACTIONS token (secrets.GITHUB_TOKEN). A PAT "
+        "writes as its own owner, so the `author:app/github-actions` dedupe search "
+        "never matches and EVERY failing run files a fresh duplicate (#2706)"
+    )
+
+    # Ordering is load-bearing in both directions: the alert must run BEFORE the
+    # `if: always()` gate audit, so the audit stays the job's last word on
+    # "was anything bypassed".
+    names = [s.get("name") for s in job["steps"]]
+    audit = "Deploy gate audit — deploy-api (#4759)"
+    assert names.index(_ALERT_STEP) < names.index(audit), (
+        "the alert must run before the always() gate audit, so the audit's bypass "
+        "statement remains the job's final word"
+    )
+
+
+def test_alert_step_ids_match_the_script_and_the_workflow():
+    """The `--steps` ids, the script's map and the workflow's `id:`s agree EXACTLY.
+
+    Three surfaces have to line up for per-step attribution to work: the workflow
+    passes `id=${{ steps.<id>.outcome }}`, the script maps `<id>` to a human label,
+    and the step carrying `<id>` has that `name`. A rename on any side would
+    otherwise let the alert file under a key with no step behind it (or attribute
+    a failure to the wrong step), and both directions are checked here.
+    """
+    run = _steps()[_ALERT_STEP].get("run", "")
+    passed = _alert_passed_ids(run)
+    declared = _step_label_map()
+    wf_ids = _workflow_step_ids()
+
+    assert len(passed) == len(set(passed)), f"duplicate ids in --steps: {passed}"
+    assert set(passed) == set(declared), (
+        f"--steps and step_label() disagree — passed-not-declared: "
+        f"{sorted(set(passed) - set(declared))}, declared-not-passed: "
+        f"{sorted(set(declared) - set(passed))}"
+    )
+    assert set(passed) <= set(wf_ids), (
+        f"--steps names ids the workflow does not declare: {sorted(set(passed) - set(wf_ids))}"
+    )
+    # The outcome interpolation must be `steps.<id>.outcome` for the SAME id —
+    # not a copy-pasted neighbour, which would attribute every failure to one step.
+    for sid in passed:
+        assert f"steps.{sid}.outcome" in run, (
+            f"--steps declares {sid!r} but the run text never reads `steps.{sid}.outcome`"
+        )
+    for sid in passed:
+        assert declared[sid] == wf_ids[sid], (
+            f"step {sid!r}: the script labels it {declared[sid]!r} but the workflow "
+            f"names that step {wf_ids[sid]!r} — the alert would name a step that "
+            f"does not exist"
+        )
+
+
+def test_drift_report_seam_carries_the_gates_own_report():
+    """The drift case must carry the gate's OWN output, not a second reading.
+
+    The gate already prints the blocking versions, the OUT-OF-ORDER subset and the
+    ordered remediation; re-running it from the alert could name a DIFFERENT
+    blocking set than the run being reported. So the gate's stdout is teed to a
+    file in the SAME step, and the alert is handed that path.
+    """
+    steps = _steps()
+    drift = steps["Check migration drift (fail-closed)"]
+    alert = steps[_ALERT_STEP]
+    run = drift.get("run", "")
+
+    assert drift.get("id") == "drift", "the drift step needs `id: drift` for attribution"
+    assert "check-migration-drift" in run, "the drift step must still run the gate"
+    assert "tee" in run and "DRIFT_REPORT_FILE" in run, (
+        "the gate's stdout must be teed to $DRIFT_REPORT_FILE so the alert carries "
+        "the report the RUN produced"
+    )
+    assert "pipefail" in run, (
+        "`set -o pipefail` is load-bearing: without it the STEP's status is tee's "
+        "(0), so a blocked deploy would read GREEN"
+    )
+
+    drift_path = (drift.get("env") or {}).get("DRIFT_REPORT_FILE")
+    alert_path = (alert.get("env") or {}).get("DRIFT_REPORT_FILE")
+    assert drift_path and alert_path, "both steps must bind DRIFT_REPORT_FILE"
+    assert drift_path == alert_path, (
+        f"the alert reads {alert_path!r} but the gate writes {drift_path!r} — the "
+        f"report would silently never reach the issue"
+    )
+    assert "--drift-report" in alert.get("run", ""), (
+        "the alert step must pass the report path as --drift-report"
+    )
