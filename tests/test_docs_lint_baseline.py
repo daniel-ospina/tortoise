@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -528,6 +529,7 @@ def test_parsed_count_must_match_the_reported_count(tmp_path: Path, capsys):
 
 def test_update_writes_a_valid_snapshot(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(dlb, "_require_lychee_binary", lambda binary: None)
     monkeypatch.setattr(dlb, "_run_markdownlint", lambda files, root: (1, MARKDOWNLINT_REPORT))
     monkeypatch.setattr(
         dlb,
@@ -642,6 +644,138 @@ def test_glob_guard_actually_fails_closed(name: str):
             "./docs/a+b.md\n",
         ):
             assert run_with(bad) != 0, f"{bad!r} must fail the job"
+
+
+def test_update_refuses_a_lychee_binary_that_is_not_the_pinned_version(tmp_path: Path):
+    """The snapshot stamps `lychee <LYCHEE_PIN>`; verify the binary IS that version.
+
+    The key can carry status text (the `error:` placeholder) and status text is
+    version-dependent, so an UNPINNED producer writes an unreproducible snapshot
+    while the metadata claims the pinned version.
+    """
+    good = tmp_path / "lychee-good"
+    good.write_text(f"#!/bin/sh\necho 'lychee {dlb.LYCHEE_PIN}'\n", encoding="utf-8")
+    bad = tmp_path / "lychee-bad"
+    bad.write_text("#!/bin/sh\necho 'lychee 0.0.1'\n", encoding="utf-8")
+    for script in (good, bad):
+        script.chmod(0o755)
+    dlb._require_lychee_binary(str(good))
+    with pytest.raises(dlb.FailClosed):
+        dlb._require_lychee_binary(str(bad))
+    with pytest.raises(dlb.FailClosed):
+        dlb._require_lychee_binary(str(tmp_path / "absent"))
+
+
+def test_update_refuses_a_snapshot_that_did_not_lint_the_whole_population(
+    tmp_path: Path, monkeypatch
+):
+    """`Linting: N` must equal the population, exactly as the CHECK requires.
+
+    Without it a run that silently skipped files writes an INCOMPLETE snapshot,
+    and an incomplete snapshot reads as a complete one — every skipped finding
+    stays "not on the list" and reds later PRs.
+    """
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(dlb, "_require_lychee_binary", lambda binary: None)
+    monkeypatch.setattr(
+        dlb,
+        "_run_markdownlint",
+        lambda files, root: (1, "Linting: 1 file\nSummary: 0 issues in 0 files\n"),
+    )
+    files = _write(tmp_path, "files.txt", "docs/x.md\ndocs/y.md\n")
+    out = tmp_path / "baseline.json"
+    rc = dlb.main(["update", "--files-from", str(files), "--baseline", str(out)])
+    assert rc == 2
+    assert not out.exists()
+
+
+def test_lychee_non_dict_status_fails_closed_instead_of_crashing(tmp_path: Path):
+    """A non-object `status` must red via an empty key, not raise AttributeError."""
+    document = {
+        "total": 1,
+        "error_map": {"docs/x.md": [{"url": "https://example.invalid/a", "status": "boom"}]},
+    }
+    findings = dlb.parse_lychee(document, tmp_path)
+    assert len(findings) == 1
+    assert findings[0][2] == "error"
+
+
+def test_check_fails_closed_when_the_linter_policy_changed(tmp_path: Path):
+    """A rule turned off is a SUPPRESSED finding, not a fixed one.
+
+    The differ compares findings, so the policy that produced them is part of the
+    comparison's validity: a same-PR `.markdownlint-cli2.jsonc` edit ("MD001":
+    false) or a `.lycheeignore` path makes the linter report FEWER findings, which
+    the differ reads as `0 new`. `run_check` refuses when the current policy files
+    differ from what the snapshot recorded.
+    """
+    baseline = _baseline(_md_keys(MARKDOWNLINT_REPORT), [])
+    baseline["linter_config"] = {
+        ".markdownlint-cli2.jsonc": "0" * 64,
+        ".lycheeignore": None,
+        "lychee.toml": None,
+    }
+    assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 2
+    # A policy that matches the checkout (none of the files exist under tmp_path)
+    # passes, and a pre-policy baseline (no field) is unaffected.
+    baseline["linter_config"] = dlb._config_digest(tmp_path)
+    assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 0
+
+
+def _extract_suppression_guard(run: str) -> str:
+    match = re.search(
+        r"(if git diff --no-renames -U0 .*?\n(?:.*\n)*?\s*fi\n)", run
+    )
+    assert match is not None, "the suppression-directive guard is missing from this step"
+    return match.group(1)
+
+
+def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
+    """An ADDED `markdownlint-disable` must fail the job — it hides a new finding.
+
+    cli2 reports 0 issues for a suppressed finding, so the differ sees `0 new` and
+    the required check passes. A PRE-EXISTING directive is baselined debt; only an
+    ADDED one is rejected. This EXECUTES the extracted guard against real git
+    diffs, because a presence-only assertion cannot tell a wired guard from one
+    whose `exit 1` was deleted.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    doc = repo / "docs" / "a.md"
+    doc.write_text("# a\n\n### b\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").stdout.strip()
+
+    def run_guard(name: str, env: dict[str, str]) -> int:
+        guard = _extract_suppression_guard(_by_name(name)["run"])
+        return subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\n{guard}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            env={**os.environ, **env},
+        ).returncode
+
+    pr_step = "Get changed markdown files"
+    mh_step = "Get changed markdown files (main health)"
+    doc.write_text("# a\n\n### b\n\nordinary\n", encoding="utf-8")
+    git("commit", "-qam", "ordinary")
+    assert run_guard(pr_step, {"BASE_SHA": base}) == 0
+    assert run_guard(mh_step, {}) == 0
+    doc.write_text("# a\n\n<!-- markdownlint-disable MD001 -->\n### b\n", encoding="utf-8")
+    git("commit", "-qam", "suppress")
+    assert run_guard(pr_step, {"BASE_SHA": base}) != 0
+    assert run_guard(mh_step, {}) != 0
 
 
 def test_update_rejects_a_lychee_document_the_check_would_reject():

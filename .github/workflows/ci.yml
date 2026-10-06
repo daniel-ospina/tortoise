@@ -735,6 +735,17 @@ jobs:
             printf './%s\0' "$entry" >> "$RUNNER_TEMP/pr-md.nul"
           done < "$RUNNER_TEMP/pr-md.raw.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/pr-md.nul" > "$RUNNER_TEMP/pr-md.txt"
+          # A changed file that ADDS a markdownlint suppression directive hides the
+          # very findings this check exists to catch: cli2 reports 0 issues, the
+          # differ sees 0 new, and a suppressed new finding passes. A PRE-EXISTING
+          # directive is part of the baselined debt; only an ADDED one is rejected.
+          # (A same-PR rule change in .markdownlint-cli2.jsonc or .lycheeignore is
+          # caught by the snapshot's own linter-policy digest.)
+          if git diff --no-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
+              | grep -qE '^\+.*markdownlint-(disable|disable-line|disable-next-line|configure-file)'; then
+            echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
+            exit 1
+          fi
           # cli2 treats every positional argument as a GLOBBY PATTERN, so a changed
           # path containing a glob metacharacter is EXPANDED to a different,
           # pre-existing file. The linter then truthfully reports `Linting: 1 file`
@@ -847,6 +858,14 @@ jobs:
             > "$RUNNER_TEMP/changed-md.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
             > "$RUNNER_TEMP/changed-md.txt"
+          # Same suppression-directive guard as the PR path (see its comment): an
+          # ADDED markdownlint disable directive hides the findings the check exists
+          # to catch, so the differ would see 0 new and pass.
+          if git diff --no-renames -U0 HEAD^ HEAD -- '*.md' \
+              | grep -qE '^\+.*markdownlint-(disable|disable-line|disable-next-line|configure-file)'; then
+            echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
+            exit 1
+          fi
           # Same path-character guard as the PR path above (see its full comment):
           # cli2 (and lychee's --files-from) expand a positional argument as a
           # globby pattern INCLUDING extglob, so such a path would be linted as a
