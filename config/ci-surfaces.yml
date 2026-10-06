@@ -840,6 +840,7 @@ surfaces:
   # hand count. Same surface as its siblings test_merge_throughput.py /
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
+  - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
   # here. main has since registered it in `core` (see the `test_pack_cli.py`
