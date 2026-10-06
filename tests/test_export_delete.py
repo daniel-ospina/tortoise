@@ -42,9 +42,9 @@ ORG_ID = "team-free-001"
 
 # ═══════════════════════════════════════════════════════════════════════
 # #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
-# The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
-# pins TORTOISE_DB_PATH, so `_anchor_usable` (tortoise/hosted_api.py)
-# path-drifts on every _make_sdk/_registry_anchor() call → the #1607 keepalive
+# The PRE-FIX fixture patched TortoiseSDK.__init__ to a per-test temp DB but
+# did not pin TORTOISE_DB_PATH, so `_anchor_usable` (tortoise/hosted_api.py)
+# path-drifted on every _make_sdk/_registry_anchor() call → the #1607 keepalive
 # anchor is evicted+closed per call (0-other-client windows) → a dropped seed
 # SDK's GC-NOSAVE (`register_gc_close`/`_gc_close` in embedded_lifecycle.py,
 # TORTOISE_FAST_ATEXIT=1) can kill
@@ -104,14 +104,58 @@ class _DriftEvictionCounter(dict):
     _restore_sdk_init. A probe-failure pop (path equal but evicted anyway —
     the enter-pin _get_proj()-failure class) is counted WARN-only: it never
     fails the gate but is reported so the churn rate stays observable.
+
+    An eviction is classified against the TWO paths that matter:
+
+    - ``expected_db_path`` is the fixture's own temp DB (the closure
+      ``patched_tortoise_sdk``/``_patch_tortoise_sdk_init`` forces every
+      in-test ``TortoiseSDK`` to bind). An anchor bound to it was created by
+      THIS test, so a pop of one is a genuine #2090 drift signal.
+    - ``_computed_db_path()`` is what ``_resolve_embedded_db_path`` returns
+      from the ENV. Post-fix the fixture pins ``TORTOISE_DB_PATH`` to
+      ``expected_db_path``, so the two agree and the test's anchor is reused.
+
+    An anchor bound to NEITHER is a LEAKED anchor from another test (a
+    background health-probe worker's in-flight ``_make_sdk`` from a prior
+    test finishes its construct-then-insert after this test's counter is
+    installed — see the reproduced stack: ``monitoring._loop`` →
+    ``_acquire_probe_sdk`` → ``_make_sdk`` → this ``pop``). Evicting such a
+    stale anchor is the intended #1502/#1950 self-heal, not #2090 churn, so
+    it is counted WARN-only (``leaked_evictions``) and never fails the gate.
+    The three-way split is what makes the zero-guard deterministic for
+    CROSS-TEST state: it no longer turns an ambient cross-test thread's
+    leftover into a verdict. (A same-path probe failure of THIS test's own
+    anchor still lands in the warn-only probe bucket by design — a loaded
+    runner's transient probe failure must not red the gate.)
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, expected_db_path: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.expected_db_path = expected_db_path
         self.drift_evictions = 0
         self.probe_failures = 0
+        self.leaked_evictions = 0
         self.unclassified = 0
         self.enabled = True
+        # Set to the real dict at teardown: once a stale reference to this
+        # counter is held by a background worker, a late setdefault/assign
+        # must land in the real dict (which patched_tortoise_sdk's exit-close
+        # drains) instead of in the discarded counter — otherwise the
+        # drain-completeness guard races that insert. Lock-free by design:
+        # teardown must never block on _KEEPALIVE_LOCK held by a slow
+        # in-flight marker construction.
+        self.forward_to = None
+
+    def setdefault(self, key, default=None):
+        if self.forward_to is not None:
+            return self.forward_to.setdefault(key, default)
+        return super().setdefault(key, default)
+
+    def __setitem__(self, key, value):
+        if self.forward_to is not None:
+            self.forward_to[key] = value
+            return
+        super().__setitem__(key, value)
 
     def pop(self, key, default=None):
         if self.enabled:
@@ -120,17 +164,25 @@ class _DriftEvictionCounter(dict):
                 bound = getattr(value, "_db_path", None)
                 if bound is None:
                     self.unclassified += 1  # never silently ignore (vacuity guard)
+                elif not _paths_same(bound, self.expected_db_path):
+                    # Foreign/leaked anchor (another test's in-flight worker) —
+                    # self-healing to evict it; never a #2090 drift signal.
+                    self.leaked_evictions += 1
                 elif _paths_same(bound, _computed_db_path()):
-                    self.probe_failures += 1  # path matches → probe-failure/benign
+                    self.probe_failures += 1  # this test's anchor, probe-failure/benign
                 else:
-                    self.drift_evictions += 1  # path drift → the churn enabler
+                    self.drift_evictions += 1  # this test's anchor path-drifted → churn
         return dict.pop(self, key, default)
 
 
-def _install_drift_counter() -> tuple[_DriftEvictionCounter, dict]:
-    """Swap the module keepalive dict for a counting dict (fresh per test)."""
+def _install_drift_counter(expected_db_path: str) -> tuple[_DriftEvictionCounter, dict]:
+    """Swap the module keepalive dict for a counting dict (fresh per test).
+
+    ``expected_db_path`` is the fixture's temp DB — the path every in-test
+    ``TortoiseSDK`` is force-bound to. See ``_DriftEvictionCounter``.
+    """
     _orig_dict = ha_mod._FALLBACK_KEEPALIVE
-    counter = _DriftEvictionCounter(_orig_dict)
+    counter = _DriftEvictionCounter(expected_db_path, _orig_dict)
     ha_mod._FALLBACK_KEEPALIVE = counter
     return counter, _orig_dict
 
@@ -148,24 +200,69 @@ class TestDriftCounterWiring:
     def test_drift_counter_classifies_real_eviction(self, monkeypatch):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "wiring.db")
-            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            drifted = os.path.join(tmpdir, "drifted-env.db")
+            # The REAL #2090 shape: the anchor is bound to the fixture's
+            # force-bind path (db_path), while the env resolves a DIFFERENT
+            # embedded path (the pre-fix unpinned TORTOISE_DB_PATH).
+            # _make_sdk path-drifts and evicts the test's OWN anchor — and
+            # that must still be counted as a gate-failing drift.
+            monkeypatch.setenv("TORTOISE_DB_PATH", drifted)
             ha_mod._FALLBACK_KEEPALIVE.clear()
-            counter, _orig_dict = _install_drift_counter()
+            counter, _orig_dict = _install_drift_counter(db_path)
             try:
-                # Deliberately drifted anchor (different path) — the next
-                # _make_sdk call must evict it (path drift) and count it.
-                other = os.path.join(tmpdir, "other.db")
-                anchor = TortoiseSDK(db_path=other, namespace="registry")
+                anchor = TortoiseSDK(db_path=db_path, namespace="registry")
+                # Production-shaped: _make_sdk eagerly holds the anchored
+                # connection, so the eviction below must exercise the
+                # PATH-DRIFT branch of _anchor_usable — not the earlier
+                # `proj is None` short-circuit.
+                anchor._get_proj()
                 ha_mod._FALLBACK_KEEPALIVE["registry"] = anchor
                 ha_mod._make_sdk(namespace="registry")  # evict + close + pop
                 assert counter.drift_evictions >= 1, (
                     f"drift eviction not counted (got {counter.drift_evictions}, "
+                    f"leaked: {counter.leaked_evictions}, "
                     f"probe-failures: {counter.probe_failures})"
                 )
+                assert counter.leaked_evictions == 0
                 assert counter.probe_failures == 0
             finally:
                 counter.enabled = False
                 # close any held anchors from the counter directly (uncounted)
+                for _ns in list(counter):
+                    _anchor = dict.pop(counter, _ns, None)
+                    if _anchor is not None:
+                        try:  # noqa: SIM105
+                            _anchor.close()
+                        except Exception:
+                            pass
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+
+    def test_drift_counter_classifies_leaked_eviction(self, monkeypatch):
+        """A pop of an anchor bound to ANOTHER test's path is a self-heal,
+        not #2090 churn — the reproduced flake (a background health-probe
+        worker's in-flight _make_sdk inserts a prior test's anchor into this
+        test's counter). It must land in the warn-only leak bucket."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            previous = os.path.join(tmpdir, "previous-test.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+            counter, _orig_dict = _install_drift_counter(db_path)
+            try:
+                anchor = TortoiseSDK(db_path=previous, namespace="registry")
+                # Same fidelity as the sibling test: production anchors hold
+                # an eager projection, so the eviction must exercise the
+                # path-mismatch branch, not the `proj is None` short-circuit.
+                anchor._get_proj()
+                ha_mod._FALLBACK_KEEPALIVE["registry"] = anchor
+                ha_mod._make_sdk(namespace="registry")  # evict + close + pop
+                assert counter.leaked_evictions == 1, (
+                    f"leaked eviction not classified (got "
+                    f"{counter.leaked_evictions})"
+                )
+                assert counter.drift_evictions == 0
+            finally:
+                counter.enabled = False
                 for _ns in list(counter):
                     _anchor = dict.pop(counter, _ns, None)
                     if _anchor is not None:
@@ -182,13 +279,14 @@ class TestDriftCounterWiring:
             db_path = os.path.join(tmpdir, "wiring.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
             ha_mod._FALLBACK_KEEPALIVE.clear()
-            counter, _orig_dict = _install_drift_counter()
+            counter, _orig_dict = _install_drift_counter(db_path)
             try:
                 ha_mod._FALLBACK_KEEPALIVE["registry"] = TortoiseSDK(
                     db_path=db_path, namespace="registry"
                 )
                 ha_mod._FALLBACK_KEEPALIVE.pop("registry", None)
                 assert counter.drift_evictions == 0
+                assert counter.leaked_evictions == 0
                 assert counter.probe_failures == 1  # path equal → probe bucket
             finally:
                 counter.enabled = False
@@ -416,22 +514,39 @@ def reg_client(monkeypatch):
         # #2127: shared helper (see sb_client) — the anchor is created pinned
         # at TestClient enter (lifespan purge) and REUSED, not evicted.
         with patched_tortoise_sdk(db_path):
-            counter, _orig_dict = _install_drift_counter()
+            counter, _orig_dict = _install_drift_counter(db_path)
             try:
+                # Coupling invariant (inside the try so a failure still runs
+                # the teardown and restores module state): expected_db_path
+                # must be the path the helper force-binds. patched_tortoise_sdk
+                # patches __init__ to this exact `db_path` AND pins
+                # TORTOISE_DB_PATH to it, so the pinned env is the observable
+                # witness of that coupling. If the two ever diverged, a
+                # genuine #2090 eviction of the fixture's own anchor could be
+                # mislabelled `leaked` and the gate go vacuously green.
+                assert _paths_same(counter.expected_db_path, _computed_db_path()), (
+                    "drift-counter expected path diverged from the fixture's "
+                    f"pinned db_path: {counter.expected_db_path!r} != "
+                    f"{_computed_db_path()!r}"
+                )
                 with TestClient(app) as tc:
                     yield tc, db_path
             finally:
                 # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
                 try:
                     # G3 (GREEN): zero mid-test drift evictions — the anchor
-                    # is reused (path pinned), never evicted, post-fix. ⚠️
-                    # This assert runs with the counter ENABLED — moving
-                    # enabled=False ahead of it would silently vacate the
-                    # #2090 proof (scope-verify P2-3).
+                    # is reused (path pinned), never evicted, post-fix. The
+                    # counter only counts evictions of anchors bound to THIS
+                    # test's db_path; a stale anchor leaked by another test's
+                    # in-flight probe worker is the warn-only leak bucket —
+                    # see _DriftEvictionCounter. ⚠️ This assert runs with the
+                    # counter ENABLED — moving enabled=False ahead of it would
+                    # silently vacate the #2090 proof (scope-verify P2-3).
                     assert counter.drift_evictions == _EXPECTED_DRIFT_EVICTIONS, (
                         f"expected {_EXPECTED_DRIFT_EVICTIONS} drift evictions, "
                         f"got {counter.drift_evictions} "
                         f"(probe-failures: {counter.probe_failures}, "
+                        f"leaked: {counter.leaked_evictions}, "
                         f"unclassified: {counter.unclassified})"
                     )
                     # #2090: the enter-pin probe-failure churn rate must be
@@ -439,39 +554,63 @@ def reg_client(monkeypatch):
                     # pinned run should read 0, but a transient probe failure
                     # on a loaded runner must not red it). Surfaces in the
                     # pytest warnings summary.
-                    if counter.probe_failures or counter.unclassified:
+                    if (counter.probe_failures or counter.leaked_evictions
+                            or counter.unclassified):
                         warnings.warn(
                             f"[#2090] keepalive probe-failure pops: "
-                            f"{counter.probe_failures}, unclassified: "
-                            f"{counter.unclassified} (drift: "
+                            f"{counter.probe_failures}, leaked (other-test "
+                            f"anchors): {counter.leaked_evictions}, "
+                            f"unclassified: {counter.unclassified} (drift: "
                             f"{counter.drift_evictions})",
                             UserWarning,
                             stacklevel=2,
                         )
                 finally:
                     counter.enabled = False  # restore-time pops must never count
-                    # #2127 drain-linchpin: under counter composition the
-                    # helper's exit-close is a design no-op (it closes the
-                    # RESTORED real dict, which is empty — every in-test
-                    # anchor lives in the counter). The fixture owns the
-                    # deterministic close: drain + close counter-held anchors
-                    # (uncounted), verbatim mirror of the `finally` drain in
-                    # TestDriftCounterWiring.test_drift_counter_classifies_real_eviction.
-                    # The (d) guard sits in an inner try so a RED
-                    # still restores the real dict + closes seeds (code-
-                    # review P2-2: an (a)/(d) assert RED must leave clean
-                    # module state).
+                    # A background probe worker's in-flight `_make_sdk` may
+                    # hold a stale reference to THIS counter (it loaded the
+                    # module global before the swap below) and complete its
+                    # insert after the drain. forward_to, set BEFORE the swap,
+                    # makes that late setdefault/assign land in the real dict —
+                    # which patched_tortoise_sdk's exit-close drains. The
+                    # check-then-write is not atomic without a lock, and
+                    # teardown deliberately does not take _KEEPALIVE_LOCK (an
+                    # abandoned marker construction could hold it), so the
+                    # drain is retried and is TOLERANT of a leftover rather
+                    # than asserting emptiness: closing foreign anchors is
+                    # self-healing test bookkeeping, not a product invariant,
+                    # and a hard assert here would red the run on the very
+                    # cross-test race this fixture exists to survive.
+                    counter.forward_to = _orig_dict
+                    ha_mod._FALLBACK_KEEPALIVE = _orig_dict
                     try:
-                        for _ns in list(counter):
-                            _anchor = dict.pop(counter, _ns, None)
-                            if _anchor is not None:
-                                try:  # noqa: SIM105
-                                    _anchor.close()
-                                except Exception:
-                                    pass
-                        assert not counter  # drain-completeness guard
+                        # #2127 drain-linchpin: under counter composition the
+                        # helper's exit-close is a design no-op (it closes the
+                        # RESTORED real dict — where any late foreign insert
+                        # was routed; every in-test anchor lives in the
+                        # counter). The fixture owns the deterministic close:
+                        # drain + close counter-held anchors (uncounted). The
+                        # drain is wrapped so a RED from the drift assert above
+                        # still closes seeds (code-review P2-2: a fixture-
+                        # teardown RED must leave clean module state).
+                        for _ in range(5):
+                            for _ns in list(counter):
+                                _anchor = dict.pop(counter, _ns, None)
+                                if _anchor is not None:
+                                    try:  # noqa: SIM105
+                                        _anchor.close()
+                                    except Exception:
+                                        pass
+                            if not counter:
+                                break
+                        if counter:  # residual late insert — never red, report
+                            warnings.warn(
+                                f"[#2090] keepalive drain left {len(counter)} "
+                                f"late-inserted anchor(s) after retries",
+                                UserWarning,
+                                stacklevel=2,
+                            )
                     finally:
-                        ha_mod._FALLBACK_KEEPALIVE = _orig_dict
                         _close_seed_sdks()  # after anchor close (last-client SAVE)
 
 
