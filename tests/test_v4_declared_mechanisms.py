@@ -638,5 +638,40 @@ def test_gate_fails_closed_on_a_non_string_name() -> None:
         assert any("declares no name" in e for e in errors), (bad, errors)
 
 
+def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
+    """Every branch of `gate_errors` is reached by a case (cycle-9 pre-empt).
+
+    A branch no test reaches is a guard that cannot be SEEN to fail — the file's
+    own rule. These are the branches the targeted cases above do not cover.
+    """
+    good = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "code": ["tortoise/fanout.py"],
+        "tests": ["tests/test_fanout_cap.py"],
+    }
+    cases = {
+        "row is not a mapping": (["not a dict"], "not a mapping"),
+        "id is not a string": ([{**good, "id": 1}], "no string id"),
+        "id is empty": ([{**good, "id": ""}], "no string id"),
+        "duplicate id": ([good, dict(good)], "duplicate id"),
+        "declared_in missing": ([{**good, "declared_in": []}], "no declaring document"),
+        "declared_in not a list": ([{**good, "declared_in": "x"}], "no declaring document"),
+        "code missing": ([{**good, "code": []}], "no code path"),
+        "code not a list": ([{**good, "code": {}}], "no code path"),
+        "empty registry": ([], None),
+    }
+    for label, (mechs, expected) in cases.items():
+        errors = gate_errors(mechs)
+        if expected is None:
+            # An empty registry is empty, not a violation — the CLOSED-SET tuple
+            # pin is what refuses it (see the closed-set test), not this gate.
+            assert errors == [], (label, errors)
+            continue
+        assert any(expected in e for e in errors), (label, expected, errors)
+
+
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
