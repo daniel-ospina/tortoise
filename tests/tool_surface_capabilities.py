@@ -126,14 +126,20 @@ class DeclaredBindingDivergence(NamedTuple):
 # `handler_operations` change that would move every other check that consumes it,
 # and is deliberately not done here.
 DECLARED_BINDING_DIVERGENCES: dict[str, DeclaredBindingDivergence] = {
-    "tortoise_operator_action": DeclaredBindingDivergence(
-        "operator_action", frozenset({"annotate_operator", "mitigate_operator"}),
-        "declares operator_action; the handler branches on action= to "
-        "mitigate_operator / annotate_operator and never calls it"),
-    "tortoise_traverse": DeclaredBindingDivergence(
-        "traverse", frozenset(),
-        "declares traverse; the handler calls navigation.tortoise_traverse(proj.db, "
-        "...) and reaches no public SDK method"),
+    # EMPTY as of #3904. Both original entries were declarations that named an SDK
+    # method the handler never reached:
+    #   * ``tortoise_operator_action`` declared ``operator_action`` while the handler
+    #     branches to ``mitigate_operator`` / ``annotate_operator``; and
+    #   * ``tortoise_traverse`` declared ``traverse`` (a LIVE but unrelated method —
+    #     signature ``(id, relationship_type, direction)``) while the handler reached
+    #     only ``_get_proj``.
+    # Both were repaired to the handler-served idiom (``sdk_method=""``), so there is
+    # no declared binding left to diverge. The DYNAMIC instrument for this class is
+    # ``tests/test_consumed_sdk_binding_3904.py`` — it drives the real handler with a
+    # recording-stub SDK and asserts the declared name is actually READ — and the
+    # synthetic probes in ``tests/test_tool_registry.py`` keep this arm falsifiable.
+    # Re-populate ONLY for a newly discovered divergence, recording the WHOLE
+    # divergence, and never to silence a red.
 }
 
 # Operations a handler reaches that are reads with no registry binding (they
@@ -203,12 +209,16 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
     "tortoise_pack_install",
+    # #3904: handler-served writer (dispatches to sdk.mitigate_operator / sdk.annotate_operator)
+    "tortoise_operator_action",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_overview", "tortoise_get", "tortoise_onboarding_state",
     "tortoise_onboarding_github_status",
     # #4035: handler-served reads (declaration corrected to sdk_method="")
     "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
+    # #3904: handler-served read (navigation.tortoise_traverse on sdk._get_proj())
+    "tortoise_traverse",
 })
 
 # #4474 removed `NON_HTTP_WRITER_TOOLS` — the last hand-maintained parallel name
