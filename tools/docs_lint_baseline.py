@@ -341,6 +341,23 @@ class FailClosed(Exception):
     """The linter did not run (or did not run cleanly) — never a lint verdict."""
 
 
+def _require_lychee_shape(document: object, where: str) -> dict:
+    """Refuse a lychee document the differ cannot read, on BOTH code paths.
+
+    `check` always required `total`/`error_map`, but `update` did not — so a
+    lychee run that emitted a parseable object without `error_map` (an error
+    envelope, a wrapper) wrote a 0-entry lychee snapshot and exited 0. The
+    ceiling accepts 0, so that snapshot then reds every future inherited link
+    finding: the generator must be exactly as fail-closed as the consumer.
+    """
+    if not isinstance(document, dict) or "error_map" not in document or "total" not in document:
+        raise FailClosed(
+            f"lychee JSON from {where} has not the expected shape (total/error_map "
+            "missing) — failing closed"
+        )
+    return document
+
+
 def parse_markdownlint_checked(text: str) -> list[tuple[str, str, str, str]]:
     """Parse a cli2 report, refusing one the parser cannot fully account for.
 
@@ -392,11 +409,7 @@ def load_lychee(output: Path, repo_root: Path) -> list[tuple[str, str, str]]:
         document = json.loads(output.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise FailClosed(f"lychee JSON report {output} is unparseable: {exc}") from exc
-    if not isinstance(document, dict) or "error_map" not in document or "total" not in document:
-        raise FailClosed(
-            f"lychee JSON report {output} has not the expected shape (total/error_map missing) "
-            "— failing closed"
-        )
+    document = _require_lychee_shape(document, f"report {output}")
     return parse_lychee(document, repo_root)
 
 
@@ -587,12 +600,13 @@ def _run_lychee(files: list[str], repo_root: Path, lychee_bin: str) -> dict:
     finally:
         list_path.unlink(missing_ok=True)
     try:
-        return json.loads(proc.stdout)
+        document = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise FailClosed(
             f"lychee produced unparseable JSON (exit {proc.returncode}): "
             f"{proc.stderr.strip()[:400]}"
         ) from exc
+    return _require_lychee_shape(document, f"lychee stdout (exit {proc.returncode})")
 
 
 def run_update(args: argparse.Namespace) -> int:

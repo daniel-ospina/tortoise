@@ -27,9 +27,12 @@ it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -603,19 +606,60 @@ def test_differ_step_exists_and_is_gated_with_the_linters(name: str, gate: str):
     "name",
     ["Get changed markdown files", "Get changed markdown files (main health)"],
 )
-def test_changed_paths_are_guarded_against_glob_expansion(name: str):
-    """cli2 and lychee expand every positional arg as a globby pattern — extglob too.
+def test_glob_guard_actually_fails_closed(name: str):
+    """EXECUTE the guard — a substring assertion let a missing `exit 1` pass.
 
-    `./docs/a[1].md` is linted as `./docs/a1.md`, and `./docs/@(README).md` as
-    `./docs/README.md`: the linter truthfully reports `Linting: 1 file` for a
-    file it never read, the differ's cardinality proof is satisfied, and a new
-    finding in the changed file passes. A denylist of `* ? [ ] { }` was measured
-    bypassable through extglob, so both count steps must carry the ALLOWLIST.
+    `assert "exit 1" in run` was satisfied by the step's unrelated BASE_SHA
+    guard, so deleting the glob guard's `exit 1` kept every test green while the
+    step exited 0 and linted the glob-expanded file (and dropping the regex's `$`
+    anchor was similarly invisible). Both guards must be an ALLOWLIST, because
+    globby/micromatch expand extglob (`@(README).md`), which contains none of
+    `* ? [ ] { }`. So run the extracted guard against real inputs.
     """
     run = _by_name(name)["run"]
-    assert "grep -qvE" in run, "a denylist is bypassable via extglob (@(x), +(x))"
-    assert "[A-Za-z0-9._@/-]" in run
-    assert "exit 1" in run
+    match = re.search(
+        r"(if grep -qvE '\^\\\./\[A-Za-z0-9\._@/-\]\+\$'[^\n]*\n(?:.*\n)*?\s*fi\n)", run
+    )
+    assert match is not None, "the allowlist guard is missing from this step"
+    guard = match.group(1)
+    listing = "pr-md.txt" if name == "Get changed markdown files" else "changed-md.txt"
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / listing
+
+        def run_with(contents: str) -> int:
+            target.write_text(contents, encoding="utf-8")
+            script = f'set -euo pipefail\nRUNNER_TEMP="$1"\n{guard}'
+            return subprocess.run(
+                ["bash", "-c", script, "bash", td], capture_output=True, text=True
+            ).returncode
+
+        assert run_with("./docs/normal-file.md\n") == 0
+        assert run_with("./node_modules/@babel/README.md\n") == 0
+        for bad in (
+            "./docs/@(README).md\n",
+            "./docs/a[1].md\n",
+            "./docs/a b.md\n",
+            "./docs/a+b.md\n",
+        ):
+            assert run_with(bad) != 0, f"{bad!r} must fail the job"
+
+
+def test_update_rejects_a_lychee_document_the_check_would_reject():
+    """The generator must be as fail-closed as the consumer.
+
+    `load_lychee` requires total/error_map, but `_run_lychee` only json.loads'd,
+    so a parseable object without error_map wrote a 0-entry lychee snapshot with
+    exit 0 — and the ceiling accepts 0, so that snapshot then reds every future
+    inherited link finding.
+    """
+    with pytest.raises(dlb.FailClosed):
+        dlb._require_lychee_shape({}, "test")
+    with pytest.raises(dlb.FailClosed):
+        dlb._require_lychee_shape({"total": 0}, "test")
+    assert dlb._require_lychee_shape({"total": 0, "error_map": {}}, "test") == {
+        "total": 0,
+        "error_map": {},
+    }
 
 
 def test_linters_capture_output_instead_of_deciding_the_verdict():
@@ -688,6 +732,32 @@ def test_snapshot_is_a_ceiling_never_a_floor():
             "add. If a raise is genuinely required, raise this ceiling in the same change "
             "and say why."
         )
+
+
+def _canonical_digest(entries: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+
+
+def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
+    """The ceiling bounds the COUNT; a SWAP of one entry for another defeats it.
+
+    A PR can delete a legitimate baseline entry and append the finding it
+    introduced while keeping `snapshot.counts` constant: the count ceiling
+    (11238 <= 11238) and the counts/lists consistency test both pass, and the
+    differ classifies the new finding as KNOWN — it only inspects findings the
+    run produces, so a removed entry is never re-checked. Measured end-to-end on
+    the previous revision: the differ returned 0 new on a swapped baseline. These
+    digests pin the CONTENTS, so append, delete and swap all require a digest
+    raised in the same change — the only thing that makes "a new entry is a new
+    failure" true for the deterministic half and the remote-varying one alike.
+    """
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert _canonical_digest(baseline["markdownlint"]) == (
+        "ba58e90af5357ad7f83eb6c4004b84b0860ce4408dbbb1b7977c704c766d5469"
+    ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
+    assert _canonical_digest(baseline["lychee"]) == (
+        "caee699b2f935fe798006b2cf51fdcf0027d6efe792bba2a5cd1e0c8fde03996"
+    ), "the lychee snapshot contents changed — a swap is not a re-baseline"
 
 
 def test_every_mapped_generator_exists_and_its_doc_is_tracked():

@@ -67,7 +67,11 @@ growing it requires raising that ceiling in the same change, out loud.
   snapshot edit. A pinned ceiling in `tests/test_docs_lint_baseline.py` enforces
   it: **exact** for markdownlint (deterministic), and the **maximum observed
   across generations** for the lychee half (its remote-link count drifts between
-  runs) — so slack above the observed range cannot hide an append.
+  runs) — so slack above the observed range cannot hide an append. The same test
+  pins a **content digest** of each list, because a ceiling bounds only the
+  count: a PR could otherwise delete one legitimate entry and append the finding
+  it introduced, keeping the count constant. Append, delete and swap therefore
+  all require a ceiling *and* a digest raised in the same change, out loud.
 - **#7534** owns the burn-down. Note its **population**: this snapshot covers ALL
 tracked markdown — 11,238 findings in 650 of the 838 tracked files. The `docs/`
 subtree holds 8,980 of those in 514 files; the remaining 2,258 in 136 files sit
