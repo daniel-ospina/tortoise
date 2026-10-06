@@ -70,7 +70,7 @@ surfaces are the same.
 
 ### 2.2 The pack surface today: a closed 7-key `kindDef`
 
-```
+```text
 tortoise/pack_registry.py:111  VALID_KINDDEF_KEYS = frozenset({
 tortoise/pack_registry.py:112      "description", "synonyms", "examples", "nearMisses",
 tortoise/pack_registry.py:113      "extractable", "storeAs", "enforcement",
@@ -177,6 +177,7 @@ schema and one merge**: both registers populate the same `Prop` type, and every 
 merged view.
 
 **Alternatives rejected:**
+
 - *One manifest register for everything* — the Python writers would have to be data-driven; that is
   rewriting the write path to serve a naming convention. Rejected.
 - *One Python register, packs only reference it* — a pack could then never introduce
@@ -244,6 +245,7 @@ FalkorDB's fulltext index does not index array-valued properties
 FTS-indexable**; declaring `indexed: true` on a raw list is an error.
 
 **Alternatives rejected:**
+
 - *A free-form `type: any` / an open props bag* — directly violates #2818 indicator 2 ("a *declared*
   surface, not an open props bag"). Rejected.
 - *JSON Schema as the type language* — the target store is FalkorDB, which has no JSON/map property
