@@ -1826,8 +1826,25 @@ def rrf_fusion(
                     strategy_names[i], w,
                 )
                 w = 1.0
-        for rank, (pid, _score) in enumerate(ranked):
-            rrf_score = w / (k + rank + 1)
+        for pid, score in ranked:
+            # #3019: TIE-AGNOSTIC RANK — a row's rank is the number of rows with a
+            # STRICTLY better score, so identically-scored candidates receive the
+            # SAME rank (a distinguished row keeps its rank).
+            #
+            # Position-as-rank is the textbook RRF formula as first written
+            # (4abff72cb, the commit that introduced this module), but it turns a
+            # deterministic intra-leg tie order into a FABRICATED score gap:
+            # measured on the W4-b twin fixture, the gap the contested twin must
+            # overcome moved 0.0038 (main) -> 0.0188 (at the #6213 head), which
+            # EXCEEDS W4_CONTESTED_BOOST(0.05) x DEFAULT_GRAPH_BOOST_WEIGHT(0.35)
+            # = 0.0175 (ranking.py:67,:58), so the contested twin stopped
+            # outranking its calm twin. Collapsing the tie makes that gap 0.0.
+            #
+            # The break is `score > ...` (strict), so a candidate with no better
+            # peer keeps rank 0 and the leg's own order is still expressed by
+            # whatever the LEG puts in its score (see temporal_leg.py).
+            _better = sum(1 for _, other in ranked if other > score)
+            rrf_score = w / (k + _better + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
