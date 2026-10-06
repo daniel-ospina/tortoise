@@ -246,6 +246,30 @@ def _is_sibling_marker(marker: dict, run_uid: str) -> bool:
 from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402
 from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # noqa: E402
 
+# ── Hand the pytest-LOADED instance of this module to the tests that need its
+# globals ─────────────────────────────────────────────────────────────────
+#
+# ⛔ DO NOT look it up as ``sys.modules["conftest"]``. That KEY is shared by
+# EVERY ``__init__``-less conftest in the tree, and pytest lets a later one take
+# it over. Measured 2026-10-06 at the #6269 head: once
+# ``tests/e2e/auth/conftest.py`` has been collected — which the default
+# ``uv run pytest tests/`` lane does, and every fast shard does NOT — the ONLY
+# ``conftest.py`` module left in ``sys.modules`` is the nested one, and this
+# module is in no entry at all (so a scan by ``__file__`` finds nothing either).
+# Tests that then monkeypatch ``_ACTIVE_SUITES_DIR`` or drive
+# ``_server_graph_hygiene`` reach a foreign module and die with
+# ``AttributeError: <module 'conftest' from '.../tests/e2e/auth/conftest.py'>
+# has no attribute '_ACTIVE_SUITES_DIR'`` — 10 failures, invisible to CI
+# because no fast shard selects an ``e2e/`` file.
+#
+# ``__name__`` is the pytest-loaded name HERE; the ``tests.conftest``
+# double-import carries ``__name__ == "tests.conftest"`` and is excluded by
+# this guard (its body re-execution is its own documented hazard — see
+# ``tests/_embedded.py``).
+if __name__ == "conftest":
+    import tests._embedded as _embedded_publish
+    _embedded_publish.LOADED_CONFTEST = sys.modules[__name__]
+
 # ── #4071: the embedded lane must not reach the CANONICAL store ───────────
 # (ask #1 of #4028). A bare ``TortoiseSDK()`` resolves through
 # ``tortoise/config.py::resolve_db_path()``, whose fallback is

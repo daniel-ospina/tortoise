@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -248,19 +247,82 @@ def _noop_proj(*_args, **_kwargs):
     yield _Proj()
 
 
+def _loaded_conftest():
+    """The pytest-LOADED ``tests/conftest.py`` module, handed over by conftest.
+
+    Never ``import tests.conftest``: pytest loads tests/conftest.py as the
+    top-level module ``conftest``, so the dotted import builds a SECOND instance
+    whose top-level re-execution overwrites ``TORTOISE_TEST_SESSION`` with a
+    fresh nonce mid-session, stranding the live session's derived graph names +
+    journal (the double-import hazard is documented in ``tests/_embedded.py``).
+
+    Never ``sys.modules["conftest"]`` either: that bare key is shared by every
+    ``__init__``-less conftest, and a nested one TAKES IT OVER — leaving the
+    loaded module in no ``sys.modules`` entry at all, so no lookup or scan can
+    find it. conftest publishes itself (``LOADED_CONFTEST``) instead; this is
+    the accessor for that handover, pinned by
+    ``test_the_loaded_conftest_is_handed_over_not_looked_up``.
+    """
+    from tests import _embedded as emb
+
+    conftest = emb.LOADED_CONFTEST
+    if conftest is None:
+        raise RuntimeError(
+            "tests/conftest.py did not publish its loaded module: "
+            "tests/_embedded.py::LOADED_CONFTEST is None, so the gate's "
+            "globals cannot be reached. See the handover block in "
+            "tests/conftest.py (the bare sys.modules['conftest'] key is NOT "
+            "that module once a nested conftest has been collected).")
+    return conftest
+
+
+def _bare_conftest_key_lookups(source: str) -> int:
+    """Count real ``sys.modules["conftest"]`` SUBSCRIPTS in ``source``.
+
+    Prose is excluded deliberately: the fix's own comments and docstrings NAME
+    the trap in order to forbid it, so a substring test fires on the very
+    documentation that prevents the regression (a naive first cut of this pin
+    did exactly that, and failed on its own file).
+    """
+    hits = 0
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "modules"
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "sys"
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == "conftest"):
+            hits += 1
+    return hits
+
+
+def test_the_loaded_conftest_is_handed_over_not_looked_up():
+    """Pin the #6269 P1: reach the loaded conftest by handover, not by key.
+
+    ⛔ The failure this prevents is ORDER-DEPENDENT and CI-invisible: with the
+    bare-key lookup, collecting a nested conftest (``tests/e2e/auth/`` — done by
+    the default ``uv run pytest tests/`` lane, by no fast shard) makes every
+    test in this file die with ``AttributeError: ... has no attribute
+    '_ACTIVE_SUITES_DIR'``. Session-observing that needs such a collection, so
+    the lookup itself is pinned on the source contract — same reason the AST
+    pins above are source pins.
+    """
+    loaded = _loaded_conftest()
+    assert Path(loaded.__file__).resolve() == REPO / "tests" / "conftest.py"
+    assert hasattr(loaded, "_ACTIVE_SUITES_DIR")
+    assert "_embedded_publish.LOADED_CONFTEST = sys.modules[__name__]" in \
+        (REPO / "tests" / "conftest.py").read_text()
+    assert _bare_conftest_key_lookups(Path(__file__).read_text()) == 0
+
+
 def _start_teardown(monkeypatch, tmp_path, *, own, live, journal,
                     full=None, probe_raises=False, others=()):
-    # The pytest-LOADED conftest module — reached through sys.modules, never
-    # `import tests.conftest`. pytest loads tests/conftest.py as the top-level
-    # module `conftest`, so `import tests.conftest` builds a SECOND instance
-    # whose top-level re-execution overwrites TORTOISE_TEST_SESSION with a
-    # fresh nonce mid-session. That strands the live session's derived graph
-    # names + journal and reds test_redirect_seam's nonce-stability pin
-    # whenever this file runs first in the same process (order-dependent red
-    # on main; the double-import hazard is documented in tests/_embedded.py).
-    # The loaded instance is also the one whose `_server_graph_hygiene`
-    # globals the monkeypatches below must reach.
-    conftest = sys.modules["conftest"]
+    # The pytest-LOADED conftest module — the one whose `_server_graph_hygiene`
+    # globals the monkeypatches below must reach. Reached by conftest's own
+    # handover; see _loaded_conftest above for why neither
+    # `import tests.conftest` nor `sys.modules["conftest"]` is admissible.
+    conftest = _loaded_conftest()
     import tortoise.embedded_reaper as reaper
     from tests import _embedded as emb
 
