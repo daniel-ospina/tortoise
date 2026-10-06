@@ -61,8 +61,14 @@ DECLARED_IDS = (
     "fanout_cap",
 )
 
-#: The only two admissible states. There is no third state and no unmarked row.
-STATES = ("implemented", "not-implemented")
+IMPLEMENTED = "implemented"
+NOT_IMPLEMENTED = "not-implemented"
+
+#: The two states this bounded slice supports. ⚠️ #5064's own row model also
+#: names a third, `descriptive` (its open question (c) asks whether it survives).
+#: It is deliberately NOT accepted here, so a `descriptive` row FAILS CLOSED
+#: until that question is settled — the safe direction, and an allow-list.
+STATES = (IMPLEMENTED, NOT_IMPLEMENTED)
 
 
 def load_registry(path: Path = REGISTRY) -> dict:
@@ -112,7 +118,7 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
 
         state = row.get("state")
 
-        if state == "implemented":
+        if state == IMPLEMENTED:
             code = list(row.get("code") or [])
             tests = list(row.get("tests") or [])
             if not code:
@@ -127,19 +133,25 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 if not (root / rel).exists():
                     errors.append(f"{mid}: declared path does not exist: {rel}")
 
-        elif state == "not-implemented":
+        elif state == NOT_IMPLEMENTED:
+            # A tracking issue is a REAL issue number. `row.get(...) in (None,
+            # "", 0)` used `==` and passed `[]`, `" "`, `"0"`, `"TBD"` and any
+            # negative int — a placeholder on the one row that claims to be
+            # marked. The check is an allow-list on the type and the sign, not a
+            # deny-list of the spellings someone thought of (review, cycle 1 P1).
             issue = row.get("tracking_issue")
-            if issue in (None, "", 0):
+            if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
                 errors.append(
-                    f"{mid}: not-implemented with no tracking_issue — an "
-                    f"unbuilt mechanism needs a home"
+                    f"{mid}: not-implemented with no real tracking_issue "
+                    f"(got {issue!r}) — an unbuilt mechanism needs a home"
                 )
 
         else:
             errors.append(
                 f"{mid}: NEITHER implemented (a code path with a test) NOR "
-                f"marked not-implemented (state={state!r}) — a declared-and-absent "
-                f"mechanism must be DECLARED, not implied"
+                f"marked not-implemented (state={state!r}, expected one of "
+                f"{STATES}) — a declared-and-absent mechanism must be DECLARED, "
+                f"not implied"
             )
 
     return errors
@@ -214,7 +226,29 @@ def test_gate_fails_closed_on_not_implemented_without_a_tracking_issue() -> None
     errors = gate_errors(
         [{"id": "x", "name": "x", "declared_in": [], "state": "not-implemented"}]
     )
-    assert any("no tracking_issue" in e for e in errors), errors
+    assert any("no real tracking_issue" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_placeholder_tracking_issue() -> None:
+    """A tracking issue must be a REAL issue number, not a truthy placeholder.
+
+    Cycle-1 review P1: `in (None, "", 0)` passed `[]`, `" "`, `"0"`, `"TBD"`
+    and negative ints, so a `not-implemented` row could be "marked" with a
+    placeholder on the one field whose whole job is to be a marker.
+    """
+    for bad in ([], " ", "TBD", "0", -3, True, 0.0):
+        errors = gate_errors(
+            [
+                {
+                    "id": "x",
+                    "name": "x",
+                    "declared_in": [],
+                    "state": "not-implemented",
+                    "tracking_issue": bad,
+                }
+            ]
+        )
+        assert any("tracking_issue" in e for e in errors), (bad, errors)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid

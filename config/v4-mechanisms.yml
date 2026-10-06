@@ -23,13 +23,15 @@
 # ⚠️ THE DECLARED SET IS NOT READ FROM ONE DESIGN DOCUMENT — and that is part of
 # the finding. #4894 (the issue this one names as its dependency, "the v4
 # write-path design of record") does **NOT** enumerate these seven mechanisms;
-# it names the raw/narrative-out change and a salience gate, and no list. Five of
-# the seven are declared in `EXTRACTOR-V4-ARCHITECTURE.md` and two in
-# `STORAGE-ARCHITECTURE.md` (the two documents are a cross-referenced PAIR, not
-# one authority). The seven names below come from #5064's own O/I/T indicator
-# (1), each with its declaring document and a filed tracking issue. Making the
-# set a single registry is the fix; `declared_in:` records where each row's
-# declaration actually lives.
+# it names the raw/narrative-out change and a salience gate, and no list. The
+# seven are declared across a cross-referenced PAIR of documents, not one
+# authority: four in `EXTRACTOR-V4-ARCHITECTURE.md` (vet, source_dedup,
+# near_dup_merge, span_link), three in `STORAGE-ARCHITECTURE.md` (span_link,
+# sufficiency_router, fanout_cap — span_link is declared in both), and one in
+# `packs/dev/manifest.yaml` (embed_gate). The seven NAMES below come from
+# #5064's own O/I/T indicator (1), each with its declaring document and a filed
+# tracking issue. Making the set a single registry is the fix; `declared_in:`
+# records where each row's declaration actually lives.
 #
 # ⛔ NOT IN SCOPE (this is #5064's bounded slice only):
 #   * indicator (2)'s "the design document is generated from the registry" —
@@ -105,7 +107,8 @@ mechanisms:
   - id: embed_gate
     name: "EMBED gate — which written rows earn a vector"
     declared_in:
-      - packs/dev/manifest.yaml  # ontology.memory_granularity
+      - packs/dev/manifest.yaml  # ontology.memory_granularity — the POLICY source
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.2a — where the gate is specified
     state: not-implemented
     tracking_issue: 5008
     note: >-
