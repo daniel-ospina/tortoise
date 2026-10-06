@@ -79,6 +79,7 @@ from typing import ClassVar
 import pytest
 
 from tortoise.projection import (
+    _engine_coerces,
     _flat_writable,
     _GuardedGraph,
     _journal_safe_params,
@@ -1134,37 +1135,53 @@ def test_a_DECIMAL_is_preserved_because_the_engine_COERCES_it():
     assert out["p"]["blob"] is None  # rejected, degraded
 
 
-def test_every_DRIVER_COERCED_number_is_preserved_not_nulled():
-    """#7406: the coercion scope is the DRIVER's, not `Decimal` alone.
+def test_the_boundary_models_the_DRIVER_transport_both_directions():
+    """#7406: the accept/reject set is the TRANSPORT's, and it is not a type list.
 
-    `_sanitize_props` deliberately admits numpy integers
-    (`test_4647_store_representable.py::test_numpy_ints_in_range_pass`), so
-    `update_point(id, v=np.int64(7))` reaches this boundary. Measured on the
-    real engine through `_GuardedGraph`, a boundary that preserved only
-    `Decimal` stored `None` where the raw handle stored `7` — silent data loss
-    on a supported surface. `Fraction` and `Decimal` ride the same driver
-    fallback.
+    The driver inlines `str(value)` for a parameter it cannot encode natively
+    and the engine parses THAT, so the boundary must accept exactly what the
+    engine parses. Two attempts at a TYPE allowlist each missed a member a
+    review then measured: `Decimal`-only nulled `np.int64(7)` on a supported
+    surface (`_sanitize_props` admits numpy integers — see
+    `test_4647_store_representable.py`), and widening to `numbers.Number`
+    nulled `np.bool_` while FORWARDING `Fraction(5, 2)` into a guaranteed
+    `Invalid input '/'` parse reject. Modelling the transport closes the class
+    instead of enumerating it.
 
-    The other direction is asserted in the same map: a NON-FINITE Decimal is
-    REJECTED by the engine at parse (`Failed to parse query parameter`), so it
-    must degrade — widening the type test must not bypass the finiteness
-    filter. `complex` is a `numbers.Number` but `(1+2j)` is not a literal.
+    Each case is a value the real engine was measured to accept or reject;
+    asserted on a WRITE and a READ because the two paths reach this by
+    different branches.
     """
     from decimal import Decimal
     from fractions import Fraction
 
     np = pytest.importorskip("numpy")
     write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    read = "MATCH (n:Point {id:$id}) WHERE n.v = $v RETURN n"
 
-    for coerced in (Decimal("0.25"), Fraction(5, 1), np.int64(7), np.int32(7)):
-        out = _journal_safe_params({"p": {"v": coerced}}, write)
-        assert out["p"]["v"] == coerced, coerced
-
-    nan, inf = Decimal("NaN"), Decimal("Infinity")
-    out = _journal_safe_params({"p": {"nan": nan, "inf": inf, "c": 1 + 2j}}, write)
-    assert out["p"]["nan"] is None, "a non-finite Decimal parses as a reject"
-    assert out["p"]["inf"] is None
-    assert out["p"]["c"] is None, "complex is not a Cypher literal"
+    accepted = [
+        Decimal("0.25"),
+        Fraction(5, 1),
+        np.int64(7),
+        np.int32(7),
+        np.bool_(True),
+        np.float64(1.5),
+    ]
+    rejected = [
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Fraction(5, 2),
+        complex(1, 2),
+        np.datetime64("1970-01-02"),
+    ]
+    for v in accepted:
+        assert _engine_coerces(v), f"engine accepts {v!r} (str={str(v)!r})"
+        assert _journal_safe_params({"p": {"v": v}}, write)["p"]["v"] is v
+        assert _journal_safe_params({"v": v}, read)["v"] is v
+    for v in rejected:
+        assert not _engine_coerces(v), f"engine rejects {v!r} (str={str(v)!r})"
+        assert _journal_safe_params({"p": {"v": v}}, write)["p"]["v"] is None
+        assert _journal_safe_params({"v": v}, read)["v"] is None
 
 
 def test_a_SET_is_a_PARSE_reject_and_a_CYCLE_degrades():
@@ -1186,6 +1203,10 @@ def test_a_SET_is_a_PARSE_reject_and_a_CYCLE_degrades():
     assert _writable_at_parse(frozenset({1})) is False
     read = "MATCH (n:Point {id:$id}) RETURN n.p AS p"
     assert _journal_safe_params({"p": {1, 2}}, read)["p"] is None
+    # ...but the read-path SHAPE exemption it exists for still works: a map or
+    # a list is accepted as a bare parameter, so it must be left alone.
+    assert _journal_safe_params({"p": {1: 2}}, read)["p"] == {1: 2}
+    assert _journal_safe_params({"p": [1, 2]}, read)["p"] == [1, 2]
 
     cyclic = {"props": None}
     cyclic["props"] = cyclic

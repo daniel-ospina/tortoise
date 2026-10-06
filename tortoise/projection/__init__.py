@@ -17,7 +17,6 @@ import contextlib
 import hashlib
 import json
 import math
-import numbers
 import re
 import os
 import shutil
@@ -2264,9 +2263,15 @@ def _journal_safe_params(params, cypher=None):
             return out if changed else value
         if _annotator_value_ok(value) or _engine_coerces(value):
             return value
-        if is_read and _writable_at_parse(value):
-            # Shape-only reject on a read: the engine accepts it as a bare
-            # parameter (measured), so leave it EXACTLY as it is.
+        if is_read and isinstance(value, (dict, list, tuple)) and _writable_at_parse(value):
+            # Shape-only reject on a read: the engine accepts a CONTAINER as a
+            # bare parameter (measured), so leave it EXACTLY as it is. Only a
+            # container — a bare SCALAR that reached here was refused by BOTH
+            # `_annotator_value_ok` and `_engine_coerces`, i.e. its `str()` is
+            # not a literal, and the engine parse-rejects it on a read too
+            # (measured: `Decimal("NaN")`, `complex(1, 2)`). Exempting every
+            # scalar `_writable_at_parse` happens not to enumerate was
+            # forwarding exactly those.
             return value
         degraded.append(path)
         return None
@@ -3041,34 +3046,48 @@ def _annotator_value_ok(val) -> bool:
     return True
 
 
+# The driver sends a parameter it cannot encode natively by INLINING
+# ``str(value)`` into the query header, and the engine parses THAT. So "will the
+# engine accept this value" is exactly "is ``str(value)`` a Cypher literal" —
+# the model `numeric_domain` already states for numbers ("the driver inlines
+# ``str(value)``", numeric_domain.py). Measured on the real engine:
+#
+#   ACCEPTED  Decimal("0.25")->"0.25"   np.int64(7)->"7"
+#             Fraction(5,1)->"5"         np.bool_(True)->"True"
+#   REJECTED  Decimal("NaN")->"NaN"     Decimal("Infinity")->"Infinity"
+#             Fraction(5,2)->"5/2"       complex(1,2)->"(1+2j)"
+#             np.datetime64("1970-01-02")->"1970-01-02"
+#
+# A TYPE allowlist cannot express that set, which is why the first two
+# attempts at this predicate each missed a member and had to be widened: the
+# review that caught `Decimal` was followed by one catching `np.bool_` (a
+# supported surface — `_sanitize_props` admits it) and `Fraction(5, 2)` (which
+# the widened `numbers.Number` test forwarded into a guaranteed parse reject).
+# Modelling the transport closes the class instead of enumerating it.
+_LITERAL_NUMBER_RE = re.compile(r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_LITERAL_BOOLS = frozenset({"True", "False"})
+
+
 def _engine_coerces(val) -> bool:
-    """True for a value the driver encodes and the engine stores as a NUMBER.
+    """True when the driver inlines ``val`` and the engine parses it as a literal.
 
     `_annotator_value_ok` answers "is this ALREADY a persistable property
-    primitive", which is NARROWER than what the engine accepts: the driver
-    falls back to the value's own literal, so a numeric object that is not a
-    Python primitive is stored as the number it prints as. Judging those with
-    the primitive test NULLED them — silent data loss. Measured on the real
-    engine, a value the boundary replaced with `null` while the raw write
-    stored it fine:
+    primitive" — NARROWER than what the engine accepts. Judging the difference
+    by the primitive test NULLED values the engine stores happily, which is
+    silent data loss, not a guard firing: measured through `_GuardedGraph`
+    against the raw handle, the boundary had stored `None` where the raw write
+    stored `7` (np.int64), `translated 0.25` (Decimal), and dropped
+    `np.bool_(True)` on a supported live surface.
 
-      * `decimal.Decimal("0.25")` — the #7406 regression, journaled `null`;
-      * `numpy.int64(7)` — reachable from a SUPPORTED surface, because
-        `sdk._sanitize_props` deliberately admits numpy integers
-        (`tests/test_4647_store_representable.py::test_numpy_ints_in_range_pass`);
-      * `fractions.Fraction(5, 1)`.
-
-    Deliberately NOT every `str()`-able object — only numbers, and only FINITE
-    ones: the engine REJECTS a non-finite at parse (`Decimal("NaN")` ->
-    "Failed to parse query parameter"), and degrading that is the whole point
-    of the boundary. So this widens the TYPE test without bypassing the
-    finite/representable filter that `_annotator_value_ok` already applies.
+    This asks the TRANSPORT's question instead of a type question, so a new
+    coercible type cannot be missed and a non-coercible one cannot be
+    forwarded: everything the engine refuses in the table above is refused
+    here, and everything it accepts is preserved. `str()` is suppressed because
+    a value whose own `__str__` raises is not encodable either.
     """
-    if isinstance(val, complex) or not isinstance(val, numbers.Number):
-        # `complex` is a `numbers.Number` but `(1+2j)` is not a literal.
-        return False
     with contextlib.suppress(Exception):
-        return math.isfinite(val)
+        text = str(val)
+        return bool(_LITERAL_NUMBER_RE.match(text)) or text in _LITERAL_BOOLS
     return False
 
 
