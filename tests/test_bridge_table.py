@@ -797,8 +797,9 @@ def _part_d_citations() -> dict[str, str]:
     # The slice's real end is the `**Documented hops.**` cut below, NOT `_section`'s heading
     # bound: the marker sits inside D1 and ahead of the next heading, so the cut truncates
     # first and the bound never determines the parse (bound, old literal, and no bound all
-    # yield the same 4 443 chars / 19 rows). Assert the marker, so a moved or renamed hop
-    # block fails here by NAME instead of silently widening the corpus past the D1 rows.
+    # yield the same 4 443 chars / 19 rows). The assert below does not ADD detection — a moved
+    # marker is already caught downstream by the row/quote parity checks; it exists so the
+    # failure is named here instead of surfacing as four unrelated row-parity failures.
     d1 = _section(doc, "### D1")
     hops = "**Documented hops.**"
     assert hops in d1, (
@@ -843,12 +844,18 @@ def _section(doc: str, heading: str) -> str:
     `#{2,3}` is same-or-higher than the level-3 `###` headings this is called with, so a
     deeper `####` inside a section does not truncate it. The split is asserted to have applied:
     without that, a section with no following heading silently returns the rest of the doc.
+
+    PRECONDITION: `heading` must be followed by another h2/h3 heading. This helper cannot
+    serve the document's FINAL section — there the rest of the doc IS the correct body, but
+    the assert cannot tell that case apart from a bound that failed to apply, so it raises.
+    No call site targets a final section; add one only with a different helper.
     """
     assert heading in doc, f"the generated doc has no {heading!r} section"
     parts = re.split(r"\n#{2,3} ", doc.split(heading)[1])
     assert len(parts) > 1, (
-        f"no heading follows {heading!r} at level 2-3 — the section bound did not apply, so "
-        "this would return the rest of the document"
+        f"no heading follows {heading!r} at level 2-3 — either the section bound did not "
+        "apply (so this would return the rest of the document), or this is the document's "
+        "final section, which _section does not support"
     )
     return parts[0]
 
