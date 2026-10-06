@@ -1143,7 +1143,7 @@ rows:
   family: graph
   family_rank: 2
   served: http
-  sdk_method: operator_action
+  sdk_method: ''
   group_source: mapped
   keyword: link
   keyword_rank: 9
@@ -1151,7 +1151,7 @@ rows:
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
     the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
-  dependency: declares TortoiseSDK.operator_action (resolves)
+  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1268,7 +1268,7 @@ rows:
   family: reasoning
   family_rank: 3
   served: http
-  sdk_method: traverse
+  sdk_method: ''
   group_source: mapped
   keyword: fetch
   keyword_rank: 1
@@ -1276,7 +1276,7 @@ rows:
   canonical: null
   job: 'Multi-hop graph traversal from entity following ALL relationship types. Returns {entity, nodes: [{node,
     relationship, depth}]}.'
-  dependency: declares TortoiseSDK.traverse (resolves)
+  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -4524,16 +4524,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.operator_action.
-  dependency: 'reached by 1 registered tool(s): tortoise_operator_action'
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: agent-reachable
+  class: no-caller-found
 - name: sdk:org_create
   method: org_create
   family: null
@@ -5448,16 +5448,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.traverse.
-  dependency: 'reached by 1 registered tool(s): tortoise_traverse'
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: agent-reachable
+  class: no-caller-found
 - name: sdk:ulid
   method: ulid
   family: null

@@ -2553,13 +2553,12 @@ class TestVocabEdgeValidation:
         **weights** it — ``ep``'s factor queries are ``IMPL|NAND``-filtered, and
         the source-credibility prior lives in ``sdk._apply_source_inheritance``
         (``extractedFrom``-filtered; ``ep.py`` itself never reads
-        ``extractedFrom``). But ``ep``'s affected-set BFS is unfiltered on the
-        relation (`MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point)`), so a
-        `related` edge onto an operator **does** pull the far endpoint into the
-        recompute set — and there a node with no ``IMPL|NAND`` factor *and no
-        run-level evidence* is recomputed as ``Beta(1,1)``, its prior discarded
-        (#5566). That is not specific to `related`, and this test does not cover
-        it.
+        ``extractedFrom``). The affected-set traversal is now ``IMPL|NAND``
+        filtered too (#5566): a `related` edge onto an operator no longer pulls
+        the far endpoint into the recompute set, so it can no longer reset a
+        node's prior to ``Beta(1,1)``. The membership pin lives in
+        `test_ep_local_395.py::test_ac3_max_hops_none_both_impls_and_run_contract`;
+        this test still does not cover it.
 
         This is a GUARD, not a policy. The transfer half is a tested decision;
         the other two absences are mechanism, not decision. Adding `related` to

@@ -11,6 +11,8 @@ aboutObjects: tortoise-cloud
 related:
   - issue: 4179
     note: "Canonical source of truth for the retention/deletion promise (owner ruling 2026-09-18)."
+  - issue: 4029
+    note: "Owner ruling 1B + 2B (2026-09-30): a solely-owned team is deleted with the account; an account's backup copies age out on the ~28-day cycle rather than being purged at 7 days."
   - issue: 2304
     note: "Graph delete = trash: quarantine → 7-day grace → erasure."
   - issue: 302
@@ -33,12 +35,18 @@ for a **7-day restore window**. After that, the deleted thing is purged.
 > **Delete = gone from your view immediately · restorable for 7 days · no copy
 > remains after about four weeks.** *(Owner, 2026-09-18.)*
 
+After the 7 days the **live** data is purged. The 7 days are not, by themselves,
+a claim that no copy survives: for a **user account**, its backup copies are
+**not** actively purged and age out on the ≈28-day cycle (owner ruling **2B**,
+2026-09-30 — see the table and *Owner decisions* below).
+
 The horizon is **path-dependent**, and the difference matters:
 
 | Path / copy | Deletion horizon | Where it lives in code |
 |-------------|------------------|------------------------|
 | **Graph** deletion — the undo window | **7 days** | `tortoise/backup_sweep.py` `_GRAPH_PURGE_GRACE_DAYS` → `retention.RESTORE_WINDOW_DAYS` |
 | **Graph** deletion — the graph's own backup pool | erased **at the 7-day purge, best-effort per artifact family** — a residual is **not retried** (see *Accepted gaps the promise carries*) | `tortoise/backup_sweep.py` `_purge_graph_storage` |
+| **User-account** deletion — the account's own backup copies | **not actively erased** — they **age out on the ≈28-day cycle** (**owner ruling 2B**, 2026-09-30; no account-backup purge exists) | `tortoise/backup_config.py` `retention_hourly/daily/weekly`; the age-out prune is `prune_backups` (`tortoise/hosted_backup.py:2952`) |
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
@@ -95,13 +103,77 @@ Everything else is a **derived alias**, never independently set:
 |------|-------------|----------------|-------------------|
 | **Graph** | immediately (API keys revoked) | 7 days | self-service Trash in the dashboard |
 | **Team account** | immediately (keys + memberships revoked) | 7 days | support / operational (no self-service surface yet) |
-| **User account** | immediately (on deletion request) | 7 days | support (email request — privacy §16) |
+| **User account** | immediately (solely-owned teams cascaded, keys revoked) | 7 days | support / operational (no self-service restore surface yet) |
 
-The **user-account** path has no in-product self-service deletion today:
-privacy §16 says so, and the blocker for a surface is the missing Supabase
-auth-admin deletion wiring — not the deferred permissions model (D31).
-`USER_ACCOUNT_DELETE_GRACE_HOURS` records the promised window for that support
-path.
+The **user-account** path is self-service **in-product** since **#4029**:
+`DELETE /v1/user/account` cascades the teams the person ALONE owns through the
+SAME cascade the team endpoint uses (owner ruling **1B**, 2026-09-30), stamps
+the one window via `USER_ACCOUNT_DELETE_GRACE_HOURS`, and the boot + hourly
+`_purge_deleted_accounts` erases the auth account once the **STORED** window
+elapses (erasing the auth account cascades the person's memberships in every
+org). The Supabase auth-admin deletion wiring that used to be the blocker for a
+surface now exists; the deferred permissions model (D31) was never the blocker.
+**Restore** within the window is support/operational — there is no self-service
+restore surface yet, so the 7 days are an undo held for support, not a button.
+**Backups are not actively deleted on this path** (owner ruling **2B**): they
+age out on the existing ≈28-day cycle.
+
+The 7 days in the **user-account** row is the *undo* window only. After it, the
+account's **live** data is erased; the account's copies in the backup pool are
+**not** actively deleted and instead age out on the ≈28-day 24/7/4 cycle (owner
+ruling **2B**, 2026-09-30 — see *Owner decisions — the account-deletion path*
+below). And deleting a personal account **deletes any team for which the
+deleter is the only owner** (owner ruling **1B**, 2026-09-30): such a team is
+**not** held for handover first.
+
+## Owner decisions — the account-deletion path (2026-09-30)
+
+Two owner decisions were ruled on **#4029**, both settling questions this
+document had left open. They govern the **user-account** deletion path, which
+**#4029** builds as an in-product self-service flow.
+
+**1B — a solely-owned team is deleted with the account.** Deleting a personal
+account **deletes any team for which that person is the only owner**; the team
+is **not** held for handover. This is recorded as a conscious choice to delete
+shared workspaces, not an oversight — so it is **not** to be re-litigated in
+the build. Because it removes other people's data, the ruling pairs it with a
+**confirmation step**: the delete control warns
+
+> Deleting your personal account will also delete any teams for which you're the only owner
+
+and offers **confirm** / **cancel**, with cancel a real exit — no partial
+delete, no account left in an ambiguous state. The warning is the safeguard;
+it is not cosmetic.
+
+The warning is a **product control**, not policy copy: it ships with the
+in-product deletion flow that **#4029 adds**, and privacy §16 now describes that
+flow. The policy copy therefore states the **consequence** (below); the warning
+itself stays in the product, where the decision is made.
+
+A solely-owned team deleted this way goes through the **team-account** purge
+(`tortoise/hosted_api.py` `_purge_deleted_orgs`), so its nested custom-graph
+namespaces and per-graph backup pools are still the **#4190** gap documented
+above — still promise-blocking.
+
+**2B — the account's backups are not actively deleted; they age out.** At the
+end of the 7-day restore window the account's **live** data is erased, but its
+copies in our backup pool are **not** purged by the deletion. They age out on
+the existing ≈**28-day** horizon — the 24-hourly / 7-daily / 4-weekly rotation
+in `tortoise/backup_config.py` (`retention_hourly` / `retention_daily` /
+`retention_weekly`), pruned by `prune_backups` (`tortoise/hosted_backup.py:2952`).
+
+This is **path-dependent**, and the two paths legitimately differ:
+
+| Deletion path | What happens to its own backup copies |
+|---------------|---------------------------------------|
+| **Graph** | erased at the **7-day** purge (`_purge_graph_storage`) |
+| **User account** | **age out** on the ≈**28-day** cycle (2B) |
+
+Both paths are reconciled by the promise's own end destination — *no copy
+remains after about four weeks* — which is why the public copy states the
+graph's 7-day erasure **and** the four-week backup horizon as **separate
+sentences** rather than one number for both. Do **not** "reconcile" the two
+into a single figure in copy: that would make one of them false.
 
 ## A different axis: the operational event store
 
@@ -133,11 +205,13 @@ as the operational event store. The control-plane audit trail lives in
   "should delete everything inside"; that widening is a separate, destructive
   change filed as **#4190** — which the end-destination ruling below makes
   **promise-blocking**, not merely a gap.
-- **Backups on a delete request (D6 — owner decision).** On a support/account
-  delete request, does live deletion actively purge backup snapshots, or do they
-  age out on the 24/7/4 cycle? And does the deletion propagate to the
-  second-region mirror (today it never does)? **Not decided.** The public wording
-  below is written to be true under the current default (mirror off).
+- **Backups on a delete request (D6 — DECIDED 2026-09-30).** The owner ruled
+  **2B**: on a user-account deletion, live deletion does **not** actively purge
+  backup snapshots — they **age out on the 24/7/4 (≈28-day) cycle** (see *Owner
+  decisions — the account-deletion path* above). The second-region mirror is
+  **unaffected**: deletion is still **not propagated** to it (append-only;
+  `BACKUP_MIRROR_ENABLED` default off), which is consistent with aging out
+  rather than actively deleting.
 
 ## The end-destination rule — the team-account promise is a commitment
 
@@ -191,43 +265,117 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 **Different axis — exempt, not gated:** `docs/event-catalog.md` (the 30-day
 `TORTOISE_EVENT_RETENTION_DAYS` operational event log, not a deletion promise).
 
-## Public wording — §6 APPROVED (2026-09-18); Deletion-scope/DPA pending
+## Public wording — §6 approved (2026-09-18); account deletion applied (2026-09-30); DPA §11 pending
 
 > **Privacy §6 is OWNER-APPROVED.** The owner ruled (2026-09-18): *"Delete =
 > gone from your view immediately · restorable for 7 days · no copy remains
-> after about four weeks."* The approved §6 bullets are quoted below and are now
-> applied to `website/privacy.html` and its mirror
-> `docs/drafts/2026-08-08-657-privacy-draft.md`. The §"Deletion scope" and
-> `website/dpa.html` §11 sentences are aligned to the same one-number style and
-> are **pending the owner's confirmation**.
+> after about four weeks."* The approved §6 bullets are quoted below; each is
+> labelled **applied** or **superseded**, and `website/privacy.html` carries
+> the applied text (with one recorded exception — the §6 Accounts bullet's
+> account-level immediate-removal claim; see *Recorded gap* under that bullet
+> below). The §"Deletion scope" sentence
+> was **applied 2026-09-30** (rulings 1B + 2B; quoted below). `website/dpa.html`
+> §11 already states the backup carve-out as *up to four weeks*, which is what
+> ruling 2B requires, so it was left **unchanged** and remains pending the
+> owner's confirmation.
 >
-> **Division of labour.** The policy copy states **one number** (four weeks)
-> plus the single graph exception. The 24-hour / 7-day / 4-weekly rotation, the
-> per-graph-vs-entity distinction, the best-effort purge caveat, the mirror
-> note, and the open backups-on-a-delete decision live in the sections above.
-> The doc explains; the policy states. Neither may contradict the other.
+> **Mirror note.** The draft's **policy body** is coupled to the published
+> page: `tests/e2e/test_legal_pages.py::test_draft_to_render_fidelity`
+> (anchored at `^## Scope of this policy`) requires every ≥40-char sentence of
+> the draft body to appear in the served `/privacy` page, so §6/§16 (and every
+> other retained-number sentence) **must be edited in BOTH files together** —
+> updating one without the other reddens the gate. Only the G-gate
+> preface/metadata (the `## Draft metadata` block, the delete-account capability
+> check, and the LFPDPPP / outline / canonical-sentence notes above the anchor)
+> is the historical snapshot, kept for the record and not rendered.
+>
+> **Division of labour.** The policy copy states the **restore window** as one
+> number (7 days), the **backup horizon** as one number (four weeks), and the
+> **single path difference** between them (a deleted graph's own backups end at
+> 7 days; an account's age out over the four weeks). The 24-hour / 7-day /
+> 4-weekly rotation, the per-graph-vs-entity distinction, the best-effort purge
+> caveat, and the mirror note live in the sections above. The doc explains; the
+> policy states. Neither may contradict the other.
 
-**Privacy §6 — the approved list items (applied):**
+**Privacy §6 — the approved list items:**
+
+**Memory graphs (applied 2026-09-18):**
 
 > **Memory graphs.** Deleting a memory graph removes it from your view
 > immediately and revokes its API keys. It stays restorable from the
 > organization's "Trash" for 7 days. After that it is permanently erased,
 > together with its backup copies.
 
+**The original Backups bullet — SUPERSEDED 2026-09-30, NOT applied:**
+
 > **Backups.** Our backups cover the last four weeks. A backup taken while your
 > data was live can therefore still contain it for up to four weeks. A deleted
 > memory graph is not in that category — its own backups are erased when its
 > 7-day window ends.
 
-**Privacy §"Deletion scope" — the aligned closing sentence (pending confirmation):**
+The wording above was the approved §6 Backups bullet and is kept here as
+history; ruling 2B replaced it in `website/privacy.html` with the version under
+*the backup path distinction* below, which is the applied text.
+
+**Privacy §6 — account deletion (owner ruling 2026-09-30, applied):**
+
+> **Accounts.** Deleting a user account or a team account removes it from your
+> view immediately. It stays restorable for 7 days. After that the account's
+> live data is permanently erased. Deleting your personal account also deletes
+> any team for which you are the only owner.
+
+**Recorded gap — the account-level half of that wording is not shipped, and the
+published copy is narrowed to what ships.** The approved wording covers two
+things and only the first is enforced. The **solely-owned-team** half IS:
+`DELETE /v1/user/account` cascades every team the deleter alone owns through the
+same `_cascade_soft_delete_org` the team endpoint uses (API keys revoked,
+memberships set `removed`), so those teams are gone from the deleter's view
+immediately (ruling 1B). The **account-level** half — "gone from your view
+immediately" for the account itself — is NOT: nothing in the shipped change
+gates sign-in for a delete-pending account. `account_deletions` is read only by
+the deletion ledger seams and the boot/hourly `_purge_deleted_accounts` erase
+sweep, so a user inside the 7-day window can sign back in and keep using the
+account; the account and its live data are erased when the stored window
+elapses. `website/privacy.html` §6/§16 therefore state immediate removal for the
+**solely-owned teams** only, and describe the account as erased after the same
+7-day window (reversible through the email channel), keeping every other
+approved element — the 7-day window, the four-week backup horizon, the
+sole-ownership rule, and the no-self-service-restore statement — unchanged.
+Closing the account-level half needs a session-mint gate outside
+`tortoise/hosted_api.py`, where no sign-in path reads the ledger; the
+account-level immediate-removal sentence returns to the copy when that gate
+ships. This is a **recorded gap against the ruling, not a new ruling**: the
+approved wording above is kept as the approval record, and the published copy
+now describes the behaviour the product actually ships.
+
+**Privacy §6 — the backup path distinction (owner ruling 2B, applied):**
+
+> **Backups.** Our backups cover the last four weeks. A backup taken while your
+> data was live can therefore still contain it for up to four weeks. The two
+> deletion paths differ in how their own backup copies end: a deleted memory
+> graph's own backups are erased when its 7-day window ends, while deleting an
+> account does not actively purge its copies in our backups — those age out on
+> the same four-week cycle.
+
+The 1B warning ("Deleting your personal account will also delete any teams for
+which you're the only owner", confirm/cancel) is deliberately **not** in the
+policy copy: it is a control on the in-product flow **#4029 ships**, so it
+belongs in the product, not in the policy.
+
+**Privacy §"Deletion scope" — applied 2026-09-30 (was pending confirmation):**
 
 > A deleted memory graph, user account, or team account remains restorable for
-> 7 days before permanent erasure; §6 covers how a deleted memory graph is
-> erased, and the
+> 7 days. After that, the deleted item's live data is permanently erased; for a
+> deleted account, copies in our backups are not actively deleted and age out on
+> the four-week cycle described in §6. §6 covers how a deleted memory graph and
+> a deleted account are erased, and the
 > [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)
 > is the single source of truth for these windows.
 
-**DPA §11 — the aligned one-number form (pending confirmation):**
+**DPA §11 — the aligned one-number form (pending confirmation; unchanged by 2B):**
 
 > … data in backups retained for up to four weeks — our backups cover the last
 > four weeks — to maintain integrity and not used for any other purpose.
+
+Ruling 2B (account backups age out on the ≈28-day cycle) is already what DPA §11
+states, so no DPA change was needed. The `website/dpa.html` §11 sentence stands.

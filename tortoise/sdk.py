@@ -27,12 +27,9 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
-import decimal
 import hashlib
 import json as _json
 import logging
-import math
-import numbers
 import os
 import re
 import stat
@@ -42,6 +39,9 @@ from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
+from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
+    reject_unrepresentable_number as _reject_unrepresentable_number,
+)
 from .cross_lens import DEFAULT_THRESHOLD
 # #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
 # search legs exclude by default. Imported here so recall_state's Object
@@ -205,9 +205,18 @@ _SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
 # provider/model choice is a product decision (deploy-time) — these are
 # cheap-tier defaults matching the analyzer's model choices (analyze.py
 # _LLM_PROVIDERS) and session_indexer's whitelist family.
+#
+# #4129: every id here must be one the provider actually SERVES, because a
+# provider answers 200 to a retired id and silently serves a different model.
+# api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
+# so naming the retired id did not fail — it silently ran a model nobody
+# configured. Verified against GET /models on 2026-10-05, which serves exactly
+# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
+# changing an id; models.OpenAICompatModel also warns at call time when the
+# served id diverges from the requested one.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
 }
@@ -1630,9 +1639,10 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
 #: `extracted_points`, `source` — so a column ADDED to the hosted detail
 #: handler reddens it too, the direction the inline columns would otherwise
 #: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
-#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
-#: because the list still uses the legacy typed filter and diverges for
-#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is pinned too
+#: — the list counts with the same non-turn predicate as the detail endpoint
+#: and the SDK read, so all three agree (#3555).
+#: Ordered as the hosted handlers append their
 #: columns: existing positions are stable and new columns go at the END, so
 #: a consumer reading positionally never shifts.
 #: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
@@ -2121,6 +2131,7 @@ def _write_session_and_turns(
     *,
     now: str,
     harness: str | None = None,
+    capture_lane: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2139,8 +2150,8 @@ def _write_session_and_turns(
     BYTE-IDENTICAL COPIES of and could therefore drift on:
 
       * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
-        ``is_episodic`` + the conditional ``harness``/``actor_user_id``/
-        ``machine_id``/``model`` clauses);
+        ``is_episodic`` + the conditional ``harness``/``capture_lane``/
+        ``actor_user_id``/``machine_id``/``model`` clauses);
       * the per-turn MERGE field list, the turn-point Cypher text, the
         ``CONTAINS`` wiring and the stale-turn sweep — all delegated to
         ``_write_capture_turns``, which holds the ONE ``UNWIND $turns``
@@ -2203,6 +2214,18 @@ def _write_session_and_turns(
         merge_sets.append("s.harness=$harness")
         merge_params["harness"] = harness
         session_record["harness"] = harness
+    # #3516 §B: the producer lane ('hook' | 'store_sync'). Set-only-when-present
+    # AND first-writer-wins — the SAME effective rule as harness, whose plain
+    # SET is made first-writer-wins by its caller's resolution
+    # (`_observed_capture_harness`). The coalesce is load-bearing: the store-sync
+    # backstop ships the SAME session AFTER the hook (#3515 piece 7), so a plain
+    # SET would RELABEL a hook session to 'store_sync' and make the hook-liveness
+    # check report a WORKING hook as not-live. A lane-less re-capture
+    # (backfill/import, or a pre-#3516 producer) never erases either.
+    if capture_lane:
+        merge_sets.append("s.capture_lane=coalesce(s.capture_lane, $capture_lane)")
+        merge_params["capture_lane"] = capture_lane
+        session_record["capture_lane"] = capture_lane
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
@@ -2579,260 +2602,6 @@ _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 #: author-label residual — documented).
 _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
-
-
-#: #4647: FalkorDB stores an integer as INT64 and a number as a double. A
-#: Python `int` is UNBOUNDED and `decimal.Decimal` is arbitrary-precision, so a
-#: value outside those domains is SILENTLY ALTERED by the store — `SET n.v = $v`
-#: reports success and stores a different number:
-#:
-#:     wrote 2**70        -> stored 9223372036854775807   (clamped)
-#:     wrote -(2**70)     -> stored -9223372036854775808  (clamped)
-#:     wrote 2**63        -> stored 9223372036854775807   (clamped: max + 1)
-#:     wrote Decimal('0.12345678901234567890')
-#:                        -> stored 0.123456789012346    (rounded)
-#:
-#: Reproduced against a live FalkorDB (#4647). The store cannot hold the value,
-#: so some information is lost either way; refusing the write is the honest
-#: failure mode, matching this function's existing fail-closed rejects below and
-#: the repo's own `SPAN_OFFSET_MAX = 2**63 - 1` precedent (commit_schema.py).
-#: A caller needing a wider identifier has a correct representation available —
-#: a string — and should choose it deliberately rather than have it inferred.
-_INT64_MIN = -(2 ** 63)
-_INT64_MAX = 2 ** 63 - 1
-
-#: Depth cap for the container recursion: a self-referential container would
-#: otherwise raise ``RecursionError`` instead of a bounded fail-closed error
-#: (code-review cycle 2, P3). 32 is the repo's own persistable depth
-#: (``projection/entities.py::_PERSISTABLE_MAX_DEPTH``); the shallower cap (12)
-#: refused structures the store holds EXACTLY — a false refusal, because the
-#: guard must sit AT the store's limit, never below it. At the limit it still
-#: fails closed (code-review cycle 5, P2).
-_MAX_RECURSION_DEPTH = 32
-
-try:  # numpy is a declared dependency, but not on every import path.
-    import numpy as _np
-
-    _HAS_NUMPY = True
-except Exception:  # pragma: no cover - environment dependent
-    _np = None
-    _HAS_NUMPY = False
-
-
-def _numeric_alteration_reason(
-    key: str, value: object, _depth: int = 0
-) -> str | None:
-    """#4647: why the store would ALTER this value, or None if it would not.
-
-    The test is EXACTNESS, not a digit count. A digit-count proxy is wrong in
-    both directions (code-review P1): it refused ``Decimal('1000000000000001')``
-    and ``Decimal(0.1)``, which a double holds exactly, while admitting
-    ``Decimal('0.1')``, which it silently rounds. The predicate is therefore
-    \"does this value round-trip through the store's own number type\" — plus
-    finiteness, which also catches the exponent axis (``Decimal('1E+400')`` ->
-    ``inf``, ``Decimal('1e-400')`` -> ``0.0``) and the non-finite Decimals.
-
-    ``numbers.Integral`` (not ``int``) so a ``numpy`` scalar is caught too —
-    numpy integers are NOT Python ``int`` subclasses. ``bool`` is excluded
-    explicitly: it is an ``int`` subclass and is always representable.
-    """
-    if _depth > _MAX_RECURSION_DEPTH:
-        # REFUSE at the cap, never ``return None``: a fail-closed guard that
-        # fails OPEN is worse than no cap, because a value nested past the cap
-        # is admitted and the store then clamps its leaf — the exact #4647
-        # defect, and a regression introduced by adding the cap at all
-        # (code-review cycle 3, P2).
-        return (
-            f"{key!r}: value is nested deeper than the guard inspects "
-            f"({_MAX_RECURSION_DEPTH} levels), so its contents cannot be "
-            "checked for a number the store would silently alter. Flatten it "
-            "or store the deep part as a string."
-        )
-    if _HAS_NUMPY and isinstance(value, (_np.timedelta64, _np.datetime64)):
-        # numpy temporal scalars register as ``numbers.Integral`` (timedelta64),
-        # or fall through every branch (datetime64), but neither has a Cypher
-        # number literal: the driver inlines ``str(value)``, which is
-        # ``'1 years'`` / ``'1970-01-02'``. Catching only the units whose
-        # ``int()`` raises left the calendar/sub-microsecond units admitted —
-        # ``str()`` is not a number for ANY unit (code-review cycle 7, P2).
-        return (
-            f"{key!r}: {type(value).__name__} has no Cypher number literal "
-            "(``str()`` renders a date/duration, not a number), so the store "
-            "cannot hold it. Store it as a string or an epoch integer."
-        )
-    if isinstance(value, bool):
-        # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
-        # is documentation, not a load-bearing branch (cycle-2 P3).
-        return None
-    if isinstance(value, numbers.Integral):
-        # ``int()`` can raise on a numpy scalar that registers as Integral but
-        # has no integer conversion — ``np.timedelta64`` does exactly this
-        # (``TypeError: ... not 'datetime.timedelta'``), which escaped as a
-        # bare key-less TypeError from a helper documented to raise ValueError
-        # (code-review cycle 6, P2). Fail closed with the key instead.
-        try:
-            ivalue = int(value)
-        except (TypeError, ValueError, OverflowError):
-            return (
-                f"{key!r}: {type(value).__name__} has no faithful INT64 "
-                "representation. Store it as a string if the full value is "
-                "needed."
-            )
-        if not (_INT64_MIN <= ivalue <= _INT64_MAX):
-            # ``bit_length`` rather than ``str(value)``: ``str`` on a very large
-            # int raises the 4300-digit limit error BEFORE the message is built,
-            # losing the key, the range and the remedy (code-review P3).
-            return (
-                f"{key!r}: integer with {ivalue.bit_length()} bits is outside "
-                f"the range FalkorDB can store ({_INT64_MIN}..{_INT64_MAX}) and "
-                "would be SILENTLY clamped to a different number. Store it as "
-                "a string if the full value is needed."
-            )
-        return None
-    if isinstance(value, decimal.Decimal):
-        if not value.is_finite():
-            return (
-                f"{key!r}: Decimal {value} is not a finite number, so the "
-                "store cannot represent it faithfully. Store it as a string "
-                "if the full value is needed."
-            )
-        # The driver sends ``str(value)``, and Cypher parses a bare integer
-        # literal as INT64 — a DIFFERENT domain from the double. An integral
-        # Decimal must therefore be range-checked, not round-tripped through a
-        # double (code-review cycle 2, P1): ``Decimal(2**70)`` is exactly
-        # representable as a double yet the store CLAMPS it, while
-        # ``Decimal('9223372036854775807')`` is NOT exactly a double yet the
-        # store holds it exactly. Checking one domain for both was wrong in
-        # both directions.
-        _text = str(value)
-        if "e" not in _text.lower() and "." not in _text:
-            _ivalue = int(value)
-            if not (_INT64_MIN <= _ivalue <= _INT64_MAX):
-                return (
-                    f"{key!r}: integer with {_ivalue.bit_length()} bits is "
-                    "outside the range FalkorDB can store "
-                    f"({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
-                    "clamped to a different number. Store it as a string if "
-                    "the full value is needed."
-                )
-            return None
-        _as_float = float(value)
-        if not math.isfinite(_as_float) or decimal.Decimal(_as_float) != value:
-            return (
-                f"{key!r}: Decimal {value} is not exactly representable as a "
-                "double, so FalkorDB would store a DIFFERENT number. Store it "
-                "as a string if the full precision is needed."
-            )
-        return None
-    if isinstance(value, numbers.Rational):
-        # ``fractions.Fraction`` and friends. An INTEGRAL Fraction is a bare
-        # INT64 literal to the store (cycle-3 P2: ``Fraction(2**70)`` was
-        # admitted and then clamped). A NON-integral Fraction has no Cypher
-        # number literal at all — the driver inlines ``str(value)``, which for
-        # ``Fraction(1, 2)`` is ``'1/2'``, and the store rejects that with an
-        # opaque ``Invalid input '/'`` rather than holding it. The cycle-5
-        # branch compared ``Fraction(float(value))`` and so ADMITTED it, i.e.
-        # the predicate contradicted the transport (code-review cycle 6, P2).
-        # Model the serialization honestly and refuse every non-integral ratio.
-        # ``bit_length()`` (never ``{value}``) because rendering a huge
-        # numerator hits CPython's 4300-digit int->str limit and would make the
-        # MESSAGE itself raise (cycle-4 P2).
-        if value.denominator == 1:
-            return _numeric_alteration_reason(key, int(value), _depth)
-        return (
-            f"{key!r}: a ratio with a {value.numerator.bit_length()}-bit "
-            f"numerator and a {value.denominator.bit_length()}-bit denominator "
-            "has no Cypher number literal (``str()`` renders '1/2'), so the "
-            "store cannot hold it. Store it as a string (or a float)."
-        )
-    if isinstance(value, numbers.Real):
-        # Plain ``float`` and the numpy floating scalars (float16/32/64,
-        # longdouble). The driver sends ``str(value)`` and Cypher parses that
-        # as a DOUBLE, so the predicate must compare the number the store will
-        # PARSE against the caller's value — not the caller's value against
-        # itself. ``np.float32(0.1)`` renders as ``'0.1'`` (numpy's
-        # shortest-repr) and parses to the double ``0.1``, a DIFFERENT number
-        # from the float32 value; a bare ``float``/finiteness test admitted it
-        # and the store altered it (code-review cycle 5, P1). ``np.float64``
-        # and plain ``float`` round-trip through their repr exactly.
-        # ``numbers.Real`` is after ``numbers.Rational`` on purpose: a
-        # ``Fraction`` is both, and the Rational branch is the exact one.
-        try:
-            _as_float = float(value)
-        except (OverflowError, ValueError):
-            _as_float = math.inf
-        if not math.isfinite(_as_float):
-            return (
-                f"{key!r}: {value!r} is not a finite number, so the store "
-                "cannot represent it faithfully. Store it as a string if the "
-                "full value is needed."
-            )
-        try:
-            _parsed = float(str(value))
-        except (OverflowError, ValueError):
-            _parsed = math.inf
-        # Compare at FULL precision: a numpy scalar's own ``!=`` narrows to its
-        # dtype, and ``float(value)`` is exact for float16/32/64 but NOT for
-        # longdouble — either misses the alteration. Widening the stored double
-        # back to longdouble and comparing there is exact for every numpy float.
-        if _HAS_NUMPY and isinstance(value, _np.floating):
-            _exact_ok = bool(_np.longdouble(_parsed) == value)
-        else:
-            _exact_ok = _parsed == float(value)
-        if not math.isfinite(_parsed) or not _exact_ok:
-            return (
-                f"{key!r}: {value!r} is not exactly representable as a double, "
-                "so FalkorDB would store a DIFFERENT number. Store it as a "
-                "string if the full precision is needed."
-            )
-        return None
-    if isinstance(value, (list, tuple, set, frozenset)):
-        # Fast path (code-review cycle 5, P2 perf): a flat sequence of plain
-        # Python floats is the embedding case — every element is exactly a
-        # double, so the only possible refusal is non-finite, which can be
-        # checked without a Python-level recursive call per element (~60-75x
-        # an ordinary props write; 1.4 ms for a 1536-dim embedding).
-        if value and all(type(item) is float for item in value):
-            for item in value:
-                if not math.isfinite(item):
-                    return (
-                        f"{key!r}: {item!r} is not a finite number, so the "
-                        "store cannot represent it faithfully. Store it as a "
-                        "string if the full value is needed."
-                    )
-            return None
-        for item in value:
-            reason = _numeric_alteration_reason(key, item, _depth + 1)
-            if reason:
-                return reason
-        return None
-    if isinstance(value, dict):
-        for item in value.values():
-            reason = _numeric_alteration_reason(key, item, _depth + 1)
-            if reason:
-                return reason
-        return None
-    if _HAS_NUMPY and isinstance(value, _np.ndarray):
-        # list/tuple/dict alone missed array-likes (cycle-2 P2):
-        # `np.array([2**70])` was admitted and stored as [9223372036854775807].
-        # Iterate the ELEMENTS, not ``.tolist()`` (code-review cycle 5, P1):
-        # ``tolist()`` widens a float32/float16 array to Python floats, so the
-        # serialized form the store actually parses (``str()`` of the ORIGINAL
-        # numpy scalar, e.g. ``'0.1'``) was never checked and a float32 array
-        # was admitted then altered.
-        for item in value.ravel():
-            reason = _numeric_alteration_reason(key, item, _depth + 1)
-            if reason:
-                return reason
-        return None
-    return None
-
-
-def _reject_unrepresentable_number(key: str, value: object) -> None:
-    """#4647: fail closed on a value the store cannot hold without altering it."""
-    reason = _numeric_alteration_reason(key, value)
-    if reason:
-        raise ValueError(reason)
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
@@ -4449,6 +4218,24 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     return succ_vf
 
 
+def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
+    """#5163: the graph's installed-pack set for the SDK's LOCAL compile
+    gates — the v1 objectKind enforcer (``validate_summary``) and the
+    client-side Layer-1 pre-check (``validate_payload_dict``).
+
+    ``None`` = no gate (the catalog union) — the documented back-compat value
+    for a graph with no ``:PackInstall`` records, and for an SDK that carries
+    no graph handle at all (never ``__init__``-ed — the test seams that build
+    a summary path with ``object.__new__``). A graph that IS bound but
+    unreachable RAISES out of ``graph_installed_namespaces`` — an outage must
+    never read as "no packs" and silently widen the gate to the union.
+    """
+    if not hasattr(sdk, "_proj"):
+        return None
+    from tortoise.pack_state import graph_installed_namespaces
+    return graph_installed_namespaces(sdk)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -4954,7 +4741,8 @@ class TortoiseSDK:
 
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
-                    id: str | None = None, **extra) -> None:
+                    id: str | None = None,
+                    recorded_ts: str | None = None, **extra) -> None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
@@ -4979,6 +4767,25 @@ class TortoiseSDK:
         and appended as the ``"point"`` key) or *id* is provided. Events with
         neither are skipped (nothing meaningful to log). The full point
         snapshot is needed for ``rebuild_all`` replay.
+
+        *recorded_ts* (#5048, recorded from #4666): the RECORDED instant of the
+        transition, minted ONCE by the caller when the same instant must also
+        be written to the node (``retract_point``). ``None`` (the default)
+        mints it here as before.
+
+        The name is deliberately NOT ``ts``. ``ts`` is an established **extra**
+        key, and ``extra`` is what builds the ``:GraphEvent`` payload —
+        ``invalidate_point`` passes ``ts=now`` (sdk.py, kwargs form, so it
+        routes into ``{"id": id, **extra}``) and the duplicate-fold tests in
+        ``tests/test_object_registered_journal.py`` do the same for
+        ``ObjectSuperseded``. Promoting the name to a named parameter silently
+        REMOVES it from that payload — a client-visible change to a durable
+        artifact (``events_poll`` returns the payload verbatim), invisible to
+        every existing test. ``recorded_ts`` collides with no caller key, so
+        the default path is additive in the strict sense: every existing
+        caller's envelope, graph payload and JSONL record are byte-identical.
+        A caller that passes BOTH keeps the old ``event.update(extra)``
+        precedence.
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:
@@ -5018,7 +4825,7 @@ class TortoiseSDK:
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
             "event_id": ulid(),
-            "ts": now_iso(),
+            "ts": recorded_ts or now_iso(),
             "type": type_,
             "initiated_by": "sdk",
             "projection_version": 2,
@@ -5806,7 +5613,7 @@ class TortoiseSDK:
         validated payload → POST. Errors are surfaced (ok=False) with the
         payload for inspection — never a silent partial write."""
         from tortoise.extractor_v2 import extract_session_v2  # noqa: I001
-        from tortoise.commit_schema import validate_payload_dict
+        from tortoise.commit_schema import compile_vocab, validate_payload_dict
         from datetime import datetime, timezone
         model = extractor_model or _default_byok_model()
         # E1 (#1533, D8): capture time is the production session date — an
@@ -5839,11 +5646,39 @@ class TortoiseSDK:
             errors.append("no payload produced (empty or failed conversation)")
         l1_errors: list[str] = []
         if payload is not None:
-            l1, _model = validate_payload_dict(payload)
-            if not l1.ok:
-                for field, reasons in l1.errors.items():
-                    for r in reasons:
-                        l1_errors.append(f"Layer-1 {field}: {r}")
+            # #5163: validate against the GRAPH's installed-pack gate, not the
+            # process-global union — the same decision the hosted commit door
+            # enforces server-side, so the client never POSTs a payload it
+            # knows the door will 422.
+            #
+            # #5339: the resolver RAISES on a bound-but-unreachable graph
+            # (pack_state's documented posture — an outage must never read as
+            # "no packs"). That must not escape this public entry point, and
+            # it must not degrade to the ungated union either: ``None`` means
+            # NO gate, which WIDENS the allowed kind set. The fail-closed
+            # property is local — the recorded error makes ``errors``
+            # non-empty, so the ``if errors or payload is None: return``
+            # below runs BEFORE ``_post_commit`` and the caller gets a
+            # structured ``ok=False`` with nothing sent. (This is NOT
+            # mirroring the sibling resolver call in ``extract_session_v2``:
+            # that one sets ``classify_later = False`` and continues the
+            # legacy pipeline, which ``extractor_v2.py`` labels an explicit
+            # FAIL-OPEN onto the wider vocabulary — not the fail-closed
+            # direction taken here.)
+            try:
+                gate = _installed_namespaces_for_gate(self)
+            except Exception as e:  # noqa: BLE001, RUF100 — an outage must
+                # never raise out of a public method, and must never widen
+                # the gate to the catalog union (see above).
+                errors.append(
+                    f"Layer-1 gate resolution failed: {type(e).__name__}: {e}")
+            else:
+                l1, _model = validate_payload_dict(
+                    payload, vocab=compile_vocab(installed_namespaces=gate))
+                if not l1.ok:
+                    for field, reasons in l1.errors.items():
+                        for r in reasons:
+                            l1_errors.append(f"Layer-1 {field}: {r}")
         if l1_errors:
             errors = l1_errors + errors
         result = {
@@ -5887,6 +5722,27 @@ class TortoiseSDK:
                                               validate_summary, check_guards)
 
         from tortoise.value_extractor import construct_graph
+        # #5163: the objectKind enforcer's set is graph-gated. Resolve ONCE —
+        # both the extraction path and the direct-summary path below need it.
+        #
+        # #5339: the resolver RAISES on a bound-but-unreachable graph
+        # (pack_state's documented posture). Guard the call for the same
+        # reason as the v2 sibling above: the outage must not escape this
+        # public entry point, and it must not become ``installed = None``
+        # either — ``None`` means NO gate and would widen the objectKind set
+        # to the catalog union, silently admitting another pack's kinds.
+        # Fail-closed: record the failure and return BEFORE the extraction/
+        # validation that needs the gate, so nothing is POSTed and the caller
+        # gets a structured ``ok=False``.
+        try:
+            installed = _installed_namespaces_for_gate(self)
+        except Exception as e:  # noqa: BLE001, RUF100 — an outage must
+            # never raise out of a public method, and must never widen
+            # the gate to the catalog union (see above).
+            return {"session_id": session_id, "ok": False,
+                    "errors": [f"Layer-1 gate resolution failed: "
+                               f"{type(e).__name__}: {e}"],
+                    "payload": None}
         if summary is None and conversation is not None:
             model = extractor_model or _default_byok_model()
             # #4911: the v1 sibling of the v2 scrub below — same reason (this
@@ -5896,13 +5752,15 @@ class TortoiseSDK:
             conversation = _redact_turn_contents(conversation)[0]
             extracted = extract_session(
                 model, conversation, existing_state=existing_state,
-                session_id=session_id, chunk_size=chunk_size, mode=mode)
+                session_id=session_id, chunk_size=chunk_size, mode=mode,
+                installed_namespaces=installed)
             summary = extracted["summary"]
             errors = extracted.get("errors", [])
             guards = extracted.get("guards", [])
             delta = extracted.get("delta")
         else:
-            errors = validate_summary(summary or {}, mode=mode)
+            errors = validate_summary(summary or {}, mode=mode,
+                                      installed_namespaces=installed)
             guards = check_guards(summary or {})
             delta = None
 
@@ -6203,7 +6061,8 @@ class TortoiseSDK:
         # loses the node, making any EntityLinked edge FROM it unreplayable), so
         # it rides the ``on_session_merged`` hook rather than following the
         # whole write. The idempotent fold MERGEs by id and coalesce-preserves
-        # created_at/actor_user_id, mirroring the live SET clauses; it is
+        # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
+        # it is
         # emitted on every capture (the MERGE is itself unconditional) so the
         # journaled ``turn_count`` tracks the live value on the #1727
         # longer-replay-payload path.
@@ -7938,9 +7797,13 @@ class TortoiseSDK:
           - Entity (Subject/Object/Event/Document/Source) → plain property
             update (delegates to update_entity).
           - Unknown id → returns {} (no write) — legacy-compatible.
+
+        #4649: resolution includes ``by_url`` so a url-keyed ``:Source`` (the
+        shape ``get_entity`` has always addressed, and ``_link_source`` mints)
+        routes to ``update_entity`` instead of silently returning ``{}``.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return {}
         if resolved[0]["label"] == "Point":
@@ -7965,9 +7828,13 @@ class TortoiseSDK:
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
         JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
         fold tombstones and a hard delete must replay as a hard delete.
+
+        #4649: resolution includes ``by_url``, matching ``get_entity`` — a
+        url-keyed ``:Source`` used to return ``False`` here (the node was never
+        found) while the read path resolved it.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return False
         if resolved[0]["label"] == "Point":
@@ -8238,11 +8105,22 @@ class TortoiseSDK:
         # no neighbor would be dirtied (stored confidences stay stale at
         # pre-delete values). Shared helper keeps this capture in lockstep
         # with _mark_dirty's own traversal.
-        op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
-        neighbor_ids = (
-            [oid for oid in op_ids if oid != id]
-            + [cid for cid in neighbor_claims if cid != id]
-        )
+        _op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
+        # #2422/#5566: the OPERATOR ids are dropped here, exactly as
+        # `_mark_dirty` drops them. Most operators are unsweepable as roots —
+        # `_sweep_dirty_roots` subtracts only `affected`, and `_affected_claims`
+        # admits an operator's INPUTS, so an operator that is nobody's input
+        # keeps its `ep_dirty` forever, pinning `_auto_dream_mode` to 'local'
+        # (measured: after a converged pass such an operator was the only
+        # remaining root AND the only remaining graph flag). A NESTED operator —
+        # one that is another operator's input — is reachable through the
+        # per-hop expansion and does not have that problem, so this is a
+        # narrowing of which ids become roots, not a claim that operators can
+        # never be swept. Nothing is lost from #1916: the claims below are the
+        # operator's OTHER inputs, and the hop in `TortoiseEP` walks
+        # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
+        # `_affected_factors` still re-derives the operator's factor.
+        neighbor_ids = [cid for cid in neighbor_claims if cid != id]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
@@ -8751,6 +8629,16 @@ class TortoiseSDK:
             "PointSuperseded",
             id=old_id, new_id=new_id,
             valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
+            # #5048: `now` is ALSO the envelope instant, so the replay's
+            # `updated_at = _journal_instant(ev)` reads the instant the live
+            # SET below writes. Without it the envelope `ts` was a SECOND
+            # clock read and every supersede drifted live vs rebuilt by
+            # microseconds — the same defect #5048 fixes for retraction, and
+            # the rule `invalidate_point` already documents ("ts=now MUST be
+            # passed … a drift from the live SET clock breaks exact-stamp
+            # rebuild parity"). `recorded_ts`, not `ts`: the latter would also
+            # add the key to the :GraphEvent payload (see `_emit_event`).
+            recorded_ts=now,
         )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
@@ -9091,9 +8979,15 @@ class TortoiseSDK:
         # _assert_lifecycle_guard) — the pre-#2498 body hardcoded the same
         # 3-status subset as supersede_point.
         self._assert_lifecycle_guard(id, method="retraction")
+        # #5048 (#4666): ONE clock read for both the record and the node.
+        # `updatedAt` is RECORDED, not recomputed (docs/durability-posture.md
+        # → `:Source.updatedAt`), so the producer must mint the instant once —
+        # a second read here, and a third at replay, made live/rebuild/fold
+        # hold three different stamps for one retraction.
+        _now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id}, id=id)
+        self._emit_event("PointRetracted", {"id": id}, id=id, recorded_ts=_now)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede/invalidate can't both pass validation
         # and have a terminal overwrite. #2498: the CAS now uses the SAME
@@ -9105,7 +8999,7 @@ class TortoiseSDK:
             f"WHERE {_terminal_excluded('n.status')} "
             "SET n.status = 'retracted', n.updatedAt = $now, "
             f"{decay_clause('n')} RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
+            params={"id": id, "now": _now})
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
@@ -10265,6 +10159,20 @@ class TortoiseSDK:
                 self.set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+            # The OPERATOR is the dirty root here, not the mitigation: EP reads
+            # the changed strength off the operator's factor, and only a
+            # seeded operator pulls its inputs into the affected set. The
+            # CREATE path below marks exactly this pair ([mid, id]); the
+            # update path must match it. Marking `[mid]` alone is no longer a
+            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
+            # back-link direction too — but the pair is what this path is
+            # specified to mark, and it does not depend on that helper's
+            # shape. The in-process flow hides a missing mark behind the
+            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
+            # has no such mask and a re-mitigation would silently not move
+            # confidence. (#5566 review P2.)
+            self._mark_dirty([mid, id])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -14257,19 +14165,41 @@ class TortoiseSDK:
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
-        """1-hop reverse-BFS from ``point_ids``: operators targeting them
-        (reverse of operator→point), then the claims those operators target
-        (1-hop forward). Shared by ``_mark_dirty`` (post-write marking) and
-        ``delete_point`` (pre-delete neighbor capture, #1916) so the
-        traversal can never drift between the two — a change to the BFS
-        shape updates both call sites in lockstep. Returns ``(op_ids,
-        claim_ids)``."""
+        """1-hop reverse-BFS from ``point_ids``: operators joined to them by an
+        ``IMPL|NAND`` edge in EITHER direction (``(op)-[:IMPL|NAND]->(p)`` and
+        ``(p)-[:IMPL|NAND]->(op)`` — a mitigation is the SOURCE of its operator
+        edge), then the claims those operators target (1-hop forward). Shared by
+        ``_mark_dirty`` (post-write marking) and ``delete_point`` (pre-delete
+        neighbor capture, #1916) so the traversal can never drift between the two
+        — a change to the BFS shape updates both call sites in lockstep. Returns
+        ``(op_ids, claim_ids)``."""
+        ids = list(point_ids)
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
             "WHERE p.id IN $ids RETURN DISTINCT op.id",
-            params={"ids": list(point_ids)},
+            params={"ids": ids},
         ).result_set
         op_ids = [r[0] for r in rows]
+        # ⛔ A mitigation is the SOURCE of its operator edge —
+        # `(mit)-[:IMPL]->(op)` — so the match above, which reads the id as the
+        # operator's TARGET, misses it. Left out, a mitigation whose strength
+        # changed through `update_point` / the MCP write path (which mark only
+        # `[id]`, unlike `mitigate_operator`) reaches NO operator, so the run is
+        # a silent no-op and the operator's factor keeps the old weight. Measured
+        # at #5566: `_affected_claims([mit]) == []`, where the pre-narrowing
+        # traversal returned the operator's other participants. The second match
+        # is a deliberate over-approximation: it also returns an operator the id
+        # CONSUMES (the id points at it with an `IMPL|NAND` edge), whose factor
+        # does not contain the id, so that case costs a recompute and not a wrong
+        # value.
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:IMPL|NAND]->(op:Point {is_operator:true}) "
+            "WHERE p.id IN $ids RETURN DISTINCT op.id",
+            params={"ids": ids},
+        ).result_set
+        for r in rows:
+            if r[0] not in op_ids:
+                op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
             rows = proj.g.query(
@@ -14817,11 +14747,14 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking; the closure guarantees 0 ≤ coverage ≤ 1 and a converged
-        full-window pass reports 1.0). The dirty-root logic is driven from
-        the window-level ``converged`` flag: a converged pass clears the
-        affected roots; a failed pass clears nothing (W4 retention —
-        non-converged regions reselect via the window union).
+        ranking). The
+        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
+        are not mirrors, so `affected` can exceed the closure and coverage can
+        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        The dirty-root logic is driven from the window-level ``converged``
+        flag: a converged pass clears the affected roots; a failed pass clears
+        nothing (W4 retention — non-converged regions reselect via the window
+        union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
@@ -14895,13 +14828,24 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Mirrors ``TortoiseEP._affected_claims``'s batched per-hop expansion
-        exactly (operators are transparent bridges — one claim-hop per BFS
-        level; operator-less direct edges via #888 W5 semantics; #780 draft
-        exclusion) so the denominator matches the pass's universe:
-        affected ⊆ closure, and a converged pass over its whole window
-        reports coverage = 1.0. The window members themselves are reachable
-        at 0 claim-hops (an operator-less isolated claim is its own window).
+        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
+        are transparent bridges — one claim-hop per BFS level; the operator
+        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
+        are bridged; operator-less direct edges via #888 W5 semantics; #780
+        draft exclusion). The window members themselves are reachable at 0
+        claim-hops (an operator-less isolated claim is its own window).
+
+        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
+        guaranteed — do not reinstate that claim. Two gaps remain, both
+        predating #5566 and both filed (as the duplicate pair **#6597** /
+        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
+        seeds by ONE claim-hop before its loop while this starts at 0, so
+        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
+        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
+        rather than ``_live_only``, so a terminal/outdated bridge is counted
+        here but can never be reached by EP. The third asymmetry — an operator
+        window member being dropped from the seed set — was #5566's own
+        regression and is handled below.
 
         Two batched queries per hop (operator-bridge + direct-edge), seeded
         with the whole window — cheap for the scheduler's large windows
@@ -14916,6 +14860,25 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+        # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
+        # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
+        # operator reaches that operator's INPUTS, so they are part of what a
+        # pass CAN reach and belong in the denominator. Without them the closure
+        # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
+        # denominator bug #6597/#6598 describe, reached through the SEED rather
+        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
+        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        op_input_rows = proj.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "AND (o.status IS NULL OR o.status <> 'draft') "
+            "AND (c.status IS NULL OR c.status <> 'draft') "
+            "RETURN DISTINCT c.id",
+            params={"ids": list(window)},
+        ).result_set
+        closure |= {r[0] for r in op_input_rows}
         frontier = list(closure)
         hops = 0
         while frontier and (max_hops is None or hops < max_hops):
@@ -14924,8 +14887,14 @@ class TortoiseSDK:
             if frontier:
                 # Operator-mediated bridges (op_type OR is_operator — legacy
                 # operator detection parity, #943). Never hops through drafts.
+                # #5566: typed AND directed, mirroring _affected_claims — only
+                # operator INPUTS are bridged (a structural predicate or the
+                # reverse-only mitigation `IMPL` forms no factor and would
+                # inflate the denominator, permanently under-reporting
+                # coverage).
                 nbr_rows = proj.g.query(
-                    "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                    "-[r2:IMPL|NAND]->(m:Point) "
                     "WHERE n.id IN $ids AND m.id <> n.id "
                     "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                     "AND (op.status IS NULL OR op.status <> 'draft') "
@@ -21476,7 +21445,11 @@ class TortoiseSDK:
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
-        # Per-label indexed writes (id OR eventId — original predicate; no url).
+        # Per-label indexed writes — the label's PRIMARY key (id | eventId)
+        # first, then its SECONDARY key on a miss (`Source` only, by `url`;
+        # #4649). The original #327 predicate was id OR eventId with no url;
+        # the read path always resolved a url-only `:Source`, so the write
+        # path must too or the write silently no-ops.
         # UNION cannot carry SET, so run each branch sequentially (#327).
         #
         # #3689 P1 (#4094): the generic Point branch applied caller props with
@@ -21507,9 +21480,34 @@ class TortoiseSDK:
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             classify_entity_mutation_op,
+            secondary_entity_id_props,
         )
 
+        # #4649: a write can MOVE the node it addressed. The only identity key a
+        # caller may rewrite is `url` (a :Source's identity): `id` is refused by
+        # `_sanitize_props` above, and `eventId` is refused for every EVENT
+        # target by the #2104 guard above — whose `MATCH (e:Event) WHERE
+        # e.eventId = $id OR e.id = $id` is a SUPERSET of the Event branch's
+        # own MATCH below, so an Event can never be the node this loop matches
+        # while `eventId` is in props (`eventId` stays writable on a Point, but
+        # a Point is matched by `id`, which is never in props). The OR-set below
+        # matches by exactly those keys. The tail would then re-resolve by
+        # `id_val` and MISS the node this very call re-keyed, returning `{}` —
+        # the value `update()` / `get_entity` document as "nothing was
+        # written" — which is the success/no-op ambiguity #4649 removes, merely
+        # inverted. Track the address the write LEAVES BEHIND and resolve the
+        # return through it (the re-key guard is kept general and defensively
+        # covers `eventId` should that ban ever be lifted).
+        post_write_id = id_val
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+            # #4649: a canonical label's identity is an OR-SET, not one key.
+            # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
+            # carry a secondary one (`Source` by `url` — url-only stubs minted
+            # by `_link_source` have no `id`, so the primary MATCH below used to
+            # miss and this surface returned the UNCHANGED node as success).
+            # The primary key is ALWAYS tried first (byte-identical MATCH text
+            # and #327 index plan), the secondary only on a miss.
+            id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
@@ -21572,11 +21570,14 @@ class TortoiseSDK:
                         else None)
                 else:
                     point_props = props
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
-                    "RETURN count(n)",
-                    params={"id": id_val, "p": point_props},
-                )
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
+                        "RETURN count(n)",
+                        params={"id": id_val, "p": point_props},
+                    )
+                    if res.result_set and res.result_set[0][0]:
+                        break
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).
@@ -21631,17 +21632,45 @@ class TortoiseSDK:
                     # The graph write still happens — only the journal record is
                     # withheld — and the withhold is LOUD, so this is a declared
                     # deferral, never the silent loss this lane exists to fix.
-                    applied = proj.g.query(
-                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                        "RETURN count(n)",
-                        params={"id": id_val, "props": props},
-                    )
-                    # A miss mutates nothing, so there is nothing to warn about
-                    # (an `update_entity("no-such-id", name=...)` must not cry
-                    # wolf). `count(n)` is safe HERE because there is no
-                    # `properties(n)` in this RETURN to become a grouping key —
-                    # the hazard the reading query below documents.
-                    matched = bool(applied.result_set and applied.result_set[0][0])
+                    rest = {k: v for k, v in props.items() if k != "name"}
+                    keys = list(rest)
+                    # #4649: the OR-SET, and the write and its read-back are ONE
+                    # statement — the form the generic branch below already uses.
+                    # They MUST NOT be split into a write followed by a separate
+                    # MATCH: a url-keyed :Source is addressed BY `url`, and `url`
+                    # is a writable prop, so a second query matching the ORIGINAL
+                    # url runs AFTER the SET and misses the re-keyed node — the
+                    # write lands, NO `EntityMutated` record is emitted, and
+                    # `rebuild_all` silently reverts the `url` (a live≠replay
+                    # divergence with no fold-miss warning, because there is no
+                    # record to miss). MATCHing first and reading
+                    # `properties(n)` after the SET binds the node by its
+                    # PRE-write key while the returned values are post-write.
+                    applied = None
+                    matched_prop = None
+                    for match_prop in id_keys:
+                        applied = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                            "SET n += $props "
+                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                            params={"id": id_val, "props": props, "keys": keys},
+                        )
+                        # A miss mutates nothing, so there is nothing to warn
+                        # about (an `update_entity("no-such-id", name=...)` must
+                        # not cry wolf). A result row means the write landed on
+                        # THIS branch's node. Do NOT add `count(n)`: beside
+                        # `properties(n)` it becomes a grouping key, so a miss
+                        # would yield no row and a duplicate-id match one row PER
+                        # GROUP.
+                        if applied.result_set:
+                            matched_prop = match_prop
+                            break
+                    matched = matched_prop is not None
+                    if isinstance(props.get(matched_prop), str):
+                        # The matched key is one this write rewrote, so the node
+                        # no longer lives at `id_val` (a non-str value means the
+                        # key was cleared, leaving nothing to resolve).
+                        post_write_id = props[matched_prop]
 
                     # Journal everything the write changed EXCEPT `name`. The
                     # reason `name` is withheld — it moves the node before the
@@ -21650,30 +21679,22 @@ class TortoiseSDK:
                     # would leave #3312 open for the ordinary call
                     # `update_entity(id, name=..., status=...)`, silently
                     # reverting the status on rebuild.
-                    rest = {k: v for k, v in props.items() if k != "name"}
                     if matched and rest:
-                        keys = list(rest)
-                        res = proj.g.query(
-                            f"MATCH (n:{label} {{{prop}:$id}}) "
-                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                            params={"id": id_val, "keys": keys},
+                        vals = list(applied.result_set[0][0])
+                        if len(vals) != len(keys):
+                            _logger.error(
+                                "state arity mismatch for %s %r: %d keys "
+                                "vs %d values — journalling the shorter "
+                                "of the two",
+                                label, id_val, len(keys), len(vals))
+                        # `rest` carries no `name`, so the classifier can
+                        # never return `rename` here — it is `restatus` or
+                        # `revise`, both implemented.
+                        self._journal_entity_mutation(
+                            label, id_val,
+                            classify_entity_mutation_op(rest),
+                            state=dict(zip(keys, vals, strict=False)),
                         )
-                        if res.result_set:
-                            vals = list(res.result_set[0][0])
-                            if len(vals) != len(keys):
-                                _logger.error(
-                                    "state arity mismatch for %s %r: %d keys "
-                                    "vs %d values — journalling the shorter "
-                                    "of the two",
-                                    label, id_val, len(keys), len(vals))
-                            # `rest` carries no `name`, so the classifier can
-                            # never return `rename` here — it is `restatus` or
-                            # `revise`, both implemented.
-                            self._journal_entity_mutation(
-                                label, id_val,
-                                classify_entity_mutation_op(rest),
-                                state=dict(zip(keys, vals, strict=False)),
-                            )
 
                     if matched:
                         # #2296 residual, deliberately NOT promised away here: if
@@ -21698,16 +21719,28 @@ class TortoiseSDK:
                         )
                     continue
                 keys = list(props)
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                    "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                    params={"id": id_val, "props": props, "keys": keys},
-                )
-                # No match => [] for THIS form. Do NOT add `count(n)`: beside
-                # `properties(n)` it becomes a grouping key, so a miss yields no
-                # row and a duplicate-id match yields one row PER GROUP.
+                res = None
+                # #4649: OR-SET — primary identity key first, then the label's
+                # secondary key(s) only if the primary matched nothing.
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
+                        "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                        params={"id": id_val, "props": props, "keys": keys},
+                    )
+                    # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                    # `properties(n)` it becomes a grouping key, so a miss yields
+                    # no row and a duplicate-id match yields one row PER GROUP.
+                    # A non-empty `keys` with a result row means the write
+                    # landed on THIS branch's node.
+                    if res.result_set:
+                        break
                 if not keys or not res.result_set:
                     continue
+                if isinstance(props.get(match_prop), str):
+                    # Same re-key case as the `name` branch above: the matched
+                    # key is one this write rewrote.
+                    post_write_id = props[match_prop]
                 vals = list(res.result_set[0][0])
                 if len(vals) != len(keys):
                     # Impossible by construction — `[k IN $keys | ...]` is
@@ -21722,7 +21755,7 @@ class TortoiseSDK:
                     label, id_val, classify_entity_mutation_op(props),
                     state=dict(zip(keys, vals, strict=False)),
                 )
-        return self._get_entity(id_val)
+        return self._get_entity(post_write_id)
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
@@ -21731,16 +21764,28 @@ class TortoiseSDK:
         # matched them by id/eventId; no caller relies on it).
         # #3860: the ONE label→id-property table, shared with the replay fold
         # (``projection._delete_entity_by_id``) so the producer and the fold
-        # cannot drift.
-        from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+        # cannot drift. #4649: the identity is an OR-SET — the primary key
+        # first, the label's ``secondary_entity_id_props`` only on a miss, so a
+        # url-keyed :Source (no `id`) is FOUND instead of `delete()` returning
+        # False for a node `get_entity` can address.
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            secondary_entity_id_props,
+        )
         total = 0
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
-            r = proj.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
-                params={"id": id_val},
-            )
-            if r.result_set and r.result_set[0][0]:
-                total += r.result_set[0][0]
+            deleted = 0
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = proj.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) DETACH DELETE n "
+                    "RETURN count(n)",
+                    params={"id": id_val},
+                )
+                deleted = (r.result_set[0][0] or 0) if r.result_set else 0
+                if deleted:
+                    break
+            if deleted:
+                total += deleted
                 # #3299: journal the destruction at the write surface that
                 # performs it. Post-hoc (after the live write succeeds,
                 # matching every other emitter) so a failed/no-op delete
@@ -22174,8 +22219,8 @@ class TortoiseSDK:
 
         Both counts use the DETAIL endpoint's non-turn predicate
         (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
-        are untyped, so the legacy ``IN ['decision','statement']`` filter the
-        LIST endpoint still uses would report 0 for them (#3555).
+        are untyped, and the list endpoint's legacy ``IN ['decision',
+        'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
         """

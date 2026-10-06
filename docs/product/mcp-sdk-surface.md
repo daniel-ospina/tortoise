@@ -68,10 +68,10 @@ Daniel's review is what carries the approval.
 
 | SDK methods, by who reaches them | Count |
 |---|---|
-| agent-reachable | 88 |
+| agent-reachable | 86 |
 | internal | 21 |
 | control-plane | 2 |
-| no-caller-found | 39 |
+| no-caller-found | 41 |
 | **total** | **150** |
 
 ---
@@ -93,7 +93,7 @@ Those are the name-level checks. The gate **additionally** fails on several serv
 evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed
 HTTP-vs-stdio serving, a registry count that no longer matches the baseline, an exemption that
 became reachable, and a missing or malformed baseline. They are listed in full in
-[`CONTRIBUTING.md`](CONTRIBUTING.md); read them there rather than inferring the gate's whole
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md); read them there rather than inferring the gate's whole
 scope from this summary.
 
 **What is not a gate failure: an added field on an existing response.** A field that is off
@@ -188,7 +188,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 | `tortoise_ingest` | Heterogeneous bulk write (epic #888 W4) — one call writes points + entities + sources + connections coherently (nodes first, then connections). Connections carrying 'operator' (… | ingest | never called, tooling, skill-docs, docs | **keep** | never called — not called over MCP, but used by tooling, skill-docs — removing it would break that |
 | `tortoise_update_entity` | Update any entity's properties. | update_entity | never called, tooling, docs | **merge** | in group `update` · never called · **proposed: move to `memory`** — `tortoise_update` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way · group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval |
 | `tortoise_delete_entity` | Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge that would be removed and changes nothing. | delete_entity | never called, tooling, docs | **merge** | in group `delete` · never called · **proposed: move to `memory`** — `tortoise_delete` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way · group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval |
-| `tortoise_operator_action` | Consolidated operator write action — action=mitigate/annotate. mitigate: reason + strength (0-1) — creates/updates the mitigation Point (idempotent). annotate: bias/precision/co… | operator_action | never called, tooling, docs | **keep** | group: `operator-action` · never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_operator_action` | Consolidated operator write action — action=mitigate/annotate. mitigate: reason + strength (0-1) — creates/updates the mitigation Point (idempotent). annotate: bias/precision/co… | handler-served | never called, tooling, docs | **keep** | group: `operator-action` · never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_annotate_operator` | Annotate an operator Point with structured epistemic dimensions (bias, precision, consistency, directness). | annotate_operator | never called, tooling, skill-docs, docs | **merge** | in group `operator-action` · never called — `tortoise_operator_action` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way |
 | `tortoise_mitigate_operator` | Create a mitigation Point that modulates an operator's edge strength. Idempotent — second call updates existing mitigation. | mitigate_operator | never called, tooling, skill-docs, docs | **merge** | in group `operator-action` · never called — `tortoise_operator_action` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way |
 
@@ -198,7 +198,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 |---|---|---|---|---|---|
 | `tortoise_overview` | Graph orientation in one call — consolidates the list_*/status/health/taxonomy/structure zoo. section: taxonomy/structure/structure_check/pointkinds/tags/sources/namespaces/grap… | handler-served | agents, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_provenance` | Provenance chain — 'Who decided this?' Follows authoredBy → Subject → delegation. | provenance | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
-| `tortoise_traverse` | Multi-hop graph traversal from entity following ALL relationship types. Returns {entity, nodes: [{node, relationship, depth}]}. | traverse | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_traverse` | Multi-hop graph traversal from entity following ALL relationship types. Returns {entity, nodes: [{node, relationship, depth}]}. | handler-served | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_entity_profile` | Multi-hop BFS from an entity with optional filters (pointKind, confidenceMin) — full neighborhood categorized by node type. Use for deep entity analysis; for a fast neighbor lis… | handler-served | agents, tooling, skill-docs, docs | **keep** | in use — called by agents |
 | `tortoise_list_topics` | Fast one-hop neighbor enumeration for an entity — quick discovery and navigation. Use for shallow context; for multi-hop filtered BFS use tortoise_entity_profile. | list_topics | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_analyze` | Answer natural language questions about the Tortoise epistemic graph. Ask things like: 'where is the disagreement?' 'what supports claim X?' | handler-served | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
@@ -309,7 +309,7 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 Grouped by **who reaches them**. This is the ranking that matters for cutting: everything in
 `agent-reachable` is called by an agent today; everything below it is not.
 
-### agent-reachable — 88
+### agent-reachable — 86
 
 | Method | Does / depends on | Used by | Recomm. | Rationale |
 |---|---|---|---|---|
@@ -373,7 +373,6 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.list_topics` | reached by 1 registered tool(s): tortoise_list_topics | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.mine_corpus` | reached by 1 registered tool(s): tortoise_mine_conversations | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.mitigate_operator` | reached by 1 registered tool(s): tortoise_mitigate_operator | eval-harness, tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.operator_action` | reached by 1 registered tool(s): tortoise_operator_action | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.org_create` | reached by 1 registered tool(s): tortoise_org_create | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.promote_point` | reached by 1 registered tool(s): tortoise_promote_point | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.provenance` | reached by 1 registered tool(s): tortoise_provenance | eval-harness, tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
@@ -389,7 +388,6 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.suggest_entry_points` | reached by 1 registered tool(s): tortoise_suggest_entry_points | tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.summarize_structure` | reached by 1 registered tool(s): tortoise_summarize_structure | tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.supersede` | reached by 1 registered tool(s): tortoise_supersede | eval-harness, tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.traverse` | reached by 1 registered tool(s): tortoise_traverse | tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.update` | reached by 1 registered tool(s): tortoise_update | eval-harness, tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.update_entity` | reached by 1 registered tool(s): tortoise_update_entity | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.update_point` | reached by 1 registered tool(s): tortoise_update_point | tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
@@ -435,7 +433,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.apikey_revoke` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_delete` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 
-### no-caller-found — 39
+### no-caller-found — 41
 
 | Method | Does / depends on | Used by | Recomm. | Rationale |
 |---|---|---|---|---|
@@ -460,6 +458,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.membership_list` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.membership_update_role` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.migrate_orgs_to_registry` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
+| `TortoiseSDK.operator_action` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.org_delete` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.org_list` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.org_update` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
@@ -467,6 +466,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.restore_point_at` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.retrieval_legs` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.test_guard` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
+| `TortoiseSDK.traverse` | reached by no registered MCP tool; caller categories: none outside tests | tooling, skill-docs, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.graph_active_key_count` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_count` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_key_ids` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
@@ -525,7 +525,7 @@ designates as canonical.
 ## On the numbers alone
 
 - **0 entries declare an SDK method that does not exist.**
-- **39 SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no tool handler, which is what `no-caller-found` means here. Of those, **11** are called from the tenant REST surface, so they are reachable by a client but not by an agent inside the gate; the remaining 28 have no caller outside tests at all.
+- **41 SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no tool handler, which is what `no-caller-found` means here. Of those, **11** are called from the tenant REST surface, so they are reachable by a client but not by an agent inside the gate; the remaining 30 have no caller outside tests at all.
 - **21 SDK methods are reachable only from our own engine, our tooling, or the tenant REST surface** — reachable by something, but by no agent path inside the gate. (Methods reachable ONLY from tenant REST are counted in the class above, not here.)
 - **Only 3 tools are referenced by an eval harness** (`tortoise_recall`, `tortoise_search`, `tortoise_check_structure`) — so almost none of this surface is covered by an evaluation.
 
