@@ -293,6 +293,49 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _reset_health_probe_state(monkeypatch) -> None:
+    """The whole of ``_reset_health_probe``'s reset, as a PLAIN function.
+
+    Extracted so the reset is exercisable directly: pytest refuses to call a
+    fixture function (``Fixtures are not meant to be called directly``), which
+    would otherwise make the #3396 guard below untestable.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.monitoring as mon
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    # #3062's round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A leftover probe worker can rebuild ``_probe_sdk`` with the
+    # previous env key after this fixture has run, which is what made
+    # ``test_probe_connection_is_reused_not_rebuilt_per_call`` count 2 builds
+    # (green in the docker lane, red in the embedded lane).
+    #
+    # This and ``_reset_probe_worker()`` below are COMPLEMENTARY, not alternatives:
+    # nulling the worker slot does not stop an already-abandoned acquisition from
+    # re-populating ``_PROBE_SDK_CACHE`` under the old env key, and clearing the
+    # cache does not release an occupied worker slot.
+    ha_mod._probe_sdk_reset()
+    # #3396: the coordinators are not the only process-global singleton — the
+    # shared ``monitoring._PROBE_WORKER`` is submitted to by the REAL ``_probe_db``
+    # (``hosted_api.py`` -> ``monitoring.probe_db`` -> ``_probe_worker().submit``),
+    # and a probe whose SDK acquisition is abandoned at
+    # ``PROBE_SDK_ACQUISITION_BUDGET`` leaves its single slot occupied.
+    # ``_probe_worker()`` replaces the worker only when it is NOT ``alive``, so an
+    # occupied-but-alive worker is handed back; ``_reset_probe_worker()`` (which
+    # nulls the global) is the only way to get a USABLE slot while the abandoned
+    # call is still inside its socket operation. The slot itself frees when that
+    # call returns (monitoring.py: "holds the single shared ``_probe_worker`` slot
+    # while it does"; proved by
+    # tests/test_monitoring.py::test_same_worker_recovers_after_a_released_hang,
+    # which recovers on the SAME worker with no reset). The old thread is a daemon
+    # — abandoned, never joined.
+    mon._reset_probe_worker()
+
+
 @pytest.fixture(autouse=True)
 def _reset_health_probe(monkeypatch):
     """#2850: /health and /health/ready share a module-level single-flight probe
@@ -303,24 +346,78 @@ def _reset_health_probe(monkeypatch):
     the module: it would otherwise re-probe behind a test's back and overwrite
     a deliberately patched verdict. The refresher's own behavior is covered by
     ``test_health_probe_loop_refreshes_the_coordinator``.
-    """
-    import tortoise.hosted_api as ha_mod
 
-    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    # Round-2 review: reset the process-global SDK CACHE too, not just the
-    # coordinators. A probe worker left over from a previous test can rebuild
-    # ``_probe_sdk`` with the previous env key after this fixture has run, which
-    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
-    # count 2 builds (green in the docker lane, red in the embedded lane).
-    ha_mod._probe_sdk_reset()
+    #3396: resetting the COORDINATORS is not enough. The shared
+    ``monitoring._PROBE_WORKER`` is a SECOND process-global: the real
+    ``_probe_db`` submits to it, and a probe whose SDK acquisition is abandoned
+    at ``PROBE_SDK_ACQUISITION_BUDGET`` keeps its single slot while that call runs
+    (it is abandoned, never cancelled, so it returns on its own). A worker that is
+    occupied but still ``alive`` is handed back by the lazy accessor, so the reset
+    below is the only way to get a usable slot BEFORE that call returns; until
+    then a direct ``_probe_db()`` can time out (``first["ok"] is False``).
+    ``monitoring._reset_probe_worker()`` is the escape hatch available for ops
+    recovery, and is what ``tests/test_monitoring.py``'s ``_fresh_probe_worker``
+    calls on both sides of its yield. (That coordinator sentence above is about the
+    health COORDINATOR and is a different object from the shared worker named here.)
+    """
+    _reset_health_probe_state(monkeypatch)
     yield
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    ha_mod._probe_sdk_reset()
+    _reset_health_probe_state(monkeypatch)
+
+
+def test_reset_health_probe_drops_a_wedged_probe_worker(monkeypatch):
+    """#3396: a WEDGED probe worker must not survive ``_reset_health_probe``.
+
+    The lazy accessor only replaces a worker that is NOT ``alive``
+    (``monitoring._probe_worker()``); an occupied-but-alive worker is therefore
+    handed back, so ``monitoring._reset_probe_worker()`` is the only way to get a
+    usable slot while the abandoned call is still running. (The slot frees by
+    itself once that call returns — it is abandoned, not cancelled.) So if this
+    module's autouse fixture omits that reset, an abandoned acquisition from an
+    earlier test in the file keeps the slot and a direct ``_probe_db()`` can
+    report ``ok: False``.
+
+    Deterministic by construction: it occupies the slot itself and then runs the
+    same reset the autouse fixture runs, so it does not depend on test ORDER (the
+    issue's documented ``-k "health or Health"`` repro is order- and timing-
+    dependent — that is why it passed most of the time and made the previous fix
+    attempt look unverifiable).
+
+    What this test proves and what it does NOT: it proves the reset drops an
+    occupied worker (the reset's contract). It does NOT prove the intermittent
+    ``-k "health or Health"`` failure is fixed — the underlying class is that a
+    ``_SingleSlotWorker`` thread cannot be joined or cancelled, so an abandoned
+    acquisition holds the slot until its own socket call returns.
+    """
+    import tortoise.monitoring as mon
+
+    started, release = threading.Event(), threading.Event()
+
+    def _block():
+        started.set()
+        release.wait(60)
+
+    wedged = mon._probe_worker()
+    wedged.submit(_block)
+    try:
+        # Generous bound: this box runs many concurrent sessions, and a red here
+        # must mean the reset failed, not that a freshly-started daemon thread was
+        # starved of the CPU. `release` is set in `finally` either way.
+        assert started.wait(30), "the shared probe worker never ran the blocker"
+        # Precondition: wedged but ALIVE, so the lazy accessor reuses it —
+        # which is what keeps this leak invisible to every liveness check.
+        assert mon._probe_worker() is wedged, (
+            "precondition: a wedged-but-alive worker must be reused")
+
+        _reset_health_probe_state(monkeypatch)
+        try:
+            assert mon._probe_worker() is not wedged, (
+                "#3396: the wedged probe worker survived the reset — "
+                "the next test inherits a wedged slot and its probe times out")
+        finally:
+            release.set()
+    finally:
+        release.set()
 
 
 def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
