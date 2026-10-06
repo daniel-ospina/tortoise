@@ -1135,8 +1135,13 @@ def test_alert_step_ids_match_the_script_and_the_workflow():
         f"{sorted(set(passed) - set(declared))}, declared-not-passed: "
         f"{sorted(set(declared) - set(passed))}"
     )
-    assert set(passed) <= set(wf_ids), (
-        f"--steps names ids the workflow does not declare: {sorted(set(passed) - set(wf_ids))}"
+    assert set(passed) == set(wf_ids), (
+        f"the workflow's `id:` set and the sites' `--steps` set must be EQUAL in "
+        f"both directions — passed-not-declared: {sorted(set(passed) - set(wf_ids))}, "
+        f"declared-not-passed: {sorted(set(wf_ids) - set(passed))}. A new `id:` on an "
+        f"alert-job step that is not added to that site's `--steps` would file under "
+        f"the job-level key with 'failed step: not reported' — silently losing the "
+        f"per-step attribution this change exists for (round-5 review, P3-3)"
     )
     for sid in passed:
         assert declared[sid] == wf_ids[sid], (

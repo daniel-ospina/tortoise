@@ -235,12 +235,22 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # alert exists to carry; the run link above is the escape hatch for
         # anything cut (the measured 2026-09-04 report was 509 bytes, so the cap
         # is not normally reached).
-        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE")"
-        echo '```'
+        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE" | iconv -f UTF-8 -t UTF-8 -c)"
+        # `tail -c` cuts at a BYTE, so it can land inside a multibyte character;
+        # `iconv -c` above drops the split sequence rather than putting invalid
+        # UTF-8 in the issue body. The fence is then made longer than any backtick
+        # run in the excerpt: the report carries repo-controlled text (migration
+        # filenames, version names), and a report containing ``` would close the
+        # block early and render the rest as live markdown. (Round-5 review, P3-2.)
+        fence='```'
+        while printf '%s' "$excerpt" | grep -qF -- "$fence"; do
+          printf -v fence '%s`' "$fence"
+        done
+        echo "$fence"
         printf '%s' "$excerpt"
         # `tail -c` can start mid-line; a fenced block is still closed below.
         echo
-        echo '```'
+        echo "$fence"
         if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
           echo
           echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
@@ -266,6 +276,17 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
 main() {
   local job="" steps="" body_file="" key="" sid="" ledger_ok=0 page_text=""
   while [ $# -gt 0 ]; do
+    # A value-taking flag with no value must be a usage error WITH a message.
+    # A bare `shift 2` fails under `set -e` and aborts with exit 1 and NO output,
+    # before `usage` can run (round-5 review, P3-1).
+    case "$1" in
+      --job|--steps|--drift-report)
+        if [ "$#" -lt 2 ]; then
+          err "$1 needs a value"
+          usage || true
+          return 2
+        fi ;;
+    esac
     case "$1" in
       --job)          job="${2:-}"; shift 2 ;;
       --steps)        steps="${2:-}"; shift 2 ;;

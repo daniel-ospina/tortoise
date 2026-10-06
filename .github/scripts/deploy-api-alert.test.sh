@@ -339,6 +339,55 @@ assert_not_contains "$POST_BODY" "did **NOT** flip" "and not the deploy-api mean
 assert_not_contains "$POST_BODY" "blocked" "the body makes no 'pipeline is blocked' claim for a job that does not block it"
 assert_contains "$PACK_BODY" "SKIPPED" "(control) the pack-smoke body DOES state the consequence that is true there"
 
+# ── case 17: the pasted report cannot break the body it is pasted into ───────
+# The report is pasted into a fenced block. Two ways it could damage the issue:
+# a fence run inside the excerpt closing the block early (the rest then renders as
+# live markdown), and `tail -c` landing inside a multibyte character (invalid
+# UTF-8 in a body GitHub then mangles). Both are pinned here. (Round-5, P3-2.)
+FENCE_REPORT="$FIX/drift-report-fence.txt"
+{
+  echo "check-migration-drift: repo migrations vs prod"
+  echo '  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):'
+  echo "    - 20260926000002   # see ###\`\`\` the runbook"
+  echo '  ```'
+  echo '  Remediation: apply migrations first —'
+  echo '    gh workflow run supabase-deploy.yml --ref main'
+} > "$FENCE_REPORT"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FENCE_REPORT"
+assert_eq "$RC" "0" "the alert succeeds on a report containing a fence"
+FENCE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$FENCE_BODY" "gh workflow run supabase-deploy.yml --ref main" "the remediation is still carried"
+assert_contains "$FENCE_BODY" '````' "the block is fenced with MORE backticks than the excerpt contains, so it cannot close early"
+# Byte-boundary: cut the report mid-character and require the body to stay valid
+# UTF-8 (`iconv -c` drops the split sequence). The fixture is built so the 6000-
+# byte tail cut lands EXACTLY inside a two-byte `é` — and that property is itself
+# asserted, so this case cannot silently become vacuous.
+python3 - "$FIX/drift-report-utf8.txt" <<'PY'
+import sys, pathlib
+head = b"check-migration-drift\n" + b"x" * 5900
+payload = b"\n  BLOCKING repo-ahead migrations\n    - 20260926000002\n    gh workflow run supabase-deploy.yml --ref main\n"
+# Derive the padding so the cut (`total - 6000`) lands on the SECOND byte of the
+# 2-byte `é`: total = len(head) + 2 + len(payload) + pad + 1  and
+# total - 6000 == len(head) + 1.
+pad = (len(head) + 1 + 6000) - (len(head) + 2 + len(payload) + 1)
+assert pad > 0, pad
+pathlib.Path(sys.argv[1]).write_bytes(head + "é".encode() + payload + b"#" * pad + b"\n")
+PY
+if tail -c 6000 "$FIX/drift-report-utf8.txt" | python3 -c "import sys; sys.stdin.buffer.read().decode('utf-8')" 2>/dev/null; then
+  bad "the utf8 fixture must be cut MID-CHARACTER, or this case is vacuous"
+else
+  ok "the fixture really is cut inside a multibyte character (the case is not vacuous)"
+fi
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "the alert succeeds on a report cut mid-character"
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "the body is valid UTF-8 even though the cut landed inside a multibyte character"
+else
+  bad "the body is NOT valid UTF-8 — a split multibyte character reached the issue"
+fi
+
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
 reset_case
@@ -353,6 +402,14 @@ assert_eq "$RC" "2" "--job is required"
 run_alert --job deploy-api --bogus x
 assert_eq "$RC" "2" "an unknown argument is a usage error"
 assert_eq "$(count_calls 'GH')" "0" "a usage error contacts nothing"
+# A value-taking flag with no value must be a usage error WITH a message, not a
+# bare `shift 2` failure under `set -e` (exit 1, no output). (Round-5, P3-1.)
+for flag in --job --steps --drift-report; do
+  reset_case
+  run_alert "$flag"
+  assert_eq "$RC" "2" "$flag with no value is a usage error"
+  assert_contains "$OUT" "needs a value" "and says so, instead of exiting 1 silently"
+done
 # `--help` documents itself and succeeds. This used to exit 2: `usage` returns 2
 # and `set -e` aborted before the `return 0` beside it could run. (Round-4
 # review, P3.)
