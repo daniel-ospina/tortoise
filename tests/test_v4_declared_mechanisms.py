@@ -82,14 +82,41 @@ def load_registry(path: Path = REGISTRY) -> dict:
 def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
     """The gate. Returns every violation — an EMPTY list is the only pass.
 
-    FAIL CLOSED: the trailing ``else`` catches a row whose ``state`` is missing,
-    misspelled, or anything outside :data:`STATES`, and reports it as NEITHER
-    implemented nor marked. A new state word cannot silently become a pass —
-    an unrecognised state is a violation, not a default (the same allow-list
-    polarity the checks rule uses).
+    FAIL CLOSED: a row whose ``state`` is missing, misspelled, or anything
+    outside :data:`STATES` is reported as NEITHER implemented nor marked. A new
+    state word cannot silently become a pass — an unrecognised state is a
+    violation, not a default (the same allow-list polarity the checks rule uses).
     """
     errors: list[str] = []
     seen: set[str] = set()
+
+    def _path_violations(mid: str, field: str, entries: object,
+                         root: Path) -> list[str]:
+        """A declared path must be a NON-EMPTY, REPO-RELATIVE string, on disk.
+
+        A bare `root / rel` is fail-OPEN (cycle-2 review P1): `""` resolves to
+        `root` itself, an absolute `rel` replaces `root` entirely, `..` escapes
+        the repo, and a non-string raises `TypeError` — a crash, not a verdict.
+        A mapping whose KEYS are existing paths also passed by key iteration.
+        So the entry is validated before it is joined.
+        """
+        out: list[str] = []
+        if not isinstance(entries, list):
+            return [f"{mid}: {field} must be a list, got {type(entries).__name__}"]
+        for rel in entries:
+            if not isinstance(rel, str) or not rel:
+                out.append(f"{mid}: {field} entry is not a non-empty string: {rel!r}")
+                continue
+            p = Path(rel)
+            if p.is_absolute() or ".." in p.parts or not p.parts:
+                out.append(
+                    f"{mid}: {field} path must be a repo-relative path inside "
+                    f"the repo: {rel!r}"
+                )
+                continue
+            if not (root / p).exists():
+                out.append(f"{mid}: declared path does not exist: {rel}")
+        return out
 
     for row in mechanisms:
         if not isinstance(row, dict):
@@ -109,50 +136,50 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
 
         # "Declared" must itself be checkable: a row that names no declaring
         # document, or names one that is not on disk, is not declared anywhere.
-        declared_in = row.get("declared_in") or []
-        if not declared_in:
+        declared_in = row.get("declared_in")
+        if not isinstance(declared_in, list) or not declared_in:
             errors.append(f"{mid}: declares no declaring document (declared_in)")
-        for rel in declared_in:
-            if not (root / rel).exists():
-                errors.append(f"{mid}: declared_in path does not exist: {rel}")
-
-        state = row.get("state")
-
-        if state == IMPLEMENTED:
-            code = list(row.get("code") or [])
-            tests = list(row.get("tests") or [])
-            if not code:
-                errors.append(f"{mid}: implemented but declares no code path")
-            if not tests:
-                errors.append(
-                    f"{mid}: implemented but declares no test — a code path "
-                    f"without a test is exactly the declared-but-absent shape "
-                    f"this gate exists to catch"
-                )
-            for rel in code + tests:
-                if not (root / rel).exists():
-                    errors.append(f"{mid}: declared path does not exist: {rel}")
-
-        elif state == NOT_IMPLEMENTED:
-            # A tracking issue is a REAL issue number. `row.get(...) in (None,
-            # "", 0)` used `==` and passed `[]`, `" "`, `"0"`, `"TBD"` and any
-            # negative int — a placeholder on the one row that claims to be
-            # marked. The check is an allow-list on the type and the sign, not a
-            # deny-list of the spellings someone thought of (review, cycle 1 P1).
-            issue = row.get("tracking_issue")
-            if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
-                errors.append(
-                    f"{mid}: not-implemented with no real tracking_issue "
-                    f"(got {issue!r}) — an unbuilt mechanism needs a home"
-                )
-
         else:
+            errors.extend(_path_violations(mid, "declared_in", declared_in, root))
+
+        # The polarity is read FROM `STATES`, so the accepted set and the
+        # message naming it cannot drift (cycle-2 review P2).
+        state = row.get("state")
+        if state not in STATES:
             errors.append(
                 f"{mid}: NEITHER implemented (a code path with a test) NOR "
                 f"marked not-implemented (state={state!r}, expected one of "
                 f"{STATES}) — a declared-and-absent mechanism must be DECLARED, "
                 f"not implied"
             )
+            continue
+
+        if state == IMPLEMENTED:
+            if not isinstance(row.get("code"), list) or not row.get("code"):
+                errors.append(f"{mid}: implemented but declares no code path")
+            else:
+                errors.extend(_path_violations(mid, "code", row["code"], root))
+            if not isinstance(row.get("tests"), list) or not row.get("tests"):
+                errors.append(
+                    f"{mid}: implemented but declares no test — a code path "
+                    f"without a test is exactly the declared-but-absent shape "
+                    f"this gate exists to catch"
+                )
+            else:
+                errors.extend(_path_violations(mid, "tests", row["tests"], root))
+
+        else:  # NOT_IMPLEMENTED — the only other member of STATES
+            # A tracking issue is a REAL issue number. `row.get(...) in (None,
+            # "", 0)` used `==` and passed `[]`, `" "`, `"0"`, `"TBD"` and any
+            # negative int — a placeholder on the one row that claims to be
+            # marked. The check is an allow-list on the type and the sign, not a
+            # deny-list of the spellings someone thought of (cycle-1 review P1).
+            issue = row.get("tracking_issue")
+            if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+                errors.append(
+                    f"{mid}: not-implemented with no real tracking_issue "
+                    f"(got {issue!r}) — an unbuilt mechanism needs a home"
+                )
 
     return errors
 
@@ -175,9 +202,9 @@ def test_every_declared_mechanism_is_implemented_with_a_test_or_marked_absent() 
 
 # ── the gate's own fail-closed proof (mutation) ─────────────────────────────
 #
-# A guard that cannot fail is worse than none. These four cases are the ones
-# that must NEVER become a pass, and they are permanent so the gate cannot
-# regress into a no-op while the registry still passes.
+# A guard that cannot fail is worse than none. These cases are the ones that
+# must NEVER become a pass, and they are permanent so the gate cannot regress
+# into a no-op while the registry still passes.
 
 
 def test_gate_fails_closed_on_a_mechanism_that_is_neither() -> None:
@@ -249,6 +276,53 @@ def test_gate_fails_closed_on_a_placeholder_tracking_issue() -> None:
             ]
         )
         assert any("tracking_issue" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_fake_declared_path() -> None:
+    """A declared path must be a NON-EMPTY, REPO-RELATIVE string that exists.
+
+    Cycle-2 review P1: a bare `root / rel` was fail-OPEN. `""` resolves to
+    `root` itself, an absolute path replaces `root`, `..` escapes the repo, and
+    a non-string raises `TypeError` instead of reporting. So an `implemented`
+    row could carry zero real code and zero real tests and still pass — the
+    `declared => present` inference this gate exists to kill.
+    """
+    base = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "code": ["config/v4-mechanisms.yml"],
+        "tests": ["config/v4-mechanisms.yml"],
+    }
+    for field in ("declared_in", "code", "tests"):
+        # `"."` is included because `Path(".").parts == ()` and `root / "."` is
+        # `root` — it EXISTS, so an exists-only check passed it silently.
+        for bad in ([""], ["."], [".."], ["/etc/hosts"], ["../../etc/hosts"],
+                    [123], [None], [{}], ["a/../b"]):
+            row = dict(base)
+            row[field] = bad
+            errors = gate_errors([row])
+            assert errors, (field, bad, "the gate PASSED a fake path")
+
+
+def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
+    """A dict `code`/`declared_in` iterates its KEYS — it must be rejected.
+
+    `{config/v4-mechanisms.yml: 1}` passed silently before cycle 2 (P1).
+    """
+    for field in ("declared_in", "code", "tests"):
+        row = {
+            "id": "x",
+            "name": "x",
+            "declared_in": ["config/v4-mechanisms.yml"],
+            "state": "implemented",
+            "code": ["config/v4-mechanisms.yml"],
+            "tests": ["config/v4-mechanisms.yml"],
+        }
+        row[field] = {"config/v4-mechanisms.yml": 1}
+        errors = gate_errors([row])
+        assert errors, (field, "the gate PASSED a mapping as a path list")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid

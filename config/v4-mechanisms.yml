@@ -26,9 +26,10 @@
 # it names the raw/narrative-out change and a salience gate, and no list. The
 # seven are declared across a cross-referenced PAIR of documents, not one
 # authority: four in `EXTRACTOR-V4-ARCHITECTURE.md` (vet, source_dedup,
-# near_dup_merge, span_link), three in `STORAGE-ARCHITECTURE.md` (span_link,
-# sufficiency_router, fanout_cap — span_link is declared in both), and one in
-# `packs/dev/manifest.yaml` (embed_gate). The seven NAMES below come from
+# near_dup_merge, span_link), four in `STORAGE-ARCHITECTURE.md` (span_link,
+# embed_gate, sufficiency_router, fanout_cap — span_link is declared in both),
+# and one in `packs/dev/manifest.yaml` (embed_gate, its policy source). The
+# seven NAMES below come from
 # #5064's own O/I/T indicator (1), each with its declaring document and a filed
 # tracking issue. Making the set a single registry is the fix; `declared_in:`
 # records where each row's declaration actually lives.
@@ -121,7 +122,8 @@ mechanisms:
   - id: sufficiency_router
     name: "sufficiency router + escalation write-back"
     declared_in:
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.5 the escalation write-back
     state: not-implemented
     tracking_issue: 5009
     note: >-
