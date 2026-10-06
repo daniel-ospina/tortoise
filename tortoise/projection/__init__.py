@@ -1969,8 +1969,34 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 # #7369: compiled ONCE — the gate runs on every write statement, so a
 # per-call recompile would be a hot-path cost for no benefit.
 _WRITE_CLAUSE_RE = re.compile(
-    r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH)\b", re.I
+    r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b", re.I
 )
+# A write keyword can appear inside a string literal, a comment, or a backtick
+# identifier (``MATCH (n) WHERE n.s='SET' RETURN n``) — matching the raw text
+# would call a pure READ a write and null a legitimate map. Strip them first.
+_LITERAL_OR_COMMENT_RE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/",
+    re.S,
+)
+# ``CALL`` is neither read nor write: ``CALL db.idx.vector.createNodeIndex(..)``
+# and every ``apoc.*`` write procedure STORE without naming a write clause, and
+# a keyword search cannot see inside the procedure name (``\bcreate\b`` does not
+# match ``createNodeIndex``). Treating CALL as a write is the conservative
+# direction: being wrong that way costs a nulled parameter, being wrong the
+# other way re-opens the abort-after-wipe this gate exists to prevent.
+_CALL_RE = re.compile(r"\bCALL\b", re.I)
+
+
+def _statement_writes(statement: str) -> bool:
+    """True when the statement MAY store a parameter value.
+
+    Deliberately conservative: anything not provably read-only is treated as a
+    write. The two ways to be wrong are not symmetric — a false "write" nulls a
+    value that would have been accepted, while a false "read" forwards a map
+    into a property position and aborts a replay AFTER the journal was wiped.
+    """
+    stripped = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
+    return bool(_WRITE_CLAUSE_RE.search(stripped) or _CALL_RE.search(stripped))
 _GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_REPLACE_RE = re.compile(
     r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -2110,7 +2136,7 @@ def _journal_safe_params(params, cypher=None):
     # ``_flat_writable`` admits them without allocating. Anything nested (a
     # dict, a list of dicts, a set, bytes) fails that test and takes the FULL
     # walk, which is the case that was aborting.
-    if statement and not _WRITE_CLAUSE_RE.search(statement):
+    if statement and not _statement_writes(statement):
         if isinstance(params, dict) and all(
             _flat_writable(val) for val in params.values()
         ):
@@ -2177,7 +2203,7 @@ def _journal_safe_params(params, cypher=None):
     # forwarded — see `_writable_at_parse`. A statement we do NOT know (empty) is
     # NOT a read: degrade conservatively, as before. Parse-time rejects degrade
     # on both.
-    is_read = bool(statement) and not _WRITE_CLAUSE_RE.search(statement)
+    is_read = bool(statement) and not _statement_writes(statement)
     for key, value in params.items():
         if key in merge_keys:
             # A MERGE key: left EXACTLY as it is. A null here is refused by the
@@ -2970,6 +2996,19 @@ def _writable_at_parse(val) -> bool:
             val.encode("utf-8")
         except UnicodeEncodeError:
             return False  # lone surrogate (driver rejects at encode)
+    # RECURSE: the engine parses the WHOLE parameter, so a container holding a
+    # parse-reject anywhere inside is rejected as a unit. Testing only the top
+    # level let `{"ids": ["ok", "bad\x00id"]}` through on a read, which the
+    # engine then refused with "Failed to parse query parameter 'ids' value" —
+    # the abort-after-wipe this gate exists to prevent, re-opened by the very
+    # exemption added for maps.
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return all(_writable_at_parse(item) for item in val)
+    if isinstance(val, dict):
+        return all(
+            _writable_at_parse(k) and _writable_at_parse(v)
+            for k, v in val.items()
+        )
     return True
 
 

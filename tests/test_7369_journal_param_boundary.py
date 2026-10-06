@@ -372,6 +372,36 @@ def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
     assert _journal_safe_params(
         {"v": b"\x01\x02"}, "MATCH (n:X {v: $v}) RETURN n",
     ) == {"v": None}
+    # A PARSE reject NESTED inside a container still degrades. The engine parses
+    # the WHOLE parameter, so testing only the top level let this through and
+    # the engine then refused it with "Failed to parse query parameter 'ids'
+    # value" — the abort-after-wipe, re-opened by the map exemption itself.
+    assert _journal_safe_params(
+        {"ids": ["ok", "bad\x00id"]}, "MATCH (n) WHERE n.id IN $ids RETURN n",
+    ) == {"ids": None}
+    assert _journal_safe_params(
+        {"m": {"a": "bad\x00x"}}, "MATCH (n) WHERE n.id = $m RETURN n",
+    ) == {"m": None}
+    # ...and a nested lone surrogate too (the driver rejects it at encode).
+    assert _journal_safe_params(
+        {"ids": ["ok", "bad\ud800id"]},
+        "MATCH (n) WHERE n.id IN $ids RETURN n",
+    ) == {"ids": None}
+    # A write keyword inside a STRING LITERAL does not make a read a write —
+    # matching the raw text would null this perfectly good map.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.s='SET' RETURN n",
+    )["m"] == {"a": 1}
+    # CALL is treated as a write: an index procedure STORES without naming a
+    # write clause, and a keyword search cannot see inside the procedure name.
+    assert _journal_safe_params(
+        {"m": {"a": 1}},
+        "CALL db.idx.vector.createNodeIndex('Point','embedding',1536,'HNSW')",
+    )["m"] is None
+    # ...and DROP is a write clause (it was missing from the keyword set).
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "CALL db.idx.fulltext.drop('Point')",
+    )["m"] is None
     # ...and the all-scalar read still takes the cheap identity route.
     assert _journal_safe_params(
         {"name": "fine"}, "MATCH (e:Subject {name:$name}) RETURN e",
