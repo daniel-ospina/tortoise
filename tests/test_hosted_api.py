@@ -325,9 +325,14 @@ def _reset_health_probe_state(monkeypatch) -> None:
     # and a probe whose SDK acquisition is abandoned at
     # ``PROBE_SDK_ACQUISITION_BUDGET`` leaves its single slot occupied.
     # ``_probe_worker()`` replaces the worker only when it is NOT ``alive``, so an
-    # occupied-but-alive worker is handed back forever; only
-    # ``_reset_probe_worker()`` (which nulls the global) recovers the slot. The old
-    # (possibly occupied) thread is a daemon — abandoned, never joined.
+    # occupied-but-alive worker is handed back; ``_reset_probe_worker()`` (which
+    # nulls the global) is the only way to get a USABLE slot while the abandoned
+    # call is still inside its socket operation. The slot itself frees when that
+    # call returns (monitoring.py: "holds the single shared ``_probe_worker`` slot
+    # while it does"; proved by
+    # tests/test_monitoring.py::test_same_worker_recovers_after_a_released_hang,
+    # which recovers on the SAME worker with no reset). The old thread is a daemon
+    # — abandoned, never joined.
     mon._reset_probe_worker()
 
 
@@ -345,14 +350,15 @@ def _reset_health_probe(monkeypatch):
     #3396: resetting the COORDINATORS is not enough. The shared
     ``monitoring._PROBE_WORKER`` is a SECOND process-global: the real
     ``_probe_db`` submits to it, and a probe whose SDK acquisition is abandoned
-    at ``PROBE_SDK_ACQUISITION_BUDGET`` keeps its single slot. A worker that is
-    occupied but still ``alive`` is handed back forever by the lazy accessor, so
-    without the reset below the slot is never recovered and a later direct
-    ``_probe_db()`` can time out (``first["ok"] is False``). ``monitoring._reset_probe_worker()``
-    is the escape hatch available for ops recovery, and is what
-    ``tests/test_monitoring.py``'s ``_fresh_probe_worker`` calls on both sides of
-    its yield. (That coordinator sentence above is about the health COORDINATOR
-    and is a different object from the shared worker named here.)
+    at ``PROBE_SDK_ACQUISITION_BUDGET`` keeps its single slot while that call runs
+    (it is abandoned, never cancelled, so it returns on its own). A worker that is
+    occupied but still ``alive`` is handed back by the lazy accessor, so the reset
+    below is the only way to get a usable slot BEFORE that call returns; until
+    then a direct ``_probe_db()`` can time out (``first["ok"] is False``).
+    ``monitoring._reset_probe_worker()`` is the escape hatch available for ops
+    recovery, and is what ``tests/test_monitoring.py``'s ``_fresh_probe_worker``
+    calls on both sides of its yield. (That coordinator sentence above is about the
+    health COORDINATOR and is a different object from the shared worker named here.)
     """
     _reset_health_probe_state(monkeypatch)
     yield
@@ -364,11 +370,12 @@ def test_reset_health_probe_drops_a_wedged_probe_worker(monkeypatch):
 
     The lazy accessor only replaces a worker that is NOT ``alive``
     (``monitoring._probe_worker()``); an occupied-but-alive worker is therefore
-    handed back forever and the single probe slot stays occupied. Only
-    ``monitoring._reset_probe_worker()`` drops it — so if this module's autouse
-    fixture omits that call, an abandoned acquisition from an earlier test in
-    the file keeps the slot and a direct ``_probe_db()`` can report ``ok:
-    False``.
+    handed back, so ``monitoring._reset_probe_worker()`` is the only way to get a
+    usable slot while the abandoned call is still running. (The slot frees by
+    itself once that call returns — it is abandoned, not cancelled.) So if this
+    module's autouse fixture omits that reset, an abandoned acquisition from an
+    earlier test in the file keeps the slot and a direct ``_probe_db()`` can
+    report ``ok: False``.
 
     Deterministic by construction: it occupies the slot itself and then runs the
     same reset the autouse fixture runs, so it does not depend on test ORDER (the
@@ -388,12 +395,15 @@ def test_reset_health_probe_drops_a_wedged_probe_worker(monkeypatch):
 
     def _block():
         started.set()
-        release.wait(30)
+        release.wait(60)
 
     wedged = mon._probe_worker()
     wedged.submit(_block)
     try:
-        assert started.wait(5), "the shared probe worker never ran the blocker"
+        # Generous bound: this box runs many concurrent sessions, and a red here
+        # must mean the reset failed, not that a freshly-started daemon thread was
+        # starved of the CPU. `release` is set in `finally` either way.
+        assert started.wait(30), "the shared probe worker never ran the blocker"
         # Precondition: wedged but ALIVE, so the lazy accessor reuses it —
         # which is what keeps this leak invisible to every liveness check.
         assert mon._probe_worker() is wedged, (
