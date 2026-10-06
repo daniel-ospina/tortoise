@@ -746,7 +746,26 @@ jobs:
           # .markdownlint-cli2.jsonc and silently fell back to DEFAULTS, so MD013
           # (line-length 80) fired on the long prose lines the repo config turns
           # off. This mirrors the main-health path above.
-          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3
+          #
+          # #7435: the findings are CAPTURED here, not adjudicated. The step lints
+          # each changed file WHOLE, so pre-existing debt in a file a change merely
+          # touches used to red this required check (#5434: 9 findings in a file the
+          # PR authored, ~24 s to reproduce locally but a full CI cycle to discover;
+          # #7475: a link broken on main since the file existed). The snapshot differ
+          # below decides pass/fail — new findings still fail, known ones do not.
+          #
+          # The exit code is deliberately NOT the verdict: GNU xargs (this runner)
+          # rewrites a child's exit 1-125 to 123, so cli2's 1 (findings) and 2
+          # (fatal) are indistinguishable here. The differ decides from the report
+          # — `Linting: N` must equal the changed-set count, and the findings
+          # parsed must equal the Summary count.
+          set +e
+          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
+            > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
+          md_rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mdlint-pr.txt"
+          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
@@ -754,7 +773,30 @@ jobs:
           # `--files-from` reads the list from a FILE — no filename reaches a
           # shell command (#4449).
           args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
+          # #7435: report JSON and do NOT fail the step here — the snapshot differ
+          # below decides, so inherited link debt in a touched file stops redding
+          # the required check while a NEW dead link still fails it.
+          format: json
+          output: ${{ runner.temp }}/lychee-pr.json
+          fail: false
           failIfEmpty: false
+      - name: Docs lint baseline (changed files)
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
+        env:
+          # A COUNT, from this workflow's own `grep -c` — never a filename, so it
+          # is safe to pass as a value (the #4449 rule covers paths, not integers).
+          EXPECTED_MD_FILES: ${{ steps.changed.outputs.count }}
+        run: |
+          # #7435 (owner ruling, Option 1): fail only on findings that are NOT in
+          # the committed snapshot. This does not weaken the check — a new finding
+          # still fails it; it stops a change being charged for debt already on
+          # main. The snapshot is a CEILING, not an amnesty: #7534 drains it to
+          # zero. See the module docstring in tools/docs_lint_baseline.py.
+          python3 tools/docs_lint_baseline.py check \
+            --markdownlint-output "$RUNNER_TEMP/mdlint-pr.txt" \
+            --markdownlint-expected-files "$EXPECTED_MD_FILES" \
+            --lychee-output "$RUNNER_TEMP/lychee-pr.json" \
+            --baseline config/docs-lint-baseline.json
       # ----- main-health path (#5215 Task 8 / D13) --------------------------
       # The PR path above cannot run on a schedule (there is no
       # `github.event.pull_request.base.sha`), so under `main_health` the
@@ -790,8 +832,15 @@ jobs:
           # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for prose);
           # the PR path above is aligned with this invocation (#2386/#5476).
           # NUL-delimited ARGV via xargs — a filename is data, never shell text.
+          # #7435: captured, not adjudicated — the differ below decides. The exit
+          # code is not the verdict (xargs rewrites it).
+          set +e
           xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
-            npx --yes markdownlint-cli2@0.23.3
+            npx --yes markdownlint-cli2@0.23.3 > "$RUNNER_TEMP/mdlint-mh.txt" 2>&1
+          md_rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mdlint-mh.txt"
+          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
@@ -800,7 +849,21 @@ jobs:
           # shell command (#4449). failIfEmpty: a link-free doc is legitimate
           # and must not red the nightly.
           args: --no-progress --files-from ${{ runner.temp }}/changed-md.txt
+          # #7435: captured for the snapshot differ (see the PR path above).
+          format: json
+          output: ${{ runner.temp }}/lychee-mh.json
+          fail: false
           failIfEmpty: false
+      - name: Docs lint baseline (main health)
+        if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
+        env:
+          EXPECTED_MD_FILES: ${{ steps.changed_mh.outputs.count }}
+        run: |
+          python3 tools/docs_lint_baseline.py check \
+            --markdownlint-output "$RUNNER_TEMP/mdlint-mh.txt" \
+            --markdownlint-expected-files "$EXPECTED_MD_FILES" \
+            --lychee-output "$RUNNER_TEMP/lychee-mh.json" \
+            --baseline config/docs-lint-baseline.json
 
   dashboard-js-tests:
     needs: changes

@@ -1282,6 +1282,10 @@ surfaces:
   - test_derived_names.py
   - test_divergence_conformance.py
   - test_docs_fetcher.py
+  # #7435: the committed docs-lint baseline snapshot + differ — the `docs` job's
+  # "fail only on findings new to the baseline" contract, plus the generated-file
+  # fix-target mapping. Same `core` home as its sibling gate test below.
+  - test_docs_lint_baseline.py
   # #2386: the REQUIRED `docs` check's fail-closed changed-markdown detection
   # (`ci.yml` → `docs` job) and its cli2/config contract. Repo-tooling change,
   # so `core` (the fallback surface) is the home.
@@ -3529,6 +3533,7 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
+  test_docs_lint_baseline.py: 2.0  # unmeasured (#7435: registered under core)
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
   # #6137: register the fast pool's unmeasured files. Registering them is
   # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
