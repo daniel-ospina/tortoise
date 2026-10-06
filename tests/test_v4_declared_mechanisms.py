@@ -114,7 +114,16 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"the repo: {rel!r}"
                 )
                 continue
-            if not (root / p).exists():
+            # `is_file()`, not `exists()`: a DIRECTORY satisfied an exists-only
+            # check, so a row could be `implemented` with zero specific code and
+            # zero specific test (cycle-3 P2 — the residual of the cycle-2 P1
+            # class). And the probe is wrapped, because a component longer than
+            # NAME_MAX raises `OSError` — a crash is not a verdict (cycle-3 P2).
+            try:
+                present = (root / p).is_file()
+            except OSError:
+                present = False
+            if not present:
                 out.append(f"{mid}: declared path does not exist: {rel}")
         return out
 
@@ -169,11 +178,13 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 errors.extend(_path_violations(mid, "tests", row["tests"], root))
 
         else:  # NOT_IMPLEMENTED — the only other member of STATES
-            # A tracking issue is a REAL issue number. `row.get(...) in (None,
-            # "", 0)` used `==` and passed `[]`, `" "`, `"0"`, `"TBD"` and any
-            # negative int — a placeholder on the one row that claims to be
-            # marked. The check is an allow-list on the type and the sign, not a
-            # deny-list of the spellings someone thought of (cycle-1 review P1).
+            # A tracking issue must be a REAL issue number — a positive,
+            # non-bool int. `row.get(...) in (None, "", 0)` used `==` and passed
+            # `[]`, `" "`, `"0"`, `"TBD"` and any negative int — a placeholder
+            # on the one row that claims to be marked. The check is an allow-list
+            # on the type and the sign (cycle-1 review P1). ⚠️ EXISTENCE is NOT
+            # verified — `tracking_issue: 424242` passes; link-checking is a
+            # different job, not this gate's.
             issue = row.get("tracking_issue")
             if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
                 errors.append(
@@ -299,11 +310,32 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
         # `"."` is included because `Path(".").parts == ()` and `root / "."` is
         # `root` — it EXISTS, so an exists-only check passed it silently.
         for bad in ([""], ["."], [".."], ["/etc/hosts"], ["../../etc/hosts"],
-                    [123], [None], [{}], ["a/../b"]):
+                    [123], [None], [{}], ["a/../b"], ["tortoise"], ["tests"]):
             row = dict(base)
             row[field] = bad
             errors = gate_errors([row])
             assert errors, (field, bad, "the gate PASSED a fake path")
+
+
+def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
+    """A path the OS cannot probe is a violation, not a crash (cycle-3 P2).
+
+    A component longer than NAME_MAX made `exists()` raise `OSError`.
+    """
+    base = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "code": ["config/v4-mechanisms.yml"],
+        "tests": ["config/v4-mechanisms.yml"],
+    }
+    for bad in (["x" * 5000], ["a/" + "x" * 5000]):
+        for field in ("declared_in", "code", "tests"):
+            row = dict(base)
+            row[field] = bad
+            errors = gate_errors([row])  # must NOT raise
+            assert errors, (field, bad[:1])
 
 
 def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
