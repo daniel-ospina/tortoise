@@ -39,10 +39,18 @@ GLOBAL_CFG = {
 
 
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch, tmp_path):
+def _isolated(monkeypatch, tmp_path, _capture_consent_default_on):
     """Never read the developer's real ~/.tortoise credentials, cwd config, or
     an ambient capture opt-in (a stray TORTOISE_CAPTURE in the shell would
-    silently flip the negative tests)."""
+    silently flip the negative tests).
+
+    #4276: the suite-wide default (``tests/conftest.py``) now GRANTS capture
+    consent, so this whole file — the decline/parity matrix — must opt back out
+    explicitly. ``_capture_consent_default_on`` is declared as a DEPENDENCY so
+    the opt-out is ordered AFTER the grant regardless of pytest's same-scope
+    autouse ordering; a decline test that inherited the grant would pass
+    vacuously (the exact fail-open shape #4276 must not introduce).
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
