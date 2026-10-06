@@ -25,19 +25,28 @@ description: >
   `nvidia_nccl_cu13` — and the step ran 93-219 s across the 16 jobs that
   install.
 
-  `--index-url` (not `--extra-index-url`) keeps the surface minimal and
-  unambiguous: this pip invocation requests exactly `torch`, whose `+cpu`
-  specifier exists ONLY on PyTorch's index, so PyPI's CUDA build cannot shadow
-  it. Torch's own dependencies (sympy, networkx, filelock, fsspec, jinja2,
-  typing-extensions) are mirrored on that index — verified HTTP 200 — so the
-  canonical PyTorch form is used as documented. `--no-deps` is deliberately NOT
-  used: with torch already satisfied, the later extras install would not pull
-  torch's own dependencies back in, and `sympy`/`networkx` are needed by torch
-  alone.
+  `--index-url` (not `--extra-index-url`) keeps the surface unambiguous: the
+  `+cpu` specifier exists ONLY on PyTorch's index, so PyPI's CUDA build cannot
+  shadow it. That index is a full mirror FOR THIS PURPOSE — torch 2.13.0's linux
+  closure (`filelock`, `typing-extensions`, `sympy` -> `mpmath`, `networkx`,
+  `jinja2` -> `MarkupSafe`, `fsspec`, `setuptools`) resolves from it, verified
+  with `pip install --report --platform manylinux_2_28_{x86_64,aarch64}
+  --python-version 3.12 --abi cp312 --only-binary=:all:`. It is not a PyPI mirror
+  in general: it lags PyPI (its newest `setuptools` is 78.1.0 vs requirements.txt's
+  `==84.0.0`, which the later requirements install restores) and serves no macOS
+  wheel — this action is linux-only by construction, and no macOS or
+  `workflow_dispatch` path calls it.
 
-  The version MUST track `uv.lock`'s `torch` pin (currently 2.13.0): the point is
-  to swap the BUILD, not the release. `uv.lock` is unaffected by this action,
-  because `uv sync --frozen` installs the dev group, which does not include torch.
+  `--no-deps` is deliberately NOT used: with torch already satisfied, the later
+  extras install would not pull torch's own dependencies back in, and
+  `sympy`/`networkx` are needed by torch alone.
+
+  The pin MUST track `uv.lock`'s `torch` pin (currently 2.13.0): the point is to
+  swap the BUILD, not the release. `uv.lock` is unaffected by this action (`uv
+  sync --frozen` installs the dev group, which has no torch). The guard below
+  makes that copy fail loudly instead of drifting — if the lock's torch moved
+  ahead of the pin, the extras install would put PyPI's CUDA wheel back ON TOP of
+  the CPU one and CI would stay green with the 3.2 GB restored.
 
 runs:
   using: composite
@@ -46,4 +55,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.13.0+cpu'
+        pin='2.13.0'
+        locked=$(python - <<'PY'
+        import pathlib, re
+        text = pathlib.Path('uv.lock').read_text(encoding='utf-8')
+        m = re.search(r'\[\[package\]\]\nname = "torch"\nversion = "([^"]+)"', text)
+        print(m.group(1) if m else 'ABSENT')
+        PY
+        )
+        if [ "$locked" != "$pin" ]; then
+          echo "::error::CPU-only torch pin ($pin) no longer matches uv.lock's torch pin ($locked). Bump this file and Dockerfile.hosted together (#7473) - otherwise the extras install pulls PyPI's CUDA wheel back on top and CI stays green with ~3.2 GB of nvidia_* wheels restored."
+          exit 1
+        fi
+        pip install --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
+        python -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"

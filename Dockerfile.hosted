@@ -16,6 +16,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# CPU-only torch (#7473), its own layer between the lock-pinned requirements and
+# the extras: installing the extras' `torch` from PyPI means the CUDA build,
+# which declares ~3.2 GB of `nvidia_*` runtime wheels as dependencies, on a host
+# that has no GPU (fly.toml sizes it around "torch + sentence-transformers + the
+# 90MB model"). `--index-url` keeps it unambiguous — the `+cpu` specifier exists
+# only on PyTorch's index, so PyPI's CUDA build cannot shadow it. Placed HERE, on
+# nothing but the base image and its own pin, so neither a pyproject.toml edit
+# nor a source change invalidates this layer. Keep the version in step with
+# uv.lock's `torch` pin (currently 2.13.0) — the point is to swap the BUILD, not
+# the release — and with the pin in .github/actions/install-cpu-torch/action.yml,
+# which carries the same version plus a guard that fails when the lock moves.
+# NOT applied to Dockerfile.selfhost: a self-hosting operator may have a GPU, so
+# that image keeps the CUDA-capable default (it still runs on CPU).
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+    'torch==2.13.0+cpu'
+
 # Layer 1: bake the embedding model (~130MB bge-small, #1349) — cached
 # unless the layer inputs change (pyproject.toml here, or any earlier layer:
 # requirements.txt, base image). Source-only changes reuse the cache, making
@@ -30,20 +46,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # requirements.txt (deploy-slim intent). Lock-pinning the extras too is a
 # separate follow-up if the index drift ever bites.
 COPY pyproject.toml .
-# #7473: install torch from PyTorch's CPU wheel index FIRST, so the [embeddings]
-# extra below cannot pull PyPI's default linux wheel — the CUDA build, which
-# declares ~3.2 GB of `nvidia_*` runtime wheels as dependencies. The hosted VM
-# is CPU-only (fly.toml sizes it around "torch + sentence-transformers + the
-# 90MB model", no GPU), so those wheels are dead weight in the image too.
-# `--index-url` keeps the surface unambiguous: torch's `+cpu` specifier exists
-# only on that index, so PyPI's CUDA build cannot shadow it, and the index
-# mirrors torch's own deps (verified HTTP 200), so nothing is left uninstalled.
-# Keep the version in step with uv.lock's `torch` pin (currently 2.13.0) — the
-# point is to swap the BUILD, not the release.
-# NOT applied to Dockerfile.selfhost: a self-hosting operator may have a GPU, so
-# that image keeps the CUDA-capable default (the CUDA build still runs on CPU).
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-    'torch==2.13.0+cpu'
 RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
@@ -55,6 +57,12 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5', revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a')" \
     && test -d /app/model/models--BAAI--bge-small-en-v1.5 \
         || (echo 'FATAL: embedding model cache not at /app/model/models--BAAI--bge-small-en-v1.5' >&2; exit 1)
+
+# #7473: the extras install above is the step that could silently put PyPI's
+# CUDA torch back on top of the CPU one (if the extras ever raise their torch
+# floor). Separate from the chain above on purpose — that chain's `||` would
+# report a misleading model-cache failure for a torch problem.
+RUN python -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
 
 # Layer 2: source code (fast, no model download — reuses Layer 1 cache)
 # --no-deps: package-only install. Dependencies were already installed
