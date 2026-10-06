@@ -256,7 +256,7 @@ is hand-typed, so the generator additionally rejects it with a maximality check.
 are map decisions with no disposition row in the doc to cite — a net-new target, or a row
 that table does not carry.
 
-#### D1 — the citation corpus
+### D1 — the citation corpus
 
 - `beta-sdk-surface.md` · rows `tortoise_assess_source`, `tortoise_get_source_reliability`, `tortoise_set_source_tier`
   > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
@@ -309,7 +309,7 @@ citation of its own — checked by the same rule — rather than assumed. Withou
 beyond the first clause; 8 sit under an ambiguous citation.** Every count
 here is computed from the doc, not typed.
 
-#### D2 — citations that do NOT name their row's destination
+### D2 — citations that do NOT name their row's destination
 
 **These are findings, not edits.** A row whose destination is not named by the row's own
 full citation is the `get_source_reliability` failure mode read one level up — the row and
@@ -333,7 +333,7 @@ rows are visible in D3, not here, and are not counted as disagreements.
 - **`tortoise_query_points_by_tag`** — map says `search_knowledge`; citation names `list_knowledge`
   > | `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |
 
-#### D2b — rows whose support exists ONLY beyond the first clause
+### D2b — rows whose support exists ONLY beyond the first clause
 
 These rows are **why the first-clause split is load-bearing, not decorative**. Their
 destination is named by the citation, but only in a clause after the first `→` — the
@@ -344,7 +344,7 @@ lose the row's whole support, silently — so the generator computes the first-c
 - **`tortoise_get_source_reliability`** — map says `list_knowledge`; the first clause names `manage_source_trust`, the full citation names `manage_source_trust`, `list_knowledge`
   > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
 
-#### D2c — destinations the sibling SDK rename table records as WRONG
+### D2c — destinations the sibling SDK rename table records as WRONG
 
 `docs/product/sdk-rename-table.md` (generated on demand) reconciles the same surface this file maps, and its
 §C3b finding plus its C6 fold record name a different destination for the rows below.
@@ -357,7 +357,7 @@ disagreement is visible at the row instead of only in the sibling artifact.
 - **`tortoise_set_point_baseline`** — map says `refresh_confidence`; the documented reading is `update_knowledge`
   > Same approved absorption as `tortoise_promote_point`; beta names the starting belief a FIELD on `update_knowledge`, not a separate verb.
 
-#### D3 — citations that name more than one target
+### D3 — citations that name more than one target
 
 A citation here does not by itself determine a destination: it names several, split by
 prose (`; reads via …`, `where they are …`, `for annotation`). Which clause applies to

@@ -3303,6 +3303,7 @@ durations:
   test_fanout_cap.py: 0.2  # unmeasured
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.0  # unmeasured
+  test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
   bench/test_smoke_embedded.py: 30.7  # unmeasured
   test_about_edges.py: 8.3  # unmeasured
   test_backfill_sources.py: 1.0  # unmeasured
