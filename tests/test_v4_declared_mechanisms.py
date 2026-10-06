@@ -90,8 +90,13 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     seen: set[str] = set()
 
+    # A non-iterable registry is a violation, not a crash (cycle-4 P2):
+    # `yaml.safe_load("mechanisms:\n")` is `None`.
+    if not isinstance(mechanisms, list):
+        return [f"mechanisms must be a list, got {type(mechanisms).__name__}"]
+
     def _path_violations(mid: str, field: str, entries: object,
-                         root: Path) -> list[str]:
+                         root: Path, *, must_be_test: bool = False) -> list[str]:
         """A declared path must be a NON-EMPTY, REPO-RELATIVE string, on disk.
 
         A bare `root / rel` is fail-OPEN (cycle-2 review P1): `""` resolves to
@@ -99,6 +104,12 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
         the repo, and a non-string raises `TypeError` — a crash, not a verdict.
         A mapping whose KEYS are existing paths also passed by key iteration.
         So the entry is validated before it is joined.
+
+        `must_be_test` (cycle-4 P2): the `tests:` field must name a TEST, not
+        merely a file that exists — otherwise `tests: ["README.md"]` satisfied
+        "implemented WITH A TEST", which is the gate's whole claim. The check is
+        the repo's own naming convention, so it holds wherever tests live
+        (`tests/`, `graph-scripts/`, `integrations/tests/`) and needs no prefix.
         """
         out: list[str] = []
         if not isinstance(entries, list):
@@ -112,6 +123,15 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 out.append(
                     f"{mid}: {field} path must be a repo-relative path inside "
                     f"the repo: {rel!r}"
+                )
+                continue
+            if must_be_test and not (
+                (p.name.startswith("test_") and p.suffix == ".py")
+                or (p.name.endswith("_test.py"))
+            ):
+                out.append(
+                    f"{mid}: {field} entry is not a test file (expected "
+                    f"`test_*.py` or `*_test.py`): {rel!r}"
                 )
                 continue
             # `is_file()`, not `exists()`: a DIRECTORY satisfied an exists-only
@@ -175,7 +195,9 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"this gate exists to catch"
                 )
             else:
-                errors.extend(_path_violations(mid, "tests", row["tests"], root))
+                errors.extend(
+                    _path_violations(mid, "tests", row["tests"], root, must_be_test=True)
+                )
 
         else:  # NOT_IMPLEMENTED — the only other member of STATES
             # A tracking issue must be a REAL issue number — a positive,
@@ -304,7 +326,7 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
         "state": "implemented",
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["config/v4-mechanisms.yml"],
-        "tests": ["config/v4-mechanisms.yml"],
+        "tests": ["tests/test_fanout_cap.py"],
     }
     for field in ("declared_in", "code", "tests"):
         # `"."` is included because `Path(".").parts == ()` and `root / "."` is
@@ -328,7 +350,7 @@ def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
         "state": "implemented",
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["config/v4-mechanisms.yml"],
-        "tests": ["config/v4-mechanisms.yml"],
+        "tests": ["tests/test_fanout_cap.py"],
     }
     for bad in (["x" * 5000], ["a/" + "x" * 5000]):
         for field in ("declared_in", "code", "tests"):
@@ -350,11 +372,47 @@ def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
             "declared_in": ["config/v4-mechanisms.yml"],
             "state": "implemented",
             "code": ["config/v4-mechanisms.yml"],
-            "tests": ["config/v4-mechanisms.yml"],
+            "tests": ["tests/test_fanout_cap.py"],
         }
         row[field] = {"config/v4-mechanisms.yml": 1}
         errors = gate_errors([row])
         assert errors, (field, "the gate PASSED a mapping as a path list")
+
+
+def test_gate_fails_closed_on_a_non_test_file_in_the_tests_field() -> None:
+    """`tests:` must name a TEST, not merely a file that exists (cycle-4 P2).
+
+    Before this, `tests: ["README.md"]` satisfied "implemented WITH A TEST" —
+    the gate's whole claim, unverifiable. The check is the repo's own naming
+    convention, so it holds wherever tests live and needs no `tests/` prefix.
+    """
+    for bad in (
+        ["tortoise/vet_gate.py"],
+        ["config/v4-mechanisms.yml"],
+        ["README.md"],
+        ["tests/__init__.py"],
+    ):
+        row = {
+            "id": "x",
+            "name": "x",
+            "state": "implemented",
+            "declared_in": ["config/v4-mechanisms.yml"],
+            "code": ["tortoise/vet_gate.py"],
+            "tests": bad,
+        }
+        errors = gate_errors([row])
+        assert any("test file" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_non_list_registry() -> None:
+    """A non-list `mechanisms` is a VERDICT, not a crash (cycle-4 P2).
+
+    `yaml.safe_load("mechanisms:\n")` is `None`; it used to raise `TypeError`
+    instead of reporting. Every other malformed shape was already reported.
+    """
+    for bad in (None, {}, "mechanisms", 7):
+        errors = gate_errors(bad)
+        assert any("must be a list" in e for e in errors), (bad, errors)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
