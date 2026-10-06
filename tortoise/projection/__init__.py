@@ -1996,7 +1996,7 @@ _WRITE_PROC_RE = re.compile(
     r"(create|drop|delete|merge|remove|build|rebuild|refactor|periodic"
     r"|install|update|insert|write|link|import|copy"
     r"|apoc\.trigger|apoc\.config|apoc\.schema|apoc\.uuid|apoc\.do|apoc\.custom"
-    r"|apoc\.cypher|apoc\.atomic|setConfigValue)",
+    r"|apoc\.cypher\.(doIt|runFile|runWrite)|apoc\.atomic|setConfigValue)",
     re.I,
 )
 

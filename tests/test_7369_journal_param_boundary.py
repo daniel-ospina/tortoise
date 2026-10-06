@@ -83,6 +83,7 @@ from tortoise.projection import (
     _journal_safe_params,
     _log_identity_skip,
     _statement_writes,
+    _writable_at_parse,
     _writable_id,
 )
 from tortoise.sdk import TortoiseSDK
@@ -1053,10 +1054,16 @@ def test_the_clause_classifier_PINS_each_round7_and_8_fix():
     # THE DEPTH BOUND IS A BOUND ON CONTAINERS, NOT ON SCALARS. A scalar leaf AT
     # the bound is parsed exactly like one at the top — the sibling predicate
     # `_is_persistable_prop_value` agrees — so it must still be forwarded.
-    # Guarding on entry refused it, contradicting this gate's own docstring.
+    #
+    # Asserted on the PREDICATE, NOT through `_journal_safe_params`: a nested list
+    # of SCALARS is short-circuited by `_annotator_value_ok` before the predicate
+    # is ever consulted, so routing it through the gate passes with the bound
+    # reverted and pins nothing. That is how the first version of this block was
+    # born inert (round 10).
     deep: object = "leaf"
     for _ in range(32):
         deep = [deep]
-    assert _journal_safe_params(
-        {"a": deep}, "MATCH (n) WHERE n.id = $a RETURN n",
-    )["a"] == deep
+    assert _writable_at_parse(deep) is True  # 32 container levels, scalar leaf
+    # With the guard on ENTRY this was False — the off-by-one: the scalar call at
+    # depth 32 refused a leaf the engine parses like any other.
+    assert _writable_at_parse([deep]) is False  # ...one more and the bound bites
