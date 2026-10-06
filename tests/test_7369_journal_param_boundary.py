@@ -82,6 +82,7 @@ from tortoise.projection import (
     _GuardedGraph,
     _journal_safe_params,
     _log_identity_skip,
+    _statement_writes,
     _writable_id,
 )
 from tortoise.sdk import TortoiseSDK
@@ -1002,3 +1003,60 @@ def test_a_MISSING_id_is_not_reported_as_an_unwritable_name(caplog):
     handler._upsert_subject({"id": "s-1", "name": "bad\x00name"})
     assert "skipping Subject" in caplog.text, caplog.text
     assert "name (MERGE key)" in caplog.text, caplog.text
+
+
+def test_the_clause_classifier_PINS_each_round7_and_8_fix():
+    """Every behaviour those fixes changed, ASSERTED — not merely probed by hand.
+
+    Round 9 found the file asserted none of them: reverting the whole commit
+    left every existing assertion green. Each block below fails on the pre-fix
+    code.
+    """
+    # A backtick-quoted WRITE procedure is still a write — the dangerous
+    # direction, where classifying it as a read forwards a map into a property
+    # position and the engine rejects it AFTER the wipe.
+    assert (
+        _statement_writes("CALL `db.idx.fulltext.createNodeIndex`('P','e','t')")
+        is True
+    )
+    # The index writers, the apoc writers that store, and bare DDL.
+    for stmt in (
+        "CALL db.idx.vector.createNodeIndex('P','e',3,'HNSW')",
+        "CALL db.idx.fulltext.drop('Point')",
+        "CALL apoc.trigger.add()",
+        "CALL apoc.config.set()",
+        "CALL apoc.cypher.doIt('CREATE (n) SET n.x=$m', {})",
+        "CALL apoc.atomic.add(n,'p',1)",
+        "CALL dbms.setConfigValue()",
+        "DROP INDEX ON :Point(embedding)",
+    ):
+        assert _statement_writes(stmt) is True, stmt
+    # ...while the READ-ONLY procedures, subqueries and keyword-named
+    # properties are not writes — nulling a map there is the #7174 false
+    # refusal this whole exemption exists to remove.
+    for stmt in (
+        "CALL db.idx.vector.queryNodes('P','e',5)",
+        "CALL db.idx.fulltext.queryNodes('P','q')",
+        "CALL apoc.load.json()",
+        "MATCH (n) CALL { WITH n RETURN n } RETURN n",
+        "MATCH (n) WHERE n.set = $m RETURN n",
+        "MATCH (n) WHERE n.drop = $m RETURN n",
+        "MATCH (n) WHERE n.x = $SET RETURN n",
+        "MATCH (n {set: $m}) RETURN n",
+        "MATCH (n:SET) RETURN n",
+    ):
+        assert _statement_writes(stmt) is False, stmt
+        # ...and the map riding on it survives, end to end.
+        assert _journal_safe_params({"m": {"a": 1}}, stmt)["m"] == {"a": 1}, stmt
+    # A write keyword inside a LITERAL does not make a read a write.
+    assert _statement_writes("MATCH (n) WHERE n.s='SET' RETURN n") is False
+    # THE DEPTH BOUND IS A BOUND ON CONTAINERS, NOT ON SCALARS. A scalar leaf AT
+    # the bound is parsed exactly like one at the top — the sibling predicate
+    # `_is_persistable_prop_value` agrees — so it must still be forwarded.
+    # Guarding on entry refused it, contradicting this gate's own docstring.
+    deep: object = "leaf"
+    for _ in range(32):
+        deep = [deep]
+    assert _journal_safe_params(
+        {"a": deep}, "MATCH (n) WHERE n.id = $a RETURN n",
+    )["a"] == deep
