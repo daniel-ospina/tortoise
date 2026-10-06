@@ -891,10 +891,10 @@ def paid_vs_selected_cli(args) -> int:
         print("--paid-vs-selected needs both --run-id and --changed-files",
               file=sys.stderr)
         return 2
-    import yaml  # noqa: PLC0415 — lazy by design
+    import yaml  # lazy by design
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import ci_selection  # noqa: PLC0415 — lazy by design
+    import ci_selection  # lazy by design
 
     manifest = yaml.safe_load(Path(args.manifest).read_text())
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]

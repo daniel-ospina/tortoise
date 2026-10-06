@@ -1917,7 +1917,7 @@ def test_a_real_full_selection_actually_is_the_ALL_string() -> None:
     """
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / "tools"))
-    import ci_selection  # noqa: PLC0415
+    import ci_selection
 
     manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
     selection = ci_selection.select(["tortoise/sdk.py"], "push", manifest)
@@ -1984,7 +1984,7 @@ def test_the_cli_mode_is_reachable_end_to_end(monkeypatch, capsys) -> None:
 
 def test_the_cli_refuses_a_missing_changed_files(monkeypatch, capsys) -> None:
     """A missing --changed-files is usage error 2, never a silent 0-ratio run."""
-    import argparse  # noqa: PLC0415
+    import argparse
 
     bad = argparse.Namespace(run_id="1", changed_files="", manifest="x",
                              repo="o/r", event="pull_request")
@@ -2031,8 +2031,8 @@ def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
     """
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / "tools"))
-    import ci_selection  # noqa: PLC0415
-    import ci_timing as ct  # noqa: PLC0415
+    import ci_selection
+    import ci_timing as ct
 
     manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
     durations = ct.durations_map(manifest)
