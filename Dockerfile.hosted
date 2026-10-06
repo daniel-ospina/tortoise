@@ -18,12 +18,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # CPU-only torch (#7473), its own layer between the lock-pinned requirements and
 # the extras: installing the extras' `torch` from PyPI means the CUDA build,
-# which declares ~2.5 GB of `nvidia_*` runtime wheels as dependencies, on a host
-# that has no GPU (fly.toml sizes it around "torch + sentence-transformers + the
-# 90MB model"). `--index-url` keeps it unambiguous — the `+cpu` specifier exists
-# only on PyTorch's index, so PyPI's CUDA build cannot shadow it. Placed HERE, on
-# nothing but the base image and its own pin, so neither a pyproject.toml edit
-# nor a source change invalidates this layer.
+# which declares the ~2.45 GB CUDA stack as dependencies (`nvidia_*` alone is
+# 2,190 MB) on a host that has no GPU (fly.toml sizes it around "torch +
+# sentence-transformers + the 90MB model"). `--extra-index-url` keeps PyPI as the
+# default index and torch unshadowable — the `+cpu` specifier exists only on
+# PyTorch's index — while torch's own dependencies still come from PyPI, exactly
+# as before this layer existed. Placed HERE, on the base image and on uv.lock (its
+# only inputs), so neither a pyproject.toml edit nor a source change invalidates
+# this layer.
 #
 # The version is READ FROM uv.lock rather than written a second time: uv.lock is
 # also what .github/actions/install-cpu-torch/action.yml compares its pin
@@ -40,11 +42,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY uv.lock .
 RUN set -eu; \
     pin=$(python -c "import re; print(re.search(r'\[\[package\]\]\nname = \"torch\"\nversion = \"([^\"]+)\"', open('uv.lock').read()).group(1))"); \
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
 
 # Layer 1: bake the embedding model (~130MB bge-small, #1349) — cached
 # unless the layer inputs change (pyproject.toml here, or any earlier layer:
-# requirements.txt, base image). Source-only changes reuse the cache, making
+# requirements.txt, uv.lock, base image). Source-only changes reuse the cache, making
 # deploys incremental.
 #
 # DOCUMENTED DRIFT DECISION (#494): the [embeddings]/[backups] extras resolve

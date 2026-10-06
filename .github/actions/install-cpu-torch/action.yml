@@ -2,13 +2,16 @@ name: Install CPU-only torch (#7473)
 description: >
   Install torch from PyTorch's CPU wheel index BEFORE the `embeddings` extra is
   installed, so that extra cannot pull PyPI's DEFAULT linux wheel — the CUDA
-  build, which declares ~2.5 GB of CUDA runtime wheels as dependencies (`nvidia_*`
-  alone is 2,190 MB, measured below).
+  build, which declares the ~2.45 GB CUDA stack as dependencies (`nvidia_*` alone
+  is 2,190 MB, measured below).
 
-  Nothing here uses CUDA. The only `cuda` occurrences in the tree are two mocks
-  raising `RuntimeError("CUDA out of memory")` (`tests/test_embeddings_filters.py`,
-  `tests/eval/write_path/test_write_path_prescreen.py`), a comment about an API
-  "GPU farm" (`tortoise/model_adapters.py`), and fixture prose. The shipped
+  Nothing here uses CUDA. In Python source, the only `cuda` occurrences are two
+  mocks raising `RuntimeError("CUDA out of memory")`
+  (`tests/test_embeddings_filters.py`,
+  `tests/eval/write_path/test_write_path_prescreen.py`) and fixture prose — the
+  "GPU farm" matches in `tortoise/model_adapters.py` are not `cuda` at all, and
+  nothing under `tortoise/` reads `torch.cuda`. (`uv.lock` does carry cuda/nvidia
+  entries; that is exactly the stack this action stops installing.) The shipped
   surfaces are CPU-only: `fly.toml` sizes the hosted VM at `memory_mb → 4096`
   around "torch + sentence-transformers + the 90MB model" with no GPU, and
   `deploy-hosted.yml` / `docker-compose.yml` / `fly.toml` contain no
@@ -21,24 +24,23 @@ description: >
   install step downloaded 140 wheels totalling 3,200 MB. Its CUDA stack is
   19 wheels / 2,445 MB — `nvidia_*` alone is 15 wheels / 2,190 MB, plus the
   CUDA-built `torch` wheel itself (554.6 MB, against ~190 MB for the CPU build)
-  — and the step ran 93-219 s across the 15 jobs that install. Roughly 2.55 GB
-  of that is avoidable: runtime libraries that can never be loaded on a host
-  with no GPU.
+  — and the step ran 93-219 s across the 16 jobs that install. Roughly 2.8 GB of
+  that is avoidable (2,445 MB CUDA stack + 554.6 MB CUDA torch - 191.8 MB CPU
+  torch): runtime libraries that can never be loaded on a host with no GPU.
 
-  `--index-url` (not `--extra-index-url`) keeps the surface unambiguous: the
-  `+cpu` specifier exists ONLY on PyTorch's index, so PyPI's CUDA build cannot
-  shadow it. That index is a full mirror FOR THIS PURPOSE — torch 2.13.0's linux
-  closure (`filelock`, `typing-extensions`, `sympy` -> `mpmath`, `networkx`,
-  `jinja2` -> `MarkupSafe`, `fsspec`, `setuptools`) resolves from it, verified
-  with `pip install --report --platform manylinux_2_28_{x86_64,aarch64}
-  --python-version 3.12 --abi cp312 --only-binary=:all:`. It is not a PyPI mirror
-  in general: it lags PyPI (its newest `setuptools` is 78.1.0 vs requirements.txt's
-  `==84.0.0`, which the later requirements install restores). This command is
-  linux-only because PyTorch publishes no `+cpu`-SUFFIXED macOS wheel — the index
-  does carry macOS wheels, under their plain version names — and one
-  `workflow_dispatch` caller does use this action
-  (`evals-on-demand.yml`), which is fine on its `ubuntu-latest` runner; a future
-  caller on macOS would fail loudly here rather than silently install CUDA.
+  `--extra-index-url` (PyPI stays the DEFAULT index) keeps torch unshadowable
+  while leaving torch's DEPENDENCIES to PyPI: the `+cpu` specifier exists ONLY on
+  PyTorch's index, so PyPI's CUDA build cannot match it, and pip takes torch's
+  deps (`filelock`, `typing-extensions`, `sympy`, `networkx`, `jinja2`, `fsspec`,
+  `setuptools`) from PyPI exactly as it did before this change. Using
+  `--index-url` instead would resolve those deps from PyTorch's mirror, which LAGS
+  PyPI — measured: with `--index-url` the branch job ended on `setuptools 78.1.0`
+  where main ends on `84.0.0`. This command is linux-only because PyTorch
+  publishes no `+cpu`-SUFFIXED macOS wheel (the index does carry macOS wheels,
+  under their plain version names), and one `workflow_dispatch` caller does use
+  this action (`evals-on-demand.yml`), which is fine on its `ubuntu-latest`
+  runner; a future caller on macOS would fail loudly here rather than silently
+  install CUDA.
 
   `--no-deps` is deliberately NOT used: with torch already satisfied, the later
   extras install would not pull torch's own dependencies back in, and
@@ -91,10 +93,10 @@ runs:
         PY
         )
         if [ "$locked" != "$pin" ]; then
-          echo "::error::CPU-only torch pin ($pin) no longer matches uv.lock's torch pin ($locked). Bump this file and Dockerfile.hosted together (#7473) - otherwise the extras install pulls PyPI's CUDA wheel back on top and CI stays green with ~2.5 GB of CUDA wheels restored."
+          echo "::error::CPU-only torch pin ($pin) no longer matches uv.lock's torch pin ($locked). Bump the pin in THIS file (#7473) - the lock is the single source for both, and Dockerfile.hosted derives its version from uv.lock so it needs no bump. Without this the extras install pulls PyPI's CUDA wheel back on top and CI stays green with ~2.8 GB of CUDA wheels restored."
           exit 1
         fi
-        "$py" -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
+        "$py" -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
         "$py" -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
 
         # Close the other half of the hole: the extras install is a LATER step and
