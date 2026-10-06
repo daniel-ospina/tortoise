@@ -293,6 +293,27 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _reset_health_probe_state(monkeypatch) -> None:
+    """The whole of ``_reset_health_probe``'s reset, as a PLAIN function.
+
+    Extracted so the reset is exercisable directly: pytest refuses to call a
+    fixture function (``Fixtures are not meant to be called directly``), which
+    would otherwise make the #3396 guard below untestable.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.monitoring as mon
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    ha_mod._probe_sdk_reset()
+    # #3396: drop a wedged probe worker. Abandoned, never joined (it is a
+    # daemon) — the next probe lazily starts a fresh one.
+    mon._reset_probe_worker()
+
+
 @pytest.fixture(autouse=True)
 def _reset_health_probe(monkeypatch):
     """#2850: /health and /health/ready share a module-level single-flight probe
@@ -303,24 +324,64 @@ def _reset_health_probe(monkeypatch):
     the module: it would otherwise re-probe behind a test's back and overwrite
     a deliberately patched verdict. The refresher's own behavior is covered by
     ``test_health_probe_loop_refreshes_the_coordinator``.
-    """
-    import tortoise.hosted_api as ha_mod
 
-    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    # Round-2 review: reset the process-global SDK CACHE too, not just the
-    # coordinators. A probe worker left over from a previous test can rebuild
-    # ``_probe_sdk`` with the previous env key after this fixture has run, which
-    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
-    # count 2 builds (green in the docker lane, red in the embedded lane).
-    ha_mod._probe_sdk_reset()
+    #3396: resetting the COORDINATORS is not enough — the hang tests wedge the
+    process-global probe WORKER, and a wedged worker is still ``alive``, so
+    ``monitoring._probe_worker()`` keeps handing the same one back. Without the
+    reset below the wedge survives into every later test in this file, and a
+    direct ``_probe_db()`` then times out (``first["ok"] is False``).
+    ``monitoring._reset_probe_worker()`` is the escape hatch ops uses for the
+    same condition; ``tests/test_monitoring.py``'s ``_fresh_probe_worker``
+    calls it on both sides of the yield for exactly this reason.
+    """
+    _reset_health_probe_state(monkeypatch)
     yield
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    ha_mod._probe_sdk_reset()
+    _reset_health_probe_state(monkeypatch)
+
+
+def test_reset_health_probe_drops_a_wedged_probe_worker(monkeypatch):
+    """#3396: a WEDGED probe worker must not survive ``_reset_health_probe``.
+
+    The lazy accessor only replaces a worker that is NOT alive
+    (``monitoring._probe_worker()``); a wedged worker is still alive, so it is
+    reused forever and the single probe slot stays occupied. Only
+    ``monitoring._reset_probe_worker()`` drops it — so if this module's autouse
+    fixture omits that call, any wedge earlier in the file leaks forward and a
+    direct ``_probe_db()`` reports ``ok: False``.
+
+    Deterministic by construction: it occupies the slot itself and then runs
+    the same reset the autouse fixture runs, so it does not depend on the
+    file's 600 s hang test landing before the reuse test. That timing
+    dependence is exactly why the issue's documented ``-k "health or Health"``
+    repro passes most of the time and made the previous fix attempt look
+    unverifiable.
+    """
+    import tortoise.monitoring as mon
+
+    started, release = threading.Event(), threading.Event()
+
+    def _block():
+        started.set()
+        release.wait(30)
+
+    wedged = mon._probe_worker()
+    wedged.submit(_block)
+    try:
+        assert started.wait(5), "the shared probe worker never ran the blocker"
+        # Precondition: wedged but ALIVE, so the lazy accessor reuses it —
+        # which is what keeps this leak invisible to every liveness check.
+        assert mon._probe_worker() is wedged, (
+            "precondition: a wedged-but-alive worker must be reused")
+
+        _reset_health_probe_state(monkeypatch)
+        try:
+            assert mon._probe_worker() is not wedged, (
+                "#3396: the wedged probe worker survived the reset — "
+                "the next test inherits a wedged slot and its probe times out")
+        finally:
+            release.set()
+    finally:
+        release.set()
 
 
 def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
