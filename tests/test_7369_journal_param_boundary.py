@@ -972,3 +972,33 @@ def test_a_RESOLVED_source_key_is_guarded_too(monkeypatch, caplog):
         f"{driver.seen!r}"
     )
     assert "url (resolved MERGE key)" in caplog.text, caplog.text
+
+
+def test_a_MISSING_id_is_not_reported_as_an_unwritable_name(caplog):
+    """Round 9: the reporter must name the identity that ACTUALLY failed.
+
+    `_upsert_subject`/`_upsert_object` guard `if not sid or not _writable_id(name)`.
+    Handing the reporter only `name` on that COMBINED condition made a record
+    with a missing `id` and a healthy `name` log `skipping Subject — name
+    (MERGE key) 'Alice' is not a writable identity` — false, since
+    `_writable_id('Alice')` is True. An absent identity is not an anomaly
+    (those records were skipped silently before this change); only the corrupt
+    MERGE key is, so the conditions are split.
+    """
+    from tortoise.projection import entities as ent_mod
+
+    handler = ent_mod._EntityHandlers()
+    caplog.set_level(logging.WARNING)
+    # Missing `id`, healthy `name`: skipped, and NOTHING is logged.
+    handler._upsert_subject({"name": "Alice"})
+    handler._upsert_object({"name": "Alice"})
+    assert caplog.text == "", (
+        f"a healthy name was reported as unwritable: {caplog.text!r}"
+    )
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    # A present id but a corrupt MERGE key: the corrupt case IS reported.
+    handler._upsert_subject({"id": "s-1", "name": "bad\x00name"})
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text

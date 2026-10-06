@@ -2192,7 +2192,14 @@ class _EntityHandlers:
         # so it is left to the parameter boundary. Function-local import — the
         # module-level cycle-avoidance pattern this file already uses.
         from tortoise.projection import _log_identity_skip, _writable_id
-        if not sid or not _writable_id(name):
+        # Split so the reporter names the identity that ACTUALLY failed: a
+        # missing `sid` is an absent PROPERTY (pre-change silent, and
+        # `_log_identity_skip` deliberately does not warn for an absent
+        # identity), so logging `name` here would have claimed a writable name
+        # was unwritable.
+        if not sid:
+            return
+        if not _writable_id(name):
             _log_identity_skip("Subject", name, "name (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
@@ -2273,7 +2280,11 @@ class _EntityHandlers:
         name = ev.get("name", "")
         # #7369: `name` is the MERGE KEY (`MERGE (o:Object {name:$name})`).
         from tortoise.projection import _log_identity_skip, _writable_id
-        if not oid or not _writable_id(name):
+        # Split so the reporter names the identity that ACTUALLY failed (see
+        # the sibling note in `_upsert_subject`).
+        if not oid:
+            return
+        if not _writable_id(name):
             _log_identity_skip("Object", name, "name (MERGE key)")
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
