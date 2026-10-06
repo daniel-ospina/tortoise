@@ -435,6 +435,22 @@ class _EdgeHandlers:
             # ponytail: auto-create stub if source endpoint doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect
+                # #7369 review r5 (P1): the stub CREATE below passes `src` as a
+                # plain VALUE position, not a MERGE key, so the parameter
+                # boundary DEGRADES an unwritable id to None and mints
+                # `CREATE (s:Point {id:null})` — a node with no identity that
+                # no later MERGE can ever match, left behind on every replay.
+                # An unwritable id is not a stub worth minting, so skip the
+                # edge exactly as the per-instance cap path below does.
+                from tortoise.projection import _writable_id
+                if not _writable_id(src):
+                    _log.warning(
+                        "input source %r is not a writable identity (empty, "
+                        "or NUL/lone-surrogate bearing) — stub not created, "
+                        "INPUT edge skipped",
+                        src,
+                    )
+                    continue
                 exists = self.g.query(
                     "MATCH (s) WHERE (s:Point OR s:Event) "
                     "AND s.id = $sid RETURN count(s) > 0",

@@ -352,11 +352,26 @@ def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
     assert _journal_safe_params(
         {"cu": "bad\x00url"}, "MATCH (s:Source {canonicalUrl:$cu}) RETURN s",
     ) == {"cu": None}
-    # A dict reaching a read is walked too — the `about_entities` shape.
+    # A map is a SHAPE-only reject: measured, the engine ACCEPTS a dict as a bare
+    # parameter on a statement that writes nothing, and rejects it only once it is
+    # STORED as a property. So on a READ it is forwarded, not nulled (#7174).
+    payload = {"deep": [{"n": 1}]}
     assert _journal_safe_params(
-        {"name": "x", "payload": {"deep": object()}},
+        {"name": "x", "payload": payload},
         "MATCH (e:Subject {name:$name}) RETURN e",
+    )["payload"] == payload
+    # ...and the SAME map on a WRITE is degraded, because there it WOULD be stored
+    # as a property and the engine raises "Property values can only be of primitive
+    # types" — the abort-after-wipe this boundary exists to prevent.
+    assert _journal_safe_params(
+        {"name": "x", "payload": payload},
+        "MATCH (e:Subject {name:$name}) SET e.payload = $payload",
     )["payload"] is None
+    # PARSE-time rejects still degrade on BOTH, because the engine parses every
+    # parameter regardless of clause (bytes measured on a read).
+    assert _journal_safe_params(
+        {"v": b"\x01\x02"}, "MATCH (n:X {v: $v}) RETURN n",
+    ) == {"v": None}
     # ...and the all-scalar read still takes the cheap identity route.
     assert _journal_safe_params(
         {"name": "fine"}, "MATCH (e:Subject {name:$name}) RETURN e",
@@ -681,3 +696,72 @@ def test_two_rebuilds_of_a_poisoned_journal_agree(superseded):
             params={"i": old},
         ).result_set)
     assert snapshots[0] == snapshots[1], snapshots
+
+
+# ── the pass-1 stub auto-creation must not mint a NULL/empty-id node ─────
+#
+# #7369 review r5 (P1). `_create_edges` auto-creates a stub for a short source
+# id that does not resolve. That `CREATE (s:Point {id:$sid})` passes `src` in a
+# plain VALUE position — it is NOT a MERGE key, so the parameter boundary is
+# free to degrade it. An unwritable id therefore reaches the driver as a bad
+# identity, in one of two ways:
+#
+#   "\x00"  -> `_annotator_value_ok` refuses it, so the boundary DEGRADES it to
+#              None, and the statement mints `CREATE (s:Point {id:null})` — a
+#              node with no identity that no later MERGE can ever match, left
+#              behind on every replay. This is the reported P1.
+#   ""       -> `_annotator_value_ok("")` is True so the boundary leaves it
+#              alone, and it mints `(:Point {id:""})` — an identity that is not
+#              one (which is exactly why `_writable_id` adds `bool(val)`).
+#
+# `_journal_safe_params`'s own docstring states the rule for the first case —
+# a null identity converts one abort into a DIFFERENT abort, so the FOLD must
+# skip via `_writable_id` — and this was the fold site that did not.
+
+
+class _MissingNodeDriver(_StrictDriver):
+    """``_StrictDriver`` whose existence probe answers "the node is missing"."""
+
+    class _Result:
+        result_set = [[False]]
+
+    def query(self, cypher, params=None, timeout=None):
+        super().query(cypher, params=params, timeout=timeout)
+        return self._Result()
+
+
+def _create_edges_seen(operator, point_id="op-1"):
+    from tortoise.projection.edges import _EdgeHandlers
+
+    driver = _MissingNodeDriver()
+    handler = _EdgeHandlers()
+    handler.g = _guarded(driver)
+    handler._create_edges({"id": point_id, "operator": operator})
+    return driver.seen
+
+
+@pytest.mark.parametrize(
+    "label,bad",
+    [
+        ("NUL-bearing (degrades to None -> :Point {id:null})", "\x00"),
+        ("empty string (-> :Point {id:''})", ""),
+        ("lone surrogate (degrades to None)", "\ud800"),
+    ],
+)
+def test_a_stub_is_never_minted_from_an_unwritable_id(label, bad):
+    seen = _create_edges_seen({"op_type": "IMPL", "inputs": [bad]})
+    stub_creates = [(c, p) for c, p in seen if "CREATE (s:Point" in c]
+    assert stub_creates == [], (
+        f"{label}: a stub was minted for an unwritable source id, so the "
+        f"graph gains a node with no usable identity: {stub_creates!r}"
+    )
+    # ...and no edge is created to the source that was never materialised.
+    assert [c for c, _ in seen if "MERGE" in c] == [], seen
+
+
+def test_a_WRITABLE_short_stub_source_still_autocreates():
+    """The new guard must not disable the #6713 stub path it sits next to."""
+    seen = _create_edges_seen({"op_type": "IMPL", "inputs": ["7"]})
+    stub_creates = [(c, p) for c, p in seen if "CREATE (s:Point" in c]
+    assert len(stub_creates) == 1, seen
+    assert stub_creates[0][1] == {"sid": "7"}, stub_creates[0]

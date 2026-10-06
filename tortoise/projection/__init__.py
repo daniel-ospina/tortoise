@@ -2088,6 +2088,15 @@ def _journal_safe_params(params, cypher=None):
     """
     if not params:
         return params
+    # #7174 merge (main x #7369): a params payload that is NOT a mapping is the
+    # VENDOR's own error and must be FORWARDED, not guessed at — `_guard_numeric_params`
+    # (`cypher_guard.py`) returns early on exactly this test for exactly this reason,
+    # and main's `test_a_non_mapping_params_payload_is_forwarded_not_guessed` pins it.
+    # Without this the walk below raised `'list' object has no attribute 'items'` on
+    # the read verbs this gate was added to (`ro_query`/`profile`/`explain`), i.e. the
+    # gate turned a forwarded vendor error into a crash — the opposite of its purpose.
+    if not isinstance(params, dict):
+        return params
     statement = cypher or ""
     # A READ still has to be gated. FalkorDB PARSES every parameter regardless
     # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
@@ -2154,11 +2163,21 @@ def _journal_safe_params(params, cypher=None):
             return out if changed else value
         if _annotator_value_ok(value):
             return value
+        if is_read and _writable_at_parse(value):
+            # Shape-only reject on a read: the engine accepts it as a bare
+            # parameter (measured), so leave it EXACTLY as it is.
+            return value
         degraded.append(path)
         return None
 
     changed = False
     out = None
+    # A statement that is KNOWN to write nothing cannot STORE a value, so a
+    # shape-only reject (a map) is a harmless parameter there and must be
+    # forwarded — see `_writable_at_parse`. A statement we do NOT know (empty) is
+    # NOT a read: degrade conservatively, as before. Parse-time rejects degrade
+    # on both.
+    is_read = bool(statement) and not _WRITE_CLAUSE_RE.search(statement)
     for key, value in params.items():
         if key in merge_keys:
             # A MERGE key: left EXACTLY as it is. A null here is refused by the
@@ -2917,6 +2936,40 @@ def _annotator_value_ok(val) -> bool:
         return True
     if isinstance(val, (list, tuple)):
         return all(_annotator_value_ok(x) for x in val)
+    return True
+
+
+def _writable_at_parse(val) -> bool:
+    """False only for what the engine rejects while PARSING a parameter.
+
+    #7174 merge (measured 2026-10-06 on the embedded engine, which agrees with
+    the real one on all six probes): the boundary's refusal has TWO failure
+    modes and they are NOT the same shape, so they must not be applied
+    alike.
+
+      * PARSE rejects — a non-finite float, a string carrying NUL or a lone
+        surrogate, and **bytes**. Measured: rejected on a READ and a WRITE
+        alike, because the engine parses every parameter regardless of clause.
+        These must degrade EVERYWHERE.  →  this predicate.
+      * SHAPE rejects — a map / set / over-deep array. Measured: rejected ONLY
+        when the value is STORED as a property (``SET n.v = $v``,
+        ``SET n += $p``); as a bare parameter on a statement that writes
+        nothing it is ACCEPTED. Degrading it there nulls a legitimate
+        structure for no reason — the false refusal #7174's anti-overfix guard
+        exists to catch, and the same over-degradation class the module
+        docstring records nulling ``$turns``.  →  gated on the write clause.
+    """
+    if isinstance(val, float):
+        return math.isfinite(val)
+    if isinstance(val, (bytes, bytearray)):
+        return False
+    if isinstance(val, str):
+        if "\x00" in val:
+            return False
+        try:
+            val.encode("utf-8")
+        except UnicodeEncodeError:
+            return False  # lone surrogate (driver rejects at encode)
     return True
 
 
