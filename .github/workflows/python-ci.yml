@@ -886,10 +886,16 @@ jobs:
           #     #3653) D3 does not admit `-n` on. Enforced by the `-n` test
           #     below, not assumed; the branch that ran is echoed so which
           #     shape got `-n` is legible in the job log.
-          #   * `--dist loadscope`, NOT loadfile: distribution is by module/
-          #     class scope, so a module's fixtures and intra-module ordering
-          #     stay on one worker by construction while files still
-          #     parallelise. D3 names loadscope specifically.
+          #   * `--dist loadscope`, NOT loadfile: xdist groups test FUNCTIONS
+          #     by module and test METHODS by class, and distributes whole
+          #     groups, so a module's functions and its fixtures stay on one
+          #     worker while files still parallelise. The guarantee is per
+          #     GROUP, not per module: a module whose tests are split across
+          #     classes reaches the workers as one group PER CLASS, so its
+          #     intra-module ordering is NOT preserved across classes (from
+          #     #6269 review F3 — the earlier wording claimed the module
+          #     stayed whole, which is only true for function-only modules).
+          #     D3 names loadscope specifically for that group-scoping.
           #   * leak count — per-worker resources come for free (each worker
           #     is its own process: its own TORTOISE_TEST_SESSION nonce,
           #     journal and active-suite marker), and the E2E-7 survivor gate
