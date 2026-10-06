@@ -691,6 +691,59 @@ def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, caps
     assert "Captured session: s-ok" in out
 
 
+def test_cmd_session_capture_consents_by_inheritance(tmp_path, monkeypatch, capsys):
+    """#4276 acceptance: a capture-driving test is correct by INHERITANCE.
+
+    There is deliberately NO ``monkeypatch.setenv("TORTOISE_CAPTURE", ...)``
+    in this test body — the only consent in force is the suite-wide autouse
+    fixture in ``tests/conftest.py``. Before #4276 a new test written the way
+    main's capture tests are written (credential present, consent assumed)
+    declined with "session capture requires explicit consent" and had to be
+    repaired by hand; after it, it passes as written.
+
+    Two directions, both must hold. Delete the conftest fixture and the
+    precondition below REDs (the inheritance is gone). Leave the fixture in
+    place but make the gate FAIL OPEN and it is instead the decline matrix in
+    ``tests/test_capture_consent.py`` that REDs — the privacy direction, which
+    is the one that must not be masked by a suite-wide grant.
+    """
+    import json
+
+    from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+    from tortoise.capture_consent import capture_consent_enabled
+
+    # No setenv for consent: this IS the inheritance under test.
+    assert capture_consent_enabled() is True, (
+        "the suite-wide capture consent (#4276) was not inherited — a new "
+        "capture-driving test must not have to opt in per-test")
+
+    # #3963: spool isolation (NOT consent — it is where the LOCAL spool writes).
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    f = tmp_path / "transcript.txt"
+    f.write_text("User: we decided to ship it\nAssistant: agreed\n")
+    assert _parse_transcript(f.read_text())
+
+    payload = {"session_id": "s-inherited", "extraction_mode": "llm:mock",
+               "extraction_provider": "mock", "extracted": 1,
+               "points": [], "errors": [], "warnings": []}
+
+    class _FakeResp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+    class _FakeCtx:
+        def __enter__(self):
+            return _FakeResp()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _FakeCtx())
+    args = type("A", (), {"file": str(f)})()
+    assert _cmd_session_capture(args, "api-key", "http://api") == 0
+    assert "Captured session: s-inherited" in capsys.readouterr().out
+
+
 def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
         tmp_path, monkeypatch, capsys):
     """#4188 (review cycle 2): only the `no-provider` mode means "not

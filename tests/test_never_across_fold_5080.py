@@ -30,6 +30,18 @@ be neither folded nor superseded.
 Every never-across pair in the tables below carries token overlap at or above
 ``NOOP_MIN_OVERLAP``, so the assertion is that the boundary refuses a fold the
 band would otherwise have taken — not that the pair was too dissimilar to fold.
+
+DECLARED RESIDUAL.  The vocabularies that decide the dimensions above —
+``_NEGATION_MARKERS``, ``_CONDITION_MARKERS``/``_CONDITION_PHRASES``,
+``_DATE_WORDS``, ``_SCRIPT_BLOCKS``, ``_CLOCK_UNITS``, the frame list, and the
+polarity/state vocabulary — are FINITE and hand-written.  A marker the list
+does not name reaches no identity dimension, so the pair FOLDS: that is the
+lossy direction (one capture order can still drop the claim), not the safe
+one.  Closing the class needs a model or an unbounded lexicon, not a longer
+list — a longer list only moves where the miss happens.  The residual is
+declared and pinned ``so it cannot go silent`` below, and is tracked on
+#5329 (marker vocabularies) and #7524 (the model/POS/NER-shaped residuals);
+no list is grown here.
 """
 from __future__ import annotations
 
@@ -71,7 +83,7 @@ NEVER_ACROSS = [
      "the cache is the problem, the lock is not", "scope"),
     ("we ship if the build passes and rollback if the tests fail",
      "we ship if the tests fail and rollback if the build passes", "scope"),
-    # #5139 — a load-bearing connective is FRAME by its commonest role, so a
+    # #5139 (closed) — a load-bearing connective is FRAME by its commonest role, so a
     # swap between two operators of ONE slot left the content multiset equal
     # and the pair folded.  `and`/`or` are conjunctions (the role that keeps a
     # coordinating paraphrase foldable) and they are also operators; the same
@@ -965,7 +977,7 @@ class TestDistinguishingDifference:
         """The FRAME use of a connective is still frame — the PAIR decides.
 
         The role is read from the pair, not from the token list, so a frame
-        connective is refused only where it did OPERATOR work (#5139).  Three
+        connective is refused only where it did OPERATOR work (#5139, closed).  Three
         shapes of legitimate fold must survive:
 
         * ONE side only — a comma list owns no `and`, so a single side fills
@@ -1139,7 +1151,7 @@ class TestDistinguishingDifference:
             assert not v2.supersede_allowed(prior, candidate)
 
     def test_a_contraction_does_not_spell_a_phrase_word(self):
-        """The phrase's inner gap is the one a dropped MARK leaves (#5139).
+        """The phrase's inner gap is the one a dropped MARK leaves (#5139, closed).
 
         A non-word interior would let a real token stand inside a phrase word:
         `we'll` would spell `well`, so `as we'll, as` would canonicalise to
@@ -1313,7 +1325,7 @@ class TestDistinguishingDifference:
             assert not v2.fold_allowed(a, b)
 
     def test_a_sentence_initial_name_is_a_known_limit(self):
-        """Documented residual, pinned with the uncapitalised name (#5134).
+        """Documented residual, pinned with the uncapitalised name (#7524).
 
         A name is caught by its capital, and a sentence-initial capital is
         positional: treating it as name-shaped would refuse `Workout at the gym
@@ -1323,7 +1335,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the plan was approved", "Alice approved the plan")
 
     def test_a_lowercase_name_on_one_side_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         A name is caught by its capital letter (see the NEVER_ACROSS rows), and
         a name the caller wrote in lower case looks exactly like a detail
@@ -1485,7 +1497,7 @@ class TestDistinguishingDifference:
         assert "the" in v2._TAIL_IGNORABLE
 
     def test_a_state_word_outside_the_polarity_table_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         The vocabulary is finite, so a state word it does not name reaches no
         dimension and the pair is the one-sided broadening case again.  `shut`
@@ -1501,7 +1513,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the server is down", "the server")
 
     def test_a_non_be_state_predicate_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         The predicate read names the be-copulas.  A non-be linking verb
         (`seems`, `remains`) is a content token, so the two sides stop being
@@ -1516,7 +1528,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the flag remains off", "the flag")
 
     def test_a_predicate_with_a_second_content_token_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         The pass reads the state term as the ENTIRE predicate complement of a
         copula.  A second content token in that complement — a passive/particle
@@ -1540,7 +1552,7 @@ class TestDistinguishingDifference:
             assert v2.fold_allowed(a, b), (a, b)
 
     def test_a_state_drop_beside_another_subject_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         A claim holding a SECOND subject is not the one-sided case in either
         direction: the removed text is a whole clause rather than one state, so
@@ -1559,7 +1571,7 @@ class TestDistinguishingDifference:
         assert not v2.fold_allowed("the flag is off", "the flag")
 
     def test_an_inverted_or_fused_state_predicate_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         `_state_predicate` reads a copula and then its complement, in order,
         so two spellings put the state outside that read and the pair folds
@@ -1569,7 +1581,7 @@ class TestDistinguishingDifference:
           copula and the state, so the complement is not the state alone.
         * a state member FUSED to a separator — `on\u0338off` is one token, and
           `_deaccent` collapses the mark, so no member is read.  That is the
-          same fused-token route PR #5320 (open, #5139) closes for the
+          same fused-token route PR #5320 (which closed #5139) uses for the
           load-bearing connective's own members; here it is not closed because
           `_content_tokens` is a set and splits nothing, so closing it would
           change what the skeleton IS for every dimension, not just this one.
@@ -1584,7 +1596,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the flag is on\u0338off", "the flag")
 
     def test_a_state_drop_in_a_compound_clause_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         `_state_predicate` reads a copula's complement to the END of the token
         sequence, so content in a FOLLOWING clause disqualifies an otherwise
@@ -1596,9 +1608,10 @@ class TestDistinguishingDifference:
         The mirror puts the state in the final clause and IS refused, so the
         guard is clause-ORDER dependent today.  Closing it means bounding the
         complement at a clause boundary — a connective-role decision that
-        belongs with PR #5320 (#5139), not a polarity member; doing it here
-        would duplicate that mechanism.  Filed separately.  The refused mirror
-        is asserted beside the pin, so the pin cannot go vacuous.
+        belongs with PR #5320 (which closed #5139), not a polarity member;
+        doing it here would duplicate that mechanism.  Filed separately.  The
+        refused mirror is asserted beside the pin, so the pin cannot go
+        vacuous.
         """
         assert not v2.fold_allowed("the build passed and the flag is off",
                                    "the build passed and the flag")
@@ -1610,7 +1623,7 @@ class TestDistinguishingDifference:
             assert v2.fold_allowed(a, b), (a, b)
 
     def test_an_attributive_state_member_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         `_state_predicate` reads a copula's predicate complement, so a state
         member in ATTRIBUTIVE (pre-nominal) position is never visited and the
@@ -1625,7 +1638,7 @@ class TestDistinguishingDifference:
         preposition with a nominal object ("the focus is on quality") is a
         part-of-speech decision: a rule that fired on "member followed by a
         content token" would refuse the pinned prepositional `on` fold.  It is
-        the same POS/syntax root as #5139 and is recorded there, not closed
+        the same POS/syntax root as #5139 and is recorded on #7524, not closed
         here.  The refused copula form is asserted beside it, so the pin
         cannot go vacuous.
         """
@@ -1637,7 +1650,7 @@ class TestDistinguishingDifference:
             assert v2.fold_allowed(a, b), (a, b)
 
     def test_a_contracted_copula_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         `_apostrophe_free` turns "flag's" into "flags", so a contracted
         be-copula is no `_COPULAS` member and `_state_predicate` sees no
@@ -1649,8 +1662,8 @@ class TestDistinguishingDifference:
 
         Unlike `am` — a plain missing set member, closed here — the clitic is
         ambiguous with the possessive ("bob's colour"), so telling the two
-        apart is a part-of-speech decision: the same POS root as #5139, where
-        it is recorded.  The uncontracted form is asserted beside it, so the
+        apart is a part-of-speech decision: the same POS root as #5139, recorded
+        on #7524.  The uncontracted form is asserted beside it, so the
         pin cannot go vacuous.
         """
         assert not v2.fold_allowed("the flag is off", "the flag")
@@ -1659,7 +1672,7 @@ class TestDistinguishingDifference:
             assert v2.fold_allowed(a, b), (a, b)
 
     def test_a_multi_member_polarity_permutation_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5134/#5139).
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         The skeleton is a SET, so a pair differing only by the ATTACHMENT of
         two polarity members compares equal and no dimension sees a
@@ -1669,7 +1682,7 @@ class TestDistinguishingDifference:
               vs "the flag is off and the gate is on"      -> folds
 
         On main this folds too — it is the set-level / attachment blind spot
-        of the whole boundary, recorded on #5139 with the clause and
+        of the whole boundary, recorded on #7524 with the clause and
         attributive shapes, and closing it needs the same syntax the fold
         predicate lacks.  The one-sided form beside a SHARED member IS refused
         (the `gate` row of `test_a_one_sided_state_word_is_a_rival_claim`), so

@@ -29,13 +29,16 @@ GLOBAL_CFG = {
 
 
 @pytest.fixture(autouse=True)
-def _home_isolated(monkeypatch, tmp_path):
+def _home_isolated(monkeypatch, tmp_path, _capture_consent_default_on):
     """#1708 D9: never read the developer's real ~/.tortoise credentials."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
-    # #3615: capture needs explicit consent — a stray ambient opt-in must not
-    # leak into (or out of) these tests.
+    # #3615/#4276: capture needs explicit consent — a stray ambient opt-in must
+    # not leak into (or out of) these tests. The suite-wide default
+    # (`tests/conftest.py`) now GRANTS it, so this file opts back out; the
+    # dependency makes that opt-out order AFTER the grant. The positive
+    # `test_session_capture_from_global` below re-opts-in explicitly.
     monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
     monkeypatch.chdir(tmp_path)
 
