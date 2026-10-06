@@ -62,6 +62,11 @@ own atexit `_cleanup`/`__del__` then abort and leak one server each. Those
 clients never reach a `tortoise.FalkorDB` close seam, so redislite's own
 `_cleanup` is guarded too (`_install_partial_init_cleanup_guard`) — it
 reclaims the orphan over the raw socket instead of raising.
+- `RedisMixin.__init__` reads `_is_redis_running()` and then starts a server
+with nothing between them, so two concurrent constructions of one
+`<dbdir>/<dbfilename>` can each bring up a server over the SAME RDB. A
+reentrant per-key lock brackets the constructor
+(`_install_construct_lock_guard`) to serialise that check-then-act span.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -826,6 +831,144 @@ def _install_missing_dbdir_guard() -> None:
 
     RedisMixin._start_redis = _start_redis
     RedisMixin._tortoise_missing_dbdir_guard = True
+
+
+# ── #4921: one construction lock per <dbdir>/<dbfilename> ──────────────────
+#
+# `RedisMixin.__init__` reads `_is_redis_running()` (client.py:449) and then
+# starts a server (client.py:462) with NOTHING between them, so two concurrent
+# constructions of the same `<dbdir>/<dbfilename>` can each bring up a server
+# over the SAME RDB — two writers on one file, the silent-divergence class this
+# guard family exists to prevent. #4879's repair narrowed the window (a registry
+# re-check immediately before its unlink, backing off if it changed) but only
+# inside that one unlink; a plain cold start on two processes at once is
+# untouched.
+#
+# Three properties are forced by the seam, and each rules out the obvious
+# cheaper lock:
+#   * REENTRANT — the constructor nests (a construction constructs another
+#     client), so a plain `threading.Lock` self-deadlocks;
+#   * CROSS-PROCESS — the race is between processes, so an in-process lock
+#     alone cannot close it;
+#   * PER-KEY — the file at risk is one `<dbdir>/<dbfilename>`, so a single
+#     global lock would serialise unrelated stores for no reason.
+# A `threading.RLock` answers the first and `fcntl.flock` the second. The flock
+# is taken only on the 0→1 depth transition because flock locks are per
+# open-file-description: a second `os.open` in the same process would block
+# against our own outer lock, a self-deadlock the RLock cannot see.
+_CONSTRUCT_LOCKS: dict[str, _ConstructLock] = {}
+_CONSTRUCT_LOCKS_GUARD = threading.Lock()
+
+
+class _ConstructLock:
+    """#4921: the per-`<dbdir>/<dbfilename>` construction lock's state."""
+
+    __slots__ = ("depth", "fd", "path", "rlock")
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.rlock = threading.RLock()
+        self.depth = 0
+        self.fd = -1
+
+
+def _construction_key(args: tuple, kwargs: dict) -> str | None:
+    """#4921: the `<dbdir>/<dbfilename>` this construction will use, or None.
+
+    Mirrors redislite's own derivation (client.py:380-468) rather than reading
+    `self`: this runs BEFORE the wrapped constructor has set `self.dbdir` /
+    `self.dbfilename`, so the only honest inputs are the arguments.
+
+    None means "no embedded server over a shared file", in which case there is
+    nothing to serialise: `host`/`port` names a server we do not start, and a
+    construction with no db file lets redislite mint its own `mkdtemp()`, which
+    no second construction can share.
+    """
+    if "host" in kwargs or "port" in kwargs:
+        return None
+    db_filename = args[0] if args else kwargs.get("dbfilename")
+    if not db_filename:
+        return None
+    db_filename = os.fspath(db_filename)
+    if db_filename == os.path.basename(db_filename):
+        db_filename = os.path.join(os.getcwd(), db_filename)  # client.py:441
+    return os.path.realpath(db_filename)
+
+
+def _open_construct_lock(key: str) -> int:
+    """Open + LOCK_EX the lock file for `key`, or -1 when its dir is already gone.
+
+    A vanished directory is not this guard's error to raise: the #3653
+    missing-dbdir guard refuses that construction by name one call later, and
+    two constructions into a directory that does not exist cannot both create
+    an RDB. Any OTHER open failure (a directory that exists but will not take
+    the file) propagates: redislite is about to write the RDB there, so
+    continuing unlocked would trade a loud failure for exactly the silent
+    two-writer divergence this guard exists to prevent.
+    """
+    try:
+        fd = os.open(key + ".tortoise-construct.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    except FileNotFoundError:
+        if not os.path.isdir(os.path.dirname(key)):
+            return -1
+        raise
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+@contextlib.contextmanager
+def _construction_lock(key: str):
+    """#4921: hold `key`'s construction lock for the block, reentrantly."""
+    with _CONSTRUCT_LOCKS_GUARD:
+        entry = _CONSTRUCT_LOCKS.get(key)
+        if entry is None:
+            entry = _CONSTRUCT_LOCKS[key] = _ConstructLock(key)
+    entry.rlock.acquire()
+    try:
+        with _CONSTRUCT_LOCKS_GUARD:
+            entry.depth += 1
+            if entry.depth == 1:
+                entry.fd = _open_construct_lock(key)
+        yield
+    finally:
+        with _CONSTRUCT_LOCKS_GUARD:
+            entry.depth -= 1
+            if entry.depth == 0 and entry.fd >= 0:
+                try:
+                    fcntl.flock(entry.fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(entry.fd)
+                    entry.fd = -1
+        entry.rlock.release()
+
+
+def _install_construct_lock_guard() -> None:
+    """#4921: serialize `RedisMixin.__init__` per `<dbdir>/<dbfilename>` (once).
+
+    Wrapping `__init__` — not `_start_redis` — is what makes this airtight: the
+    read (`_is_redis_running()`) and the start (`_start_redis()`) are BOTH
+    inside `__init__`, so bracketing the constructor is the only way one lock
+    can cover the whole check-then-act span. A guard on `_start_redis` alone
+    would engage entirely AFTER the read it is meant to protect.
+    """
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to guard
+        return
+    if getattr(RedisMixin, "_tortoise_construct_lock_guard", False):
+        return
+    original = RedisMixin.__init__
+
+    def __init__(self, *args, **kwargs):
+        key = _construction_key(args, kwargs)
+        if key is None:
+            original(self, *args, **kwargs)
+            return
+        with _construction_lock(key):
+            original(self, *args, **kwargs)
+
+    RedisMixin.__init__ = __init__
+    RedisMixin._tortoise_construct_lock_guard = True
 
 
 def _install_partial_init_cleanup_guard() -> None:
@@ -2897,7 +3040,7 @@ _REDISLITE_GUARDS_INSTALLED = False
 
 
 def install_redislite_guards() -> None:
-    """Install all four redislite patches, once (#5386).
+    """Install all five redislite patches, once (#5386).
 
     Order is irrelevant (the patch targets are disjoint), and each installer
     is itself idempotent and a no-op when redislite is absent; this wrapper
@@ -2912,13 +3055,14 @@ def install_redislite_guards() -> None:
     _install_owner_record_patch()
     _install_dead_socket_guard()
     _install_missing_dbdir_guard()
+    _install_construct_lock_guard()
 
 
 class _RedisliteGuardInstaller:
     """Install the redislite patches the moment redislite finishes importing.
 
     #5386: `import tortoise` must not import redislite (it is ~90% of that
-    module's import cost), yet the four patches above MUST be in place before
+    module's import cost), yet the five patches above MUST be in place before
     the first redislite client of ANY kind is constructed — including RAW
     constructions that never go through the guarded `tortoise.FalkorDB`
     (#4487: the reaper's per-server "all owners dead" signal has no other

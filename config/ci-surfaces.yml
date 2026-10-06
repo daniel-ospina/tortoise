@@ -1302,6 +1302,11 @@ surfaces:
   # opt-in half reds). Registered in `core` (the projection surface).
   - test_embedded_durability_claim.py
   - test_embedded_lifecycle.py
+  # #4921: the construction lock that brackets `RedisMixin.__init__`'s
+  # check-then-start span — two concurrent constructions of one
+  # `<dbdir>/<dbfilename>` each started a server over the SAME RDB. Pure unit:
+  # tmp dirs + a subprocess child; no embedded server is ever started.
+  - test_4921_construct_lock.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
@@ -3552,6 +3557,7 @@ durations:
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
+  test_4921_construct_lock.py: 2.0  # #4921: the #3400 flat default — a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). Locally measured this turn: 14 tests, 6.5s wall in the carve-out lane. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). Refresh from the first post-merge run that includes it.
   test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
