@@ -1285,6 +1285,51 @@ def test_probe_runs_before_any_local_can_hold_the_uri():
         "--showlocals will render its password"
 
 
+def test_probe_does_not_preempt_the_locality_refusal(monkeypatch):
+    """A non-loopback URI must NOT be probed.
+
+    The session refuses one on locality grounds WITHOUT any I/O (#1647 E2E-6),
+    and that refusal is the more precise diagnosis. Probing first replaced it
+    with "could not be reached" — breaking
+    `tests/test_tripwire.py::test_non_loopback_uri_fails_session`, which pins
+    the session-level behaviour; this pins the helper's.
+    """
+    import tests._embedded as emb
+
+    def _boom(timeout_s, attempts):  # pragma: no cover - must not be reached
+        raise AssertionError("probed a target the session refuses on locality")
+
+    monkeypatch.setattr(emb, "_probe_configured_db", _boom)
+    for uri in (
+        "docker://:pw@db.internal.example.com:6379/g",  # remote host
+        "docker://:pw@10.0.0.5:6379/g",                  # private, not loopback
+        "docker://:pw@:6379/g",                          # fail-closed: no host
+    ):
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_TEST_ALLOW_REMOTE", raising=False)
+        emb._assert_configured_db_answers()
+
+
+def test_probe_still_runs_when_the_remote_override_allows_connecting(monkeypatch):
+    """The gate must MIRROR the session's, override included.
+
+    With TORTOISE_TEST_ALLOW_REMOTE=1 the session does connect to a
+    non-loopback target, so skipping the probe there would resurrect the bare
+    `redis.exceptions.TimeoutError` this change exists to remove. Two gates
+    that can disagree are worse than one.
+    """
+    import tests._embedded as emb
+
+    calls = []
+    monkeypatch.setattr(
+        emb, "_probe_configured_db",
+        lambda t, a: calls.append((t, a)) or None)
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://:pw@db.internal.example.com:6379/0")
+    monkeypatch.setenv("TORTOISE_TEST_ALLOW_REMOTE", "1")
+    emb._assert_configured_db_answers()
+    assert calls, "a permitted remote target must still be probed"
+
+
 def test_probe_is_inert_without_a_supported_uri(monkeypatch):
     """The embedded/carve-out lanes do no network I/O here."""
     import tests._embedded as emb
