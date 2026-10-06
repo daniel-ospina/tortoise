@@ -1187,23 +1187,25 @@ def test_drift_report_seam_carries_the_gates_own_report():
     )
     # `set -o pipefail` is what makes the STEP fail when the gate fails: without it
     # the step's status is `tee`'s (0), so a blocked deploy reads GREEN and the
-    # alert never fires — a fail-OPEN, not merely a silence. Pinned on the COMMAND
-    # (a comment cannot arm it) and on the ORDER (armed after the pipeline is not
-    # armed), and `set +o pipefail` is refused outright.
+    # alert never fires — a fail-OPEN, not merely a silence.
+    #
+    # ⛔ Pinned as the FIRST EXECUTABLE LINE, not as a substring. `re.search` takes
+    # the first match, so ANY non-executed occurrence ahead of the pipeline — a
+    # trailing comment (`true  # set -o pipefail`), a heredoc body, `echo "set -o
+    # pipefail"` — satisfied the substring form while pipefail was NOT armed
+    # (round-4 review, P2-2). Requiring the arming to be the first line of code
+    # also subsumes the ordering check: nothing can precede it, the pipeline
+    # included.
     code = _shell_code(run)
-    armed = re.search(r"set\s+-o\s+pipefail", code)
-    assert armed, (
-        "the drift step must run `set -o pipefail` OUTSIDE a comment: without it "
-        "the step's status is tee's (0) and a blocked deploy reads GREEN"
+    first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+    assert first == "set -o pipefail", (
+        f"the drift step's FIRST executable line must be exactly `set -o pipefail` "
+        f"(found {first!r}) — without it armed first the step's status is tee's "
+        f"(0) and a blocked deploy reads GREEN. A comment, a heredoc body or an "
+        f"echo does not arm it."
     )
     assert not re.search(r"set\s+\+o\s+pipefail", code), (
         "`set +o pipefail` would disarm the seam it exists to arm"
-    )
-    gate_at = code.find("check-migration-drift")
-    pipeline = code.find("|", gate_at)
-    assert pipeline == -1 or armed.start() < pipeline, (
-        "`set -o pipefail` must be armed BEFORE the gate's pipeline — armed "
-        "afterwards it has no effect on it"
     )
 
     drift_path = (drift.get("env") or {}).get("DRIFT_REPORT_FILE")

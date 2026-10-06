@@ -331,6 +331,13 @@ assert_contains "$(title_line)" "title=deploy-hosted: post-deploy-verify failed 
 POST_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
 assert_contains "$POST_BODY" "LIVE and unhealthy" "the body says a bad release is live, NOT that the deploy failed"
 assert_not_contains "$POST_BODY" "did **NOT** flip" "and not the deploy-api meaning (the deploy did succeed here)"
+# The opener used to hard-code "the hosted deploy pipeline is blocked" for all
+# three jobs — FALSE here, where the deploy already succeeded and the release is
+# live. The job's own meaning must be the only claim in the body. (Round-4
+# review, P2-1: a body that misleads the on-call reader is the defect this whole
+# change exists to remove.)
+assert_not_contains "$POST_BODY" "blocked" "the body makes no 'pipeline is blocked' claim for a job that does not block it"
+assert_contains "$PACK_BODY" "SKIPPED" "(control) the pack-smoke body DOES state the consequence that is true there"
 
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
@@ -346,6 +353,13 @@ assert_eq "$RC" "2" "--job is required"
 run_alert --job deploy-api --bogus x
 assert_eq "$RC" "2" "an unknown argument is a usage error"
 assert_eq "$(count_calls 'GH')" "0" "a usage error contacts nothing"
+# `--help` documents itself and succeeds. This used to exit 2: `usage` returns 2
+# and `set -e` aborted before the `return 0` beside it could run. (Round-4
+# review, P3.)
+reset_case
+run_alert --help
+assert_eq "$RC" "0" "--help exits 0, as it claims"
+assert_eq "$(count_calls 'GH')" "0" "--help contacts nothing"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

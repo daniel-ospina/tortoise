@@ -81,7 +81,7 @@
 #       GITHUB_REPOSITORY / GITHUB_RUN_ID / GITHUB_SERVER_URL / GITHUB_SHA
 #       GITHUB_WORKFLOW_REF, GITHUB_REF_NAME (optional, for the body)
 #       TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (optional — the nudge leg)
-#       DRIFT_REPORT_FILE_OVERRIDE / --drift-report (the gate's own report)
+#       DRIFT_REPORT_FILE (or --drift-report) — the gate's own report
 # Test: bash .github/scripts/deploy-api-alert.test.sh
 # ============================================================================
 set -euo pipefail
@@ -135,7 +135,7 @@ job_block_note() { # <job>
     post-deploy-verify)
       printf '%s' 'This job runs **AFTER** the release: a red here means the release is **LIVE and unhealthy** (there is no rollback), NOT that the deploy failed.' ;;
     *)
-      printf '%s' 'The job failed; read the run to see what it gates.' ;;
+      printf '%s' 'read the run to see what it gates (no note is declared for this job)' ;;
   esac
 }
 
@@ -190,10 +190,17 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
     done
   fi
   {
-    echo "**\`deploy-hosted\` → \`${job}\` failed** — the hosted deploy pipeline is"
-    echo "blocked. #2240: this job had no out-of-band observability, so a"
-    echo "fail-closed gate could stop the pipeline in silence. This issue is that"
-    echo "channel; it is filed and updated automatically."
+    # ⛔ The opener carries the JOB'S OWN meaning, never a hard-coded claim. "the
+    # hosted deploy pipeline is blocked" is true for `deploy-api` and
+    # `packaging-smoke` and FALSE for `post-deploy-verify`, which runs AFTER the
+    # release — a red there means the release is LIVE and unhealthy, not blocked.
+    # `job_block_note` is the single source, so the opener and the table cannot
+    # drift apart. (Round-4 review, P2-1.)
+    echo "**\`deploy-hosted\` → \`${job}\` failed** — $(job_block_note "$job")"
+    echo
+    echo "#2240: this job had no out-of-band observability, so a fail-closed gate"
+    echo "could stop the pipeline in silence. This issue is that channel; it is"
+    echo "filed and updated automatically."
     echo
     echo "| field | value |"
     echo "|---|---|"
@@ -209,8 +216,6 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
     fi
     echo "| commit | \`${GITHUB_SHA:-unknown}\` |"
     echo "| run | ${RUN_URL} |"
-    echo
-    echo "**The job's colour is the pipeline's colour** — $(job_block_note "$job")"
     echo
     if [ "$sid" = "$DRIFT_STEP_ID" ]; then
       echo "### Migration-drift gate report"
@@ -265,7 +270,7 @@ main() {
       --job)          job="${2:-}"; shift 2 ;;
       --steps)        steps="${2:-}"; shift 2 ;;
       --drift-report) DRIFT_REPORT_FILE="${2:-}"; shift 2 ;;
-      -h|--help)      usage; return 0 ;;
+      -h|--help)      usage || true; exit 0 ;;
       *) err "unknown argument: $1"; usage; return 2 ;;
     esac
   done
