@@ -546,10 +546,10 @@ contradict.**
 So this is a live question, and the honest thing is to argue it rather than drop it. Here is the
 argument, both ways, with the weak parts named.
 
-**The case for pinning a small advertised set.** 55 of the 82 tools we advertise have never been
-called by anything, including us. Mainstream clients cap the tools they will show — a
-reported 40 in Cursor — so most of this surface is invisible to an agent anyway, and we pay
-context for it on every turn. Every comparable we studied pins a smaller set,
+**The case for pinning a small advertised set.** 55 of the 82 tools we advertise have no
+call in our own tool-call log. Mainstream clients cap the tools they will show — a
+reported 40 in Cursor — so a client that caps there sees at most 40 of these 82, while we
+pay context for all of them on every turn. Every comparable we studied pins a smaller set,
 and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and
 `tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all 82 callable.
 
