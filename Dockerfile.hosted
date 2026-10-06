@@ -16,9 +16,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# CPU-only torch (#7473), its own layer between the lock-pinned requirements and
+# the extras: installing the extras' `torch` from PyPI means the CUDA build,
+# which declares the ~2.45 GB CUDA stack as dependencies (`nvidia_*` alone is
+# 2,190 MB) on a host that has no GPU (fly.toml sizes it around "torch +
+# sentence-transformers + the 90MB model"). `--extra-index-url` keeps PyPI as the
+# default index and torch unshadowable — the `+cpu` specifier exists only on
+# PyTorch's index — while torch's own dependencies still come from PyPI, exactly
+# as before this layer existed. Placed HERE, on the base image and on uv.lock (its
+# only inputs), so neither a pyproject.toml edit nor a source change invalidates
+# this layer.
+#
+# The version is READ FROM uv.lock rather than written a second time: uv.lock is
+# also what .github/actions/install-cpu-torch/action.yml compares its pin
+# against, so the lock is the single source of truth for both, and a lock bump
+# either installs the new release here or fails that guard in CI.
+#
+# This aligns the RELEASE as well as the build, deliberately: the extras installs
+# never resolve from the lock, so on main they drifted to PyPI's newest (torch
+# 2.14.1) while the lock pins 2.13.0 — the release `uv sync --extra embeddings`
+# gives a developer. One instance of #494's extras drift, closed.
+#
+# NOT applied to Dockerfile.selfhost: a self-hosting operator may have a GPU, so
+# that image keeps the CUDA-capable default (it still runs on CPU).
+COPY uv.lock .
+RUN set -eu; \
+    pin=$(python -c "import re; print(re.search(r'\[\[package\]\]\nname = \"torch\"\nversion = \"([^\"]+)\"', open('uv.lock').read()).group(1))"); \
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu "torch==${pin}+cpu"
+
 # Layer 1: bake the embedding model (~130MB bge-small, #1349) — cached
 # unless the layer inputs change (pyproject.toml here, or any earlier layer:
-# requirements.txt, base image). Source-only changes reuse the cache, making
+# requirements.txt, uv.lock, base image). Source-only changes reuse the cache, making
 # deploys incremental.
 #
 # DOCUMENTED DRIFT DECISION (#494): the [embeddings]/[backups] extras resolve
@@ -41,6 +69,12 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5', revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a')" \
     && test -d /app/model/models--BAAI--bge-small-en-v1.5 \
         || (echo 'FATAL: embedding model cache not at /app/model/models--BAAI--bge-small-en-v1.5' >&2; exit 1)
+
+# #7473: the extras install above is the step that could silently put PyPI's
+# CUDA torch back on top of the CPU one (if the extras ever raise their torch
+# floor). Separate from the chain above on purpose — that chain's `||` would
+# report a misleading model-cache failure for a torch problem.
+RUN python -c "import torch; assert torch.version.cuda is None, f'torch {torch.__version__} was built with CUDA - the CPU-only install did not take'"
 
 # Layer 2: source code (fast, no model download — reuses Layer 1 cache)
 # --no-deps: package-only install. Dependencies were already installed
