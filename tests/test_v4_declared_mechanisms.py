@@ -341,7 +341,7 @@ def test_gate_fails_closed_on_a_placeholder_tracking_issue() -> None:
     and negative ints, so a `not-implemented` row could be "marked" with a
     placeholder on the one field whose whole job is to be a marker.
     """
-    for bad in ([], " ", "TBD", "0", -3, True, 0.0):
+    for bad in ([], " ", "TBD", "0", 0, -3, True, 0.0):  # int 0 pins `<= 0`
         errors = gate_errors(
             [
                 {
