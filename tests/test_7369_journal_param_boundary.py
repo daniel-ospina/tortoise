@@ -1132,3 +1132,65 @@ def test_a_DECIMAL_is_preserved_because_the_engine_COERCES_it():
     )
     assert out["p"]["confidence"] == Decimal("0.25")  # coerced, preserved
     assert out["p"]["blob"] is None  # rejected, degraded
+
+
+def test_every_DRIVER_COERCED_number_is_preserved_not_nulled():
+    """#7406: the coercion scope is the DRIVER's, not `Decimal` alone.
+
+    `_sanitize_props` deliberately admits numpy integers
+    (`test_4647_store_representable.py::test_numpy_ints_in_range_pass`), so
+    `update_point(id, v=np.int64(7))` reaches this boundary. Measured on the
+    real engine through `_GuardedGraph`, a boundary that preserved only
+    `Decimal` stored `None` where the raw handle stored `7` — silent data loss
+    on a supported surface. `Fraction` and `Decimal` ride the same driver
+    fallback.
+
+    The other direction is asserted in the same map: a NON-FINITE Decimal is
+    REJECTED by the engine at parse (`Failed to parse query parameter`), so it
+    must degrade — widening the type test must not bypass the finiteness
+    filter. `complex` is a `numbers.Number` but `(1+2j)` is not a literal.
+    """
+    from decimal import Decimal
+    from fractions import Fraction
+
+    np = pytest.importorskip("numpy")
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+
+    for coerced in (Decimal("0.25"), Fraction(5, 1), np.int64(7), np.int32(7)):
+        out = _journal_safe_params({"p": {"v": coerced}}, write)
+        assert out["p"]["v"] == coerced, coerced
+
+    nan, inf = Decimal("NaN"), Decimal("Infinity")
+    out = _journal_safe_params({"p": {"nan": nan, "inf": inf, "c": 1 + 2j}}, write)
+    assert out["p"]["nan"] is None, "a non-finite Decimal parses as a reject"
+    assert out["p"]["inf"] is None
+    assert out["p"]["c"] is None, "complex is not a Cypher literal"
+
+
+def test_a_SET_is_a_PARSE_reject_and_a_CYCLE_degrades():
+    """#7406: two classifications corrected after review.
+
+    A `set` was grouped with `list`/`tuple` as a SHAPE-only reject, so a read
+    forwarded it. Measured: the engine refuses a set while PARSING the
+    parameter (`Failed to parse query parameter`), on a read exactly as on a
+    write — there is no statement to forward it on.
+
+    And `_walk`'s container recursion had no depth bound, so a self-referential
+    structure raised `RecursionError` — which aborts the rebuild AFTER the wipe
+    on the replay path this boundary exists for, where `_guard_numeric_params`
+    is a no-op under `_TOLERATE_ALTERED_NUMBERS`. Not JSON-reachable (a cycle
+    cannot come from `json.loads`), but the contract is "degrades, never
+    raises" and the sibling predicate is already bounded.
+    """
+    assert _writable_at_parse({1, 2}) is False
+    assert _writable_at_parse(frozenset({1})) is False
+    read = "MATCH (n:Point {id:$id}) RETURN n.p AS p"
+    assert _journal_safe_params({"p": {1, 2}}, read)["p"] is None
+
+    cyclic = {"props": None}
+    cyclic["props"] = cyclic
+    out = _journal_safe_params(
+        {"rows": [cyclic]},
+        "UNWIND $rows AS r SET t += r.props RETURN count(t)",
+    )
+    assert "rows" in out  # degraded, NOT a RecursionError

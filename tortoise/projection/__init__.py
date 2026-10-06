@@ -14,10 +14,10 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations  # noqa: I001
 
 import contextlib
-import decimal
 import hashlib
 import json
 import math
+import numbers
 import re
 import os
 import shutil
@@ -2211,17 +2211,29 @@ def _journal_safe_params(params, cypher=None):
     ) | frozenset(_GATE_ROW_UNWOUND_RE.findall(statement))
     degraded: list = []
 
-    def _walk(value, path, shape):
+    def _walk(value, path, shape, _depth: int = 0):
         if shape == "rows" and isinstance(value, (list, tuple)):
+            if _depth >= _PERSISTABLE_MAX_DEPTH:
+                # Same bound as `_writable_at_parse`, and for the same reason:
+                # this recursion is the only boundary on the replay path, so a
+                # self-referential or absurdly deep container must DEGRADE
+                # rather than raise a RecursionError AFTER the wipe. Checked on
+                # entry to a container (not before the branches) so a deep
+                # SCALAR leaf is still written — every hop here descends.
+                degraded.append(path)
+                return None
             changed = False
             out = []
             for i, row in enumerate(value):
-                walked = _walk(row, f"{path}[{i}]", "map")
+                walked = _walk(row, f"{path}[{i}]", "map", _depth + 1)
                 if walked is not row:
                     changed = True
                 out.append(walked)
             return out if changed else value
         if shape == "map" and isinstance(value, dict):
+            if _depth >= _PERSISTABLE_MAX_DEPTH:
+                degraded.append(path)
+                return None
             changed = False
             out = {}
             for k, v in value.items():
@@ -2244,6 +2256,7 @@ def _journal_safe_params(params, cypher=None):
                     )
                     if k in structural_fields
                     else None,
+                    _depth + 1,
                 )
                 if walked is not v:
                     changed = True
@@ -3029,17 +3042,34 @@ def _annotator_value_ok(val) -> bool:
 
 
 def _engine_coerces(val) -> bool:
-    """True for a value the engine COERCES rather than rejects.
+    """True for a value the driver encodes and the engine stores as a NUMBER.
 
     `_annotator_value_ok` answers "is this ALREADY a persistable property
-    primitive", and a `decimal.Decimal` is not one — so the walker NULLED it.
-    But the driver encodes it and the engine stores the float: measured on
-    #7406, `test_non_json_native_value_is_journalled_as_stored` passes on main
-    with the raw `Decimal("0.25")` and journals `0.25`. Degrading it replaced a
-    value the engine accepts with null — silent data loss, and the same
-    false-refusal class as the `n += r.props` regression fixed in the same head.
+    primitive", which is NARROWER than what the engine accepts: the driver
+    falls back to the value's own literal, so a numeric object that is not a
+    Python primitive is stored as the number it prints as. Judging those with
+    the primitive test NULLED them — silent data loss. Measured on the real
+    engine, a value the boundary replaced with `null` while the raw write
+    stored it fine:
+
+      * `decimal.Decimal("0.25")` — the #7406 regression, journaled `null`;
+      * `numpy.int64(7)` — reachable from a SUPPORTED surface, because
+        `sdk._sanitize_props` deliberately admits numpy integers
+        (`tests/test_4647_store_representable.py::test_numpy_ints_in_range_pass`);
+      * `fractions.Fraction(5, 1)`.
+
+    Deliberately NOT every `str()`-able object — only numbers, and only FINITE
+    ones: the engine REJECTS a non-finite at parse (`Decimal("NaN")` ->
+    "Failed to parse query parameter"), and degrading that is the whole point
+    of the boundary. So this widens the TYPE test without bypassing the
+    finite/representable filter that `_annotator_value_ok` already applies.
     """
-    return isinstance(val, decimal.Decimal)
+    if isinstance(val, complex) or not isinstance(val, numbers.Number):
+        # `complex` is a `numbers.Number` but `(1+2j)` is not a literal.
+        return False
+    with contextlib.suppress(Exception):
+        return math.isfinite(val)
+    return False
 
 
 def _writable_at_parse(val, _depth: int = 0) -> bool:
@@ -3094,7 +3124,13 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
     # first refused a deep-but-writable container the sibling accepts — a false
     # refusal baked into the fix. Checking on entry to a container still
     # terminates a cycle (every hop descends).
-    if isinstance(val, (list, tuple, set, frozenset)):
+    if isinstance(val, (set, frozenset)):
+        # A set is NOT a shape-only reject. Measured: the engine refuses it
+        # while PARSING the parameter (`Failed to parse query parameter`), on a
+        # read exactly as on a write, so there is no statement it can be
+        # forwarded on and #7174's read-path exemption does not reach it.
+        return False
+    if isinstance(val, (list, tuple)):
         if _depth >= _PERSISTABLE_MAX_DEPTH:
             return False
         return all(_writable_at_parse(item, _depth + 1) for item in val)
