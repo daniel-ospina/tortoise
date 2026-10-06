@@ -95,9 +95,20 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
     if not isinstance(mechanisms, list):
         return [f"mechanisms must be a list, got {type(mechanisms).__name__}"]
 
-    def _path_violations(mid: str, field: str, entries: object,
-                         root: Path, *, must_be_test: bool = False) -> list[str]:
-        """A declared path must be a NON-EMPTY, REPO-RELATIVE string, on disk.
+    #: Field -> the KIND of artifact it must name. A declared path that EXISTS
+    #: but is the wrong kind (a README satisfying `code:`, a source file
+    #: satisfying `tests:`) is the same fail-open class as a missing one: the
+    #: row claims an artifact it does not name. Cycle 4 closed it for `tests:`,
+    #: cycle 5 for `code:`/`declared_in:` — closed here as one rule.
+    def _is_test_name(name: str) -> bool:
+        return (
+            (name.startswith("test_") and name.endswith(".py"))
+            or name.endswith("_test.py")
+        )
+
+    def _path_violations(mid: str, field: str, entries: object, root: Path,
+                         kind: str) -> list[str]:
+        """A declared path must be the RIGHT KIND of artifact, on disk, IN the repo.
 
         A bare `root / rel` is fail-OPEN (cycle-2 review P1): `""` resolves to
         `root` itself, an absolute `rel` replaces `root` entirely, `..` escapes
@@ -105,15 +116,21 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
         A mapping whose KEYS are existing paths also passed by key iteration.
         So the entry is validated before it is joined.
 
-        `must_be_test` (cycle-4 P2): the `tests:` field must name a TEST, not
-        merely a file that exists — otherwise `tests: ["README.md"]` satisfied
-        "implemented WITH A TEST", which is the gate's whole claim. The check is
-        the repo's own naming convention, so it holds wherever tests live
-        (`tests/`, `graph-scripts/`, `integrations/tests/`) and needs no prefix.
+        `kind` (cycles 4-5) pins WHAT the path must be, because existence alone
+        does not prove the claim: `tests:` must match the repo's own naming
+        convention (`test_*.py` / `*_test.py`, wherever tests live — `tests/`,
+        `graph-scripts/`, `integrations/tests/` — so no prefix is required);
+        `code:` must be a non-test `.py`; `declared_in:` must be a document
+        (`.md`/`.yaml`/`.yml`).
+
+        Containment (cycle-5 P2) is by RESOLVED path: the repo carries committed
+        symlinks (`scripts/`, `skills/` → agent-infra), so `is_file()` alone
+        followed a declared path out of the repo.
         """
         out: list[str] = []
         if not isinstance(entries, list):
             return [f"{mid}: {field} must be a list, got {type(entries).__name__}"]
+        root_resolved = root.resolve()
         for rel in entries:
             if not isinstance(rel, str) or not rel:
                 out.append(f"{mid}: {field} entry is not a non-empty string: {rel!r}")
@@ -125,22 +142,31 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"the repo: {rel!r}"
                 )
                 continue
-            if must_be_test and not (
-                (p.name.startswith("test_") and p.suffix == ".py")
-                or (p.name.endswith("_test.py"))
-            ):
+            if kind == "test" and not _is_test_name(p.name):
                 out.append(
                     f"{mid}: {field} entry is not a test file (expected "
                     f"`test_*.py` or `*_test.py`): {rel!r}"
                 )
                 continue
+            if kind == "code" and (p.suffix != ".py" or _is_test_name(p.name)):
+                out.append(
+                    f"{mid}: {field} entry is not production source (expected "
+                    f"a non-test `.py`): {rel!r}"
+                )
+                continue
+            if kind == "doc" and p.suffix not in (".md", ".yaml", ".yml"):
+                out.append(
+                    f"{mid}: {field} entry is not a declaring document "
+                    f"(expected `.md`/`.yaml`/`.yml`): {rel!r}"
+                )
+                continue
             # `is_file()`, not `exists()`: a DIRECTORY satisfied an exists-only
-            # check, so a row could be `implemented` with zero specific code and
-            # zero specific test (cycle-3 P2 — the residual of the cycle-2 P1
-            # class). And the probe is wrapped, because a component longer than
-            # NAME_MAX raises `OSError` — a crash is not a verdict (cycle-3 P2).
+            # check (cycle-3 P2). The probe is wrapped, because a component
+            # longer than NAME_MAX raises `OSError` — a crash is not a verdict
+            # (cycle-3 P2).
             try:
-                present = (root / p).is_file()
+                resolved = (root / p).resolve()
+                present = resolved.is_file() and resolved.is_relative_to(root_resolved)
             except OSError:
                 present = False
             if not present:
@@ -169,7 +195,7 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
         if not isinstance(declared_in, list) or not declared_in:
             errors.append(f"{mid}: declares no declaring document (declared_in)")
         else:
-            errors.extend(_path_violations(mid, "declared_in", declared_in, root))
+            errors.extend(_path_violations(mid, "declared_in", declared_in, root, "doc"))
 
         # The polarity is read FROM `STATES`, so the accepted set and the
         # message naming it cannot drift (cycle-2 review P2).
@@ -187,7 +213,7 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             if not isinstance(row.get("code"), list) or not row.get("code"):
                 errors.append(f"{mid}: implemented but declares no code path")
             else:
-                errors.extend(_path_violations(mid, "code", row["code"], root))
+                errors.extend(_path_violations(mid, "code", row["code"], root, "code"))
             if not isinstance(row.get("tests"), list) or not row.get("tests"):
                 errors.append(
                     f"{mid}: implemented but declares no test — a code path "
@@ -196,7 +222,7 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 )
             else:
                 errors.extend(
-                    _path_violations(mid, "tests", row["tests"], root, must_be_test=True)
+                    _path_violations(mid, "tests", row["tests"], root, "test")
                 )
 
         else:  # NOT_IMPLEMENTED — the only other member of STATES
@@ -259,7 +285,7 @@ def test_gate_fails_closed_on_implemented_without_a_test() -> None:
                 "name": "x",
                 "declared_in": ["config/v4-mechanisms.yml"],
                 "state": "implemented",
-                "code": ["config/v4-mechanisms.yml"],
+                "code": ["tortoise/fanout.py"],
             }
         ]
     )
@@ -325,7 +351,7 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
         "name": "x",
         "state": "implemented",
         "declared_in": ["config/v4-mechanisms.yml"],
-        "code": ["config/v4-mechanisms.yml"],
+        "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
     }
     for field in ("declared_in", "code", "tests"):
@@ -349,7 +375,7 @@ def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
         "name": "x",
         "state": "implemented",
         "declared_in": ["config/v4-mechanisms.yml"],
-        "code": ["config/v4-mechanisms.yml"],
+        "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
     }
     for bad in (["x" * 5000], ["a/" + "x" * 5000]):
@@ -371,7 +397,7 @@ def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
             "name": "x",
             "declared_in": ["config/v4-mechanisms.yml"],
             "state": "implemented",
-            "code": ["config/v4-mechanisms.yml"],
+            "code": ["tortoise/fanout.py"],
             "tests": ["tests/test_fanout_cap.py"],
         }
         row[field] = {"config/v4-mechanisms.yml": 1}
@@ -413,6 +439,74 @@ def test_gate_fails_closed_on_a_non_list_registry() -> None:
     for bad in (None, {}, "mechanisms", 7):
         errors = gate_errors(bad)
         assert any("must be a list" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_non_source_code_file() -> None:
+    """`code:` must name production SOURCE, not merely a file that exists.
+
+    Cycle-5 P2: existence-only let `code: ["README.md"]`, the registry YAML, or
+    a TEST file satisfy "implemented (a code path with a test)" — the same
+    fail-open class cycle 4 closed for `tests:`, left unfixed on `code:`.
+    """
+    for bad in (
+        ["README.md"],
+        ["config/v4-mechanisms.yml"],
+        ["tests/test_fanout_cap.py"],
+        ["tortoise/fanout.pyc"],
+    ):
+        row = {
+            "id": "x",
+            "name": "x",
+            "state": "implemented",
+            "declared_in": ["config/v4-mechanisms.yml"],
+            "code": bad,
+            "tests": ["tests/test_fanout_cap.py"],
+        }
+        errors = gate_errors([row])
+        assert any("production source" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_non_document_declared_in() -> None:
+    """`declared_in:` must name a DOCUMENT, not any file that exists."""
+    for bad in (["tortoise/fanout.py"], ["tests/test_fanout_cap.py"], ["README"]):
+        row = {
+            "id": "x",
+            "name": "x",
+            "state": "implemented",
+            "declared_in": bad,
+            "code": ["tortoise/fanout.py"],
+            "tests": ["tests/test_fanout_cap.py"],
+        }
+        errors = gate_errors([row])
+        assert any("declaring document" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_path_outside_the_repo_via_symlink(tmp_path) -> None:
+    """Containment is by RESOLVED path (cycle-5 P2).
+
+    The repo carries committed symlinks (`scripts/`, `skills/` → agent-infra),
+    so `is_file()` alone followed a declared path OUT of the repo.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("x\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "escaped.py").write_text("x = 1\n")
+    (repo / "link").symlink_to(outside, target_is_directory=True)
+
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["link/escaped.py"],
+        "tests": ["tests/test_x.py"],
+    }
+    errors = gate_errors([row], root=repo)
+    assert any("does not exist" in e for e in errors), errors
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
