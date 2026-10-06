@@ -7,8 +7,8 @@ that way so filtering cannot silently shrink the result count (epic #898). The
 extractor's #2552 fix (``extractor_v2._fts_rows``) dropped the capture's own
 turn-echo rows AFTER the cut and refilled from a finite over-fetch window
 (``_PRIOR_OVERFETCH``). A session can hold ``MAX_SESSION_TURNS`` (500) turns, so
-whenever the echoes outnumber ``limit + _PRIOR_OVERFETCH`` and outrank a real
-prior, the prior is silently absent from the S3 prior set — the extracted claim
+whenever the echoes outnumber ``limit + _PRIOR_OVERFETCH`` and sort ahead of a
+real prior, the prior is silently absent from the S3 prior set — the extracted claim
 is ADDed instead of folded, producing a duplicate memory Point.
 
 Fix: the exclusion is a caller-supplied, OPT-IN pre-truncation filter in the
@@ -121,11 +121,11 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     real prior. The echoes contain the query tokens; the prior does too, so it
     is a genuine candidate of the fused pool.
 
-    ``prior_id`` must sort AFTER the echo ids (``<session_id>_t<i>``): the FTS
-    leg ties every matching row on score, so the fused order IS the ``id``
-    tie-break (#3019), and only a late-sorting prior sits outside a window the
-    echoes fill. An earlier revision relied on the prior being seeded after the
-    hot echoes, i.e. on the opaque DB row order this tie-break replaces."""
+    ``prior_id`` must sort AFTER the echo ids (``<session_id>_t<i>``): every row
+    in this fixture scores alike, so the fused order is the ``id`` tie-break
+    (#3019), and only a late-sorting prior sits outside a window the echoes
+    fill. An earlier revision relied on the prior being seeded after the hot
+    echoes, i.e. on the opaque DB row order this tie-break replaces."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
     s.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
@@ -145,9 +145,9 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
     an order of magnitude still returns the real prior.
 
     FALSIFIER — (1) *what value makes this test fail?* The presence of
-    ``pt_real`` in the exclusion call. (2) *does the fixture contain a row where
-    that value is reachable?* Yes: ``pt_real`` is seeded and asserted to be a
-    candidate of the same fused pool (``pool_size=_POOL``) BEFORE the
+    ``zz_pt_real`` in the exclusion call. (2) *does the fixture contain a row
+    where that value is reachable?* Yes: ``zz_pt_real`` is seeded and asserted
+    to be a candidate of the same fused pool (``pool_size=_POOL``) BEFORE the
     exclusion — so the only thing that can remove it from the pre-exclusion
     window is the new pre-truncation filter, and the only thing that can fail
     to surface it is the OLD after-the-cut drop.
@@ -231,18 +231,20 @@ def test_limit_applies_to_the_already_filtered_candidate_set(sdk):
     FALSIFIER — (1) *what value makes this test fail?* The identity of the two
     returned rows: pre-truncation they are the two REAL priors; a filter applied
     after the cut returns two echoes (or nothing after a drop). (2) *reachable?*
-    Yes: three echoes outrank the two priors and the window is 2, so the
-    ordering is forced.
+    Yes: the three echoes sort ahead of the two priors and the window is 2, so
+    the ordering is forced. The priors are named ``zz_pt_*`` precisely so they
+    sort after the ``s1_t*`` echoes — with earlier-sorting priors the window
+    would hold the priors either way and the test would not discriminate.
     """
     for i in range(3):
         _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id="pt_a")
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id="pt_b")
+    sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_a")
+    sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_b")
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=2, exclude_turn_echo_session="s1"))
     assert len(rows) == 2, rows
-    assert set(rows) == {"pt_a", "pt_b"}, rows
+    assert set(rows) == {"zz_pt_a", "zz_pt_b"}, rows
 
 
 def test_caller_minted_point_in_the_turn_namespace_survives(sdk):
@@ -270,11 +272,11 @@ def test_caller_minted_point_in_the_turn_namespace_survives(sdk):
 
 def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
                                n_echoes: int) -> None:
-    """The PRODUCTION call shape's fixture: ``n_echoes`` echoes that each
-    outrank ONE real prior, and — unlike ``_seed_echo_wall`` — no ``pool_size``
-    is passed by the caller under test, so the fused pool is the product
-    default. The echoes carry three copies of the query and the prior two, so
-    the ordering is forced without relying on tie-breaks."""
+    """The PRODUCTION call shape's fixture: ``n_echoes`` echoes plus ONE real
+    prior, and — unlike ``_seed_echo_wall`` — no ``pool_size`` is passed by the
+    caller under test, so the fused pool is the product default. Every row
+    scores alike, so the ``id`` tie-break decides: ``prior_id`` must sort after
+    the echo ids for the echoes to fill the pool ahead of it."""
     for i in range(n_echoes):
         _seed_echo(sdk, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
     sdk.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
@@ -306,8 +308,9 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
     FALSIFIER — (1) *what value makes this test fail?* Two of them. First,
     whether ``DEFAULT_POOL_SIZE`` is still the bound the comments name — asserted
     literally below, so a moved default reddens here and forces the documentation
-    to move with it. Second, whether ``pt_real`` is returned by the call that
-    passes NO ``pool_size``; the echoes outrank the prior and outnumber the pool,
+    to move with it. Second, whether ``zz_pt_real`` is returned by the call that
+    passes NO ``pool_size``; the echoes sort ahead of the prior and outnumber
+    the pool,
     so the prior is outside the candidate set before any filter runs and no
     post-fetch exclusion can reach it.
     """
@@ -335,16 +338,17 @@ def test_within_the_pool_the_exclusion_recovers_the_prior_in_production_shape(sd
     back. That is what makes the pin above a measurement of the POOL rather than
     of the exclusion — if the seam were broken, this test would fail too.
 
-    FALSIFIER — (1) *what value makes this test fail?* ``pt_real``'s absence. (2)
-    *reachable?* Yes: half the default pool, all outranking the prior, so the
-    prior is a pool candidate and only the exclusion can surface it.
+    FALSIFIER — (1) *what value makes this test fail?* ``zz_pt_real``'s absence.
+    (2) *reachable?* Yes: half the default pool, ALL sorting ahead of the
+    ``zz_pt_real`` prior, so the prior sits outside the pre-exclusion window and
+    the exclusion is what surfaces it.
     """
     n_echoes = _DOCUMENTED_PROD_POOL // 2
-    _seed_echo_wall_production(sdk, "s1", "pt_real", n_echoes)
+    _seed_echo_wall_production(sdk, "s1", "zz_pt_real", n_echoes)
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
         exclude_turn_echo_session="s1"))
-    assert "pt_real" in rows, (
+    assert "zz_pt_real" in rows, (
         f"within the pool the exclusion must surface the prior, got {rows}")
     assert not any(i.startswith("s1_t") for i in rows), rows
