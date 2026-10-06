@@ -2250,10 +2250,12 @@ def _branch_terminal_state_from_prs(
         raise SurfaceError(
             f"head-ref lookup for {branch} returned {type(prs).__name__}, not a list"
         )
-    # ⛔ A FULL PAGE IS REFUSED, NOT READ AS "NOT FOUND". `sort=created desc` puts
-    # the OLDEST PR last, so the merged PR this function exists to find is exactly
-    # what falls off the page — the silent answer would be the one that keeps the
-    # issue blocked forever (#5485) while looking like a completed lookup.
+    # ⛔ A FULL PAGE IS REFUSED, NOT READ AS "NOT FOUND". `sort=created desc`
+    # puts the OLDEST PR last, so the merges this function exists to find are the
+    # ones that fall off a full page — a silent "not found" would keep the issue
+    # blocked forever (#5485) while looking like a completed lookup. The refusal
+    # is deliberately CONSERVATIVE: it fires on any full page, so it can refuse an
+    # answer that was in fact on the page — the safe direction, never the other.
     if len(prs) >= _TARGETED_PR_PAGE:
         raise SurfaceError(
             f"head-ref lookup for {branch} hit its {_TARGETED_PR_PAGE}-PR page cap; "
