@@ -1272,14 +1272,18 @@ jobs:
           #      written (#4711) and were never rechecked.
           #
           # #6137 re-cut the two rows. They are the LPT legs of
-          # `slow_files - carve_out` on the committed `durations` map — 34 and
-          # 35 files at 16.202 / 16.205 min, re-derivable with
+          # `slow_files - carve_out` on the committed `durations` map — 30 and
+          # 31 files at 13.817 / 13.813 min, re-derivable with
           # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
+          # (The first cut packed 43 files / 16.21m; eight dual-registered
+          # files returned to the fast pool — a second surface's diff would
+          # otherwise run them on NEITHER leg — so the legs were re-cut to
+          # 13.82m. See config/ci-surfaces.yml's `slow_files` exclusions.)
           # The in-step watchdog below is sized from the heavier leg
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than 16.2.
+          # committed weight was 2.84 min rather than 13.8.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1290,37 +1294,35 @@ jobs:
           - half: a
             files: >-
               eval/retrieval/test_gate_1349 eval/retrieval/test_run
-              eval/why_suite/test_why_suite_benchmark eval/write_path/test_write_path_benchmark
-              eval/write_path/test_write_path_runner test_4314_inert_hooks test_backfill_sources
-              test_billing test_capture_session test_ci_selection test_cli_context
-              test_consistency_divergence_5011 test_embedded_evidence test_enumeration_surfaces
-              test_ep_sources test_epic903_fixtures test_epic903_scheduler
-              test_epic903_warmstart test_extractor_v2 test_graph_write_loop_responsiveness
-              test_hosted_volunteer_context test_index_directory test_ingest_mode
-              test_ingest_validation test_journal_embedding_5004 test_markers
-              test_mcp_route_challenge test_oauth_mcp test_operator_idempotency_4971
-              test_pack_shipping_wheel test_probe_reset_inflight_4608 test_sdk test_sdk_group3
-              test_selfhost_health_probe_executor
+              eval/why_suite/test_why_suite_benchmark test_about_edges test_battery_setup
+              test_billing test_ci_selection test_cli_context test_consistency_divergence_5011
+              test_control_plane test_dream test_embedded_evidence test_ep_selector
+              test_epic903_fixtures test_epic903_scheduler test_event_provenance
+              test_graphcopy_boolean_index_3154 test_hosted_volunteer_context
+              test_import_endpoint test_index_cli test_index_directory test_indexes test_ingest
+              test_monitoring test_oauth_mcp test_pack_shipping_wheel test_platform_seams
+              test_search_engine_gaps test_source_inheritance_own
+              test_unjournaled_mutation_class
           - half: b
             files: >-
-              eval/harness/test_harness_benchmark test_about_edges test_abuse_integration
-              test_battery_r1_seed test_battery_setup test_capture_loop_responsiveness
-              test_client_surface test_commit_endpoint test_control_plane test_dr_endpoints
-              test_dream test_ep_selector test_epic903_modes test_event_provenance
-              test_graph_diagnostics test_graphcopy_boolean_index_3154 test_hosted_api
-              test_import_endpoint test_index_cli test_indexes test_ingest test_ingest_bundle
-              test_ingest_v2_consolidation test_mcp_http test_monitoring test_platform_seams
-              test_projection test_relationships_bounded test_sdk_surface
-              test_search_engine_gaps test_skip_guard test_source_inheritance_own
-              test_surface_manifest test_unjournaled_mutation_class test_write_verb
+              eval/harness/test_harness_benchmark eval/write_path/test_write_path_runner
+              test_abuse_integration test_backfill_sources test_battery_r1_seed
+              test_capture_session test_client_surface test_commit_endpoint test_dr_endpoints
+              test_enumeration_surfaces test_ep_sources test_epic903_modes
+              test_epic903_warmstart test_extractor_v2 test_graph_diagnostics test_hosted_api
+              test_ingest_bundle test_ingest_mode test_ingest_v2_consolidation
+              test_ingest_validation test_markers test_mcp_http test_mcp_route_challenge
+              test_operator_idempotency_4971 test_projection test_relationships_bounded test_sdk
+              test_sdk_group3 test_skip_guard test_surface_manifest test_write_verb
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
     # that fires first cancels the step and loses them. #6137 moved 43 files
     # into these legs, taking their committed `durations` weight from 2.84m to
-    # 16.21m, so
+    # 16.21m (13.82m after the eight dual-registered files returned to the
+    # fast pool), so
     # the #3239 literal budget no longer clears the work: the watchdog goes to
-    # 35m (2.16x the 16.21m heavier leg) and this cap to 40m (2.47x). The cap
+    # 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x). The cap
     # still clears the watchdog, so a hung leg prints its counts before the
     # runner cancels the step.
     timeout-minutes: 40
@@ -1544,8 +1546,8 @@ jobs:
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
           # shards derive their budget from. #6137 moved 43 files in, so the
-          # heavier leg now carries 16.21m and this literal is 35m, i.e. 2.16x
-          # the 2.0x minimum the headroom floor requires (32.4m); it was 10m
+          # heavier leg now carries 13.82m and this literal is 35m, i.e. 2.53x
+          # the 2.0x minimum the headroom floor requires (27.6m); it was 10m
           # when the legs' committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is

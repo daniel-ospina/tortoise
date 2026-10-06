@@ -2263,6 +2263,20 @@ slow_files:
 #     the `core` diff's `slow_selected` never contains them and the guard runs
 #     on neither leg (`test_every_named_guard_runs_for_its_own_source`, the
 #     #7076 class). They stay in the fast pool.
+#   * the same rule excludes EIGHT MORE dual-registered files: eval/write_path/
+#     test_write_path_benchmark.py, test_4314_inert_hooks.py,
+#     test_capture_loop_responsiveness.py,
+#     test_graph_write_loop_responsiveness.py, test_journal_embedding_5004.py,
+#     test_probe_reset_inflight_4608.py, test_sdk_surface.py and
+#     test_selfhost_health_probe_executor.py. Each is named by a SECOND surface
+#     (core, and for the first also ep/eval), and a diff that selects that other
+#     surface subtracts it from the fast pool (`files -= slow`) without ever
+#     re-adding it to `slow_selected` (that set is keyed by the FIRST-match
+#     classifier) — so it would run on NEITHER leg. The second surface's own
+#     slow files usually keep `slow_run` True, which is what made this silent.
+#     They stay in the fast pool too, and
+#     tests/test_ci_selection.py::test_every_slow_file_a_second_surface_names_
+#     runs_for_that_surface pins the class rather than these names.
 #   * the `onboarding` surface is EXCLUDED. A `website/*` PR selects
 #     `onboarding` and is pinned to `slow_run is False`
 #     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
@@ -2297,19 +2311,16 @@ slow_files:
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
 # job's own drift-guard step fails closed if the union stops matching this list.
 # Both legs are budgeted from that weight (a 35m watchdog under a 40m cap for
-# 16.21m legs), pinned by
+# 13.82m legs), pinned by
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py
 - eval/why_suite/test_why_suite_benchmark.py
-- eval/write_path/test_write_path_benchmark.py
 - eval/write_path/test_write_path_runner.py
-- test_4314_inert_hooks.py
 - test_abuse_integration.py
 - test_battery_r1_seed.py
 - test_battery_setup.py
-- test_capture_loop_responsiveness.py
 - test_capture_session.py
 - test_ci_selection.py
 - test_client_surface.py
@@ -2324,20 +2335,15 @@ slow_files:
 - test_epic903_warmstart.py
 - test_extractor_v2.py
 - test_graph_diagnostics.py
-- test_graph_write_loop_responsiveness.py
 - test_hosted_volunteer_context.py
 - test_import_endpoint.py
 - test_ingest_v2_consolidation.py
-- test_journal_embedding_5004.py
 - test_markers.py
 - test_monitoring.py
 - test_oauth_mcp.py
 - test_operator_idempotency_4971.py
 - test_platform_seams.py
-- test_probe_reset_inflight_4608.py
 - test_relationships_bounded.py
-- test_sdk_surface.py
-- test_selfhost_health_probe_executor.py
 - test_skip_guard.py
 - test_surface_manifest.py
 - test_unjournaled_mutation_class.py

@@ -1215,6 +1215,91 @@ def test_slow_files_never_in_fast_gate_selections():
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
+def test_every_slow_file_a_second_surface_names_runs_for_that_surface():
+    """#6234: a `slow_files` entry named by a SECOND surface must still run on
+    that second surface's diff.
+
+    `classify_test_file` is FIRST-match, and `select()` keys the tier-2 slow
+    leg set on that same first match while subtracting EVERY `slow_files` entry
+    from the fast pool (`files -= slow`). So a slow file that a second surface
+    also names is dropped from the fast set and never re-added to
+    `slow_selected` when the second surface is the matched one — it runs on
+    NEITHER leg. The leg still reports green because the second surface usually
+    owns other slow files, so `slow_run` stays True: the coverage hole is
+    invisible to the drift guard, whose union check is about the committed legs
+    and not about which tier-2 diff reaches them.
+
+    The repo already excludes the two known instances
+    (`test_capture_install.py` / `test_session_verify.py`) and, after #6234,
+    eight more. The property is driven from the manifest — for EVERY slow file
+    a second surface names, not a frozen list — so relocating a
+    dual-registered file back into `slow_files` reds here with its name.
+
+    A selection that matches the second surface is the MINIMAL case: a diff
+    that also matches another surface owning the file would run it, so if the
+    minimal one does not, the hole is real. `uri_requiring` files are exempt:
+    they are deliberately kept out of every URI-less tier-2 leg (see
+    `slow_leg_by_surface`), a separate documented exclusion.
+    """
+    m = load_manifest()
+    slow = set(m["slow_files"])
+    carve = set(m["carve_out"])
+    uri = uri_requiring_files(m)
+    surfaces = m["surfaces"]
+
+    # A path whose diff selects `s` on its own. SOURCE_PATTERNS is the manifest's
+    # source->surface map; `core` and `classify` have NO entry (they are only
+    # reachable as the fallback / via a test-file change), so for those we use a
+    # registered test file that CLASSIFIES as the surface — a test-file change
+    # selects its classifying surface, which is the same path the hole is on.
+    def _probe(s: str) -> str | None:
+        pats = SOURCE_PATTERNS.get(s)
+        if pats:
+            return pats[0]
+        for member in surfaces.get(s) or []:
+            if member in slow or member in carve:
+                continue
+            if classify_test_file(member, m) == s:
+                return "tests/" + member
+        return None
+
+    offenders: list[str] = []
+    for f in sorted(slow - carve - uri):
+        owner = classify_test_file(f, m)
+        base = f.rsplit("/", 1)[-1]
+        offenders_for_f: list[str] = []
+        for s, files in surfaces.items():
+            if s == owner:
+                continue
+            if f not in (files or []) and base not in (files or []):
+                continue
+            probe = _probe(s)
+            assert probe is not None, (
+                f"no probe diff selects surface {s!r} for slow file {f}; the "
+                "probe derivation needs a SOURCE_PATTERNS entry or a "
+                "surface-classifying test file")
+            sel = select([probe], "pull_request", m)
+            assert s in sel["surfaces"], (
+                f"probe {probe!r} no longer selects surface {s!r} (got "
+                f"{sel['surfaces']}) — update `_probe` in this test")
+            ran = set(sel["test_files"]) if sel["test_files"] != "ALL" else set()
+            ran |= set(sel["slow_selected"])
+            if f not in ran:
+                offenders_for_f.append(
+                    f"{f} (owner {owner!r}, reached by a {s!r} diff)")
+        offenders.extend(offenders_for_f)
+
+    assert not offenders, (
+        "slow_files entries a SECOND surface names that the second surface's "
+        "diff would run on NEITHER leg: `classify_test_file` is first-match, so "
+        "the file is subtracted from the fast pool and never re-added to "
+        "`slow_selected`, while the second surface usually keeps `slow_run` "
+        "True so the leg still reports green. Keep them OUT of `slow_files` "
+        "(the test_capture_install.py / test_session_verify.py precedent):\n  "
+        + "\n  ".join(sorted(set(offenders)))
+    )
+
+
 def test_expensive_eval_integration_is_in_the_on_demand_lane():
     """The suite's single most expensive file is OFF the merge gate.
 
