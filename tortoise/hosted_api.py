@@ -27561,8 +27561,12 @@ def _analytics_open_incident(outcome: str, reason: str) -> bool:
         # nothing behind it, and a pause lifted mid-outage could never be
         # reopened (only a delivered write disarms the gate, which is exactly
         # what a degraded sink cannot produce). FILED and DEDUP both mean an
-        # incident IS on record, so both arm it.
-        return fact is not OpenOutcome.SUPPRESSED
+        # incident IS on record, so both arm it. #4781: that rule is NOT written
+        # here — it is the single shared ``alert_store.incident_is_on_record``
+        # (imported locally so the never-raise try also covers the import). A
+        # second copy here is the #3820 duplicate-rule defect #4781 removed.
+        from tortoise.alert_store import incident_is_on_record
+        return incident_is_on_record(fact)
     except Exception as e:  # the write path must never raise
         _logger.warning("analytics sink alert failed (%s): %s", outcome, e)
         return False
