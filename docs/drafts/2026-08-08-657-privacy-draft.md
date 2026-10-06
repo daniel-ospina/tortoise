@@ -28,6 +28,7 @@ created: 2026-08-08
 ### Step 5 — delete-account capability check (build-time, G-gate ⑧)
 
 **RESULT: ABSENT (2026-08-08, re-verified this session).** Evidence:
+
 - `website/welcome.html` — grep for `delete-account|account-settings|deactiv|deleteUser|account-management`: **no matches**; links only to Dashboard (`https://app.premiselabs.co`), signup, self-hosted (no account-settings surface).
 - `apps/dashboard/` — **shell only** (single `index.html`; no account-management UI/content).
 - `apps/graph-viz/server/main.py` — only content-level deletes: `DELETE /api/points/{point_id}` and `DELETE /api/edges/{edge_id}`; **no user/account deletion endpoint**.
@@ -37,7 +38,7 @@ created: 2026-08-08
 
 ### LFPDPPP note (RESOLVED 2026-08-08 — owner clarification)
 
-The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email hello@premiselabs.co, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
+The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
 
 ### Outline coverage (16 areas per plan T2 Step 1 → sections)
 
@@ -68,6 +69,14 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 
 ---
 
+<!-- Deliberate: this file is a two-part document — a drafting/G-gate preface
+  with its own H1 (above), then the policy itself, which opens with its own H1.
+  The config already carves out the frontmatter-title case for the same reason
+  (front_matter_title: ""); this is the body-title twin of it. The sibling TOS
+  draft (`2026-08-08-657-tos-draft.md`) has the identical two-H1 shape.
+  Every other MD025 report in this repo is real, so the rule is left ON and
+  suppressed for this one line only. -->
+<!-- markdownlint-disable-next-line MD025 -->
 # Privacy Policy
 
 **Effective date:** [effective date to be set to the actual deploy date at T8]
@@ -95,7 +104,7 @@ Premise Labs is **not a registered legal entity**. The data controller is the na
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](/aviso-privacidad).
+**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](https://tortoise.premiselabs.co/aviso-privacidad).
 
 ## 2. Data processed by the service (outline ②)
 

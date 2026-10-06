@@ -14687,9 +14687,10 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     filter EXCLUDES null-actor (legacy) rows by construction (a MATCH-level
     WHERE on a property a legacy Session does not have can never match).
     Malformed (non-UUID) filter → 422 (a client error, never a silent empty
-    result). When absent the query is byte-identical to the pre-#2600 shape
-    + two appended RETURN columns (actor_user_id/harness — appended at the
-    END so the positional r[0..3] count mapping is unchanged).
+    result). When absent the query keeps the pre-#2600 shape, except that
+    #3555 unified its point predicate with the detail endpoint's non-turn
+    filter, plus the RETURN columns appended since (at the END, so the
+    positional r[0..3] count mapping is unchanged).
     """
     _require_scope(org, "graphs:read", "list_sessions")
     actor_filter = (request.query_params.get("actor_user_id") or "").strip()
@@ -14717,7 +14718,22 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "MATCH (s:Session) "
             + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-            "WHERE p.pointKind IN ['decision', 'statement'] "
+            # #3555: the NON-TURN filter, matching get_session_detail (both its
+            # count and its points list, added under #822). It replaces the
+            # hardcoded pair `pointKind IN ['decision', 'statement']`, which
+            # reported `extracted: 0` on the list for a session whose non-turn
+            # points were untyped or carried a registered kind outside the pair
+            # -- while the SAME session's detail reported them, so two
+            # endpoints disagreed on one figure. The reachable producers: the M2
+            # lane writes points with NO pointKind (extractor_v2 repairs a
+            # missing or `unclassified` kind to 'statement' before the write,
+            # so NULL arrives from M2), and non-extractor write paths may mint
+            # any registered kind. `IS NULL` is deliberate -- `NULL <> 'event'`
+            # is NULL, not true, in Cypher -- and the filter stays load-bearing:
+            # a session's CONTAINS edge also carries its TURN points
+            # (`pointKind='event'`), so plain `count(p)` would report turns as
+            # extractions.
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
             "s.actor_user_id, s.harness, "
             "s.machine_id, s.model "
@@ -14801,8 +14817,9 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     """Get a single session with its conversation turns and extracted points (#714).
 
     Returns turns (episodic Point nodes with pointKind='event', ordered by
-    turn index) and extracted decisions/claims (Point nodes linked via
-    CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+    turn index) and extracted Points (linked via CONTAINS, filtered to every
+    NON-TURN point: pointKind IS NULL OR <> 'event' -- untyped M2 points are
+    extracted points too, #3555).
 
     #2002 (W6): dual-auth (session JWT OR tt_ key, #1828) — the Settings
     Captured-sessions transcript View (DE2E-11) reads on the session JWT,
