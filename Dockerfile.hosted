@@ -30,6 +30,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # requirements.txt (deploy-slim intent). Lock-pinning the extras too is a
 # separate follow-up if the index drift ever bites.
 COPY pyproject.toml .
+# #7473: install torch from PyTorch's CPU wheel index FIRST, so the [embeddings]
+# extra below cannot pull PyPI's default linux wheel — the CUDA build, which
+# declares ~3.2 GB of `nvidia_*` runtime wheels as dependencies. The hosted VM
+# is CPU-only (fly.toml sizes it around "torch + sentence-transformers + the
+# 90MB model", no GPU), so those wheels are dead weight in the image too.
+# `--index-url` keeps the surface unambiguous: torch's `+cpu` specifier exists
+# only on that index, so PyPI's CUDA build cannot shadow it, and the index
+# mirrors torch's own deps (verified HTTP 200), so nothing is left uninstalled.
+# Keep the version in step with uv.lock's `torch` pin (currently 2.13.0) — the
+# point is to swap the BUILD, not the release.
+# NOT applied to Dockerfile.selfhost: a self-hosting operator may have a GPU, so
+# that image keeps the CUDA-capable default (the CUDA build still runs on CPU).
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+    'torch==2.13.0+cpu'
 RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses

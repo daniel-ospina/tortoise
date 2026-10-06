@@ -1,0 +1,49 @@
+name: Install CPU-only torch (#7473)
+description: >
+  Install torch from PyTorch's CPU wheel index BEFORE the `embeddings` extra is
+  installed, so that extra cannot pull PyPI's DEFAULT linux wheel — the CUDA
+  build, which declares the ~3,200 MB of `nvidia_*` runtime wheels as
+  dependencies.
+
+  Nothing here uses CUDA. The only `cuda` occurrences in the tree are two mocks
+  raising `RuntimeError("CUDA out of memory")` (`tests/test_embeddings_filters.py`,
+  `tests/eval/write_path/test_write_path_prescreen.py`), a comment about an API
+  "GPU farm" (`tortoise/model_adapters.py`), and fixture prose. The shipped
+  surfaces are CPU-only: `fly.toml` sizes the hosted VM at `memory_mb → 4096`
+  around "torch + sentence-transformers + the 90MB model" with no GPU, and
+  `deploy-hosted.yml` / `docker-compose.yml` / `fly.toml` contain no
+  `gpu`/`cuda`/`accelerator` reference at all. The recorded embedder decision
+  agrees: `docs/research/2026-08-17-1349-embedder-selection.md` pre-registers the
+  "384-dim CPU benchmark pool" and names Docker-CPU candidates, with a GPU/API
+  tier only as a later path.
+
+  MEASURED (run 37461537748 on main, job `test-carve-out (b)` log): the install
+  step downloaded 31 sized wheels totalling 3,184 MB — `nvidia_cublas`,
+  `nvidia_cudnn_cu13`, `nvidia_cuda_cupti`, `nvidia_cuda_nvrtc`,
+  `nvidia_cuda_runtime`, `nvidia_cufft`, `nvidia_cufile`, `nvidia_curand`,
+  `nvidia_cusolver`, `nvidia_cusparse`, `nvidia_cusparselt_cu13`,
+  `nvidia_nccl_cu13` — and the step ran 93-219 s across the 16 jobs that
+  install.
+
+  `--index-url` (not `--extra-index-url`) keeps the surface minimal and
+  unambiguous: this pip invocation requests exactly `torch`, whose `+cpu`
+  specifier exists ONLY on PyTorch's index, so PyPI's CUDA build cannot shadow
+  it. Torch's own dependencies (sympy, networkx, filelock, fsspec, jinja2,
+  typing-extensions) are mirrored on that index — verified HTTP 200 — so the
+  canonical PyTorch form is used as documented. `--no-deps` is deliberately NOT
+  used: with torch already satisfied, the later extras install would not pull
+  torch's own dependencies back in, and `sympy`/`networkx` are needed by torch
+  alone.
+
+  The version MUST track `uv.lock`'s `torch` pin (currently 2.13.0): the point is
+  to swap the BUILD, not the release. `uv.lock` is unaffected by this action,
+  because `uv sync --frozen` installs the dev group, which does not include torch.
+
+runs:
+  using: composite
+  steps:
+    - name: Install CPU-only torch (#7473)
+      shell: bash
+      run: |
+        set -euo pipefail
+        pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.13.0+cpu'
