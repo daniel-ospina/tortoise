@@ -796,10 +796,17 @@ def _part_d_citations() -> dict[str, str]:
     )
     # Bound with the shared helper, NOT a hand-rolled double-split. A second `.split("### D2")[0]`
     # bound is decorative: break it and `split` finds nothing, `[0]` returns the REST OF THE
-    # DOCUMENT (5 395 -> 10 820 chars, past `## Reproduce`), and every test still passes — the
-    # citation regexes happen to be D1-only in shape, so the wrong slice parses identically.
-    # `_section` asserts its anchor and bounds at the next heading of the same-or-higher level,
-    # which turns that silent-wrong-slice into a hard failure (found by #7451 review round 5).
+    # DOCUMENT (5 395 -> 10 820 chars, past `## Reproduce`), and every test still passes.
+    #
+    # Why it was SILENT — the mechanism is the cut on the NEXT line, not the regex shape: the
+    # `**Documented hops.**` marker sits at line 300, INSIDE D1 (which runs 259-311) and BEFORE
+    # the `### D2` heading at 312, so it truncates the correct and the broken slice to the SAME
+    # 4 443-char string. Drop that cut and they are no longer equal at all: correct 5 395 chars /
+    # 20 quotes vs broken 10 820 chars / 27 quotes. So the bound's protection was being supplied
+    # by an unrelated line further down — accidental, not by construction.
+    #
+    # `_section` asserts its anchor and bounds at the next heading, so both halves are enforced
+    # here instead (found by #7451 review round 5).
     d1 = _section(doc, "### D1")
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
     d1 = d1.split("**Documented hops.**")[0]
