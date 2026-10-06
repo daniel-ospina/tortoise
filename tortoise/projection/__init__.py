@@ -14,6 +14,7 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations  # noqa: I001
 
 import contextlib
+import decimal
 import hashlib
 import json
 import math
@@ -2248,7 +2249,7 @@ def _journal_safe_params(params, cypher=None):
                     changed = True
                 out[k] = walked
             return out if changed else value
-        if _annotator_value_ok(value):
+        if _annotator_value_ok(value) or _engine_coerces(value):
             return value
         if is_read and _writable_at_parse(value):
             # Shape-only reject on a read: the engine accepts it as a bare
@@ -3025,6 +3026,20 @@ def _annotator_value_ok(val) -> bool:
     if isinstance(val, (list, tuple)):
         return all(_annotator_value_ok(x) for x in val)
     return True
+
+
+def _engine_coerces(val) -> bool:
+    """True for a value the engine COERCES rather than rejects.
+
+    `_annotator_value_ok` answers "is this ALREADY a persistable property
+    primitive", and a `decimal.Decimal` is not one — so the walker NULLED it.
+    But the driver encodes it and the engine stores the float: measured on
+    #7406, `test_non_json_native_value_is_journalled_as_stored` passes on main
+    with the raw `Decimal("0.25")` and journals `0.25`. Degrading it replaced a
+    value the engine accepts with null — silent data loss, and the same
+    false-refusal class as the `n += r.props` regression fixed in the same head.
+    """
+    return isinstance(val, decimal.Decimal)
 
 
 def _writable_at_parse(val, _depth: int = 0) -> bool:

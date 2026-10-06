@@ -1109,3 +1109,26 @@ def test_a_MERGED_or_UNWOUND_row_field_is_not_a_property_value():
     )
     assert out2["rows"][0]["inputs"] == [{"id": "a", "idx": 0}]
     assert out2["rows"][0]["junk"] is None
+
+
+def test_a_DECIMAL_is_preserved_because_the_engine_COERCES_it():
+    """#7406: `_annotator_value_ok` is the wrong question for a coercible number.
+
+    A `decimal.Decimal` is not a persistable property primitive, so the walker
+    nulled it — but the driver encodes it and the engine stores the float.
+    Measured on the real engine: `test_non_json_native_value_is_journalled_as_
+    stored` passes on `main` with the raw `Decimal("0.25")` and journals
+    `0.25`; with the boundary the journal read `None`. Same false-refusal class
+    as the `n += r.props` regression above — degrading a value the engine
+    ACCEPTS is silent data loss. A value the engine really does reject (bytes)
+    still degrades in the same map, which keeps this from being a blanket
+    exemption for unknown types.
+    """
+    from decimal import Decimal
+
+    out = _journal_safe_params(
+        {"p": {"confidence": Decimal("0.25"), "blob": b"x"}},
+        "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)",
+    )
+    assert out["p"]["confidence"] == Decimal("0.25")  # coerced, preserved
+    assert out["p"]["blob"] is None  # rejected, degraded
