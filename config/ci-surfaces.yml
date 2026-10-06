@@ -620,6 +620,11 @@ surfaces:
   # change via SOURCE_PATTERNS["sdk"] — and `tortoise/sdk.py` itself is a
   # SHARED_MODULE (full matrix). See tools/ci_selection.py.
   - test_vocab_gating_callers_5163.py
+  # #4653: the :GraphEventMeta watermark across the same wipe+replay —
+  # `:GraphEventMeta` is export-skipped by the `api` surface (hosted_api
+  # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
+  # run the pin that says export-skip is not a durability statement.
+  - test_rebuild_event_meta_watermark_4653.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1297,6 +1302,15 @@ surfaces:
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #2725: a `packs/` diff selects `core`, but the enforcement drift pin that
+  # enumerates index-reachable retry kinds lives in this file. Without dual
+  # registration a pack that declares a new per-kind retry would pass its own
+  # PR's CI and could red main after merge, because the pin never ran on the
+  # diff that introduced the kind. The RISK is the reason for the registration;
+  # no such red has been observed on main (main has never carried the venture
+  # pack).
+  # Same rationale and pattern as test_boot_regressions.py above.
+  - test_enforcement.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
@@ -1538,6 +1552,10 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
+  # watermark re-derivation, both in tortoise/projection/ (core fallback) over
+  # tortoise/event_store.py's allocator.
+  - test_rebuild_event_meta_watermark_4653.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -1590,6 +1608,13 @@ surfaces:
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
   # fallback — same rationale as test_turn_embedding_write_path_4194.py above.
   - test_4999_vector_mechanism.py
+  # #4997: the vector leg's served label set must come from ONE declaration in
+  # `tortoise/security.py` (read, not re-derived), and the store's vector-index
+  # set must be a measured fact. Pins the unpatterned engine modules
+  # `tortoise/search_engine.py` (run_vector_query) and `tortoise/projection/`
+  # (the inventory read), which fall to the `core` fallback — same rationale as
+  # test_4999_vector_mechanism.py above.
+  - test_4997_vector_index_parity.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   # #4199: the dense leg's material is judged against the READ's own kind
@@ -1673,6 +1698,13 @@ surfaces:
   # suite directly above.
   - test_invalidate_inverted_window_5358.py
   - test_value_extractor.py
+  # #2725: venture domain pack — manifest scope, corpus kind coverage, the
+  # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
+  # (per-graph approval vs per-item classification). Mostly DB-free; the
+  # state/approval assertions are URI-gated PER TEST by the `requires_db` marker,
+  # which skips when no TORTOISE_DB_URI is set — the `sdk` fixture itself does
+  # not skip, so a new URI-dependent test must carry the marker.
+  - test_venture_pack.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
   # APPROVAL set. Guards tortoise/value_extractor.py,
@@ -2420,10 +2452,17 @@ durations:
 # the full-matrix push halves; duration_coverage_issues() floors coverage at 90%.
 # A weight is a measured CI value wherever one exists: the sweep takes the CI junit
 # wall time of the leg that CARRIES the file, not a local timing, because the CI wall
-# is what the split must model. Three exceptions are named below — the pinned equality
+# is what the split must model. The exceptions are named below: the pinned equality
 # (borrowed from a measured sibling), the row retained from main (a local embedded-lane
-# timing from #4602, kept deliberately) and any row marked `# unmeasured` (a file no leg
-# of this sweep's four source runs collected; see the RETAINED paragraph).
+# timing from #4602, kept deliberately), any row marked `# unmeasured` (a file no leg
+# of this sweep's four source runs collected; see the RETAINED paragraph), and a NEW
+# file's first weight, which carries the flat default until a sweep collects it
+# (`test_venture_pack.py`, #3419). That last one is deliberately NOT "just pick a
+# number": a weight is a SHARD-LAYOUT input, so a number that does not model CI
+# decides which files run together. A local 67.2 was tried there first and did
+# exactly that — see that row. This is a list of
+# CATEGORIES, not of every such row: further local-timing rows predate this note
+# (search `locally measured`), and refreshing them all is #5215's job.
 #
 # ONE row borrows its value: test_mcp_rename_table.py is held equal to
 # test_bridge_table.py's measurement because
@@ -2684,6 +2723,7 @@ durations:
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
   test_value_extractor.py: 6.5
+  test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   test_pack_state.py: 5.1
   test_skip_guard.py: 16.0
   test_admin_return_to.py: 1.2
@@ -3224,6 +3264,7 @@ durations:
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
+  test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2

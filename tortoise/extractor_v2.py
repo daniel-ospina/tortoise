@@ -117,6 +117,31 @@ CHAINS = {
         "path": ["campaign", "content", "channel"],
         "note": "Marketing flow: a campaign produces content that reaches an audience through a channel.",
     },
+    # Venture (#2725). Declared in the canonical table as well as the manifest
+    # (the dev/marketing/product-strategy pattern) for two reasons: the extractor
+    # gets the chain guidance, and `validate_chain_completeness` treats their
+    # semantics as established. The completeness contract is genuinely wrong for
+    # this domain — a stake with no programme yet, a tranche whose release is not
+    # discussed in the same meeting, and an action item that does not close in
+    # the meeting that opened it are all normal — so making them completeness-
+    # checked would emit an "incomplete chain" note on ordinary captures.
+    "ventureFundingFlow": {
+        "path": ["fundingAgreement", "tranche", "condition", "disbursement"],
+        "note": ("Committed funding reaches a company in parcels: each tranche "
+                 "is gated by a condition, and the movement of money is the "
+                 "dated disbursement event — never a state on the tranche."),
+    },
+    "venturePortfolioFlow": {
+        "path": ["investment", "program", "asset"],
+        "note": ("A stake carries programmes; a programme produces the assets "
+                 "(products, technology, IP) the company owns."),
+    },
+    "ventureActionLoop": {
+        "path": ["actionItem", "actionItemCompleted"],
+        "note": ("An action item is opened from a meeting and closed by a "
+                 "dated completion event; the Object carries open → "
+                 "in-progress → done."),
+    },
 }
 
 # #5165: there is deliberately NO ``PACK_NS`` tuple here. The pack-kind set
@@ -548,6 +573,11 @@ _PACK_TRIGGERS = {
     "product-strategy:": ("product", "market", "competitor", "customer",
                           "roadmap", "feature", "use case", "strategy"),
     "pm:": ("project", "milestone", "pm:", "portfolio", "program"),
+    # #2725: venture is a shipped pack with a trigger entry (not an unfireable
+    # namespace) so compact-mode story selection can gate it like the starters.
+    "venture:": ("venture", "fund", "portfolio", "grant", "tranche",
+                  "disbursement", "term of award", "programme", "asset",
+                  "patent", "condition"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
@@ -586,8 +616,8 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # A namespace with NO trigger entry cannot be story-selected —
         # always include it (per-tenant custom packs AND, since #5165, any
         # catalog pack shipped without a trigger entry; dropping them would
-        # silently strip their kinds from the compact prompt). The five
-        # shipped catalog namespaces all HAVE entries, so the default
+        # silently strip their kinds from the compact prompt). All six
+        # shipped catalog namespaces HAVE entries, so the default
         # render's selection is unchanged for them — but the byte-identity
         # argument is about those entries, not about a starter-set
         # restriction: a new catalog pack is injected whole in compact mode
@@ -799,7 +829,7 @@ def _render_master_verbose(master: dict, rng=None) -> str:
     lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
-    lines.append(_group("PACK KINDS (from the installed packs)",
+    lines.append(_group("PACK KINDS (from the pack manifests)",
                         master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")
@@ -5246,9 +5276,9 @@ def validate_chain_completeness(embed_list: dict,
        payload where FIX P repairs them to ``statement``).
     2. For each PACK-DECLARED chain whose id is NOT in the canonical
        hardcoded ``CHAINS`` dict (productDelivery/epicToCode/
-       campaignToChannel — their enforcement semantics are established via
-       the graph/payload validators and must not change), find the LOWEST
-       step index with an emitted item.
+       campaignToChannel and the venture chains — their enforcement
+       semantics are established via the graph/payload validators and must
+       not change), find the LOWEST step index with an emitted item.
     3. If the NEXT step (index+1) has NO emitted item → warn, naming the
        missing step. A ruleRevised-only embed (highest step emitted, no
        next step) never warns — a revision without its rule is outside this
