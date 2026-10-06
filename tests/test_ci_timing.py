@@ -1744,3 +1744,309 @@ def test_the_pre_fix_shape_swallowed_the_failure(
     proc = subprocess.run(["bash", "-e", "-c", pre_fix], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout
     assert "already open" in proc.stdout, proc.stdout
+
+
+# --- paid vs selected + queue wait (#7532) ---------------------------------
+#
+# The property under test is not "the arithmetic returns a number" — it is that
+# the ratio moves with the SELECTION and not with the jobs, because that is the
+# only reading that distinguishes execution inflation from a heavy corpus.
+
+def _job(name, start, end):
+    return {"name": name, "started_at": start, "completed_at": end}
+
+
+def test_job_execution_s_marks_an_incomplete_job_as_unknown() -> None:
+    """A queued/cancelled job has NO execution cost — None, never 0.
+
+    Returning 0 would silently deflate the ratio and make a stalled gate look
+    cheap, which is the opposite of the diagnostic.
+    """
+    assert ci_timing.job_execution_s(
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z")) == 600.0
+    assert ci_timing.job_execution_s({"name": "test (a)", "started_at": "2026-10-06T10:00:00Z"}) is None
+    assert ci_timing.job_execution_s({"name": "test (a)", "completed_at": "2026-10-06T10:10:00Z"}) is None
+    assert ci_timing.job_execution_s(
+        {"name": "test (a)", "started_at": "not-a-time", "completed_at": "nope"}) is None
+
+
+def test_queue_wait_is_measured_from_the_run_not_the_job() -> None:
+    """Queue residency = run created_at -> job started_at (#7532).
+
+    The Jobs API exposes no job-created_at, so this is the only honest reading
+    — and it is exactly the number the 'is it queue latency?' question needs.
+    """
+    job = _job("test (a)", "2026-10-06T10:00:30Z", "2026-10-06T10:10:30Z")
+    assert ci_timing.queue_wait_s(job, "2026-10-06T10:00:00Z") == 30.0
+    assert ci_timing.queue_wait_s(job, None) is None
+    assert ci_timing.queue_wait_s({"name": "test (a)"}, "2026-10-06T10:00:00Z") is None
+
+
+def test_selected_weight_sums_only_the_legs_that_run() -> None:
+    """The fast pool always; the slow leg only when `slow_run`.
+
+    #7537 review P1: the carve-out leg is deliberately NOT here — `select()`
+    SUBTRACTS carve-out files from both keys, so `paid_vs_selected` excludes the
+    carve-out JOB from the numerator to match. One side must not have weight the
+    other lacks.
+    """
+    durations = {"tests/a.py": 100, "tests/b.py": 50, "tests/slow_c.py": 900}
+    selection = {
+        "test_files": ["tests/a.py", "tests/b.py"],
+        "slow_run": False,
+        "slow_selected": ["tests/slow_c.py"],
+    }
+    assert ci_timing.selected_weight_s(selection, durations) == 150.0
+    selection["slow_run"] = True
+    assert ci_timing.selected_weight_s(selection, durations) == 1050.0
+
+
+def test_selected_weight_tolerates_a_partially_populated_map() -> None:
+    """An unmeasured file contributes the default, never a crash — the same
+    'absent = not adopted' collapse `ci_selection` uses."""
+    durations = {"tests/a.py": 100}
+    selection = {"test_files": ["tests/a.py", "tests/unknown.py"], "slow_run": False}
+    assert ci_timing.selected_weight_s(selection, durations) == 100.0
+    assert ci_timing.selected_weight_s(selection, durations, default_weight=25.0) == 125.0
+    # A non-numeric value falls back to the default; it is a malformed map
+    # entry, not a 0-weight file (#3407 c4). Here only a.py is malformed, so
+    # the total is unknown.py's real 5 — the default must not swallow it.
+    assert ci_timing.selected_weight_s(
+        selection, {"tests/a.py": None, "tests/unknown.py": 5}) == 5.0
+
+
+def test_the_ratio_moves_with_the_selection_not_with_the_jobs() -> None:
+    """THE discriminating property (#7532).
+
+    Identical jobs, two selections: the full (push-shaped) selection calibrates
+    near 1.0 while a tiny PR-shaped surface pays the same work for a fraction of
+    the weight. If the ratio responded to the JOBS this would be impossible —
+    and that is precisely what makes it evidence of execution inflation rather
+    than of a heavy corpus.
+    """
+    jobs = [_job(f"test ({c})", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z")
+            for c in "abcdefghi"]                      # 9 x 600 s = 5400 s paid
+    durations = {f"tests/f{i}.py": 600 for i in range(9)}
+
+    # #7537 review P1: the REAL producer returns the string "ALL" here, not a
+    # list. A hand-built list made this test pass while the real full-selection
+    # path was 4.5x wrong.
+    full = {"full": True, "test_files": "ALL", "slow_run": False}
+    tiny = {"full": False, "test_files": ["tests/f0.py"], "slow_run": False}
+
+    push_like = ci_timing.paid_vs_selected(jobs, full, durations, "2026-10-06T10:00:00Z")
+    pr_like = ci_timing.paid_vs_selected(jobs, tiny, durations, "2026-10-06T10:00:00Z")
+
+    assert push_like["paid_s"] == 5400.0
+    assert push_like["selected_s"] == 5400.0
+    assert push_like["ratio"] == 1.0            # the push-run calibration
+    assert pr_like["paid_s"] == 5400.0          # same work paid...
+    assert pr_like["selected_s"] == 600.0       # ...for a ninth of the weight
+    assert pr_like["ratio"] == 9.0
+    assert push_like["jobs_counted"] == sorted(f"test ({c})" for c in "abcdefghi")
+
+
+def test_non_test_jobs_and_incomplete_jobs_do_not_enter_the_ratio() -> None:
+    """`docs`/`ai-review-gate` are not shard work, and an incomplete test job
+    must not be counted as zero — both would corrupt the denominator's meaning
+    in opposite directions."""
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        _job("docs", "2026-10-06T10:00:00Z", "2026-10-06T10:09:00Z"),
+        {"name": "test (b)", "started_at": "2026-10-06T10:00:00Z"},   # never completed
+    ]
+    selection = {"test_files": ["tests/a.py"], "slow_run": False}
+    out = ci_timing.paid_vs_selected(jobs, selection, {"tests/a.py": 300}, "2026-10-06T10:00:00Z")
+    assert out["paid_s"] == 300.0
+    assert out["jobs_counted"] == ["test (a)"]
+
+
+def test_a_zero_weight_selection_reports_unknown_not_a_free_run() -> None:
+    """ratio None, never 0.0 — a zero would read as 'this gate costs nothing',
+    which is the exact opposite of the truth when the map is empty."""
+    jobs = [_job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z")]
+    out = ci_timing.paid_vs_selected(jobs, {"test_files": [], "slow_run": False}, {}, None)
+    assert out["selected_s"] == 0.0
+    assert out["ratio"] is None
+    assert out["paid_s"] == 300.0
+
+
+def test_the_queue_split_refutes_queue_latency_as_the_cause() -> None:
+    """The measured shape: 0.2-1.5 min of queue wait against 10-minute shards.
+
+    Reporting queue_s alongside the ratio is what makes 'it is queuing, not
+    running' refutable in one call rather than by a separate investigation.
+    """
+    jobs = [_job("test (a)", "2026-10-06T10:01:00Z", "2026-10-06T10:11:00Z")]  # 1 min queued, 10 run
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py"], "slow_run": False},
+        {"tests/a.py": 600}, "2026-10-06T10:00:00Z")
+    assert out["queue_s"] == 60.0
+    assert out["paid_s"] == 600.0
+    assert out["paid_s"] > 5 * out["queue_s"]     # execution dominates, not queueing
+
+
+# --- regressions from the #7537 review (P1 x2) ------------------------------
+
+def test_the_ALL_sentinel_is_not_iterated_as_characters() -> None:
+    """REGRESSION (#7537 review P1, reproduced on the real manifest).
+
+    `ci_selection.select()` returns the STRING "ALL" for a full selection
+    (push/schedule, a shared-module change, or an unclaimed path). `list("ALL")`
+    is ['A','L','L'], whose keys are never in `durations`, so the ENTIRE fast
+    pool fell back to the default weight — a measured 4.5x deflation of
+    `selected_s`, i.e. a 4.5x inflation of `ratio`, on the very shape the
+    push-run calibration of 1.0 is supposed to come from.
+
+    The discriminating assertion is the second one: with a nonzero default, the
+    broken version adds exactly 3 * default (one per sentinel character).
+    """
+    durations = {"tests/a.py": 600, "tests/b.py": 300, "tests/slow_c.py": 900}
+    sel = {"full": True, "test_files": "ALL", "slow_run": True,
+           "slow_selected": ["tests/slow_c.py"]}
+    assert ci_timing.selected_weight_s(sel, durations) == 1800.0
+    assert ci_timing.selected_weight_s(sel, durations, default_weight=25.0) == 1800.0
+
+
+def test_a_real_full_selection_actually_is_the_ALL_string() -> None:
+    """Anti-drift ratchet: binds the test suite to the REAL producer.
+
+    Without this, a fixture that drifts from `ci_selection.select()`'s actual
+    return shape silently stops testing the full-selection path — which is
+    exactly how the P1 above survived a green suite.
+    """
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "tools"))
+    import ci_selection
+
+    manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    selection = ci_selection.select(["tortoise/sdk.py"], "push", manifest)
+    assert selection["test_files"] == "ALL", (
+        "ci_selection.select() no longer returns the 'ALL' sentinel for a full "
+        "selection — update selected_weight_s and this ratchet together"
+    )
+
+
+def test_unweighted_test_legs_are_reported_not_counted() -> None:
+    """REGRESSION (#7537 review P1): numerator and denominator cover the SAME legs.
+
+    `test-carve-out` / `test-d14-hosted-api` / `test-concurrency-falkor` /
+    `test-track-b` run file sets that `select()` SUBTRACTS from `test_files`
+    and `slow_selected` (`ci_selection.py:1233,1081`). Counting their seconds
+    added execution with no matching weight, inflating the ratio by
+    construction — the opposite of a diagnostic. They must be REPORTED, not
+    silently dropped.
+    """
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:10:00Z"),
+        _job("test-carve-out", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        _job("test-d14-hosted-api", "2026-10-06T10:00:00Z", "2026-10-06T10:03:20Z"),
+    ]
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py"], "slow_run": False}, {"tests/a.py": 600}, None)
+    assert out["paid_s"] == 600.0
+    assert out["jobs_counted"] == ["test (a)"]
+    assert out["excluded_jobs"] == ["test-carve-out", "test-d14-hosted-api"]
+
+
+def test_a_non_string_timestamp_does_not_escape_the_guard() -> None:
+    """A truthy non-string timestamp raises AttributeError on .replace(), which
+    escaped the (ValueError, TypeError) guard and aborted the whole run."""
+    assert ci_timing.job_execution_s({"name": "test (a)", "started_at": 1, "completed_at": 2}) is None
+    assert ci_timing.queue_wait_s({"name": "test (a)", "started_at": 1}, "2026-10-06T10:00:00Z") is None
+
+
+def test_the_cli_mode_is_reachable_end_to_end(monkeypatch, capsys) -> None:
+    """#7537 cycle 2 P2: the FIRST version of this test called
+    `paid_vs_selected_cli()` directly, so it still passed with the dispatch line
+    deleted from `main()` — it proved nothing about reachability. This drives
+    `main()` through argv, so removing that dispatch fails the test."""
+    root = Path(__file__).resolve().parent.parent
+    monkeypatch.setattr(ci_timing, "fetch_run",
+                        lambda repo, rid: {"created_at": "2026-10-06T10:00:00Z"})
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, rid: [
+        _job("test (a)", "2026-10-06T10:01:00Z", "2026-10-06T10:11:00Z"),
+        _job("docs", "2026-10-06T10:00:00Z", "2026-10-06T10:12:00Z"),
+    ])
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "daniel-ospina/tortoise", "--run-id", "1",
+        "--paid-vs-selected", "--changed-files", "tools/ci_timing.py",
+        "--manifest", str(root / "config" / "ci-surfaces.yml"),
+    ])
+    assert ci_timing.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["paid_s"] == 600.0
+    assert out["jobs_counted"] == ["test (a)"]
+    assert out["queue_s"] == 60.0
+    assert out["event"] == "pull_request"
+    assert out["complete"] is True
+
+
+def test_the_cli_refuses_a_missing_changed_files(monkeypatch, capsys) -> None:
+    """A missing --changed-files is usage error 2, never a silent 0-ratio run."""
+    import argparse
+
+    bad = argparse.Namespace(run_id="1", changed_files="", manifest="x",
+                             repo="o/r", event="pull_request")
+    assert ci_timing.paid_vs_selected_cli(bad) == 2
+
+
+def test_the_full_pool_denominator_excludes_the_on_demand_lane() -> None:
+    """REGRESSION (#7537 cycle 2 P1): the `durations` map is NOT the pool the
+    gate runs — it carries `on_demand` entries python-ci never executes
+    (`eval/retrieval/test_integration.py` alone is 1523.4 s of the 7398.2 s map).
+    Summing the whole map inflates the denominator and inverts the calibration:
+    a true 1.0 reads ~0.79. `full_pool` restricts it to the run legs."""
+    durations = {"tests/a.py": 600, "tests/b.py": 300,
+                 "eval/retrieval/test_integration.py": 1523.4}
+    sel = {"full": True, "test_files": "ALL", "slow_run": True, "slow_selected": []}
+    assert ci_timing.selected_weight_s(sel, durations, full_pool={"tests/a.py", "tests/b.py"}) == 900.0
+    # without a pool it over-counts — the defect this pins
+    assert ci_timing.selected_weight_s(sel, durations) == 2423.4
+
+
+def test_a_stalled_shard_is_reported_as_an_incomplete_run() -> None:
+    """#7537 cycle 2 P2: an incomplete shard keeps its files' full weight in the
+    denominator while adding 0 to paid_s, which LOWERS the ratio — a stalled
+    shard would read as cheaper. The run must be marked non-comparable."""
+    jobs = [
+        _job("test (a)", "2026-10-06T10:00:00Z", "2026-10-06T10:05:00Z"),
+        {"name": "test (b)", "started_at": "2026-10-06T10:00:00Z"},  # never finished
+    ]
+    out = ci_timing.paid_vs_selected(
+        jobs, {"test_files": ["tests/a.py", "tests/b.py"], "slow_run": False},
+        {"tests/a.py": 300, "tests/b.py": 300}, None)
+    assert out["complete"] is False
+    assert out["incomplete_shard_jobs"] == ["test (b)"]
+    assert out["ratio"] == 0.5     # flattering: full weight, half the work paid
+    assert out["jobs_counted"] == ["test (a)"]
+
+
+def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
+    """The real full selection plus the real pool must calibrate, not over-count.
+
+    This is the end-to-end binding the unit fixtures cannot give: it takes the
+    sentinel AND the denominator from the actual manifest, so the P1s in both
+    directions are pinned by the real artifacts.
+    """
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "tools"))
+    import ci_selection
+    import ci_timing as ct
+
+    manifest = yaml.safe_load((root / "config" / "ci-surfaces.yml").read_text())
+    durations = ct.durations_map(manifest)
+    assert durations, "the manifest must carry a durations map for this ratchet"
+    selection = ci_selection.select(["tortoise/sdk.py"], "push", manifest)
+    assert selection["test_files"] == "ALL"
+
+    run_legs = set(ci_selection.fast_pool(manifest))
+    run_legs |= set(manifest.get("slow_files") or []) - ci_selection.carve_out_files(manifest)
+    on_demand = ci_selection.on_demand_files(manifest)
+    # The pool must exclude what the gate never runs, and the restricted sum
+    # must be strictly smaller — otherwise this ratchet is vacuous.
+    assert not (run_legs & on_demand), "on_demand files must not be run legs"
+    whole = ct.selected_weight_s(selection, durations)
+    restricted = ct.selected_weight_s(selection, durations, full_pool=run_legs)
+    assert restricted < whole, "the restricted pool MUST drop the on_demand weight"
+    assert restricted > 0
