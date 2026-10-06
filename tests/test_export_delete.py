@@ -183,11 +183,28 @@ def _install_drift_counter(expected_db_path: str) -> tuple[_DriftEvictionCounter
     return counter, _orig_dict
 
 
-def _own_bound_leftovers(counter: _DriftEvictionCounter) -> list[TortoiseSDK]:
-    """Anchors bound to THIS test's db_path still present in ``counter``."""
+def _own_drain_failures(
+    failures: list[TortoiseSDK], expected_db_path: str
+) -> list[TortoiseSDK]:
+    """Anchors the drain returned but did NOT remove, that THIS test owns.
+
+    ``failures`` holds only anchors whose ``pop`` attempt returned them while
+    ``counter`` still held them (see ``_drain_drift_counter``) — an identity
+    scope, not a path scope. The path test below only decides which of those
+    DRAIN failures are attributable to this test:
+
+    - this test's db_path → own → RED;
+    - ``_db_path is None`` → unknown provenance → RED (NOT ignored): the
+      counter tracked it and the drain failed on it, so it is a
+      closure-completeness failure. In this fixture (embedded-only: the
+      patched ``__init__`` force-binds a path, and the keepalive branch does
+      not exist under a URI) it can only be this test's;
+    - any other path → foreign → warn-only cross-test self-heal bucket.
+    """
     return [
-        anchor for anchor in counter.values()
-        if _paths_same(getattr(anchor, "_db_path", None), counter.expected_db_path)
+        anchor for anchor in failures
+        if getattr(anchor, "_db_path", None) is None
+        or _paths_same(getattr(anchor, "_db_path", None), expected_db_path)
     ]
 
 
@@ -197,32 +214,53 @@ def _drain_drift_counter(counter: _DriftEvictionCounter) -> None:
     #2127: the fixture owns the deterministic close of anchors the counter
     tracked. A late write from a background worker holding a stale reference is
     routed to the real dict by ``forward_to`` and closed by
-    ``patched_tortoise_sdk``'s exit-close, so a leftover bound to this test's
-    db_path means an anchor THIS test created was never closed → RED. A
-    leftover bound elsewhere is the warn-only cross-test leak bucket.
+    ``patched_tortoise_sdk``'s exit-close.
+
+    The guard is IDENTITY-SCOPED, deliberately not path-scoped. It REDs only on
+    anchors a ``pop`` attempt returned while ``counter`` still held them — i.e.
+    the drain started on an anchor it then failed to remove. A stale-reference
+    worker whose check-then-write straddles teardown (it read ``forward_to`` as
+    ``None``, teardown set it and drained, then ``super().setdefault`` landed in
+    the discarded counter) inserts AFTER every pop attempt; its anchor is never
+    pop-attempted, so it cannot RED this guard however its path classifies — it
+    stays in the warn-only bucket below. Path alone could not separate those
+    two cases: the patched ``__init__`` binds every in-test construction,
+    including a previous test's abandoned worker, to THIS test's db_path.
     """
+    failed_pops: list[TortoiseSDK] = []  # returned by pop, still in the dict
     for _ in range(_DRAIN_ATTEMPTS):
         for namespace in list(counter):
             anchor = counter.pop(namespace, None)
-            if anchor is not None:
-                try:  # noqa: SIM105
-                    anchor.close()
-                except Exception:
-                    pass
+            if anchor is None:
+                continue
+            try:  # noqa: SIM105
+                anchor.close()
+            except Exception:
+                pass
+            # Identity, not key membership: a concurrent late insert under the
+            # same key replaces the value, so ``get`` returning a DIFFERENT
+            # object means the popped anchor WAS removed (no drain failure).
+            # Deduped by identity so a retried pass cannot inflate the count.
+            if counter.get(namespace) is anchor and not any(
+                seen is anchor for seen in failed_pops
+            ):
+                failed_pops.append(anchor)
+        time.sleep(0)  # yield BEFORE the re-check so an in-flight insert can
+        # land and be drained by the next pass; on the fast path the counter is
+        # emptied in the pass above, so this is the yield the loop was for.
         if not counter:
             break
-        time.sleep(0)  # yield so an in-flight insert can land before re-check
 
-    own_leftover = _own_bound_leftovers(counter)
-    assert not own_leftover, (
-        f"#2127 drain-completeness guard: {len(own_leftover)} anchor(s) bound "
+    own_failures = _own_drain_failures(failed_pops, counter.expected_db_path)
+    assert not own_failures, (
+        f"#2127 drain-completeness guard: {len(own_failures)} anchor(s) bound "
         f"to this test's db_path survived the drain: "
-        f"{[getattr(a, '_db_path', None) for a in own_leftover]}"
+        f"{[getattr(a, '_db_path', None) for a in own_failures]}"
     )
     if counter:
         warnings.warn(
-            f"[#2090] keepalive drain left {len(counter)} non-own anchor(s) "
-            f"after {_DRAIN_ATTEMPTS} attempts",
+            f"[#2090] keepalive drain left {len(counter)} anchor(s) it did "
+            f"not own after {_DRAIN_ATTEMPTS} attempts",
             UserWarning,
             stacklevel=2,
         )
@@ -335,7 +373,7 @@ class TestDriftCounterWiring:
 
                 counter = _UndrainableCounter(db_path)
                 dict.__setitem__(counter, "registry", foreign_anchor)
-                with pytest.warns(UserWarning, match="non-own anchor"):
+                with pytest.warns(UserWarning, match="did not own"):
                     _drain_drift_counter(counter)
             finally:
                 for anchor in (own_anchor, foreign_anchor):
@@ -343,6 +381,74 @@ class TestDriftCounterWiring:
                         anchor.close()
                     except Exception:
                         pass
+
+    def test_drain_guard_ignores_late_ambient_insert(self, monkeypatch):
+        """#2127/P2 falsifiability control: an own-PATH anchor inserted after
+        the drain stays warn-only — it must not be able to RED the guard.
+
+        This is the cross-test artifact the guard exists to tolerate: every
+        in-test ``TortoiseSDK`` construction — including a previous test's
+        abandoned daemon worker — is force-bound to THIS test's db_path by the
+        patched ``__init__``, so a path test cannot separate it from a real
+        leak. Identity scoping can: it is never pop-attempted."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+
+            class _StubAnchor:
+                def __init__(self, path):
+                    self._db_path = path
+
+                def close(self):
+                    pass
+
+            class _ReinsertingCounter(_DriftEvictionCounter):
+                """Each successful pop re-inserts a fresh own-path anchor, so
+                the counter is non-empty when the drain gives up — the shape
+                of a stale-reference worker write that lands after every pop
+                attempt."""
+
+                def pop(self, key, default=None):
+                    value = super().pop(key, default)
+                    if value is not None:
+                        dict.__setitem__(self, "ambient", _StubAnchor(db_path))
+                    return value
+
+            counter = _ReinsertingCounter(db_path)
+            dict.__setitem__(counter, "registry", _StubAnchor(db_path))
+            try:
+                with pytest.warns(UserWarning, match="did not own"):
+                    _drain_drift_counter(counter)
+            finally:
+                counter.forward_to = {}
+                for _ns in list(counter):
+                    dict.pop(counter, _ns, None)
+
+    def test_drain_guard_reds_on_unattributable_leftover(self, monkeypatch):
+        """#2127/P3 falsifiability control: the guard is not blind to the
+        ``_db_path is None`` bucket.
+
+        An anchor the counter tracked whose drain failed and whose provenance
+        cannot be attributed is still a closure-completeness failure — in this
+        embedded-only fixture it can only be this test's."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+
+            class _StubAnchor:
+                _db_path = None
+
+                def close(self):
+                    pass
+
+            class _UndrainableCounter(_DriftEvictionCounter):
+                def pop(self, key, default=None):  # drain cannot remove
+                    return dict.get(self, key)
+
+            counter = _UndrainableCounter(db_path)
+            dict.__setitem__(counter, "registry", _StubAnchor())
+            with pytest.raises(AssertionError, match="drain-completeness"):
+                _drain_drift_counter(counter)
 
     def test_drift_counter_ignores_same_path_pop(self, monkeypatch):
         """A pop of a healthy same-path anchor must NOT count as drift
@@ -641,9 +747,10 @@ def reg_client(monkeypatch):
                     ha_mod._FALLBACK_KEEPALIVE = _orig_dict
                     try:
                         # #2127: the fixture owns the deterministic close of the
-                        # anchors the counter tracked; the helper REDs on a
-                        # leftover bound to THIS test's db_path and warns on a
-                        # cross-test one.
+                        # anchors the counter tracked. The helper identity-scopes
+                        # its RED to anchors a pop attempt failed to remove
+                        # (own path or unattributable → RED) and stays
+                        # warn-only for foreign and post-drain ambient anchors.
                         _drain_drift_counter(counter)
                     finally:
                         _close_seed_sdks()  # after anchor close (last-client SAVE)
