@@ -64,7 +64,13 @@ swapped between discovery and the action is refused too (T4). Ownership is
 the one property a foreign uid cannot forge. A kill whose candidate dir has
 already vanished is authorized only by the live pid's OWN argv naming that
 dir (the pass-1 binding — no foreign uid can edit another process's
-command line). The policy is STRICT-ONLY:
+command line). Ownership alone proves the TARGET is ours, not that WE
+SELECTED it: pass-1 derives the candidate dir from the pgrep hit's argv, so
+#4238 additionally requires a LIVE pass-1 candidate's pid to be the process
+the kernel reports at the other end of the socket inside that dir
+(`_socket_served_by`: `SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS) — a
+decoy argv can name one of our dirs, but it cannot be the process serving
+it. The policy is STRICT-ONLY:
 there is deliberately no environment override, config flag, or allowlist
 to act on another uid's directory — a root-run scheduled sweep therefore
 reaps nothing (not the documented deployment; see
@@ -82,6 +88,7 @@ import re
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -389,8 +396,23 @@ def _kill_provenance_refusal(record: dict) -> str | None:
     `dbdir`, so an attacker who toggles the path (absent → symlink to a dir
     the victim's argv names) cannot forge the binding.
 
+    #4238 — SELECTION, not just ownership. The present arm above proves the
+    target dir is OURS; it does NOT prove WE selected it. A pass-1 record
+    (`_live`, set by `_discover_from_live`) took its dir from the pgrep hit's
+    own argv, which only NAMES a directory — a local decoy process whose
+    command line contains `--unixsocket <our-dir>/redis.socket` becomes a
+    candidate whose `dbdir` is one of our dirs while its recorded pid is the
+    decoy's. That record would then be killed (harmlessly, by the attacker's
+    own choice) and its post-kill cleanup would rmtree OUR directory. So for
+    a live pass-1 record the present arm additionally requires
+    `_socket_served_by`: the kernel-reported peer pid of the socket inside
+    that dir must BE the recorded pid. A decoy pid is not the process serving
+    our dir's socket, so the kill and its rmtree are refused. The socket-less
+    arm (b) is untouched — it has no directory to rmtree, and its argv
+    binding is the reason a genuine socket-less orphan stays reapable.
+
     None means "authorized". Fail closed: an unreadable/absent dir with no
-    pid binding is refused.
+    pid binding, or a live pass-1 record not served by its pid, is refused.
     """
     dbdir = record.get("dbdir") or ""
     if not dbdir:
@@ -408,6 +430,22 @@ def _kill_provenance_refusal(record: dict) -> str | None:
         return f"candidate dir {dbdir!r} cannot be inspected"
     if present:
         if _dir_owned_by_euid(dbdir):
+            # #4238 SELECTION binding — ownership proves the TARGET is ours,
+            # not that WE selected it. A pass-1 record's dir was named by the
+            # pgrep hit's OWN argv, so a local decoy can point the record at
+            # one of our dirs while the recorded pid is the decoy's; the
+            # post-kill cleanup would then rmtree that dir. Require the
+            # recorded pid to be the process actually serving the probed
+            # socket (kernel peer credentials), so a decoy never authorizes
+            # the kill or its cleanup. The socket has already answered two
+            # CLIENT LIST probes above, so it is connectable here (a
+            # vanished/unresponsive socket is skipped earlier, fail closed).
+            pid = record.get("pid")
+            if record.get("_live") and pid \
+                    and not _socket_served_by(record.get("socket_path"), pid):
+                return (f"candidate dir {dbdir!r} is not served by pid {pid} "
+                        f"— pass-1 named it from argv only (selection "
+                        f"binding, #4238)")
             return None
         return (f"candidate dir {dbdir!r} is not owned by euid "
                 f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
@@ -1068,6 +1106,75 @@ def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
         return "undetermined"
 
 
+# #4238: peer-credential reads for a CONNECTED AF_UNIX socket. Linux exposes
+# the peer pid in `SO_PEERCRED` (struct ucred = 3 ints: pid, uid, gid);
+# macOS/BSD exposes it as `LOCAL_PEERPID` on `SOL_LOCAL`. Both are reported by
+# the KERNEL, so the peer pid cannot be authored by an argv or by a file read
+# out of the candidate directory.
+_SO_PEERCRED = getattr(socket, "SO_PEERCRED", None)
+_SOL_LOCAL = getattr(socket, "SOL_LOCAL", 0)
+_LOCAL_PEERPID = getattr(socket, "LOCAL_PEERPID", 0x002)
+
+
+def _socket_peer_pid(sock: socket.socket) -> int | None:
+    """PID of the process at the other end of a CONNECTED AF_UNIX socket.
+
+    Returns None when the platform exposes neither `SO_PEERCRED` nor
+    `LOCAL_PEERPID`, or when the option cannot be read — so every caller
+    fails CLOSED. Never raises.
+    """
+    if _SO_PEERCRED is not None:
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            pid = struct.unpack("3i", raw)[0]
+        except (OSError, struct.error):
+            return None
+        return pid if pid > 0 else None
+    try:
+        raw = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID, struct.calcsize("i"))
+        pid = struct.unpack("i", raw)[0]
+    except (OSError, struct.error):
+        return None
+    return pid if pid > 0 else None
+
+
+def _socket_served_by(socket_path: str | None, pid: int | None) -> bool:
+    """True only when the process accepting at `socket_path` IS `pid`.
+
+    #4238 SELECTION binding. Pass-1 discovery derives BOTH the candidate dir
+    (from the pgrep hit's `argv`) and the pid (from pgrep); `argv` only
+    NAMES the dir, so a local decoy whose own command line contains
+    `--unixsocket <our-dir>/redis.socket` can point the record at one of OUR
+    directories while the recorded pid is the decoy's. #4136's ownership
+    guard proves the target dir is ours; it cannot prove WE selected it. The
+    kernel-reported peer pid of the socket INSIDE that dir can: it is the one
+    process actually serving the dir, so a mismatch is decisive.
+
+    Fail closed: any connect error, an unreadable peer credential, a missing
+    socket_path/pid, or an unsupported platform is False. Never raises.
+    """
+    if not socket_path or not pid:
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        sock.settimeout(PROBE_TIMEOUT)
+        try:
+            sock.connect(socket_path)
+        except OSError:
+            return False
+        peer = _socket_peer_pid(sock)
+    finally:
+        try:  # noqa: SIM105
+            sock.close()
+        except OSError:
+            pass
+    return peer is not None and peer == pid
+
+
 def _probe_socket_any(socket_path: str,
                       timeout: float = PROBE_SOCKET_TIMEOUT) -> str:
     """Probe a socket path that may exceed the macOS AF_UNIX sun_path limit
@@ -1459,6 +1566,9 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         if rec is None:
             return None
         rec["pid"] = pid  # pgrep pid is authoritative for live servers
+        # #4238: marks this record as PASS-1 selected — its dir came from the
+        # pid's argv. `_kill_provenance_refusal` requires such a record's
+        # pid to be the process actually serving the socket inside that dir.
         rec["_live"] = True
         return rec
 
