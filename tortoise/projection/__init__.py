@@ -1968,8 +1968,13 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 
 # #7369: compiled ONCE — the gate runs on every write statement, so a
 # per-call recompile would be a hot-path cost for no benefit.
+# The negative lookbehind keeps a PROPERTY reference from being read as a
+# clause: `n.set`, `n.drop`, `n.create`, `n.remove` are property names in a read,
+# and matching them nulled a map the engine accepts (#7174 false refusal). A
+# keyword only counts at clause position, which is never just after `.` or a
+# word character.
 _WRITE_CLAUSE_RE = re.compile(
-    r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b", re.I
+    r"(?<![.\w])(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b", re.I
 )
 # A write keyword can appear inside a string literal, a comment, or a backtick
 # identifier (``MATCH (n) WHERE n.s='SET' RETURN n``) — matching the raw text
@@ -1978,13 +1983,19 @@ _LITERAL_OR_COMMENT_RE = re.compile(
     r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/",
     re.S,
 )
-# ``CALL`` is neither read nor write: ``CALL db.idx.vector.createNodeIndex(..)``
-# and every ``apoc.*`` write procedure STORE without naming a write clause, and
-# a keyword search cannot see inside the procedure name (``\bcreate\b`` does not
-# match ``createNodeIndex``). Treating CALL as a write is the conservative
-# direction: being wrong that way costs a nulled parameter, being wrong the
-# other way re-opens the abort-after-wipe this gate exists to prevent.
-_CALL_RE = re.compile(r"\bCALL\b", re.I)
+# ``CALL`` is a write only when its PROCEDURE name says so. Blanket-treating
+# every CALL as a write nulls maps on read-only procedures and subqueries the
+# engine ACCEPTS — ``db.idx.vector.queryNodes``, ``db.idx.fulltext.queryNodes``,
+# ``CALL { … }`` — which is the #7174 false refusal this exemption exists to
+# remove, and it also disables the read fast path for every such retrieval.
+# The write procedures (``db.idx.*.createNodeIndex``, ``db.idx.*.drop``, every
+# ``apoc.*`` that stores) are matched on their own name.
+_CALL_PROC_RE = re.compile(r"\bCALL\s+([A-Za-z_][A-Za-z0-9_.]*)", re.I)
+_WRITE_PROC_RE = re.compile(
+    r"(create|drop|delete|merge|remove|build|rebuild|refactor|periodic"
+    r"|install|update|insert|write|link|load|import|copy)",
+    re.I,
+)
 
 
 def _statement_writes(statement: str) -> bool:
@@ -1996,7 +2007,12 @@ def _statement_writes(statement: str) -> bool:
     into a property position and aborts a replay AFTER the journal was wiped.
     """
     stripped = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
-    return bool(_WRITE_CLAUSE_RE.search(stripped) or _CALL_RE.search(stripped))
+    if _WRITE_CLAUSE_RE.search(stripped):
+        return True
+    return any(
+        _WRITE_PROC_RE.search(m.group(1))
+        for m in _CALL_PROC_RE.finditer(stripped)
+    )
 _GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_REPLACE_RE = re.compile(
     r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -2839,6 +2855,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _PERSISTABLE_MAX_DEPTH,
     _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
@@ -2965,7 +2982,7 @@ def _annotator_value_ok(val) -> bool:
     return True
 
 
-def _writable_at_parse(val) -> bool:
+def _writable_at_parse(val, _depth: int = 0) -> bool:
     """False only for what the engine rejects while PARSING a parameter.
 
     #7174 merge (measured 2026-10-06 on the embedded engine, which agrees with
@@ -3002,11 +3019,23 @@ def _writable_at_parse(val) -> bool:
     # engine then refused with "Failed to parse query parameter 'ids' value" —
     # the abort-after-wipe this gate exists to prevent, re-opened by the very
     # exemption added for maps.
+    #
+    # BOUNDED, like the sibling `_is_persistable_prop_value` (entities.py:74).
+    # This predicate's contract is "DEGRADES, never raises", and an unbounded
+    # walk breaks it twice over: a self-referential container recurses forever,
+    # and a deep one exhausts the stack. `_guard_numeric_params` refuses those
+    # first on the normal path but is a NO-OP under `_TOLERATE_ALTERED_NUMBERS`
+    # — the replay context this gate exists for — so here the walk is the only
+    # boundary, and a RecursionError would abort the rebuild AFTER the wipe.
+    # Past the bound we return False (degrade), which also terminates a cycle.
+    if _depth >= _PERSISTABLE_MAX_DEPTH:
+        return False
     if isinstance(val, (list, tuple, set, frozenset)):
-        return all(_writable_at_parse(item) for item in val)
+        return all(_writable_at_parse(item, _depth + 1) for item in val)
     if isinstance(val, dict):
         return all(
-            _writable_at_parse(k) and _writable_at_parse(v)
+            _writable_at_parse(k, _depth + 1)
+            and _writable_at_parse(v, _depth + 1)
             for k, v in val.items()
         )
     return True

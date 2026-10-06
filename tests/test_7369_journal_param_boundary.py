@@ -399,13 +399,66 @@ def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
         "CALL db.idx.vector.createNodeIndex('Point','embedding',1536,'HNSW')",
     )["m"] is None
     # ...and DROP is a write clause (it was missing from the keyword set).
+    # Pinned on a BARE DROP, not `CALL db.idx.fulltext.drop(...)` — the latter is
+    # already caught by the call-procedure rule, so it would pass even with DROP
+    # removed from the keyword set.
     assert _journal_safe_params(
-        {"m": {"a": 1}}, "CALL db.idx.fulltext.drop('Point')",
+        {"m": {"a": 1}}, "DROP INDEX ON :Point(embedding)",
     )["m"] is None
+    # A PROPERTY named after a keyword is not a clause: `n.set` in a read is a
+    # property reference, and nulling the map there is a false refusal.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.set = $m RETURN n",
+    )["m"] == {"a": 1}
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.drop = $m RETURN n",
+    )["m"] == {"a": 1}
+    # A read-only CALL/subquery is NOT a write either — these are the retrieval
+    # paths, and nulling a map there is the #7174 false refusal again.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "CALL db.idx.vector.queryNodes('Point','embedding',5)",
+    )["m"] == {"a": 1}
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) CALL { WITH n RETURN n } RETURN n",
+    )["m"] == {"a": 1}
     # ...and the all-scalar read still takes the cheap identity route.
     assert _journal_safe_params(
         {"name": "fine"}, "MATCH (e:Subject {name:$name}) RETURN e",
     ) == {"name": "fine"}
+
+
+def test_a_SELF_REFERENTIAL_or_deep_parameter_DEGRADES_and_never_raises():
+    """The recursion must be BOUNDED — its contract is "degrades, never raises".
+
+    An unbounded walk breaks that twice: a cycle recurses forever and a deep
+    container exhausts the stack. On the replay path (`_TOLERATE_ALTERED_NUMBERS`)
+    the sibling `_guard_numeric_params` is a no-op, so this walk is the ONLY
+    boundary there and a RecursionError would abort the rebuild AFTER the wipe.
+    """
+    cyclic: list = ["ok"]
+    cyclic.append(cyclic)
+    assert _journal_safe_params(
+        {"a": cyclic}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    cyclic_map: dict = {"ok": 1}
+    cyclic_map["self"] = cyclic_map
+    assert _journal_safe_params(
+        {"a": cyclic_map}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    deep: object = 1
+    for _ in range(2000):
+        deep = [deep]
+    assert _journal_safe_params(
+        {"a": deep}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    # A shallow, entirely writable container is STILL forwarded (the bound must
+    # not become a blanket refusal).
+    assert _journal_safe_params(
+        {"a": {"n": [1, "two"]}}, "MATCH (n) WHERE n.id = $a RETURN n",
+    )["a"] == {"n": [1, "two"]}
 
 
 def test_an_EMPTY_identity_is_refused_not_admitted():
