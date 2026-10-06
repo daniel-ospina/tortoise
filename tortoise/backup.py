@@ -17,6 +17,33 @@ from tortoise.cypher_guard import tolerates_altered_numbers
 logger = logging.getLogger(__name__)
 
 
+def _count_journal_events(events_file: Path) -> int:
+    """Count the journal's events the way the READER counts them, unparsed.
+
+    ``len(read_all()) + torn_trailing_count`` — records PLUS the torn
+    fragments the reader tolerates, minus the seal annotations ``append``
+    writes, complete or TORN (#5917) — without json-parsing every record.
+    Parsing to produce a REPORTED number measured 20 s on a 300,000-record
+    journal against 0.07 s for this pass; both are pinned to agree in
+    ``tests/test_5917_torn_tail_seal.py``.
+
+    Byte-safe by construction (``errors="replace"``) and universal-newline
+    aware (the text mode's default), so a multi-byte tear or a bare-CR journal
+    counts without raising.
+    """
+    from tortoise.log import SEAL_SENTINEL, is_seal_annotation
+    count = 0
+    with open(events_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            text = line.strip()
+            if not text or is_seal_annotation(text):
+                continue
+            if SEAL_SENTINEL.startswith(text):
+                continue          # a TORN annotation is not an event
+            count += 1
+    return count
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
 
@@ -145,7 +172,7 @@ def restore(backup_dir: str, db_path: str,
     # the backup) is the one every other engine names.
     _source_records: list[dict] | None = None
     if into_falkor:
-        from tortoise.log import SEAL_SENTINEL, EventLog, refuse_torn_tail_revival
+        from tortoise.log import EventLog, refuse_torn_tail_revival
         _source_log = EventLog(events_file)
         try:
             _source_records = _source_log.read_all()
@@ -171,23 +198,11 @@ def restore(backup_dir: str, db_path: str,
     # surface has always reported (`test_backup_restore_default_copies_a_torn_
     # tail_backup` pins a torn journal at 2) — minus the seal annotations
     # `append` writes, which annotate a fragment rather than being one (#5917).
-    # Count events the way the READER sees them: records PLUS the torn
-    # fragments it tolerates (what this surface has always reported —
-    # `test_backup_restore_default_copies_a_torn_tail_backup` pins a torn
-    # journal at 2), and NOT the seal annotations `append` writes, complete or
-    # torn (#5917). Deriving it from the reader is also the only way to keep it
-    # byte-safe: a text-mode read raises UnicodeDecodeError on the multi-byte
-    # tear read_all survives. A journal the reader REFUSES (genuine mid-file
-    # corruption) falls back to a byte-safe line count — the number is
-    # advisory, and refusing here would block a copy-only restore.
-    from tortoise.log import SEAL_SENTINEL, EventLog
-    try:
-        _journal = EventLog(events_file)
-        count = len(_journal.read_all()) + _journal.torn_trailing_count
-    except ValueError:
-        with open(events_file, encoding="utf-8", errors="replace") as f:
-            count = sum(1 for line in f
-                        if line.strip() and line.strip() != SEAL_SENTINEL)
+    # Counted WITHOUT parsing: the reader-derived count parsed every record a
+    # second time (twice on the ``into_falkor`` path, which already parsed the
+    # journal above) to produce a number this surface only reports — measured
+    # 20.4 s vs 0.07 s on a 300,000-record journal.
+    count = _count_journal_events(events_file)
 
     # Restore into FalkorDB if requested
     if into_falkor:

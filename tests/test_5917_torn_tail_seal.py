@@ -623,6 +623,100 @@ def test_the_backup_count_agrees_with_the_reader():
     print("PASS test_the_backup_count_agrees_with_the_reader")
 
 
+def test_a_complete_record_that_lost_only_its_newline_is_terminated():
+    """The `unterminated + parses` arm: terminate it, do NOT annotate it.
+
+    A crash that lands after a record's last byte but before its `\n` is
+    ordinary, and the annotation is not just redundant: a tear of it would
+    leave a sentinel prefix after a VALID record, which refuses every later
+    replay. Round 11 measured that mutating this arm to write the sentinel
+    still passed all 40 tests and made this shape permanently unreadable.
+    """
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "r0"})
+    with open(p, "ab") as f:
+        f.write(b'{"id": "r1"}')          # the terminating newline was lost
+    log.append({"id": "r2"})
+
+    body = _raw(p)
+    assert SEAL_SENTINEL.encode() not in body, body
+    assert body == b'{"id": "r0"}\n{"id": "r1"}\n{"id": "r2"}\n', body
+    reader = EventLog(p)
+    assert [r["id"] for r in reader.read_all()] == ["r0", "r1", "r2"]
+    assert reader.torn_trailing_count == 0, reader.torn_trailing_raw
+    print("PASS test_a_complete_record_that_lost_only_its_newline_is_terminated")
+
+
+def test_the_backup_count_never_parses_the_journal(monkeypatch):
+    """The reported count must not json-parse every record (290x measured).
+
+    Parsing to produce a number this surface only REPORTS cost 20.4 s on a
+    300,000-record journal against 0.07 s unparsed — and on the
+    `into_falkor=True` path the journal was already parsed once. Pinning it by
+    making the parse impossible: if the count path parses, this raises.
+    """
+    import json as json_mod
+
+    from tortoise.backup import restore
+
+    root = Path(tempfile.mkdtemp())
+    backup_dir = root / "backup"
+    backup_dir.mkdir()
+    payload = b"".join(b'{"id": "r%d"}\n' % i for i in range(500))
+    (backup_dir / "events.jsonl").write_bytes(payload)
+    work = root / "work"
+    work.mkdir()
+
+    def _boom(*a, **k):
+        raise AssertionError("the event count parsed the journal")
+
+    monkeypatch.setattr(json_mod, "loads", _boom)
+    result = restore(str(backup_dir), str(work / "r.db"),
+                     events_path=str(work / "events.jsonl"))
+    assert result["status"] == "ok", result
+    assert result["events"] == 500, result
+    print("PASS test_the_backup_count_never_parses_the_journal")
+
+
+def test_the_backup_count_agrees_with_the_reader_on_hard_shapes():
+    """Sentinel-prefix lines, adjacent torn seals, and a 4 MiB record.
+
+    The count is now computed from LINE SHAPE rather than by reading, so it
+    must still agree with `len(read_all()) + torn_trailing_count` — including
+    a TORN annotation (`__Torn`), which is not an event, and an adjacent torn
+    seal that is not its fragment's successor.
+    """
+    from tortoise.backup import restore
+
+    marker = SEAL_SENTINEL.encode()
+    big = b'{"id": "big", "pad": "' + b"A" * (4 << 20) + b'"}'
+    cases = {
+        "torn-marker": (b'{"id": "a"}\n{"id": "torn"\n' + marker[:7]
+                        + b'\n{"id": "b"}\n'),
+        "adjacent-torn-seals": (b'{"id": "a"}\n{"id": "torn"\n' + marker
+                                + b'\n' + marker[:5] + b'\n{"id": "b"}\n'),
+        "sentinel-only": marker + b"\n",
+        "empty": b"",
+        "crlf": b'{"id": "a"}\r\n{"id": "b"}\r\n{"id": "torn"',
+        "big-record": b'{"id": "a"}\n' + big + b"\n",
+    }
+    for name, payload in cases.items():
+        root = Path(tempfile.mkdtemp())
+        backup_dir = root / "backup"
+        backup_dir.mkdir()
+        (backup_dir / "events.jsonl").write_bytes(payload)
+        work = root / "work"
+        work.mkdir()
+        reader = EventLog(backup_dir / "events.jsonl")
+        expected = len(reader.read_all()) + reader.torn_trailing_count
+        result = restore(str(backup_dir), str(work / "r.db"),
+                         events_path=str(work / "events.jsonl"))
+        assert result["status"] == "ok", (name, result)
+        assert result["events"] == expected, (name, result, expected)
+    print("PASS test_the_backup_count_agrees_with_the_reader_on_hard_shapes")
+
+
 def test_adjacent_torn_seals_are_not_counted_as_fragments():
     """Two torn seals in a row, or a torn seal before a complete one.
 
