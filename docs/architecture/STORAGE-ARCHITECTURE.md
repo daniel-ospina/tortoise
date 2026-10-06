@@ -128,6 +128,8 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 
 **This is the governing decision for this document. Everything below is either (a) the reasoning behind it, or (b) the work that remains once there are users to justify it.** **This document is NOT a migration plan.** Earlier drafts read as *"leave FalkorDB for Postgres"*; that was never the decision, and the two-store model (§9.3) has always put raw files outside the graph — so the graph was never meant to hold the bulk.
 
+**⚠️ SCOPE — this decides a PROVIDER, not a PLACEMENT (owner clarification, 2026-10-06).** It decides that we keep the **graph** on FalkorDB's **hosting service**; the Postgres **vendor** is a separate matter that §14 lists under *what this document does not decide* (*"Supabase is the owner's recorded choice (local default now, Supabase post-beta)"*). **This decision does NOT rule on what belongs in the graph and what belongs in Postgres** — that split is **§9's**, and it is a separate question with its own rules. A lane that reads the ⚠️ *Do NOT re-open* line in §14.2 as a prohibition on the **data split** has misread it: the ruling is about the **engine and its host**, and §14.2 says so itself — *"The open question is capacity, not engine."* **Any departure from §9's split requires careful research and the owner's explicit approval.**
+
 **What is true today, and what changes later:**
 
 | | now | later (post-users) |
@@ -424,15 +426,17 @@ The extraction document states no target and no aggregate reduction; the number 
 
 ---
 
-## 7. State values — RETAIN is decided and landed; PLACEMENT is open
+## 7. State values — RETAIN is decided and landed; PLACEMENT is DECIDED (2026-10-06, below)
 
 > **🔗 Read together with `EXTRACTOR-V4-ARCHITECTURE.md` §2.4 — the proposed fourth layer (verbatim raw facts).** Both are the same instinct — *keep the exact thing, outside the graph, linked to it* — and §2.4 carries a controlled ablation (**verbatim beats derived by 15.9 / 22.0 pts**) plus the pre-registered experiment (`#3011`) that would settle it on our stack.
 
-**⚠️ STATUS — and the two documents disagreed until 2026-09-24** (extractor §9 records D8 as `DECIDED (retain half landed)`; this section is headed *open*). **Both are right about different halves, and the split is the resolution:**
+**⚠️ STATUS — and the two documents disagreed until 2026-09-24** (extractor §9 records D8 as `DECIDED (retain half landed)`; this section was headed *open*). **Both are right about different halves, and the split is the resolution:**
 
 - ✅ **RETAINING verbatim operational values is DECIDED and LANDED** — commit `4a690d0be` / PR `#2456` (2026-09-07): `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) plus `VALUE_FIDELITY_RULE` (`:230`, rendered into the S2/S4 `{anti_routine}` slot and appended to S1). **The rule reaches the model.**
 - ⛔ **What is MISSING is mechanical enforcement** — the rule is prompt-only; `valueGate` still does not exist. That is **`#4899`**'s.
-- ⚠️ **What is genuinely OPEN is PLACEMENT** — whether a state value becomes a `Point`, or a **structural field on an entity** (and whether it can then skip an embedding). **The paragraphs below are that open half.**
+- ✅ **PLACEMENT is NO LONGER OPEN — it is DECIDED (owner, 2026-10-06; the decision paragraph follows immediately below).** It was: whether a state value becomes a `Point`, or a **structural field on an entity**. The paragraphs AFTER the decision record the reasoning that was open when they were written.
+
+**✅ PLACEMENT ACCEPTED (owner, 2026-10-06): a state/numeric value is a STRUCTURAL FIELD ON AN ENTITY, not a `Point`.** The reasoning is the ontology's own: operators connect only epistemic targets, EP confidence propagates over atomic beliefs, and relevance modulation needs beliefs separable (§8) — **a belief can be argued with, an attribute cannot.** The grounded requirement (*"75% of tranche 1 spent → tranche 2 unlocks"*) is a **comparison of an attribute**, so an amount is an entity field: no confidence, **no NAND-ability, and no embedding**. **⚠️ COST — CORRECTED 2026-10-06. An earlier version of this line read *"the cost lever is therefore skipping the vector, not leaving the graph"*, and that OVERSTATES it.** The measured model (§2.1, §12.1b): **on FalkorDB the WHOLE graph is RAM — no spill-to-disk, and no eviction on Cloud *as far as we can establish*; §2.1 names confirming that with the vendor as the single most valuable thing to confirm — so cost is proportional to total data and there is NO cold-data tier.** The measured split of a ~141 MB graph is **45 MB of indices + 51.6 MB of embeddings + 16 MB of text** — ⚠️ **the pair §1's ruling block declares superseded (it reads 143 MB / 46 MB; see its *"This block SUPERSEDES the body's older figures"*).** The vector class is the *biggest single* lever, but **the 45 MB of indices MIXES node- and text-driven fulltext indices with the embedding-driven `Point` HNSW index (§12.1b — exactly ONE vector index in the graph, on `Point`), so node count is an INDEPENDENT lever: reifying each value into its own node adds node- and label-matrix index entries that have nothing to do with embeddings** — and an index on the value itself is RAM rented forever, proportional to how many entities carry it, read or not. **⇒ Skipping the embedding makes a value CHEAPER, not FREE** — a value is cheap only if it is **neither embedded NOR indexed**, and the moment the requirement is *sum the amounts* or *filter by amount* that is an index and recurring RAM. **This is a COST question, separate from the PLACEMENT decision above, which stands on semantics** — and it is why the disk-tier option stays live (§2.1: *"the escape only exists in the deferred Postgres option"*). ⚠️ **No live-graph count appears here: a snapshot count is CONTEXTUAL, not a finding, and the live graph is the DOGFOOD instance (other graphs hold `Object`s).** **An earlier draft of this line cited a zero `Object` count on this graph as evidence that the entity tier was empty — that reading is WITHDRAWN, and the figure is dropped as evidence.** The dated measurements this cost model rests on are §12.1b's and §12.2's, each against the snapshot recorded there — **none of them states or implies that an entity tier is empty or unpopulated.** ⚠️ **Where a sentence ASSERTS a figure** ("I think we spent 2 million") that assertion is a belief and may be a `Point` — the separate, smaller prose question, not this placement.
 
 **Raised by the owner 2026-09-23:** *"State values we might need to think through how to store them for low-cost (so ideally out of RAM or only if must) yet good search and good association."*
 
@@ -442,9 +446,9 @@ State values are personal/entity attribute values that must survive verbatim —
 
 **The tension:** they need good search and good association, but they should not sit in RAM.
 
-**Proposal to test (not decided — ⚠️ the PLACEMENT half; see the STATUS block above, which supersedes any reading of this line as "state values are undecided"):** state values are **structured** — subject + attribute + value + date. If they can be found **structurally** (by subject and attribute) rather than by vector similarity, they may need **no embedding at all** — and the embedding is the only part that costs RAM. That would make them cheap to store, cheap to search, and still fully associated via `aboutSubject`/`aboutObject`.
+**Superseded proposal (this WAS the open PLACEMENT half; it is now DECIDED above — kept as reasoning, not as an open option):** state values are **structured** — subject + attribute + value + date. If they can be found **structurally** (by subject and attribute) rather than by vector similarity, they may need **no embedding at all**. **⚠️ CORRECTION 2026-10-06:** that draft then read *"the embedding is the only part that costs RAM"* — **false.** The embedding is the *largest single* part; the properties and every index are RAM too, and on FalkorDB they are RAM whether or not they are ever read. That would make them cheap to store, cheap to search, and still fully associated via `aboutSubject`/`aboutObject`.
 
-**Unverified:** whether the query patterns users actually need for state values are structural (find "5K time for this user") or semantic (find "things about the user's running"). If the latter, embeddings are required and the question becomes quantization only.
+**⚠️ STILL UNVERIFIED — and it now bears directly on the decision above:** whether the query patterns users actually need for state values are structural (find "5K time for this user") or semantic (find "things about the user's running"). **If the latter, an embedding IS required and the "no embedding" clause of the decision above does not hold** — so the decision fixes the value's PLACEMENT, while its embedding clause stays conditional on this measurement.
 
 **⇒ This is the storage half of a two-part design.** The extractor half is `EXTRACTOR-V4-ARCHITECTURE.md` §7 — and it carries a finding that changes this section: **the existing carve-out keeps *personal* state values and actively DISCARDS decision-relevant operational ones** (`#2453`). So the table proposed here must hold **two classes**, not one:
 
@@ -457,7 +461,7 @@ State values are personal/entity attribute values that must survive verbatim —
 
 **⚠️ Harmonise, do not duplicate.** `#2453` (retain operational values verbatim) · `#2817` (no numeric/locale canonicalisation exists — PT-BR/EN amounts) · `#2782` (money needs amount + currency on entities) · `#2521` (numeric aggregation across sessions) · `#2820` (tracking map — its **"state & value model"** workstream owns all of this). **Read this section together with extractor §7; neither can be built alone.**
 
-> ⚠️ **Caveat from `#4889`.** The `aboutSubject` half of that association **does not exist in production today** — the live graph holds **0 `aboutSubject` edges** and the entire Subject layer is unpopulated. **State values would rest on `aboutObject` alone** unless `#4889` lands, and `aboutObject` is itself the largest — possibly unnecessary — edge type in the graph (§11's note).
+> ⚠️ **Caveat from `#4889` — CORRECTED 2026-10-06 (owner).** An earlier version of this caveat asserted that the `aboutSubject` half **does not exist in production today** and cited **0 `aboutSubject` edges in the live graph**. **That framing is WITHDRAWN: the live graph is a DOGFOOD instance, so an edge count there was never the right test.** The code exists and is tested (`tortoise/subject_binding.py`; the `aboutSubject` write paths in `projection/edges.py` and `connectors/github.py`; `tests/test_subject_binding_1370.py`), and `#4889` is **CLOSED (COMPLETED)**. **What remains open is the end-to-end check against a real workload, which needs a capstone issue (not yet filed).** Note also that `aboutObject` is itself the largest — possibly unnecessary — edge type in the graph (§11's note).
 
 ---
 
@@ -509,7 +513,7 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 SOURCES  — documents · code files · meeting transcripts · conversations · pull requests
            all the SAME kind of thing: raw, outside the graph, cheap to store
                 ↓  extracted into
-GRAPH    — entities · claims · operators · connections
+GRAPH    — entities · Points · operators · connections
            the reasoning layer, uniform over EVERY source
 ```
 
@@ -1276,8 +1280,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §4 tenancy | `#3885` | **one project, tenant-scoped rows** — not one project per team |
 | §5 cost | `#4333` · `#4614` | published rates; ~10× headroom at 1,000 users |
 | §6 the split does NOT fix volume | **`#4899`** · `#1026` | **storage ~580× on the STORAGE line × selection ~10× (a target, not a measurement) — neither alone reaches 100×.** This is the section that stops a storage migration being sold as the fix |
-| §7 state values | **`#2453`** (LANDED) · **`#4899`** (enforcement) · `#2820` | the carve-out, and the structured / possibly-embedding-free proposal. ⚠️ **The former "`#1509` (E2, §9)" citation was WRONG** — `#1509` has no §9 and no E2; the decision is a **comment** on `#1509`, and **E2 is `#1534`'s slot** (CLOSED). See §7's own corrected note |
-| §7 caveat | **`#4889`** | `aboutSubject` is **unpopulated (0 edges)** — the association leg does not exist |
+| §7 state values | **`#2453`** (LANDED) · **`#4899`** (enforcement) · `#2820` | the carve-out, plus the DECIDED placement (owner, 2026-10-06): a state/numeric value is a **structural field on an entity**, with the embedding clause conditional on the §7 query-pattern measurement. ⚠️ **The former "`#1509` (E2, §9)" citation was WRONG** — `#1509` has no §9 and no E2; the decision is a **comment** on `#1509`, and **E2 is `#1534`'s slot** (CLOSED). See §7's own corrected note |
+| §7 caveat | **`#4889`** | ⚠️ **CORRECTED (owner, 2026-10-06).** The live graph is a **DOGFOOD instance** — an edge count there was never the right test, and the earlier *"0 edges"* framing is withdrawn. **Correctness is verified by the CODE's tests** (`tortoise/subject_binding.py` and the `aboutSubject` write paths exist; `#4889` is CLOSED), and the **end-to-end check needs a capstone issue (not yet filed)**, not a caveat asserting a production count. |
 | §8 granularity | `#1509` (E3) · `#4333` | **volume reduction may not come from fusing claims** — it bounds the whole document |
 | §9.1 narrative placement | `#2281` | the narrative **is** the ingest-time-distilled layer that issue asks for |
 | §9.2 PR / Object / Event | `#1844` | object-only sources; the anchor is a document, **never an event** |
