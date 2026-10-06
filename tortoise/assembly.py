@@ -286,6 +286,11 @@ def extract_subject_terms(question: str,
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
 from typing import Protocol  # noqa: E402
+# #3302: the canonical OBJECT terminal vocabulary. Safe as a module-level
+# import: commit_ops' import closure does not reach assembly (verified), so
+# this edge cannot cycle — unlike projection/entities.py, which imports the
+# same set at FUNCTION level for its own reasons.
+from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES  # noqa: E402
 
 # #3317: the Object statuses the RESOLVER will not resolve — the resolver's
 # view of the Object-SEARCH exclusion boundary (deliberately NARROWER than
@@ -1284,10 +1289,25 @@ def synthesize_hits(
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
 # excluded successor as invisible -> the renderer's NAME-ONLY annotation).
-# Mirrors the canonical search_engine.TERMINAL_EXCLUDED_STATUSES tuple (P2-3:
-# an 'outdated'-status successor object is recall-excluded too).
+#
+# The OBJECT terminal vocabulary is ``commit_ops.OBJECT_TERMINAL_STATUSES``.
+# It is NOT ``search_engine``/``live``'s ``TERMINAL_EXCLUDED_STATUSES``, which
+# is the POINT vocabulary — #3302: the comment that used to sit here cited
+# that Point source for an Object set, sending a reader to the module that
+# does not own this vocabulary. Derived from the canonical set rather than
+# copied by value, because the by-value copy was the actual root: an Object
+# set that was a frozen snapshot of a source it did not reference drifts the
+# moment the canonical set moves.
+#
+# The one DELIBERATE divergence is ``outdated``: no Object writer produces it
+# (the plan states this in (q) and in the ``_team_sweep_allowed`` rationale),
+# so the member is behaviourally dead and its retention is a decision, not an
+# accident. It is pinned as a SUBSET relation in tests/test_assembly_pure.py
+# (#3317), so a canonical-set change cannot silently drop it and a future
+# widening is a deliberate edit. Keep the divergence documented here; the pin
+# is what makes it safe.
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
-    {"superseded", "deprecated", "archived", "retracted", "outdated"})
+    OBJECT_TERMINAL_STATUSES | {"outdated"})
 
 
 @dataclass(frozen=True)
