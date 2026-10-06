@@ -623,7 +623,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Returns {entity, nodes: [{node, relationship, depth}]}.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="traverse",  # navigation.tortoise_traverse — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (tortoise.navigation.tortoise_traverse on sdk._get_proj(); #3904)
     ),
     # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ─────────────
     ToolDefinition(
@@ -1094,7 +1094,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(0-1).",
         annotations=_rw(),
         http_policy=True,
-        sdk_method="operator_action",
+        sdk_method="",  # custom handler in mcp_server.py (dispatches to sdk.mitigate_operator / sdk.annotate_operator; #3904)
     ),
     ToolDefinition(
         name="tortoise_create_edge",

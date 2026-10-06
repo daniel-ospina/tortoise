@@ -680,7 +680,7 @@ def test_the_d2c_disclosure_names_the_sibling_wrong_destinations() -> None:
     from tools.bridge_table import CONTESTED_DESTINATION, DESTINATION
 
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
-    d2c = _section(doc, "#### D2c —")
+    d2c = _section(doc, "### D2c —")
 
     listed = re.findall(r"^- \*\*`([a-z_]+)`\*\* — map says `([a-z_]+)`; the documented "
                        r"reading is `([a-z_]+)`$", d2c, re.M)
@@ -794,9 +794,20 @@ def _part_d_citations() -> dict[str, str]:
         "the generated doc has no Part D — the citation corpus is unreachable, so a "
         "truncated citation is invisible to every reader"
     )
-    d1 = doc.split("#### D1")[1].split("#### D2")[0]
+    # The slice's real end is the `**Documented hops.**` cut below, NOT `_section`'s heading
+    # bound: the marker sits inside D1 and ahead of the next heading, so the cut truncates
+    # first and the bound never determines the parse (bound, old literal, and no bound all
+    # yield the same 4 443 chars / 19 rows). The assert below does not ADD detection — a moved
+    # marker is already caught downstream by the row/quote parity checks; it exists so the
+    # failure is named here instead of surfacing as four unrelated row-parity failures.
+    d1 = _section(doc, "### D1")
+    hops = "**Documented hops.**"
+    assert hops in d1, (
+        f"the D1 slice contains no {hops!r} marker — the citation corpus end moved, so this "
+        "parse would run past the documented-hop block instead of stopping at the D1 rows"
+    )
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
-    d1 = d1.split("**Documented hops.**")[0]
+    d1 = d1.split(hops, 1)[0]
     rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
     quotes = re.findall(r"^  > (.+)$", d1, re.M)
     assert rows, "Part D1 rendered no citation rows — the citation guard is unarmed"
@@ -828,17 +839,33 @@ def _is_maximal(quote: str, text: str) -> bool:
 
 
 def _section(doc: str, heading: str) -> str:
-    """The body of `heading`, up to the next heading of the same-or-higher level."""
+    """The body of `heading`, up to the next heading of the same-or-higher level.
+
+    `#{2,3}` is same-or-higher than the level-3 `###` headings this is called with, so a
+    deeper `####` inside a section does not truncate it. The split is asserted to have applied:
+    without that, a section with no following heading silently returns the rest of the doc.
+
+    PRECONDITION: `heading` must be followed by another h2/h3 heading. This helper cannot
+    serve the document's FINAL section — there the rest of the doc IS the correct body, but
+    the assert cannot tell that case apart from a bound that failed to apply, so it raises.
+    No call site targets a final section; add one only with a different helper.
+    """
     assert heading in doc, f"the generated doc has no {heading!r} section"
-    return re.split(r"\n#{2,4} ", doc.split(heading)[1])[0]
+    parts = re.split(r"\n#{2,3} ", doc.split(heading)[1])
+    assert len(parts) > 1, (
+        f"no heading follows {heading!r} at level 2-3 — either the section bound did not "
+        "apply (so this would return the rest of the document), or this is the document's "
+        "final section, which _section does not support"
+    )
+    return parts[0]
 
 
 def _cited_findings() -> tuple[set[str], set[str], set[str]]:
     """(unsupported, clause-only, ambiguous) from the RENDERED doc — the oracle subject."""
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
-    d2 = _section(doc, "#### D2 —")
-    d2b = _section(doc, "#### D2b —")
-    d3 = _section(doc, "#### D3 —")
+    d2 = _section(doc, "### D2 —")
+    d2b = _section(doc, "### D2b —")
+    d3 = _section(doc, "### D3 —")
     unsupported = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2, re.M))
     clause_only = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2b, re.M))
     ambiguous = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \|", d3, re.M))
@@ -1007,10 +1034,16 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
     }, f"D2 membership changed: {sorted(unsupported)}"
     # The destination-anchor rule removed the three prose false positives; a regression to
     # scanning the whole post-arrow segment re-adds them here.
+    # #3904 dropped `tortoise_operator_action` from this set — NOT a map edit racing the
+    # doc, but the consequence of repairing its declaration: its `sdk_method` was
+    # `operator_action`, a name that does not exist on `TortoiseSDK`, and it is now
+    # `none declared`. The row's destination moved from a phantom method to no method, so
+    # its citation stopped being ambiguous. This literal is the pin doing its job (see the
+    # docstring): the change was noticed and attributed, which is what it exists to force.
     assert ambiguous == {
         "tortoise_annotate_operator", "tortoise_assess_source", "tortoise_belief_timeline",
         "tortoise_get_source_reliability", "tortoise_mitigate_operator",
-        "tortoise_operator_action", "tortoise_provenance", "tortoise_session_context",
+        "tortoise_provenance", "tortoise_session_context",
         "tortoise_set_source_tier",
     }, f"D3 membership changed: {sorted(ambiguous)}"
 
@@ -1054,7 +1087,7 @@ def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
         return [f"`{n}`" for n in re.findall(r"`([a-z_][a-z0-9_]*)`", cell)]
 
     # ── D2 rows: dest + named + the rendered quote ─────────────────
-    d2 = _section(doc, "#### D2 —")
+    d2 = _section(doc, "### D2 —")
     parsed_d2: dict[str, dict] = {}
     for m in re.finditer(
         r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; citation names ([^\n]+)\n"
@@ -1088,7 +1121,7 @@ def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
         )
 
     # ── D2b rows: clause attribution must not be swapped ───────────
-    d2b = _section(doc, "#### D2b —")
+    d2b = _section(doc, "### D2b —")
     parsed_d2b: dict[str, dict] = {}
     for m in re.finditer(
         r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; the first clause names "
@@ -1121,7 +1154,7 @@ def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
         assert cell["quote"] == want["quote"]
 
     # ── D3 rows: every column ──────────────────────────────────────
-    d3 = _section(doc, "#### D3 —")
+    d3 = _section(doc, "### D3 —")
     parsed_d3: dict[str, dict] = {}
     for m in re.finditer(
         r"^\| `([a-z_][a-z0-9_]*)` \| `([^`]+)` \| ([^|]+)\| ([^|]+)\|$", d3, re.M

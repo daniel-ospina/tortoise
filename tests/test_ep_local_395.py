@@ -570,16 +570,51 @@ def test_ac2_noarg_draft_only_no_factors():
 def test_ac3_max_hops_none_both_impls_and_run_contract():
     """AC3 — max_hops=None returns the full connected subgraph in BOTH BFS
     implementations (terminates on frontier-empty, no range(None) crash);
-    run() keeps its 2-tuple; _last_affected == run set."""
+    run() keeps its 2-tuple; _last_affected == run set.
+
+    #5566: membership is factor-bearing-only — a claim wired to an operator
+    ONLY by a non-logical (`related`) edge is not in the run and keeps its
+    stored prior/confidence.
+    """
     from tortoise.analyze import _bfs_select_operators
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "m1")
         b = _make_claim(sdk, "m2")
         c = _make_claim(sdk, "m3")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [c["id"]])
+        op1 = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op2 = sdk.create_operator("IMPL", b["id"], [c["id"]])
         proj = sdk._get_proj()
         ep = sdk._get_ep()
+        # #5566: m4/m5 reach the graph ONLY through a non-logical (`related`)
+        # edge onto an operator, and carry a persisted prior + stored
+        # confidence. A structural predicate is not a factor, so neither may
+        # enter the affected set — otherwise `_update_claim_posterior`
+        # recomputes them from empty natural parameters as Beta(1,1),
+        # discarding both. m4 hangs off the SEED-adjacent operator (caught at
+        # seed time by `_live_neighbors`); m5 off the far operator (caught by
+        # the BFS hop) — the two admission paths the fix narrows.
+        m4 = _make_claim(sdk, "m4")
+        m5 = _make_claim(sdk, "m5")
+        for _op, _m in ((op1["id"], m4["id"]), (op2["id"], m5["id"])):
+            proj.g.query(
+                "MATCH (o:Point {id:$o}), (m:Point {id:$m}) "
+                "CREATE (o)-[:related]->(m)",
+                params={"o": _op, "m": _m},
+            )
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "SET n.ep_alpha=5.0, n.ep_beta=1.0, n.confidence=0.8333",
+                params={"id": _m},
+            )
+        # Same sink, reverse-only `IMPL`: the mitigation back-link
+        # `(mit)-[:IMPL]->(op)` is not an operator INPUT either, so the
+        # directed hop must not admit the mitigation point (whose prior is a
+        # calibrated baseline `mitigate_operator` set).
+        mit = sdk.mitigate_operator(op1["id"], "weakness", strength=0.3)["id"]
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.confidence=0.7",
+            params={"id": mit},
+        )
         # ep BFS
         affected = ep._affected_claims([a["id"]], max_hops=None)
         assert {a["id"], b["id"], c["id"]} <= affected
@@ -591,6 +626,133 @@ def test_ac3_max_hops_none_both_impls_and_run_contract():
         assert isinstance(iterations, int) and isinstance(converged, bool)
         assert ep._last_affected == affected
         assert ep._last_affected == {a["id"], b["id"], c["id"]}
+        # ...the non-logical claims did NOT enter, and kept their prior
+        # (ep_alpha/ep_beta) and stored confidence unchanged (#5566).
+        for _m in (m4["id"], m5["id"]):
+            assert _m not in ep._last_affected
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "RETURN n.ep_alpha, n.ep_beta, n.confidence",
+                params={"id": _m},
+            ).result_set[0]
+            assert list(stored) == [5.0, 1.0, 0.8333], (
+                f"structural-edge claim {_m} moved: {stored}")
+        assert mit not in ep._last_affected
+        mit_stored = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.posterior_alpha, n.posterior_beta, n.confidence",
+            params={"id": mit},
+        ).result_set[0]
+        assert list(mit_stored) == [None, None, 0.7], (
+            f"mitigation point moved: {mit_stored}")
+        # The dream coverage denominator (`_window_closure`) mirrors
+        # `_affected_claims` and must exclude the same non-factor claims, or a
+        # fully-resolved window reports coverage < 1.0 forever (#5566).
+        closure = sdk._window_closure([a["id"]], max_hops=2)
+        assert {m4["id"], m5["id"], mit} & closure == set()
+        assert {a["id"], b["id"], c["id"]} <= closure
+
+
+def test_idempotent_remitigation_dirties_the_operator():
+    """#5566 review (P2) — a re-mitigation must reach downstream confidence.
+
+    `mitigate_operator`'s idempotent UPDATE branch marked only the mitigation
+    dirty (`_mark_dirty([mid])`); its CREATE branch marks the pair
+    (`_mark_dirty([mid, id])`). The mitigation edge runs `(mit)-[:IMPL]->(op)`
+    while `_reverse_bfs_neighbors` matches `(op:Point {is_operator:true})
+    -[:IMPL|NAND]->(p)`, so the mitigation alone reaches no operator and no
+    claim. With the #5566 hop now factor-filtered, a changed strength would
+    never enter a run. In-process the operator's own creation-time `ep_dirty`
+    flag masks it; `ep_dirty` is deliberately NOT journaled (#5166), so a
+    rebuilt/replayed graph has no mask. This test clears every trace of the
+    creation-time marking before the update — the state a fresh process
+    hydrates — and asserts the pass is not a no-op.
+    """
+    with _fresh_sdk() as sdk:
+        src = _make_claim(sdk, "source")
+        claim = _make_claim(sdk, "downstream")
+        sdk.set_point_baseline(src["id"], 10, 1)
+        sdk.set_point_baseline(claim["id"], 1, 1)
+        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+        proj = sdk._get_proj()
+        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        weak = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        # Clear the creation-time marking: the graph flags AND the in-memory
+        # mirror, i.e. what a rebuilt/replayed process starts from.
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.ep_dirty = true "
+            "SET n.ep_dirty = null, n.ep_dirty_at = null")
+        sdk._dirty_roots.clear()
+        assert sdk.compute_confidence()["diagnostic"] == "no_dirty_roots"
+        # The idempotent UPDATE path: a stronger mitigation on the same operator.
+        sdk.mitigate_operator(op["id"], "major counter-evidence", strength=0.5)
+        assert op["id"] in sdk._dirty_roots, (
+            "the OPERATOR is the dirty root: EP reads the changed strength off "
+            "its factor, and only a seeded operator pulls its inputs in")
+        strong = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        assert strong < weak, (
+            "a stronger re-mitigation must lower the downstream claim's "
+            f"confidence: weak(0.10)={weak:.4f}, strong(0.50)={strong:.4f}")
+        # The coverage denominator (`_window_closure`) must not under-count a
+        # window that contains an OPERATOR — the dirty-root state a mitigation
+        # write produces. EP seeded at the operator reaches that operator's
+        # inputs, so they belong in the closure; without the operator-seed
+        # branch `reachable` is smaller than `affected` and coverage exceeds
+        # 1.0 (measured 2.0 on this fixture's shape).
+        window = [mit["id"], op["id"]]
+        reachable = sdk._window_closure(window, max_hops=2)
+        affected = sdk._get_ep()._affected_claims(window, max_hops=2)
+        assert len(affected) <= len(reachable), (
+            f"coverage denominator under-counts an operator window: "
+            f"affected={len(affected)}, reachable={len(reachable)}")
+
+
+def test_a_mitigation_write_reaches_its_operator_from_any_caller():
+    """#5566 review (P1) — a mitigation write OUTSIDE `mitigate_operator` must reach it.
+
+    The narrowed hop requires the id to be the operator's TARGET
+    (`(n)<-[:IMPL|NAND]-(op)-…`), while a mitigation is the SOURCE of its
+    operator edge (`(mit)-[:IMPL]->(op)`). #5566 patched `mitigate_operator`'s two
+    branches by hand, but `update_point` — which the MCP write path forwards
+    arbitrary props to — marks only `[id]`, so on the pre-fix tree a strength
+    change through it reached NO operator: measured dirty roots `['mit']` and an
+    EMPTY affected set, with the operator's factor silently keeping the old
+    weight. Root discovery therefore has to be symmetric, which is what this
+    pins: the mitigation alone must find the operator, and the write must reach
+    the claims the operator feeds.
+    """
+    with _fresh_sdk() as sdk:
+        src = _make_claim(sdk, "source")
+        claim = _make_claim(sdk, "downstream")
+        sdk.set_point_baseline(src["id"], 10, 1)
+        sdk.set_point_baseline(claim["id"], 1, 1)
+        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.ep_dirty = true "
+            "SET n.ep_dirty = null, n.ep_dirty_at = null")
+        sdk._dirty_roots.clear()
+        # The defect is in ROOT DISCOVERY, not in the traversal, so assert it
+        # directly first: reading the id only as the operator's TARGET finds
+        # nothing for a mitigation.
+        op_ids, _claim_ids = sdk._reverse_bfs_neighbors(proj, [mit["id"]])
+        assert op["id"] in op_ids, (
+            "a mitigation is the SOURCE of (mit)-[:IMPL]->(op); root discovery "
+            "that reads the id only as the operator's TARGET finds no operator, "
+            "so the write is a silent no-op")
+        sdk.update_point(mit["id"], mitigation_strength=0.5)
+        roots = sorted(
+            r[0] for r in proj.g.query(
+                "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id").result_set)
+        assert src["id"] in roots and claim["id"] in roots, (
+            "a mitigation-strength write must dirty the operator's participants: "
+            "through the mitigation alone nothing downstream is recomputed, and "
+            f"the operator's factor keeps the old weight. roots={roots}")
+        affected = sdk._get_ep()._affected_claims(roots, max_hops=None)
+        assert src["id"] in affected and claim["id"] in affected, (
+            "a mitigation-strength write must reach the operator's participants: "
+            f"affected={affected}")
 
 
 def test_ac3_last_affected_no_stale_writeback():

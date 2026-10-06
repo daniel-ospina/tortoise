@@ -578,6 +578,7 @@ jobs:
         # this suite's `node --test` passes no `--experimental-strip-types` flag).
         with:
           node-version: '22'
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
@@ -1455,6 +1456,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]' build==1.6.0
         # build pinned (#1929 code-review P2): test_pack_shipping_wheel.py's
@@ -1820,6 +1822,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         # [test,embeddings] — NOT just [test]: the pre-cache step imports
         # sentence_transformers (embeddings extra), and create_point calls
@@ -2182,6 +2185,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
@@ -2503,6 +2507,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Run the embedded_only marker selection (URI unset — #4164)
