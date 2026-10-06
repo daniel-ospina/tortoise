@@ -419,6 +419,29 @@ jobs:
         # <1s, no dependency beyond the pyyaml installed above.
         run: python3 tools/registry_integrity.py
 
+      - name: "Required-set sync (#6144)"
+        # The required-status-check set is declared in three places — live
+        # branch protection, `.mergify.yml`'s `queue_conditions` /
+        # `merge_conditions`, and the declarative branch-protection mirror — and
+        # nothing read two of them. (The mirror is named INDIRECTLY on purpose:
+        # I11's undeclared-reader scan is a BYTE scan, so naming its path in a
+        # comment here is indistinguishable from a tool that READS it, and the
+        # fix for that is not to exempt this workflow — which would blind the
+        # scan to a real reader added to it later — but to not spell the path in
+        # prose.) `.mergify.yml` stated the invariant in a COMMENT with a
+        # hand-maintained "Last reconciled …" line; a comment cannot fail.
+        #
+        # Hosted in THIS job because it is the same class of check as the
+        # manifest drift gate beside it: a cheap, unconditional, fail-closed
+        # assertion about repo config, whose red must block a merge. It adds
+        # no new required context and no new workflow — it rides the aggregate
+        # that is already required.
+        #
+        # Offline by default (no `--live`: reading branch protection needs
+        # admin scope, and `GITHUB_TOKEN` cannot). `--live` is the owner/rail
+        # check. Exit 2 = could not measure, which is NOT a pass.
+        run: python3 .github/scripts/check-required-set.py
+
   test:
     # #880: split into parallel shards (matrix). #6135: the COUNT is
     # `config/ci-surfaces.yml::fast_shards` and the shape is the selector's

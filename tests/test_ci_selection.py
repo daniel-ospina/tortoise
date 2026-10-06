@@ -353,7 +353,6 @@ _SELF_GUARD_DEBT: dict[str, str] = {
     "tests/test_capture_consent.py": "tortoise/capture_consent.py",
     "tests/test_chain_enforcer.py": "tortoise/chain_enforcer.py",
     "tests/test_commit_schema.py": "tortoise/commit_schema.py",
-    "tests/test_enforcement.py": "tortoise/enforcement.py",
     "tests/test_github_indexer.py": "tortoise/indexer/github_indexer.py",
     "tests/test_github_issue.py": "tortoise/github_issue.py",
     "tests/test_github_map.py": "tortoise/github_map.py",

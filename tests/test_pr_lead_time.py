@@ -780,5 +780,48 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
     text = plt.render(res)
     clean_line = next(ln for ln in text.splitlines()
                       if "never force-pushed" in ln)
+    contaminated_line = next(ln for ln in text.splitlines()
+                             if "both boundaries exist" in ln)
     assert "10.0min" in clean_line, clean_line
     assert "30.0min" not in clean_line, clean_line
+    # #7414: the MEDIANS above were pinned, the SHARES were not. Substituting the
+    # contaminated all-PR share (a_split['dispatch']) for the clean one
+    # (a_clean['dispatch']) in the rendered sentence left every assertion here
+    # green, so the exact misattribution this change exists to kill could be
+    # reintroduced silently. This output carries two shares for one reason: they
+    # must DIFFER (the contaminated row's dispatch charges the PR's earlier life;
+    # the clean one measures a real CI-start latency). Pin the value in both
+    # places it is published, and pin the contamination as an INEQUALITY so a
+    # future edit that collapses the two cannot pass by matching itself.
+    clean = res["leg_a_clock_split_clean_pct"]
+    contaminated = res["leg_a_clock_split_pct"]
+    # Every share each sentence publishes, pinned as a WHOLE rather than one field
+    # at a time. The two dicts must DIFFER (the contaminated row's dispatch charges
+    # the PR's earlier life; the clean one measures a CI-start latency), and
+    # pinning the full published set means a corruption of ANY share — a wrong
+    # denominator, or the clean numerator over the all-PR total — fails here,
+    # instead of only the single field a reviewer happened to name.
+    SHARES = ("prs", "authoring", "dispatch", "gate_ci")
+    assert {k: clean[k] for k in SHARES} == {
+        "prs": 1, "authoring": 0.0, "dispatch": 25.0, "gate_ci": 75.0,
+    }, clean
+    assert {k: contaminated[k] for k in SHARES} == {
+        "prs": 2, "authoring": 0.0, "dispatch": 63.2, "gate_ci": 36.8,
+    }, contaminated
+    assert clean["dispatch"] != contaminated["dispatch"], (clean, contaminated)
+    # The RENDERED sentences are a second published surface, INDEPENDENT of the
+    # dicts above: pinning res[...] does not constrain render(), and render() is
+    # what a reader actually sees. Pin each sentence WHOLE, so every share and
+    # every median it publishes fails here if any one of them is rewired to the
+    # other population's figure — the misattribution this change exists to kill.
+    assert clean_line == (
+        "  sub-split of (a) at FIRST COMMIT + FIRST CI START, over the 1 PRs whose "
+        "head was never force-pushed: authoring 0.0% | dispatch 25.0% | gate CI "
+        "75.0%  (median authoring=0.00h, dispatch=10.0min, gate CI=0.50h)"
+    ), clean_line
+    assert contaminated_line == (
+        "    of the 2 PRs where both boundaries exist, 1 are EXCLUDED from that "
+        "share: a force-pushed head cannot have had CI before it existed, so their "
+        "dispatch charges the PR's earlier life (all-PR share: authoring 0.0% | "
+        "dispatch 63.2% | gate CI 36.8%)"
+    ), contaminated_line
