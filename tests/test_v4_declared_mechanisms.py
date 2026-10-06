@@ -161,13 +161,15 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 )
                 continue
             # `is_file()`, not `exists()`: a DIRECTORY satisfied an exists-only
-            # check (cycle-3 P2). The probe is wrapped, because a component
-            # longer than NAME_MAX raises `OSError` — a crash is not a verdict
-            # (cycle-3 P2).
+            # check (cycle-3 P2). The probe is wrapped because a declared path
+            # the OS cannot probe must be a VERDICT, not a crash: NAME_MAX
+            # overflow raises `OSError`, an embedded NUL or a lone surrogate
+            # raises `ValueError`/`UnicodeEncodeError`, and a symlink loop
+            # raises `RuntimeError` (cycles 3 and 6).
             try:
                 resolved = (root / p).resolve()
                 present = resolved.is_file() and resolved.is_relative_to(root_resolved)
-            except OSError:
+            except (OSError, ValueError, RuntimeError):
                 present = False
             if not present:
                 out.append(f"{mid}: declared path does not exist: {rel}")
@@ -366,9 +368,14 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
 
 
 def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
-    """A path the OS cannot probe is a violation, not a crash (cycle-3 P2).
+    """A path the OS cannot probe is a violation, not a crash.
 
-    A component longer than NAME_MAX made `exists()` raise `OSError`.
+    Cycle-3 P2: a component longer than NAME_MAX made the probe raise
+    `OSError`. Cycle-6 P2: an embedded NUL or a lone surrogate raises
+    `ValueError`/`UnicodeEncodeError`. ⚠️ The hostile names are KIND-VALID, so
+    they actually REACH the probe — an over-long name with the wrong extension
+    is rejected by the kind check first, which left this test vacuous and the
+    `except` uncovered (cycle-6 P2).
     """
     base = {
         "id": "x",
@@ -378,12 +385,37 @@ def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
     }
-    for bad in (["x" * 5000], ["a/" + "x" * 5000]):
-        for field in ("declared_in", "code", "tests"):
+    hostile = {
+        "declared_in": ["x" * 4996 + ".md", "a\x00b.md", "\ud800.md"],
+        "code": ["x" * 4997 + ".py", "a\x00b.py", "\ud800.py"],
+        "tests": ["test_" + "x" * 4994 + ".py", "test_\x00x.py", "test_\ud800.py"],
+    }
+    for field, bads in hostile.items():
+        for bad in bads:
             row = dict(base)
-            row[field] = bad
+            row[field] = [bad]
             errors = gate_errors([row])  # must NOT raise
-            assert errors, (field, bad[:1])
+            assert errors, (field, bad[:12])
+
+
+def test_gate_fails_closed_on_a_symlink_loop(tmp_path) -> None:
+    """A symlink loop raises `RuntimeError` from `resolve()` — a verdict, not a crash."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("x\n")
+    (repo / "loop").symlink_to(repo / "loop")
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["loop/a.py"],
+        "tests": ["tests/test_x.py"],
+    }
+    errors = gate_errors([row], root=repo)  # must NOT raise
+    assert errors, errors
 
 
 def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
