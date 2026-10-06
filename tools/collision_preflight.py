@@ -422,8 +422,11 @@ STATUS_INCOMPLETE = "INCOMPLETE"
 # all (#3504 classes 2 and 5; decision D3).
 #
 # ⛔ Do not reintroduce a stoplist, an IDF threshold, or a similarity score here.
-# The computed surfaces that replace it are the claim registry (#5052) and file
-# overlap (agent-infra #1241) — state, not text over immutable history.
+# The computed surfaces that would replace it are a claim registry (#5052 —
+# OPEN, proposed, NOT yet built) and file overlap (agent-infra #1241) — state,
+# not text over immutable history. ⛔ Recorded as PROPOSED because that is what
+# it is: citing a ticket as an existing mechanism is how an ownerless promise
+# ends up in a comment (#7051).
 
 # Claim-shaped comments. This is a GATE, so BOTH failure directions are
 # defects: prose that must NOT force a COLLISION, and genuine claims that must
@@ -1926,9 +1929,14 @@ def _branch_terminal_state(
          and carries the head sha and `mergedAt`.
          ⚠ Coverage is the SAMPLED window, not all of merge history: that sample
          is bounded to `CLOSED_PR_LIMIT` (100) most recent closed PRs. A
-         squash-merge older than the window is simply NOT detected, and the
-         branch keeps blocking (fail-closed — the safe direction, but the doc
-         must not imply full coverage).
+         squash-merge older than the window is NOT detected HERE, and the branch
+         keeps blocking (fail-closed — the safe direction, but the doc must not
+         imply full coverage). ⛔ THE GAP IS CLOSED OUTSIDE THIS FUNCTION, for
+         exactly the refs where it bites: `_branch_terminal_state_from_prs` runs
+         a TARGETED head-ref lookup on the refs that would otherwise block, so a
+         squash-merge older than the sample no longer blocks forever (#5485,
+         measured on #6151). This function stays a pure predicate over data the
+         caller already holds.
       2. The tip is an ancestor of origin/main AND is NOT one of main's own
          first-parent commits — i.e. it entered main as a MERGE parent, which is
          the shape of an absorbed branch head. One `for-each-ref --merged` walk
@@ -1973,8 +1981,9 @@ def _branch_terminal_state(
          whose `origin/main` cannot be resolved, a branch that is FRESH at
          exactly a merged PR's head is read as landed. It needs the local
          `origin/main` to be absent or unreadable AND the branch to be sitting
-         on a merged head, and resolving it properly is the stage-1 registry's
-         job (D1) — not a third guess here.
+         on a merged head. NO MECHANISM OWNS THIS RESIDUAL TODAY — the registry
+         this comment used to defer it to does not exist — so this function
+         DECLINES it rather than guessing at it (#7051).
 
     ⛔ `main_tip` HAS NO DEFAULT, AND `None` MEANS "DO NOT APPLY PREDICATE 2".
     (`main_tip` and `first_parent` are resolved by separate git calls, so
@@ -1997,8 +2006,9 @@ def _branch_terminal_state(
     predicate 2 is the secondary, approximate one. Its remaining imprecision is
     stated rather than hidden: a branch whose tip entered main as a merge parent
     while its own work did NOT land is still read as terminal, and a fast-forward
-    landing and rebase residue are both missed. The durable fix for that residue
-    is the stage-1 registry (decision D1), not another guess here.
+    landing and rebase residue are both missed. No mechanism owns that residue
+    today — the registry these comments used to defer it to does not exist — so
+    this function declines it rather than guessing (#7051).
 
     BOTH apply to LOCAL branches only. A remote-tracking ref is a local CACHE of
     the last fetch, not the remote's state: a branch that was squash-merged and
@@ -2110,12 +2120,141 @@ def _branch_terminal_state(
     return None
 
 
+def _branch_terminal_state_from_prs(
+    gh_bin: str, slug: str | None, cwd: str, timeout: float,
+    branch: str, sha: str | None, main_tip: str | None,
+) -> str | None:
+    """The TARGETED terminal test for ONE local branch — the sampled window's fix.
+
+    #5485: every terminal test in this tool reads data ALREADY IN HAND, so a
+    squash-merge older than `CLOSED_PR_LIMIT` (100) is invisible and the branch
+    then blocks the issue it closed — permanently, with no dismissal path.
+    Measured 2026-10-06 on #6151: `refs/heads/fix/6134-6146-6151-graph-correctness`
+    (tip adcfedc42, 1 commit ahead of main, 0 worktrees, no open PR) blocked the
+    one item the priority stack labels UNHELD, because its PR #6156 merged on
+    2026-09-28 — far outside the sample.
+
+    This asks GitHub about THIS ref's PRs, over REST (`gh api`), for the same
+    reason the closed-PR surface is REST: the `gh pr list` GraphQL path resets on
+    this host (#3587). It demotes ONLY on the predicate decision D4 rests on — a
+    MERGED PR whose `head.sha` EQUALS this branch's tip:
+
+      * a branch name REUSED after its merge has moved past that sha and keeps
+        blocking (the merge is not evidence about the NEW commits),
+      * a CLOSED-unmerged PR is not a landing and keeps blocking,
+      * `sha == main_tip` refuses, for the reason predicate 1 needs the same
+        guard: a lane that has just created a worktree sits ON main's tip, and if
+        that tip is itself a merged PR's head (a fast-forward or empty-diff
+        landing) an unguarded test would call a branch with NO COMMITS OF ITS OWN
+        terminal — a live lane read as free, the dangerous direction.
+
+    Returns a human reason, or None when the ref must keep blocking. EVERY
+    failure (no slug, no resolvable tip, gh error, non-list payload) returns
+    None: the caller's default is BLOCKING, so an unanswerable question is never
+    a demotion.
+    """
+    if not slug or not sha:
+        return None
+    if sha == main_tip:
+        return None
+    owner = slug.split("/")[0]
+    args = [
+        "api",
+        f"repos/{slug}/pulls?state=all&head={owner}:{branch}&per_page=20",
+        "--jq",
+        'map({number, state, headSha: (.head.sha // ""), '
+        'mergedAt: (.merged_at // "")})',
+    ]
+    try:
+        prs = _gh_json(gh_bin, args, cwd, timeout)
+    except SurfaceError:
+        return None
+    if not isinstance(prs, list):
+        return None
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        # MERGED only: `_pr_terminal_state` also names a closed-unmerged PR
+        # "closed", and an abandoned PR is not a landing.
+        if _pr_terminal_state(pr) != "merged":
+            continue
+        head_sha = str(pr.get("headSha") or "")
+        if head_sha == sha:
+            return (
+                f"its tip {sha[:9]} is the head of the MERGED PR #{pr.get('number')} "
+                f"(targeted head-ref lookup, outside the {CLOSED_PR_LIMIT}-PR sample)"
+            )
+        # ⛔ THE TIP-DIVERGENCE ARM — #5485's unsolved half, and the reason the
+        # exact test above does NOT close this issue on its own. A MERGED PR's
+        # head is frequently NOT the branch tip: it picks up a merge of main or
+        # an amend before landing. Measured on #6156: its head is a merge commit
+        # (a749c662d) and the LOCAL tip (adcfedc42) is its ANCESTOR — so equality
+        # refuses a branch whose work demonstrably landed, which is exactly the
+        # "blocks forever" half.
+        #
+        # The sound closure is CONTAINMENT, not equality: if the branch's tip is
+        # an ancestor of the merged PR's head, every commit the branch owns is
+        # inside the PR that landed. ⛔ NOT a patch-id (D1 forbids it for exactly
+        # this test: `--stable` and `--unstable` both ignore whitespace, so a
+        # match can call a branch merged when its content differs — a
+        # FALSE-ACCEPT). A branch REUSED after its merge has moved PAST that
+        # head, so `behind` stops holding and it keeps blocking: the safe
+        # direction is preserved by the predicate's own shape.
+        if not head_sha:
+            continue
+        if not _tip_is_ancestor_of(gh_bin, slug, cwd, timeout, sha, head_sha):
+            continue
+        return (
+            f"its tip {sha[:9]} is contained in the MERGED PR #{pr.get('number')} "
+            f"(head {head_sha[:9]}; targeted lookup + compare, outside the "
+            f"{CLOSED_PR_LIMIT}-PR sample)"
+        )
+    return None
+
+
+def _tip_is_ancestor_of(
+    gh_bin: str, slug: str, cwd: str, timeout: float, tip: str, head_sha: str,
+) -> bool:
+    """True when `tip` is an ancestor of `head_sha`, per GitHub's compare API.
+
+    ⛔ THE STATUS POLARITY IS THE TRAP, and it was read backwards on the first
+    write-up: for `compare/{base}...{head}`, `status` describes the HEAD relative
+    to the BASE, so when the base (`tip`) is an ancestor of the head (`head_sha`)
+    GitHub returns **`ahead`** (head is ahead of base), NOT `behind`. Verified on
+    the #6156 case: `compare/adcfedc42...a749c662d` -> `{ahead: 4, behind: 0,
+    status: "ahead"}`. Reading it the other way made every containment fail and
+    the arm silently inert — a demotion predicate that never fires is the same
+    class of defect as one that fires wrongly, and it looks like a pass.
+
+    Asked of GITHUB rather than computed locally because a merged PR's head
+    object is usually absent from the local clone (after a squash merge it is
+    not an ancestor of main), and fetching it would be a second transport for a
+    fact one REST call answers exactly. Any failure — non-2xx, a missing or odd
+    `status`, a non-dict payload — returns False, so an unanswerable question
+    keeps the ref BLOCKING.
+    """
+    args = [
+        "api",
+        f"repos/{slug}/compare/{tip}...{head_sha}",
+        "--jq",
+        "{status: .status}",
+    ]
+    try:
+        payload = _gh_json(gh_bin, args, cwd, timeout)
+    except SurfaceError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("status") or "").strip().lower() in ("ahead", "identical")
+
+
 def scan_branch_surface(
     surface: Surface, refs: list[tuple[str, str]], issue: int,
     identity: Identity, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
     remote_namespaces: set[str] | None = None,
+    targeted_terminal: dict[str, str] | None = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -2125,6 +2264,10 @@ def scan_branch_surface(
 
       1. **self** — the ref is the caller's OWN branch (#3504 class 4)
       2. **terminal** — its content already landed (#5186)
+      2b. **terminal, targeted** — a MERGED PR whose head is this ref's tip, found
+          outside the closed-PR sample (#5485); supplied by the caller, which has
+          the gh binary and the resolved slug, and never demoted on a
+          non-exact match
       3. otherwise **blocking** — a live lane that names this issue
 
     A self or terminal ref is reported (never silent) at `weak` strength, which
@@ -2155,6 +2298,18 @@ def scan_branch_surface(
                 ref,
                 f"branch is {terminal} — immutable history, not in-flight work "
                 "(non-blocking)",
+                "weak",
+            )
+            continue
+        # #5485: the tests above cannot see a squash-merge older than the closed-PR
+        # sample. The caller looked THAT up for exactly the refs reaching here, and
+        # a reason exists only for an EXACT tip/hold-sha match on a merged PR.
+        targeted = (targeted_terminal or {}).get(ref)
+        if targeted is not None:
+            surface.add(
+                ref,
+                f"branch is terminal — {targeted}; immutable history, not "
+                "in-flight work (non-blocking)",
                 "weak",
             )
             continue
@@ -3583,10 +3738,40 @@ def run_preflight(
                 ancestor_merged_local = ancestor_merged
             else:
                 ancestor_merged = None
+            # #5485: the terminal tests above all read data already in hand, so a
+            # squash-merge older than the sample is invisible and its branch blocks
+            # forever. Ask GitHub about the LOCAL refs that will actually block —
+            # bounded by the issue-number match, so this is normally 0-2 calls. Any
+            # failure leaves the ref BLOCKING (never a demotion) and is counted so
+            # the note can report the inability rather than pass strictness off as
+            # a measurement.
+            targeted_terminal: dict[str, str] = {}
+            targeted_failures = 0
+            if namespace == "refs/heads":
+                for _ref, _sha in refs:
+                    if _is_generated_branch(_ref) or not number_present(_ref, issue):
+                        continue
+                    if identity.owns_branch(_ref):
+                        continue
+                    if _branch_terminal_state(
+                        _ref, _sha, merged_head_shas, ancestor_merged, main_tip,
+                        first_parent,
+                    ) is not None:
+                        continue
+                    try:
+                        _reason = _branch_terminal_state_from_prs(
+                            gh_bin, slug, cwd, timeout, _ref, _sha, main_tip,
+                        )
+                    except SurfaceError:
+                        targeted_failures += 1
+                        continue
+                    if _reason is not None:
+                        targeted_terminal[_ref] = _reason
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
                 remote_namespaces=remote_namespaces,
+                targeted_terminal=targeted_terminal,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -3614,6 +3799,12 @@ def run_preflight(
             else:
                 surface.note += (
                     f"; {len(ancestor_merged)} already merged into main"
+                )
+            if namespace == "refs/heads" and targeted_failures:
+                surface.note += (
+                    "; ⚠ the targeted head-ref lookup could not run for "
+                    f"{targeted_failures} ref(s) — those refs keep blocking "
+                    "(fail-closed)"
                 )
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")

@@ -4637,5 +4637,109 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("COLLISION-uncertain", out)
 
 
+class BranchTerminalLookupTests(unittest.TestCase):
+    """#5485: the TARGETED terminal lookup, and the two arms that close the gap.
+
+    Why it exists: every terminal test in the tool read data already in hand, so
+    a squash-merge older than `CLOSED_PR_LIMIT` (100) was invisible — and
+    `refs/heads/fix/6134-6146-6151-graph-correctness` therefore blocked #6151
+    permanently, because its PR #6156 merged 2026-09-28 (measured 2026-10-06).
+    The branch had 1 commit ahead of main, 0 worktrees, no open PR, and no
+    assignee: it was the one row the priority stack labels UNHELD, held by
+    nothing but a stale ref.
+    """
+
+    SHA = "adcfedc4221329a0f5ae9079248b3b0261134a73"
+    PR_HEAD = "a749c662d075a5dc0c96560b21b784578e5c1d63"
+    MAIN_TIP = "b9c1a1323000000000000000000000000000000000"
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "collision_preflight.py"
+        spec = importlib.util.spec_from_file_location("cp_under_test", path)
+        cls.mod = importlib.util.module_from_spec(spec)
+        sys.modules["cp_under_test"] = cls.mod
+        spec.loader.exec_module(cls.mod)
+
+    def _call(self, prs, status="ahead", sha=None, main_tip=None, raises=False):
+        """Drive the real function with `_gh_json` stubbed at the boundary."""
+        def fake(_gh, args, _cwd, _timeout):
+            if raises:
+                raise self.mod.SurfaceError("gh failed")
+            if any("compare" in a for a in args):
+                return {"status": status}
+            return prs
+
+        with mock.patch.object(self.mod, "_gh_json", side_effect=fake):
+            return self.mod._branch_terminal_state_from_prs(
+                "gh", "daniel-ospina/tortoise", ".", 30.0,
+                "fix/6134-6146-6151-graph-correctness",
+                self.SHA if sha is None else sha,
+                self.MAIN_TIP if main_tip is None else main_tip,
+            )
+
+    def _merged_pr(self, head_sha):
+        return [{"number": 6156, "state": "closed", "headSha": head_sha,
+                 "mergedAt": "2026-09-29T00:03:52Z"}]
+
+    def test_exact_tip_match_demotes(self):
+        # Predicate 1, carried past the sample's edge.
+        reason = self._call(self._merged_pr(self.SHA))
+        self.assertIsNotNone(reason, "an exact head match must demote")
+        self.assertIn("#6156", reason)
+
+    def test_containment_demotes_when_the_pr_head_is_not_the_tip(self):
+        # ⛔ THE CASE #6151 ACTUALLY HIT, and the reason equality alone does not
+        # close #5485's half: a merged PR's head is often a MERGE COMMIT (main
+        # merged into the branch) or an amend, so the local tip is its ANCESTOR.
+        # Equality refuses it; containment is what proves the work landed.
+        reason = self._call(self._merged_pr(self.PR_HEAD))
+        self.assertIsNotNone(reason, "a contained tip must demote")
+        self.assertIn("contained in the MERGED PR #6156", reason)
+
+    def test_compare_polarity_is_ahead_not_behind(self):
+        # ⛔ THE TRAP THAT MADE THE FIRST IMPLEMENTATION SILENTLY INERT: for
+        # `compare/{base}...{head}` the status describes the HEAD relative to the
+        # BASE, so `tip` being an ancestor of `head_sha` is reported as AHEAD.
+        # Reading it as `behind` meant every containment failed, the arm never
+        # fired, and the run looked like a pass (#6151 still returned COLLISION).
+        for status in ("behind", "diverged"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    self._call(self._merged_pr(self.PR_HEAD), status=status),
+                    f"status={status} is NOT containment and must keep blocking",
+                )
+        self.assertIsNotNone(
+            self._call(self._merged_pr(self.PR_HEAD), status="ahead")
+        )
+
+    def test_fresh_branch_sitting_on_a_merged_head_never_demotes(self):
+        # The fail-OPEN this test exists to prevent: a lane that has just created
+        # its worktree sits on main's tip, and if that tip is itself a merged
+        # PR's head (fast-forward or empty-diff landing) an unguarded arm would
+        # call a branch with NO COMMITS OF ITS OWN terminal — a live lane read as
+        # free, which is the dangerous direction for every demotion here.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), sha=self.SHA, main_tip=self.SHA),
+            "tip == main's tip must never demote",
+        )
+
+    def test_closed_unmerged_pr_does_not_demote(self):
+        # An abandoned PR is not a landing. `_pr_terminal_state` names it
+        # "closed"; only "merged" may demote.
+        prs = [{"number": 6156, "state": "closed", "headSha": self.SHA,
+                "mergedAt": ""}]
+        self.assertIsNone(self._call(prs))
+
+    def test_missing_head_sha_does_not_crash_and_does_not_demote(self):
+        self.assertIsNone(self._call(self._merged_pr("")))
+
+    def test_gh_failure_keeps_the_ref_blocking(self):
+        # The fail-closed default: the caller keeps the ref BLOCKING, so an
+        # unanswerable question must never become a demotion.
+        self.assertIsNone(self._call(self._merged_pr(self.SHA), raises=True))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
