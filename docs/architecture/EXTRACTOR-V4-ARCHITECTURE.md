@@ -949,7 +949,17 @@ At answer time the rule is recency-precedence (*"the fact with the LATEST `menti
 | **No event node in provenance** | ✅ **confirms D2's rule** — the anchor is always a document/utterance. |
 
 ### ⛔ REFUSED — contradicts a recorded decision ⇒ a REOPEN, not an adoption
-The contention + confidence model **is a recorded decision** (`ONTOLOGY.md` §3.1 *"evaluations … are Statements (Points) with EP confidence — not edges"*; the operator layer; `#1509` §2.4 ontology-first). **Hindsight's practice contradicts it, so it cannot be adopted — but it must go in front of the owner as a reopen, with these five challenges stated plainly:**
+
+The contention + confidence model **is a recorded decision** (`ONTOLOGY.md` §3.1 *"evaluations … are Statements (Points) with EP confidence — not edges"*; the operator layer; `#1509` §2.4 ontology-first). **Hindsight's practice contradicts it, so it cannot be adopted.**
+
+> ### ✅ REOPEN CLOSED — the owner ruled on 2026-10-06 (`#2730`): we KEEP EP confidence; `proof_count` and `Trend` are NOT adopted.
+>
+> **OVERRIDES:** the memory-system default is **no per-claim confidence** — GraphRAG **erases** (consolidation), Graphiti/Zep **replaces** (`invalid_at`), Mem0 **accumulates** with no relation at all, and Hindsight **built `opinion`+confidence and deleted it** (migration 2026-04-02), keeping only derived aggregates. **We deliberately keep per-claim confidence** as a Statement (Point) with EP confidence **propagated over a typed operator graph**, because a derived aggregate has **nowhere to put an attack**: `proof_count` can record *"ten independent sources mention this"* but cannot represent *"and it was contradicted by a stronger argument"*. Hindsight's edge constraint is seven types — `temporal, semantic, entity, causes, caused_by, enables, prevents` — **none adversarial**; its `contradict` verdict was never persisted as an edge.
+>
+> **The five challenges below are therefore HISTORY, not an open invitation — do not re-open this by re-reading them.**
+> ⚠️ **Two different claims, and only one is established.** (1) **The representational difference is a FACT**: Hindsight *structurally cannot* store an adversarial relation (that is its schema constraint), we can and do (typed `IMPL`/`NAND`), so *"can it represent a contention at all"* is settled **by construction**. (2) **The outcome difference is UNMEASURED**: that propagation over a typed graph produces *better answers* than scalar drift remains **argument, not measurement**. **Nothing here may be read as *"we proved propagation beats scalar drift."*** Challenges **1** (they built it and deleted it) and **4** (justify the cost on audit, adjudication, or propagation) still want a **measurement**; the ruling closes the **direction**, not the **measurement**. Challenge **5** is **REFUSED**: `proof_count`/`Trend` measure corroboration by **independent mentions**; EP confidence measures whether a claim **survives its attackers** — different questions, not a cheaper version of ours (and neither field exists in this repo).
+
+The five challenges that were put to the owner, kept for the record:
 
 1. **⭐ They built `opinion`+confidence and deleted it in ~4 months.** If we cannot say what we do *differently* from `Assess(o,f) → c ± α`, then "per-claim scalar confidence updated by LLM evidence-assessment" is a **demonstrated dead end**, not a novel design.
    **→ Our answer:** theirs is **evidence-driven scalar drift** — each new fact independently bumps each opinion it resembles, with **no support graph to traverse**. Ours is **propagation over a typed factor graph.** Different mechanisms. **But the difference is currently argued, not measured.**
