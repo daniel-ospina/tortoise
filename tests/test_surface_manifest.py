@@ -2096,3 +2096,46 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
         "numerator or denominator would contradict the measurement at any other count"
     )
     assert "Two thirds" not in text, "the magnitude must be derived, not asserted"
+
+
+def test_the_render_does_not_claim_a_client_cap_binds_a_smaller_surface(tmp_path, monkeypatch):
+    """The cap clause is arithmetic over the advertised set, so it needs a set bigger than the cap.
+
+    "a client that caps there sees at most 40 of these {N}" is false for any surface the cap does
+    not bind — and "40 of these 10" is arithmetic over a population with no 40 in it. That is the
+    direction this document itself argues for (it proposes shrinking the advertised set), so the
+    small case is on the intended path. Both sides of the threshold are rendered here.
+    """
+    sm = _load_manifest_tool()
+    base = _manifest()
+    tool_idx = [
+        i for i, r in enumerate(base["rows"]) if not str(r.get("name", "")).startswith("sdk:")
+    ]
+    assert len(tool_idx) > 41, "the fixture needs a surface on both sides of the cap"
+
+    for n in (10, 41):
+        doc = copy.deepcopy(base)
+        keep = set(tool_idx[:n])
+        doc["rows"] = [
+            r for i, r in enumerate(doc["rows"])
+            if i in keep or str(r.get("name", "")).startswith("sdk:")
+        ]
+        assert len([r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]) == n
+
+        text = _render_manifest(sm, doc, tmp_path, monkeypatch)
+
+        assert "the other -" not in text and "of these 0" not in text, (
+            f"a {n}-tool surface rendered a negative or empty remainder"
+        )
+        if n > 40:
+            assert f"sees at most 40 of these {n}" in text, (
+                "a surface larger than the cap must say the cap hides part of it"
+            )
+        else:
+            assert "at most 40 of these" not in text, (
+                "the cap cannot hide part of a surface it fits, and '40 of these 10' is "
+                "arithmetic over a population that has no 40 in it"
+            )
+            assert "a cap the whole surface fits inside" in text, (
+                "the small surface must say the cap does not bind"
+            )
