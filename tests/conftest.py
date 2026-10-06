@@ -359,6 +359,37 @@ def _fresh_capture_spool():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _capture_consent_default_on(monkeypatch):
+    """#4276: make the capture consent opt-in INHERITED, not repeated per test.
+
+    #3615 made hosted capture explicit and opt-in (``TORTOISE_CAPTURE``,
+    **product default OFF**) — that decision is untouched. This is a
+    TEST-SUITE default only: a real user's environment never sets the
+    variable, so ``capture_consent_enabled()`` still declines for them.
+
+    Without it, every test that drives a transmitting path (``session
+    capture`` / ``sessions import`` / ``session drain``) must opt in itself,
+    and each new such test written against the pre-#3615 "the credential
+    implies consent" model re-breaks the suite (#4276, first row:
+    ``tests/test_session_verify.py``).
+
+    The NEGATIVE tests declare their exception EXPLICITLY with
+    ``monkeypatch.delenv`` — the decline/parity matrix in
+    ``test_capture_consent.py``, ``test_session_capture_e2e.py`` and
+    ``test_cli_global_config.py`` — so a gate that fails OPEN on the unset
+    variable still turns them RED. That discrimination is mutation-verified
+    in #4276 (fail-open gate ⇒ 13 decline tests red).
+
+    Function-scoped and ``monkeypatch``-based, so the grant cannot leak past
+    the test that used it.
+    """
+    from tortoise.capture_consent import CAPTURE_OPT_IN_ENV
+
+    monkeypatch.setenv(CAPTURE_OPT_IN_ENV, "1")
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _serialize_embedded_construction():
     """#3546: install ONE process-wide embedded construction lock, once.
