@@ -151,6 +151,14 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 out.append(f"{mid}: {field} entry is not a non-empty string: {rel!r}")
                 continue
             p = Path(rel)
+            # ⚠️ `not p.parts` (and the `not rel` above) are BELT-AND-BRACES, the
+            # one documented exception to this file's "a guard must be seen to
+            # fail" rule (cycle-10 P2-4): an empty or dot basename is also
+            # rejected by the per-field kind rule (`Path("").suffix == ""` is no
+            # valid doc/code/test name), so neither operand can be the DECIDING
+            # check in any test. They are kept because the kind rules are the
+            # part most likely to change, and a future kind that accepted a bare
+            # name must still not admit `""` or `"."` as an artifact.
             if p.is_absolute() or ".." in p.parts or not p.parts:
                 out.append(
                     f"{mid}: {field} path must be a repo-relative path inside "
@@ -472,8 +480,18 @@ def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
     """A dict `code`/`declared_in` iterates its KEYS — it must be rejected.
 
     `{config/v4-mechanisms.yml: 1}` passed silently before cycle 2 (P1).
+
+    ⚠️ The mapping key is KIND-VALID per field (cycle-10 P2-1): a kind-invalid
+    key is rejected by `_kind_violation` before the container type is ever the
+    deciding guard, and `assert errors` cannot tell the two apart — dropping the
+    `isinstance(..., list)` check survived the suite while
+    `code: {"tortoise/fanout.py": 1}` passed.
     """
-    for field in ("declared_in", "code", "tests"):
+    for field, key in (
+        ("declared_in", "config/v4-mechanisms.yml"),
+        ("code", "tortoise/fanout.py"),
+        ("tests", "tests/test_fanout_cap.py"),
+    ):
         row = {
             "id": "x",
             "name": "x",
@@ -482,9 +500,52 @@ def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
             "code": ["tortoise/fanout.py"],
             "tests": ["tests/test_fanout_cap.py"],
         }
-        row[field] = {"config/v4-mechanisms.yml": 1}
+        row[field] = {key: 1}
         errors = gate_errors([row])
         assert errors, (field, "the gate PASSED a mapping as a path list")
+
+
+def test_gate_fails_closed_on_a_non_py_test_prefixed_name(tmp_path) -> None:
+    """`test_*.py` requires the `.py` SUFFIX too (cycle-10 P2-2).
+
+    Every non-test case lacked the `test_` prefix, so the `and name.endswith(
+    ".py")` operand was never the deciding check — dropping it let an existing
+    `tests/test_notes.txt` satisfy "has a test".
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "impl.py").write_text("x = 1\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_notes.txt").write_text("x\n")
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["src/impl.py"],
+        "tests": ["tests/test_notes.txt"],
+    }
+    errors = gate_errors([row], root=repo)
+    assert any("not a test file" in e for e in errors), errors
+
+
+def test_gate_accepts_the_yaml_document_suffix() -> None:
+    """`.yml` is a legitimate declaring document, not only `.md` (cycle-10 P2-3).
+
+    No test accepted a `.yml` `declared_in`, so removing that tuple member
+    survived while the registry itself declares `packs/dev/manifest.yaml`.
+    """
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "code": ["tortoise/fanout.py"],
+        "tests": ["tests/test_fanout_cap.py"],
+    }
+    assert gate_errors([row]) == []
 
 
 def test_gate_fails_closed_on_a_non_test_file_in_the_tests_field() -> None:
@@ -549,8 +610,13 @@ def test_gate_fails_closed_on_a_non_source_code_file() -> None:
 
 
 def test_gate_fails_closed_on_a_non_document_declared_in() -> None:
-    """`declared_in:` must name a DOCUMENT, not any file that exists."""
-    for bad in (["tortoise/fanout.py"], ["tests/test_fanout_cap.py"], ["README"]):
+    """`declared_in:` must name a DOCUMENT, not any file that exists.
+
+    ⚠️ `notes.txt` is included because the tuple's PERMISSIVE direction was
+    unpinned (cycle-10 P2-3): every rejection case had no suffix or a `.py` one,
+    so adding `.txt`/`.rst` to the accepted tuple survived the suite.
+    """
+    for bad in (["tortoise/fanout.py"], ["tests/test_fanout_cap.py"], ["README"], ["notes.txt"], ["NOTES.rst"]):
         row = {
             "id": "x",
             "name": "x",
@@ -701,6 +767,7 @@ def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
         "declared_in missing": ([{**good, "declared_in": []}], "no declaring document"),
         "declared_in not a list": ([{**good, "declared_in": "x"}], "no declaring document"),
         "code missing": ([{**good, "code": []}], "no code path"),
+        "tests missing": ([{**good, "tests": []}], "declares no test"),
         "code not a list": ([{**good, "code": {}}], "no code path"),
         "empty registry": ([], None),
     }
