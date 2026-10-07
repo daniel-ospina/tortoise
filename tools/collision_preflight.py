@@ -224,11 +224,13 @@ Exit codes
                     surface never decides it, however it is shaped
     2  INCOMPLETE   NOT clean, and NOT a collision. MULTIPLE CAUSES, and a
                     caller must distinguish them because the remedies differ:
-                    (a) >= 1 BLOCKING surface could not be queried. A surface that
-                        can never produce a blocking hit is EXEMPT and its failure
-                        is only REPORTED: it has no ability to prevent a
-                        duplicate, so its failure cannot conceal one (#5251).
-                        Rendered as a report ending in `VERDICT: INCOMPLETE`.
+                    (a) >= 1 BLOCKING surface could not be queried, or was
+                        TRUNCATED at its completeness cap (its remedy is to raise
+                        `--pr-limit`, not to fix gh auth). A surface that can never
+                        produce a blocking hit is EXEMPT and its failure is only
+                        REPORTED: it has no ability to prevent a duplicate, so its
+                        failure cannot conceal one (#5251). Rendered as a report
+                        ending in `VERDICT: INCOMPLETE`.
                     (b) the queried NUMBER is not a work item: it is an OPEN PULL
                         REQUEST (#7009). Raised by `NotAWorkItem` BEFORE any
                         verdict is computed, so this cause prints NO report and
@@ -242,9 +244,7 @@ Exit codes
                         Verdict-less in exactly the same way as (b) — stderr only,
                         no report — so a caller inferring "no VERDICT line means it
                         is the open-PR refusal" MISROUTES this one. Remedy: pass
-                        `--repo owner/name`. (Added after a review found the count
-                        here said "TWO", making the table itself a false claim of
-                        exactly the kind this function exists to prevent.)
+                        `--repo owner/name`.
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)

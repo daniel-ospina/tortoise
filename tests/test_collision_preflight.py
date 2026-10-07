@@ -795,8 +795,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # broken surface ("fix gh auth/network") instead of "re-run with the
         # issue number". The two causes must stay distinguishable.
         self.assertNotIn("VERDICT", out)
-        # Anti-vacuity: the refusal must be about THIS number, not a blanket
-        # refusal to run — the run reached the surfaces and named the object.
+        # The refusal names the number it refused. This does NOT distinguish a
+        # targeted refusal from a blanket one — the number is in the message by
+        # construction, as is "is an OPEN PULL REQUEST". What it does catch is a
+        # regression that drops the number from the message.
         self.assertIn("#3061", out)
 
     def test_open_pr_own_number_REFUSES_even_when_its_branch_is_the_callers(self):
@@ -834,7 +836,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # No `VERDICT` line at all — see the sibling test for why "not CLEAN"
         # is too weak a pin (it would let `VERDICT: INCOMPLETE` through).
         self.assertNotIn("VERDICT", out)
-        # Anti-vacuity: it must still name the object, not blanket-refuse.
+        # Names the object it refused — see the sibling test for what this
+        # assertion does and does not prove.
         self.assertIn("#3061", out)
 
     def test_open_pr_own_number_with_UNREADABLE_closing_field_still_refuses(self):
