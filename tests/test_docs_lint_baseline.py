@@ -1243,6 +1243,15 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     digests pin the CONTENTS, so append, delete and swap all require a digest
     raised in the same change — the only thing that makes "a new entry is a new
     failure" true for the deterministic half and the remote-varying one alike.
+
+    The pinned linter POLICY is held to the same standard, for the same reason.
+    The runtime guard (`_require_unchanged_linter_policy`) compares the snapshot's
+    `linter_config` map against the checkout — but that map is itself part of the
+    PR's own diff, so a change that turns a rule OFF (or adds a `.markdownlint*`
+    config, or a `[tool.lychee]` section) and rewrites the map to match would pass
+    the guard while the linter reported FEWER findings, and the differ would then
+    call the change clean. Pinning the map's digest forces that edit out loud,
+    exactly as the two list digests force an append, a delete or a swap out loud.
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
@@ -1251,6 +1260,14 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     assert _canonical_digest(baseline["lychee"]) == (
         "568e42acb1a73bc4ff3b68a1cecf58b4233d9f8f3ebd68279f7c3e59cece8493"
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
+    assert hashlib.sha256(
+        json.dumps(baseline["linter_config"], sort_keys=True).encode("utf-8")
+    ).hexdigest() == "6f63d7c4437ca88c69184fcde2d53d38beb649c64eadd21edad0b02887cce658", (
+        "the pinned linter-policy map changed — turning a rule off in any "
+        ".markdownlint* config (or adding one, or adding a [tool.lychee] section) "
+        "suppresses the very findings the required `docs` check exists to catch, so "
+        "the edit must raise this digest in the same change"
+    )
 
 
 def test_every_mapped_generator_exists_and_its_doc_is_tracked():

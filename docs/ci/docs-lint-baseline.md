@@ -134,8 +134,10 @@ so those sections are digested too — only the section, never the whole file,
 because a dependency bump is not a policy change, while a *missing* section is a
 fixed marker, so adding one still fails closed. The whole map is **required**:
 `check` fails closed if the field is absent, because a snapshot that simply
-omitted it would disable this check. A policy change must be made together with a
-re-baseline (`update`) that says why. Separately, both `docs` paths reject a
+omitted it would disable this check. A policy change therefore cannot be made
+without moving this snapshot, and the map's digest is pinned by
+`tests/test_docs_lint_baseline.py`, so the edit is always visible in the diff and
+must be made out loud, with the reason. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
 debt and is unaffected; that guard greps the added-markdown diff read from a
