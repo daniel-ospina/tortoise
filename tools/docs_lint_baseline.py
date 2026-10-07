@@ -146,12 +146,30 @@ MARKDOWNLINT_PIN = "markdownlint-cli2@0.23.3"
 MARKDOWNLINT_VERSION = "markdownlint-cli2@0.23.3 / markdownlint 0.41.1"
 LYCHEE_PIN = "0.24.2"
 
-# The linter POLICY files, whose content digest is part of the snapshot's
-# identity. A rule turned off in `.markdownlint-cli2.jsonc`, or a path ignored in
-# `.lycheeignore`, makes the linter report FEWER findings — which the differ
-# reads as "nothing new", passing the required check with new debt. The check
-# refuses when these differ from what the snapshot recorded.
-LINTER_CONFIG_FILES = (".markdownlint-cli2.jsonc", ".lycheeignore", "lychee.toml")
+# The linter POLICY file BASENAMES, at any depth. cli2 reads its
+# `.markdownlint*` config from ANY directory on the path to a linted file and a
+# more specific config OVERRIDES the repo one, so pinning only the root file
+# left a same-PR `docs/.markdownlint-cli2.jsonc` (or a root `.markdownlint.json`)
+# free to turn a rule off. A path ignored in `.lycheeignore`/`lychee.toml` has the
+# same effect on the link half. Every TRACKED file with one of these basenames is
+# digested, so ADDING one is a policy change too.
+LINTER_CONFIG_NAMES = frozenset({
+    ".markdownlint-cli2.jsonc",
+    ".markdownlint-cli2.yaml",
+    ".markdownlint-cli2.yml",
+    ".markdownlint-cli2.cjs",
+    ".markdownlint-cli2.mjs",
+    ".markdownlint.jsonc",
+    ".markdownlint.json",
+    ".markdownlint.yaml",
+    ".markdownlint.yml",
+    ".markdownlint.cjs",
+    ".markdownlint.mjs",
+    ".markdownlintrc",
+    ".markdownlintignore",
+    ".lycheeignore",
+    "lychee.toml",
+})
 
 BASELINE_SCHEMA = 1
 DEFAULT_BASELINE = "config/docs-lint-baseline.json"
@@ -349,15 +367,28 @@ def generated_target(path: str, repo_root: Path) -> str | None:
 # ── fail-closed loading of the linters' output ───────────────────────────────
 
 
-def _config_digest(repo_root: Path) -> dict[str, str | None]:
-    """Content digest of each linter POLICY file, or None when it is absent."""
-    return {
-        name: (
-            hashlib.sha256((repo_root / name).read_bytes()).hexdigest()
-            if (repo_root / name).is_file()
-            else None
+def _config_digest(repo_root: Path) -> dict[str, str]:
+    """Content digest of EVERY tracked linter-policy file, keyed by repo path.
+
+    Tracked, not merely on-disk: CI checks out the PR commit, so a policy file
+    the PR adds is exactly what must change this map — and an added file is a
+    key that was not recorded, so it fails closed. A non-repo root (a test
+    fixture) has no policy files.
+    """
+    if not (repo_root / ".git").exists():
+        return {}
+    proc = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=repo_root, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise FailClosed(
+            f"`git ls-files` failed in {repo_root} (rc {proc.returncode}) — the linter "
+            "policy cannot be attested, so the snapshot cannot be validated"
         )
-        for name in LINTER_CONFIG_FILES
+    return {
+        rel: hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
+        for rel in proc.stdout.split("\0")
+        if rel and Path(rel).name in LINTER_CONFIG_NAMES and (repo_root / rel).is_file()
     }
 
 
@@ -365,15 +396,19 @@ def _require_unchanged_linter_policy(baseline: dict, repo_root: Path) -> None:
     """Refuse a diff computed under a DIFFERENT linter policy than the snapshot's.
 
     The differ compares findings, so the policy that produced them is part of the
-    comparison's validity: a same-PR edit to `.markdownlint-cli2.jsonc` (turn a
-    rule off), `.lycheeignore` or `lychee.toml` (ignore a path) suppresses the
-    finding instead of fixing it, and the differ then reports `0 new`. Pinning
-    the policy makes that edit fail closed until the snapshot is regenerated to
-    match it. A baseline without the field (pre-policy schema) is unaffected.
+    comparison's validity: a same-PR edit to any `.markdownlint*` config (turn a
+    rule off), or to `.lycheeignore`/`lychee.toml` (ignore a path), suppresses the
+    finding instead of fixing it, and the differ then reports `0 new`. Pinning the
+    policy makes that edit fail closed until the snapshot is regenerated to match
+    it. The field is REQUIRED: a baseline that simply omits `linter_config` would
+    otherwise disable this whole check.
     """
     recorded = baseline.get("linter_config")
     if not isinstance(recorded, dict):
-        return
+        raise FailClosed(
+            "the baseline carries no linter_config map, so the linter policy it was "
+            "generated under cannot be attested — regenerate it with `update`"
+        )
     current = _config_digest(repo_root)
     if current == recorded:
         return

@@ -100,15 +100,24 @@ markdown file is affected today.
 
 ## The linter policy is part of the snapshot
 
-A rule turned off in `.markdownlint-cli2.jsonc`, or a path ignored in
+A rule turned off in **any** `.markdownlint*` config, or a path ignored in
 `.lycheeignore`/`lychee.toml`, makes the linter report **fewer** findings — which
-the differ reads as "nothing new", passing the required check with new debt. The
-snapshot therefore records a content digest of each linter policy file, and
-`check` fails closed when they differ: a policy change must be made together with
-a re-baseline (`update`) that says why. Separately, both `docs` paths reject a
+the differ reads as "nothing new", passing the required check with new debt.
+`markdownlint-cli2` reads that config family from *any* directory on the path to a
+linted file, and a more specific config **overrides** the repo one, so pinning
+only the root file would leave a same-PR `docs/.markdownlint-cli2.jsonc` free to
+turn a rule off. The snapshot therefore records a content digest of **every
+tracked file with one of those basenames, at any depth**, keyed by repo path — so
+*adding* a config is a policy change too. The field is **required**: `check`
+fails closed if it is absent, because a snapshot that simply omitted it would
+disable this whole check. A policy change must be made together with a
+re-baseline (`update`) that says why. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
-debt and is unaffected.
+debt and is unaffected; that guard greps the added-markdown diff read from a
+**file**, never a pipe, because `grep -q` exits at its first match and the
+resulting SIGPIPE under `set -o pipefail` made the pipeline non-zero — silently
+skipping the guard on a large diff.
 
 ## Regenerating it
 

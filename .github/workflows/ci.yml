@@ -739,10 +739,21 @@ jobs:
           # very findings this check exists to catch: cli2 reports 0 issues, the
           # differ sees 0 new, and a suppressed new finding passes. A PRE-EXISTING
           # directive is part of the baselined debt; only an ADDED one is rejected.
-          # (A same-PR rule change in .markdownlint-cli2.jsonc or .lycheeignore is
-          # caught by the snapshot's own linter-policy digest.)
-          if git diff --no-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
-              | grep -qE '^\+.*markdownlint-(disable|disable-line|disable-next-line|configure-file)'; then
+          # (A same-PR rule change in any .markdownlint* config, or in
+          # .lycheeignore, is caught by the snapshot's linter-policy digest.)
+          #
+          # The grep reads a FILE, never a pipe: `grep -q` exits at its first
+          # match, and under `set -o pipefail` the SIGPIPE that sends `git diff`
+          # made the whole pipeline non-zero — so a LARGE markdown diff silently
+          # skipped the guard (measured: a >64 KB diff exited 0 with a directive
+          # present). Anchored on the HTML comment opener so ordinary prose that
+          # merely NAMES the directive is not a false failure.
+          if ! git diff --no-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
+              > "$RUNNER_TEMP/added-md.txt"; then
+            echo "::error::could not read the changed-markdown diff to check for suppression directives"
+            exit 1
+          fi
+          if grep -qE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi
@@ -858,11 +869,15 @@ jobs:
             > "$RUNNER_TEMP/changed-md.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
             > "$RUNNER_TEMP/changed-md.txt"
-          # Same suppression-directive guard as the PR path (see its comment): an
-          # ADDED markdownlint disable directive hides the findings the check exists
-          # to catch, so the differ would see 0 new and pass.
-          if git diff --no-renames -U0 HEAD^ HEAD -- '*.md' \
-              | grep -qE '^\+.*markdownlint-(disable|disable-line|disable-next-line|configure-file)'; then
+          # Same suppression-directive guard as the PR path (see its comment): the
+          # grep reads a FILE, not a pipe, so a large diff cannot skip it by
+          # SIGPIPE, and it is anchored on the HTML comment opener.
+          if ! git diff --no-renames -U0 HEAD^ HEAD -- '*.md' \
+              > "$RUNNER_TEMP/added-md-mh.txt"; then
+            echo "::error::could not read the changed-markdown diff to check for suppression directives"
+            exit 1
+          fi
+          if grep -qE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi

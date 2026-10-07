@@ -105,6 +105,10 @@ def _check(
 def _baseline(markdownlint: list[str], lychee: list[str]) -> dict:
     return {
         "schema_version": dlb.BASELINE_SCHEMA,
+        # `_check` defaults `repo_root` to `tmp_path`, which is not a git repo, so
+        # its policy map is empty. The field is REQUIRED (a snapshot that omits it
+        # would silently disable the policy check).
+        "linter_config": {},
         "markdownlint": markdownlint,
         "lychee": lychee,
     }
@@ -704,30 +708,93 @@ def test_check_fails_closed_when_the_linter_policy_changed(tmp_path: Path):
     """A rule turned off is a SUPPRESSED finding, not a fixed one.
 
     The differ compares findings, so the policy that produced them is part of the
-    comparison's validity: a same-PR `.markdownlint-cli2.jsonc` edit ("MD001":
-    false) or a `.lycheeignore` path makes the linter report FEWER findings, which
-    the differ reads as `0 new`. `run_check` refuses when the current policy files
-    differ from what the snapshot recorded.
+    comparison's validity: a same-PR `.markdownlint*` edit ("MD001": false) or a
+    `.lycheeignore` path makes the linter report FEWER findings, which the differ
+    reads as `0 new`. `run_check` refuses when the current policy files differ
+    from what the snapshot recorded — and refuses when the field is absent at all,
+    since an omitted map would disable the check.
     """
     baseline = _baseline(_md_keys(MARKDOWNLINT_REPORT), [])
-    baseline["linter_config"] = {
-        ".markdownlint-cli2.jsonc": "0" * 64,
-        ".lycheeignore": None,
-        "lychee.toml": None,
-    }
+    baseline["linter_config"] = {".markdownlint-cli2.jsonc": "0" * 64}
     assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 2
-    # A policy that matches the checkout (none of the files exist under tmp_path)
-    # passes, and a pre-policy baseline (no field) is unaffected.
+    # A policy that matches the checkout passes.
     baseline["linter_config"] = dlb._config_digest(tmp_path)
     assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 0
+    # The field is REQUIRED: deleting it must not silently disable the check.
+    del baseline["linter_config"]
+    assert _check(tmp_path, MARKDOWNLINT_REPORT, _lychee_document({}), baseline) == 2
+
+
+def test_policy_digest_covers_configs_at_any_depth(tmp_path: Path):
+    """cli2 reads `.markdownlint*` from ANY directory; a nested config overrides.
+
+    Digesting only the repo-root file left a same-PR `docs/.markdownlint-cli2.jsonc`
+    (or a root `.markdownlint.json`) free to turn a rule off while the pinned file
+    stayed untouched. Every TRACKED policy basename is digested, so ADDING one is
+    a policy change.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    (repo / ".markdownlint-cli2.jsonc").write_text('{"config": {}}\n', encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    root_only = dlb._config_digest(repo)
+    assert set(root_only) == {".markdownlint-cli2.jsonc"}
+    (repo / "docs" / ".markdownlint.json").write_text('{"MD001": false}\n', encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "nested override")
+    nested = dlb._config_digest(repo)
+    assert "docs/.markdownlint.json" in nested
+    assert nested != root_only
 
 
 def _extract_suppression_guard(run: str) -> str:
-    match = re.search(
-        r"(if git diff --no-renames -U0 .*?\n(?:.*\n)*?\s*fi\n)", run
+    """The suppression-directive guard from a step's `run` block.
+
+    The guard may be ONE `if` (a pipe: `git diff … | grep -qE …; then … fi`) or
+    TWO sibling `if`s (write the added-markdown diff to a file, then grep THAT
+    file). The pipe form is what this PR first shipped, and it was BLIND on a
+    large diff: `grep -q` exits at its first match, and under `set -o pipefail`
+    the SIGPIPE that sends `git diff` made the whole pipeline non-zero, so the
+    guard was skipped. Both shapes are extracted so the EXECUTED assertions
+    below decide whether the guard works, not which idiom it is written in.
+    """
+    lines = run.splitlines(keepends=True)
+
+    def indent(line: str) -> int:
+        return len(line) - len(line.lstrip())
+
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(r"\s*if (?:! )?git diff --no-renames -U0 .*-- '\*\.md'", line)
+        ),
+        None,
     )
-    assert match is not None, "the suppression-directive guard is missing from this step"
-    return match.group(1)
+    assert start is not None, "the suppression-directive guard is missing from this step"
+    lead = indent(lines[start])
+    block: list[str] = []
+    for line in lines[start:]:
+        block.append(line)
+        if line.strip() == "fi" and indent(line) == lead:
+            break
+    # The file form is TWO sibling `if`s: after the first `fi`, a second `if`
+    # greps the SAME temp file. Keep going only when that sibling is present.
+    nxt = next((l for l in lines[start + len(block) :] if l.strip()), "")
+    if re.match(r"\s*if grep -qE .*\$RUNNER_TEMP/", nxt):
+        for line in lines[start + len(block) :]:
+            block.append(line)
+            if line.strip() == "fi" and indent(line) == lead:
+                break
+    return "".join(block)
 
 
 def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
@@ -758,12 +825,17 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
 
     def run_guard(name: str, env: dict[str, str]) -> int:
         guard = _extract_suppression_guard(_by_name(name)["run"])
+        # The guard writes the added-markdown diff to `$RUNNER_TEMP` and greps the
+        # FILE (never a pipe — `grep -q` mid-pipe under `set -o pipefail` returned
+        # non-zero and skipped the guard on a large diff).
+        runner_temp = tmp_path / "runner"
+        runner_temp.mkdir(exist_ok=True)
         return subprocess.run(
             ["bash", "-c", f"set -euo pipefail\n{guard}"],
             cwd=repo,
             capture_output=True,
             text=True,
-            env={**os.environ, **env},
+            env={**os.environ, "RUNNER_TEMP": str(runner_temp), **env},
         ).returncode
 
     pr_step = "Get changed markdown files"
@@ -772,8 +844,23 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
     git("commit", "-qam", "ordinary")
     assert run_guard(pr_step, {"BASE_SHA": base}) == 0
     assert run_guard(mh_step, {}) == 0
+    # Prose that merely NAMES the directive must not red the check (this PR's own
+    # doc does exactly that); only a real HTML comment directive is rejected.
+    doc.write_text("# a\n\nSee the `markdownlint-disable` directive.\n", encoding="utf-8")
+    git("commit", "-qam", "prose")
+    assert run_guard(pr_step, {"BASE_SHA": base}) == 0
     doc.write_text("# a\n\n<!-- markdownlint-disable MD001 -->\n### b\n", encoding="utf-8")
     git("commit", "-qam", "suppress")
+    assert run_guard(pr_step, {"BASE_SHA": base}) != 0
+    assert run_guard(mh_step, {}) != 0
+    # A LARGE diff must not skip the guard: `grep -q` in a PIPE exited at its first
+    # match, and under `set -o pipefail` the SIGPIPE to `git diff` made the
+    # pipeline non-zero, so a large markdown diff reported no directive at all.
+    # The directive goes FIRST with ~140 KB after it so grep exits early mid-write.
+    big = repo / "docs" / "big.md"
+    big.write_text("<!-- markdownlint-disable MD001 -->\n" + "filler\n" * 20000, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "large suppressed file")
     assert run_guard(pr_step, {"BASE_SHA": base}) != 0
     assert run_guard(mh_step, {}) != 0
 
