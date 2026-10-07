@@ -1279,6 +1279,31 @@ def test_snapshot_exists_is_consistent_and_announces_its_end_state():
     )
 
 
+def test_committed_policy_map_matches_the_checkout():
+    """A config-only change touches no `.md`, so no `docs` step ever checks it.
+
+    `_require_unchanged_linter_policy` is called from `run_check`, and the
+    workflow gates both differ steps on a NON-ZERO changed-markdown count — so a
+    PR that only turns a rule off in `.markdownlint-cli2.jsonc` (or adds a
+    `[tool.lychee]` section, or an ignore path) skips the differ entirely and the
+    policy change lands with nothing recorded. Measured: such a diff produces an
+    empty changed-markdown list, so the step's `count != '0'` gate is false.
+
+    This test is the net that runs anyway — a policy file change selects the FULL
+    suite, and `config/docs-lint-baseline.json` selects `core`, which includes this
+    file. The committed map must match the checkout, so a policy change has to
+    move the snapshot; and the snapshot's own digest is pinned above, so it has to
+    be made out loud.
+    """
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert baseline["linter_config"] == dlb._config_digest(ROOT), (
+        "the committed linter-policy map no longer matches the checkout — a policy "
+        "file changed without the snapshot moving. A rule turned off is a suppressed "
+        "finding, not a fixed one: regenerate with `update` in the same change and "
+        "say why. (#7534 drains the debt; the entry count must never grow.)"
+    )
+
+
 def test_snapshot_is_a_ceiling_never_a_floor():
     """The snapshot may SHRINK freely and may never GROW unnoticed.
 
