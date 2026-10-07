@@ -954,7 +954,7 @@ The contention + confidence model **is a recorded decision** (`ONTOLOGY.md` §3.
 
 > ### ✅ REOPEN CLOSED — the owner ruled on 2026-10-06: we KEEP EP confidence; `proof_count` and `Trend` are NOT adopted.
 >
-> ✅ **`OVERRIDES:` posted on `#2730`** — per this document's rule at §16 (below), the marker's home is the **issue**, not this file; the issue comment carries the full text. **Do not re-open this by re-reading the five challenges below — they are kept as history.**
+> ✅ **`OVERRIDES:` posted on `#2730`** — for **this ruling** the marker lives on the **issue**, per §16's rule (below); the issue comment carries the full text. ⚠️ The rule is **not** yet true file-wide — line 52 still inlines a marker for a different ruling (that one is dated 2026-09-26), so this is narrowed to the case at hand rather than stated as a general convention. **Do not re-open this by re-reading the five challenges below — they are kept as history.**
 >
 > ⚠️ **Two claims, and only one is established — stated so the ruling cannot be overclaimed later.**
 >
