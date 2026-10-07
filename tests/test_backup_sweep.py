@@ -3050,10 +3050,14 @@ def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
                 raise RuntimeError("injected select_graph raise")
             return object()
 
+    measured: list[str] = []
+
     def _measure_ok(p, **kw):
+        measured.append(p.graph_name)
         return _ok(p.graph_name, 1.0)
 
     def _measure_raises(p, **kw):
+        measured.append(p.graph_name)
         if p.graph_name == "g_meas":
             raise RuntimeError("injected measurement raise")
         return _ok(p.graph_name, 5.0)
@@ -3063,15 +3067,15 @@ def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
         #     top of the loop, which must not let the survivor through.
         ("invalid-row", [{"graph_id": "a", "graph_name": "g_ok1"},
                          {"graph_id": "g_bad", "graph_name": ""}],
-         None, _measure_ok),
+         None, _measure_ok, "g_ok1"),
         # (b) select_graph raises for one of the org's graphs.
         ("select-raises", [{"graph_id": "b", "graph_name": "g_ok2"},
                            {"graph_id": "c", "graph_name": "g_sel"}],
-         "g_sel", _measure_ok),
+         "g_sel", _measure_ok, "g_ok2"),
         # (c) the measurement itself raises — the fail-open this review found.
         ("measure-raises", [{"graph_id": "d", "graph_name": "g_ok3"},
                             {"graph_id": "e", "graph_name": "g_meas"}],
-         None, _measure_raises),
+         None, _measure_raises, "g_ok3"),
     ]
 
     recorded: list = []
@@ -3079,10 +3083,20 @@ def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
         bs_mod, "record_graph_storage",
         lambda org_id, reading, **kw: recorded.append((org_id, reading)))
 
-    for label, graphs, raises_for, measure in cases:
+    for label, graphs, raises_for, measure, survivor in cases:
         recorded.clear()
+        measured.clear()
         monkeypatch.setattr(bs_mod, "measure_projection_storage", measure)
         bs_mod._record_org_storage(_Db(raises_for), "org_a", graphs)
+        # SELF-SUFFICIENCY (review round 2, P3): `recorded == []` alone is
+        # one-sided. `_record_org_storage` swallows every Exception, so a fault
+        # that aborts it EARLY also records nothing and would leave this test
+        # green — MEASURED: injecting a raise right after `readings = []` kept it
+        # passing. Assert the healthy survivor was actually handed to the meter,
+        # so "nothing recorded" is accepted only when something WAS measured.
+        assert survivor in measured, (
+            f"[{label}] the survivor {survivor!r} never reached the meter, so this "
+            f"case proves nothing about the aggregate (measured={measured})")
         assert recorded == [], (
             f"[{label}] a skipped graph MUST fail the aggregate — recording the "
             f"survivors' sum as the ORG's figure is the silent understatement "
