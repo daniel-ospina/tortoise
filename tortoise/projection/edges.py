@@ -81,7 +81,15 @@ def stub_key(rel: str, target: dict):
 def _mint_subject_stub(g, name: str) -> None:
     """MERGE the Subject stub live wiring's auto-detect fallback creates
     (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring."""
+    replayed descriptor mints a byte-identical stub to live wiring.
+
+    #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
+    after the wipe. Skip rather than raise.
+    """
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(name):
+        _log_identity_skip("Subject stub", name, "name (MERGE key)")
+        return
     g.query(
         "MERGE (s:Subject {name:$name}) "
         "ON CREATE SET s.id=$name, s.subjectKind='other'",
@@ -89,7 +97,7 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
+def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
@@ -117,6 +125,11 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
     # S0b (#5012): resolve a URL variant to the node its canonical identity
     # already names, so the stub path cannot mint a second :Source either.
     key = resolve_source_key(g, url)
+    # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url:$url})`).
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(key):
+        _log_identity_skip("Source stub", key, "url (MERGE key)")
+        return None
     canonical = normalize_source_url(key)
     params = {"url": key, "raw_url": url, "cu": canonical,
               "sk": source_kind, "now": _now_iso()}
@@ -525,6 +538,22 @@ class _EdgeHandlers:
             # ponytail: auto-create stub if source endpoint doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect
+                # #7369 review r5 (P1): the stub CREATE below passes `src` as a
+                # plain VALUE position, not a MERGE key, so the parameter
+                # boundary DEGRADES an unwritable id to None and mints
+                # `CREATE (s:Point {id:null})` — a node with no identity that
+                # no later MERGE can ever match, left behind on every replay.
+                # An unwritable id is not a stub worth minting, so skip the
+                # edge exactly as the per-instance cap path below does.
+                from tortoise.projection import _writable_id
+                if not _writable_id(src):
+                    _log.warning(
+                        "input source %r is not a writable identity (empty, "
+                        "or NUL/lone-surrogate bearing) — stub not created, "
+                        "INPUT edge skipped",
+                        src,
+                    )
+                    continue
                 exists = self.g.query(
                     "MATCH (s) WHERE (s:Point OR s:Event) "
                     "AND s.id = $sid RETURN count(s) > 0",
@@ -631,6 +660,14 @@ class _EdgeHandlers:
         keeps a session/connector/provenance Source from ever becoming an
         ``aboutDocument`` target.
         """
+        # #7369: `target_name` rides as a READ parameter here, and the engine
+        # parses every parameter regardless of clause — an unwritable one
+        # aborts the replay after the wipe just as a write would.
+        from tortoise.projection import _log_identity_skip, _writable_id
+        if not _writable_id(target_name):
+            _log_identity_skip(
+                "aboutDocument edge", target_name, "name (read parameter)")
+            return False
         if label == 'Source':
             r = self.g.query(
                 "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "
@@ -836,6 +873,15 @@ class _EdgeHandlers:
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
         key = resolve_source_key(self.g, source_url)
+        # #7369: `key` is the Source MERGE key, and `source_url` is a
+        # first-class JOURNALED field of `DocumentCreated` (sdk.py), forwarded
+        # verbatim by `_upsert_document` — an unwritable one aborts the replay
+        # after the wipe. Same gate as its three siblings (_mint_source_stub,
+        # _materialize_connector_source, _upsert_source).
+        from tortoise.projection import _log_identity_skip, _writable_id
+        if not _writable_id(key):
+            _log_identity_skip("Source link", key, "url (MERGE key)")
+            return
         canonical = normalize_source_url(key)
         self.g.query(
             "MERGE (s:Source {url:$url}) "
