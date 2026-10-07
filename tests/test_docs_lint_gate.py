@@ -246,9 +246,70 @@ def test_detection_step_is_executable_fail_closed_shell():
     assert "::error::" in code, (
         "the step must fail LOUDLY when it cannot compute the changed set (#2386)"
     )
+    # #7628: the base must be the base branch's TIP, resolved by the `base_tip`
+    # step — NOT `github.event.pull_request.base.sha`, which is the PR's
+    # MERGE-BASE. Pairing the merge-base with a merge-ref checkout made this diff
+    # include the base branch's own newly-landed commits, so a PR that was merely
+    # behind was failed for findings it did not author (#7542).
     assert (step.get("env") or {}).get("BASE_SHA") == (
-        "${{ github.event.pull_request.base.sha }}"
-    ), "the base SHA must arrive through `env: BASE_SHA` (#2386)"
+        "${{ steps.base_tip.outputs.sha }}"
+    ), "the changed-set base must be the resolved base TIP, not pull_request.base.sha (#7628)"
+
+
+def test_base_is_resolved_from_the_base_branch_tip_not_the_merge_base():
+    """#7628: the changed set must be THIS PR's changes, not the base's own.
+
+    The defect: `BASE_SHA` was bound to `github.event.pull_request.base.sha`, which
+    is the PR's MERGE-BASE, while the checkout is the MERGE ref (`refs/pull/N/merge`)
+    that GitHub builds on the base's CURRENT tip. So `merge-base...HEAD` swallowed
+    every commit the base branch landed after the merge-base, and a PR one commit
+    behind was failed for the base's own finding. Measured on #7542: base.sha ==
+    merge-base(16bb2ab12, main) == be01e05c0, while the evaluated tree sat on
+    3c1fc8086, whose #7611 introduced the offending MD018.
+
+    The guard is the shape of the fix: the base is RESOLVED, and the merge-base
+    field is not used as the base anywhere in this job.
+    """
+    steps = _docs_job().get("steps") or []
+    by_id = {s["id"]: s for s in steps if s.get("id")}
+
+    base_tip = by_id.get("base_tip")
+    assert base_tip is not None, (
+        "the base tip must be resolved by its own step: the diff step's body is "
+        "EXECUTED offline by this module, so it cannot fetch (#7628)"
+    )
+
+    code = base_tip["run"]
+    assert "git fetch" in code, "the step must fetch the base branch (#7628)"
+    assert "refs/heads/${BASE_REF}" in code, (
+        "it must fetch the BASE BRANCH, on the strength of a ref name (#7628)"
+    )
+    assert (base_tip.get("env") or {}).get("BASE_REF") == (
+        "${{ github.event.pull_request.base.ref }}"
+    ), "the base ref must arrive through `env: BASE_REF` (#2386)"
+    assert "${{ " not in code and "${{}}" not in code, (
+        "the run body must be pure bash: a `${{ }}` interpolation is evaluated "
+        "before the shell sees it (#2386)"
+    )
+    assert "::error::" in code and "exit 1" in code, (
+        "an empty base ref must fail closed rather than leave an empty output (#2386)"
+    )
+    assert base_tip.get("if") == "${{ !inputs.main_health }}", (
+        "a scheduled main-health call has no PR base, so this step is inert there "
+        "(#5215 Task 8)"
+    )
+
+    assert by_id["changed"]["env"]["BASE_SHA"] == "${{ steps.base_tip.outputs.sha }}", (
+        "the diff step must consume the RESOLVED tip (#7628)"
+    )
+
+    # The regression itself: the merge-base field is no longer the base.
+    for step in steps:
+        assert "pull_request.base.sha" not in yaml.safe_dump(step), (
+            "the PR's merge-base must not be used as the changed-set base anywhere "
+            "in the `docs` job — that is the #7628 defect, and using it in a second "
+            "place would reintroduce it (#545 DRIFT_BASE_SHA is a separate job)"
+        )
 
 
 # ── the detection step's verdicts (executed) ─────────────────────────────────

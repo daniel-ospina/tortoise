@@ -681,6 +681,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Resolve the base branch tip (#7628)
+        id: base_tip
+        # #7628: the base for the changed-set diff must be the base branch's
+        # CURRENT TIP, not `github.event.pull_request.base.sha` (the PR's
+        # merge-base). The checkout above is the MERGE ref (`refs/pull/N/merge`),
+        # which GitHub builds on the base's current tip; so `merge-base...HEAD`
+        # is "everything the base branch landed since the merge-base, PLUS this
+        # PR's own changes", and a PR that is merely behind lints the base
+        # branch's own new `.md` files WHOLE and is failed for findings it did not
+        # author. Measured on #7542: base.sha == merge-base(16bb2ab12, main) ==
+        # be01e05c0, while the evaluated tree sat on 3c1fc8086, whose #7611 added
+        # the offending MD018. Resolving the tip makes the diff exactly this PR's
+        # changes, because `merge-base(TIP, HEAD) == TIP` -- HEAD is the merge
+        # commit.
+        #
+        # A SEPARATE step, not folded into the diff step: that step's body is
+        # EXECUTED offline by tests/test_docs_lint_gate.py, so it must not fetch.
+        if: ${{ !inputs.main_health }}
+        env:
+          # Same #2386 discipline as the diff step below: the value arrives through
+          # the ENVIRONMENT, never as a `${{ }}` interpolation inside the shell.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # Fail closed like the diff step: an empty ref makes the fetch a no-op
+          # and leaves the output empty, which is the silent green this check
+          # exists to prevent (#2386), one input over.
+          if [ -z "${BASE_REF:-}" ]; then
+            echo "::error::pull_request base ref is empty — cannot resolve the base branch tip; failing closed (#7628)"
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          echo "sha=$(git rev-parse "refs/remotes/origin/${BASE_REF}")" >> "$GITHUB_OUTPUT"
       - name: Get changed markdown files
         id: changed
         # #5215 Task 8 (D13): a scheduled main-health call has no PR base, so
@@ -692,7 +725,13 @@ jobs:
           # #2386: the base SHA is passed through the ENVIRONMENT, not a `${{ }}`
           # interpolation inside the shell, so the run body below is pure bash and
           # is EXECUTED (not text-scanned) by tests/test_docs_lint_gate.py.
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          #
+          # #7628: bound to the base branch's TIP (resolved by the step above),
+          # NOT to `github.event.pull_request.base.sha`. That field is the PR's
+          # MERGE-BASE, and pairing it with the merge-ref checkout made this diff
+          # swallow the base branch's own newly-landed commits. The run body is
+          # unchanged: with the tip, `TIP...HEAD` is exactly this PR's changes.
+          BASE_SHA: ${{ steps.base_tip.outputs.sha }}
         run: |
           # #4449: the list goes to a FILE and is consumed as DATA. A filename
           # is PR-author-controlled, so it must never reach a shell — a path
