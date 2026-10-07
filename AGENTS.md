@@ -499,10 +499,15 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 > accumulates leftovers: measured 2026-10-06 it had **restarted 213 times** (it was 46
 > when #5084 was filed on 2026-09-24), and a single-file run showed graphs appearing from
 > *other* lanes' sessions. `tools/test_lane.py` gives the lane its own throwaway container
-> — its graphs die with the container, so no lane can leave residue on another's target:
+> — for every test that takes its target from `TORTOISE_DB_URI`, its graphs die with the
+> container, so no lane can leave residue on another's target. **Not yet the whole suite**
+> (measured 2026-10-07): tests that build their URI through `tests/_live_utils.py` key on
+> `TORTOISE_TEST_DOCKER_PORT` (default 6379) and a `falkordb` password, so **9 modules** still
+> address the shared instance and their graphs still accumulate there. Closing that seam is
+> #5084's remaining work — the tool is the isolation half, not the whole fix.
 >
 > ```bash
-> eval "$(uv run python tools/test_lane.py uri)"   # start + export TORTOISE_DB_URI
+> eval "$(uv run python tools/test_lane.py uri)" || exit 1   # start + export TORTOISE_DB_URI
 > uv run pytest tests/ -q
 > uv run python tools/test_lane.py status          # it prints the URI again
 > uv run python tools/test_lane.py down            # remove it

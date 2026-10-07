@@ -395,7 +395,8 @@ def test_list_reports_a_failed_docker_ps_instead_of_claiming_none_exist(monkeypa
 
 def test_pick_port_skips_ports_already_taken(monkeypatch):
     monkeypatch.setattr(tl, "port_is_free", lambda p: p != tl.PORT_RANGE[0])
-    monkeypatch.setattr(tl, "_container_publishes", lambda _p: False)
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
+    monkeypatch.setattr(tl, "_container_publishes", lambda _p, _s=None: False)
     assert tl.pick_port(*tl.PORT_RANGE) == tl.PORT_RANGE[0] + 1
 
 
@@ -403,17 +404,65 @@ def test_pick_port_skips_ports_published_by_a_container(monkeypatch):
     """A port can be free on the host yet already published (another lane's
     container), which would make `docker run -p` fail."""
     monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
     monkeypatch.setattr(tl, "_container_publishes",
-                        lambda p: p == tl.PORT_RANGE[0])
+                        lambda p, _s=None: p == tl.PORT_RANGE[0])
     assert tl.pick_port(*tl.PORT_RANGE) == tl.PORT_RANGE[0] + 1
 
 
 def test_pick_port_raises_when_the_range_is_exhausted(monkeypatch):
     monkeypatch.setattr(tl, "port_is_free", lambda _p: False)
-    monkeypatch.setattr(tl, "_container_publishes", lambda _p: False)
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
+    monkeypatch.setattr(tl, "_container_publishes", lambda _p, _s=None: False)
     with pytest.raises(SystemExit) as exc:
         tl.pick_port(16390, 16392)
     assert "no free port" in str(exc.value)
+
+
+def test_published_scan_is_none_when_docker_cannot_be_asked(monkeypatch):
+    """`_published_scan` must not collapse "docker failed" into an empty table:
+    the empty-table claim is exactly what fail-open is made of."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    assert tl._published_scan() is None
+
+
+def test_pick_port_fails_closed_when_the_docker_scan_fails(monkeypatch):
+    """A FAILED `docker ps -a` must NOT be read as "nothing is published".
+
+    Measured defect (review, 2026-10-07): `_container_publishes` ignored the
+    return code, so a timed-out scan yielded `False` for every port and
+    `pick_port` returned a port `docker run -p` then refused."""
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", lambda: None)
+    with pytest.raises(SystemExit) as exc:
+        tl.pick_port(16390, 16392)
+    assert "docker ps -a" in str(exc.value)
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_start_refuses_when_a_stale_container_cannot_be_removed(monkeypatch):
+    """A failed `rm` on a stale container must surface as a REMOVAL failure.
+
+    Measured defect (review, 2026-10-07): the branch's comment said the result
+    was read while the call discarded it, so the failure resurfaced only as
+    `docker run`'s "name already in use"."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda _n: "FAILED to remove it — check `docker ps -a`")
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "could not be removed" in str(exc.value)
+
+
+def test_remove_and_describe_refuses_a_protected_name(monkeypatch):
+    """`_remove_and_describe` takes an arbitrary name, so its guard has to be on
+    the NAME — call-site discipline is not an invariant the suite can check."""
+    def _must_not_run(*a, **k):          # a removal must not reach docker here
+        raise AssertionError("_docker called for a protected name")
+    monkeypatch.setattr(tl, "_docker", _must_not_run)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("falkordb-16379")
+    assert "refusing to remove" in str(exc.value)
 
 
 # ── the eval contract ──────────────────────────────────────────────────────

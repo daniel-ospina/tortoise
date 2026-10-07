@@ -17,9 +17,21 @@ instance accumulates per-run graphs:
     single-file run while other lanes worked showed graphs appearing from
     THEIR sessions (each journaled under its own session nonce).
 
-A private instance removes the class by construction: the graphs a lane mints
-live in a container that dies with the lane, so nothing it does can contaminate
-another lane and no peer's leftovers can contaminate it.
+A private instance removes the class for every test that resolves its target
+from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container that dies
+with the lane, so nothing it does can contaminate another lane and no peer's
+leftovers can contaminate it.
+
+SCOPE — THIS IS NOT YET THE WHOLE SUITE (measured 2026-10-07; do not oversell)
+---------------------------------------------------------------------------
+Tests that build their URI through ``tests/_live_utils.py`` key on
+``TORTOISE_TEST_DOCKER_PORT`` (default 6379) and a ``falkordb`` password, so they
+address the SHARED instance and their graphs still accumulate there. This tool
+exports neither variable, and it starts the private container without
+``requirepass``, so the seam's default password could not authenticate against it
+even if the port were exported. Measured 2026-10-07: **9 test modules import that
+seam.** Closing that gap is #5084's remaining work; this tool is the isolation
+half of it, not the whole fix.
 
 MEASURED TRADE-OFF (do not oversell this tool)
 ----------------------------------------------
@@ -44,13 +56,24 @@ Also fail-closed by design:
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
 * ````docker ps -a`` is consulted for port collisions, because a stopped
-  container still reserves its published port.
+  container still reserves its published port;
+* ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike ``GIT_DIR``/
+  ``GIT_WORK_TREE``): a remote daemon is addressed as-is, so the printed
+  ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
+  a warning is printed when ``DOCKER_HOST`` is set;
+* a FAILED ``docker ps -a`` scan ABORTS port selection instead of reporting
+  "nothing is published" (a failure is never read as permission).
 
 USAGE
 -----
-    eval "$(uv run python tools/test_lane.py uri)"   # start if needed + export
+    eval "$(uv run python tools/test_lane.py uri)" || exit 1
     uv run pytest tests/ -q
     uv run python tools/test_lane.py down            # remove it
+
+The ``|| exit 1`` is not decoration. On a failure the tool exits non-zero and
+prints nothing on stdout, and `eval ""` returns 0 — so a bare
+`eval "$(...)"` leaves a PREVIOUSLY exported ``TORTOISE_DB_URI`` (commonly the
+shared lane) in place while the command looks like it succeeded.
 
 ``uri`` prints ``export TORTOISE_DB_URI='...'`` on stdout so it can be
 ``eval``-ed; every diagnostic goes to stderr, so ``eval "$(...)"`` stays clean.
@@ -227,16 +250,46 @@ def _docker(*args: str,
             ["docker", *args], 126, "", f"could not run docker: {exc}")
 
 
-def _container_publishes(port: int) -> bool:
+def _published_scan() -> str | None:
+    """The `docker ps -a` names+ports table, or None when docker could not be
+    asked.
+
+    None rather than "": an empty table is a CLAIM about docker, and a failed or
+    timed-out call is not evidence for it. This tool exists for an overloaded
+    host, so a failed scan is an expected case, not an exotic one.
+    """
     # `-a`: a STOPPED container still reserves its published host port, so a
     # running-only scan can hand back a port `docker run -p` will then refuse.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
-    return f":{port}->" in (r.stdout or "")
+    return None if r.returncode != 0 else (r.stdout or "")
+
+
+def _container_publishes(port: int, scan: str | None = None) -> bool:
+    """Whether `port` is already published, reusing a caller's scan when given."""
+    table = _published_scan() if scan is None else scan
+    return table is not None and f":{port}->" in table
 
 
 def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
+    """The first loopback port that is free AND not already published.
+
+    The `docker ps -a` scan is taken ONCE and reused for every candidate, and a
+    FAILED scan ABORTS rather than yielding an empty table: reading a failure as
+    "nothing is published" would mark every candidate free and hand back a port
+    `docker run -p` then refuses — the fail-open this module's rule ("a failure
+    is never read as permission") exists to forbid.
+    """
+    if os.environ.get("DOCKER_HOST"):
+        print("test-lane: DOCKER_HOST is set — the printed 127.0.0.1 URI names "
+              "that daemon's loopback, not this host's", file=sys.stderr)
+    scan = _published_scan()
+    if scan is None:
+        raise SystemExit(
+            "test-lane: `docker ps -a` failed — cannot tell which ports are "
+            "already published; refusing to guess (check the docker daemon)"
+        )
     for port in range(lo, hi + 1):
-        if port_is_free(port) and not _container_publishes(port):
+        if port_is_free(port) and not _container_publishes(port, scan):
             return port
     raise SystemExit(
         f"test-lane: no free port in {lo}-{hi}; remove stale fdb-lane-* "
@@ -363,10 +416,16 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"belong to another lane would be unforgivable)"
         )
     if state != "absent":
-        # The result is READ rather than discarded: a failed `rm` leaves a name
-        # that makes the `docker run` below fail with "name already in use",
-        # which reads as a run problem rather than the removal problem it is.
-        _remove_and_describe(name)
+        # The result is READ, not discarded (an earlier comment claimed that
+        # while discarding it): a failed `rm` leaves a name that makes the
+        # `docker run` below fail with "name already in use", which reads as a
+        # run problem rather than the removal problem it is.
+        outcome = _remove_and_describe(name)
+        if outcome.startswith("FAILED"):
+            raise SystemExit(
+                f"test-lane: {name} exists, is not running, and could not be "
+                f"removed — refusing to start over it ({outcome})"
+            )
 
     chosen = port if port is not None else pick_port()
     r = _docker(
