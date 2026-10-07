@@ -14,11 +14,12 @@ governingAgreement: "#2817"
 
 # WS-C — Numeric values as structural fields on an entity
 
-**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 (corrected framing), awaiting owner approval
+**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run.
 **Feeds:** #2782 (money representation) · **Related:** #2813, #2795, #2818, #2730, #2725, #2687, #2453, #2747, #3011
 
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
-> **Nothing here is implemented.** The field surfaces in §7 are **approval required, not approved**.
+> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**; **S3** (the HTTP
+> validator) is the one genuine contract change, and it needs an **explicit decision**.
 
 **Revision note (v2, 2026-10-06).** v1 was written parser-first: it made a locale-aware numeric parser the
 foundation and reified each value as a tagged union of five `valueKind`s. **That foundation is withdrawn.**
@@ -26,21 +27,43 @@ foundation and reified each value as a tagged union of five `valueKind`s. **That
 lists what the corrected shape excludes. The platform research carried over is in §2.2/§2.4 and §9; v1's
 decisions and its test table are not carried over.
 
+**Revision note (v3, 2026-10-07).** A correction to §1, §2.3, §6/T2 and §8, with the withdrawn wording
+restated in §7.2 step 3 and new v3 notes in §3 (OD5) and §9, after an `issue-scoping` run
+**rejected the increment it was scoping** (a separate deterministic numeric-fidelity gate) on measured
+evidence. §2.3's safety argument was **circular**; §8's claim that this shape makes the misread detectable
+is **false**; §1's premise was stated more strongly than its own search could support, and that search
+could not have falsified it. **The shape in §2 is unchanged** — a flat structural field, no enforcement, no
+index, no embedding. One question in §2.3 remains the owner's.
+
 ---
 
 ## 1. Problem and the grounded requirement
 
-**There is no numeric normalization anywhere in the system.** `rg -n
-"milh(ão|ao)|amountMinor|amount_minor|valueKind|value_kind|parse_number|normalize_number" tortoise/ tools/`
-returns no hits — re-run against this tree 2026-10-06, exit 1, no matches. (`rg -n -E` is `--encoding`, not
-`--regexp`, and fails with exit 2 without searching; the form above is valid ripgrep.) Every amount arrives
-as a raw string and stays one:
+**There is no *canonically stored* value anywhere in the system, and no check that a number in `content`
+is the number the source turn stated.**
+
+⚠️ **Correction (v3).** This section previously read *"there is no numeric normalization anywhere in the
+system"* and supported it with `rg -n "milh(ão|ao)|amountMinor|amount_minor|valueKind|value_kind|parse_number|normalize_number" tortoise/ tools/`
+(exit 1). **Every alternative in that pattern is an identifier this design itself invented**, so the search
+cannot match the machinery that exists — it is a search incapable of falsifying its own claim. What exists,
+and is live on this write path, is a **value-identity engine**:
+
+| Symbol | Location | Live call sites |
+| --- | --- | --- |
+| `_value_signature` | `tortoise/extractor_v2.py:3202` | `:3847`, `:4959`, `:5075`, `:5076` |
+| `_value_bindings` | `tortoise/extractor_v2.py:3859` | `:4965` |
+| `_num_word_value` | `tortoise/extractor_v2.py:3176` | `:3226`, `:3235`, `:3260`, `:3693`, `:3898`, `:3900`, `:4387`, `:4827` |
+| `distinguishing_difference` | `tortoise/extractor_v2.py:4974` | the factorised form of the `:4959`/`:4965` comparison — **written and test-covered, not yet wired** |
+
+Every amount still arrives as a raw string and stays one:
 `"R$ 1.234,56"`, `"1,234.56"` and `"1234.56"` are three strings denoting one number, and nothing can
-compare, sum or threshold them.
+compare, sum or threshold them **as stored values**. The engine can tell that two such strings *differ*
+(`distinguishing_difference('1.234','1,234')` → `'number'`), but nothing can tell which one is right, and
+nothing compares either against the source turn.
 
 The only structured-value precedent is the **date gate**: `_valid_iso_date`
-(`tortoise/extractor_v2.py:773-781`), mirrored by `Point._iso_date_prefix`
-(`tortoise/commit_schema.py:296-305`). It is the never-guess posture this design adopts.
+(`tortoise/extractor_v2.py:969`), mirrored by `Point._iso_date_prefix`
+(`tortoise/commit_schema.py:547`). It is the never-guess posture this design adopts.
 
 **The grounded requirement (#2782, verbatim):** *"tranche released / 75% of tranche 1 spent → tranche 2
 unlocks"* — a **sum and a ratio against a threshold**.
@@ -54,21 +77,24 @@ for it. The trace is **#2725 → #2782 → #2817**: the corpus asks for a **sum 
 **What the current path does with an amount.** An undeclared numeric field falls through different write
 lanes, and none of them store it as a value:
 
-- The v2 extractor's S5 stage (`execute_embed`, `tortoise/extractor_v2.py:3586`) builds the point entry
-  (`pt_entry`, `:3896`) from a fixed field set — a number stays in prose only.
-- `EventAPI.add_point` (`tortoise/api.py:120`) and the commit door's point writes
-  (`tortoise/hosted_api.py:8100`, `:8122`) write a fixed property set.
-- The projection's Point property list (`tortoise/projection/entities.py:182-195`) is fixed, and Point has
-  no extras pass, so a property written live by the SDK props loop (`tortoise/sdk.py:2577-2581`) is not
-  restored by `rebuild_all`.
-- The HTTP commit validator `Point` (`tortoise/commit_schema.py:269`) is `extra="forbid"` (`:272`): a
+- The v2 extractor's S5 stage (`execute_embed`, `tortoise/extractor_v2.py:5804`) builds the point entry
+  (`pt_entry`, `:6160`) from a fixed field set — a number stays in prose only.
+- `EventAPI.add_point` (`tortoise/api.py:187`) and the commit door's point writes
+  (`tortoise/hosted_api.py:14104`, `:14244`, in `_execute_commit_writes`) write a fixed property set.
+- The projection's Point property list is fixed (`_upsert_point_props`,
+  `tortoise/projection/entities.py:801`), but Point carries the same open-set passthrough as
+  Subject/Object (`_persist_extra_props`, `tortoise/projection/entities.py:1102`, #2795/#2958): an
+  undeclared scalar prop written live by `create_point` (`tortoise/sdk.py:5397-5399`) is replayed by
+  `rebuild_all`, flagged by a "not declared" drift warning (`:1110`). Only `_POINT_DENY` members
+  (`:715`) and undeclared list props are dropped.
+- The HTTP commit validator `Point` (`tortoise/commit_schema.py:500`) is `extra="forbid"` (`:503`): a
   customer **cannot send an amount at all** today.
 
-**Prose is load-bearing.** `VALUE_FIDELITY_RULE` (`tortoise/extractor_v2.py:228-240`) requires the exact
+**Prose is load-bearing.** `VALUE_FIDELITY_RULE` (`tortoise/extractor_v2.py:324`) requires the exact
 value to be written into `content`, and the retention graders read `content` only
 (`tests/eval/write_path/grading.py:24-27`, `tests/eval/write_path/schema.py:128-142`,
 `tests/eval/harness/grading.py:32-45`; the snapshot query is `MEMORY_ROW_QUERY`,
-`tests/eval/write_path/runner.py:284-288`). The design below is therefore additive: the raw text stays,
+`tests/eval/write_path/runner.py:341`). The design below is therefore additive: the raw text stays,
 and the value is derived alongside it.
 
 ---
@@ -95,8 +121,7 @@ is what makes the field cheap.
 On FalkorDB **the whole graph is RAM** — no spill-to-disk and no eviction on Cloud — at **$0.10/GB-hour ≈
 $73/GB/month** on provisioned memory (**MEASURED** — vendor pricing, $0.10/GB-hour × ~730 h; the storage
 magnitudes below are measured in `docs/architecture/STORAGE-ARCHITECTURE.md` §2.2 / line 173,
-§7 / line 439 and §12.1 / lines 858, 930, which live on
-branch `docs/storage-precision` (PR #7559) and are **not in this checkout**). There is **no cold tier**: an
+§7 / line 439 and §12.1 / lines 858, 930 — tracked at `1c8bc4701` (PR #7559's merge commit)). There is **no cold tier**: an
 unread byte costs the same as a read one. The only documented removal of a graph is `GRAPH.DELETE`
 (permanent); per-graph eviction is documented only for Enterprise (self-managed), not Cloud —
 **documentation-based, unconfirmed** (its source qualifies it *"not exposed on Cloud as far as we can
@@ -135,19 +160,54 @@ establish the absence; the two profiles below are what the research returned):
 Our own controlled ablation agrees on the keep-the-source half: raw **verbatim beats derived by 15.9 /
 22.0 pts** (`EXTRACTOR-V4-ARCHITECTURE.md` §2.4; pre-registered #3011).
 
-⇒ **Keep the raw text as the evidence, declare the field on the schema, and validate the value against
-the words it came from.**
+⇒ **Keep the raw text as the evidence, declare the field on the schema, and keep every typed value
+traceable to the words it came from.** ⚠️ *(v3: this conclusion previously read "…and validate the value
+against the words it came from", the withdrawn requirement. See the restatement immediately below.)*
 
-**Design requirement:** the approach is safe without a locale table only if the value is validated against
-its source — a misread `R$ 1.234,56 → 1.234` is an **arithmetic mismatch against the sentence** to be
-detected, not a silent wrong number. Nothing implements this check today.
+**Design requirement (restated, v3).** ⚠️ **The earlier statement of this requirement was circular and is
+withdrawn.** It read: *"the approach is safe without a locale table only if the value is validated against
+its source"* — but deciding whether `1.234` read out of `R$ 1.234,56` is a misread **is** the
+separator/locale question. Comparing `1.234` to `1.234,56` as values requires knowing which character is
+the decimal separator, so the validation the argument rests on needs the locale table §4 excludes and
+§6/T3 forbids. **The argument did not establish what it claimed.**
+
+The achievable requirement is narrower, and it is the one this design commits to:
+
+> **A value that is typed at all must be traceable to the raw text it came from; a value that cannot be
+> read unambiguously is not typed.**
+
+Abstention protects the *typed field*. It does **not** detect a wrong number that remains in `content` —
+**abstaining is not detecting** — so §8's misread is *not* made detectable by this shape. Detecting it
+requires carrying the verbatim source span, which is a different deliverable: **#2684**
+(`[evidence-assembly] Slice B: verbatim value-spans on value-bearing points`, the #2542 value-fidelity
+family). *(Under the owner's alternative reading (b) below, the detection would move inside this design;
+the paragraph above states the reading this correction's wording assumes.)*
 
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
+**⚠️ Open decision for the owner — this correction does not settle it.** §4's blanket *"no separator
+pattern ladder"* makes T2's named regression (`R$ 1.234,56` read as `1.234`) **undetectable by
+construction** — §6/T3 does no work for this case, because T3 governs only forms with **no** anchor and
+`R$` **is** an anchor (§6/T2). Two coherent readings exist:
+
+- **(a) Keep §4 as written.** The design types only unambiguous values and explicitly **cannot detect the
+  misread**; detection belongs to #2684. *(This correction's **wording** assumes (a) — it is the reading
+  the research supports: neither comparable ships a locale parser and both keep the raw text, and our own
+  ablation has verbatim beating derived by 15.9 / 22.0 pts — **but the owner's choice remains open**, and
+  the restatements in §6/T2, §7.2 step 3 and the OD5 note below are therefore **conditional on the owner
+  selecting (a)**. The owner-approved v2 text stands as the alternative.)*
+- **(b) Admit a minimal anchored separator/currency rule** for values that carry a currency anchor. It is
+  the **only** route to detecting T2's regression inside this design, it departs from §4's blanket
+  exclusion, and it therefore needs a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
+
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
 against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and our own
-ablation); the **validate-against-source** half may be ours and is not borrowed authority. The
-arithmetic-mismatch check is stated here as a design requirement, not as a claim about what comparables do.
+ablation); **traceability of a typed value to its raw text** may be ours and is not borrowed authority.
+⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
+No such check is proposed by this design **under reading (a)** (see the restated requirement above) — a
+lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
+against (§9). Reading (b) would reintroduce one in a narrower, anchored form, and that is the owner's
+decision.
 
 ### 2.4 Representation facts carried over
 
@@ -164,7 +224,7 @@ question needs it (§3).
 | Cryptocurrencies have no ISO 4217 code and can need 8+ decimals. | ISO 4217 overview; `currency-core` docs | Medium — emerging |
 
 FalkorDB stores scalars and scalar arrays only; it has **no map/object property type** and **no decimal
-type** (the props-passthrough note is `tortoise/sdk.py:947-956`). A value therefore cannot be a
+type** (the props-passthrough note is `tortoise/sdk.py:2768-2777`). A value therefore cannot be a
 `{amount, currency}` map, and a Python `Decimal` would have to be stored as an unindexable, unsummable
 string. This is why the value is a set of scalar fields rather than one object.
 
@@ -177,11 +237,18 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 
 | ID | Question | Recommendation | Consequence if different |
 | --- | --- | --- | --- |
-| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `tortoise/projection/entities.py:182-195`) and on the HTTP `Point` model (`tortoise/commit_schema.py:269`). | A parallel declaration drifts from the write path, and the field is dropped on rebuild. |
+| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and on the HTTP `Point` model (`tortoise/commit_schema.py:500`). | A parallel declaration drifts from the write path: the field still replays via the open-set passthrough, but the drift warning fires on every rebuild and the HTTP validator refuses it. |
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
 | **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text.** A client value is a cross-check; a mismatch is rejected, not silently trusted or overwritten. | Trusting a client value lets an unverified amount (e.g. `999999`) land with no relation to the prose. |
+
+⚠️ **v3 note on OD5.** The recommendation stands, but **the cross-check half is only implementable under
+reading (b) of §2.3.** Comparing a client value to a server-derived value is the same comparison the
+circular argument needed, so under reading **(a)** — the reading this correction's wording assumes, while
+**the owner's choice remains open** — there is no cross-check to perform:
+the server derives, the field is typed, and a client-supplied value cannot be adjudicated. A lane taking
+OD5's cross-check as settled should take **(b)** first.
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -218,7 +285,7 @@ ladders, and cross-currency aggregation.
 Existing points already hold numbers as prose. Nothing is rewritten: the field is **added**.
 
 - **The raw text is never modified.** `content` and `quote` are untouched, so content-addressed point ids
-  (`point_content_id`, `tortoise/commit_schema.py:1126`) and commit ids are unaffected.
+  (`point_content_id`, `tortoise/commit_schema.py:1452`) and commit ids are unaffected.
 - **Backfill materialises derived values for historical consistency.** The rule adopted is the
   **stricter** of the two found in research:
   - it must be **safe to run twice** (idempotent);
@@ -241,9 +308,16 @@ These are requirements on the derivation, not evidence of an implementation that
 
 - **T1 — Verbatim round-trip.** The stored value's `verbatim` is a byte-exact substring of the source, and
   no `content`/`quote` byte changes.
-- **T2 — Validate against source (the core test).** For each fixture, the derived amount reconciles
-  arithmetically with the sentence it came from. Named regression: `R$ 1.234,56` must not be accepted as
-  `1.234`; the mismatch is detected against the source.
+- **T2 — Validate against source (restated, v3).** As originally written this test was **unreachable**: it
+  required `R$ 1.234,56` to be *detected* as differing from `1.234`, which needs the separator/locale rule
+  §4 excludes (see §2.3). Restated to the achievable property: **for each fixture the typed value is
+  traceable to the raw text, and an ambiguous form produces no typed value at all** — `R$ 1.234,56` must
+  not be **accepted as** `1.234`; under reading (a) it is not typed at all, because §4 excludes the
+  separator rule that reading it would need. ⚠️ The operative rule here is **§4's blanket exclusion, not
+  T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor; whether an anchor licenses a
+  separator rule is exactly the open (a)/(b) decision in §2.3, and T3 does not settle it. Restated
+  accordingly, and contingent on (a). Detecting a misread that is already in `content` is **#2684's**
+  property, not this one's.
 - **T3 — Ambiguity drops, never guesses.** `1.234` / `1,234` without a locale anchor produce **no typed
   value**; the raw text remains.
 - **T4 — Currency is part of the value.** An unanchored symbol (`$`, `¥`) produces no currency; a
@@ -261,35 +335,57 @@ These are requirements on the derivation, not evidence of an implementation that
 
 ## 7. Sequencing and required approvals
 
-### 7.1 Required surface approvals — approval required, not approved
+### 7.1 Surface changes — declaration for S1/S2, a decision for S3
 
-A design that assumes a field the write path cannot accept cannot be built. Three surfaces accept a point
-property; each needs a decision, and **none is approved**:
+**⛔ THE FIELD BELONGS ON `create_entity`, NOT ON `create_point`.** The approved MCP surface
+(`docs/product/canonical-mcp-tools.md`, row 10) has **`create_entity` absorbing `create_point`**,
+`create_event`, `create_object`, `create_subject`, `create_document` and `diary_write`, and design
+decision #4 of that document says why: *"**Points, Events, Sources, Subjects, Objects and Documents are
+all entities** (ontology §1), so one `create_entity` with `type=` covers the whole creator family **with
+the right fields per type**."* The SDK list agrees and collapses `create_point` plus four siblings into
+**`create_entity(type=)`** (`docs/product/beta-sdk-surface.md`, row 12).
+
+**⇒ A numeric value is the *"right fields per type"* case.** The field therefore rides the surface
+migration tracked by **#4282** — **Phase 2** (the SDK) then **Phase 3.1** (the 26 tools implemented on the
+frozen SDK) — and **adds no tool and no method**, so it **does not re-cut the frozen manifest** and
+`tools/surface-guard.py` is untouched. A lane that adds this field to `create_point` would have its work
+discarded at Phase 2.
+
+A design that assumes a field the write path cannot accept cannot be built. **S1 and S2 do not reject the
+field today**, because both filter by **deny-list** rather than allow-list; what each needs is
+**declaration**, not permission:
 
 | # | Surface | Current state | What is needed |
 | --- | --- | --- | --- |
-| **S1** | MCP tool `tortoise_create_point` (`tortoise/mcp_server.py:787`; registry entry `tortoise/tool_registry.py:61`) | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:715`); unknown keys pass through. | Declare the value field so it is accepted and documented; no boundary rejection blocks it. |
-| **S2** | SDK `TortoiseSDK.create_point` (`tortoise/sdk.py:2354`) | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:849`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
-| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:269`, `extra="forbid"` at `:272`) | Closed: a customer **cannot send an amount today**. | Add the value field to the `Point` model, or decide explicitly that the field is server-derived and never client-supplied — a contract change. |
+| **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:1366`; registry entry `tortoise/tool_registry.py:101`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:1285`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
+| **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:4937`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:2596`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
+| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today**. | Add the value field to the `Point` model, or decide explicitly that the field is server-derived and never client-supplied — a contract change. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
-(`tortoise/projection/entities.py:182-195`) is fixed, and Point has no extras pass (unlike Subject/Object,
-which call `_persist_extra_props`, `tortoise/projection/entities.py:132`), so a value written live by the
-SDK props loop (`tortoise/sdk.py:2577-2581`) is not restored by `rebuild_all`. Adding the field to that
-list is a schema change and is **inside the approved scope**: it is the persistence gate the §7.1 surface
-approval depends on, so approving this design authorizes it. What §4 excludes is *implementation in this
-document* — no code, schema, graph or gate changes here — not the requirement being approved.
+is fixed (`_upsert_point_props`, `tortoise/projection/entities.py:801`), but Point carries the **same
+open-set passthrough** as Subject/Object (`_persist_extra_props`,
+`tortoise/projection/entities.py:1102`, #2795/#2958), so an undeclared scalar value written live
+(`tortoise/sdk.py:5397-5399`) **is** replayed by
+`rebuild_all` — flagged by a "not declared" drift warning (`:1110`) rather than dropped. The persistence
+gate is therefore **declaration, not permission**: adding the field to the declared list keeps the drift
+warning off and documents the field, and it is **inside the approved scope**. What §4 excludes is
+*implementation in this document* — no code, schema, graph or gate changes here — not the requirement
+being approved.
 
 ### 7.2 Sequencing
 
 The work cannot begin at the derivation. The dependency order is:
 
-1. **Owner decisions** — the three surfaces (§7.1) and the open register (§3). Nothing below starts before
-   these.
+1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
+   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1; only **S3** (the
+   HTTP commit validator) is a genuine contract change, and it is closed today.
 2. **Declare the field** on the accepted schema: the Point property list and the HTTP `Point` model. No
    behaviour change.
-3. **Derive and validate** — the value is computed from the raw text and checked against the words it came
-   from (§2.3).
+3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
+   it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
+   previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
+   this design **under reading (a)**. Detecting a misread already in `content` is #2684's property, not
+   this step's.)*
 4. **Backfill** historical prose (§5) — after step 3, and only under the stricter rule.
 5. **Consume** — the sum-and-ratio traversal the grounded requirement (#2782) needs.
 
@@ -302,50 +398,84 @@ without approval.
 
 `R$ 1.234,56` read with EN conventions is `1.234` — a 1000× error. That misread is a **live correctness
 defect on the current path, independent of this design**, and it is tracked as a defect, not as a chapter
-of this design. This document does not fix it. The corrected shape is what makes such a misread detectable
-once a value field exists — an arithmetic mismatch against the source sentence — but detection is not the
-defect's fix, and the defect is not an argument for the withdrawn parser.
+of this design. **Tracker: #2684** (`[evidence-assembly] Slice B: verbatim value-spans on value-bearing
+points`, the #2542 value-fidelity family) — the misread is a *source-fidelity* defect, so its home is the
+span-carrying slice. This document does not fix it, and the defect is not an argument for the withdrawn
+parser.
+
+⚠️ **Correction (v3).** An earlier version of this section claimed *"the corrected shape is what makes
+such a misread detectable once a value field exists — an arithmetic mismatch against the source
+sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (under §6/T3
+and reading (a); §2.3 records the owner's alternative (b), which would change this) and
+compares nothing against the source turn. Detection is #2684's property and is not delivered here.
 
 ---
 
 ## 9. Sources
 
-**Internal (repo; line references checked against this tree, HEAD `beb06cc5a`):**
+**Internal (repo files; line references checked against the base tree at `d531debae` — origin/main, the
+diff base. This doc-only commit changes no code, so they hold at `64aee5537` too. The two
+`~/.swarm/research/…` entries below are machine-local, outside this repo and not at that head):**
 
 - `docs/ONTOLOGY.md` §11 (v3.2, #398) — derived-value cache doctrine (`Derived values may be CACHED, never
-  authoritative … the derivation is the truth, the cache is a performance artifact`, `:850-854`); §4.1
-  Point (`:350`).
-- `tortoise/extractor_v2.py` — `VALUE_FIDELITY_RULE:228-240`, `_s2s4_rules:284`, `_granularity_text:719`,
-  `_render_master:524`, `_valid_iso_date:773-781`, `run_s1:784`, `OUTPUT_CONTRACT:1005`,
-  `_verbatim_match:2213`, `_fact_value_contradiction:2339`, `_resolve_source_turn:3423`,
-  `execute_embed:3586`, supersession record `:3870-3880`, `pt_entry:3896`.
-- `tortoise/commit_schema.py` — `class Point:269` (`extra="forbid"` `:272`), `_iso_date_prefix:296-305`,
-  `_point_canonical:1002`, `canonical_payload:1040`, `compute_client_commit_id:1105`,
-  `point_content_id:1126`.
-- `tortoise/sdk.py` — `_sanitize_props:849`, FalkorDB primitives note `:947-956`, `TortoiseSDK.create_point:2354`,
-  props write loop `:2577-2581`, `_extract_session_v2:3618` (create_point call `:3812-3820`).
-- `tortoise/projection/entities.py` — `_persist_extra_props:132`, `_upsert_point_props:151`, Point SET list
-  `:182-195`, MERGE-by-name `:511`.
-- `tortoise/mcp_server.py:715`, `:787`; `tortoise/tool_registry.py:61`; `tortoise/api.py:120`;
-  `tortoise/hosted_api.py:8100`, `:8122`; `tortoise/retrieval.py` — fact-critical guard `:808-844`,
-  `_pkg_norm:848-858` ("CURRENCY SYMBOLS ARE CONTENT", #2687); `tortoise/aggregate.py:175-181`;
-  `tortoise/pack_registry.py:111-114`.
+  authoritative … the derivation is the truth, the cache is a performance artifact`, `:1515`); §4.1
+  Point (`:844`).
+- `tortoise/extractor_v2.py` — `VALUE_FIDELITY_RULE:324`, `_s2s4_rules:393`, `_granularity_text:914`,
+  `_render_master:719`, `_valid_iso_date:969`, `run_s1:980`, `OUTPUT_CONTRACT:1201`,
+  `_verbatim_match:2552`, `_fact_value_contradiction:2743`, `_resolve_source_turn:5592`,
+  `execute_embed:5804`, supersession record `:6134-6140`, `pt_entry:6160`.
+- `tortoise/extractor_v2.py` — the **existing value-identity engine** the corrected §1 names:
+  `_num_word_value:3176`, `_value_signature:3202`, `_UNIT_WORDS:3853`, `_value_bindings:3859`,
+  `distinguishing_difference:4974`, and its live call sites `:4959`, `:4965`, `:5075-5076`.
+- `docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28` (owner decision) — *"never create a parallel
+  layer doing the same thing with redundant machinery (debugging nightmare)"*, applied as precedent by
+  `tortoise/vet_gate.py:31-32`. Any check built on this design **reuses** `distinguishing_difference`; a
+  second canonicaliser is what that decision forbids.
+- `tests/eval/write_path/` — the sealed-gold number-word fixture (`fixtures/wp01_quarry_debug.json:68`,
+  `generate_corpus.py:216,240`, `gold/wp01_quarry_debug.gold.json:176,318`), used to measure the
+  `_resolve_source_turn` anti-correlation recorded on #2684.
+- `tortoise/commit_schema.py` — `class Point:500` (`extra="forbid"` `:503`), `_iso_date_prefix:547`,
+  `_point_canonical:1322`, `canonical_payload:1366`, `compute_client_commit_id:1431`,
+  `point_content_id:1452`.
+- `tortoise/sdk.py` — `_sanitize_props:2596`, FalkorDB primitives note `:2768-2777`, `TortoiseSDK.create_point:4937`,
+  props CREATE-map write `:5397-5399`, `_extract_session_v2:6956` (create_point call `:7257`).
+- `tortoise/projection/entities.py` — `_persist_extra_props:758`, `_upsert_point_props:801`, Point prop list
+  `_POINT_HANDLED:649` / `_POINT_DENY:715`, MERGE-by-name `_upsert_subject:2180` / `_upsert_object:2253`.
+- `tortoise/mcp_server.py:1285` (`_SERVER_MANAGED_PROPS`), `:1366` (`tortoise_create_point`);
+  `tortoise/tool_registry.py:101`; `tortoise/api.py:187` (`add_point`); `tortoise/hosted_api.py:14104`,
+  `:14244` (the commit door's point writes, in `_execute_commit_writes`); `tortoise/retrieval.py` —
+  fact-critical guard `_pkg_differ_value_critical:1682` (`_token_is_fact_critical:1628`),
+  `_pkg_norm:1650-1656` ("CURRENCY SYMBOLS ARE CONTENT", #2687); `tortoise/aggregate.py:175-181`;
+  `tortoise/pack_registry.py` (`CANONICAL_KINDS:105`).
 - Eval graders: `tests/eval/write_path/grading.py:24-27`, `tests/eval/write_path/schema.py:128-142`,
-  `tests/eval/write_path/runner.py:284-288`, `tests/eval/harness/grading.py:32-45`.
-- `docs/architecture/STORAGE-ARCHITECTURE.md` §2.2 / line 173 (split; restated §7 / line 439) — 45 MB
-indices, 51.6 MB of embeddings over ≈33,580 embeddings, 16 MB text; §7 / line 439 — the live graph
-(141 MB, 15,521 nodes / 8,032 `Point`s); §12.1 / line 858 ("1.5 KB each") and line 930 ("1,830 B ≈
-1.79 KB/vector") — the per-embedding size. §12.1b is the unindexed `Object`/`Event` accounting and
-carries none of these magnitudes. **Not in this checkout:** the file lives on branch
-`docs/storage-precision` (PR #7559); the magnitudes are cited from that source, not from #2782.
+  `tests/eval/write_path/runner.py` (`MEMORY_ROW_QUERY:341`), `tests/eval/harness/grading.py:32-45`.
+- `docs/architecture/STORAGE-ARCHITECTURE.md` §2.2 / line 173 — 45 MB indices, 51.6 MB of embeddings,
+16 MB text (the ≈33,580-embedding count is §12.1a / line 933); §7 / line 439 — the same split restated
+as ≈113 MB of the ~141 MB graph, with the 141 MB / 45 MB pair flagged there as superseded by §1's ruling
+block (which reads 143 MB / 46 MB) — **line 439 carries no node or `Point` counts**; §12.1 / line 858
+("1.5 KB each") and §12.1a / line 930 ("1,830 B ≈ 1.79 KB/vector") — the per-embedding size. §12.1b is
+the unindexed `Object`/`Event` accounting and carries none of these magnitudes. The 15,521-node /
+8,032-`Point` figures are this document's own **INFERRED** arithmetic (§2.2 table), not magnitudes from
+that source. Tracked at `1c8bc4701` (PR #7559's merge commit — the commit that produced the magnitudes;
+the earlier `e18dda11b` pin was a branch commit of a different PR that never touched the file); the
+magnitudes are cited from that source, not from #2782.
 - Research: `~/.swarm/research/2026-09-09-typed-values-and-lifecycles.md`,
   `~/.swarm/research/2026-09-09-numeric-storage-audit.md`.
-- `EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (the verbatim-vs-derived ablation; pre-registered #3011) — this file
-  is not present in the checkout this design was re-derived against, and the reference is kept from the
-  source material rather than re-checked here.
+- `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`; the verbatim-vs-derived ablation,
+  pre-registered #3011) — §2.4 reports **verbatim beats derived by 15.9 pts (LoCoMo) / 22.0 pts
+  (LongMemEval-S)** (`:148`).
 
 **External:**
 
+- [arXiv 2602.11886](https://arxiv.org/abs/2602.11886) — LLM-based triplet extraction from financial
+  reports. Verbatim from the abstract: *"We also propose a hybrid verification strategy that combines regex
+  matching with an LLM-as-a-judge check, reducing apparent subject hallucination rates from **65.2% to
+  1.6%** by filtering false positives caused by coreference resolution."* The paper's own mechanism is
+  **coreference resolution** and its remedy is regex **plus an LLM judge**, so the honest reading is *"a bare
+  lexical check was not usable on its own and needed a judge to be trusted"* — **not** *"a lexical check's
+  positives were all false"*. Cited as why the v3 correction **withdraws** the detection claim rather than
+  adding a lexical source-comparison check: §2.3's validate-against-source half had no borrowed authority
+  (§2.3, "Honest research limit"), and the one comparable that tried it needed a model in the loop.
 - PostgreSQL — [Numeric Types](https://www.postgresql.org/docs/current/datatype-numeric.html),
   [Monetary Types](https://www.postgresql.org/docs/current/datatype-money.html).
 - Crunchy Data — [Working with Money in Postgres](https://www.crunchydata.com/developers/playground/working-with-money-in-postgres).

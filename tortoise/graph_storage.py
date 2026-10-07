@@ -239,7 +239,12 @@ class GraphStorageReading:
 
     ``total_mb`` is the best estimate (the MEDIAN of the per-repeat totals);
     ``min_mb``/``max_mb``/``spread_mb`` are the observed range across those
-    repeats, and ``readings_mb`` keeps every individual total. ``samples`` is
+    repeats, and ``readings_mb`` keeps every individual total — the per-REPEAT
+    totals for a single-graph reading, and the per-GRAPH totals when the reading
+    came from `combine_graph_storage_readings` (whose per-repeat dimension has
+    no meaning once summed across graphs); `as_dict` publishes it as
+    ``graph_storage_readings_mb``, so read the provenance before interpreting it.
+    ``samples`` is
     the ``SAMPLES`` value sent to FalkorDB; ``repeats`` is how many times the
     command ran.
 
@@ -309,6 +314,81 @@ def _failed_reading(graph_name: str, samples: int, repeats: int,
         ok=False,
         error=str(error)[:300],
         measured_at=measured_at,
+    )
+
+
+def combine_graph_storage_readings(
+        readings: Any, *, graph_name: str = "") -> GraphStorageReading | None:
+    """Fold per-graph readings into ONE reading at the ledger's grain (#5331).
+
+    The metering ledger keys on ``(org_id, period_start)`` — a GAUGE with no
+    graph dimension — so recording each graph of an org separately makes the
+    LAST one win. An org's storage is the SUM of its graphs', so a multi-graph
+    org would otherwise be understated by a label that silently replaces the
+    default graph's bytes with a small or empty custom graph's.
+
+    Sums ``total_mb``, and the range is summed on BOTH ends: ``min_mb`` is the
+    sum of the graphs' minima and ``max_mb`` the sum of their maxima, so
+    ``spread_mb`` stays a real range. (Taking ``min(sub-mins)`` against
+    ``sum(sub-maxes)`` would publish a lower bound far below anything the org
+    could actually hold.) ``indices_mb`` stays ``None`` if ANY graph's share is
+    unknown — summing only the known ones would report a precise-looking share
+    that understates the org. ``samples``/``repeats`` take the MIN across
+    graphs — a combined reading must not claim more precision than its
+    least-precise input.
+
+    ``readings_mb`` is REPURPOSED here: for a single graph it holds the
+    per-repeat totals, but across graphs it holds the per-GRAPH totals (the
+    per-repeat dimension has no meaning once summed).
+
+    ⛔ ANY failure — total or partial — yields a FAILED reading. A partial
+    total is not a measurement of the org: recording the survivors' sum would
+    silently understate the very cap input this exists to supply, which is the
+    same error as recording a fabricated zero.
+    """
+    if not readings:
+        return None
+    ok = [r for r in readings if getattr(r, "ok", False)]
+    if len(ok) != len(readings):
+        first = readings[0]
+        failed = [r for r in readings if not getattr(r, "ok", False)]
+        return _failed_reading(
+            graph_name or str(getattr(first, "graph_name", "")),
+            max(int(getattr(r, "samples", SAMPLES_DEFAULT)) for r in readings),
+            max(int(getattr(r, "repeats", 1)) for r in readings),
+            str(getattr(first, "measured_at", "")),
+            "; ".join(
+                f"{getattr(r, 'graph_name', '?')}: {getattr(r, 'error', 'failed')}"
+                for r in failed)[:300],
+        )
+    total = sum(float(r.total_mb) for r in ok)
+    lo = sum(float(r.min_mb) for r in ok)
+    hi = sum(float(r.max_mb) for r in ok)
+    shares = [getattr(r, "indices_mb", None) for r in ok]
+    indices = None if any(v is None for v in shares) else sum(
+        float(v) for v in shares)
+    merged_nodes: dict[str, float] = {}
+    for r in ok:
+        for k, v in (getattr(r, "node_attributes_mb", None) or {}).items():
+            merged_nodes[k] = merged_nodes.get(k, 0.0) + float(v)
+    first = ok[0]
+    return GraphStorageReading(
+        graph_name=graph_name or str(getattr(first, "graph_name", "")),
+        total_mb=total,
+        samples=min(int(getattr(r, "samples", SAMPLES_DEFAULT)) for r in ok),
+        repeats=min(int(getattr(r, "repeats", 1)) for r in ok),
+        readings_mb=tuple(float(r.total_mb) for r in ok),
+        min_mb=lo,
+        max_mb=hi,
+        spread_mb=max(0.0, hi - lo),
+        indices_mb=indices,
+        node_attributes_mb=merged_nodes,
+        ok=True,
+        error=None,
+        measured_at=str(getattr(first, "measured_at", "")),
+        estimated=True,
+        excludes=tuple(getattr(first, "excludes", EXCLUDED_OVERHEAD)),
+        precision_note=str(getattr(first, "precision_note", PRECISION_NOTE)),
     )
 
 
@@ -506,8 +586,12 @@ def measure_and_record_graph_storage(
         _selfhost_transport: bool = False) -> GraphStorageReading:
     """Measure an open projection and record it for *org_id* (both fail-soft).
 
-    The end-to-end entry point: one call produces the reading AND puts it on
-    the per-org ledger. Returns the reading in every case, so the caller can
+    ⛔ SINGLE-GRAPH helper, NOT an org's entry point. The production path for an
+    org's storage figure is ``backup_sweep._record_org_storage``, which measures
+    EVERY graph of the org and records ONE combined reading (see
+    `combine_graph_storage_readings`). Calling this per graph would reintroduce
+    last-graph-wins on a ``(org_id, period_start)`` gauge and understate a
+    multi-graph org. Returns the reading in every case, so the caller can
     inspect what was measured. The return value does NOT report the ledger
     write: a dropped write is signalled to the operator by ``record_graph_storage``
     logging at WARNING, not by a changed return value.

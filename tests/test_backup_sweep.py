@@ -2743,3 +2743,435 @@ def test_sweep_resolutions_clears_nothing_on_a_blind_run():
         "team_a": {"graphs": {"default": {"status": "backed_up", "p0_checked": True}}},
     }}
     assert sweep_resolutions(blind_with_evidence) == []
+
+
+
+def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch):
+    """#5331 / #4495: the backup sweep is the PRODUCTION caller of the graph
+    storage meter — ONE reading per ORG per period.
+
+    `graph_storage.measure_and_record_graph_storage` shipped in #5696 with
+    **zero** production callers — no scheduler, no cron, no request path — so
+    no org-period ever carried a storage figure. The owner ruled on 2026-09-27
+    (#4495) that storage is denominated in MB/GB with purchased overage,
+    REPLACING the node cap; a byte allowance can only be enforced against a
+    byte reading, so with no caller the ruling is unimplementable.
+
+    This is the tripwire for that dormancy. It FAILS if the sweep stops
+    measuring, and — critically — it runs the **REAL** meter over the exact
+    object the sweep hands over, because a spy on the recording function alone
+    verifies the SHAPE of a call and never its EFFECT.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_st', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_st"))
+        team_g.query("CREATE (p:Point {id:'pt-st', content:'s', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import measure_projection_storage
+
+        seen: list[tuple] = []
+
+        def _capture(p, **kw):
+            # Capture, then delegate to the REAL meter — never bypass it.
+            seen.append((p,))
+            return measure_projection_storage(p, **kw)
+
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _capture)
+        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                             config=_config())
+        assert r["results"]["team_st"]["status"] == "backed_up", r["results"]
+
+        # 1. The meter IS called, once for this org's one graph.
+        assert len(seen) == 1, (
+            f"storage meter called {len(seen)}x, want 1 — the sweep stopped "
+            f"being the meter's production caller (#5331)")
+
+        # 2. ⛔ THE P0 TRIPWIRE. The meter reads `proj.db` and `proj.graph_name`
+        #    — NOT `.g`. A projection carrying only `.g` yields a FAILED reading
+        #    ("no graph handle / graph name supplied") and records NOTHING, so
+        #    the feature is a silent no-op. A spy on the recording function
+        #    cannot see that: it replaces the very function whose argument
+        #    handling is in question. So run the REAL meter over the real object.
+        proj_seen = seen[0][0]
+        reading = measure_projection_storage(proj_seen)
+        assert reading.ok, (
+            f"the sweep handed the meter a projection it cannot read: "
+            f"{reading.error!r} — it reads `db`/`graph_name`, got "
+            f"{sorted(vars(proj_seen))}")
+        assert reading.graph_name == _team_graph("team_st"), reading.graph_name
+        assert getattr(getattr(proj_seen, "g", None), "name", None) == \
+            _team_graph("team_st"), "the reading is on the wrong graph"
+
+
+def test_sweep_records_one_summed_storage_reading_per_org_5331(shared_proj, monkeypatch):
+    """#5331: a MULTI-GRAPH org gets ONE summed reading, not last-graph-wins.
+
+    The metering ledger keys on ``(org_id, period_start)`` — a GAUGE with no
+    graph dimension — and `_sweep_graph_list` puts `default` FIRST. So a
+    per-graph write lets a small or empty custom graph overwrite the default's
+    bytes, silently understating the org. An org's storage is the SUM of its
+    graphs. This test fails if the aggregation is dropped (the recorded total
+    would then be whichever graph was visited last).
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_sum', tier:'pro'})")
+        proj.db.select_graph(_team_graph("team_sum")).query(
+            "CREATE (p:Point {id:'pt-sum', content:'s', pointKind:'claim'})")
+        ns = "team_team_sum_g_c1"
+        reg.query("CREATE (g:Graph {id:'g_c1', org_id:'team_sum', kind:'custom',"
+                  " namespace:$ns, status:'active'})", params={"ns": ns})
+        proj.db.select_graph(ns).query(
+            "CREATE (p:Point {id:'pt-c1', content:'c', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import GraphStorageReading, measure_projection_storage
+
+        per_graph: list[str] = []
+        real_measure = measure_projection_storage
+
+        def _fake_measure(p, **kw):
+            name = getattr(p, "graph_name", "")
+            per_graph.append(name)
+            # Distinct, known values so the SUM is distinguishable from the LAST
+            # graph's value (the bug: last-graph-wins would record 3.0, not 8.0).
+            total = 5.0 if name == _team_graph("team_sum") else 3.0
+            return GraphStorageReading(
+                graph_name=name, total_mb=total, samples=100, repeats=1,
+                readings_mb=(total,), min_mb=total, max_mb=total,
+                spread_mb=0.0, indices_mb=None, node_attributes_mb={},
+                ok=True, error=None, measured_at="2026-10-07T00:00:00Z")
+
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _fake_measure)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                             config=_config())
+        assert r["results"]["team_sum"]["status"] == "backed_up", r["results"]
+
+        # Both graphs of the org were measured...
+        assert len(per_graph) == 2, per_graph
+        # ...and EXACTLY ONE reading was written for the org (the ledger's grain).
+        assert len(recorded) == 1, (
+            f"expected 1 per-org ledger write, got {len(recorded)} — per-graph "
+            f"writes make the last graph win (#5331)")
+        org_id, reading = recorded[0]
+        assert org_id == "team_sum", org_id
+        # THE ASSERTION THAT CATCHES LAST-GRAPH-WINS: the SUM, not 3.0.
+        assert reading.total_mb == 8.0, (
+            f"recorded {reading.total_mb} MB — expected the SUM 8.0; "
+            f"recording only the last graph's 3.0 would understate the org")
+
+        assert real_measure is not None  # keep the real import meaningful
+
+
+def test_sweep_logs_and_survives_a_failed_storage_reading_5331(
+        shared_proj, monkeypatch, caplog):
+    """#5331: a FAILED reading is VISIBLE and never aborts the backup.
+
+    Two guards in one, because both failures were real: (a) the meter is TOTAL
+    by contract, so a discarded non-ok reading is a silent no-op — the exact way
+    the meter stayed dormant (DEBUG-only logging); the failure must reach a
+    WARNING. (b) Backup durability outranks metering: the backup must still
+    complete.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_sf', tier:'pro'})")
+        proj.db.select_graph(_team_graph("team_sf")).query(
+            "CREATE (p:Point {id:'pt-sf', content:'s', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import _failed_reading
+
+        def _fail(p, **kw):
+            return _failed_reading(
+                getattr(p, "graph_name", ""), 100, 1,
+                "2026-10-07T00:00:00Z", "injected measurement failure")
+
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _fail)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="tortoise.backup_sweep"):
+            r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                 config=_config())
+
+        # (b) the backup still happened despite the failed reading.
+        assert r["results"]["team_sf"]["status"] == "backed_up", r["results"]
+        assert store.list("backups/"), "no backup object written under a failed meter"
+
+        # (a) the failure is LOUD, and the failed reading is not recorded.
+        assert "storage metering FAILED" in caplog.text, (
+            "a failed storage reading must log at WARNING — a silent no-op is "
+            f"how the meter stayed dormant. Got: {caplog.text!r}")
+        assert recorded == [], (
+            "a FAILED reading must not be written to the ledger — a fabricated "
+            "zero would be read as a real storage figure")
+
+
+
+def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
+        shared_proj, monkeypatch, caplog):
+    """#5331: a PARTIAL measurement failure records NOTHING and says so.
+
+    `combine_graph_storage_readings` used to fold the *surviving* graphs into a
+    recorded total, so an org whose default graph failed to measure but whose
+    small custom graph succeeded got the custom graph's bytes written as the
+    ORG's figure — a silent understatement of exactly the cap input this
+    exists to supply, with the per-graph failure only at DEBUG. A partial total
+    is not a measurement of the org, which is the same rule as "never write a
+    fabricated zero".
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_pt', tier:'pro'})")
+        proj.db.select_graph(_team_graph("team_pt")).query(
+            "CREATE (p:Point {id:'pt-pt', content:'s', pointKind:'claim'})")
+        ns = "team_team_pt_g_c1"
+        reg.query("CREATE (g:Graph {id:'g_c1', org_id:'team_pt', kind:'custom',"
+                  " namespace:$ns, status:'active'})", params={"ns": ns})
+        proj.db.select_graph(ns).query(
+            "CREATE (p:Point {id:'pt-c1', content:'c', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import GraphStorageReading, _failed_reading
+
+        measured: list[str] = []
+
+        def _default_fails(p, **kw):
+            name = getattr(p, "graph_name", "")
+            measured.append(name)
+            if name == _team_graph("team_pt"):  # the DEFAULT graph fails
+                return _failed_reading(name, 100, 1, "2026-10-07T00:00:00Z",
+                                       "injected default-graph failure")
+            return GraphStorageReading(
+                graph_name=name, total_mb=100.0, samples=100, repeats=1,
+                readings_mb=(100.0,), min_mb=100.0, max_mb=100.0,
+                spread_mb=0.0, indices_mb=None, node_attributes_mb={},
+                ok=True, error=None, measured_at="2026-10-07T00:00:00Z")
+
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _default_fails)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="tortoise.backup_sweep"):
+            r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                 config=_config())
+
+        # The backup itself is unaffected — metering never aborts a backup.
+        assert r["results"]["team_pt"]["status"] == "backed_up", r["results"]
+        assert store.list("backups/"), "backup object must still be written"
+
+        # SELF-SUFFICIENCY: both graphs must actually have been handed to the
+        # meter, or this test would also pass via the ALL-failed path and prove
+        # nothing about PARTIAL handling.
+        assert len(measured) == 2, (
+            f"expected both of the org's graphs to be measured, got {measured}")
+
+        # The partial total (100.0 from the custom graph alone) must NOT land.
+        assert recorded == [], (
+            "a PARTIAL measurement must not be recorded — the surviving graphs' "
+            f"sum understates the org. Got: {recorded}")
+        assert "storage metering FAILED" in caplog.text, (
+            "the per-graph failure must be LOUD, not DEBUG-only — that path is "
+            f"how the meter stayed dormant. Got: {caplog.text!r}")
+        # ...and the warning must NAME the graph that failed.
+        assert _team_graph("team_pt") in caplog.text, caplog.text
+
+
+def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
+    """#5331 review round 1: ALL THREE skip paths must fail the aggregate.
+
+    This change's headline invariant — "every skipped graph appends a FAILED
+    reading, so a partial read can never be recorded as the org's figure" — was
+    asserted NOWHERE. MEASURED: reverting `readings.append(_failed_reading(...))`
+    at either sibling skip path to a bare `continue` left all 69 tests green, and
+    the third path (a measurement RAISE) appended nothing at all, so a two-graph
+    org whose data-rich graph raised recorded the SURVIVOR's total as the ORG's
+    figure (`('org_a', 5.0, True)`).
+
+    EVERY case therefore carries a survivor: with only the broken graph in the
+    list a dropped reading and a failed reading both end in "nothing recorded",
+    so the assertion would hold vacuously and prove nothing. Driven through
+    `_record_org_storage` with a stub db rather than a real sweep because the
+    sweep routes `select_graph` through the backup path too, which would conflate
+    the two and make the select-failure case unattributable.
+    """
+    import tortoise.backup_sweep as bs_mod
+    from tortoise.graph_storage import GraphStorageReading
+
+    def _ok(name, total):
+        return GraphStorageReading(
+            graph_name=name, total_mb=total, samples=100, repeats=1,
+            readings_mb=(total,), min_mb=total, max_mb=total, spread_mb=0.0,
+            indices_mb=None, node_attributes_mb={}, ok=True, error=None,
+            measured_at="2026-10-07T00:00:00Z")
+
+    class _Db:
+        """`select_graph` raises only for the name the case under test injects."""
+
+        def __init__(self, raises_for=None):
+            self.raises_for = raises_for
+
+        def select_graph(self, name, *a, **kw):
+            if name == self.raises_for:
+                raise RuntimeError("injected select_graph raise")
+            return object()
+
+    measured: list[str] = []
+
+    def _measure_ok(p, **kw):
+        measured.append(p.graph_name)
+        return _ok(p.graph_name, 1.0)
+
+    def _measure_raises(p, **kw):
+        measured.append(p.graph_name)
+        if p.graph_name == "g_meas":
+            raise RuntimeError("injected measurement raise")
+        return _ok(p.graph_name, 5.0)
+
+    cases = [
+        # (a) an `_invalid` row resolves to graph_name == "" — the guard at the
+        #     top of the loop, which must not let the survivor through.
+        ("invalid-row", [{"graph_id": "a", "graph_name": "g_ok1"},
+                         {"graph_id": "g_bad", "graph_name": ""}],
+         None, _measure_ok, "g_ok1"),
+        # (b) select_graph raises for one of the org's graphs.
+        ("select-raises", [{"graph_id": "b", "graph_name": "g_ok2"},
+                           {"graph_id": "c", "graph_name": "g_sel"}],
+         "g_sel", _measure_ok, "g_ok2"),
+        # (c) the measurement itself raises — the fail-open this review found.
+        ("measure-raises", [{"graph_id": "d", "graph_name": "g_ok3"},
+                            {"graph_id": "e", "graph_name": "g_meas"}],
+         None, _measure_raises, "g_ok3"),
+    ]
+
+    recorded: list = []
+    monkeypatch.setattr(
+        bs_mod, "record_graph_storage",
+        lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+    for label, graphs, raises_for, measure, survivor in cases:
+        recorded.clear()
+        measured.clear()
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", measure)
+        bs_mod._record_org_storage(_Db(raises_for), "org_a", graphs)
+        # SELF-SUFFICIENCY (review round 2, P3): `recorded == []` alone is
+        # one-sided. `_record_org_storage` swallows every Exception, so a fault
+        # that aborts it EARLY also records nothing and would leave this test
+        # green. MEASURED: injecting a raise as the FIRST statement INSIDE the
+        # swallowed `try:` kept it passing. (Placement matters for reproducing
+        # that: a raise placed before the `try:` propagates instead of being
+        # swallowed, so it errors on the pre-fix tree too and demonstrates
+        # nothing.) Assert the healthy survivor was actually handed to the meter
+        # — this gates on the meter being CALLED; the positive control below
+        # covers the other half, that a reading that IS measured gets recorded.
+        assert survivor in measured, (
+            f"[{label}] the survivor {survivor!r} never reached the meter, so this "
+            f"case proves nothing about the aggregate (measured={measured})")
+        assert recorded == [], (
+            f"[{label}] a skipped graph MUST fail the aggregate — recording the "
+            f"survivors' sum as the ORG's figure is the silent understatement "
+            f"this rule exists to prevent. Got: {recorded}")
+
+    # POSITIVE CONTROL (review round 3, P3): every case above asserts that NOTHING
+    # was recorded, so a broken recording path would satisfy all of them. MEASURED
+    # on the previous revision: forcing `combined = None`, or discarding the
+    # survivor's reading, each left this test GREEN. With no skip at all the org's
+    # figure MUST be recorded — that is the half the witness assertions cannot see.
+    recorded.clear()
+    measured.clear()
+    monkeypatch.setattr(bs_mod, "measure_projection_storage", _measure_ok)
+    bs_mod._record_org_storage(_Db(None), "org_a",
+                               [{"graph_id": "f", "graph_name": "g_ok4"}])
+    assert [r[1].total_mb for r in recorded] == [1.0], (
+        f"a sweep with NO skip must record the org's figure — without this the "
+        f"block above is satisfied by any recording path that is broken "
+        f"outright. Got: {recorded}")
+
+
+def test_combine_graph_storage_readings_unit_5331():
+    """#5331: DIRECT unit test for the aggregator — the three fixes cycle 3 and 4
+    made (summed range ends, `None`-propagating index share, least-precise
+    samples) were otherwise unasserted: reverting any of them left every
+    integration test green, and the ledger's `min <= total <= max` check accepts
+    the wrong range silently. No DB, no fixtures.
+    """
+    from tortoise.graph_storage import (
+        GraphStorageReading,
+        _failed_reading,
+        combine_graph_storage_readings,
+    )
+
+    def _r(name, total, lo, hi, *, samples=100, indices=None, ok=True):
+        return GraphStorageReading(
+            graph_name=name, total_mb=total, samples=samples, repeats=1,
+            readings_mb=(total,), min_mb=lo, max_mb=hi, spread_mb=hi - lo,
+            indices_mb=indices, node_attributes_mb={}, ok=ok,
+            error=None if ok else "boom", measured_at="2026-10-07T00:00:00Z")
+
+    # Two graphs each reporting [90, 110]. The honest aggregate is [180, 220] —
+    # NOT min(mins)=90 (which would publish a 55% understatement).
+    c = combine_graph_storage_readings(
+        [_r("a", 100.0, 90.0, 110.0), _r("b", 100.0, 90.0, 110.0)],
+        graph_name="org_x")
+    assert c.ok, c.error
+    assert c.total_mb == 200.0, c.total_mb
+    assert c.min_mb == 180.0, f"both range ends must be summed, got min={c.min_mb}"
+    assert c.max_mb == 220.0, c.max_mb
+    assert c.spread_mb == 40.0, c.spread_mb
+    assert c.graph_name == "org_x"
+
+    # An UNKNOWN index share (None) must not be silently dropped from the sum.
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, indices=0.5),
+         _r("b", 1.0, 1.0, 1.0, indices=None)]).indices_mb is None
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, indices=0.5),
+         _r("b", 1.0, 1.0, 1.0, indices=0.25)]).indices_mb == 0.75
+
+    # Precision: the LEAST-precise input wins (never claim more than you have).
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, samples=100),
+         _r("b", 1.0, 1.0, 1.0, samples=10)]).samples == 10
+
+    # A partial failure yields a FAILED reading naming the graph that failed.
+    partial = combine_graph_storage_readings(
+        [_r("a", 100.0, 100.0, 100.0), _failed_reading("b", 100, 1, "", "boom")])
+    assert not partial.ok, "a partial total must not read as ok"
+    assert "b" in (partial.error or ""), partial.error
+
+    # No input → nothing to record.
+    assert combine_graph_storage_readings([]) is None

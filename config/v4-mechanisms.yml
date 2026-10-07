@@ -1,0 +1,142 @@
+# Declared v4 write-path mechanisms — the declared set for issue #5064.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# #5064's root, in one sentence: **"The design documents a substrate the code
+# does not have."** Extractor v4 declares selection, dedup, merge, span-linkage,
+# an embedding gate, a sufficiency router and a fan-out cap as adopted
+# decisions. Several had no implementation and no implementing issue, and
+# **nothing compared the declared set against the code set — so a declared
+# mechanism read exactly like a shipped one.**
+#
+# This file is the ONE PLACE the declared set lives (#5064 indicator 1). The
+# gate is `tests/test_v4_declared_mechanisms.py`:
+#
+#   state: implemented      -> `code:` and `tests:` are non-empty and EVERY
+#                              declared path exists on disk
+#   state: not-implemented  -> `tracking_issue:` is present
+#
+# A row that is **neither** fails the gate (FAIL CLOSED). That is the root
+# sentence made checkable: a declared-and-absent mechanism cannot be read as a
+# shipped one.
+#
+# ⚠️ THE DECLARED SET IS NOT READ FROM ONE DESIGN DOCUMENT — and that is part of
+# the finding. #4894 (the issue this one names as its dependency, "the v4
+# write-path design of record") does **NOT** enumerate these seven mechanisms;
+# it names the raw/narrative-out change and a salience gate, and no list. The
+# seven are declared across a cross-referenced PAIR of documents, not one
+# authority: four in `EXTRACTOR-V4-ARCHITECTURE.md` (vet, source_dedup,
+# near_dup_merge, span_link), four in `STORAGE-ARCHITECTURE.md` (span_link,
+# embed_gate, sufficiency_router, fanout_cap — span_link is declared in both),
+# and one in `packs/dev/manifest.yaml` (embed_gate, its policy source). The
+# seven NAMES below come from #5064's own O/I/T indicator (1), each with its
+# declaring document and a filed tracking issue. Making the set a single
+# registry is the fix; `declared_in:` records where each row's declaration
+# actually lives.
+#
+# ⛔ NOT IN SCOPE — the substrate refactor, any change to the extraction/write
+# path, and indicator (2)'s "generate the design document from the registry"
+# (#5064's open question (a), registry-as-source vs registry-as-check). The full
+# non-scope note is stated once, in the gate's own docstring —
+# `tests/test_v4_declared_mechanisms.py` — so the two cannot drift.
+#
+# Mapping to #5064's own symptom table: #5005 vet · #5012 source dedup ·
+# #5006 near-dup MERGE · #5007 span link · #5008 embed gate · #5009 sufficiency
+# router · #5010 fan-out cap.
+
+version: 1
+
+# The declared set is CLOSED: exactly these seven ids, in this order (#5064
+# O/I/T indicator 1). The gate pins the tuple, so a mechanism can neither be
+# silently dropped from nor reordered within the registry without the gate
+# saying so.
+mechanisms:
+  - id: vet
+    name: "S2.2 VET — adversarial candidate review (validity + coverage)"
+    declared_in:
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §S2.2; decision D5
+    state: implemented
+    code:
+      - tortoise/vet_gate.py
+      - tortoise/extractor_v2.py
+    tests:
+      - tests/test_vet_gate_5005.py
+    note: >-
+      Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
+      the flag says otherwise.
+
+  - id: source_dedup
+    name: "S0a NORMALIZE + HASH → S0b SOURCE DEDUP"
+    declared_in:
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §4.2
+    state: implemented
+    code:
+      - tortoise/source_identity.py
+    tests:
+      - tests/test_source_dedup_registration.py
+    note: >-
+      S0b resolves an inbound spelling to the `:Source` node that owns its
+      identity; dedup was URL-keyed only before this.
+
+  - id: near_dup_merge
+    name: "near-duplicate MERGE (Jev-arbitrated, D12/O4)"
+    declared_in:
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
+    state: not-implemented
+    tracking_issue: 5006
+    note: >-
+      `classify_consolidation` still has the four-way ADD/UPDATE/NOOP/DELETE
+      outcome set and no MERGE action; the paraphrase-NOOP band absorbs one side
+      by threshold instead.
+
+  - id: span_link
+    name: "verbatim SPAN link on every Point (an address, not a payload)"
+    declared_in:
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §2.4.1
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §9.4
+    state: implemented
+    code:
+      - tortoise/commit_schema.py
+    tests:
+      - tests/test_verbatim_span.py
+    note: >-
+      `source_turn_id` + `span_start`/`span_end` character offsets into the
+      `Source`; the span TEXT is never stored on the `Point`.
+
+  - id: embed_gate
+    name: "EMBED gate — which written rows earn a vector"
+    declared_in:
+      - packs/dev/manifest.yaml  # ontology.memory_granularity — the POLICY source
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.2a — where the gate is specified
+    state: not-implemented
+    tracking_issue: 5008
+    note: >-
+      Two gates on one policy: the SELECTION sibling is the identifier-only
+      DISCARD predicate (`tortoise/value_gate.py`, #4899, implemented); the
+      EMBEDDING gate (EMBED / NO-EMBED on a written row) does not exist. A
+      vector, once written, is paid for permanently — FalkorDB Cloud bills
+      provisioned RAM, no eviction.
+
+  - id: sufficiency_router
+    name: "sufficiency router + escalation write-back"
+    declared_in:
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.5 the escalation write-back
+    state: not-implemented
+    tracking_issue: 5009
+    note: >-
+      Escalate on measured INSUFFICIENCY of the assembled evidence, not on query
+      type. No code path in `tortoise/`.
+
+  - id: fanout_cap
+    name: "connection fan-out cap (200)"
+    declared_in:
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §11.5
+    state: implemented
+    code:
+      - tortoise/fanout.py
+    tests:
+      - tests/test_fanout_cap.py
+    note: >-
+      `PER_ENTITY_FANOUT_CAP = 200` (owner, 2026-09-23), consumed by the
+      assembly slices.
