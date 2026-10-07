@@ -53,14 +53,17 @@ export function disconnectReasonText(reason) {
   const http = /^http_(\d+)$/.exec(reason)
   if (http) {
     const code = Number(http[1])
-    // Match the HTTP range to what GitHub actually established. 404/422 mean it
-    // did not recognise the token (it may be gone); 401/403 mean it rejected
-    // the REQUEST before touching the token, so the token is certainly still
-    // live; a 5xx means it could not process the call. Saying "may already be
-    // gone" for any of the latter two is the wrong reassurance — the exact
-    // failure #4946 exists to remove.
-    if (code === 404 || code === 422) {
-      return `GitHub answered ${code} to the revocation request, so the token may already be gone`
+    // Match the status to what GitHub actually established. 422 is its "the
+    // token is not valid" answer, so the token may already be gone; 404 on this
+    // route means the REQUEST or the app was not recognised, which establishes
+    // nothing about the token — so it takes the neutral arm rather than
+    // claiming it may be gone; 401/403 mean it rejected the request before
+    // touching the token, so the token is certainly still live; a 5xx means it
+    // could not process the call. Claiming "may already be gone" where the
+    // token is in fact live is the exact wrong reassurance #4946 exists to
+    // remove.
+    if (code === 422) {
+      return `GitHub rejected the token as no longer valid (it answered ${code}), so the token may already be gone`
     }
     if (code === 401 || code === 403) {
       return `GitHub rejected the revocation request (it answered ${code}), so the token is still live — this server's GitHub app credentials may be wrong`

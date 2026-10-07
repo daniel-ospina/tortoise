@@ -212,10 +212,17 @@ test('#4946: every server revoke_reason degrades to honest words, never to undef
     assert.ok(!/native code/.test(text), `${reason} must not leak a prototype member: ${text}`)
   }
   assert.equal(disconnectReasonText(''), 'the endpoint reported no reason')
-  assert.ok(/404/.test(disconnectReasonText('http_404')), 'the 4xx arm names the status')
-  // 404/422: GitHub did not recognise the token — it may be gone.
+  // 422 is GitHub's "the token is not valid" answer — it may be gone.
   assert.ok(/may already be gone/.test(disconnectReasonText('http_422')),
-    '422 means the token was not recognised')
+    '422 means GitHub rejected the token as no longer valid')
+  // 404 on this route says the REQUEST or the app was not recognised, which
+  // establishes nothing about the token — it must take the neutral arm, never
+  // the "may already be gone" reassurance.
+  const notFound = disconnectReasonText('http_404')
+  assert.ok(/404/.test(notFound), 'the arm names the status')
+  assert.ok(/unknown/.test(notFound), '404 must say the liveness is unknown')
+  assert.ok(!/may already be gone/.test(notFound),
+    '404 establishes nothing about the token, so it must not claim it may be gone')
   // 401/403: the REQUEST was rejected before the token was touched — it is live.
   // Assert the SPECIFIC arm, not merely the words "still live", which the
   // generic fallback also contains.
@@ -482,10 +489,16 @@ async function runDisconnectGithub(apiImpl) {
   const updates = []
   const refreshes = []
   globalThis.__gdApi = apiImpl
+  // The setter CHAINS each updater onto the previous result, the way React
+  // does. A frozen seed would hand every updater `busy:false`, so an assertion
+  // that the in-flight state CLEARS would be satisfied by the seed rather than
+  // by the handler — and a permanent busy-lock (every close path is
+  // `!busy`-guarded and every button is `disabled={busy}`, so the modal can
+  // never be dismissed) went unnoticed.
+  let state = { open: true, busy: false, error: 'stale', result: null }
   globalThis.__gdSet = (updater) => {
-    updates.push(typeof updater === 'function'
-      ? updater({ open: true, busy: false, error: 'stale', result: null })
-      : updater)
+    state = typeof updater === 'function' ? updater(state) : updater
+    updates.push(state)
   }
   globalThis.__gdRefresh = () => { refreshes.push(1); return Promise.resolve() }
   const [{ value: fn }] = await evalExpressions([`(${extractFunction('disconnectGithub')})`], {
@@ -507,8 +520,9 @@ test('#4946 wiring: disconnectGithub POSTs the landed endpoint and refreshes (EX
   assert.equal(updates[0].busy, true, 'the request arms the busy state')
   assert.equal(updates[0].error, '', 'a new attempt clears the stale error')
   assert.deepEqual(updates[1], {
-    open: true, busy: false, error: 'stale', result: { connected: false, revoked: true, revoke_reason: 'revoked' },
-  }, 'the response body is kept for the honest outcome panel')
+    open: true, busy: false, error: '', result: { connected: false, revoked: true, revoke_reason: 'revoked' },
+  }, 'the response body is kept for the honest outcome panel, and the in-flight state clears')
+  assert.equal(updates[1].busy, false, 'the success arm must clear busy — a permanent lock is undismissable')
   assert.equal(refreshes.length, 1,
     'a successful disconnect must refresh the onboarding projection so the card stops saying Connected')
 })
