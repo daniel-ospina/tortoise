@@ -27,7 +27,8 @@ foundation and reified each value as a tagged union of five `valueKind`s. **That
 lists what the corrected shape excludes. The platform research carried over is in §2.2/§2.4 and §9; v1's
 decisions and its test table are not carried over.
 
-**Revision note (v3, 2026-10-07).** A correction to §1, §2.3, §6/T2 and §8, after an `issue-scoping` run
+**Revision note (v3, 2026-10-07).** A correction to §1, §2.3, §6/T2 and §8, with the withdrawn wording
+restated in §7.2 step 3 and new v3 notes in §3 (OD5) and §9, after an `issue-scoping` run
 **rejected the increment it was scoping** (a separate deterministic numeric-fidelity gate) on measured
 evidence. §2.3's safety argument was **circular**; §8's claim that this shape makes the misread detectable
 is **false**; §1's premise was stated more strongly than its own search could support, and that search
@@ -180,7 +181,8 @@ Abstention protects the *typed field*. It does **not** detect a wrong number tha
 **abstaining is not detecting** — so §8's misread is *not* made detectable by this shape. Detecting it
 requires carrying the verbatim source span, which is a different deliverable: **#2684**
 (`[evidence-assembly] Slice B: verbatim value-spans on value-bearing points`, the #2542 value-fidelity
-family).
+family). *(Under the owner's alternative reading (b) below, the detection would move inside this design;
+the paragraph above states the reading this correction's wording assumes.)*
 
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
@@ -189,9 +191,11 @@ pattern ladder"* and §6/T3's abstention rule jointly make T2's named regression
 `1.234`) **undetectable by construction**. Two coherent readings exist:
 
 - **(a) Keep §4 as written.** The design types only unambiguous values and explicitly **cannot detect the
-  misread**; detection belongs to #2684. *(The correction above adopts this reading. It is the one the
-  research supports: neither comparable ships a locale parser and both keep the raw text, and our own
-  ablation has verbatim beating derived by 15.9 / 22.0 pts.)*
+  misread**; detection belongs to #2684. *(This correction's **wording** assumes (a) — it is the reading
+  the research supports: neither comparable ships a locale parser and both keep the raw text, and our own
+  ablation has verbatim beating derived by 15.9 / 22.0 pts — **but the owner's choice remains open**, and
+  the restatements in §6/T2, §7.2 step 3 and the OD5 note below are therefore **conditional on the owner
+  selecting (a)**. The owner-approved v2 text stands as the alternative.)*
 - **(b) Admit a minimal anchored separator/currency rule** for values that carry a currency anchor. It is
   the **only** route to detecting T2's regression inside this design, it departs from §4's blanket
   exclusion, and it therefore needs a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
@@ -200,9 +204,10 @@ pattern ladder"* and §6/T3's abstention rule jointly make T2's named regression
 against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and our own
 ablation); **traceability of a typed value to its raw text** may be ours and is not borrowed authority.
 ⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
-No such check is proposed by this design (see the restated requirement above) — a lexical
-source-comparison check is exactly what the evidence on bare string-presence verification argues against
-(§9).
+No such check is proposed by this design **under reading (a)** (see the restated requirement above) — a
+lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
+against (§9). Reading (b) would reintroduce one in a narrower, anchored form, and that is the owner's
+decision.
 
 ### 2.4 Representation facts carried over
 
@@ -240,7 +245,8 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 
 ⚠️ **v3 note on OD5.** The recommendation stands, but **the cross-check half is only implementable under
 reading (b) of §2.3.** Comparing a client value to a server-derived value is the same comparison the
-circular argument needed, so under reading **(a)** — the adopted one — there is no cross-check to perform:
+circular argument needed, so under reading **(a)** — the reading this correction's wording assumes, while
+**the owner's choice remains open** — there is no cross-check to perform:
 the server derives, the field is typed, and a client-supplied value cannot be adjudicated. A lane taking
 OD5's cross-check as settled should take **(b)** first.
 
@@ -304,10 +310,14 @@ These are requirements on the derivation, not evidence of an implementation that
   no `content`/`quote` byte changes.
 - **T2 — Validate against source (restated, v3).** As originally written this test was **unreachable**: it
   required `R$ 1.234,56` to be *detected* as differing from `1.234`, which needs the separator/locale rule
-  §4 excludes and T3 forbids (see §2.3). Restated to the achievable property: **for each fixture the typed
-  value is traceable to the raw text, and an ambiguous form produces no typed value at all** —
-  `R$ 1.234,56` must not be **accepted as** `1.234`, because under T3 it is not typed at all. Detecting a
-  misread that is already in `content` is **#2684's** property, not this one's.
+  §4 excludes (see §2.3). Restated to the achievable property: **for each fixture the typed value is
+  traceable to the raw text, and an ambiguous form produces no typed value at all** — `R$ 1.234,56` must
+  not be **accepted as** `1.234`; under reading (a) it is not typed at all, because §4 excludes the
+  separator rule that reading it would need. ⚠️ The operative rule here is **§4's blanket exclusion, not
+  T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor; whether an anchor licenses a
+  separator rule is exactly the open (a)/(b) decision in §2.3, and T3 does not settle it. Restated
+  accordingly, and contingent on (a). Detecting a misread that is already in `content` is **#2684's**
+  property, not this one's.
 - **T3 — Ambiguity drops, never guesses.** `1.234` / `1,234` without a locale anchor produce **no typed
   value**; the raw text remains.
 - **T4 — Currency is part of the value.** An unanchored symbol (`$`, `¥`) produces no currency; a
@@ -374,7 +384,8 @@ The work cannot begin at the derivation. The dependency order is:
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
    it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
-   this design. Detecting a misread already in `content` is #2684's property, not this step's.)*
+   this design **under reading (a)**. Detecting a misread already in `content` is #2684's property, not
+   this step's.)*
 4. **Backfill** historical prose (§5) — after step 3, and only under the stricter rule.
 5. **Consume** — the sum-and-ratio traversal the grounded requirement (#2782) needs.
 
@@ -394,15 +405,17 @@ parser.
 
 ⚠️ **Correction (v3).** An earlier version of this section claimed *"the corrected shape is what makes
 such a misread detectable once a value field exists — an arithmetic mismatch against the source
-sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (§6/T3) and
+sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (under §6/T3
+and reading (a); §2.3 records the owner's alternative (b), which would change this) and
 compares nothing against the source turn. Detection is #2684's property and is not delivered here.
 
 ---
 
 ## 9. Sources
 
-**Internal (repo files; line references checked against this tree, HEAD `d531debae` at the v3 correction;
-the two `~/.swarm/research/…` entries below are machine-local, outside this repo and not at that head):**
+**Internal (repo files; line references checked against the base tree at `d531debae` — origin/main, the
+diff base. This doc-only commit changes no code, so they hold at `64aee5537` too. The two
+`~/.swarm/research/…` entries below are machine-local, outside this repo and not at that head):**
 
 - `docs/ONTOLOGY.md` §11 (v3.2, #398) — derived-value cache doctrine (`Derived values may be CACHED, never
   authoritative … the derivation is the truth, the cache is a performance artifact`, `:1515`); §4.1
@@ -454,9 +467,14 @@ that source, not from #2782.
 **External:**
 
 - [arXiv 2602.11886](https://arxiv.org/abs/2602.11886) — LLM-based triplet extraction from financial
-  reports; a hybrid regex + LLM-judge pass cuts apparent subject hallucination **65.2% → 1.6%**, i.e. a bare
-  string-presence check's positives were overwhelmingly false. Cited as why §2.3 does not propose a lexical
-  source-comparison check, and why the v3 correction withdraws the detection claim rather than adding one.
+  reports. Verbatim from the abstract: *"We also propose a hybrid verification strategy that combines regex
+  matching with an LLM-as-a-judge check, reducing apparent subject hallucination rates from **65.2% to
+  1.6%** by filtering false positives caused by coreference resolution."* The paper's own mechanism is
+  **coreference resolution** and its remedy is regex **plus an LLM judge**, so the honest reading is *"a bare
+  lexical check was not usable on its own and needed a judge to be trusted"* — **not** *"a lexical check's
+  positives were all false"*. Cited as why the v3 correction **withdraws** the detection claim rather than
+  adding a lexical source-comparison check: §2.3's validate-against-source half had no borrowed authority
+  (§2.3, "Honest research limit"), and the one comparable that tried it needed a model in the loop.
 - PostgreSQL — [Numeric Types](https://www.postgresql.org/docs/current/datatype-numeric.html),
   [Monetary Types](https://www.postgresql.org/docs/current/datatype-money.html).
 - Crunchy Data — [Working with Money in Postgres](https://www.crunchydata.com/developers/playground/working-with-money-in-postgres).
