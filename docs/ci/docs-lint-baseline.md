@@ -108,16 +108,25 @@ linted file, and a more specific config **overrides** the repo one, so pinning
 only the root file would leave a same-PR `docs/.markdownlint-cli2.jsonc` free to
 turn a rule off. The snapshot therefore records a content digest of **every
 tracked file with one of those basenames, at any depth**, keyed by repo path — so
-*adding* a config is a policy change too. The field is **required**: `check`
-fails closed if it is absent, because a snapshot that simply omitted it would
-disable this whole check. A policy change must be made together with a
+*adding* a config is a policy change too. lychee does not take its policy from
+`lychee.toml` alone: it also auto-loads `[tool.lychee]` from `pyproject.toml`,
+`"lychee"` from `package.json` and `[package.metadata.lychee]` from `Cargo.toml`,
+so those sections are digested too — only the section, never the whole file,
+because a dependency bump is not a policy change, while a *missing* section is a
+fixed marker, so adding one still fails closed. The whole map is **required**:
+`check` fails closed if the field is absent, because a snapshot that simply
+omitted it would disable this check. A policy change must be made together with a
 re-baseline (`update`) that says why. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
 debt and is unaffected; that guard greps the added-markdown diff read from a
 **file**, never a pipe, because `grep -q` exits at its first match and the
 resulting SIGPIPE under `set -o pipefail` made the pipeline non-zero — silently
-skipping the guard on a large diff.
+skipping the guard on a large diff. It matches **case-insensitively**, because
+cli2's own directive parser does (`<!-- MARKDOWNLINT-DISABLE -->` suppresses a
+finding just as the lowercase form does), and it runs with rename detection on,
+so a pure `git mv` of a file that already carries a directive is not mistaken for
+an added one.
 
 ## Regenerating it
 

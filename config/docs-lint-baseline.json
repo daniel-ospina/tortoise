@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "linter_config": {
-    ".markdownlint-cli2.jsonc": "ee3683b901b443e4f2cff67f4f289dcee157d43b99af83fba5b1161378f6e04f"
+    ".markdownlint-cli2.jsonc": "ee3683b901b443e4f2cff67f4f289dcee157d43b99af83fba5b1161378f6e04f",
+    "pyproject.toml": "d9b50541bf088ab8ed23167addf9d6912d5b39cf9546e7be672ee12ebcfa5667"
   },
   "note": "SNAPSHOT, NOT AN AMNESTY (#7435). This file records the findings that already existed when it was taken, so the REQUIRED `docs` check fails a change only on findings that are NOT here. It repairs nothing. Read 'end_state' before editing it.",
   "end_state": {

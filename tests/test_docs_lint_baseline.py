@@ -755,6 +755,54 @@ def test_policy_digest_covers_configs_at_any_depth(tmp_path: Path):
     assert nested != root_only
 
 
+def test_policy_digest_covers_the_lychee_carrier_files(tmp_path: Path):
+    """lychee reads its policy from `Cargo.toml`, `pyproject.toml` and `package.json`.
+
+    Only `lychee.toml` was digested, so a same-PR `[tool.lychee] exclude = [...]`
+    (or the equivalent in `package.json`/`Cargo.toml`) changed the link half's
+    policy while every digested file stayed byte-identical — measured as the
+    differ reporting `0 new` against a genuinely new dead link. Digesting the
+    whole carrier would red the check on every dependency bump, so only the
+    section is digested; a MISSING section is a fixed marker, so adding one is a
+    change too.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "demo"\nversion = "1.0"\n', encoding="utf-8")
+    package = repo / "package.json"
+    package.write_text('{"name": "demo"}\n', encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    before = dlb._config_digest(repo)
+    assert set(before) == {"pyproject.toml", "package.json"}
+    # An UNRELATED edit (a dependency bump) is NOT a policy change.
+    pyproject.write_text('[project]\nname = "demo"\nversion = "2.0"\n', encoding="utf-8")
+    git("commit", "-qam", "bump")
+    assert dlb._config_digest(repo) == before
+    # ADDING the lychee section IS a policy change.
+    pyproject.write_text(
+        '[project]\nname = "demo"\nversion = "2.0"\n\n'
+        '[tool.lychee]\nexclude = ["brand-new-missing.md"]\n',
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "lychee policy")
+    assert dlb._config_digest(repo)["pyproject.toml"] != before["pyproject.toml"]
+    # `package.json` carries it too.
+    package.write_text(
+        '{"name": "demo", "lychee": {"exclude": ["^https://"]}}\n', encoding="utf-8"
+    )
+    git("commit", "-qam", "json lychee policy")
+    assert dlb._config_digest(repo)["package.json"] != before["package.json"]
+
+
 def _extract_suppression_guard(run: str) -> str:
     """The suppression-directive guard from a step's `run` block.
 
@@ -775,7 +823,9 @@ def _extract_suppression_guard(run: str) -> str:
         (
             i
             for i, line in enumerate(lines)
-            if re.match(r"\s*if (?:! )?git diff --no-renames -U0 .*-- '\*\.md'", line)
+            if re.match(
+                r"\s*if (?:! )?git diff (?:--no-renames|--find-renames) -U0 .*-- '\*\.md'", line
+            )
         ),
         None,
     )
@@ -787,13 +837,19 @@ def _extract_suppression_guard(run: str) -> str:
         if line.strip() == "fi" and indent(line) == lead:
             break
     # The file form is TWO sibling `if`s: after the first `fi`, a second `if`
-    # greps the SAME temp file. Keep going only when that sibling is present.
-    nxt = next((l for l in lines[start + len(block) :] if l.strip()), "")
-    if re.match(r"\s*if grep -qE .*\$RUNNER_TEMP/", nxt):
-        for line in lines[start + len(block) :]:
-            block.append(line)
-            if line.strip() == "fi" and indent(line) == lead:
-                break
+    # greps the SAME temp file. Extend only when that sibling references the very
+    # file the first block wrote — the step's later glob-allowlist guard also
+    # greps a `$RUNNER_TEMP/...` file, and matching it would smuggle an unrelated
+    # `exit 1` into the guard under test.
+    marker = re.search(r"\$RUNNER_TEMP/(\w+)", "".join(block))
+    if marker:
+        sibling = f"$RUNNER_TEMP/{marker.group(1)}"
+        nxt = next((l for l in lines[start + len(block) :] if l.strip()), "")
+        if re.match(r"\s*if grep ", nxt) and sibling in nxt:
+            for line in lines[start + len(block) :]:
+                block.append(line)
+                if line.strip() == "fi" and indent(line) == lead:
+                    break
     return "".join(block)
 
 
@@ -853,6 +909,26 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
     git("commit", "-qam", "suppress")
     assert run_guard(pr_step, {"BASE_SHA": base}) != 0
     assert run_guard(mh_step, {}) != 0
+    # cli2's directive parser is CASE-INSENSITIVE: `<!-- MARKDOWNLINT-DISABLE -->`
+    # suppresses a finding exactly as the lowercase form does, so a case-sensitive
+    # guard let an uppercase directive through while the differ saw `0 new`.
+    case_base = git("rev-parse", "HEAD").stdout.strip()
+    doc.write_text("# a\n\n<!-- MARKDOWNLINT-DISABLE MD001 -->\n### b\n", encoding="utf-8")
+    git("commit", "-qam", "uppercase suppression")
+    assert run_guard(pr_step, {"BASE_SHA": case_base}) != 0
+    assert run_guard(mh_step, {}) != 0
+    # A PURE RENAME of a file that ALREADY carries a directive must NOT fail: with
+    # rename detection off a `git mv` reads as the whole file being added, so a
+    # pre-existing directive looked new — a false failure on a no-op change.
+    legacy = repo / "docs" / "c.md"
+    legacy.write_text("# c\n\n<!-- markdownlint-disable MD001 -->\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "add a file with a pre-existing directive")
+    rename_base = git("rev-parse", "HEAD").stdout.strip()
+    git("mv", "docs/c.md", "docs/d.md")
+    git("commit", "-qm", "pure rename")
+    assert run_guard(pr_step, {"BASE_SHA": rename_base}) == 0
+    assert run_guard(mh_step, {}) == 0
     # A LARGE diff must not skip the guard: `grep -q` in a PIPE exited at its first
     # match, and under `set -o pipefail` the SIGPIPE to `git diff` made the
     # pipeline non-zero, so a large markdown diff reported no directive at all.

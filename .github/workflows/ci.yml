@@ -746,14 +746,20 @@ jobs:
           # match, and under `set -o pipefail` the SIGPIPE that sends `git diff`
           # made the whole pipeline non-zero — so a LARGE markdown diff silently
           # skipped the guard (measured: a >64 KB diff exited 0 with a directive
-          # present). Anchored on the HTML comment opener so ordinary prose that
-          # merely NAMES the directive is not a false failure.
-          if ! git diff --no-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
+          # present). It is CASE-INSENSITIVE because cli2's directive parser is
+          # (`<!-- MARKDOWNLINT-DISABLE -->` suppresses just as the lowercase form
+          # does, and a case-sensitive guard stayed silent on it), and anchored on
+          # the HTML comment opener so ordinary prose that merely NAMES the
+          # directive is not a false failure. `--find-renames`, not
+          # `--no-renames`: with rename detection off a pure `git mv` of a file
+          # that already carries a directive reads as the WHOLE file being added,
+          # failing a change that added nothing.
+          if ! git diff --find-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
               > "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
+          if grep -qiE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi
@@ -871,13 +877,14 @@ jobs:
             > "$RUNNER_TEMP/changed-md.txt"
           # Same suppression-directive guard as the PR path (see its comment): the
           # grep reads a FILE, not a pipe, so a large diff cannot skip it by
-          # SIGPIPE, and it is anchored on the HTML comment opener.
-          if ! git diff --no-renames -U0 HEAD^ HEAD -- '*.md' \
+          # SIGPIPE; it is case-insensitive like cli2's own parser; and
+          # `--find-renames` keeps a pure rename from reading as an added file.
+          if ! git diff --find-renames -U0 HEAD^ HEAD -- '*.md' \
               > "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
+          if grep -qiE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi

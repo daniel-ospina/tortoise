@@ -135,6 +135,7 @@ import json
 import re
 import subprocess
 import tempfile
+import tomllib
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -170,6 +171,23 @@ LINTER_CONFIG_NAMES = frozenset({
     ".lycheeignore",
     "lychee.toml",
 })
+
+# lychee 0.24.2 does NOT take its policy from `lychee.toml` alone: it also
+# auto-loads a section out of `Cargo.toml` (`[package.metadata.lychee]`),
+# `pyproject.toml` (`[tool.lychee]`) and `package.json` (`"lychee"`) in its
+# WORKING DIRECTORY — which is the repo root, because `_run_lychee` runs there.
+# Digesting those files WHOLE would red the required check on every dependency
+# bump, which is not a policy change, so only the lychee section is digested —
+# and a MISSING section digests to a fixed marker, so ADDING one is a policy
+# change too (measured: `[tool.lychee] exclude = ["..."]` in the tracked
+# `pyproject.toml` emptied the link half while every digested file stayed
+# byte-identical, and the differ then reported `0 new`).
+LYCHEE_CARRIERS: dict[str, tuple[str, ...]] = {
+    "Cargo.toml": ("package", "metadata", "lychee"),
+    "pyproject.toml": ("tool", "lychee"),
+    "package.json": ("lychee",),
+}
+_NO_LYCHEE_SECTION = hashlib.sha256(b"<no lychee section>").hexdigest()
 
 BASELINE_SCHEMA = 1
 DEFAULT_BASELINE = "config/docs-lint-baseline.json"
@@ -367,6 +385,29 @@ def generated_target(path: str, repo_root: Path) -> str | None:
 # ── fail-closed loading of the linters' output ───────────────────────────────
 
 
+def _lychee_section_digest(path: Path, rel: str) -> str:
+    """Digest of the lychee config section inside a carrier file, or a marker.
+
+    A carrier that cannot be parsed is a policy that cannot be attested, so it
+    fails closed rather than reading as "unchanged".
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+        data: object = json.loads(text) if rel.endswith(".json") else tomllib.loads(text)
+    except (OSError, ValueError) as exc:
+        raise FailClosed(
+            f"cannot read {rel} to attest the lychee policy it may carry: {exc}"
+        ) from exc
+    node: object = data
+    for key in LYCHEE_CARRIERS[rel]:
+        node = node.get(key) if isinstance(node, dict) else None
+    if node is None:
+        return _NO_LYCHEE_SECTION
+    return hashlib.sha256(
+        json.dumps(node, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def _config_digest(repo_root: Path) -> dict[str, str]:
     """Content digest of EVERY tracked linter-policy file, keyed by repo path.
 
@@ -385,11 +426,15 @@ def _config_digest(repo_root: Path) -> dict[str, str]:
             f"`git ls-files` failed in {repo_root} (rc {proc.returncode}) — the linter "
             "policy cannot be attested, so the snapshot cannot be validated"
         )
-    return {
-        rel: hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
-        for rel in proc.stdout.split("\0")
-        if rel and Path(rel).name in LINTER_CONFIG_NAMES and (repo_root / rel).is_file()
-    }
+    digest: dict[str, str] = {}
+    for rel in proc.stdout.split("\0"):
+        if not rel or not (repo_root / rel).is_file():
+            continue
+        if Path(rel).name in LINTER_CONFIG_NAMES:
+            digest[rel] = hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
+        elif rel in LYCHEE_CARRIERS:
+            digest[rel] = _lychee_section_digest(repo_root / rel, rel)
+    return digest
 
 
 def _require_unchanged_linter_policy(baseline: dict, repo_root: Path) -> None:
