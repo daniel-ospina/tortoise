@@ -212,6 +212,35 @@ LINTER_CONFIG_NAMES = frozenset({
     "lychee.toml",
 })
 
+# A markdownlint config must be SELF-CONTAINED for its content digest to mean
+# anything: the digest pins the config FILE's bytes, so a config that loads its
+# rules from somewhere else is a route the map cannot see. Two measured forms:
+#
+#   * `"config": {"extends": "./lintcfg/relaxed.json"}` — the map moves when the
+#     reference is ADDED, but a LATER change that edits only `relaxed.json` to
+#     `{"MD001": false}` leaves the map byte-identical, and cli2 then reports
+#     `0 issues`: a rule is off and the guard is silent.
+#   * a PROGRAMMATIC config (`.cjs`/`.mjs`) — the file EXECUTES, so it can load a
+#     module the map does not track; its bytes do not describe its policy.
+#
+# The indirection is REFUSED rather than followed: an `extends` may name a
+# PACKAGE (`markdownlint/style/prettier`), not only a repo path, so following it
+# would mean resolving npm's module graph inside the differ. The check is
+# fail-closed, and its one false positive is deliberate and fails loud — a
+# declarative config that merely MENTIONS the key inside a block comment is
+# refused, and the remedy is to reword the comment.
+_POLICY_INDIRECTION = re.compile(
+    r'"(?P<quoted>extends|customRules)"\s*:'  # JSON/JSONC: the quoted key
+    r"|^\s*(?P<bare>extends|customRules)\s*:",  # YAML: the bare key at line start
+    re.M,
+)
+_PROGRAMMATIC_CONFIG_NAMES = frozenset({
+    ".markdownlint-cli2.cjs",
+    ".markdownlint-cli2.mjs",
+    ".markdownlint.cjs",
+    ".markdownlint.mjs",
+})
+
 # lychee 0.24.2 does NOT take its policy from `lychee.toml` alone: it also
 # auto-loads a section out of `Cargo.toml` (`[package.metadata.lychee]`),
 # `pyproject.toml` (`[tool.lychee]`) and `package.json` (`"lychee"`) in its
@@ -468,6 +497,37 @@ def _lychee_section_digest(path: Path, rel: str) -> str:
     ).hexdigest()
 
 
+def _require_self_contained_config(path: Path, rel: str) -> None:
+    """Refuse a markdownlint config whose policy the digest cannot attest.
+
+    A content digest only pins what it READS: a config that pulls its rules from
+    another file (`extends`, `customRules`) or executes code (a `.cjs`/`.mjs`
+    config that can load an untracked module) leaves a route where editing THAT
+    file turns a rule off without moving the snapshot — so `check` reports `0 new`
+    on a genuinely suppressed finding. See `_POLICY_INDIRECTION` for the
+    measurement. Fail closed rather than follow the reference: it may name an npm
+    package, not a repo path.
+    """
+    if path.name in _PROGRAMMATIC_CONFIG_NAMES:
+        raise FailClosed(
+            f"{rel} is a PROGRAMMATIC markdownlint config — it executes and can load "
+            "rules from a module this snapshot does not track, so the linter policy "
+            "cannot be attested. Inline the policy in a declarative config."
+        )
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise FailClosed(f"cannot read {rel} to attest the linter policy: {exc}") from exc
+    match = _POLICY_INDIRECTION.search(text)
+    if match is not None:
+        key = match.group("quoted") or match.group("bare")
+        raise FailClosed(
+            f"{rel} declares `{key}`, so it loads linter policy from a file this "
+            "snapshot does not track — editing THAT file would turn a rule off with "
+            "the snapshot unmoved. Inline the policy in this file."
+        )
+
+
 def _config_digest(repo_root: Path) -> dict[str, str]:
     """Content digest of EVERY tracked linter-policy file, keyed by repo path.
 
@@ -491,6 +551,7 @@ def _config_digest(repo_root: Path) -> dict[str, str]:
         if not rel or not (repo_root / rel).is_file():
             continue
         if Path(rel).name in LINTER_CONFIG_NAMES:
+            _require_self_contained_config(repo_root / rel, rel)
             digest[rel] = hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
         elif rel in LYCHEE_CARRIERS:
             digest[rel] = _lychee_section_digest(repo_root / rel, rel)

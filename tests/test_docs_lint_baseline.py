@@ -946,6 +946,60 @@ def test_policy_digest_covers_configs_at_any_depth(tmp_path: Path):
     assert nested != root_only
 
 
+def test_policy_digest_refuses_a_config_that_loads_policy_elsewhere(tmp_path: Path):
+    """A content digest pins what it READS; `extends` reads a second file.
+
+    Digesting the config's own bytes is not enough when the config names another
+    file as the source of its rules: measured on `.markdownlint-cli2.jsonc` with
+    `"config": {"extends": "./lintcfg/relaxed.json"}`, editing ONLY
+    `relaxed.json` to `{"MD001": false}` left `_config_digest` byte-identical
+    while cli2 reported `0 issues` — a rule turned off with the guard silent, in
+    a LATER change than the one that added the reference. A programmatic
+    `.cjs`/`.mjs` config is the same hole one level down (it executes, so it can
+    load an untracked module), so both are refused rather than followed: an
+    `extends` may name a package, not only a repo path.
+    """
+    repo = tmp_path / "repo"
+    (repo / "lintcfg").mkdir(parents=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    # A self-contained declarative config is accepted.
+    config = repo / ".markdownlint-cli2.jsonc"
+    config.write_text('{"config": {"MD013": false}}\n', encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    assert set(dlb._config_digest(repo)) == {".markdownlint-cli2.jsonc"}
+
+    # ...but one that DELEGATES its rules does not.
+    config.write_text(
+        '{"config": {"extends": "./lintcfg/relaxed.json"}}\n', encoding="utf-8"
+    )
+    git("commit", "-qam", "extends")
+    with pytest.raises(dlb.FailClosed, match="extends"):
+        dlb._config_digest(repo)
+
+    # `customRules` is the same indirection, in the same single-line shape.
+    config.write_text('{"customRules": ["./rules/extra.mjs"]}\n', encoding="utf-8")
+    git("commit", "-qam", "customRules")
+    with pytest.raises(dlb.FailClosed, match="customRules"):
+        dlb._config_digest(repo)
+
+    # A programmatic config EXECUTES, so its bytes do not describe its policy.
+    config.unlink()
+    (repo / ".markdownlint-cli2.cjs").write_text(
+        "module.exports = require('./lintcfg/relaxed.json');\n", encoding="utf-8"
+    )
+    git("add", "-A")
+    git("commit", "-qm", "programmatic")
+    with pytest.raises(dlb.FailClosed, match="PROGRAMMATIC"):
+        dlb._config_digest(repo)
+
+
 def test_policy_digest_covers_the_lychee_carrier_files(tmp_path: Path):
     """lychee reads its policy from `Cargo.toml`, `pyproject.toml` and `package.json`.
 

@@ -137,7 +137,10 @@ fixed marker, so adding one still fails closed. The whole map is **required**:
 omitted it would disable this check. A policy change therefore cannot be made
 without moving this snapshot, and the map's digest is pinned by
 `tests/test_docs_lint_baseline.py`, so the edit is always visible in the diff and
-must be made out loud, with the reason. Separately, both `docs` paths reject a
+must be made out loud, with the reason. A config that does not **hold** its own
+policy is refused rather than followed: `extends` and `customRules` name a second
+file, and a `.cjs`/`.mjs` config executes, so a rule switched off in what they
+load would move this snapshot not at all. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
 debt and is unaffected; that guard greps the added-markdown diff read from a
