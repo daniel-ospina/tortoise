@@ -557,11 +557,17 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     here rather than left implied. Widening to ``superseded`` would also break
     the pinned current-state render (`test_resolver_docker_exact_and_both_halves`),
     but that is a docker-lane consequence; this pure pin is the fast one.
+
+    #3302: the equality assertion at the end pins the RECALL set's own
+    contents. The subset assertions above are about the RESOLVER set and are
+    blind to four of the recall set's five members (only ``retracted`` is
+    shared), so they cannot substitute for it.
     """
     from tortoise.assembly import (
         _RECALL_OBJECT_EXCLUDED_STATUSES,
         _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES,
     )
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
     assert (
         _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
         <= _RECALL_OBJECT_EXCLUDED_STATUSES
@@ -569,6 +575,13 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
     for st in ("superseded", "deprecated", "archived", "outdated"):
         assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+    # #3302: the successor-probe set is EXACTLY the canonical OBJECT vocabulary
+    # plus its one load-bearing divergence. `outdated` is not a dead member —
+    # create_entity/update_entity can write it through the public MCP surface
+    # (`status` is not server-managed), so an exact pin is required rather than
+    # a subset check.
+    assert set(_RECALL_OBJECT_EXCLUDED_STATUSES) == \
+        set(OBJECT_TERMINAL_STATUSES) | {"outdated"}
 
 
 # ── #4061 R1/R2/R3: the exclusion is decided where it is applied ───────────

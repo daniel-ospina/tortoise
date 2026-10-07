@@ -316,6 +316,8 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         with:
           node-version: '22'  # `.ts` type stripping + syntax detection is DEFAULT-ON from 22.18; these checks pass no flag
+      - uses: ./.github/actions/install-cpu-torch
+        if: needs.dedup-check.outputs.skip != 'true'
       - name: Install
         if: needs.dedup-check.outputs.skip != 'true'
         run: |

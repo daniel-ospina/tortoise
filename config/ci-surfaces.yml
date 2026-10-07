@@ -769,6 +769,7 @@ surfaces:
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
+  - test_graph_script_provenance.py
   - test_heavy_import_guard.py
   - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
@@ -798,6 +799,7 @@ surfaces:
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_entity_identity.py
   - test_ci_verdict.py
   - test_env_isolation.py
   # #3595: the unsupported Cypher `=~` operator must FAIL LOUDLY instead of
@@ -1302,6 +1304,11 @@ surfaces:
   # opt-in half reds). Registered in `core` (the projection surface).
   - test_embedded_durability_claim.py
   - test_embedded_lifecycle.py
+  # #4921: the construction lock that brackets `RedisMixin.__init__`'s
+  # check-then-start span — two concurrent constructions of one
+  # `<dbdir>/<dbfilename>` each started a server over the SAME RDB. Pure unit:
+  # tmp dirs + a subprocess child; no embedded server is ever started.
+  - test_4921_construct_lock.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
@@ -2440,6 +2447,7 @@ carve_out:
 - test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
+- test_4921_construct_lock.py  # #4921: two of its tests construct real embedded servers under a forced check-then-act interleave (one server over one RDB, and the unguarded red half) — they skip under the docker redirect, so the file is embedded-only
 - test_flip_gate.py
 # #4047: both #3845 fork-guard files are module-level `embedded_only` (their
 # subject is the embedded daemon's module-fork wedge), were absent from
@@ -3562,6 +3570,7 @@ durations:
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
+  test_4921_construct_lock.py: 60.0  # #4921: a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). Locally measured this turn: 20 tests, wall time dominated by the 2 forced-interleave tests (two real embedded servers per arm) — 29s on an idle-ish box, ~85s on a loaded one, so the flat #3400 default is set mid-range (60.0) and the true weight is deliberately NOT claimed: it moves with box load more than with the code. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). Refresh from the first post-merge run that includes it.
   test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
