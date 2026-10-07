@@ -566,12 +566,6 @@ class NotAWorkItem(Exception):
     auth/network", a remedy unrelated to the actual problem and one that no
     amount of retrying resolves.
 
-    (An earlier version of this docstring claimed that raising `SurfaceError`
-    here still returned `VERDICT: CLEAN`. That is FALSE at this call site — the
-    blocking open-PR scan's handler yields exit 2, not 0 — and it contradicted
-    the raise-site comment, which said the opposite. Corrected: a wrong reason
-    for a right decision is still a defect, because the next reader inherits it.)
-
     This class therefore carries a DISTINCT identity through to `main`, which
     turns it into exit 2 rather than into a mislabelled advisory note.
 
@@ -3075,10 +3069,10 @@ def scan_pr_surface(
     leaves the verdict CLEAN.
 
     RAISES `NotAWorkItem` for an open PR number, in ADDITION to `SurfaceError`.
-    On the CLI path both produce exit 2, but ONLY `NotAWorkItem` reaches
-    `main()` — a `SurfaceError` is absorbed by the per-surface handler and
-    rendered as `VERDICT: INCOMPLETE`. A PROGRAMMATIC caller of this function or
-    of `run_preflight` must therefore catch `NotAWorkItem` itself.
+    On the CLI path ONLY `NotAWorkItem` reaches `main()`; a `SurfaceError` is
+    absorbed by the per-surface handler and never becomes this refusal. A
+    PROGRAMMATIC caller of this function or of `run_preflight` must therefore
+    catch `NotAWorkItem` itself.
 
     #4567 found this order
     inverted: the keyword test ran first and `continue`d unconditionally, so the

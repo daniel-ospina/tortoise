@@ -373,9 +373,9 @@ boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive tit
   line now counts only surfaces actually read and names any advisory shortfall.)
 - `exit 1` **COLLISION** — a hit on a blocking surface; do **not** dispatch, coordinate on the named
   surface first. An advisory-surface match is reported but never blocks.
-- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (gh auth/network) **or an
-  open-PR list was truncated at its completeness cap**. This is **not** clean. Fix the surface and
-  re-run; never treat it as a pass.
+- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (**fix the surface**) **or
+  an open-PR list was truncated at its completeness cap** (**widen with `--pr-limit`**). This is
+  **not** clean; never treat it as a pass.
   ⛔ **EXIT 2 HAS A THIRD CAUSE WITH NO `VERDICT` LINE, AND ITS REMEDY IS NOT `gh auth/network`:** if
   the number you passed is an **OPEN PULL REQUEST**, the pre-flight refuses before computing any
   verdict — it prints only the refusal on stderr and emits **no report at all**. A PR number is not a
