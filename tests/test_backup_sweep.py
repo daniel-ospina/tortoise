@@ -2773,14 +2773,18 @@ def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch)
         store = MemoryStorage()
 
         import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import measure_projection_storage
 
         calls: list[tuple] = []
+        real_meter = bs_mod.measure_and_record_graph_storage
 
-        def _spy(p, org_id, **kw):
+        def _capture(p, org_id, **kw):
+            # Capture, then delegate to the REAL meter so the ledger path is
+            # not bypassed.
             calls.append((org_id, p))
-            return None
+            return real_meter(p, org_id, **kw)
 
-        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _spy)
+        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _capture)
         r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                              config=_config())
         assert r["results"]["team_st"]["status"] == "backed_up", r["results"]
@@ -2792,11 +2796,23 @@ def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch)
         org_seen, proj_seen = calls[0]
         assert org_seen == "team_st", org_seen
 
-        # 2. It is handed the ALREADY-OPEN projection of this org's own graph —
-        #    not a fresh/shared one (measuring the wrong graph would put a
-        #    foreign byte count on this org's ledger).
+        # 2. ⛔ THE P0 TRIPWIRE. The meter reads `proj.db` and `proj.graph_name`
+        #    — NOT `.g`. A projection carrying only `.g` yields a FAILED reading
+        #    (`"no graph handle / graph name supplied"`) and records NOTHING, so
+        #    the whole feature is a silent no-op. Spying on
+        #    `measure_and_record_graph_storage` alone cannot see that: it
+        #    replaces the very function whose argument handling is in question.
+        #    So run the REAL meter over the exact object the sweep handed over.
+        reading = measure_projection_storage(proj_seen)
+        assert reading.ok, (
+            f"the sweep handed the meter a projection it cannot read: "
+            f"{reading.error!r} — expected `db` and `graph_name` on it, got "
+            f"{sorted(vars(proj_seen))}")
+        assert reading.graph_name == _team_graph("team_st"), reading.graph_name
+
+        # 3. And the reading is for THIS org's own graph — never a foreign one.
         measured_graph = getattr(proj_seen, "g", None)
-        assert measured_graph is not None, "meter was handed a projection with no graph"
+        assert measured_graph is not None, "meter got a projection with no graph"
         assert getattr(measured_graph, "name", None) == _team_graph("team_st"), (
             f"meter measured {getattr(measured_graph, 'name', None)!r}, expected "
             f"{_team_graph('team_st')!r} — the reading is on the wrong graph")

@@ -657,6 +657,41 @@ def _backup_graph(
     except Exception as e:
         return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": str(e)}
+    # ── #5331: put this graph's storage on the per-org metering ledger. ──
+    # Owner ruling (2026-09-27, #4495/#5331): storage is denominated in MB/GB
+    # with purchased overage, REPLACING the node cap — and a byte allowance can
+    # only be enforced against a byte reading, which nothing produced: the meter
+    # was merged (#5696) but had ZERO production callers, so no org-period ever
+    # carried a storage figure. This is that caller.
+    #
+    # ⛔ `db` and `graph_name` are load-bearing, NOT decoration: the meter reads
+    # `proj.db` and `proj.graph_name` (`measure_projection_storage`), so a
+    # projection carrying only `.g` yields a FAILED reading and the ledger
+    # silently records nothing. Do not "simplify" this to `SimpleNamespace(g=g)`.
+    #
+    # DELIBERATELY BEFORE the size-guard return BELOW: the byte figure is
+    # independent of the node-count guard, and the oversized population is
+    # exactly the one a byte cap exists to price — measuring after the guard
+    # would leave the largest graphs reading as a false zero.
+    try:
+        _meter_reading = measure_and_record_graph_storage(
+            SimpleNamespace(g=g, db=db, graph_name=graph_name), org_id)
+    except Exception:
+        # Belt-and-braces only: the meter is TOTAL by contract and never raises.
+        # Backup durability outranks metering (an aborted backup is an
+        # unprotected graph; a dropped reading recovers on the next sweep), so
+        # an unexpected raise must not abort the dump.
+        logger.exception(
+            "storage meter raised for %s/%s — continuing", org_id, graph_name)
+    else:
+        # The REAL failure path is a returned non-ok reading, which must be
+        # VISIBLE: at default log levels a discarded reading is a silent
+        # no-op, which is exactly how the meter stayed dormant.
+        if not _meter_reading.ok:
+            logger.warning(
+                "storage metering FAILED for %s/%s: %s — no reading recorded "
+                "for this period", org_id, graph_name, _meter_reading.error)
+
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
@@ -686,23 +721,6 @@ def _backup_graph(
 
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
-    # ── #5331: put this graph's storage on the per-org metering ledger. ──
-    # Owner ruling (2026-09-27, #4495/#5331): storage is denominated in MB/GB
-    # with purchased overage, REPLACING the node cap — and a byte cap can only
-    # be enforced against a byte reading, which nothing produced: the meter was
-    # merged (#5696) but had ZERO production callers, so no org-period ever
-    # carried a storage figure. This is that caller: the sweep already
-    # enumerates orgs and opens a projection per graph, so the measurement is
-    # nearly free and lands on the SAME period ledger the cap reads.
-    # Fail-soft by contract, exactly like the backup itself: a metering failure
-    # must never abort a backup, and `measure_and_record_graph_storage` returns
-    # a reading in every case (a dropped ledger write is logged, not raised).
-    try:
-        measure_and_record_graph_storage(proj, org_id)
-    except Exception:
-        logger.warning(
-            "storage metering failed for %s/%s — continuing (best-effort, "
-            "never aborts the backup)", org_id, graph_name, exc_info=True)
     if not config.registry_stream_key or len(config.registry_stream_key) != 32:
         return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": "REGISTRY_STREAM_KEY missing or invalid — fail-closed (#661)"}
