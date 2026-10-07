@@ -29,6 +29,7 @@ import {
   disconnectOutcomeMessage, disconnectReasonText,
 } from './githubDisconnect.js'
 import { importsFromMain, probeTags, evalExpressions } from './jsxSourceProbe.js'
+import { stripComments } from './testSupport.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(HERE, 'main.jsx'), 'utf8')
@@ -75,6 +76,12 @@ function buttonByLabel(props, label) {
   return button
 }
 
+/** The dialog element of a rendered control. */
+const dialogOf = (props) => collect(GithubDisconnectControl(props), 'div')
+  .find((d) => d.props.role === 'dialog')
+const backdropOf = (props) => collect(GithubDisconnectControl(props), 'div')
+  .find((d) => d.props.className === 'modal-backdrop')
+
 // ── the copy of record ─────────────────────────────────────────────────────
 // Spelled out here as the INDEPENDENT copy of record (the accountDeletion
 // `DELETE_ACCOUNT_WARNING` pattern): a change to the module's own constant
@@ -107,6 +114,23 @@ test('#4946: the dialog renders only when opened, and offers exactly two ruled a
     'exactly the opener plus the two actions')
 })
 
+test('#4946: rendering the dialog emits no React key warning', () => {
+  // `actions(...children)` passing the rest ARRAY as a single child made React
+  // warn "Each child in a list should have a unique key" on every render; the
+  // spread fixes it and nothing else would notice.
+  const errors = []
+  const orig = console.error
+  console.error = (...args) => { errors.push(String(args[0])) }
+  try {
+    render({ ...baseProps, open: true })
+    render({ ...baseProps, open: true, result: { revoked: true, revoke_reason: 'revoked' } })
+  } finally {
+    console.error = orig
+  }
+  const keyWarnings = errors.filter((e) => /unique "key"/.test(e))
+  assert.deepEqual(keyWarnings, [], `unkeyed list children warn on every render — got: ${keyWarnings}`)
+})
+
 test('#4946: disconnecting hides the opener but keeps the outcome dialog open', () => {
   // The opener must not survive the connection flipping false...
   assert.deepEqual(labelsOf({ ...baseProps, connected: false, open: false }), [],
@@ -120,6 +144,27 @@ test('#4946: disconnecting hides the opener but keeps the outcome dialog open', 
   })
   assert.ok(html.includes('role="dialog"'), 'the outcome dialog survives the disconnect')
   assert.ok(/not confirmed/i.test(html), 'the honest warning is reachable after the flip')
+})
+
+test('#4946 (P1 placement): main.jsx renders the control OUTSIDE the connected branch', () => {
+  // `probeTags` evaluates the tag in isolation, so it cannot see WHERE the tag
+  // sits — re-nesting it in the connected arm passed the whole suite. Pin the
+  // placement structurally: after the connected/disconnected ternary, and not
+  // wrapped in a `githubConnected &&` gate, so the dialog cannot be unmounted
+  // by the flag the disconnect itself flips.
+  const stripped = stripComments(mainJsx)
+  const sectionAt = stripped.indexOf('aria-labelledby="settings-github-heading"')
+  assert.ok(sectionAt > -1, 'the GitHub-connect home must exist')
+  const section = stripped.slice(sectionAt, stripped.indexOf('settings-memory-heading', sectionAt))
+  assert.equal((section.match(/<GithubDisconnectControl/g) || []).length, 1,
+    'exactly one control in the GitHub-connect home')
+  const controlAt = section.indexOf('<GithubDisconnectControl')
+  const disconnectedArm = section.indexOf('Connect GitHub to bring issues and repo docs')
+  assert.ok(disconnectedArm > -1 && disconnectedArm < controlAt,
+    'the control must render AFTER the connected/disconnected ternary — inside the connected arm the '
+    + 'outcome panel unmounts the moment github_connected flips false (#4946 P1)')
+  assert.ok(!/githubConnected\s*&&/.test(section.slice(disconnectedArm, controlAt)),
+    'the control must not be gated on githubConnected — the dialog has to survive the flag flipping false')
 })
 
 test('#4946: the opener only opens — it never disconnects', () => {
@@ -210,6 +255,24 @@ test('#4946 (a11y): the dialog autoFocuses Cancel, never the affirmative CTA', (
     'the affirmative CTA must not be autofocused — a stray Enter must not disconnect')
 })
 
+test('#4946 (a11y): the dialog is a focusable, Escape-closable modal with a backdrop close', () => {
+  const dialog = dialogOf({ ...baseProps, open: true })
+  assert.ok(dialog, 'the dialog element must render')
+  // tabIndex -1 is load-bearing: BOTH the busy-reclaim effect and
+  // focusDialogContainer call .focus() on this div, which is a no-op without it.
+  assert.equal(dialog.props.tabIndex, -1, 'the dialog container must be focusable')
+  assert.equal(dialog.props['aria-modal'], 'true')
+  let closes = 0
+  dialog.props.onKeyDown({ key: 'Enter' })
+  assert.equal(closes, 0, 'a non-Escape key must not close')
+
+  const props = { ...baseProps, open: true, onClose: () => { closes += 1 } }
+  dialogOf(props).props.onKeyDown({ key: 'Escape' })
+  assert.equal(closes, 1, 'Escape must close the dialog')
+  backdropOf(props).props.onClick()
+  assert.equal(closes, 2, 'the backdrop must close the dialog')
+})
+
 test('#4946 (a11y): the busy transition is announced on a polite live region', () => {
   const statusOf = (props) => collect(GithubDisconnectControl(props), 'span')
     .find((s) => s.props.role === 'status')
@@ -248,16 +311,13 @@ async function wiringProbe(state, connected = true) {
   return { props: probes[0].props, calls }
 }
 
-test('#4946 wiring: the three action props are distinct, real handlers', async () => {
-  const { props, calls } = await wiringProbe({ open: true, busy: false, error: '', result: null })
-  assert.equal(typeof props.onOpen, 'function')
-  assert.equal(typeof props.onClose, 'function')
-  assert.equal(typeof props.onConfirm, 'function')
-  props.onOpen()
-  props.onClose()
-  props.onConfirm()
-  assert.deepEqual(calls, { open: 1, close: 1, confirm: 1 },
-    'each action must reach its own handler — a swapped pair would show here')
+test('#4946 wiring: each action prop IS its own handler (identity, not just counts)', async () => {
+  // A count-based assertion is a bijection: swapping onOpen/onClose passes it.
+  // Assert identity against the three distinct sentinels instead.
+  const { props } = await wiringProbe({ open: true, busy: false, error: '', result: null })
+  assert.equal(props.onOpen, globalThis.__gdWiring.open, 'onOpen must BE the open handler')
+  assert.equal(props.onClose, globalThis.__gdWiring.close, 'onClose must BE the close handler')
+  assert.equal(props.onConfirm, globalThis.__gdWiring.confirm, 'onConfirm must BE the confirm handler')
 })
 
 test('#4946 wiring: the control\'s props are driven by the disconnect state, not literals', async () => {
@@ -310,7 +370,6 @@ function extractFunction(name) {
 }
 
 async function runDisconnectGithub(apiImpl) {
-  const seen = []
   const updates = []
   const refreshes = []
   globalThis.__gdApi = apiImpl
@@ -330,13 +389,12 @@ async function runDisconnectGithub(apiImpl) {
   })
   assert.equal(typeof fn, 'function')
   await fn()
-  return { updates, refreshes, seen }
+  return { updates, refreshes }
 }
 
 test('#4946 wiring: disconnectGithub POSTs the landed endpoint and refreshes (EXECUTED)', async () => {
-  const { updates, refreshes } = await runDisconnectGithub(async (path, opts) => {
-    return { connected: false, revoked: true, revoke_reason: 'revoked' }
-  })
+  const { updates, refreshes } = await runDisconnectGithub(async () =>
+    ({ connected: false, revoked: true, revoke_reason: 'revoked' }))
   assert.equal(updates[0].busy, true, 'the request arms the busy state')
   assert.equal(updates[0].error, '', 'a new attempt clears the stale error')
   assert.deepEqual(updates[1], {
@@ -367,11 +425,19 @@ test('#4946 wiring: a failed disconnect keeps the dialog open with the reason (E
   assert.equal(refreshes.length, 0, 'a failed disconnect must not claim the connection changed')
 })
 
-test('#4946 (a11y) wiring: open captures the trigger and close restores focus (EXECUTED)', async () => {
+/** Run the open/close handlers against a capturing setter and focus spies. */
+async function runOpenClose({ restoreReturns = {} } = {}) {
   const calls = { remember: 0, restore: 0 }
+  const states = []
   globalThis.__gdFocus = {
     remember: () => { calls.remember += 1 },
-    restore: () => { calls.restore += 1 },
+    // `'restore' in …` (not `?? {}`) so an explicit `null` return — the
+    // detached-opener case — is honoured rather than swallowed by nullish
+    // coalescing.
+    restore: () => { calls.restore += 1; return 'restore' in restoreReturns ? restoreReturns.restore : {} },
+  }
+  globalThis.__gdSetState = (v) => {
+    states.push(typeof v === 'function' ? v({ open: false, busy: true, error: 'e', result: 'r' }) : v)
   }
   const [{ value: openFn }, { value: closeFn }] = await evalExpressions([
     `(${extractFunction('openGithubDisconnect')})`,
@@ -380,13 +446,52 @@ test('#4946 (a11y) wiring: open captures the trigger and close restores focus (E
     bindings: {
       rememberFocusedTrigger: 'globalThis.__gdFocus.remember',
       restoreFocus: 'globalThis.__gdFocus.restore',
-      setGithubDisconnect: '() => {}',
+      setGithubDisconnect: 'globalThis.__gdSetState',
       githubDisconnectRestoreRef: '{}',
     },
   })
+  return { openFn, closeFn, calls, states }
+}
+
+test('#4946 (a11y) wiring: opening captures the trigger and actually opens (EXECUTED)', async () => {
+  const { openFn, calls, states } = await runOpenClose()
   openFn()
   assert.equal(calls.remember, 1, 'the opener must capture the trigger for focus restore (#2392)')
   assert.equal(calls.restore, 0, 'opening must not restore focus')
+  assert.deepEqual(states[0], { open: true, busy: true, error: '', result: null },
+    'opening must set open and clear stale error/result — a no-op leaves the dialog unopenable')
+})
+
+test('#4946 (a11y) wiring: closing restores focus and fully resets state (EXECUTED)', async () => {
+  const { closeFn, calls, states } = await runOpenClose()
   closeFn()
-  assert.equal(calls.restore, 1, 'every close must hand focus back to the opener (#2392)')
+  assert.equal(calls.restore, 1, 'every close must try to hand focus back to the opener (#2392)')
+  assert.deepEqual(states[0], { open: false, busy: false, error: '', result: null },
+    'closing must fully reset — a no-op leaves the dialog unclosable')
+})
+
+test('#4946 (a11y) wiring: a close after the opener unmounted parks focus on the heading (EXECUTED)', async () => {
+  // After a SUCCESSFUL disconnect the opener has unmounted, and `restoreFocus`
+  // deliberately returns null for a detached node — so the close must fall back
+  // to the GitHub-connect heading instead of dropping focus onto <body>.
+  const focused = []
+  globalThis.document = {
+    getElementById: (id) => (id === 'settings-github-heading' ? { focus: () => focused.push(id) } : null),
+  }
+  try {
+    const { closeFn } = await runOpenClose({ restoreReturns: { restore: null } })
+    closeFn()
+    assert.deepEqual(focused, ['settings-github-heading'],
+      'a detached opener must fall back to the heading, not <body>')
+  } finally {
+    delete globalThis.document
+  }
+})
+
+test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', async () => {
+  // The fallback above only works if the heading is focusable.
+  assert.match(mainJsx, /<h3 id="settings-github-heading" tabIndex=\{-1\}>/,
+    'the heading must carry tabIndex -1 so the close fallback can focus it (#3890 pattern)')
+  const { closeFn } = await runOpenClose({ restoreReturns: { restore: null } })
+  assert.equal(typeof closeFn, 'function')
 })

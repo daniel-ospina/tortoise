@@ -498,7 +498,7 @@ function SettingsTab(props) {
           below; this home owns the OAuth connection state. Connect errors
           surface on the issues row (one mechanism — no drift). ── */}
       <section className="settings-home" aria-labelledby="settings-github-heading">
-        <h3 id="settings-github-heading">GitHub connect</h3>
+        <h3 id="settings-github-heading" tabIndex={-1}>GitHub connect</h3>
         {loading ? (
           <p className="dim">Loading GitHub status…</p>
         ) : githubConnected ? (
@@ -2636,7 +2636,16 @@ function claimIntentInFlight() {
   // pure local close — no request, and any stale response state is dropped —
   // that also hands focus back to the opener (#2392).
   function closeGithubDisconnect() {
-    restoreFocus(githubDisconnectRestoreRef)
+    // #2392: a SUCCESSFUL disconnect unmounts the opener (the connection flipped
+    // false), and `restoreFocus` deliberately skips a detached node — so fall
+    // back to the GitHub-connect heading (tabIndex -1) rather than dropping
+    // focus onto <body>. Same programmatic-focus-target pattern as the
+    // Memory-sources heading (#3890).
+    const restored = restoreFocus(githubDisconnectRestoreRef)
+    if (!restored && typeof document !== 'undefined') {
+      const heading = document.getElementById('settings-github-heading')
+      if (heading && typeof heading.focus === 'function') heading.focus()
+    }
     setGithubDisconnect({ open: false, busy: false, error: '', result: null })
   }
 

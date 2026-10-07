@@ -112,8 +112,10 @@ export function GithubDisconnectControl({ connected, open, busy, error, result, 
   // `.key-create-modal`: this dialog is deliberately NEITHER (disconnecting
   // clears no indexed data), so it wears a bare `.modal` and lays out its own
   // two actions.
+  // `...children` (not the rest ARRAY) so React does not warn about unkeyed list
+  // children on every dialog render.
   const actions = (...children) =>
-    h('div', { style: { display: 'flex', gap: 8, marginTop: '0.8rem' } }, children)
+    h('div', { style: { display: 'flex', gap: 8, marginTop: '0.8rem' } }, ...children)
   const content = result
     ? h(
       React.Fragment,
