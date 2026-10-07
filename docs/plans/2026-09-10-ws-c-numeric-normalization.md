@@ -4,7 +4,7 @@ type: engineering
 domain: platform
 doc_status: draft
 created: 2026-09-10
-updated: 2026-10-06
+updated: 2026-10-07
 ownedBy: epistemic-team
 subjects.team: epistemic-team
 aboutObjects: tortoise-extractor, tortoise-commit-schema, tortoise-projection
@@ -14,12 +14,13 @@ governingAgreement: "#2817"
 
 # WS-C — Numeric values as structural fields on an entity
 
-**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run.
+**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run, with the **owner's 2026-10-07 decision (Option (a))** folded into §2.3.
 **Feeds:** #2782 (money representation) · **Related:** #2813, #2795, #2818, #2730, #2725, #2687, #2453, #2747, #3011
 
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
-> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**; **S3** (the HTTP
-> validator) is the one genuine contract change, and it needs an **explicit decision**.
+> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**. **S3** (the HTTP
+> validator) needs **no change either**, under the owner's 2026-10-07 decision: the field is
+> **server-written**, and never through the `Point` model, so that model is untouched (§2.3, §3/OD5).
 
 **Revision note (v2, 2026-10-06).** v1 was written parser-first: it made a locale-aware numeric parser the
 foundation and reified each value as a tagged union of five `valueKind`s. **That foundation is withdrawn.**
@@ -33,7 +34,10 @@ restated in §7.2 step 3 and new v3 notes in §3 (OD5) and §9, after an `issue-
 evidence. §2.3's safety argument was **circular**; §8's claim that this shape makes the misread detectable
 is **false**; §1's premise was stated more strongly than its own search could support, and that search
 could not have falsified it. **The shape in §2 is unchanged** — a flat structural field, no enforcement, no
-index, no embedding. One question in §2.3 remains the owner's.
+index, no embedding. **The one question this raised was decided by the owner on 2026-10-07: Option (a),
+recorded below in §2.3** — the design types only unambiguous values and does **not** claim to detect a
+misread. A follow-up folded the ruling itself into §2.3 (and dropped the conditionality it had left on
+§6/T2, §7.2 step 3, §8, the OD5 note and the “Honest research limit” note).
 
 ---
 
@@ -157,8 +161,10 @@ establish the absence; the two profiles below are what the research returned):
   fact edges reference source episodes.
 - **Mem0** keeps text as text; structured fields ride alongside it as **filterable metadata**.
 
-Our own controlled ablation agrees on the keep-the-source half: raw **verbatim beats derived by 15.9 /
-22.0 pts** (`EXTRACTOR-V4-ARCHITECTURE.md` §2.4; pre-registered #3011).
+The controlled ablation (`EXTRACTOR-V4-ARCHITECTURE.md` §2.4 — **arXiv 2601.00821v3**, an external study) agrees
+on the keep-the-source half: raw **verbatim beats derived by 15.9 / 22.0 pts**. ⚠️ *(v3 follow-up: this
+previously read "**Our own** controlled ablation", which was wrong — the 15.9/22.0 figures are the external
+ablation's, not ours. Our own reproduction is pre-registered at **#3011** and has no data yet.)*
 
 ⇒ **Keep the raw text as the evidence, declare the field on the schema, and keep every typed value
 traceable to the words it came from.** ⚠️ *(v3: this conclusion previously read "…and validate the value
@@ -180,34 +186,61 @@ Abstention protects the *typed field*. It does **not** detect a wrong number tha
 **abstaining is not detecting** — so §8's misread is *not* made detectable by this shape. Detecting it
 requires carrying the verbatim source span, which is a different deliverable: **#2684**
 (`[evidence-assembly] Slice B: verbatim value-spans on value-bearing points`, the #2542 value-fidelity
-family). *(Under the owner's alternative reading (b) below, the detection would move inside this design;
-the paragraph above states the reading this correction's wording assumes.)*
+family). *(Detection moving inside this design was the rejected alternative (b), recorded below in this
+section.)*
 
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
-**⚠️ Open decision for the owner — this correction does not settle it.** §4's blanket *"no separator
-pattern ladder"* makes T2's named regression (`R$ 1.234,56` read as `1.234`) **undetectable by
-construction** — §6/T3 does no work for this case, because T3 governs only forms with **no** anchor and
-`R$` **is** an anchor (§6/T2). Two coherent readings exist:
+**✅ Decided — the owner selected Option (a) on 2026-10-07** (recorded on #2817, comment `6047432766`).
+§4's blanket *"no separator pattern ladder"* means T2's named regression (`R$ 1.234,56` read as
+`1.234`) is **not detectable by this design** — §6/T3 does no work for that case, because T3 governs only
+forms with **no** anchor and `R$` **is** an anchor (§6/T2). **That is now a stated property of the
+design, not an open question.**
 
-- **(a) Keep §4 as written.** The design types only unambiguous values and explicitly **cannot detect the
-  misread**; detection belongs to #2684. *(This correction's **wording** assumes (a) — it is the reading
-  the research supports: neither comparable ships a locale parser and both keep the raw text, and our own
-  ablation has verbatim beating derived by 15.9 / 22.0 pts — **but the owner's choice remains open**, and
-  the restatements in §6/T2, §7.2 step 3 and the OD5 note below are therefore **conditional on the owner
-  selecting (a)**. The owner-approved v2 text stands as the alternative.)*
-- **(b) Admit a minimal anchored separator/currency rule** for values that carry a currency anchor. It is
-  the **only** route to detecting T2's regression inside this design, it departs from §4's blanket
-  exclusion, and it therefore needs a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
+> **OVERRIDES:** we do **not** ship a locale-aware numeric parser or a separator/locale pattern ladder
+> (the industry default for money and number normalization, and what v1 of this design proposed) — the
+> value is derived from, and kept beside, the raw sentence; a value that cannot be read unambiguously is
+> not typed, and **detecting** a wrong reading is owned by the span-carrying slice, **#2684**.
+
+What this settles:
+
+- **§4 keeps its blanket exclusion.** No locale table, no separator pattern ladder, no magnitude table.
+- **§6/T3 is the operative rule for ambiguity**: an unanchored `1.234` / `1,234` produces **no typed
+  value**; the raw text remains.
+- **The design does not detect the misread.** §8's error class stays **open**, tracked at **#2684**, and is
+  not claimed as caught here.
+- **The restatements in §6/T2, §7.2 step 3, §8 and the OD5 note are settled**, not conditional.
+
+**Why (on the record, not as a re-argument).** The grounded requirement behind the workstream (#2782) is a
+**sum and a ratio against a threshold** — *"75% of tranche 1 spent → tranche 2 unlocks"*. That needs
+values read **correctly**; nothing grounded asks the design to catch a wrong read. What the research
+returned points the same way: both comparables keep the raw source, and the controlled ablation has the
+verbatim route ahead of the derived one by 15.9 / 22.0 pts (external — **arXiv 2601.00821v3**; our own
+reproduction is pre-registered at **#3011** and has not been run). *(The “neither ships a locale parser”
+half stays **unverified** — see this section's opening; it is not relied on here.)*
+
+**The rejected alternative — (b), recorded for when it would be right.** A minimal **anchored**
+separator/currency rule for values carrying a currency anchor. It is the **only** route to detecting T2's
+regression inside this design, and it would be the right call if detection ever became a grounded
+requirement. It departs from §4's blanket exclusion, so taking it later requires a fresh owner decision
+and a marked `OVERRIDES:` line naming the misparse mode it reintroduces. *(The **other** route to
+detection — a separate deterministic numeric-fidelity check — was scoped and refused on **measurement**,
+not preference: it would have been a third copy of value-identity logic against the recorded decision at
+`docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28`, and it was blind in its own target case —
+the quote-match rate that locates the source drops 80% → 50% on rewritten numbers (the
+`_resolve_source_turn` anti-correlation recorded on #2684). Detection's home is the span
+carried by #2684 — not this design.)*
 
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
-against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and our own
-ablation); **traceability of a typed value to its raw text** may be ours and is not borrowed authority.
+against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and the
+external controlled ablation of `EXTRACTOR-V4-ARCHITECTURE.md` §2.4 — **arXiv 2601.00821v3**, *not* ours;
+our own reproduction is pre-registered at #3011 with no data); **traceability of a typed value to its raw
+text** may be ours and is not borrowed authority.
 ⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
-No such check is proposed by this design **under reading (a)** (see the restated requirement above) — a
+No such check is proposed by this design (see the restated requirement above) — a
 lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
-against (§9). Reading (b) would reintroduce one in a narrower, anchored form, and that is the owner's
-decision.
+against (§9). The owner rejected the anchored narrower form (b) on 2026-10-07 (recorded above in this
+section).
 
 ### 2.4 Representation facts carried over
 
@@ -237,18 +270,23 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 
 | ID | Question | Recommendation | Consequence if different |
 | --- | --- | --- | --- |
-| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and on the HTTP `Point` model (`tortoise/commit_schema.py:500`). | A parallel declaration drifts from the write path: the field still replays via the open-set passthrough, but the drift warning fires on every rebuild and the HTTP validator refuses it. |
+| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and **not** on the HTTP `Point` model (`tortoise/commit_schema.py:500`) — ⚠️ **v3 (2026-10-07):** that half is foreclosed by the owner's Option (a) decision, because `Point` is `extra="forbid"`, so declaring the field there would be the one place a client could newly submit it. (OD5 closes the *cross-check*, not client acceptance — §3/OD5.) See §7.1 S3 and §7.2 step 2. | A parallel declaration drifts from the write path — the field still replays via the open-set passthrough, but the drift warning fires on every rebuild. Declaring it on `Point` **widens** the contract instead: the closed model would begin accepting a client-supplied amount — the one place a client could newly submit it. (OD5 closes the *cross-check*, not client acceptance — §3/OD5.) |
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
-| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text.** A client value is a cross-check; a mismatch is rejected, not silently trusted or overwritten. | Trusting a client value lets an unverified amount (e.g. `999999`) land with no relation to the prose. |
+| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text; there is no client-supplied value to adjudicate.** *(v3 follow-up, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare one against, so a client-supplied value is not adjudicated — the server-derived value is the field's source. |
 
-⚠️ **v3 note on OD5.** The recommendation stands, but **the cross-check half is only implementable under
-reading (b) of §2.3.** Comparing a client value to a server-derived value is the same comparison the
-circular argument needed, so under reading **(a)** — the reading this correction's wording assumes, while
-**the owner's choice remains open** — there is no cross-check to perform:
-the server derives, the field is typed, and a client-supplied value cannot be adjudicated. A lane taking
-OD5's cross-check as settled should take **(b)** first.
+⚠️ **v3 note on OD5 — the cross-check half is CLOSED by the 2026-10-07 decision.** The server-derives
+half stands. The cross-check half is **not implementable**: comparing a client value to a server-derived
+value is the same comparison §2.3's circular argument needed, and Option (a) rejects the anchored
+separator rule it depends on. There is no client-supplied amount to adjudicate, so **no cross-check is
+performed**. `create_entity` therefore carries a **derived,
+server-written** field, and the derivation — not any client-supplied prop — is the value's source.
+*(Scope, since the MCP and SDK boundaries filter by **deny-list** and let unknown keys through — §7.1
+S1/S2: this is a property of the **input**, not of the boundary. `create_entity` takes no amount
+parameter and the derivation writes the field; the design **does not adjudicate** a client-supplied prop
+that happens to share its name. "Server-written" is the whole of the claim — it is not a claim that the
+boundary cannot admit such a prop.)*
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -312,12 +350,11 @@ These are requirements on the derivation, not evidence of an implementation that
   required `R$ 1.234,56` to be *detected* as differing from `1.234`, which needs the separator/locale rule
   §4 excludes (see §2.3). Restated to the achievable property: **for each fixture the typed value is
   traceable to the raw text, and an ambiguous form produces no typed value at all** — `R$ 1.234,56` must
-  not be **accepted as** `1.234`; under reading (a) it is not typed at all, because §4 excludes the
-  separator rule that reading it would need. ⚠️ The operative rule here is **§4's blanket exclusion, not
-  T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor; whether an anchor licenses a
-  separator rule is exactly the open (a)/(b) decision in §2.3, and T3 does not settle it. Restated
-  accordingly, and contingent on (a). Detecting a misread that is already in `content` is **#2684's**
-  property, not this one's.
+  not be **accepted as** `1.234`; it is not typed at all, because §4 excludes the separator rule that
+  reading it would need (Option (a), decided 2026-10-07 — §2.3). ⚠️ The operative rule here is **§4's
+  blanket exclusion, not T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor. The
+  owner has since rejected the anchored alternative (b), so T3's scope is unchanged and §4 does the work.
+  Detecting a misread that is already in `content` is **#2684's** property, not this one's.
 - **T3 — Ambiguity drops, never guesses.** `1.234` / `1,234` without a locale anchor produce **no typed
   value**; the raw text remains.
 - **T4 — Currency is part of the value.** An unanchored symbol (`$`, `¥`) produces no currency; a
@@ -335,7 +372,7 @@ These are requirements on the derivation, not evidence of an implementation that
 
 ## 7. Sequencing and required approvals
 
-### 7.1 Surface changes — declaration for S1/S2, a decision for S3
+### 7.1 Surface changes — declaration for S1/S2, and none for S3 under the 2026-10-07 decision
 
 **⛔ THE FIELD BELONGS ON `create_entity`, NOT ON `create_point`.** The approved MCP surface
 (`docs/product/canonical-mcp-tools.md`, row 10) has **`create_entity` absorbing `create_point`**,
@@ -359,7 +396,7 @@ field today**, because both filter by **deny-list** rather than allow-list; what
 | --- | --- | --- | --- |
 | **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:1366`; registry entry `tortoise/tool_registry.py:101`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:1285`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
 | **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:4937`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:2596`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
-| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today**. | Add the value field to the `Point` model, or decide explicitly that the field is server-derived and never client-supplied — a contract change. |
+| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-written**, and this surface cannot receive it at all: nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design carries **no contract change** at all; its only surface work is the S1/S2 declaration above. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
 is fixed (`_upsert_point_props`, `tortoise/projection/entities.py:801`), but Point carries the **same
@@ -377,15 +414,16 @@ being approved.
 The work cannot begin at the derivation. The dependency order is:
 
 1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
-   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1; only **S3** (the
-   HTTP commit validator) is a genuine contract change, and it is closed today.
-2. **Declare the field** on the accepted schema: the Point property list and the HTTP `Point` model. No
-   behaviour change.
+   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1. **S3 is resolved
+   too** by the 2026-10-07 decision: the field is server-written, so the HTTP
+   `Point` model is untouched, and the only surface work this design carries is the S1/S2 declaration.
+2. **Declare the field** on the accepted schema: the Point property list. (The HTTP `Point` model is
+   **untouched** — the field is server-written, §7.1/S3.) No behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
    it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
-   this design **under reading (a)**. Detecting a misread already in `content` is #2684's property, not
-   this step's.)*
+   this design — the owner decided so on 2026-10-07 (§2.3). Detecting a misread already in `content` is
+   #2684's property, not this step's.)*
 4. **Backfill** historical prose (§5) — after step 3, and only under the stricter rule.
 5. **Consume** — the sum-and-ratio traversal the grounded requirement (#2782) needs.
 
@@ -405,17 +443,17 @@ parser.
 
 ⚠️ **Correction (v3).** An earlier version of this section claimed *"the corrected shape is what makes
 such a misread detectable once a value field exists — an arithmetic mismatch against the source
-sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (under §6/T3
-and reading (a); §2.3 records the owner's alternative (b), which would change this) and
+sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (§6/T3, and §4
+under the owner's 2026-10-07 decision) and
 compares nothing against the source turn. Detection is #2684's property and is not delivered here.
 
 ---
 
 ## 9. Sources
 
-**Internal (repo files; line references checked against the base tree at `d531debae` — origin/main, the
-diff base. This doc-only commit changes no code, so they hold at `64aee5537` too. The two
-`~/.swarm/research/…` entries below are machine-local, outside this repo and not at that head):**
+**Internal (repo files; `file:line` references were checked against the tree as it stood when this
+revision was written — a docs-only change moves no code, so they hold until a code change touches those
+files. The two `~/.swarm/research/…` entries below are machine-local, outside this repo):**
 
 - `docs/ONTOLOGY.md` §11 (v3.2, #398) — derived-value cache doctrine (`Derived values may be CACHED, never
   authoritative … the derivation is the truth, the cache is a performance artifact`, `:1515`); §4.1
@@ -461,9 +499,10 @@ the earlier `e18dda11b` pin was a branch commit of a different PR that never tou
 magnitudes are cited from that source, not from #2782.
 - Research: `~/.swarm/research/2026-09-09-typed-values-and-lifecycles.md`,
   `~/.swarm/research/2026-09-09-numeric-storage-audit.md`.
-- `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`; the verbatim-vs-derived ablation,
-  pre-registered #3011) — §2.4 reports **verbatim beats derived by 15.9 pts (LoCoMo) / 22.0 pts
-  (LongMemEval-S)** (`:148`).
+- `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`) — the verbatim-vs-derived ablation, which
+  is **external** (`:148` names **arXiv 2601.00821v3**); **#3011** is our own *pre-registered*
+  reproduction of it and has no data. §2.4 reports **verbatim beats derived by 15.9 pts (LoCoMo) / 22.0 pts
+  (LongMemEval-S)** (`:148`) — the external figures, not ours.
 
 **External:**
 
