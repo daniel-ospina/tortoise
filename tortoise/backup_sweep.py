@@ -45,6 +45,7 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
+from .graph_storage import measure_and_record_graph_storage  # #5331 metering ledger
 from .hosted_backup import (
     _delete_backup_objects,
     _is_supabase_source,
@@ -685,6 +686,23 @@ def _backup_graph(
 
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
+    # ── #5331: put this graph's storage on the per-org metering ledger. ──
+    # Owner ruling (2026-09-27, #4495/#5331): storage is denominated in MB/GB
+    # with purchased overage, REPLACING the node cap — and a byte cap can only
+    # be enforced against a byte reading, which nothing produced: the meter was
+    # merged (#5696) but had ZERO production callers, so no org-period ever
+    # carried a storage figure. This is that caller: the sweep already
+    # enumerates orgs and opens a projection per graph, so the measurement is
+    # nearly free and lands on the SAME period ledger the cap reads.
+    # Fail-soft by contract, exactly like the backup itself: a metering failure
+    # must never abort a backup, and `measure_and_record_graph_storage` returns
+    # a reading in every case (a dropped ledger write is logged, not raised).
+    try:
+        measure_and_record_graph_storage(proj, org_id)
+    except Exception:
+        logger.warning(
+            "storage metering failed for %s/%s — continuing (best-effort, "
+            "never aborts the backup)", org_id, graph_name, exc_info=True)
     if not config.registry_stream_key or len(config.registry_stream_key) != 32:
         return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": "REGISTRY_STREAM_KEY missing or invalid — fail-closed (#661)"}

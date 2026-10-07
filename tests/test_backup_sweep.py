@@ -2743,3 +2743,93 @@ def test_sweep_resolutions_clears_nothing_on_a_blind_run():
         "team_a": {"graphs": {"default": {"status": "backed_up", "p0_checked": True}}},
     }}
     assert sweep_resolutions(blind_with_evidence) == []
+
+
+def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch):
+    """#5331 / #4495: the backup sweep is the PRODUCTION caller of the graph
+    storage meter.
+
+    `graph_storage.measure_and_record_graph_storage` shipped in #5696 and had
+    **zero** production callers — no scheduler, no cron, no request path — so
+    no org-period ever carried a storage figure. The owner ruled on
+    2026-09-27 (#4495) that storage is denominated in MB/GB with purchased
+    overage, REPLACING the node cap; a byte allowance can only be enforced
+    against a byte reading, so without a caller producing that reading the
+    ruling is unimplementable. The sweep already enumerates orgs and opens a
+    projection per graph, so it is the natural (and near-free) seam.
+
+    This is the tripwire for the exact regression that left the meter dormant:
+    it FAILS if the sweep stops measuring.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_st', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_st"))
+        team_g.query("CREATE (p:Point {id:'pt-st', content:'s', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+
+        calls: list[tuple] = []
+
+        def _spy(p, org_id, **kw):
+            calls.append((org_id, p))
+            return None
+
+        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _spy)
+        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                             config=_config())
+        assert r["results"]["team_st"]["status"] == "backed_up", r["results"]
+
+        # 1. The meter is CALLED — once per swept graph, for the right org.
+        assert len(calls) == 1, (
+            f"storage meter called {len(calls)}x, want 1 — the sweep stopped "
+            f"being the meter's production caller (#5331)")
+        org_seen, proj_seen = calls[0]
+        assert org_seen == "team_st", org_seen
+
+        # 2. It is handed the ALREADY-OPEN projection of this org's own graph —
+        #    not a fresh/shared one (measuring the wrong graph would put a
+        #    foreign byte count on this org's ledger).
+        measured_graph = getattr(proj_seen, "g", None)
+        assert measured_graph is not None, "meter was handed a projection with no graph"
+        assert getattr(measured_graph, "name", None) == _team_graph("team_st"), (
+            f"meter measured {getattr(measured_graph, 'name', None)!r}, expected "
+            f"{_team_graph('team_st')!r} — the reading is on the wrong graph")
+
+
+def test_backup_sweep_survives_a_failing_storage_meter_5331(shared_proj, monkeypatch):
+    """#5331: the storage measurement is FAIL-SOFT — a metering fault must never
+    abort a backup.
+
+    Backup durability outranks metering: a dropped storage reading costs one
+    period's overage accounting (recoverable on the next sweep), whereas an
+    aborted backup is an unprotected graph. This pins that precedence.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_sf', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_sf"))
+        team_g.query("CREATE (p:Point {id:'pt-sf', content:'s', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+
+        def _boom(p, org_id, **kw):
+            raise RuntimeError("injected metering failure")
+
+        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _boom)
+        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                             config=_config())
+
+        # The backup still happened, despite the meter exploding.
+        assert r["results"]["team_sf"]["status"] == "backed_up", r["results"]
+        assert store.list("backups/"), "no backup object written under a failing meter"
