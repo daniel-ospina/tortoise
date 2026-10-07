@@ -33,12 +33,10 @@ tool exports neither variable, and it starts the private container without
 even if its port were exported. Closing that seam is #5084's remaining work — this
 tool is the isolation half of it, not the whole fix.
 
-(Three earlier revisions of this paragraph carried module COUNTS — "9", then
-"46 / ~90 / 440". All three were wrong, and the last was wrong twice over: a
-`grep` is not a count until its pattern AND its population are pinned, and it had
-counted ``__pycache__/*.pyc`` build artifacts, which makes it machine-state
-dependent as well as inflated. The counts are DELETED rather than corrected
-again; the mechanism above is the part that stays true.)
+(No module counts appear here on purpose: a `grep` is not a count until its
+pattern AND its population are pinned — one earlier figure included
+``__pycache__/*.pyc`` build artifacts — so the MECHANISM above is the durable
+part, and the counts are absent rather than corrected.)
 
 MEASURED TRADE-OFF (do not oversell this tool)
 ----------------------------------------------
@@ -598,6 +596,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         graphs = _graph_count(name)
         print(f"  graphs={'unknown' if graphs is None else graphs}",
               file=sys.stderr)
+        if graphs is None:
+            # `status`'s whole job is the ANSWER, so a failed query is not one —
+            # the same rule this function already applied to `docker port`
+            # below. (`up` differs: there the URI is the deliverable.)
+            return 1
         asked, published = _published_port(name)
         if not asked:
             print("  port=unknown (the `docker port` query failed)",

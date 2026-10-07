@@ -608,6 +608,16 @@ def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
     assert ":0/" not in err
 
 
+def test_status_fails_closed_when_the_graph_count_fails(monkeypatch, capsys):
+    """`status`'s whole job is the answer, so BOTH of its queries must fail
+    closed — a failed `GRAPH.LIST` used to print `graphs=unknown` and exit 0."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: None)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    assert tl.main(["status"]) == 1
+    assert "graphs=unknown" in capsys.readouterr().err
+
+
 def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
     """Every printed URI goes through `uri_for`, which is why the remote-daemon
     warning lives there and not in `pick_port` — a future direct print of a
@@ -643,20 +653,25 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
     seen = []
 
     def _fake(*args, **kwargs):
-        seen.append(args)
+        seen.append((args, kwargs))
         return _R(0, "PONG")
     monkeypatch.setattr(tl, "_docker", _fake)
     assert tl.start() == ("fdb-lane-0123456789", 16400)
 
-    run = [a for a in seen if a[:2] == ("run", "-d")]
-    assert run, "`docker run` must have been invoked"
-    argv = run[0]
+    runs = [(argv, kw) for argv, kw in seen if argv[:2] == ("run", "-d")]
+    assert runs, "`docker run` must have been invoked"
+    argv, kwargs = runs[0]
     # The two fail-closed properties the module ADVERTISES, pinned to the argv
     # rather than to the prose: bind LOOPBACK only, and leave persistence OFF.
     # Without these, `-p 127.0.0.1:{port}:6379` could become `-p {port}:6379`
     # (all interfaces) with the whole suite still green.
     assert "127.0.0.1:16399:6379" in argv
     assert "REDIS_ARGS=--appendonly no --save ''" in argv
+    # Positional pins are not enough on their own: `docker run` must also keep
+    # the image-pull budget. Dropping it re-bounds a cold pull to the 60 s
+    # DOCKER_TIMEOUT, so a first run with no local image fails as
+    # "docker run failed: timed out after 60s" while the suite stays green.
+    assert kwargs.get("timeout") == tl.IMAGE_PULL_TIMEOUT
 
 
 def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch):
