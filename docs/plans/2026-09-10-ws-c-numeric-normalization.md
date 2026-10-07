@@ -4,7 +4,7 @@ type: engineering
 domain: platform
 doc_status: draft
 created: 2026-09-10
-updated: 2026-10-06
+updated: 2026-10-07
 ownedBy: epistemic-team
 subjects.team: epistemic-team
 aboutObjects: tortoise-extractor, tortoise-commit-schema, tortoise-projection
@@ -14,7 +14,7 @@ governingAgreement: "#2817"
 
 # WS-C — Numeric values as structural fields on an entity
 
-**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run.
+**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run, with the **owner's 2026-10-07 decision (Option (a))** folded into §2.3.
 **Feeds:** #2782 (money representation) · **Related:** #2813, #2795, #2818, #2730, #2725, #2687, #2453, #2747, #3011
 
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
@@ -33,7 +33,10 @@ restated in §7.2 step 3 and new v3 notes in §3 (OD5) and §9, after an `issue-
 evidence. §2.3's safety argument was **circular**; §8's claim that this shape makes the misread detectable
 is **false**; §1's premise was stated more strongly than its own search could support, and that search
 could not have falsified it. **The shape in §2 is unchanged** — a flat structural field, no enforcement, no
-index, no embedding. One question in §2.3 remains the owner's.
+index, no embedding. **The one question this raised was decided by the owner on 2026-10-07: Option (a),
+recorded below in §2.3** — the design types only unambiguous values and does **not** claim to detect a
+misread. A follow-up folded the ruling itself into §2.3 (and dropped the conditionality it had left on
+§6/T2, §7.2 step 3, §8, the OD5 note and the “Honest research limit” note).
 
 ---
 
@@ -180,34 +183,49 @@ Abstention protects the *typed field*. It does **not** detect a wrong number tha
 **abstaining is not detecting** — so §8's misread is *not* made detectable by this shape. Detecting it
 requires carrying the verbatim source span, which is a different deliverable: **#2684**
 (`[evidence-assembly] Slice B: verbatim value-spans on value-bearing points`, the #2542 value-fidelity
-family). *(Under the owner's alternative reading (b) below, the detection would move inside this design;
-the paragraph above states the reading this correction's wording assumes.)*
+family). *(Detection moving inside this design was the rejected alternative (b); see §2.3.)*
 
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
-**⚠️ Open decision for the owner — this correction does not settle it.** §4's blanket *"no separator
-pattern ladder"* makes T2's named regression (`R$ 1.234,56` read as `1.234`) **undetectable by
-construction** — §6/T3 does no work for this case, because T3 governs only forms with **no** anchor and
-`R$` **is** an anchor (§6/T2). Two coherent readings exist:
+**✅ Decided — the owner selected Option (a) on 2026-10-07** (recorded on #2817, comment `6047432766`).
+§4's blanket *"no separator pattern ladder"* means T2's named regression (`R$ 1.234,56` read as
+`1.234`) is **not detectable by this design** — §6/T3 does no work for that case, because T3 governs only
+forms with **no** anchor and `R$` **is** an anchor (§6/T2). **That is now a stated property of the
+design, not an open question.**
 
-- **(a) Keep §4 as written.** The design types only unambiguous values and explicitly **cannot detect the
-  misread**; detection belongs to #2684. *(This correction's **wording** assumes (a) — it is the reading
-  the research supports: neither comparable ships a locale parser and both keep the raw text, and our own
-  ablation has verbatim beating derived by 15.9 / 22.0 pts — **but the owner's choice remains open**, and
-  the restatements in §6/T2, §7.2 step 3 and the OD5 note below are therefore **conditional on the owner
-  selecting (a)**. The owner-approved v2 text stands as the alternative.)*
-- **(b) Admit a minimal anchored separator/currency rule** for values that carry a currency anchor. It is
-  the **only** route to detecting T2's regression inside this design, it departs from §4's blanket
-  exclusion, and it therefore needs a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
+> **OVERRIDES:** we do **not** ship a locale-aware numeric parser or a separator/locale pattern ladder
+> (the industry default for money and number normalization, and what v1 of this design proposed) — the
+> value is derived from, and kept beside, the raw sentence; a value that cannot be read unambiguously is
+> not typed, and **detecting** a wrong reading is owned by the span-carrying slice, **#2684**.
+
+What this settles:
+
+- **§4 keeps its blanket exclusion.** No locale table, no separator pattern ladder, no magnitude table.
+- **§6/T3 is the operative rule for ambiguity**: an unanchored `1.234` / `1,234` produces **no typed
+  value**; the raw text remains.
+- **The design does not detect the misread.** §8's error class stays **open**, tracked at **#2684**, and is
+  not claimed as caught here.
+- **The restatements in §6/T2, §7.2 step 3, §8 and the OD5 note are settled**, not conditional.
+
+**Why (on the record, not as a re-argument).** The grounded requirement behind the workstream (#2782) is a
+**sum and a ratio against a threshold** — *"75% of tranche 1 spent → tranche 2 unlocks"*. That needs
+values read **correctly**; nothing grounded asks the design to catch a wrong read. The research points the
+same way: neither comparable ships a locale parser and both keep the raw source, and our own ablation has
+the verbatim route ahead of the derived one by 15.9 / 22.0 pts.
+
+**The rejected alternative — (b), recorded for when it would be right.** A minimal **anchored**
+separator/currency rule for values carrying a currency anchor. It is the **only** route to detecting T2's
+regression inside this design, and it would be the right call if detection ever became a grounded
+requirement. It departs from §4's blanket exclusion, so taking it later requires a fresh owner decision
+and a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
 
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
 against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and our own
 ablation); **traceability of a typed value to its raw text** may be ours and is not borrowed authority.
 ⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
-No such check is proposed by this design **under reading (a)** (see the restated requirement above) — a
+No such check is proposed by this design (see the restated requirement above) — a
 lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
-against (§9). Reading (b) would reintroduce one in a narrower, anchored form, and that is the owner's
-decision.
+against (§9). The owner rejected the anchored narrower form (b) on 2026-10-07 (§2.3).
 
 ### 2.4 Representation facts carried over
 
@@ -241,14 +259,14 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
-| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text.** A client value is a cross-check; a mismatch is rejected, not silently trusted or overwritten. | Trusting a client value lets an unverified amount (e.g. `999999`) land with no relation to the prose. |
+| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text, and no client value is accepted.** *(v3.1, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare a client value against, so none is accepted. |
 
-⚠️ **v3 note on OD5.** The recommendation stands, but **the cross-check half is only implementable under
-reading (b) of §2.3.** Comparing a client value to a server-derived value is the same comparison the
-circular argument needed, so under reading **(a)** — the reading this correction's wording assumes, while
-**the owner's choice remains open** — there is no cross-check to perform:
-the server derives, the field is typed, and a client-supplied value cannot be adjudicated. A lane taking
-OD5's cross-check as settled should take **(b)** first.
+⚠️ **v3 note on OD5 — the cross-check half is CLOSED by the 2026-10-07 decision.** The server-derives
+half stands. The cross-check half is **not implementable**: comparing a client value to a server-derived
+value is the same comparison §2.3's circular argument needed, and Option (a) rejects the anchored
+separator rule it depends on. There is no client-supplied amount to adjudicate, so **no cross-check is
+performed and no client value is accepted**. `create_entity` therefore carries a **derived,
+server-written** field.
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -312,12 +330,11 @@ These are requirements on the derivation, not evidence of an implementation that
   required `R$ 1.234,56` to be *detected* as differing from `1.234`, which needs the separator/locale rule
   §4 excludes (see §2.3). Restated to the achievable property: **for each fixture the typed value is
   traceable to the raw text, and an ambiguous form produces no typed value at all** — `R$ 1.234,56` must
-  not be **accepted as** `1.234`; under reading (a) it is not typed at all, because §4 excludes the
-  separator rule that reading it would need. ⚠️ The operative rule here is **§4's blanket exclusion, not
-  T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor; whether an anchor licenses a
-  separator rule is exactly the open (a)/(b) decision in §2.3, and T3 does not settle it. Restated
-  accordingly, and contingent on (a). Detecting a misread that is already in `content` is **#2684's**
-  property, not this one's.
+  not be **accepted as** `1.234`; it is not typed at all, because §4 excludes the separator rule that
+  reading it would need (Option (a), decided 2026-10-07 — §2.3). ⚠️ The operative rule here is **§4's
+  blanket exclusion, not T3 alone** — T3 governs forms with *no* anchor, and `R$` **is** an anchor. The
+  owner has since rejected the anchored alternative (b), so T3's scope is unchanged and §4 does the work.
+  Detecting a misread that is already in `content` is **#2684's** property, not this one's.
 - **T3 — Ambiguity drops, never guesses.** `1.234` / `1,234` without a locale anchor produce **no typed
   value**; the raw text remains.
 - **T4 — Currency is part of the value.** An unanchored symbol (`$`, `¥`) produces no currency; a
@@ -384,8 +401,8 @@ The work cannot begin at the derivation. The dependency order is:
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
    it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
-   this design **under reading (a)**. Detecting a misread already in `content` is #2684's property, not
-   this step's.)*
+   this design — the owner decided so on 2026-10-07 (§2.3). Detecting a misread already in `content` is
+   #2684's property, not this step's.)*
 4. **Backfill** historical prose (§5) — after step 3, and only under the stricter rule.
 5. **Consume** — the sum-and-ratio traversal the grounded requirement (#2782) needs.
 
@@ -405,8 +422,8 @@ parser.
 
 ⚠️ **Correction (v3).** An earlier version of this section claimed *"the corrected shape is what makes
 such a misread detectable once a value field exists — an arithmetic mismatch against the source
-sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (under §6/T3
-and reading (a); §2.3 records the owner's alternative (b), which would change this) and
+sentence."* **That is false and is withdrawn:** the shape **abstains** on `1.234` / `1,234` (§6/T3, and §4
+under the owner's 2026-10-07 decision) and
 compares nothing against the source turn. Detection is #2684's property and is not delivered here.
 
 ---
