@@ -522,14 +522,22 @@ def test_clean_run_has_no_remediation_markers():
 # downgrades a pending `CREATE TABLE` to warn-only and the gate exits 0 with the
 # migration unapplied — FAIL-OPEN.
 #
-# A body well over 64 KiB (the default pipe capacity) is used rather than a
+# A body comfortably over the pipe capacity is used rather than a
 # timing-dependent race, so these are deterministic on a loaded host and under
-# both BSD and GNU coreutils. The `ls | head -n1` site is guarded with `|| true`
-# and needs thousands of matching files to exceed the buffer, so it is not pinned
-# here; it is exercised by
-# test_duplicate_branch_flags_out_of_order_after_rename on Linux CI.
+# both BSD and GNU coreutils. The `ls | head -n1` site at `:126` is guarded with
+# `|| true` and is deliberately NOT pinned here: it needs thousands of matching
+# files to exceed the buffer, and the test that observed the CI red stages three
+# ~40-byte migrations, whose `ls` listing is ~60 bytes — far too small to
+# SIGPIPE (0/20 runs non-zero at 2 files vs 20/20 at 2600). So the specific
+# trigger of that red is UNIDENTIFIED; what these tests establish is the defect
+# CLASS, and that these three paths now fail loudly pre-fix and pass post-fix.
+#
+# False-negative floor, stated because it bounds what these can promise: every
+# fixture must EXCEED the pipe capacity, so on a host whose default capacity were
+# raised above ~243 KiB these would silently stop failing pre-fix (they would
+# still pass post-fix). The sizes below give ~4x headroom over the 64 KiB default.
 
-_PIPE_BUSTING_LINES = 5000  # ~170 KiB of DDL: comfortably past the pipe buffer
+_PIPE_BUSTING_LINES = 5000  # measured 243 KiB (block) / 268 KiB (index-only)
 
 
 def _run_staged(mig: Path, stub: Path) -> subprocess.CompletedProcess:
