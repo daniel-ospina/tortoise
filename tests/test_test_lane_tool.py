@@ -226,6 +226,9 @@ def test_uri_for_refuses_a_port_that_is_not_a_port(bad):
     (1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
      "unknown"),                                 # daemon down != no container
     (1, "", "permission denied while trying to connect", "unknown"),
+    (1, "", "error: context \"ops\" not found", "unknown"),   # a broken
+    # context is not an absent container — only Docker's "no such" phrasings
+    # are read as absence, so anything unrecognised fails CLOSED to `unknown`.
 ])
 def test_container_state_distinguishes_absent_from_unknown(monkeypatch, rc, stdout, stderr, expected):
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(rc, stdout, stderr))
@@ -288,11 +291,71 @@ def test_docker_calls_time_out_instead_of_hanging(monkeypatch):
 
 
 def test_docker_absence_is_not_inferred_from_a_missing_binary(monkeypatch):
+    """Round 5, P1: the r4 `FileNotFoundError` handler forwarded `str(exc)`,
+    which for the REAL shape is "[Errno 2] No such file or directory: 'docker'"
+    — its "no such" made `container_state` answer `absent`, so `down` would have
+    exited 0 and reported no container while the lane's container was still
+    running. The stub raises the real three-argument shape on purpose: a
+    `FileNotFoundError("docker")` has no "no such" in it and would let the
+    broken code pass."""
     def _missing(*_a, **_k):
-        raise FileNotFoundError("docker")
+        raise FileNotFoundError(2, "No such file or directory", "docker")
 
     monkeypatch.setattr(tl.subprocess, "run", _missing)
+    r = tl._docker("inspect", "fdb-lane-x")
+    assert r.returncode != 0
+    assert "no such" not in r.stderr and "not found" not in r.stderr
     assert tl.container_state("fdb-lane-x") == "unknown"
+
+
+def test_git_failure_is_not_read_as_a_worktree(monkeypatch, capsys):
+    """Round 5, P2: `repo_root` was the last unbounded `subprocess.run` on the
+    hot path. A hung or missing git must fall back, not hang the lane."""
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(tl.subprocess, "run", _timeout)
+    assert tl.repo_root() == Path.cwd()
+    assert "did not answer" in capsys.readouterr().err
+
+
+def test_the_git_fallback_message_names_the_actual_cause(monkeypatch, capsys):
+    """A guard's text must be followable at the moment it trips: "did not answer
+    within 30s" is wrong (and misleading) when git is simply not installed."""
+    def _missing(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(tl.subprocess, "run", _missing)
+    assert tl.repo_root() == Path.cwd()
+    err = capsys.readouterr().err
+    assert "not available on PATH" in err
+    assert "did not answer" not in err
+
+
+def test_wait_ready_derives_each_call_timeout_from_the_remaining_budget(lane, monkeypatch):
+    """Round 5, P3 — and the reason VGATE exists: the first version of this
+    test did NOT discriminate, because with `READY_TIMEOUT` monkeypatched to 3
+    the reverted `timeout=READY_TIMEOUT` also satisfies `1 <= t <= 3`
+    (VGATE reproduced both branches and refused the PASS).
+
+    The clock is driven explicitly instead, so the remaining budget is KNOWN at
+    each docker call: 2.9 s (=> timeout 2) and then 0.4 s (=> timeout 1).
+    `seen == [2, 1]` admits ONLY a derived timeout — a constant 1 would give
+    `[1, 1]`, the reverted `timeout=READY_TIMEOUT` would give `[3, 3]`.
+    """
+    clock = iter([100.0, 100.1, 100.1, 102.6, 102.6, 105.2])
+    seen = []
+
+    def _never(*_a, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 3)
+    monkeypatch.setattr(tl.time, "monotonic", lambda: next(clock, 999.0))
+    monkeypatch.setattr(tl.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(tl, "_docker", _never)
+    assert tl._wait_ready("fdb-lane-x") is False
+    assert seen == [2, 1], f"expected the 2.9s then 0.4s budgets, got {seen}"
 
 
 def test_list_reports_a_failed_docker_ps_instead_of_claiming_none_exist(monkeypatch, capsys):
@@ -472,6 +535,42 @@ def test_wait_ready_is_bounded_in_wall_time(lane, monkeypatch):
     monkeypatch.setattr(tl, "_docker", _never)
     assert tl._wait_ready("fdb-lane-x") is False
     assert calls == [], "a zero deadline must not issue a single docker call"
+
+
+def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monkeypatch):
+    """Round 5, P3: `_remove_and_describe`'s whole point is that the cleanup's
+    result is READ, and no test exercised the failure branch — reverting it to
+    an unverified "removed it" left the suite green."""
+    monkeypatch.setattr(tl, "is_managed", lambda _n: True)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "container busy"))
+    assert "FAILED to remove it" in tl._remove_and_describe("fdb-lane-0123456789")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
+    assert tl._remove_and_describe("fdb-lane-0123456789") == "removed it"
+
+
+def test_cleanup_refuses_an_unmanaged_name(lane, monkeypatch):
+    """The module claims EVERY removal intent passes the ownership check; this
+    is the one that bypassed it (round 5, P3)."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("cleanup reached docker for an unmanaged name")
+
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("falkordb")
+    assert "refusing to remove" in str(exc.value)
+
+
+def test_stop_refuses_on_an_unknown_daemon_state(lane, monkeypatch):
+    """Round 5, P3: `start` refused on `unknown` but `stop` went straight to
+    `rm -f`, which the PR body claimed the module does not do."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("stop() reached docker with an unknown state")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.stop()
+    assert "cannot determine the state" in str(exc.value)
 
 
 def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, monkeypatch):

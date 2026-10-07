@@ -84,6 +84,9 @@ DEFAULT_GRAPH = "tortoise_test_matrix"
 #: Docker calls are bounded: this tool exists for an overloaded host, so a
 #: wedged daemon must fail diagnosably instead of hanging the lane forever.
 DOCKER_TIMEOUT = 60
+#: The other subprocess on the hot path — every command resolves the worktree
+#: first, so a hung `git` would hang the lane the same way.
+GIT_TIMEOUT = 30
 #: `docker run` may have to pull the image first.
 IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
@@ -109,8 +112,18 @@ def repo_root() -> Path:
     """
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_WORK_TREE")}
-    out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, check=False, env=env)
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False, env=env,
+                             timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"test-lane: `git rev-parse` did not answer within {GIT_TIMEOUT}s"
+              f" — falling back to the current directory", file=sys.stderr)
+        return Path.cwd()
+    except FileNotFoundError:
+        print("test-lane: `git` is not available on PATH — falling back to "
+              "the current directory", file=sys.stderr)
+        return Path.cwd()
     return Path(out.stdout.strip()) if out.stdout.strip() else Path.cwd()
 
 
@@ -201,8 +214,15 @@ def _docker(*args: str,
         return subprocess.CompletedProcess(
             ["docker", *args], 1, "",
             f"docker {' '.join(args[:1])} timed out after {timeout}s")
-    except FileNotFoundError as exc:      # no docker binary on PATH
-        return subprocess.CompletedProcess(["docker", *args], 1, "", str(exc))
+    except FileNotFoundError:
+        # Deliberately NOT `str(exc)`: that is "[Errno 2] No such file or
+        # directory: 'docker'", whose "no such" makes container_state classify
+        # "docker is not installed" as ABSENT — a failure reported as evidence
+        # of absence, the one inference this module refuses to make. Caught by
+        # round 5, P1.
+        return subprocess.CompletedProcess(
+            ["docker", *args], 127, "",
+            "docker executable is not available on PATH")
 
 
 def _container_publishes(port: int) -> bool:
@@ -226,16 +246,20 @@ def _wait_ready(name: str) -> bool:
     """Wait for the container's server to answer PING — bounded in WALL TIME.
 
     Seconds, not iterations: an iteration count is not a bound when each
-    iteration awaits an unbounded docker call (round 4, P2).
+    iteration awaits an unbounded docker call (round 4, P2). Every call's
+    timeout comes from the REMAINING budget, so the deadline is not overshot by
+    a full per-call timeout (round 5, P3).
     """
     deadline = time.monotonic() + READY_TIMEOUT
-    while time.monotonic() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
-                       timeout=READY_TIMEOUT)
+                       timeout=max(1, int(remaining)))
         if "PONG" in (ping.stdout or ""):
             return True
-        time.sleep(1)
-    return False
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
 
 def container_state(name: str) -> str:
@@ -251,7 +275,12 @@ def container_state(name: str) -> str:
     if r.returncode == 0:
         return (r.stdout or "").strip() or "unknown"
     err = f"{r.stderr or ''}{r.stdout or ''}".lower()
-    return "absent" if ("no such" in err or "not found" in err) else "unknown"
+    # ONLY Docker's own absence phrasings ("No such container"/"No such
+    # object"). Unrecognised failures — a broken context, a permission problem,
+    # anything whose text merely happens to contain "not found" — fail CLOSED to
+    # `unknown`, because reading a failure as absence is what licenses a blind
+    # `docker rm` (round 5).
+    return "absent" if "no such" in err else "unknown"
 
 
 def _graph_count(name: str) -> int | None:
@@ -353,7 +382,14 @@ def start(port: int | None = None) -> tuple[str, int]:
 def _remove_and_describe(name: str) -> str:
     """Remove a container this tool just created, and say what actually
     happened — a cleanup whose result is unread is how a running container with
-    a reserved port survives to make every later `start()` refuse."""
+    a reserved port survives to make every later `start()` refuse.
+
+    Guarded like every other removal intent, so the claim that no removal can
+    bypass the ownership check is true of the whole module and not just of
+    `stop()` (round 5, P3).
+    """
+    if not is_managed(name):
+        raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
     rm = _docker("rm", "-f", name)
     return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")
@@ -377,6 +413,14 @@ def stop() -> str:
     state = container_state(name)
     if state == "absent":
         return "absent"
+    if state == "unknown":
+        # Refuse BEFORE the `rm`, exactly as `start()` does: with a wedged
+        # daemon a blind `rm -f` pays two 60 s timeouts to learn nothing, and
+        # the module's rule is that a failure is never read as permission.
+        raise SystemExit(
+            f"test-lane: cannot determine the state of {name} — is the docker "
+            f"daemon running? (refusing to remove a container blindly)"
+        )
     r = _docker("rm", "-f", name)
     if r.returncode != 0:
         # Never report a removal that did not happen.
