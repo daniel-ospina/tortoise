@@ -2860,7 +2860,17 @@ def scan_pr_surface(
         #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
         #    branch can suppress is not a refusal.
         if terminal is None and str(pr.get("number")) == str(issue):
-            linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+            # The message decoration must NOT be able to pre-empt the refusal.
+            # `_closing_ref_numbers` raises `SurfaceError` on an absent/malformed
+            # `closingIssuesReferences`, and this runs BEFORE the raise below — so
+            # an unguarded call would let the open-PR handler absorb it and report
+            # a mislabelled broken surface ("closing-reference-source-unavailable
+            # … fix gh auth/network") instead of the refusal. Degrade to an empty
+            # list: the refusal carries on and merely says less.
+            try:
+                linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+            except SurfaceError:
+                linked = []
             # The refusal is UNCONDITIONAL within the open case. It does not
             # depend on the PR naming a linked issue, because the defect is
             # not "we could not name the work item" — it is "the number you

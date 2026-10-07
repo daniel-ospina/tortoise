@@ -2260,12 +2260,14 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
         self.assertNotIn("VERDICT: CLEAN", out)
-        # The ordering property is now guaranteed MORE strongly, not less: the
-        # refusal short-circuits before any surface is scanned, so the run emits
-        # no report at all — hence no `HITS` block to inspect and no match-test
-        # hit that could have fired. Assert the absence of the report itself.
-        self.assertNotIn("HITS", out)
-        self.assertNotIn("matched issue-number", out)
+        # The ordering property this test exists for (#4567) is pinned by
+        # `rc == 2` alone. The old `HITS`-block assertions were removed after
+        # review found them VACUOUS: the refusal never calls `format_report`, so
+        # there is no report to inspect and those `assertNotIn`s could not fail
+        # once `assertEqual(rc, 2)` passed. The earlier comment here claimed the
+        # refusal "short-circuits before any surface is scanned" — also false:
+        # the issue surface is queried first; only the PR loop refuses.
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
 
     def test_found_clone_is_not_the_callers_checkout(self):
         # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
