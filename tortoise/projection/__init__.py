@@ -1984,6 +1984,16 @@ _LITERAL_OR_COMMENT_RE = re.compile(
     r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/",
     re.S,
 )
+# For the GATE patterns only. Same job — remove STRING LITERALS and COMMENTS so
+# a `MERGE {…}` inside a literal cannot false-exempt a parameter — but it KEEPS
+# backtick-quoted IDENTIFIERS, because the identity key's production spelling is
+# backticked (```CREATE (n:Point {`id`: $id})```) and `_GATE_ID_FIELD_RE` has to
+# read it. `_statement_writes` still uses the backtick-stripping version, since
+# its write-procedure second pass reads the RAW statement for those.
+_GATE_LITERAL_OR_COMMENT_RE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|//[^\n]*|/\*.*?\*/",
+    re.S,
+)
 # ``CALL`` is a write only when its PROCEDURE name says so. Blanket-treating
 # every CALL as a write nulls maps on read-only procedures and subqueries the
 # engine ACCEPTS — ``db.idx.vector.queryNodes``, ``db.idx.fulltext.queryNodes``,
@@ -2045,6 +2055,15 @@ _GATE_ROW_UNWOUND_RE = re.compile(
 # (as _retract/_apply_revise already do via _writable_id) — so the boundary
 # leaves them untouched and does not manufacture a null key.
 _GATE_MERGE_KEY_RE = re.compile(r"MERGE[^{}]*\{([^{}]*)\}", re.I)
+# A param bound to the `id` FIELD of a node property map is that node's
+# IDENTITY, whatever the clause. Nulling it does not degrade a property — it
+# writes an UNMATCHABLE `{id: null}` node that no later statement can address.
+# Measured: `create_point(..., id="a\x00b")` went from a RAISE on the raw handle
+# to a silent `(:Point {id: null})` with the boundary on. `MERGE` maps are
+# covered whole by `_GATE_MERGE_KEY_RE`; this covers the `id` field of a
+# `CREATE` map, whose production spelling is BACKTICKED (```CREATE (n:Point
+# {`id`: $id``)```) — hence the gate text below keeps backticked identifiers.
+_GATE_ID_FIELD_RE = re.compile(r"`?id`?\s*:\s*\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 # A MERGE key can also be a ROW FIELD rather than a parameter — ``MERGE (t:Point
 # {id: turn.id})`` over ``UNWIND $turns``. Nulling that field is the same
@@ -2182,25 +2201,29 @@ def _journal_safe_params(params, cypher=None):
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
     # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
     # scalar in a property — does not match and stays a value position.
-    # The gate patterns run on the LITERAL-STRIPPED text, exactly as
-    # `_statement_writes` does. A `MERGE {…}` or an `+= $x` inside a STRING
-    # LITERAL is text, not syntax, and matching it on the raw statement
-    # false-EXEMPTS a parameter that is then never nulled. Measured:
-    # `{"v": b"\x00"}` against
+    # The gate patterns run on text with STRING LITERALS and COMMENTS removed,
+    # so a `MERGE {…}` inside a literal cannot false-exempt a parameter that is
+    # then never nulled — measured: `{"v": b"\x00"}` against
     # `MATCH (n) WHERE n.x = 'MERGE {id: $v}' RETURN n` was forwarded untouched
     # and the engine raised "Failed to parse query parameter 'v' value".
-    gate_text = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
+    #
+    # Backtick-quoted IDENTIFIERS are deliberately KEPT here (unlike
+    # `_statement_writes`, which needs them gone): the identity key in the
+    # production `CREATE` spelling is backticked, and `_GATE_ID_FIELD_RE` has to
+    # see it.
+    gate_text = _GATE_LITERAL_OR_COMMENT_RE.sub(" ", statement)
     spread = frozenset(_GATE_SPREAD_RE.findall(gate_text)) | frozenset(
         _GATE_REPLACE_RE.findall(gate_text)
     )
     # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
     rows = frozenset(_GATE_UNWIND_RE.findall(gate_text))
-    # Parameters that are MERGE KEYS: never nulled here (see the note above).
+    # Parameters that are MERGE KEYS or a node's IDENTITY `id`: never nulled
+    # here (see the note above).
     merge_keys = frozenset(
         name
         for group in _GATE_MERGE_KEY_RE.findall(gate_text)
         for name in _GATE_PARAM_RE.findall(group)
-    )
+    ) | frozenset(_GATE_ID_FIELD_RE.findall(gate_text))
     # Row FIELDS used as merge keys — never nulled inside a row map either.
     merge_key_fields = frozenset(
         field
@@ -2259,7 +2282,16 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = {}
             for k, v in value.items():
-                if not _map_key_ok(k):
+                # BOTH key rules, because they are different failure modes: the
+                # DRIVER raises before dispatch on an empty/backtick key, and
+                # the ENGINE parse-rejects a key carrying a NUL or a lone
+                # surrogate (measured: `{"a\x00b": 1}` through
+                # `_persist_extra_props` aborted a `rebuild_all`). Either way
+                # the entry cannot be stored under any name, so DROP it and
+                # record it — the same "degrade the offending entry, keep the
+                # rest" policy as a corrupt value — rather than null the whole
+                # map and lose the keys that are fine.
+                if not _map_key_ok(k) or not _writable_at_parse(k, _depth + 1):
                     # The DRIVER raises on this key before dispatch, so the
                     # entry cannot be stored under ANY name. DROP it and record
                     # it — the same "degrade the offending entry, keep the
@@ -2268,8 +2300,7 @@ def _journal_safe_params(params, cypher=None):
                     degraded.append(f"{path}.<key {k!r}>")
                     changed = True
                     continue
-                if k in merge_key_fields:
-                    # A row field this statement MERGEs on: a null is refused
+                if k in merge_key_fields:                    # A row field this statement MERGEs on: a null is refused
                     # by the engine, so leave it exactly as it is.
                     out[k] = v
                     continue

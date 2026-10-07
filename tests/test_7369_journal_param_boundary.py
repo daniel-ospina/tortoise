@@ -1362,3 +1362,49 @@ def test_a_NULL_inside_an_ARRAY_is_refused_because_the_engine_rejects_it():
         assert _journal_safe_params({"p": {"v": arr}}, write)["p"]["v"] is None
     assert _value_ok(None) is True  # top level still clears the property
     assert _value_ok(["a", "b"]) is True
+
+
+def test_a_NUL_map_KEY_is_dropped_because_the_ENGINE_parse_rejects_it():
+    """#7406 review: the key guard knew only the DRIVER's rule, not the engine's.
+
+    `_map_key_ok` covers what the driver RAISES on before dispatch (empty /
+    backtick). It does not cover what the ENGINE parse-rejects — a key carrying
+    a NUL or a lone surrogate. Measured: a PointAdded whose property KEY
+    carries a NUL reaches `_EntityHandlers._persist_extra_props`
+    (`entities.py`, `... SET n += $extra`) and aborted a `rebuild_all` with
+    "Failed to parse query parameter 'extra' value". The walker now applies
+    both rules to a key.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    out = _journal_safe_params({"p": {"a\x00b": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+
+
+def test_the_IDENTITY_param_is_never_nulled_in_a_CREATE_map():
+    """#7406 review: a regression — a corrupted id wrote an unmatchable node.
+
+    `_GATE_MERGE_KEY_RE` recognises only `MERGE` property maps, so the `id` of a
+    `CREATE (n:Point {`id`: $id, ...})` was a value position and got degraded.
+    Measured through the real engine: `create_point(..., id="a\x00b")` RAISED
+    on the raw handle but, with the boundary on, created a
+    `(:Point {id: null})` no later statement can ever address. Nulling an
+    identity is not a degraded property — it is a different failure.
+
+    Asserted in BOTH production spellings (the key is backticked in the SDK) and
+    for MERGE, plus the other direction: a NON-identity field in the same map is
+    still degraded, so this cannot become a blanket exemption for the map.
+    """
+    corrupt = "x\x00y"
+    for stmt in (
+        "CREATE (n:Point {`id`: $id, content: $c})",
+        "CREATE (n:Point {id: $id, content: $c})",
+        "MERGE (n:Point {id: $id, content: $c})",
+    ):
+        out = _journal_safe_params({"id": corrupt, "c": "C"}, stmt)
+        assert out["id"] == corrupt, (stmt, out["id"])
+        assert out["c"] == "C", stmt
+
+    out = _journal_safe_params(
+        {"id": "x", "c": "a\x00b"}, "CREATE (n:Point {`id`: $id, content: $c})"
+    )
+    assert out["c"] is None, out["c"]
