@@ -1895,6 +1895,33 @@ def bff_session(ctx, base_url: str) -> tuple[str, str]:
     return SESSION_UNREACHABLE, f"{resp.status} from {SESSION_PATH}"
 
 
+# The instrument's TRANSPORT-FAILURE reading, and it is NOT an HTTP status: no
+# server answered, so the exchange measured nothing about the product. It is the
+# same sentinel `_http` already uses for an unreachable target.
+#
+# What it must NEVER be is a bare falsy default. `bff_api` used to `return 0,
+# None` from a bare `except Exception`, which made "the request never completed"
+# and "the caller passed a falsy value" the same thing and threw away the one
+# fact that explains it — the exception. The run could then only record
+# `-> 0`, which is exactly the attribution gap the ship-test is stuck on for the
+# serving revision (#5001): the instrument said it could not certify the
+# revision without being able to say what stopped it.
+TRANSPORT_ERROR = 0
+
+
+def transport_failure(body: object) -> str:
+    """The CAUSE carried by a transport-failure body, or "" for a real response.
+
+    A transport failure has no status to report, so the exception that produced
+    it is the ONLY thing that can make the failure attributable. This accessor is
+    what keeps `-> 0` from being all the record says — the sibling seam
+    `bff_session` has always carried `{type}: {message}`; the read path did not.
+    """
+    if isinstance(body, dict) and body.get("error") == "transport_error":
+        return str(body.get("detail") or "")
+    return ""
+
+
 def bff_api(ctx, base_url: str, method: str, path: str,
             body: dict | None = None) -> tuple[int, object]:
     """One call to the same-origin ``/api/v1`` proxy, as this session.
@@ -1919,21 +1946,33 @@ def bff_api(ctx, base_url: str, method: str, path: str,
             resp = ctx.request.delete(url)
         else:
             resp = ctx.request.post(url, data=body if body is not None else {})
-    except Exception:
-        return 0, None
+    except Exception as exc:
+        # A TRANSPORT failure, CARRIED — never a silent falsy default. There is
+        # no HTTP status here (the request never completed), so the cause is the
+        # only honest thing to report; discarding it is what made the ship-test's
+        # `-> 0` unattributable (#5001). The structured body is deliberately
+        # shaped like the proxy's own error bodies, so callers that already read
+        # `body["error"]`/`body["detail"]` keep working.
+        return TRANSPORT_ERROR, {
+            "error": "transport_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
     try:
         return resp.status, resp.json()
     except Exception:
         return resp.status, None
 
 
-def read_projection_via_bff(ctx, base_url: str) -> tuple[int, dict | None]:
+def read_projection_via_bff(ctx, base_url: str) -> tuple[int, dict | None, str]:
     """The server's own onboarding projection, read as this session.
 
-    Returns ``(status, projection)``. The STATUS is returned rather than
-    swallowed: a read that failed (503 from a degraded store, 401, an
-    unreachable origin) must not be silently indistinguishable from a server
-    that observed nothing — that conflation is the #4291 class.
+    Returns ``(status, projection, transport_failure)``. The STATUS is returned
+    rather than swallowed: a read that failed (503 from a degraded store, 401,
+    an unreachable origin) must not be silently indistinguishable from a server
+    that observed nothing — that conflation is the #4291 class. The third
+    element names WHICH transport failure it was when the request never
+    completed at all; `""` means a real response came back (and the status is
+    then a real one to read).
 
     Through the BFF proxy rather than the raw API origin, so the projection the
     instrument judges the screen against is fetched through the SAME endpoint
@@ -1941,10 +1980,11 @@ def read_projection_via_bff(ctx, base_url: str) -> tuple[int, dict | None]:
     own server read, not between two different routes.
     """
     status, body = bff_api(ctx, base_url, "GET", "/onboarding/state")
+    failure = transport_failure(body)
     if status != 200 or not isinstance(body, dict):
-        return status, None
+        return status, None, failure
     projection = body.get("onboarding") if isinstance(body.get("onboarding"), dict) else body
-    return status, projection
+    return status, projection, failure
 
 
 def projection_readable(status: int, projection: dict | None) -> bool:
@@ -1959,13 +1999,31 @@ def projection_readable(status: int, projection: dict | None) -> bool:
     return status == 200 and projection is not None
 
 
-def read_projection(ctx, base_url: str) -> tuple[int, dict | None]:
+def projection_read_detail(status: int, failure: str = "") -> str:
+    """The ONE line every projection-read guard records, cause included.
+
+    A transport failure has no status to show, so the cause is named in the
+    same line as the reading. `GET /api/v1/onboarding/state -> 0` alone is
+    unattributable (#5001) — a guard that stops the whole run must say WHICH
+    transport failure stopped it, or the next lane is back to guessing between
+    the instrument's read path and the deployment's proxy.
+    """
+    line = f"GET /api/v1/onboarding/state -> {status}"
+    if failure:
+        line += f" (transport error: {failure})"
+    return line
+
+
+def read_projection(ctx, base_url: str) -> tuple[int, dict | None, str]:
     """The server's truth, read through the WALKED SESSION and nothing else.
 
     There is deliberately no key-based alternative here. `--agent-key` supplies
     the agent write's credential; if it also carried this read, the browser (org
     A) could be judged against org B's projection and the instrument would
     report `passed` for a lying UI — a false pass. One identity, one read.
+
+    The third element is the transport failure that produced the status, `""`
+    when a real response was read — see `read_projection_via_bff`.
     """
     return read_projection_via_bff(ctx, base_url)
 
@@ -2833,19 +2891,20 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
         # carries a decidable claim. A page with no connection surface is
         # not an honest negative — it is an unmeasured one, and must not be
         # credited as a pass (the vacuous-pin class #3806 exists to prevent).
-        projection_status, projection = read_projection(ctx, args.base_url)
+        projection_status, projection, read_failure = read_projection(ctx, args.base_url)
         if not projection_readable(projection_status, projection):
             # The instrument's OWN read of the server's truth failed. It
             # cannot judge a screen it could not check, and it must not
             # claim a product finding it cannot support (the #4291 class):
             # a transient 503 here would otherwise be reported as the client
             # "claiming a connection while the server state was unreadable".
+            # The cause travels with the reading, so the record says WHY (#5001).
+            read_line = projection_read_detail(projection_status, read_failure)
             obs.add(name="server-read", ok=False, ui="",
-                    detail=f"GET /api/v1/onboarding/state -> {projection_status}",
+                    detail=read_line,
                     screenshot=shot(page, "server-read"))
             obs.verdict = instrument_error_verdict(
-                "projection_unreadable",
-                f"GET /api/v1/onboarding/state -> {projection_status}")
+                "projection_unreadable", read_line)
             return _finalize(obs, out_dir, td)
         ui = read_connection_surface(page)
         # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
@@ -2916,7 +2975,8 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                 # was EVER readable, not by which read happened to be last.
                 saw_readable = False
                 for _ in range(20):
-                    projection_status, projection = read_projection(ctx, args.base_url)
+                    projection_status, projection, read_failure = read_projection(
+                        ctx, args.base_url)
                     saw_readable = saw_readable or projection_readable(
                         projection_status, projection)
                     # The SAME edge-only question as the probe below (#4646): this
@@ -2928,10 +2988,12 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                     page.wait_for_timeout(1000)
                 if not saw_readable:
                     # The server's own truth was NEVER readable (a degraded
-                    # session store answers 503 here). Nothing was measured.
+                    # session store answers 503 here). Nothing was measured —
+                    # and if the request never completed, the recorded line
+                    # names the transport failure that stopped it (#5001).
                     obs.verdict = instrument_error_verdict(
                         "projection_unreadable",
-                        f"GET /api/v1/onboarding/state -> {projection_status}")
+                        projection_read_detail(projection_status, read_failure))
                     return _finalize(obs, out_dir, td)
                 # The post-write poll asks the SERVER-OBSERVED question, so it
                 # is edge-only like every screen judgement (#4646): the probe is
@@ -2957,11 +3019,11 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
         page.goto(args.base_url.rstrip("/") + "/",
                   wait_until="domcontentloaded", timeout=args.timeout)
         page.wait_for_timeout(args.settle_ms)
-        projection_status, projection = read_projection(ctx, args.base_url)
+        projection_status, projection, read_failure = read_projection(ctx, args.base_url)
         if not projection_readable(projection_status, projection):
             obs.verdict = instrument_error_verdict(
                 "projection_unreadable",
-                f"GET /api/v1/onboarding/state -> {projection_status}")
+                projection_read_detail(projection_status, read_failure))
             return _finalize(obs, out_dir, td)
         ui = read_connection_surface(page)
         surface = connection_surface_kind(page)
