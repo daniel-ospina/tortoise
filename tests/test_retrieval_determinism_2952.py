@@ -53,15 +53,12 @@ def _reset_breakers():
 
 # ── rrf_fusion: stable total order over ties ───────────────────────────────
 
-#: Leg contents chosen so RRF ties BY CONSTRUCTION: within each leg the scores
-#: are DISTINCT (so the leg's order is real, not a tie), arranged so ``a`` is
-#: rank 0 in fts and rank 1 in vector while ``b`` is the mirror. Both then score
-#: 1/(k+1) + 1/(k+2) — the same two terms, so their fused scores are EXACTLY
-#: equal and only the tie-break decides their order. (#3019: the scores must be
-#: distinct WITHIN a leg, or the tie-agnostic rank collapses every member to
-#: rank 0 and the crossing construction degenerates into a plain tie.)
-_FTS = [("a", 0.9), ("b", 0.8)]
-_VECTOR = [("b", 0.8), ("a", 0.7)]
+#: Leg contents chosen so RRF ties by construction: ``a`` is rank 0 in fts and
+#: rank 1 in vector; ``b`` is the mirror. Both score 1/(k+1) + 1/(k+2) — the
+#: same two terms, so their fused scores are EXACTLY equal and only the
+#: tie-break decides their order.
+_FTS = [("a", 0.9), ("b", 0.9)]
+_VECTOR = [("b", 0.8), ("a", 0.8)]
 
 
 def test_rrf_fusion_tie_order_is_leg_order_independent():

@@ -439,34 +439,13 @@ def temporal_leg_fusion_order(
         head=head_excl)
     if not picks or weight <= 0:
         return order_ids, []
-    # #3019: carry each leg's intended ORDER in its SCORES, not in its row
-    # position. This used to pass a constant 0.0 for every member on both legs
-    # and let `rrf_fusion` read the order off the list position — which is the
-    # same conflation #6213 fixes there (a constant-scored leg's position IS its
-    # rank, so a deterministic tie order became a FABRICATED score gap). With
-    # the fusion now tie-agnostic, an all-zero leg is membership-only and loses
-    # its order, so the order is expressed here instead: a strictly descending
-    # score per position gives each member the SAME rank it had as a position,
-    # and the relative magnitudes keep the tail placement contract (the picks
-    # rank below the head slice).
-    base_leg = [(pid, float(len(order_ids) - i))
-                for i, pid in enumerate(order_ids)]
     if placement == "head":
-        leg = [(pid, float(len(picks) - i)) for i, pid in enumerate(picks)]
+        leg = [(pid, 0.0) for pid in picks]
     else:
-        # The picks must be STRICTLY WORSE than every head row, so a pick's rank
-        # is `ceiling + j` — exactly the positional rank it had under the old
-        # constant-0.0 wiring. Using a descending `len(picks) - i` here OVERLAPS
-        # the head's range (`ceiling`..1) and lets a pick tie or BEAT an interior
-        # head row, which scrambles the visible head: measured on window=9,
-        # limit=3, the picks reached rank 4 and 7 (`h0 h1 h2 h3 p0 h4 h5 p1 p2`)
-        # instead of landing below the head (`h0..h5 p0 p1 p2`). Negative scores
-        # keep them below the head's floor of 1 while staying ordered.
-        head = [(c["id"], float(ceiling - i))
-                for i, c in enumerate(candidates[:ceiling])]
-        leg = head + [(pid, float(-i)) for i, pid in enumerate(picks)]
+        leg = ([(c["id"], 0.0) for c in candidates[:ceiling]]
+               + [(pid, 0.0) for pid in picks])
     fused = rrf_fusion(
-        [base_leg, leg],
+        [[(pid, 0.0) for pid in order_ids], leg],
         strategy_names=["semantic", "temporal"],
         weights={"temporal": weight},
     )

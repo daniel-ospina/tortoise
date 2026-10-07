@@ -1826,35 +1826,8 @@ def rrf_fusion(
                     strategy_names[i], w,
                 )
                 w = 1.0
-        # #3019: TIE-AGNOSTIC RANK — a row's rank is the number of rows with a
-        # STRICTLY better score, so identically-scored candidates receive the
-        # SAME rank (a distinguished row keeps its rank).
-        #
-        # Position-as-rank is the textbook RRF formula as first written
-        # (4abff72cb, the commit that introduced this module), but it turns a
-        # deterministic intra-leg tie order into a FABRICATED score gap:
-        # measured on the W4-b twin fixture, the gap the contested twin must
-        # overcome moved 0.0038 (main) -> 0.0188 (at the #6213 head), which
-        # EXCEEDS W4_CONTESTED_BOOST(0.05) x DEFAULT_GRAPH_BOOST_WEIGHT(0.35)
-        # = 0.0175 (ranking.py:67,:58), so the contested twin stopped
-        # outranking its calm twin. Collapsing the tie makes that gap 0.0.
-        #
-        # Built by sorting ONCE per leg (O(n log n)): a score's rank is the
-        # index of its first occurrence in the descending order, which is
-        # exactly the count of strictly-better scores. An O(n^2) count per row
-        # was measured at 291 s for one 10,000-row leg, and `pool_size` is
-        # validated up to 10,000 (sdk.py:17405), so the quadratic form was a
-        # reachable stall rather than a theoretical one. The rank map is
-        # computed HERE, at leg scope — building it inside the row loop below
-        # would re-derive it per row (and a second `for pid, score in ranked:`
-        # nested there would score the whole leg len(ranked) times).
-        _desc = sorted((s for _, s in ranked), reverse=True)
-        _rank_of: dict[float, int] = {}
-        for _i, _s in enumerate(_desc):
-            if _s not in _rank_of:
-                _rank_of[_s] = _i
-        for pid, score in ranked:
-            rrf_score = w / (k + _rank_of[score] + 1)
+        for rank, (pid, _score) in enumerate(ranked):
+            rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf

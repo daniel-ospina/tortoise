@@ -405,13 +405,7 @@ def test_head_boundary_is_the_candidate_index_not_the_dated_index():
 
 
 def test_empty_temporal_leg_leaves_rrf_order_byte_identical():
-    # #3019: the base leg carries DISTINCT DESCENDING scores. A constant-scored
-    # leg is membership-only under the tie-agnostic fusion (identical scores
-    # collapse to one rank), so a base whose ORDER is the thing being pinned has
-    # to express that order in its scores — which is exactly what a real leg does
-    # with a real similarity. With distinct scores the original strong assertion
-    # still holds, and it still fails if the fusion reorders a ranked leg.
-    base = [(f"p{i}", float(60 - i)) for i in range(60)]
+    base = [(f"p{i}", 0.0) for i in range(60)]
     fused = rrf_fusion([base, []], strategy_names=["semantic", "temporal"],
                        weights={"temporal": 1.0})
     assert list(fused) == [pid for pid, _ in base]
@@ -502,25 +496,15 @@ def test_window_tail_placement_keeps_picks_out_of_the_head():
     # visible head item. That is the shape the tail placement avoids (the
     # proxy does NOT show it is end-to-end worse — see the module
     # docstring); this pins both shapes so a placement regression is caught.
-    #
-    # #3019: both legs carry DISTINCT DESCENDING scores. A constant-scored leg
-    # is membership-only under the tie-agnostic fusion (every member collapses
-    # to rank 0), so with all-zero scores this test would be decided by the
-    # `(-score, id)` tie-break rather than by the leg's RANKS — it would still
-    # pass while exercising nothing about placement.
-    base = [(f"cluster{i}", float(60 - i)) for i in range(60)]
-    base[45] = ("gold_a", 15.0)
-    base[50] = ("gold_b", 10.0)
-    # Counterfactual: the picks fused at leg ranks 0..N (``placement="head"``).
+    base = [(f"cluster{i}", 0.0) for i in range(60)]
+    base[45] = ("gold_a", 0.0)
+    base[50] = ("gold_b", 0.0)
     rank_zero = rrf_fusion(
-        [base, [("gold_a", 1.0), ("gold_b", 0.0)]],
+        [base, [("gold_a", 0.0), ("gold_b", 0.0)]],
         strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
     assert list(rank_zero)[:2] == ["gold_a", "gold_b"]
-    # Shipped wiring: the same picks BELOW the head slice, so their leg rank is
-    # 10/11 and the head keeps ranks 0..9.
     tail = rrf_fusion(
-        [base, [(pid, float(20 - i)) for i, (pid, _) in enumerate(base[:10])]
-         + [("gold_a", 0.0), ("gold_b", -1.0)]],
+        [base, [*base[:10], ("gold_a", 0.0), ("gold_b", 0.0)]],
         strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
     assert list(tail)[:2] == ["cluster0", "cluster1"], list(tail)[:4]
 
@@ -571,9 +555,7 @@ def test_deictic_only_anchors_are_dropped():
 
 
 def test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order():
-    # #3019: distinct descending base scores, as above — the no-op property is
-    # that a zero-WEIGHT leg adds its member but does not reorder a ranked base.
-    base = [(f"p{i}", float(20 - i)) for i in range(20)]
+    base = [(f"p{i}", 0.0) for i in range(20)]
     fused = rrf_fusion([base, [("deep", 0.0)]],
                        strategy_names=["semantic", "temporal"],
                        weights={"temporal": 0.0})
