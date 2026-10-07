@@ -124,10 +124,10 @@ data, not chosen for convenience.
     while CI lints only the changed files, and remote-link outcomes (429/403/…)
     plus lychee's run cache move the count for an unchanged link between runs.
     Measured at the snapshot's own base_sha: ``docs/license-notes.md`` carries
-    the hashicorp URL TWICE, the all-file ``update`` recorded it ONCE (while
-    recording the couchbase URL on the same file TWICE), and a changed-file run
-    reports the hashicorp URL twice — so a count comparison classified an
-    INHERITED finding as new and redded an unrelated PR, the #7475 failure this
+    the hashicorp URL TWICE and a changed-file run reports it twice, while the
+    all-file ``update`` records each target ONCE (that half is deduplicated, so
+    it cannot record any target twice) — a count comparison therefore classified
+    an INHERITED finding as new and redded an unrelated PR, the #7475 failure this
     snapshot exists to remove. Membership still fails a genuinely new dead link;
     it stops re-failing a *repeat* of a link already on the list, which the
     owner's ruling ("reject a change only for problems not on that list") does

@@ -1471,6 +1471,12 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
         assert with_block.get("fail") is False, action_name
         assert with_block.get("failIfEmpty") is False, action_name
         assert str(with_block.get("output", "")).endswith(report), action_name
+        # The LINTER must be pinned, not the action's mutable default: the module
+        # asserts the snapshot was taken with a specific lychee, and the snapshot's
+        # keys encode that version's status text — while `lychee-action@v2`
+        # defaults to a version in its own action.yml (#7542 review round 10).
+        # markdownlint is pinned the same way (`markdownlint-cli2@0.23.3`).
+        assert with_block.get("lycheeVersion") == "v0.24.2", action_name
         step = _by_name(differ_name)
         assert f'--lychee-output "$RUNNER_TEMP/{report}"' in step["run"], differ_name
         assert step["env"]["EXPECTED_MD_FILES"] == "${{ " + count_expr + " }}", differ_name

@@ -764,16 +764,20 @@ jobs:
           #
           # TWO greps, because cli2's directive regexes are not all line-scoped.
           # `disable`/`disable-line`/`disable-next-line` are matched line by line,
-          # so the opener must sit on the same added line. `configure-file` — and
-          # `capture`/`restore`, which re-arm a captured disabled state — are
-          # matched against the WHOLE document joined with newlines, and their
-          # `\s*` spans them, so `<!--\nmarkdownlint-configure-file {...}\n-->`
-          # is honoured by cli2 while a same-line opener anchor never sees it.
-          # Measured end-to-end before this split: the guard exited 0, cli2
-          # reported `0 issues`, and the differ read `0 new` on a genuinely new
-          # finding. The second grep therefore drops the opener anchor and accepts
-          # that prose naming one of those three words is a false positive — this
-          # is whole-file suppression, so it fails CLOSED.
+          # so the opener must sit on the same added line. `configure-file` is the
+          # ONE directive matched against the WHOLE document joined with newlines
+          # (cli2 passes `[lines.join("\n")]` to it alone), so
+          # `<!--\nmarkdownlint-configure-file {...}\n-->` is honoured while a
+          # same-line opener anchor never sees it — measured end-to-end before
+          # this split: the guard exited 0, cli2 reported `0 issues`, and the
+          # differ read `0 new` on a genuinely new finding.
+          #
+          # The second grep is deliberately NOT anchored, and carries
+          # `capture`/`restore` beside `configure-file`. Those two are matched
+          # per-line like `disable`, but they re-arm a CAPTURED suppression, so
+          # they belong in the unanchored set as well. The cost is that prose
+          # naming one of the three is a false positive — these are whole-file or
+          # re-arming suppressions, so the guard fails CLOSED.
           #
           # `--text` because git treats a `.md` containing a NUL byte as BINARY
           # and prints `Binary files ... differ` with no `+` lines at all, while
@@ -851,6 +855,13 @@ jobs:
           # `--files-from` reads the list from a FILE — no filename reaches a
           # shell command (#4449).
           args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
+          # #7435: PIN the linter. `lychee-action@v2` defaults to a linter version
+          # in ITS OWN action.yml, so without this the required check's lychee is a
+          # number that changes under us while `tools/docs_lint_baseline.py`
+          # asserts the snapshot was taken with a specific one — and the snapshot's
+          # keys encode that version's status text. The markdownlint half is pinned
+          # for the same reason (`markdownlint-cli2@0.23.3`).
+          lycheeVersion: v0.24.2
           # #7435: report JSON and do NOT fail the step here — the snapshot differ
           # below decides, so inherited link debt in a touched file stops redding
           # the required check while a NEW dead link still fails it.
@@ -952,6 +963,9 @@ jobs:
           # shell command (#4449). failIfEmpty: a link-free doc is legitimate
           # and must not red the nightly.
           args: --no-progress --files-from ${{ runner.temp }}/changed-md.txt
+          # #7435: pinned to the same linter as the PR path (see its comment) — the
+          # action's own default is not a contract.
+          lycheeVersion: v0.24.2
           # #7435: captured for the snapshot differ (see the PR path above).
           format: json
           output: ${{ runner.temp }}/lychee-mh.json
