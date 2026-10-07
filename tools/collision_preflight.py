@@ -3061,14 +3061,18 @@ def scan_pr_surface(
 
     ⛔ ORDER IS LOAD-BEARING, but the number==issue case is NO LONGER a
     first-decided *weak hit*: an OPEN PR whose number is the issue RAISES
-    `NotAWorkItem` (#7009). That check runs at block 0, BEFORE the ownership
+    `NotAWorkItem` (#7009) — ON A NON-ADVISORY SURFACE. The refusal is scoped by
+    `surface.authority`, so an ADVISORY entry whose `state` is non-terminal is
+    REPORTED weak and never refused: an advisory surface cannot force an exit.
+    That check runs at block 0, BEFORE the ownership
     check — it is an INPUT-VALIDITY test, not a match test, so `main()`
     auto-declaring the caller's own branch (the documented `--repo .` form)
     cannot suppress it. The caller's OWN PR is still decided before any match
     test; a TERMINAL PR whose number is the issue still takes the weak arm and
     leaves the verdict CLEAN.
 
-    RAISES `NotAWorkItem` for an open PR number, in ADDITION to `SurfaceError`.
+    RAISES `NotAWorkItem` for an open PR number on a non-advisory surface, in
+    ADDITION to `SurfaceError`.
     On the CLI path ONLY `NotAWorkItem` reaches `main()`; a `SurfaceError` is
     absorbed by the per-surface handler and never becomes this refusal. A
     PROGRAMMATIC caller of this function or of `run_preflight` must therefore
@@ -3184,11 +3188,15 @@ def scan_pr_surface(
                     # its CONTENTS are unknown, not empty, so the message below
                     # must not answer "it names no closing issue". The guard keys
                     # on `surface.authority` (may this surface refuse?) while this
-                    # read keys on `use_closing_field` (did the payload carry the
-                    # field?) — different questions, so they may legitimately
+                    # read keys on `use_closing_field` (did the CALLER request the
+                    # field? — it is a request flag, not a property of the
+                    # payload, which may still lack it: that is the SurfaceError
+                    # arm below) — different questions, so they may legitimately
                     # diverge. `unreadable` is what keeps the divergence from
                     # becoming a false claim; the two agree at both call sites
-                    # today, so this is the drift arm, not the live one.
+                    # today, so this is the drift arm, not the live one, and
+                    # `test_blocking_surface_without_the_closing_field_reports_it_unread`
+                    # is what keeps it from being silently deletable.
                     unreadable = True
             except SurfaceError:
                 # `unreadable` is carried so the message below does NOT assert a
@@ -3238,7 +3246,10 @@ def scan_pr_surface(
         #    whose object is a CLOSED/MERGED PR is immutable history, not
         #    in-flight work, so CLEAN is the CORRECT answer for it. Refusing
         #    there would turn a right answer into a refusal. The hazard is
-        #    entirely the NON-TERMINAL case, which block 0 has already refused.
+        #    entirely the NON-TERMINAL case, which block 0 refuses on a
+        #    NON-ADVISORY surface; on the ADVISORY one block 0 cannot fire, so
+        #    that same entry reaches here and is reported weak — which is the
+        #    behaviour this block exists to preserve.
         if str(pr.get("number")) == str(issue):
             surface.add(_pr_ref(pr),
                         f"PR number == issue ({issue}): this PR *is* the issue, "
