@@ -239,6 +239,44 @@ class TestFailClosedRebuild:
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert "unknown-event-type" in str(ei.value)
 
+    def test_unknown_event_type_fails_rebuild_log_too(self, env):
+        """FAILS IF: the apply-based `rebuild(log)` engine warns and RETURNS on
+        an unrecognized record while `rebuild_all` refuses it — the asymmetry
+        #3585 exists to close, where a lost DB can be "recovered" onto a
+        projection `rebuild_all` calls incomplete (this was the recut's
+        regression: the `apply()` else-arm recorded nothing).
+        REACHABLE: a type outside the projection vocabulary, folded through
+        `rebuild(log)`'s `apply()` dispatch."""
+        sdk, events = env
+        _raw(events, type="FutureRecordType", event_id="e-future-log")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild(
+                EventLog(str(events / "events.jsonl")),
+                confirm_destructive=True)
+        assert "unknown-event-type" in str(ei.value), str(ei.value)
+
+    def test_unknown_event_type_is_not_recovered(self, env, tmp_path):
+        """FAILS IF: transparent recovery reports success while the journal
+        holds an unrecognized record — the apply-based engine would return
+        `recovered: True` over an incomplete projection (R8/R9 asymmetry; the
+        recut's regression measured exactly `recovered: True`).
+        REACHABLE: a healthy `PointAdded` (so the log set is unambiguous and
+        the graph is non-empty) plus one `FutureRecordType`."""
+        sdk, events = env
+        _raw(events, type="PointAdded", event_id="e-p1-unk",
+             point={"id": "p1-unk", "content": "x", "kind": "statement",
+                    "status": "live",
+                    "createdAt": "2026-01-01T00:00:00Z"})
+        _raw(events, type="FutureRecordType", event_id="e-future-rec")
+        sdk.close()
+        proj = _fresh(tmp_path, "recover-unk")
+        try:
+            res = recover_from_log(str(events), proj)
+            assert res["recovered"] is False, res
+            assert "unknown-event-type" in res["reason"], res["reason"]
+        finally:
+            proj.close()
+
     def test_delete_miss_is_exempt_and_reported(self, env, caplog):
         """FAILS IF: a delete matching 0 rows fails the run — it is the NAMED
         exception (#4743), and the run must still complete.
@@ -536,6 +574,30 @@ class TestReReviewRoundTwo:
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
         assert r["divergence"] == "non-folded", r["divergence"]
+
+    def test_id_only_absent_target_supersede_refuses_both_engines(self, env):
+        """FAILS IF: an `ObjectSuperseded` carrying an `id` no journaled
+        registration created — and NO usable `name` — is treated as a no-op by
+        the reference fold.
+
+        The recut left the `object-superseded-miss` refusal nested inside the
+        NAME branch's zero-carrier `else`, so an id-only miss left `target`
+        None and recorded NOTHING: `rebuild_all` raised `NonFoldedEventsError`
+        while `check_consistency` returned `ok=True divergence=None
+        nf_refused=0` — the classifier asymmetry #3585 exists to close.
+        REACHABLE: a hand-written id-only supersede for an id the journal never
+        registered (the writer emits no name with it)."""
+        sdk, events = env
+        _raw(events, type="ObjectSuperseded", id="obj-never-registered",
+             supersedes_by="other", event_id="e-sup-idonly")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert "object-superseded-miss" in str(ei.value), str(ei.value)
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert any("object-superseded-miss" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]
 
     def test_pointsmerged_then_supersede_is_exempt_in_both_engines(
             self, env, tmp_path):

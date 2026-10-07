@@ -1223,19 +1223,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     # Genuine ambiguity: the fold's STATUS resolution is
                     # heuristic, so the status leg is excluded (and reported).
                     ambiguous.add(oname)
-                else:
-                    # #3585 re-review: NO carrier at all is not ambiguity — the
-                    # graph fold matches 0 Objects and records
-                    # `object-superseded-miss` (refused), so the reference fold
-                    # must refuse too, or `check_consistency` passes on a
-                    # journal `rebuild_all` refuses.
-                    record_non_folded(
-                        SHAPE_OBJECT_SUPERSEDED_MISS,
-                        event_id=ev.get("event_id"), event_type=t, seq=seq,
-                        candidates=(oname,),
-                        detail=("reference fold: name-only supersede matched "
-                                "no Object"),
-                    )
+            # #3585 re-review (P1-fix): the refusal is hoisted to this
+            # POST-RESOLUTION point, so EVERY unresolvable supersede is
+            # recorded — not only the name-only no-carrier case. An `id` no
+            # journaled registration created (and no usable `name`) matched
+            # nothing in the graph fold either, which records
+            # `object-superseded-miss` and fails; leaving `target is None`
+            # unrecorded made `check_consistency` pass a journal `rebuild_all`
+            # refuses — exactly the classifier asymmetry #3585 exists to
+            # close. The genuine >1-carrier ambiguity case stays the carve-out
+            # (the fold's status resolution there is heuristic, so it is
+            # reported via `ambiguous`, never refused).
+            if target is None and not (
+                    isinstance(oname, str) and oname in ambiguous):
+                record_non_folded(
+                    SHAPE_OBJECT_SUPERSEDED_MISS,
+                    event_id=ev.get("event_id"), event_type=t, seq=seq,
+                    id=oid if isinstance(oid, str) else None,
+                    candidates=(
+                        (oname,) if isinstance(oname, str) and oname
+                        else (oid,)),
+                    detail="reference fold: supersede matched no Object",
+                )
             if target is not None:
                 entities[target]["status"] = "superseded"
     return entities, deleted, ambiguous
