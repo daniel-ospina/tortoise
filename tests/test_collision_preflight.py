@@ -837,6 +837,57 @@ class CollisionPreflightTest(unittest.TestCase):
         # Anti-vacuity: it must still name the object, not blanket-refuse.
         self.assertIn("#3061", out)
 
+    def test_open_pr_own_number_with_UNREADABLE_closing_field_still_refuses(self):
+        """The refusal must survive a malformed closing-reference field (#7009).
+
+        Regression for a guard that could not fire in CI. `_closing_ref_numbers`
+        raises `SurfaceError` on an absent/malformed `closingIssuesReferences`, and
+        it is evaluated to DECORATE the refusal message — so without the guard the
+        open-PR handler absorbs that error and the run reports a MISLABELLED broken
+        surface (`closing-reference-source-unavailable … fix gh auth/network`)
+        instead of the refusal. That remedy is unrelated to the problem and no
+        amount of retrying resolves it.
+
+        No other test reaches this path: the only open-PR fixture whose number ==
+        the issue carries the field, and the existing deleted-field test uses a
+        different number, so block 0 never runs. Reaching it at all requires
+        DELETING the key after `gh_fixtures`, which normalizes it in — a draft of
+        this test that omitted it was VACUOUS: the field was present-and-empty,
+        the guard never ran, and the test stayed green against a guard-removed
+        copy (measured).
+
+        It also pins the SECOND fix here: the message must not assert "it names no
+        closing issue" for a field that was merely UNREADABLE. A wrong reason for a
+        right decision is the defect class this whole change is about.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        # The harness normalizes `closingIssuesReferences` IN (setdefault, ~20
+        # call sites) so no call site can forget it, which means the key must be
+        # DELETED explicitly to reach the guard at all — exactly as
+        # `test_missing_closing_reference_field_is_incomplete_not_clean` does.
+        # Without this the field is present-and-empty, `_closing_ref_numbers`
+        # never raises, and the guard can be deleted with the test still green.
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["closingIssuesReferences"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertNotIn("fix gh auth/network", out)
+        # No report at all — the same contract the sibling refusal tests pin.
+        self.assertNotIn("VERDICT", out)
+        # The REASON must not assert a fact the tool cannot know. The field was
+        # UNREADABLE, not absent, so "It names no closing issue" is false — a
+        # wrong reason for a right decision, the defect class this change is
+        # about. The corrected message names the unreadable field instead.
+        self.assertIn("could not be read", out)
+        self.assertNotIn("It names no closing issue", out)
+
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
         # make — and on a TERMINAL PR it is still history, not in-flight work.

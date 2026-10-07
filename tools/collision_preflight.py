@@ -222,7 +222,7 @@ Exit codes
     1  COLLISION    >= 1 STRONG hit on a >= 1 BLOCKING surface (do NOT dispatch).
                     A weak hit never decides this, and a hit on an ADVISORY
                     surface never decides it, however it is shaped
-    2  INCOMPLETE   NOT clean, and NOT a collision. TWO DISTINCT CAUSES, and a
+    2  INCOMPLETE   NOT clean, and NOT a collision. MULTIPLE CAUSES, and a
                     caller must distinguish them because the remedies differ:
                     (a) >= 1 BLOCKING surface could not be queried. A surface that
                         can never produce a blocking hit is EXEMPT and its failure
@@ -237,6 +237,14 @@ Exit codes
                         the issue number". A caller keying its remedy on
                         `VERDICT: INCOMPLETE` will MISS this one; keying on the
                         exit code alone cannot tell (a) from (b).
+                    (c) the TARGET is ambiguous: `--repo` was omitted and the number
+                        resolves in more than one sibling repo (`_ambiguity_refusal`).
+                        Verdict-less in exactly the same way as (b) — stderr only,
+                        no report — so a caller inferring "no VERDICT line means it
+                        is the open-PR refusal" MISROUTES this one. Remedy: pass
+                        `--repo owner/name`. (Added after a review found the count
+                        here said "TWO", making the table itself a false claim of
+                        exactly the kind this function exists to prevent.)
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)
@@ -3137,6 +3145,8 @@ def scan_pr_surface(
         #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
         #    branch can suppress is not a refusal.
         if terminal is None and str(pr.get("number")) == str(issue):
+            linked = []
+            unreadable = False
             # The message decoration must NOT be able to pre-empt the refusal.
             # `_closing_ref_numbers` raises `SurfaceError` on an absent/malformed
             # `closingIssuesReferences`, and this runs BEFORE the raise below — so
@@ -3147,7 +3157,13 @@ def scan_pr_surface(
             try:
                 linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
             except SurfaceError:
+                # `unreadable` is carried so the message below does NOT assert a
+                # fact the tool cannot know. An absent field supports "it names no
+                # closing issue"; an UNREADABLE one does not, and claiming it
+                # would be a wrong reason for a right decision — the defect class
+                # this very change is about.
                 linked = []
+                unreadable = True
             # The refusal is UNCONDITIONAL within the open case. It does not
             # depend on the PR naming a linked issue, because the defect is
             # not "we could not name the work item" — it is "the number you
@@ -3159,6 +3175,10 @@ def scan_pr_surface(
             where = (
                 " It closes " + ", ".join(f"#{n}" for n in linked) + "."
                 if linked else
+                " Its closing-reference field could not be read, so resolve the"
+                " work item by hand (this repo's convention puts it in the title"
+                " as `(#N)`)."
+                if unreadable else
                 " It names no closing issue, so resolve the work item by hand"
                 " (this repo's convention puts it in the title as `(#N)`)."
             )
