@@ -83,6 +83,10 @@ def test_a_protected_name_sharing_the_prefix_is_still_refused(monkeypatch):
 
 
 def test_the_protected_names_are_the_shared_instances_this_lane_must_never_touch():
+    """`PROTECTED_NAMES` documents the shared instances; today it is the PREFIX
+    rule that refuses them, which is why the discriminating test is the
+    prefix-collision one above (this one pins the constant's contents, and that
+    the refusal holds however it is achieved)."""
     for shared in ("falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb"):
         assert shared in tl.PROTECTED_NAMES
         assert tl.is_managed(shared) is False
@@ -112,11 +116,10 @@ def test_no_function_parameter_can_select_a_container():
     """Review round 3, P1: the CLI was locked but `stop(name)`/`start(slug)`
     still accepted a peer's container name (`is_managed` passes it — a peer's
     name IS `fdb-lane-<sha1(path)[:10]>`). The fix is structural: the target is
-    derived inside the function, so the only parameters left are properties of
-    THIS lane. Re-adding a name/slug parameter fails here."""
+    derived inside the function, so the only parameter left is a property of
+    THIS lane. Re-adding a name/slug/image parameter fails here."""
     assert list(inspect.signature(tl.stop).parameters) == []
-    assert list(inspect.signature(tl.start).parameters) == ["port", "image"]
-    assert "slug" not in inspect.signature(tl.start).parameters
+    assert list(inspect.signature(tl.start).parameters) == ["port"]
     assert list(inspect.signature(tl.lane_name).parameters) == []
 
 
@@ -131,14 +134,29 @@ def test_no_flag_can_target_another_lanes_container():
         assert exc.value.code == 2, f"argparse must reject {flag} (usage error)"
 
 
-@pytest.mark.parametrize("command", ["down", "list"])
-@pytest.mark.parametrize("flag,value", [("--port", "16390"), ("--graph", "g")])
-def test_a_command_that_ignores_a_flag_must_not_accept_it(command, flag, value):
-    """Round 3, P3: `down --port 16390` exited 0, which reads as "down that
-    port". A command that takes no mapping must reject the flag loudly."""
+@pytest.mark.parametrize("argv", [
+    ["down", "--port", "16390"],
+    ["down", "--graph", "g"],
+    ["list", "--port", "16390"],
+    ["list", "--graph", "g"],
+    ["status", "--port", "16390"],   # reads a port, never chooses one
+])
+def test_a_command_that_ignores_a_flag_must_not_accept_it(argv):
+    """Round 3 P3, extended in round 4: `down --port 16390` exited 0, which
+    reads as "down that port". A command that does not use a flag must reject
+    it loudly. (`status --graph` IS used, and is asserted accepted below.)"""
     with pytest.raises(SystemExit) as exc:
-        tl.main([command, flag, value])
+        tl.main(argv)
     assert exc.value.code == 2
+
+
+def test_status_still_accepts_the_flag_it_does_use(monkeypatch, capsys):
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 1)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: 16390)
+    assert tl.main(["status", "--graph", "other_graph"]) == 0
+    _out, err = capsys.readouterr()
+    assert "other_graph" in err
 
 
 def test_lane_name_is_derived_from_this_worktree(monkeypatch):
@@ -225,8 +243,8 @@ def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
 
 def test_container_publishes_consults_stopped_containers(monkeypatch):
     """A stopped container still reserves its published host port, so the scan
-    must pass `-a`; without it `pick_port` returns a port `docker run -p`
-    then refuses."""
+    must ask for the full list (`-a`/`--all`); without it `pick_port` returns a
+    port `docker run -p` then refuses."""
     seen = {}
 
     def _fake(*args, **kwargs):
@@ -235,8 +253,46 @@ def test_container_publishes_consults_stopped_containers(monkeypatch):
 
     monkeypatch.setattr(tl, "_docker", _fake)
     assert tl._container_publishes(16390) is True
-    assert "-a" in seen["args"]
+    assert set(seen["args"]) & {"-a", "--all"}, "must not scan running-only"
     assert tl._container_publishes(16490) is False
+
+
+def test_published_port_reads_the_mapping_docker_reports(monkeypatch):
+    """Round 4, P3: `_published_port` produces the port in the eval-ed URI and
+    was stubbed at every call site, so its real body — the sole mechanism behind
+    the "published, not requested" fix — was never exercised."""
+    cases = [
+        (_R(0, "127.0.0.1:16390\n", ""), 16390),
+        (_R(0, "[::1]:16391\n", ""), 16391),      # IPv6 form, same suffix parse
+        (_R(0, "", ""), None),                    # no mapping is not a port
+        (_R(1, "", "No such container"), None),   # a failure is not a port
+    ]
+    for result, expected in cases:
+        monkeypatch.setattr(tl, "_docker", lambda *a, _r=result, **k: _r)
+        assert tl._published_port("fdb-lane-x") == expected
+
+
+def test_docker_calls_time_out_instead_of_hanging(monkeypatch):
+    """Round 4, P2: `subprocess.run` without a timeout can block forever, and a
+    wedged daemon is this tool's expected failure mode. A timeout must come back
+    as the same non-zero shape every caller already handles."""
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+    monkeypatch.setattr(tl.subprocess, "run", _timeout)
+    r = tl._docker("inspect", "fdb-lane-x")
+    assert r.returncode == 1
+    assert "timed out" in r.stderr
+    # ... and the callers read that as "unknown", never as "absent".
+    assert tl.container_state("fdb-lane-x") == "unknown"
+
+
+def test_docker_absence_is_not_inferred_from_a_missing_binary(monkeypatch):
+    def _missing(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(tl.subprocess, "run", _missing)
+    assert tl.container_state("fdb-lane-x") == "unknown"
 
 
 def test_list_reports_a_failed_docker_ps_instead_of_claiming_none_exist(monkeypatch, capsys):
@@ -278,7 +334,6 @@ def test_pick_port_raises_when_the_range_is_exhausted(monkeypatch):
 # ── the eval contract ──────────────────────────────────────────────────────
 
 def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-x")
     monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     rc = tl.main(["uri"])
@@ -377,12 +432,46 @@ def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch)
 
 def test_start_removes_only_a_container_this_tool_manages(lane, monkeypatch):
     """The stale-container `rm` must satisfy the ownership guard (a real
-    refusal, not an `assert` — `python -O` strips those)."""
+    refusal, not an `assert` — `python -O` strips those).
+
+    `_docker` is stubbed: with the guard reverted this test must fail as an
+    ASSERTION, not by reaching a real `docker rm` in the operator's daemon.
+    """
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was reached for an unmanaged container")
+
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     monkeypatch.setattr(tl, "is_managed", lambda _n: False)
+    monkeypatch.setattr(tl, "_docker", _boom)
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "refusing to remove unmanaged" in str(exc.value)
+
+
+def test_start_refuses_to_reuse_a_running_container_that_is_wedged(lane, monkeypatch):
+    """Round 4, P3: the reuse path handed back a URI without checking the server
+    answered, so a wedged long-lived container kept being reused indefinitely."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: 16390)
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: False)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "never answered PING" in str(exc.value)
+
+
+def test_wait_ready_is_bounded_in_wall_time(lane, monkeypatch):
+    """A PING loop bounded in iterations is unbounded if each iteration can
+    block; the bound is the deadline."""
+    calls = []
+
+    def _never(*_a, **_k):
+        calls.append(1)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 0)
+    monkeypatch.setattr(tl, "_docker", _never)
+    assert tl._wait_ready("fdb-lane-x") is False
+    assert calls == [], "a zero deadline must not issue a single docker call"
 
 
 def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, monkeypatch):

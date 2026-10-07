@@ -81,6 +81,13 @@ IMAGE = os.environ.get("TORTOISE_TEST_LANE_IMAGE", "falkordb/falkordb:latest")
 NAME_PREFIX = "fdb-lane-"
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
+#: Docker calls are bounded: this tool exists for an overloaded host, so a
+#: wedged daemon must fail diagnosably instead of hanging the lane forever.
+DOCKER_TIMEOUT = 60
+#: `docker run` may have to pull the image first.
+IMAGE_PULL_TIMEOUT = 600
+#: How long a fresh or reused container gets to answer PING.
+READY_TIMEOUT = 60
 #: The shared instances every lane and the orchestration graph depend on. They
 #: do not carry NAME_PREFIX, so the prefix rule already refuses them; this
 #: constant documents them AND is what `is_managed` consults, so a future shared
@@ -127,7 +134,15 @@ def lane_name() -> str:
 
 
 def is_managed(name: str) -> bool:
-    """True only for names this tool may remove."""
+    """True only for names this tool may remove.
+
+    TRIPWIRE, not a live filter: with the target now derived internally,
+    ``lane_name()`` is always ``fdb-lane-<10 hex>``, so in production this can
+    only return True. It is kept — one line, no cost — because EVERY removal
+    intent still has to pass it, so re-introducing a way to name a container
+    (the round-2/3 peer-deletion defect) does not silently regain the ability
+    to delete a shared instance.
+    """
     return name.startswith(NAME_PREFIX) and name not in PROTECTED_NAMES
 
 
@@ -169,15 +184,31 @@ def port_is_free(port: int) -> bool:
     return True
 
 
-def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], capture_output=True, text=True,
-                          check=check)
+def _docker(*args: str,
+            timeout: int = DOCKER_TIMEOUT) -> subprocess.CompletedProcess:
+    """Run docker — never raising, never hanging.
+
+    A failure comes back as a non-zero result so every caller's "a failure is
+    not evidence of absence" rule applies uniformly, and a TIMEOUT is converted
+    into that same shape with a self-describing stderr rather than blocking
+    forever (round 4, P2): this tool exists for an overloaded host, so a wedged
+    daemon is an expected failure, not an exotic one.
+    """
+    try:
+        return subprocess.run(["docker", *args], capture_output=True,
+                              text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["docker", *args], 1, "",
+            f"docker {' '.join(args[:1])} timed out after {timeout}s")
+    except FileNotFoundError as exc:      # no docker binary on PATH
+        return subprocess.CompletedProcess(["docker", *args], 1, "", str(exc))
 
 
 def _container_publishes(port: int) -> bool:
     # `-a`: a STOPPED container still reserves its published host port, so a
     # running-only scan can hand back a port `docker run -p` will then refuse.
-    r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}", check=False)
+    r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return f":{port}->" in (r.stdout or "")
 
 
@@ -191,16 +222,32 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
     )
 
 
+def _wait_ready(name: str) -> bool:
+    """Wait for the container's server to answer PING — bounded in WALL TIME.
+
+    Seconds, not iterations: an iteration count is not a bound when each
+    iteration awaits an unbounded docker call (round 4, P2).
+    """
+    deadline = time.monotonic() + READY_TIMEOUT
+    while time.monotonic() < deadline:
+        ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
+                       timeout=READY_TIMEOUT)
+        if "PONG" in (ping.stdout or ""):
+            return True
+        time.sleep(1)
+    return False
+
+
 def container_state(name: str) -> str:
-    """`running` | `stopped` | `absent` | `unknown`.
+    """`absent`, `unknown`, or docker's own state string (`running`, `exited`, ...).
 
     `absent` (the container does not exist) is deliberately distinguished from
-    `unknown` (docker itself failed — daemon down, permission): reporting the
-    first when the second is true is how `status` would claim a lane has no
-    container when it merely could not ask, and `start()` would go on to
-    `docker rm` a container that may belong to another lane.
+    `unknown` (docker itself failed — daemon down, permission, timeout):
+    reporting the first when the second is true is how `status` would claim a
+    lane has no container when it merely could not ask, and `start()` would go
+    on to `docker rm` a container that may belong to another lane.
     """
-    r = _docker("inspect", "--format", "{{.State.Status}}", name, check=False)
+    r = _docker("inspect", "--format", "{{.State.Status}}", name)
     if r.returncode == 0:
         return (r.stdout or "").strip() or "unknown"
     err = f"{r.stderr or ''}{r.stdout or ''}".lower()
@@ -213,8 +260,7 @@ def _graph_count(name: str) -> int | None:
     None rather than 0: `graphs=0` is a claim about the container, and a failed
     `docker exec` is not evidence for it.
     """
-    r = _docker("exec", name, "redis-cli", "--no-auth-warning", "GRAPH.LIST",
-                check=False)
+    r = _docker("exec", name, "redis-cli", "--no-auth-warning", "GRAPH.LIST")
     if r.returncode != 0:
         return None
     return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
@@ -222,7 +268,7 @@ def _graph_count(name: str) -> int | None:
 
 def _published_port(name: str) -> int | None:
     """The loopback port a container publishes for 6379, or None."""
-    r = _docker("port", name, "6379/tcp", check=False)
+    r = _docker("port", name, "6379/tcp")
     if r.returncode != 0:
         return None
     for token in (r.stdout or "").replace("\n", " ").split():
@@ -234,10 +280,12 @@ def _published_port(name: str) -> int | None:
     return None
 
 
-def start(port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
+def start(port: int | None = None) -> tuple[str, int]:
     """Start (or reuse) THIS LANE's container. Returns (name, published port).
 
-    There is no container parameter — see the module docstring's CONTRACT.
+    There is no container parameter — see the module docstring's CONTRACT. The
+    image is not a parameter either: `TORTOISE_TEST_LANE_IMAGE` is the seam, so
+    a caller cannot smuggle in a different runtime.
 
     The published port is returned rather than the requested one because it is
     the only authoritative value: it is what the lane's URI must name, and the
@@ -255,6 +303,14 @@ def start(port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
         published = _published_port(name)
         if published is None:
             raise SystemExit(f"test-lane: {name} is running but publishes no port")
+        # A long-lived container can be wedged: the fresh path refuses to hand
+        # back a URI to a server that never answers, and so must this one.
+        if not _wait_ready(name):
+            raise SystemExit(
+                f"test-lane: {name} is running but never answered PING within "
+                f"{READY_TIMEOUT}s — it may be wedged: run `uv run python "
+                f"tools/test_lane.py down` and retry"
+            )
         return name, published
     if state == "unknown":
         raise SystemExit(
@@ -265,41 +321,42 @@ def start(port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
     if state != "absent":
         if not is_managed(name):
             raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
-        _docker("rm", "-f", name, check=False)
+        _docker("rm", "-f", name)
 
     chosen = port if port is not None else pick_port()
     r = _docker(
         "run", "-d", "--name", name,
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
-        image,
-        check=False,
+        IMAGE,
+        timeout=IMAGE_PULL_TIMEOUT,   # the image may need pulling first
     )
     if r.returncode != 0:
         raise SystemExit(f"test-lane: docker run failed: {r.stderr.strip()}")
 
-    for _ in range(30):
-        ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
-                       check=False)
-        if "PONG" in (ping.stdout or ""):
-            published = _published_port(name)
-            if published is None:
-                # Never leave behind a container nobody can address.
-                _docker("rm", "-f", name, check=False)
-                raise SystemExit(
-                    f"test-lane: {name} answered PING but publishes no port; "
-                    f"removal attempted"
-                )
-            return name, published
-        time.sleep(1)
-    logs = _docker("logs", "--tail", "20", name, check=False)
-    rm = _docker("rm", "-f", name, check=False)
-    fate = ("removed it" if rm.returncode == 0
+    if not _wait_ready(name):
+        logs = _docker("logs", "--tail", "20", name)
+        raise SystemExit(
+            f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
+            f"Logs:\n{logs.stdout}{logs.stderr}"
+        )
+    published = _published_port(name)
+    if published is None:
+        # Never leave behind a container nobody can address.
+        raise SystemExit(
+            f"test-lane: {name} answered PING but publishes no port; "
+            f"{_remove_and_describe(name)}"
+        )
+    return name, published
+
+
+def _remove_and_describe(name: str) -> str:
+    """Remove a container this tool just created, and say what actually
+    happened — a cleanup whose result is unread is how a running container with
+    a reserved port survives to make every later `start()` refuse."""
+    rm = _docker("rm", "-f", name)
+    return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")
-    raise SystemExit(
-        f"test-lane: {name} never answered PING; {fate}. Logs:\n"
-        f"{logs.stdout}{logs.stderr}"
-    )
 
 
 def stop() -> str:
@@ -320,7 +377,7 @@ def stop() -> str:
     state = container_state(name)
     if state == "absent":
         return "absent"
-    r = _docker("rm", "-f", name, check=False)
+    r = _docker("rm", "-f", name)
     if r.returncode != 0:
         # Never report a removal that did not happen.
         raise SystemExit(
@@ -365,8 +422,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    r = _docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}",
-                check=False)
+    r = _docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}")
     if r.returncode != 0:
         # The rest of this module refuses to infer absence from a failed call;
         # `list` must not be the exception.
@@ -387,14 +443,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # Flags live on the SUBcommands so the natural spelling works
     # (`uri --port 16390`), and ONLY on the commands that use them: `down` takes
-    # no target and no mapping, so accepting a flag it ignores would read as
-    # "down that port" (review round 3, P3).
-    mapper = argparse.ArgumentParser(add_help=False)
+    # no target and no mapping, and `status` reads a port rather than choosing
+    # one, so accepting a flag either ignores would read as "do that" (round 3
+    # P3 + round 4 P3).
+    graph_only = argparse.ArgumentParser(add_help=False)
+    graph_only.add_argument("--graph", default=DEFAULT_GRAPH,
+                            help=f"graph/database name for the URI "
+                                 f"(default {DEFAULT_GRAPH})")
+    mapper = argparse.ArgumentParser(add_help=False, parents=[graph_only])
     mapper.add_argument("--port", type=int, default=None,
                         help="publish on this loopback port (default: first free)")
-    mapper.add_argument("--graph", default=DEFAULT_GRAPH,
-                        help=f"graph/database name for the URI "
-                             f"(default {DEFAULT_GRAPH})")
     plain = argparse.ArgumentParser(add_help=False)
     sub = p.add_subparsers(dest="command", required=True)
     for name, fn, help_, parent in (
@@ -403,7 +461,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("uri", cmd_uri, "same as `up` (reads better inside $( ))", mapper),
         ("down", cmd_down, "remove this lane's container", plain),
         ("status", cmd_status, "is it running, and how many graphs does it hold",
-         mapper),
+         graph_only),
         ("list", cmd_list, "list every fdb-lane-* container", plain),
     ):
         sp = sub.add_parser(name, help=help_, parents=[parent])
