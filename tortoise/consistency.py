@@ -41,6 +41,7 @@ the journal produces.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -64,6 +65,8 @@ from .projection import (
     _promotion_point_with_operator,
     _writable_id,
     journal_hard_delete_seqs,
+    journal_object_hard_deleted_ids,
+    journal_object_surviving_keys,
     journal_point_creation_ids,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
@@ -1133,6 +1136,102 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     entities: dict = {}
     deleted: set = set()
     ambiguous: set = set()
+    # #3585 re-review (cycle 2, FIX B): `rebuild_all` DEFERS the
+    # `ObjectSuperseded` fold to a sweep AFTER every Object-creation event AND
+    # every delete, so a supersede that PRECEDES its own `ObjectRegistered` is
+    # legitimately foldable there. This reference fold is chronological, so it
+    # must ask the JOURNAL which Objects exist at the END before it treats an
+    # unresolvable supersede as a miss — the entity-leg analogue of
+    # `journal_point_creation_ids`. Resolving a forward-referenced supersede
+    # when its target is created is what `rebuild_all`'s deferred sweep
+    # produces for the field this leg compares (`status`); a chronological
+    # refusal instead reds a journal the graph reproduces exactly (and invents
+    # a bogus status divergence).
+    surviving_ids, surviving_names = journal_object_surviving_keys(events)
+    # Ids the journal HARD-DELETES anywhere — the named
+    # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries.
+    hard_deleted_objects = journal_object_hard_deleted_ids(events)
+    # Supersedes naming an Object created LATER, held until that creation
+    # materializes it.
+    pending: list[tuple[int, dict]] = []
+    # DISTINCT ids registered per Object name. The graph MERGEs by name, so a
+    # re-registration of one id is still ONE carrier; two distinct ids make a
+    # name-only supersede's status heuristic (the exclusion `_compare_entities`
+    # reports). Needed up front because a forward-referenced name may gain its
+    # second carrier only AFTER the supersede's creation event fires.
+    name_ids: dict[str, set[str]] = {}
+    for _ev in events:
+        if not isinstance(_ev, dict) or _ev.get("type") != "ObjectRegistered":
+            continue
+        _nm, _oid = _ev.get("name"), _ev.get("id")
+        if isinstance(_nm, str) and _nm and isinstance(_oid, str) and _oid:
+            name_ids.setdefault(_nm, set()).add(_oid)
+
+    def _object_target(oid, oname):
+        """``(target_key, ambiguous_here)`` against the CURRENT index.
+
+        ``ambiguous_here`` is LOCAL to THIS event: the >1-carrier carve-out
+        must not leak through the never-cleared ``ambiguous`` reporting set,
+        or every LATER zero-carrier supersede of a once-ambiguous name is
+        silently exempted — passing a journal `rebuild_all` refuses.
+        """
+        if isinstance(oid, str) and ("Object", oid) in entities:
+            return ("Object", oid), False
+        if isinstance(oname, str) and oname:
+            carriers = [
+                k for k, r in entities.items()
+                if k[0] == "Object" and r.get("name") == oname
+                and r.get("status") != "superseded"]
+            if len(carriers) == 1:
+                return carriers[0], False
+            if len(carriers) > 1:
+                return None, True
+        return None, False
+
+    def _will_be_created(oid, oname) -> bool:
+        return ((isinstance(oid, str) and oid in surviving_ids)
+                or (isinstance(oname, str) and bool(oname)
+                    and oname in surviving_names))
+
+    def _object_hard_deleted(oid) -> bool:
+        return isinstance(oid, str) and oid in hard_deleted_objects
+
+    def _record_supersede_miss(seq: int, ev: dict) -> None:
+        candidate = ev.get("name") if isinstance(ev.get("name"), str) \
+            and ev.get("name") else ev.get("id")
+        record_non_folded(
+            SHAPE_OBJECT_SUPERSEDED_MISS,
+            event_id=ev.get("event_id"), event_type="ObjectSuperseded",
+            seq=seq,
+            id=ev.get("id") if isinstance(ev.get("id"), str) else None,
+            candidates=(candidate,),
+            detail="reference fold: supersede matched no Object",
+        )
+
+    def _resolve_pending(label, eid, name, rec):
+        # A creation just materialized this entity; apply any supersede that
+        # named it while it did not yet exist — the position `rebuild_all`'s
+        # trailing sweep occupies for the fields this leg compares. A LATER
+        # state op still wins, because the main pass applies it after this.
+        if label != "Object":
+            return
+        for seq, ev in list(pending):
+            oid, oname = ev.get("id"), ev.get("name")
+            by_id = isinstance(oid, str) and oid == eid
+            by_name = (isinstance(oname, str) and bool(name)
+                       and oname == name)
+            if not (by_id or by_name):
+                continue
+            # A name several Objects share is the ambiguity the status leg
+            # cannot resolve; resolving the forward reference out of order
+            # must not make a later registration look buried.
+            rec_name = rec.get("name")
+            if (isinstance(rec_name, str)
+                    and len(name_ids.get(rec_name, ())) > 1):
+                ambiguous.add(rec_name)
+            rec["status"] = "superseded"
+            pending.remove((seq, ev))
+
     for seq, ev in enumerate(events):
         t = ev.get("type")
         if t in _ENTITY_CREATION:
@@ -1157,6 +1256,7 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
+            _resolve_pending(label, eid, name, rec)
         elif t == "EntityMutated":
             label, eid, op = ev.get("label"), ev.get("id"), ev.get("op")
             if not isinstance(eid, str):
@@ -1209,44 +1309,41 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     rec["name"] = newname
         elif t == "ObjectSuperseded":
             oid, oname = ev.get("id"), ev.get("name")
-            target = None
-            if isinstance(oid, str) and ("Object", oid) in entities:
-                target = ("Object", oid)
-            elif isinstance(oname, str) and oname:
-                carriers = [
-                    k for k, r in entities.items()
-                    if k[0] == "Object" and r.get("name") == oname
-                    and r.get("status") != "superseded"]
-                if len(carriers) == 1:
-                    target = carriers[0]
-                elif len(carriers) > 1:
-                    # Genuine ambiguity: the fold's STATUS resolution is
-                    # heuristic, so the status leg is excluded (and reported).
-                    ambiguous.add(oname)
-            # #3585 re-review (P1-fix): the refusal is hoisted to this
-            # POST-RESOLUTION point, so EVERY unresolvable supersede is
-            # recorded — not only the name-only no-carrier case. An `id` no
-            # journaled registration created (and no usable `name`) matched
-            # nothing in the graph fold either, which records
-            # `object-superseded-miss` and fails; leaving `target is None`
-            # unrecorded made `check_consistency` pass a journal `rebuild_all`
-            # refuses — exactly the classifier asymmetry #3585 exists to
-            # close. The genuine >1-carrier ambiguity case stays the carve-out
-            # (the fold's status resolution there is heuristic, so it is
-            # reported via `ambiguous`, never refused).
-            if target is None and not (
-                    isinstance(oname, str) and oname in ambiguous):
-                record_non_folded(
-                    SHAPE_OBJECT_SUPERSEDED_MISS,
-                    event_id=ev.get("event_id"), event_type=t, seq=seq,
-                    id=oid if isinstance(oid, str) else None,
-                    candidates=(
-                        (oname,) if isinstance(oname, str) and oname
-                        else (oid,)),
-                    detail="reference fold: supersede matched no Object",
-                )
+            target, ambiguous_here = _object_target(oid, oname)
             if target is not None:
                 entities[target]["status"] = "superseded"
+            elif ambiguous_here:
+                # Genuine >1-carrier ambiguity: the fold's STATUS resolution
+                # is heuristic, so the status leg is excluded (and reported).
+                # The carve-out is LOCAL to THIS event (FIX C) — never the
+                # never-cleared `ambiguous` set, which would silently exempt
+                # every later zero-carrier supersede of a once-ambiguous name.
+                ambiguous.add(oname)
+            elif _will_be_created(oid, oname):
+                # Forward reference (FIX B): `rebuild_all`'s deferred sweep
+                # folds it, so it must NOT be refused here. Hold it until the
+                # target's creation event materializes it.
+                pending.append((seq, ev))
+            elif _object_hard_deleted(oid):
+                # Named exemption: the journal HARD-DELETED the target, so the
+                # deferred sweep's 0-row match is legitimate
+                # (`supersede-target-deleted`), never a miss.
+                pass
+            else:
+                # Genuinely unresolvable: an id no journaled registration
+                # created (and no usable name) matched nothing in the graph
+                # fold either, which records `object-superseded-miss` and
+                # fails — so the reference fold must refuse too, or
+                # `check_consistency` passes a journal `rebuild_all` refuses.
+                _record_supersede_miss(seq, ev)
+    # Held supersedes whose creation never materialized in this fold: the
+    # journal index named the target, but a delete (or a creation the fold
+    # could not read) removed it first. Mirror the deferred sweep's 0-row
+    # classification, carrying the deleted-target exemption.
+    for seq, ev in pending:
+        if _object_hard_deleted(ev.get("id")):
+            continue
+        _record_supersede_miss(seq, ev)
     return entities, deleted, ambiguous
 
 
@@ -1872,6 +1969,26 @@ def recover_from_log(events_dir: str, projection) -> dict:
     first_refusal = ""
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
+    # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
+    # keys (`apply()` refuses an ObjectSuperseded whose target the journal
+    # never leaves in place, while a forward reference is NOT refused) plus the
+    # ids the journal hard-deletes (the named `supersede-target-deleted`
+    # exemption).
+    # Passed only to a projection whose ``apply()`` accepts them — the fake /
+    # injected backends used in tests take ``apply(ev)`` alone, and a kwarg
+    # they do not accept would be miscounted as a TORN record.
+    journal_object_surviving = journal_object_surviving_keys(events)
+    journal_object_deleted = journal_object_hard_deleted_ids(events)
+    apply_kwargs: dict = {}
+    try:
+        _apply_params = inspect.signature(projection.apply).parameters
+    except (TypeError, ValueError):
+        _apply_params = {}
+    if "journal_object_surviving" in _apply_params:
+        apply_kwargs = {
+            "journal_object_surviving": journal_object_surviving,
+            "journal_object_deleted": journal_object_deleted,
+        }
     # #3585 (R8/R9): this apply-based engine folds inside the non-folded
     # collector too. A refused event means the recovery REPLAYED an incomplete
     # journal — reporting `recovered: True` there is the false PASS #3947's
@@ -1905,7 +2022,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     if edge is not None:
                         deferred_corrects.append(edge)
                 else:
-                    projection.apply(ev)
+                    projection.apply(ev, **apply_kwargs)
                 applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1
