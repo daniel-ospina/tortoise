@@ -330,7 +330,21 @@ assert_eq "$RC" "0" "a failed post-deploy verification alerts"
 assert_contains "$(title_line)" "title=deploy-hosted: post-deploy-verify failed at 'health-gate'" "its own key"
 POST_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
 assert_contains "$POST_BODY" "LIVE and unhealthy" "the body says a bad release is live, NOT that the deploy failed"
-assert_not_contains "$POST_BODY" "did **NOT** flip" "and not the deploy-api meaning (the deploy did succeed here)"
+assert_not_contains "$POST_BODY" "verified end-to-end" "and not the deploy-api meaning (the deploy did succeed here)"
+
+# ── case 18: a LATE `deploy-api` failure must not read as "nothing shipped" ──
+# `Deploy` runs BEFORE the `if: always()` gate audit, and the alert is the job's
+# LAST step — so a red here can happen with a release already created. The body's
+# consequence must defer to the failed step rather than assert the pre-deploy
+# meaning. (Round-6 review, P3.)
+reset_case
+run_alert --job deploy-api --steps "deploy=success bypass-report=failure"
+assert_eq "$RC" "0" "a late deploy-api failure still alerts"
+DEPLOY_LATE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$DEPLOY_LATE_BODY" "verified end-to-end" "the body states the pipeline invariant, true for every step"
+assert_contains "$DEPLOY_LATE_BODY" "failed step" "and defers 'did anything ship?' to the failed-step row"
+assert_not_contains "$DEPLOY_LATE_BODY" "nothing has shipped" "it must NOT assert the pre-Deploy meaning unconditionally"
+assert_not_contains "$DEPLOY_LATE_BODY" "did **NOT** flip" "nor the old unconditional flip claim"
 # The opener used to hard-code "the hosted deploy pipeline is blocked" for all
 # three jobs — FALSE here, where the deploy already succeeded and the release is
 # live. The job's own meaning must be the only claim in the body. (Round-4

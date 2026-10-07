@@ -2023,7 +2023,7 @@ interchangeable:
 
 | failed job | what it means |
 |---|---|
-| `deploy-api` | nothing has shipped since the last successful run |
+| `deploy-api` | the release was **not** verified end-to-end — nothing shipped if the failure was **before** `Deploy`; **at or after** it a release may be live but unverified (read the `failed step` row) |
 | `packaging-smoke` | the deploy was **skipped** — the app did not flip |
 | `post-deploy-verify` | the release is **live and unhealthy** (there is no rollback) — the deploy itself succeeded |
 

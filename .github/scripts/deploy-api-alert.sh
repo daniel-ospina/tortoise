@@ -129,7 +129,16 @@ step_label() { # <step-id> -> human label, or "" when unknown
 job_block_note() { # <job>
   case "$1" in
     deploy-api)
-      printf '%s' '`post-deploy-verify` is skipped when this job does not succeed (its `if:` requires `needs.deploy-api.result` to be `success`), so a red here means the app did **NOT** flip — nothing has shipped since the last successful run.' ;;
+      # ⛔ This must be true for EVERY step in the job, not just the early ones.
+      # `Deploy` runs BEFORE the `if: always()` gate audit, and the alert is the
+      # job's LAST step — so a red here can happen with a release already created
+      # (`flyctl deploy --wait-timeout 420` may have released before failing, and
+      # the audit can fail on its own after a clean deploy). The old text asserted
+      # "nothing has shipped since the last successful run", which is FALSE in those
+      # cases and would tell an on-call reader a live, unverified release does not
+      # exist (round-6 review, P3). So the invariant is stated, and the shipped-or-
+      # not question is deferred to the `failed step` row.
+      printf '%s' '`post-deploy-verify` is skipped when this job does not succeed (its `if:` requires `needs.deploy-api.result` to be `success`), so a red here means the release was **not** verified end-to-end — see the `failed step` row below: a failure **before** `Deploy` shipped nothing, **at or after** it a release may be live but unverified.' ;;
     packaging-smoke)
       printf '%s' '`deploy-api` is gated on this job (its `if:` reads `needs.packaging-smoke.result`), so a red here leaves the deploy **SKIPPED** — the app did **NOT** flip.' ;;
     post-deploy-verify)
