@@ -14,6 +14,7 @@ tool's CONTRACT, not Docker's behaviour:
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -130,11 +131,10 @@ def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
 
 
 def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
-    """`uri --port N` and `down --name <shared>` are the natural spellings.
+    """`uri --port N` is the natural spelling.
 
     Regression (#5084 self-review): the flags were declared on the ROOT parser,
-    so `down --name falkordb` died in argparse and never reached the ownership
-    guard — the guard was there but unreachable from the CLI.
+    so post-subcommand flags died in argparse before reaching any guard.
     """
     monkeypatch.setattr(tl, "start", lambda slug, port, **k: ("fdb-lane-x", port))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
@@ -142,9 +142,20 @@ def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
     out, _err = capsys.readouterr()
     assert "127.0.0.1:16401" in out
 
+
+def test_down_offers_no_way_to_target_another_lanes_container():
+    """Review P1-2: `--name` was an escape hatch that could remove a PEER
+    lane's live `fdb-lane-<other-slug>`. It is gone: `down` can only ever act
+    on this worktree's own container, and argparse now rejects the flag."""
     with pytest.raises(SystemExit) as exc:
-        tl.main(["down", "--name", "falkordb"])
-    assert "refusing to remove" in str(exc.value)
+        tl.main(["down", "--name", "fdb-lane-peer-slug"])
+    assert exc.value.code == 2, "argparse must reject --name (usage error)"
+
+
+def test_target_name_is_always_derived_from_this_worktree(monkeypatch):
+    monkeypatch.setattr(tl, "repo_root", lambda: "/tmp/wt-under-test")
+    args = argparse.Namespace(slug=None, graph=tl.DEFAULT_GRAPH)
+    assert tl._target_name(args) == tl.container_name(tl.slug_for("/tmp/wt-under-test"))
 
 
 def test_status_reports_the_published_port_not_the_requested_one(monkeypatch, capsys):
@@ -157,3 +168,63 @@ def test_status_reports_the_published_port_not_the_requested_one(monkeypatch, ca
     _out, err = capsys.readouterr()
     assert "127.0.0.1:16390" in err
     assert ":0/" not in err, "a placeholder port must never be printed"
+
+
+# ── start(): the port handed to the caller must be the PUBLISHED one ───────
+
+class _R:
+    """Just enough of a CompletedProcess for the docker seam."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def test_start_returns_the_published_port_not_the_requested_one(monkeypatch):
+    """Review P2-1: `-p 0:6379` lets Docker choose the port, so echoing the
+    requested value would print a URI pointing at nothing."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: 16400)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
+    assert tl.start("slug") == ("fdb-lane-slug", 16400)
+
+
+def test_start_rejects_an_invalid_port_before_touching_docker(monkeypatch):
+    """The ordering IS the guard: validation must precede `container_state` (a
+    docker call) and the stale-container `docker rm`, or an invalid value still
+    reaches docker. Both seams are booby-trapped here, so this test fails if the
+    check is ever moved below them again (VGATE caught exactly that)."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before port validation")
+
+    monkeypatch.setattr(tl, "container_state", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    for bad in (0, -1, 65536):
+        with pytest.raises(SystemExit) as exc:
+            tl.start("slug", port=bad)
+        assert "not a valid TCP port" in str(exc.value)
+
+
+def test_stop_surfaces_a_failed_removal(monkeypatch):
+    """Review P3: `stop` returned "removed" even when `docker rm` failed."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
+    with pytest.raises(SystemExit) as exc:
+        tl.stop("fdb-lane-0123456789")
+    assert "failed to remove" in str(exc.value)
+
+
+# ── the eval contract must not be injectable ───────────────────────────────
+
+@pytest.mark.parametrize("bad", [
+    "o'brien",            # would close the single-quoted export line
+    "a b",
+    "x; rm -rf /",
+    "$(whoami)",
+    "graf\nh",
+    "",
+])
+def test_uri_for_refuses_a_graph_name_that_would_break_the_eval_line(bad):
+    with pytest.raises(SystemExit) as exc:
+        tl.uri_for(16399, bad)
+    assert "refusing graph name" in str(exc.value)

@@ -50,9 +50,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # #5128 shape: refuse an old interpreter before module-level 3.12+ constructs.
@@ -100,12 +102,25 @@ def is_managed(name: str) -> bool:
     return name.startswith(NAME_PREFIX) and name not in PROTECTED_NAMES
 
 
+GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
+
+
 def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
     """The URI shape the docker lane's tests expect (`docker://` + loopback).
 
     No password: this tool starts the container without `requirepass` (it is
     loopback-bound and disposable), so the URI carries an empty password.
+
+    The graph name is validated because this string is printed into a single
+    quoted `export` line that the documented usage `eval`s: an unvalidated name
+    would make the line invalid shell (or inject into it).
     """
+    if not GRAPH_NAME_RE.match(graph):
+        raise SystemExit(
+            f"test-lane: refusing graph name {graph!r} — it must match "
+            f"{GRAPH_NAME_RE.pattern} (it is interpolated into an eval-ed "
+            f"export line)"
+        )
     return f"docker://:@127.0.0.1:{port}/{graph}"
 
 
@@ -135,7 +150,9 @@ def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def _container_publishes(port: int) -> bool:
-    r = _docker("ps", "--format", "{{.Names}} {{.Ports}}", check=False)
+    # `-a`: a STOPPED container still reserves its published host port, so a
+    # running-only scan can hand back a port `docker run -p` will then refuse.
+    r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}", check=False)
     return f":{port}->" in (r.stdout or "")
 
 
@@ -163,7 +180,18 @@ def _published_port(name: str) -> int | None:
 
 
 def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
-    """Start (or reuse) this lane's container. Returns (name, port)."""
+    """Start (or reuse) this lane's container. Returns (name, published port).
+
+    The returned port is always the one Docker PUBLISHES, never the one that was
+    requested: `-p 0:6379` makes Docker choose an ephemeral port, so echoing the
+    requested value would hand the caller a URI pointing at nothing.
+
+    A requested port is validated FIRST — before `container_state` and before
+    the stale-container `docker rm` — so an invalid value cannot reach docker at
+    all (the guard is only as good as its ordering).
+    """
+    if port is not None and not (0 < port < 65536):
+        raise SystemExit(f"test-lane: --port {port} is not a valid TCP port")
     name = container_name(slug)
     state = container_state(name)
     if state == "running":
@@ -172,6 +200,10 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
             raise SystemExit(f"test-lane: {name} is running but publishes no port")
         return name, published
     if state != "absent":
+        # Defence in depth: this is the one remove path that does not go through
+        # `stop()`, so assert the same invariant rather than relying on the
+        # caller having built the name from `container_name()`.
+        assert is_managed(name), f"refusing to remove unmanaged {name!r}"
         _docker("rm", "-f", name, check=False)
 
     chosen = port if port is not None else pick_port()
@@ -189,8 +221,12 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
         ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
                        check=False)
         if "PONG" in (ping.stdout or ""):
-            return name, chosen
-        import time
+            published = _published_port(name)
+            if published is None:
+                raise SystemExit(
+                    f"test-lane: {name} answered PING but publishes no port"
+                )
+            return name, published
         time.sleep(1)
     logs = _docker("logs", "--tail", "20", name, check=False)
     _docker("rm", "-f", name, check=False)
@@ -213,7 +249,13 @@ def stop(name: str) -> str:
     state = container_state(name)
     if state == "absent":
         return "absent"
-    _docker("rm", "-f", name, check=False)
+    r = _docker("rm", "-f", name, check=False)
+    if r.returncode != 0:
+        # Never report a removal that did not happen.
+        raise SystemExit(
+            f"test-lane: failed to remove {name}: "
+            f"{(r.stderr or r.stdout).strip()}"
+        )
     return "removed"
 
 
@@ -231,10 +273,14 @@ def cmd_uri(args: argparse.Namespace) -> int:
 
 
 def _target_name(args: argparse.Namespace) -> str:
-    """The container this invocation acts on: explicit --name wins, else the
-    slug derived from the worktree. Both are validated by `stop`/`up`."""
-    if getattr(args, "name", None):
-        return args.name
+    """The container this invocation acts on.
+
+    ONLY the worktree-derived name: an explicit `--name` used to be accepted
+    here, which made `down --name fdb-lane-<peer>` able to delete ANOTHER
+    lane's live container — the exact cross-lane destruction this tool exists
+    to prevent (review P1-2). The library-level `stop()` keeps its refusal for
+    the non-`fdb-lane-*` family as defence in depth, and is unit-tested.
+    """
     return container_name(args.slug or slug_for(repo_root()))
 
 
@@ -271,10 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="test_lane.py",
         description="Private throwaway FalkorDB for the docker test lane (#5084)",
     )
-    # The flags live on the SUBcommands, so both the documented and the natural
-    # spellings work: `uri --port 16390`, `down --name falkordb`. (Defining them
-    # on the root only accepts them BEFORE the subcommand, which silently made
-    # `down --name <shared>` fail on argument parsing instead of on the guard.)
+    # The flags live on the SUBcommands so the natural spelling works:
+    # `uri --port 16390`. (Declaring them on the root only accepted them BEFORE
+    # the subcommand, which silently made a post-subcommand flag fail in
+    # argparse instead of at the code that guards it.) There is deliberately NO
+    # `--name`: an explicit container name could target a PEER lane's
+    # `fdb-lane-<other-slug>` and delete its live isolated DB (review P1-2), so
+    # `down` can only ever act on the container derived from this worktree.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--slug", default=None,
                         help="lane slug (default: derived from this worktree path)")
@@ -282,9 +331,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="publish on this loopback port (default: first free)")
     common.add_argument("--graph", default=DEFAULT_GRAPH,
                         help=f"graph/database name for the URI (default {DEFAULT_GRAPH})")
-    common.add_argument("--name", default=None,
-                        help="explicit container name (refused unless it starts "
-                             f"with {NAME_PREFIX})")
     sub = p.add_subparsers(dest="command", required=True)
     for name, fn, help_ in (
         ("up", cmd_up, "start this lane's container and print the export line"),
