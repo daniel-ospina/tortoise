@@ -75,6 +75,16 @@ python tools/ship_test_onboarding.py \
   are instrument faults (exit 3), and both used to be graded as product
   findings. (A key for a DIFFERENT org is a separate, documented limitation —
   see Open gaps.)
+* **An unreadable projection names the cause it stopped on.** The `server-read`
+  step's `detail` — and the verdict — carries the HTTP status when a response
+  came back, or, when the request never completed at all, the transport error
+  (`GET /api/v1/onboarding/state -> 0 (transport error: TimeoutError: …)`).
+  Status `0` is **not** an HTTP status: it is the instrument saying no server
+  answered, so nothing about the product was measured. It can never mean "the
+  server observed nothing" — that is a 200 carrying an empty projection. The
+  cause is recorded because `-> 0` alone left the serving revision's failure
+  unattributable between the instrument's read path and the deployment's proxy
+  (#5001).
 
 ### How the walk authenticates (#3501 / #4054)
 
