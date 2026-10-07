@@ -887,19 +887,24 @@ def test_transient_503_conventions_agree_on_status():
 # trips, so a control plane that is slow-but-alive MULTIPLIES into request
 # latency and can cross the OAuth budget without anything being "down".
 #
-# PINNED BELOW — the four series that exist on this endpoint, all MEASURED:
+# PINNED HERE (all MEASURED; each test asserts its exact sequence):
 #
 #   authorization_code, registry client ........ 6 round-trips  (10 s budget)
 #   authorization_code, mint ABORT ............. 10 round-trips (10 s budget)
+#   authorization_code, LOST-DELIVERY SETTLE ... 11 round-trips (10 s budget)
 #   refresh_token .............................. 9 round-trips  (30 s budget)
 #   refresh_token, mint ABORT .................. 12 round-trips (30 s budget)
 #
-# The success rows are the ones a naive measurement finds; the ABORT rows are the
-# ones that fire when the control plane is degraded, and they are the LONGEST —
-# the abort path does strictly more work (unwinding the half-minted pair) at
-# exactly the moment nothing is keeping up, then answers a RETRYABLE 503.
+# These are NOT claimed to be every series the endpoint can produce. The FAILURE
+# rows are all longer than the success rows, and longer than the naive "abort"
+# intuition: unwinding a half-minted pair costs extra round-trips, and the
+# lost-delivery path additionally pays a settle PATCH that never succeeds — so the
+# worst case on the code grant is reached exactly when the control plane is
+# already slow. Two different outcomes ride on those lengths (the mint-abort
+# answers a RETRYABLE 503; the lost-settle a terminal "re-run authorization"),
+# which is why the count and the outcome are pinned separately.
 #
-# METHOD NOTE — one shape MEASURED and deliberately NOT pinned, recorded so the
+# METHOD NOTE — a shape MEASURED and deliberately NOT pinned, recorded so the
 # next lane does not re-derive it:
 #
 #   * A CIMD client's ("Claude connector") token exchange is ALSO 6. A CIMD row
@@ -1106,17 +1111,19 @@ def _fail_access_token_mint(cp):
 
 
 def test_abort_path_is_longer_than_the_success_series_on_both_grants():
-    """The series that fires under a DEGRADED control plane is the LONGEST one
-    — MEASURED as 10 for the code grant (against 6 on success) and 12 for
-    refresh (against 9) — and both answer a RETRYABLE 503.
+    """The series that fires under a DEGRADED control plane is LONGER than the
+    success series — MEASURED as 10 for the code grant (against 6 on success) and
+    12 for refresh (against 9) — and both answer a RETRYABLE 503.
 
-    This is the number a bound must be chosen from, and it is the opposite of
-    the intuition the success legs invite: the abort path does strictly MORE
-    work (``_rollback_minted`` / ``_mint_observably_clean`` to unwind the
-    half-minted pair, plus ``_restore_code`` on the code grant) at exactly the
-    moment the control plane is already slow — and then tells the client to
-    retry the whole exchange. A bound sized from 6 or 9 would be a bound for the
-    healthy path only.
+    This is the opposite of the intuition the success legs invite: the abort path
+    does strictly MORE work (``_rollback_minted`` / ``_mint_observably_clean`` to
+    unwind the half-minted pair, plus ``_restore_code`` on the code grant) at
+    exactly the moment the control plane is already slow — and then tells the
+    client to retry the whole exchange. A bound sized from 6 or 9 would be a bound
+    for the healthy path only.
+
+    NOT the maximum on this grant: the LOST-DELIVERY settle path measured 11 (see
+    the file header).
     """
     # ── authorization_code ──
     cp = FakeControlPlane()
@@ -1175,3 +1182,71 @@ def test_abort_path_is_longer_than_the_success_series_on_both_grants():
 
     assert len(counter.calls) == 10 and len(counter2.calls) == 12, (
         f"the abort series changed shape: {len(counter.calls)} / {len(counter2.calls)}")
+
+
+def test_lost_settle_makes_the_longest_code_grant_series(monkeypatch):
+    """The code grant's LONGEST series — MEASURED as 11 — is the LOST-DELIVERY
+    SETTLE, and it is longer than the pinned mint-abort series because it pays the
+    settle PATCH that the abort path never reaches.
+
+    When ``_issue_tokens`` SUCCEEDS but ``_settle_redemption`` loses its CAS
+    (#3027's reconciler race — a concurrent attempt taking the claim), the request
+    has already minted the pair, so it must roll the pair back AND still record the
+    outcome: 6 round-trips INCLUDING the lost settle, then 4 to compensate the
+    pair, then 1 ``_restore_code`` to leave a retry possible. This is the shape the
+    degraded control plane produces, not a contrived race: the claim grace is 60 s,
+    and at the per-call latency #2848 observed (12-25 s) six serial calls already
+    exceed it, so losing the settle is the EXPECTED outcome.
+
+    The OUTCOME is pinned, not just the count, and the assertion is written to
+    distinguish the two: ``OAuthTemporarilyUnavailable`` SUBCLASSES ``OAuthError``
+    (``oauth.py``), so ``pytest.raises(OAuthError)`` alone would also accept the
+    retryable 503. This path is TERMINAL — the client is told to re-run
+    authorization rather than retry — which is the difference between a connector
+    re-authorizing and a connector stampeding a degraded control plane.
+
+    The loss is forced by running the REAL settle (so its PATCH is counted, which
+    is the whole point) and then reporting the CAS as lost.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    real_settle = oauth._settle_redemption
+    counter = _RoundTripCounter(cp)
+
+    def _losing_settle(inner, *a, **k):
+        real_settle(inner, *a, **k)
+        return False
+
+    monkeypatch.setattr(oauth, "_settle_redemption", _losing_settle)
+
+    with pytest.raises(oauth.OAuthError) as ei:
+        oauth.exchange_auth_code(
+            counter, {"grant_type": "authorization_code", "code": "lost-code",
+                      "code_verifier": _seed_code(cp, "lost-code"),
+                      "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT,
+                      "resource": None},
+            "https://tortoise.example")
+
+    # The count is not the whole contract: OAuthTemporarilyUnavailable SUBCLASSES
+    # OAuthError, so ``raises(OAuthError)`` would also pass on the retryable 503.
+    # Assert the TERMINAL outcome explicitly, or a regression that made this path
+    # retryable — inviting a stampede on an already-degraded control plane — would
+    # keep the suite green.
+    assert not isinstance(ei.value, oauth.OAuthTemporarilyUnavailable), (
+        f"the lost-settle path must be terminal, not retryable; got {type(ei.value).__name__}")
+
+    assert counter.calls == [
+        "query:oauth_clients",               # _verify_client_auth
+        "query:oauth_codes:PATCH",           # the atomic claim
+        "query:organizations",               # _assert_org_usable
+        "query:oauth_refresh_tokens:POST",   # mint 1 of 2
+        "query:oauth_access_tokens:POST",    # mint 2 of 2
+        "query:oauth_codes:PATCH",           # the settle — LOST, and paid anyway
+        "query:oauth_refresh_tokens:PATCH",  # compensate the pair
+        "query:oauth_access_tokens:PATCH",
+        "query:oauth_refresh_tokens",        # observe the compensation
+        "query:oauth_access_tokens",
+        "query:oauth_codes:PATCH",           # _restore_code
+    ], counter.calls
+    assert len(counter.calls) == 11, (
+        f"the lost-settle series changed shape: {len(counter.calls)}")
