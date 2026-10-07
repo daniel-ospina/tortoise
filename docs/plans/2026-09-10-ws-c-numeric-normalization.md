@@ -20,7 +20,7 @@ governingAgreement: "#2817"
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
 > **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**. **S3** (the HTTP
 > validator) needs **no change either**, under the owner's 2026-10-07 decision: the field is
-> **server-derived and never client-supplied**, so the `Point` model is untouched (§2.3, §3/OD5).
+> **server-written**, and never through the `Point` model, so that model is untouched (§2.3, §3/OD5).
 
 **Revision note (v2, 2026-10-06).** v1 was written parser-first: it made a locale-aware numeric parser the
 foundation and reified each value as a tagged union of five `valueKind`s. **That foundation is withdrawn.**
@@ -282,9 +282,11 @@ value is the same comparison §2.3's circular argument needed, and Option (a) re
 separator rule it depends on. There is no client-supplied amount to adjudicate, so **no cross-check is
 performed**. `create_entity` therefore carries a **derived,
 server-written** field, and the derivation — not any client-supplied prop — is the value's source.
-Because the MCP and SDK boundaries filter by **deny-list** and let unknown keys through (§7.1 S1/S2),
-this is a **declaration**: the value field's key is declared **server-managed**, which is what makes a
-client-supplied spelling rejected rather than written. Declaring a key server-managed widens no contract.
+*(Scope, since the MCP and SDK boundaries filter by **deny-list** and let unknown keys through — §7.1
+S1/S2: this is a property of the **input**, not of the boundary. `create_entity` takes no amount
+parameter and the derivation writes the field; the design **does not adjudicate** a client-supplied prop
+that happens to share its name. "Server-written" is the whole of the claim — it is not a claim that the
+boundary cannot admit such a prop.)*
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -394,7 +396,7 @@ field today**, because both filter by **deny-list** rather than allow-list; what
 | --- | --- | --- | --- |
 | **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:1366`; registry entry `tortoise/tool_registry.py:101`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:1285`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
 | **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:4937`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:2596`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
-| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-derived and never client-supplied**: there is no client value to accept, so nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design carries **no contract change** at all; its only surface work is the S1/S2 declaration above. |
+| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-written**, and this surface cannot receive it at all: nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design carries **no contract change** at all; its only surface work is the S1/S2 declaration above. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
 is fixed (`_upsert_point_props`, `tortoise/projection/entities.py:801`), but Point carries the **same
@@ -413,10 +415,10 @@ The work cannot begin at the derivation. The dependency order is:
 
 1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
    these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1. **S3 is resolved
-   too** by the 2026-10-07 decision: the field is server-derived and never client-supplied, so the HTTP
+   too** by the 2026-10-07 decision: the field is server-written, so the HTTP
    `Point` model is untouched, and the only surface work this design carries is the S1/S2 declaration.
 2. **Declare the field** on the accepted schema: the Point property list. (The HTTP `Point` model is
-   **untouched** — the field is server-derived and never client-supplied, §7.1/S3.) No behaviour change.
+   **untouched** — the field is server-written, §7.1/S3.) No behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
    it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
