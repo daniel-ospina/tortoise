@@ -771,8 +771,16 @@ class CollisionPreflightTest(unittest.TestCase):
         TERMINAL — so the guard's `terminal is None` clause was False and the
         number clause never decided. This test is that same shape with the state
         made non-terminal: the one value that reaches the guard, and therefore the
-        only shape that pins the scoping. Measured: it fails on the parent tool
-        (exit 2, "is an OPEN PULL REQUEST") and passes here.
+        only shape that pins the scoping.
+
+        Measured 2026-10-08: it fails against the PRE-FIX tool (`origin/main`, exit
+        2, "is an OPEN PULL REQUEST") and passes here. It also passes against the
+        intermediate tool that scoped on `use_closing_field` instead of
+        `surface.authority` — those two are behaviourally identical at every call
+        site today, so this test pins that SOME scope exists, not the particular
+        key it is expressed with. The authority key has no separately observable
+        behaviour to pin: it exists so a future payload-capability change cannot
+        silently delete the refusal.
         """
         self.gh_fixtures(closed_prs=[{
             "number": 3061, "title": "fix(battery): #2712 restore the pin test",

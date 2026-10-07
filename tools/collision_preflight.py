@@ -3177,7 +3177,19 @@ def scan_pr_surface(
             # … fix gh auth/network") instead of the refusal. Degrade to an empty
             # list: the refusal carries on and merely says less.
             try:
-                linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+                if use_closing_field:
+                    linked = sorted(_closing_ref_numbers(pr))
+                else:
+                    # A BLOCKING surface whose caller did not request the field:
+                    # its CONTENTS are unknown, not empty, so the message below
+                    # must not answer "it names no closing issue". The guard keys
+                    # on `surface.authority` (may this surface refuse?) while this
+                    # read keys on `use_closing_field` (did the payload carry the
+                    # field?) — different questions, so they may legitimately
+                    # diverge. `unreadable` is what keeps the divergence from
+                    # becoming a false claim; the two agree at both call sites
+                    # today, so this is the drift arm, not the live one.
+                    unreadable = True
             except SurfaceError:
                 # `unreadable` is carried so the message below does NOT assert a
                 # fact the tool cannot know. THIS branch is reached when the field
