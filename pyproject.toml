@@ -73,7 +73,7 @@ backups = ["boto3>=1.34", "cryptography>=42"]
 # nothing extra. Optional on purpose: without it the parity cell reports
 # not-measured instead of failing (fail-closed, never a default number).
 parity = ["pyarrow>=17"]
-test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460)
+test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460)
 
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').
@@ -88,6 +88,13 @@ dev = [
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",
     "pytest-asyncio",
+    # #6136 (epic #5215, owner decision D3): pytest-xdist for the ONE shard
+    # D3 admits. Declared in BOTH the `test` extra (CI's
+    # `pip install -e '.[test]'`) and this dev group so no install path can
+    # resolve without it — a lane whose `-n` reaches pytest without the
+    # plugin reds with "unrecognized arguments", while a lane that never
+    # passes `-n` (D3's default) simply stays serial.
+    "pytest-xdist>=3.6",
     "scikit-learn>=1.0",
     "requests>=2.31",
     "jax>=0.4",

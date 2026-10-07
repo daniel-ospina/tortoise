@@ -1651,11 +1651,14 @@ def test_deployed_sha_is_empty_when_the_route_is_unavailable(monkeypatch) -> Non
 def test_read_projection_returns_none_on_a_failed_read(monkeypatch) -> None:
     import tools.ship_test_onboarding as mod
     monkeypatch.setattr(mod, "bff_api", lambda *a, **k: (401, {"error": "not_signed_in"}))
-    status, projection = read_projection(object(), "https://app")
+    status, projection, failure = read_projection(object(), "https://app")
     assert projection is None
     # the STATUS survives: a failed read must not be indistinguishable from a
     # server that observed nothing (the #4291 conflation, one layer down)
     assert status == 401
+    # a REAL response carries no transport failure — the third element is only
+    # populated when the request never completed (#5001)
+    assert failure == ""
 
 
 def test_http_returns_a_clean_failure_on_an_unreachable_target(monkeypatch) -> None:
@@ -1677,8 +1680,8 @@ def test_http_returns_a_clean_failure_on_an_unreachable_target(monkeypatch) -> N
 def test_read_projection_unwraps_the_onboarding_object(monkeypatch) -> None:
     import tools.ship_test_onboarding as mod
     monkeypatch.setattr(mod, "bff_api", lambda *a, **k: (200, {"onboarding": UNOBSERVED}))
-    status, projection = read_projection(object(), "https://app")
-    assert status == 200 and projection == UNOBSERVED
+    status, projection, failure = read_projection(object(), "https://app")
+    assert status == 200 and projection == UNOBSERVED and failure == ""
 
 
 # ── the session seam (#4291) ────────────────────────────────────────────────
@@ -1789,8 +1792,8 @@ def test_the_projection_read_goes_through_the_same_origin_bff_proxy() -> None:
     import tools.ship_test_onboarding as mod
 
     ctx = _RequestCtx({"https://app/api/v1/onboarding/state": _Resp(200, {"onboarding": OBSERVED})})
-    status, projection = mod.read_projection(ctx, "https://app")
-    assert (status, projection) == (200, OBSERVED)
+    status, projection, failure = mod.read_projection(ctx, "https://app")
+    assert (status, projection, failure) == (200, OBSERVED, "")
     assert ctx.request.calls == [("GET", "https://app/api/v1/onboarding/state", None)]
 
 
@@ -1813,7 +1816,7 @@ def test_the_agent_key_can_never_carry_the_projection_read() -> None:
         "the identity whose server truth judges it")
     # and the read is performed by the context's own request (the session)
     ctx = _RequestCtx({"https://app/api/v1/onboarding/state": _Resp(200, {"onboarding": UNOBSERVED})})
-    assert mod.read_projection(ctx, "https://app") == (200, UNOBSERVED)
+    assert mod.read_projection(ctx, "https://app") == (200, UNOBSERVED, "")
     assert ctx.request.calls == [("GET", "https://app/api/v1/onboarding/state", None)]
 
 
@@ -2127,7 +2130,7 @@ def test_a_200_with_an_unparseable_body_is_an_unreadable_read() -> None:
 
                 return _R()
 
-    assert mod.read_projection(_Bad(), "https://app") == (200, None)
+    assert mod.read_projection(_Bad(), "https://app") == (200, None, "")
     assert mod.projection_readable(200, None) is False
 
 
@@ -2291,7 +2294,14 @@ class _FakeRequester:
         queue = self.plan.get((method, path)) or self.plan.get(("ANY", path))
         if not queue:
             return _Resp2(404, {"error": "not_found"})
-        return _Resp2(*queue.pop(0)) if len(queue) > 1 else _Resp2(*queue[0])
+        head = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(head, BaseException):
+            # A TRANSPORT failure: the request never completed, so there is no
+            # response to hand back. Modelled explicitly because preserving
+            # exactly this distinction is the seam's whole job (#5001) — a fake
+            # that could only return responses could never exercise it.
+            raise head
+        return _Resp2(*head)
 
     def get(self, url):
         return self._one("GET", url)
@@ -3465,6 +3475,80 @@ def test_walk_step5_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     # records the truthy, non-residue `not_reached`, which would report an
     # unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+
+
+# ── #5001: `status 0` must never be a silent falsy default ──────────────────
+# The serving revision's projection read returned transport status `0` and the
+# record could only say `GET /api/v1/onboarding/state -> 0`. The reading itself
+# is honest (no server answered, so nothing about the product was measured);
+# what was missing is WHY, which is the whole reason the failure could not be
+# attributed between the instrument's read path and the deployment's proxy.
+# These pin that the cause survives the seam and reaches the record.
+
+def test_bff_api_carries_the_transport_cause_instead_of_a_bare_zero() -> None:
+    """A request that never completed must report the exception, not `(0, None)`.
+
+    `bff_api` used to `return 0, None` from a bare `except Exception` — a falsy
+    default that made "the request never completed" and "the caller passed
+    nothing" the same thing, and discarded the only fact that explains it. The
+    sibling seam `bff_session` has always carried `{type}: {message}`.
+    """
+    import tools.ship_test_onboarding as mod
+
+    class _Refusing:
+        class request:
+            @staticmethod
+            def get(url):
+                raise ConnectionResetError("connection reset by peer")
+
+    status, body = mod.bff_api(_Refusing(), "https://app", "GET", "/onboarding/state")
+    # the transport reading is preserved (it is NOT an HTTP status — no server
+    # answered), and it is named rather than spelled as a magic `0`...
+    assert status == mod.TRANSPORT_ERROR == 0
+    # ...and the CAUSE travels with it, which is what makes the failure
+    # attributable in the artifact.
+    assert mod.transport_failure(body) == (
+        "ConnectionResetError: connection reset by peer"), body
+    # A transport failure is still not readable: this must never become a pass.
+    assert mod.projection_readable(status, None) is False
+    # ...and a REAL response carries no transport failure, so the accessor
+    # cannot be satisfied by an ordinary error body.
+    assert mod.transport_failure({"error": "upstream_unavailable", "detail": "x"}) == ""
+    assert mod.transport_failure(None) == ""
+
+
+def test_walk_step5_names_the_transport_cause_it_stopped_on(monkeypatch, tmp_path):
+    """The guard that stops the run records WHY the read never completed.
+
+    Same call site as `test_walk_step5_unreadable_projection_is_an_instrument_error`,
+    but the read RAISES instead of answering a status. `-> 0` alone is what left
+    the serving revision unattributable (#5001), so the recorded step and the
+    verdict must both name the transport failure — while the run stays an
+    instrument fault (never a product finding, never a pass).
+    """
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"):
+            [ConnectionResetError("connection reset by peer")],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED],
+        mcp_tools_call=_MCP_OK)
+
+    step = next(s for s in obs.steps if s.name == "server-read")
+    assert "GET /api/v1/onboarding/state -> 0" in step.detail, step.detail
+    assert "ConnectionResetError: connection reset by peer" in step.detail, step.detail
+    # the verdict — the line a deploy job reads — carries it too
+    assert "projection_unreadable" in obs.verdict
+    assert "ConnectionResetError: connection reset by peer" in obs.verdict, obs.verdict
+    # and it is STILL an instrument fault: an unreadable read is never evidence
+    # about the product, and never a green.
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert mod.failure_reason(obs.verdict, session_state=obs.session["state"]) \
+        == mod.REASON_INSTRUMENT_ERROR
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # it stopped at the read: no key was minted and nothing was written
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
 
 
 def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tmp_path):
