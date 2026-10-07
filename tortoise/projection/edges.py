@@ -395,6 +395,107 @@ def _source_version_transit(versions: dict[str, str] | None):
     return [[ref, h] for ref, h in versions.items()]
 
 
+def source_change_notices(g, source_refs, current_versions: dict[str, str] | None):
+    """#5516 — the advisory write-time notice: was this Source read at a version
+    that is no longer current?
+
+    For each ref, compares the Source's CURRENT ``contentHash`` (read by the
+    caller into ``current_versions`` via :func:`resolve_source_versions`) against
+    the versions recorded on the Source's ``extractedFrom`` links (#5256's
+    ``r.sourceVersion``). The Source has changed for the writer iff its current
+    version has **never been recorded as read** — so the decision is
+    order-independent and cannot re-fire once the current version has been read.
+
+    Advisory by construction: it writes nothing, and the caller treats any
+    failure as "no notice" rather than as a write failure. Returns a list of
+    ``{"source", "previousVersion", "currentVersion"}`` dicts — empty when
+    every Source is unchanged, or when nothing comparable was recorded.
+
+    ⚠ It does carry a read's own side effect: :func:`resolve_source_key` performs
+    its documented idempotent adopt-on-touch (it stamps ``canonicalUrl`` /
+    ``urlAliases`` on an existing PRE-canonical node). At the ``create_point``
+    call site the identical resolution has already run inside
+    :func:`resolve_source_versions`, so no NEW write occurs there — but a direct
+    caller on a pre-canonical Source does mutate it, and this docstring will not
+    claim otherwise.
+
+    Blank/absent on EITHER side is honest-absent and produces NO notice: ``''``
+    compares equal to a Source's ``''`` and reads as a false *current* (#5256),
+    and a Source read for the first time has no prior version to compare
+    against. The comparison is exact string equality, exactly as
+    :func:`tortoise.search_engine.currency_status` compares one link's pair —
+    content hashes carry no ordering, so there is no "newer" to infer.
+
+    The fire/silence decision deliberately does NOT order by ``p.createdAt``:
+    that is a CALLER-owned logical date (the ingest path passes document
+    frontmatter dates), so a read recorded later can carry an earlier
+    ``createdAt``. Ordering the decision by it would fire a notice for an
+    UNCHANGED Source whenever a newer read happens to carry an older date.
+    ``createdAt`` orders only which prior version the notice NAMES.
+
+    ⚠ The recorded side is the **Source's** recorded reads, not a per-writer
+    one: the create seam records no writer identity on the ``extractedFrom``
+    link, so a per-writer scoping is not derivable here. On a multi-writer graph
+    it answers "has this Source changed since its last recorded read" — the
+    stronger, still-true statement.
+
+    ``source_refs`` is normalized exactly as :func:`resolve_source_versions`
+    does — a bare ``str`` is ONE ref, never iterated character-wise — and
+    ``current_versions`` is keyed by the RAW ``extractedFrom`` ref (that
+    function's journal-stable key).
+    """
+    refs = [source_refs] if isinstance(source_refs, str) else list(source_refs)
+    versions = current_versions or {}
+    notices: list[dict] = []
+    seen: set[str] = set()
+    for raw_ref in refs:
+        if not raw_ref:
+            continue
+        current = versions.get(raw_ref)
+        if not isinstance(current, str) or not current.strip():
+            continue
+        # Resolve to the ONE Source node identity `resolve_source_versions`
+        # addressed (see the adopt-on-touch note above). Dedup on the RESOLVED
+        # key, not the raw ref: two refs that alias one Source describe ONE
+        # change, and reporting it twice would inflate the notice list.
+        key = resolve_source_key(g, raw_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        # (1) DECISION — order-independent. Has this Source already been read at
+        # its CURRENT version? If so it has not changed since that read and a
+        # notice would be a FALSE change. `LIMIT 1` exits on the first edge that
+        # proves it.
+        hit = g.query(
+            "MATCH (p:Point)-[r:extractedFrom]->(s:Source {url:$url}) "
+            "WHERE r.sourceVersion = $current "
+            "RETURN 1 LIMIT 1",
+            params={"url": key, "current": current}).result_set
+        if hit:
+            continue
+        # (2) LABEL — `previousVersion` names a prior recorded read. When
+        # several exist, `createdAt` picks which (BEST-EFFORT: it is a
+        # caller-owned logical date); the decision above is already made, so a
+        # caller-owned date cannot flip fire/silence.
+        rows = g.query(
+            "MATCH (p:Point)-[r:extractedFrom]->(s:Source {url:$url}) "
+            "WHERE r.sourceVersion IS NOT NULL AND r.sourceVersion <> '' "
+            "AND r.sourceVersion <> $current "
+            "RETURN r.sourceVersion "
+            "ORDER BY p.createdAt DESC, p.id DESC LIMIT 1",
+            params={"url": key, "current": current}).result_set
+        if not rows:
+            continue
+        recorded = rows[0][0]
+        if isinstance(recorded, str) and recorded.strip():
+            notices.append({
+                "source": raw_ref,
+                "previousVersion": recorded,
+                "currentVersion": current,
+            })
+    return notices
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
