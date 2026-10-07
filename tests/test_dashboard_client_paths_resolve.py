@@ -145,6 +145,9 @@ TRAILING_HOLE_SITES = {
     ("api", "/v1/index/docs", "POST"): 1,
     ("api", "/v1/index/github/re-poll", "POST"): 1,
     ("api", "/v1/onboarding/github/connect", "POST"): 1,
+    # #4946 item 3: the disconnect control's own trailing-hole site — the same
+    # shape as /connect, a deliberate +1 for a path the server already serves.
+    ("api", "/v1/onboarding/github/disconnect", "POST"): 1,
     ("api", "/v1/onboarding/github/repos", "GET"): 1,
     ("api", "/v1/onboarding/github/status", "GET"): 1,
     ("api", "/v1/onboarding/state", "GET"): 1,
