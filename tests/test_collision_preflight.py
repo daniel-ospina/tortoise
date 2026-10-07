@@ -785,7 +785,16 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
+        # The refusal is delivered on STDERR WITH NO REPORT: `main()` prints it
+        # and returns before `format_report` runs. Pin the WHOLE guarantee, not
+        # just "not CLEAN": the module docstring and AGENTS.md both promise a
+        # caller that keys its remedy on `VERDICT: INCOMPLETE` that this cause
+        # emits NO `VERDICT` line at all, and `assertNotIn("VERDICT: CLEAN")`
+        # alone would pass a regression that ended the refusal in
+        # `VERDICT: INCOMPLETE` — still exit 2, but now mis-remedied as a
+        # broken surface ("fix gh auth/network") instead of "re-run with the
+        # issue number". The two causes must stay distinguishable.
+        self.assertNotIn("VERDICT", out)
         # Anti-vacuity: the refusal must be about THIS number, not a blanket
         # refusal to run — the run reached the surfaces and named the object.
         self.assertIn("#3061", out)
@@ -822,7 +831,9 @@ class CollisionPreflightTest(unittest.TestCase):
             self_branches=("fix/2712-pin-preflight-test",))
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
+        # No `VERDICT` line at all — see the sibling test for why "not CLEAN"
+        # is too weak a pin (it would let `VERDICT: INCOMPLETE` through).
+        self.assertNotIn("VERDICT", out)
         # Anti-vacuity: it must still name the object, not blanket-refuse.
         self.assertIn("#3061", out)
 
@@ -2259,7 +2270,6 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
         # The ordering property this test exists for (#4567) is pinned by
         # `rc == 2` alone. The old `HITS`-block assertions were removed after
         # review found them VACUOUS: the refusal never calls `format_report`, so
@@ -2267,7 +2277,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # once `assertEqual(rc, 2)` passed. The earlier comment here claimed the
         # refusal "short-circuits before any surface is scanned" — also false:
         # the issue surface is queried first; only the PR loop refuses.
-        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        #
+        # The ONE non-vacuous assertion at this seam is the ABSENCE of a
+        # `VERDICT` line: the documented promise is that this cause emits no
+        # report at all (stderr only), which is precisely what makes a caller
+        # that keys its remedy on `VERDICT: INCOMPLETE` miss it. "not CLEAN"
+        # would pass a regression ending in `VERDICT: INCOMPLETE` (still exit
+        # 2) — the exact mis-remedy the distinction exists to prevent.
+        self.assertNotIn("VERDICT", out)
 
     def test_found_clone_is_not_the_callers_checkout(self):
         # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a

@@ -376,6 +376,15 @@ boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive tit
 - `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (gh auth/network) **or an
   open-PR list was truncated at its completeness cap**. This is **not** clean. Fix the surface and
   re-run; never treat it as a pass.
+  ⛔ **EXIT 2 HAS A THIRD CAUSE WITH NO `VERDICT` LINE, AND ITS REMEDY IS NOT `gh auth/network`:** if
+  the number you passed is an **OPEN PULL REQUEST**, the pre-flight refuses before computing any
+  verdict — it prints only the refusal on stderr and emits **no report at all**. A PR number is not a
+  work item, and an exit 0 there would authorise a dispatch on work that PR already belongs to (#7009,
+  the #7477 case — measured: `collision_preflight.py 7477` read CLEAN while #7455 was held on four
+  surfaces). **The remedy is to re-run with the ISSUE number.** A caller keying its remedy on
+  `VERDICT: INCOMPLETE` misses this cause entirely, and keying on the exit code alone cannot tell it
+  from the surface cause. The `--repo`-omitted ambiguity refusal is a further verdict-less exit 2 whose
+  remedy is `--repo owner/name`.
 
 **OPEN** PR lists are enumerated to completeness (`--pr-limit`, default 1000); a list longer than its
 cap is reported **TRUNCATED** and the run is `exit 2` — a partial list is never CLEAN. The
