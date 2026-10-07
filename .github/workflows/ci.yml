@@ -81,13 +81,11 @@ jobs:
       - name: Compute per-surface path gates (#2149)
         id: gate
         run: |
-          # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base
-          # — `github.event.pull_request.base.sha` is empty and the empty-diff
-          # fallback below would set EVERY gate true and re-run the whole
-          # ~20-gate matrix nightly (the cost this plan exists to cut). Under
-          # `main_health` only the five always-on required jobs run, so every
-          # gated surface is explicitly false. `inputs.main_health` is empty on
-          # a `pull_request` event, so this branch is main-health only.
+          # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base,
+          # so the empty-diff fallback below would set EVERY gate true and re-run
+          # the whole ~20-gate matrix nightly. Under `main_health` only the five
+          # always-on required jobs run, so every gated surface is explicitly
+          # false. (`inputs.main_health` is empty on a `pull_request` event.)
           if [ "${{ inputs.main_health }}" = "true" ]; then
             for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
@@ -344,25 +342,16 @@ jobs:
                   # asserted /health/ready once after polling the strictly
                   # weaker db.ok, reddening healthy deploys.
                   startswith(".github/scripts/deploy-health-gate"),
-                  # #3907: the SHARED auto-file substrate the re-pointed
-                  # monitors file through (e2e-live-reconcile, tenant-provision)
-                  # — its harness pins search-before-file (one issue per
-                  # finding), the recurrence counter, the machine-author +
-                  # exact-title guard against a forged look-alike title, and
-                  # fail-closed on a failed search.
-                  # TODO(#5019): availability-watchdog.sh — the monitor #3907
-                  # names as "the shape the fix is about" — and
-                  # availability-record.sh / welcome-e2e-monitor.sh /
-                  # registry-cron.sh still POST inline, so the substrate is not
-                  # yet what EVERY monitor files through.
+                  # #3907: the SHARED auto-file substrate — its harness pins
+                  # search-before-file, the recurrence count, the forged-title
+                  # guard, and fail-closed search. TODO(#5019): the watchdog and
+                  # the other monitors still POST inline, so it is not yet
+                  # universal.
                   startswith(".github/scripts/auto-file-issue"),
                   # #4759: the bypass reporter / expiry helper and the scheduled
                   # check that ages every SKIP_* lane left set.
                   startswith(".github/scripts/deploy-bypass"),
-                  # #2240: the out-of-band failure alert for a failed hosted
-                  # deploy, and the SHARED shell Telegram sender it nudges
-                  # through (#4574 item 1 — the contract the watchdog migrated
-                  # onto, so its harness must re-run when the sender changes).
+                  # #2240/#4574: the deploy failure alert and its shared Telegram sender.
                   startswith(".github/scripts/deploy-api-alert"),
                   startswith(".github/scripts/telegram-send"),
                   isfile(".github/workflows/skip-bypass-expiry.yml"),

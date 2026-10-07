@@ -18,6 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
@@ -5492,6 +5494,40 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     test) through this single function is what makes the mutation visible.
     """
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
+
+
+def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
+    """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
+
+    Measured on main 2026-10-07: `ci.yml`'s `changes` gate script reached 21043
+    UTF-8 bytes and GitHub refused to LOAD the workflow, so `CI` ran ZERO jobs on
+    every branch — none of the five required contexts (`docs`, `legal-e2e`,
+    `license-surface`, `pricing-artifact`, `test-isolation`) could appear, and no
+    PR could go green. The cap is on the COMPILED scalar, and a `run:` with NO
+    `${{ }}` is never compiled (`ai-review-gate.yml` loads a 34 KB one), so this
+    pin guards exactly the scalars GitHub compiles. actionlint catches expression
+    SYNTAX but not this length (#6253), which is why the invariant is pinned here
+    — a comment added to a script this size re-arms a silent full-CI outage.
+    """
+    limit = 21000
+    expr = "${{"
+    offenders = []
+    for wf in _workflow_files(REPO / ".github" / "workflows"):
+        doc = yaml.safe_load(wf.read_text(encoding="utf-8")) or {}
+        for job_id, job in (doc.get("jobs") or {}).items():
+            for step in (job or {}).get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str) or expr not in run:
+                    continue
+                size = len(run.encode("utf-8"))
+                if size > limit:
+                    offenders.append((wf.name, job_id, step.get("name", "?"), size))
+    assert not offenders, (
+        "a `run:` containing `${{ }}` reached GitHub's 21000-byte expression cap, "
+        f"so GitHub refuses to LOAD the workflow (zero jobs, no check-runs): {offenders}"
+    )
 
 
 def _scan_changed_set_diffs(workflows: list[Path]) -> tuple[int, list[str], list[str]]:
