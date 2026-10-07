@@ -542,6 +542,13 @@ jobs:
       - name: Check migrations are append-only
         run: bash .github/scripts/check-migration-append-only diff
         env:
+          # #7628: this is the PR's MERGE-BASE, which is NOT what the `docs`
+          # changed set uses any more (that now resolves the base branch TIP).
+          # Whether THIS consumer shares the #7628 defect is unmeasured — its
+          # policy only ever ADDS migrations, so the over-inclusion is narrower —
+          # but two different meanings of "the base" for "the changed set" is the
+          # inconsistency a future reader will trip over. Change it only with its
+          # own measurement, not for symmetry.
           DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #1235: enables the unapplied-rename exception (same-repo PRs);
           # forks don't get secrets → strict block preserved (fail-closed).
@@ -713,7 +720,19 @@ jobs:
             exit 1
           fi
           git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-          echo "sha=$(git rev-parse "refs/remotes/origin/${BASE_REF}")" >> "$GITHUB_OUTPUT"
+          # Assign FIRST, never `echo "sha=$(git rev-parse …)"`. Under `set -e`
+          # an ASSIGNMENT propagates the command substitution's exit status, so a
+          # failed `rev-parse` fails THIS step; as a nested substitution that status
+          # is discarded and the step would publish whatever the substitution
+          # printed and still exit 0. Measured: assignment form aborts with exit 128
+          # (macOS git 2.50.1 and Linux git 2.54.0, inside a repo).
+          # The `-z` test below is defence in depth.
+          SHA="$(git rev-parse "refs/remotes/origin/${BASE_REF}")"
+          if [ -z "${SHA}" ]; then
+            echo "::error::could not resolve refs/remotes/origin/${BASE_REF} (#7628)"
+            exit 1
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
       - name: Get changed markdown files
         id: changed
         # #5215 Task 8 (D13): a scheduled main-health call has no PR base, so
