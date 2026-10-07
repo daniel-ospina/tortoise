@@ -535,7 +535,7 @@ test('#4946 wiring: a failed disconnect keeps the dialog open with the reason (E
 })
 
 /** Run the open/close handlers against a capturing setter and focus spies. */
-async function runOpenClose({ restoreReturns = {} } = {}) {
+async function runOpenClose({ restoreReturns = {}, result = null } = {}) {
   const calls = { remember: 0, restore: 0 }
   const states = []
   globalThis.__gdFocus = {
@@ -556,6 +556,7 @@ async function runOpenClose({ restoreReturns = {} } = {}) {
       rememberFocusedTrigger: 'globalThis.__gdFocus.remember',
       restoreFocus: 'globalThis.__gdFocus.restore',
       setGithubDisconnect: 'globalThis.__gdSetState',
+      githubDisconnect: JSON.stringify({ result }),
       githubDisconnectRestoreRef: '{}',
     },
   })
@@ -619,13 +620,37 @@ test('#4946 (a11y) wiring: a close with the opener still mounted does NOT jump t
   }
 })
 
-test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', () => {
-  // The fallback in closeGithubDisconnect only works if the heading is
-  // focusable; the executed fallback itself is pinned by the test above.
-  // Match against the COMMENT-STRIPPED source: a raw `mainJsx` match is
-  // satisfied by the pattern parked in a comment while the real heading loses
-  // its `tabIndex` (#4637). Every other JSX assertion in this file already
-  // reads `stripComments(mainJsx)`.
-  assert.match(stripComments(mainJsx), /<h3 id="settings-github-heading" tabIndex=\{-1\}>/,
+test('#4946 (a11y) wiring: a close after a COMPLETED disconnect parks focus on the heading even with the opener still mounted (EXECUTED)', async () => {
+  // The endpoint ALWAYS clears the local credential, so `github_connected` goes
+  // false once `refreshOnboarding()` lands. Closing the outcome panel before
+  // that refresh resolves must NOT restore focus to an opener that is about to
+  // unmount — that is the #2392 drop-to-<body> path, and it survives any test
+  // that only exercises the already-detached case.
+  const focused = []
+  globalThis.document = {
+    getElementById: (id) => ({ focus: () => focused.push(id) }),
+  }
+  try {
+    const { closeFn, calls, states } = await runOpenClose({
+      restoreReturns: { restore: {} }, result: { revoked: true, revoke_reason: 'revoked' },
+    })
+    closeFn()
+    assert.equal(calls.restore, 1, 'the close still releases the captured trigger')
+    assert.deepEqual(focused, ['settings-github-heading'],
+      'a completed disconnect must land on the heading, not on a doomed opener')
+    assert.deepEqual(states[0], { open: false, busy: false, error: '', result: null },
+      'the reset must still happen on the completed path')
+  } finally {
+    delete globalThis.document
+  }
+})
+
+test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', async () => {
+  // Pin the heading on the EXECUTED render, not a source regex: a regex is
+  // satisfied by the pattern parked in a comment or in a string literal
+  // (#4637), while the rendered heading cannot be. The fallback itself is
+  // pinned by the two tests above.
+  const html = await renderGithubSection(true, { open: false, busy: false, error: '', result: null })
+  assert.match(html, /<h3 id="settings-github-heading" tabindex="-1">/,
     'the heading must carry tabIndex -1 so the close fallback can focus it (#3890 pattern)')
 })

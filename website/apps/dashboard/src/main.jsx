@@ -2636,13 +2636,18 @@ function claimIntentInFlight() {
   // pure local close — no request, and any stale response state is dropped —
   // that also hands focus back to the opener (#2392).
   function closeGithubDisconnect() {
-    // #2392: a SUCCESSFUL disconnect unmounts the opener (the connection flipped
-    // false), and `restoreFocus` deliberately skips a detached node — so fall
-    // back to the GitHub-connect heading (tabIndex -1) rather than dropping
-    // focus onto <body>. Same programmatic-focus-target pattern as the
+    // #2392: a COMPLETED disconnect clears the local credential server-side and
+    // writes `github_connected: false` UNCONDITIONALLY (the endpoint always
+    // clears, even when GitHub did not confirm) — so the opener is going away,
+    // either already unmounted or about to be when `refreshOnboarding()` lands.
+    // Never trust a successful restore in that case: the opener is still mounted
+    // for the length of one refresh GET, and focusing it would drop focus onto
+    // <body> the moment it unmounts. Fall back to the GitHub-connect heading
+    // (tabIndex -1) instead — the same programmatic-focus-target pattern as the
     // Memory-sources heading (#3890).
+    const completed = !!(githubDisconnect && githubDisconnect.result)
     const restored = restoreFocus(githubDisconnectRestoreRef)
-    if (!restored && typeof document !== 'undefined') {
+    if ((!restored || completed) && typeof document !== 'undefined') {
       const heading = document.getElementById('settings-github-heading')
       if (heading && typeof heading.focus === 'function') heading.focus()
     }
