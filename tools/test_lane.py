@@ -34,9 +34,8 @@ even if its port were exported. Closing that seam is #5084's remaining work — 
 tool is the isolation half of it, not the whole fix.
 
 (No module counts appear here on purpose: a `grep` is not a count until its
-pattern AND its population are pinned — one earlier figure included
-``__pycache__/*.pyc`` build artifacts — so the MECHANISM above is the durable
-part, and the counts are absent rather than corrected.)
+pattern AND its population are pinned, so the MECHANISM above is the durable
+part.)
 
 MEASURED TRADE-OFF (do not oversell this tool)
 ----------------------------------------------
@@ -85,23 +84,27 @@ shared lane) in place while the command looks like it succeeded.
 """
 from __future__ import annotations
 
-import argparse
-import hashlib
-import os
-import re
-import socket
-import subprocess
 import sys
-import time
-from pathlib import Path
 
-# #5128 shape: refuse an old interpreter before module-level 3.12+ constructs.
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.12+-only construct would otherwise fail first, and it would fail with a
+# traceback instead of this message. The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/test_lane.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
         f"`uv run python tools/test_lane.py`"
     )
+
+import argparse
+import hashlib
+import os
+import re
+import socket
+import subprocess
+import time
+from pathlib import Path
 
 #: Overridable so CI can pin a digest/version; `latest` matches the existing
 #: in-repo precedent (scripts/restore-smoke.sh also runs falkordb/falkordb:latest).
@@ -461,10 +464,10 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"belong to another lane would be unforgivable)"
         )
     if state != "absent":
-        # The result is READ, not discarded (an earlier comment claimed that
-        # while discarding it): a failed `rm` leaves a name that makes the
-        # `docker run` below fail with "name already in use", which reads as a
-        # run problem rather than the removal problem it is.
+        # A failed `rm` must be read and reported, not discarded: it leaves a
+        # name that makes the `docker run` below fail with "name already in
+        # use", which reads as a run problem rather than the removal problem
+        # it is.
         outcome = _remove_and_describe(name)
         if outcome.startswith("FAILED"):
             raise SystemExit(
@@ -609,8 +612,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             # answer, so the CLI verdict must not read as success. It did — the
             # state branch returned 1 while this one fell through to 0.
             return 1
-        if published is not None:
-            print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
+        if published is None:
+            # `start()` calls this identical state a hard error ("running but
+            # publishes no port"), and `status` cannot report a URI it does not
+            # have — so it must not report success either.
+            print("  port=none (the container publishes no mapping)",
+                  file=sys.stderr)
+            return 1
+        print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
     return 0
 
 

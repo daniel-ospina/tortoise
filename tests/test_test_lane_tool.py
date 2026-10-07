@@ -356,14 +356,10 @@ def test_the_git_fallback_message_names_the_actual_cause(monkeypatch, capsys):
 
 
 def test_wait_ready_derives_each_call_timeout_from_the_remaining_budget(lane, monkeypatch):
-    """A first version of this test did NOT discriminate: with `READY_TIMEOUT`
-    monkeypatched to 3, the reverted `timeout=READY_TIMEOUT` also satisfied
-    `1 <= t <= 3`.
-
-    The clock is driven explicitly instead, so the remaining budget is KNOWN at
-    each docker call: 2.9 s (=> timeout 2) and then 0.4 s (=> timeout 1).
+    """The clock is driven explicitly, so the remaining budget is a KNOWN value
+    at each docker call: 2.9 s (=> timeout 2) and then 0.4 s (=> timeout 1).
     `seen == [2, 1]` admits ONLY a derived timeout — a constant 1 would give
-    `[1, 1]`, the reverted `timeout=READY_TIMEOUT` would give `[3, 3]`.
+    `[1, 1]`, and a per-call `timeout=READY_TIMEOUT` would give `[3, 3]`.
     """
     clock = iter([100.0, 100.1, 100.1, 102.6, 102.6, 105.2])
     seen = []
@@ -468,9 +464,8 @@ def test_repo_root_warns_and_falls_back_when_git_fails(monkeypatch, capsys):
 def test_pick_port_fails_closed_when_the_docker_scan_fails(monkeypatch):
     """A FAILED `docker ps -a` must NOT be read as "nothing is published".
 
-    Measured defect (review, 2026-10-07): `_container_publishes` ignored the
-    return code, so a timed-out scan yielded `False` for every port and
-    `pick_port` returned a port `docker run -p` then refused."""
+    Ignoring the return code yields `False` for every port on a timed-out scan,
+    and `pick_port` then returns a port `docker run -p` refuses."""
     monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
     monkeypatch.setattr(tl, "_published_scan", lambda: None)
     with pytest.raises(SystemExit) as exc:
@@ -480,11 +475,9 @@ def test_pick_port_fails_closed_when_the_docker_scan_fails(monkeypatch):
 
 
 def test_start_refuses_when_a_stale_container_cannot_be_removed(monkeypatch):
-    """A failed `rm` on a stale container must surface as a REMOVAL failure.
-
-    Measured defect (review, 2026-10-07): the branch's comment said the result
-    was read while the call discarded it, so the failure resurfaced only as
-    `docker run`'s "name already in use"."""
+    """A failed `rm` on a stale container must surface as a REMOVAL failure —
+    not as `docker run`'s "name already in use", which reads as a run problem
+    rather than the removal problem it is."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda _n: "FAILED to remove it — check `docker ps -a`")
@@ -618,6 +611,33 @@ def test_status_fails_closed_when_the_graph_count_fails(monkeypatch, capsys):
     assert "graphs=unknown" in capsys.readouterr().err
 
 
+def test_status_fails_when_a_running_container_publishes_no_port(monkeypatch, capsys):
+    """`start()` calls this identical state a hard error; `status` must not call
+    it success, and it cannot report a URI it does not have."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
+    assert tl.main(["status"]) == 1
+    assert "port=none" in capsys.readouterr().err
+
+
+def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch):
+    """The reuse path must RETURN, not fall through: falling through would\n    `docker rm -f` + recreate a live lane container, destroying the test graphs
+    of the run that is using it — the opposite of what reuse is for."""
+    removed = []
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda n: removed.append(n) or "removed it")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("`docker run` must not be reached on the reuse path")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert removed == [], "a running lane container must never be removed"
+
+
 def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
     """Every printed URI goes through `uri_for`, which is why the remote-daemon
     warning lives there and not in `pick_port` — a future direct print of a
@@ -627,6 +647,33 @@ def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
     _out, err = capsys.readouterr()
     assert "DOCKER_HOST is set" in err
     assert uri == "docker://:@127.0.0.1:16390/tortoise_test_matrix"
+
+
+def test_docker_forwards_its_timeout_to_subprocess(monkeypatch):
+    """Every docker call must stay BOUNDED — the module exists because a wedged
+    daemon must not hang the lane. Nothing pinned the forwarding, so dropping
+    `timeout=timeout` would make every call unbounded with the suite green."""
+    seen = {}
+
+    def _fake(cmd, **kwargs):
+        seen.update(kwargs)
+        return _R(0, "ok", "")
+    monkeypatch.setattr(tl.subprocess, "run", _fake)
+    tl._docker("ps")
+    assert seen.get("timeout") == tl.DOCKER_TIMEOUT
+
+
+def test_repo_root_bounds_the_git_call(monkeypatch):
+    """A hung `git` must not hang the lane: the timeout forwarding IS the bound,
+    and nothing pinned it either."""
+    seen = {}
+
+    def _fake(cmd, **kwargs):
+        seen.update(kwargs)
+        return _R(0, "/tmp/wt\n", "")
+    monkeypatch.setattr(tl.subprocess, "run", _fake)
+    tl.repo_root()
+    assert seen.get("timeout") == tl.GIT_TIMEOUT
 
 
 def test_repo_root_falls_back_when_git_cannot_be_executed(monkeypatch, capsys):
