@@ -893,7 +893,7 @@ def test_transient_503_conventions_agree_on_status():
 # the same (all measured, all pinned below):
 #
 #   authorization_code, registry client ........ 6 round-trips  (10 s budget)
-#   refresh_token ............................ 8 round-trips  (30 s budget)
+#   refresh_token ............................ 9 round-trips  (30 s budget)
 #   authorization_code, CIMD client, FIRST ... 8 round-trips  (10 s budget)
 #   authorization_code, CIMD client, later ... 6 round-trips
 #
@@ -1024,7 +1024,7 @@ def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
 
 def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
     """The REFRESH grant is the LONGER series on the same endpoint — MEASURED
-    here as EIGHT serial round-trips — and it is the one no test pinned at all.
+    here as NINE serial round-trips — and it is the one no test pinned at all.
 
     It is on Anthropic's 30 s budget rather than the 10 s the code grant gets,
     which is the only reason a series this long is tolerable; at the issue's
@@ -1032,10 +1032,19 @@ def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
     Pinned so that a round-trip ADDED here (a quota or membership read, say) is
     visible, which is the same silent-regression failure the code-grant leg
     exists for.
+
+    The sibling access row MATTERS and is seeded deliberately: ``_issue_tokens``
+    always mints refresh+access as a pair, so any refresh token this AS issued
+    has a live sibling with ``refresh_token_id == refresh_id``. That is what makes
+    ``refresh_grant``'s ``prev_access`` lookup non-empty, which is what adds the
+    final ``oauth_access_tokens:PATCH``. Seeding the refresh row alone yields 8
+    and leaves that round-trip unpinned (verified by mutation: deleting the
+    prev-access revoke still passed at 8).
     """
     cp = FakeControlPlane()
     _seed_base_tables(cp)
-    _, token = _seed_refresh_token(cp, "series-rt")
+    rid, token = _seed_refresh_token(cp, "series-rt")
+    _seed_access_token(cp, refresh_id=rid)
     counter = _RoundTripCounter(cp)
 
     out = oauth.refresh_grant(
@@ -1053,11 +1062,13 @@ def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
         "query:oauth_refresh_tokens:POST",  # mint the rotated refresh token
         "query:oauth_access_tokens:POST",   # mint the new access token
         "query:oauth_refresh_tokens:PATCH",  # revoke the presented token
+        "query:oauth_access_tokens:PATCH",  # revoke the sibling access token
     ], counter.calls
 
     counter.per_call_s = 0.05
     counter.calls.clear()
-    legacy = _seed_refresh_token(cp, "series-rt-2")[1]
+    rid2, legacy = _seed_refresh_token(cp, "series-rt-2")
+    _seed_access_token(cp, refresh_id=rid2)
     t0 = time.perf_counter()
     out2 = oauth.refresh_grant(
         counter, {"grant_type": "refresh_token", "refresh_token": legacy,
