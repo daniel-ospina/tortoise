@@ -598,10 +598,38 @@ def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
-    assert tl.main(["status"]) == 0
+    # A FAILED `docker port` is not an answer either. This case used to fall
+    # through to 0, so a caller keying the exit code read "could not ask" as
+    # SUCCESS while the state branch above returned 1 — the test's own name
+    # claimed the opposite of what it asserted.
+    assert tl.main(["status"]) == 1
     err = capsys.readouterr().err
     assert "port=unknown" in err
     assert ":0/" not in err
+
+
+def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
+    """Every printed URI goes through `uri_for`, which is why the remote-daemon
+    warning lives there and not in `pick_port` — a future direct print of a
+    loopback URI would otherwise drop the warning silently."""
+    monkeypatch.setenv("DOCKER_HOST", "ssh://build-host")
+    uri = tl.uri_for(16390)
+    _out, err = capsys.readouterr()
+    assert "DOCKER_HOST is set" in err
+    assert uri == "docker://:@127.0.0.1:16390/tortoise_test_matrix"
+
+
+def test_repo_root_falls_back_when_git_cannot_be_executed(monkeypatch, capsys):
+    """git present but unrunnable (PermissionError/ENOEXEC) is the SAME fact as
+    absent. It used to escape as a traceback, contradicting the fallback the
+    docstring documents (and which `_docker` already handles for its own calls)."""
+    def _boom(*_a, **_k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(tl.subprocess, "run", _boom)
+    root = tl.repo_root()
+    _out, err = capsys.readouterr()
+    assert root == tl.Path.cwd()
+    assert "could not be run" in err
 
 
 # ── start(): the port handed to the caller must be the PUBLISHED one ───────
@@ -612,8 +640,23 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))
-    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
+    seen = []
+
+    def _fake(*args, **kwargs):
+        seen.append(args)
+        return _R(0, "PONG")
+    monkeypatch.setattr(tl, "_docker", _fake)
     assert tl.start() == ("fdb-lane-0123456789", 16400)
+
+    run = [a for a in seen if a[:2] == ("run", "-d")]
+    assert run, "`docker run` must have been invoked"
+    argv = run[0]
+    # The two fail-closed properties the module ADVERTISES, pinned to the argv
+    # rather than to the prose: bind LOOPBACK only, and leave persistence OFF.
+    # Without these, `-p 127.0.0.1:{port}:6379` could become `-p {port}:6379`
+    # (all interfaces) with the whole suite still green.
+    assert "127.0.0.1:16399:6379" in argv
+    assert "REDIS_ARGS=--appendonly no --save ''" in argv
 
 
 def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch):

@@ -22,22 +22,23 @@ from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container that dies
 with the lane, so nothing it does can contaminate another lane and no peer's
 leftovers can contaminate it.
 
-SCOPE — NOT THE WHOLE SUITE (measured 2026-10-07; do not oversell)
-------------------------------------------------------------------------
-Tests that resolve their target from ``TORTOISE_DB_URI`` are isolated by
-exporting it — **440 test modules reference that variable**. Tests that build a
-URI through ``tests/_live_utils.py`` instead key on
+SCOPE — NOT THE WHOLE SUITE (do not oversell)
+----------------------------------------------------------------------------------
+Tests that resolve their target from ``TORTOISE_DB_URI`` are isolated by exporting
+it. Tests that build a URI through ``tests/_live_utils.py`` instead key on
 ``TORTOISE_TEST_DOCKER_PORT`` (default 6379) and a ``falkordb`` password, so they
-still address the SHARED instance: **46 test modules import that module** and
-**~90 mention a literal ``:6379``**. This tool exports neither variable, and it
-starts the private container without ``requirepass``, so the seam could not
-authenticate against it even if the port were exported. Closing that seam is
-#5084's remaining work; this tool is the isolation half of it, not the whole fix.
+still address the SHARED instance and their graphs still accumulate there; this
+tool exports neither variable, and it starts the private container without
+``requirepass``, so the seam's default password could not authenticate against it
+even if its port were exported. Closing that seam is #5084's remaining work — this
+tool is the isolation half of it, not the whole fix.
 
-(An earlier revision of this note said "9 modules". That number came from a
-grep for one import spelling and counted the modules that use only the seam's
-SKIP guard — the set the tool already isolates. The counts above are the
-measured ones.)
+(Three earlier revisions of this paragraph carried module COUNTS — "9", then
+"46 / ~90 / 440". All three were wrong, and the last was wrong twice over: a
+`grep` is not a count until its pattern AND its population are pinned, and it had
+counted ``__pycache__/*.pyc`` build artifacts, which makes it machine-state
+dependent as well as inflated. The counts are DELETED rather than corrected
+again; the mechanism above is the part that stays true.)
 
 MEASURED TRADE-OFF (do not oversell this tool)
 ----------------------------------------------
@@ -159,6 +160,13 @@ def repo_root() -> Path:
     except FileNotFoundError:
         print("test-lane: `git` is not available on PATH — falling back to "
               "the current directory", file=sys.stderr)
+        return Path.cwd()
+    except OSError as exc:
+        # git present but not runnable (PermissionError, ENOEXEC) is the SAME
+        # fact as absent. `_docker` handles its identical case; letting this one
+        # escape as a traceback would contradict the fallback contract above.
+        print(f"test-lane: `git` could not be run ({exc}) — falling back to "
+              f"the current directory", file=sys.stderr)
         return Path.cwd()
     root = out.stdout.strip()
     if out.returncode != 0 or not root:
@@ -594,7 +602,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         if not asked:
             print("  port=unknown (the `docker port` query failed)",
                   file=sys.stderr)
-        elif published is not None:
+            # Same rule as the `unknown` STATE above: a failed query is not an
+            # answer, so the CLI verdict must not read as success. It did — the
+            # state branch returned 1 while this one fell through to 0.
+            return 1
+        if published is not None:
             print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
     return 0
 
