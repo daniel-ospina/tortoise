@@ -123,10 +123,17 @@ debt and is unaffected; that guard greps the added-markdown diff read from a
 **file**, never a pipe, because `grep -q` exits at its first match and the
 resulting SIGPIPE under `set -o pipefail` made the pipeline non-zero — silently
 skipping the guard on a large diff. It matches **case-insensitively**, because
-cli2's own directive parser does (`<!-- MARKDOWNLINT-DISABLE -->` suppresses a
-finding just as the lowercase form does), and it runs with rename detection on,
-so a pure `git mv` of a file that already carries a directive is not mistaken for
-an added one.
+cli2's own directive parser does (an uppercase `MARKDOWNLINT-DISABLE` comment
+suppresses a finding just as the lowercase form does), and it runs with rename
+detection on, so a pure `git mv` of a file that already carries a directive is
+not mistaken for an added one. It is a **heuristic over added lines**, and it has
+exactly one false positive, which is deliberate and fails loud: a directive
+written inside a code FENCE is not honoured by cli2 — the finding it names still
+reports — but the added line still matches the pattern (measured: a directive
+inside a fence left the named finding in place, while the same directive in a
+backtick span removed it). The remedy is to reword the example; the check is a
+required gate, so failing a demonstration that hides nothing is the safe
+direction.
 
 ## Regenerating it
 
