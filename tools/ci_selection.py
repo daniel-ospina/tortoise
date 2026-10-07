@@ -737,6 +737,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
              # and the same defect #4174 describes a gate having.
              "tools/drift-guard.py",
+             # #5084 review P1: tools/test_lane.py owns
+             # tests/test_test_lane_tool.py (registered `core`), but `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches it — so a tool-only edit selected NO surface, took the
+             # docs-only early return and fell back to tier-1 smoke: the tests
+             # that pin the tool's fail-closed ownership guard (it must never
+             # remove a shared instance, and must refuse a peer lane's
+             # container) would not have run on the PR editing that guard.
+             # Same #1349/#3332/#3616 silent-drop class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_test_lane_tool_change_selects_core_not_tier1.
+             "tools/test_lane.py",
              # #7435: the docs-lint baseline differ owns
              # tests/test_docs_lint_baseline.py, which is `core`-registered, but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no

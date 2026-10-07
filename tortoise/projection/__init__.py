@@ -1966,6 +1966,432 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 # shape this hardening eliminates.
 
 
+# #7369: compiled ONCE — the gate runs on every write statement, so a
+# per-call recompile would be a hot-path cost for no benefit.
+# The negative lookbehind keeps a PROPERTY reference from being read as a
+# clause: `n.set`, `n.drop`, `n.create`, `n.remove` are property names in a read,
+# and matching them nulled a map the engine accepts (#7174 false refusal). A
+# keyword only counts at clause position, which is never just after `.` or a
+# word character.
+_WRITE_CLAUSE_RE = re.compile(
+    r"(?<![\w.$:])(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH|DROP)\b(?!\s*:)",
+    re.I,
+)
+# A write keyword can appear inside a string literal, a comment, or a backtick
+# identifier (``MATCH (n) WHERE n.s='SET' RETURN n``) — matching the raw text
+# would call a pure READ a write and null a legitimate map. Strip them first.
+_LITERAL_OR_COMMENT_RE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/",
+    re.S,
+)
+# For the GATE patterns only. Same job — remove STRING LITERALS and COMMENTS so
+# a `MERGE {…}` inside a literal cannot false-exempt a parameter — but it KEEPS
+# backtick-quoted IDENTIFIERS, because the identity key's production spelling is
+# backticked (```CREATE (n:Point {`id`: $id})```) and `_GATE_ID_FIELD_RE` has to
+# read it. `_statement_writes` still uses the backtick-stripping version, since
+# its write-procedure second pass reads the RAW statement for those.
+_GATE_LITERAL_OR_COMMENT_RE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|//[^\n]*|/\*.*?\*/",
+    re.S,
+)
+# ``CALL`` is a write only when its PROCEDURE name says so. Blanket-treating
+# every CALL as a write nulls maps on read-only procedures and subqueries the
+# engine ACCEPTS — ``db.idx.vector.queryNodes``, ``db.idx.fulltext.queryNodes``,
+# ``CALL { … }`` — which is the #7174 false refusal this exemption exists to
+# remove, and it also disables the read fast path for every such retrieval.
+# The write procedures (``db.idx.*.createNodeIndex``, ``db.idx.*.drop``, every
+# ``apoc.*`` that stores) are matched on their own name.
+_CALL_PROC_RE = re.compile(r"\bCALL\s+`?([A-Za-z_][A-Za-z0-9_.]*)", re.I)
+_WRITE_PROC_RE = re.compile(
+    r"(create|drop|delete|merge|remove|build|rebuild|refactor|periodic"
+    r"|install|update|insert|write|link|import|copy"
+    r"|apoc\.trigger|apoc\.config|apoc\.schema|apoc\.uuid|apoc\.do|apoc\.custom"
+    r"|apoc\.cypher\.(doIt|runFile|runWrite|runMany)|apoc\.atomic|setConfigValue)",
+    re.I,
+)
+
+
+def _statement_writes(statement: str) -> bool:
+    """True when the statement MAY store a parameter value.
+
+    Deliberately conservative: anything not provably read-only is treated as a
+    write. The two ways to be wrong are not symmetric — a false "write" nulls a
+    value that would have been accepted, while a false "read" forwards a map
+    into a property position and aborts a replay AFTER the journal was wiped.
+    """
+    stripped = _LITERAL_OR_COMMENT_RE.sub(" ", statement)
+    if _WRITE_CLAUSE_RE.search(stripped):
+        return True
+    # The procedure name is read from the RAW statement as well: a backtick -
+    # quoted name (```CALL `db.idx.fulltext.createNodeIndex`(…)```) is valid Cypher
+    # and really writes, but the identifier stripper has already removed it from
+    # `stripped`, so a RAW pass is the only way to see it.
+    return any(
+        _WRITE_PROC_RE.search(m.group(1))
+        for m in _CALL_PROC_RE.finditer(stripped)
+    ) or any(
+        _WRITE_PROC_RE.search(m.group(1))
+        for m in _CALL_PROC_RE.finditer(statement)
+    )
+_GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
+_GATE_REPLACE_RE = re.compile(
+    r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)")
+_GATE_UNWIND_RE = re.compile(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", re.I)
+# A row field consumed STRUCTURALLY rather than stored as a property value:
+# `n += r.props` (a map-of-properties the engine ACCEPTS) or
+# `UNWIND r.inputs AS inp` (a list of dicts never stored at all).
+_GATE_ROW_MERGED_RE = re.compile(
+    r"\+= *[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)"
+)
+_GATE_ROW_UNWOUND_RE = re.compile(
+    r"UNWIND +[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)", re.I
+)
+# A MERGE matches its node on the keys in the pattern's property map. A null
+# there is NOT a safe degrade — FalkorDB REFUSES it ("Cannot merge node using
+# null property value"), so nulling such a parameter converts one abort into
+# another instead of preventing it (measured: a PointAdded whose point.id
+# carries a NUL passes the isinstance(str) check, is nulled here, and MERGE
+# then raises). Those parameters belong to the FOLD, which must SKIP the record
+# (as _retract/_apply_revise already do via _writable_id) — so the boundary
+# leaves them untouched and does not manufacture a null key.
+_GATE_MERGE_KEY_RE = re.compile(r"MERGE[^{}]*\{([^{}]*)\}", re.I)
+# A CREATE property map carries the node's IDENTITY in its `id` field, exactly
+# as a MERGE map does — and nulling it does not degrade a property, it writes an
+# UNMATCHABLE `{id: null}` node. Measured: `create_point(..., id="a\x00b")`
+# went from a RAISE on the raw handle to a silent `(:Point {id: null})`.
+#
+# WRITE clauses ONLY — deliberately NOT `MATCH`. There is nothing to write in a
+# lookup, a null simply matches nothing, and protecting the id there would
+# FORWARD a parse reject instead of degrading it: measured, `get_point`,
+# `delete_point`, `traverse` and the replay fold `_fold_entity_mutation` all
+# raised again on a NUL id (the fold inside `rebuild_all`'s pass-1b, which has
+# no per-event try/except), where they had degraded before. The trade is only
+# ever right where the value becomes an identity that is WRITTEN.
+#
+# The production spelling is BACKTICKED (```CREATE (n:Point {`id`: $id})```),
+# hence the gate text below keeps backticked identifiers.
+_GATE_CREATE_MAP_RE = re.compile(r"CREATE[^{}]*\{([^{}]*)\}", re.I)
+_GATE_ID_FIELD_RE = re.compile(r"`?id`?\s*:\s*\$([A-Za-z_][A-Za-z0-9_]*)")
+_GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+# A MERGE key can also be a ROW FIELD rather than a parameter — ``MERGE (t:Point
+# {id: turn.id})`` over ``UNWIND $turns``. Nulling that field is the same
+# manufactured null key by a different route (measured: the real turn statement
+# nulls the row's ``id`` and the engine answers "Cannot merge node using null
+# property value"), so the field names appearing as ``<row>.<field>`` inside a
+# MERGE property map are excluded from the row walk too.
+_GATE_ROW_FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _flat_writable(val) -> bool:
+    """Cheap test: ``val`` is a writable scalar, or a FLAT sequence of them.
+
+    This is the READ fast path ONLY. A retrieval's parameters are
+    overwhelmingly an id list — the shape a 5,000-id lookup sends — and the
+    full container walk that gates it costs ~22 ms per call, so the flat case is
+    checked without the recursive container machinery.
+
+    Anything nested (a dict, a list OF dicts, a set, bytes, a subclass) returns
+    False and takes the FULL walk, which is where correctness lives. The
+    predicate is deliberately exact-type: it can only ever decide "no walk
+    needed", so it must stay conservative about what it admits.
+    """
+    if val is None:
+        return True
+    if type(val) in (str, int, float, bool):
+        return _annotator_value_ok(val)
+    if type(val) in (list, tuple):
+        return all(
+            item is None or (type(item) in (str, int, float, bool)
+                             and _annotator_value_ok(item))
+            for item in val
+        )
+    return False
+
+
+def _journal_safe_params(params, cypher=None):
+    """``params`` with every value a Cypher property can actually take (#7369).
+
+    The parameter boundary is the ONE place a journal-derived value reaches
+    FalkorDB, so the writability policy is enforced HERE rather than at each of
+    the fold sites that build a parameter. That is the whole point: a recorded
+    field becomes safe BY CONSTRUCTION, and a field recorded LATER cannot
+    reopen the hole. That is how this hole reopened — every newly recorded
+    field had to remember its own per-site gate, and ``valid_to`` is simply the
+    one that was missed; the creation folds carry ~20 more.
+
+    ``self.g`` is that boundary. It is the single handle every projection write
+    goes through — live ``apply()`` and all three replay engines — and it
+    already carries the sibling cross-cutting decisions: the #3595 operator
+    refusal, ``_is_bulk_wipe``, and the #3359 op count.
+
+    DEGRADES, never raises. A value the driver cannot take becomes ``None``
+    instead of aborting a replay that has ALREADY wiped the graph — pass-1a and
+    pass-1b have no per-event ``try/except``, so the raise lands after
+    ``_wipe_all_nodes`` and leaves the graph wiped or half-built.
+
+    ``None`` rather than a REMOVED key, deliberately: a parameter the Cypher
+    still references must stay BOUND. What ``None`` then DOES depends on the
+    clause, and this is worth being exact about because the two differ — in a
+    map MERGE (``SET n += $map``) an omitted key would leave the PRE-EXISTING
+    value in place, whereas in a DIRECT SET (``SET n.x = $v``) it CLEARS the
+    property. Clearing is the intended degrade: the journal stated no usable
+    value, so the field is absent rather than silently untrusted-but-present.
+    Note this is a behaviour change on the LIVE path too — the statement used
+    to fail atomically and keep every property, and now it succeeds with that
+    one property cleared (e.g. the EP flush, ``ep.py``).
+
+    MERGE KEYS ARE EXCLUDED. A null is not a safe universal degrade: the engine
+    REFUSES a null merge key (``Cannot merge node using null property value``),
+    so nulling one converts an abort into a DIFFERENT abort rather than
+    preventing it. Those parameters are left untouched, and the FOLD is
+    responsible for skipping a record whose identity is unwritable (the
+    creation anchors do this via ``_writable_id``).
+
+    READ STATEMENTS ARE GATED TOO, but the two dominant shapes are cheap. A
+    statement with no write clause cannot put a value into a property, but the
+    engine still PARSES every parameter, so a read cannot be skipped — a read
+    whose parameters are all scalars or flat id LISTS (``WHERE p.id IN $ids``)
+    takes ``_flat_writable`` and returns without the container walk; a read
+    carrying a nested value pays the walk, which is what was aborting.
+
+    The statement — not the value — says which parameters are CONTAINERS, and a
+    container must be walked as one or a legitimate structure is nulled
+    wholesale. Three shapes exist in this codebase (measured, not assumed):
+
+      ``SET n += $p``        the map is MERGED into the node's properties
+      ``SET n = $p``         the map REPLACES the node's properties
+      ``UNWIND $p AS row``   the list holds ROW MAPS, consumed as rows
+
+    Anything else is a VALUE position, where a map / bytes / set / non-finite
+    float / NUL-or-surrogate string is what the engine rejects. Getting the
+    container shapes wrong is not hypothetical: a rows-first rule nulled
+    ``$turns``, which silently skipped the capture turn upsert AND the document
+    version bump — the replay completed with the right shape and the wrong
+    content, which is worse than the raise it was meant to prevent. The
+    predicate is ``_annotator_value_ok`` OR ``_engine_coerces``: the annotator
+    dims' policy widened by the transport rule the driver itself uses, so the
+    rule keeps ONE home.
+
+    Returns ``params`` UNCHANGED (the same object) when nothing needed
+    degrading, so the healthy hot path allocates nothing.
+    """
+    if not params:
+        return params
+    # #7174 merge (main x #7369): a params payload that is NOT a mapping is the
+    # VENDOR's own error and must be FORWARDED, not guessed at — `_guard_numeric_params`
+    # (`cypher_guard.py`) returns early on exactly this test for exactly this reason,
+    # and main's `test_a_non_mapping_params_payload_is_forwarded_not_guessed` pins it.
+    # Without this the walk below raised `'list' object has no attribute 'items'` on
+    # the read verbs this gate was added to (`ro_query`/`profile`/`explain`), i.e. the
+    # gate turned a forwarded vendor error into a crash — the opposite of its purpose.
+    if not isinstance(params, dict):
+        return params
+    statement = cypher or ""
+    # A READ still has to be gated. FalkorDB PARSES every parameter regardless
+    # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
+    # replay after the wipe exactly as a write does — skipping reads here
+    # RE-OPENED the hole (measured: ``resolve_source_key``,
+    # ``_try_about_edge``, and a plain dict in ``about_entities``).
+    #
+    # What the clause buys is a cheap route for the two dominant READ shapes:
+    # scalars, and an id LIST (``WHERE p.id IN $ids``). Neither needs the
+    # container walk — the walk is what cost ~22 ms per 5,000-id retrieval — so
+    # ``_flat_writable`` admits them without allocating. Anything nested (a
+    # dict, a list of dicts, a set, bytes) fails that test and takes the FULL
+    # walk, which is the case that was aborting.
+    if (
+        statement
+        and not _statement_writes(statement)
+        and isinstance(params, dict)
+        and all(_flat_writable(val) for val in params.values())
+    ):
+        return params
+    # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
+    # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
+    # scalar in a property — does not match and stays a value position.
+    # The gate patterns run on text with STRING LITERALS and COMMENTS removed,
+    # so a `MERGE {…}` inside a literal cannot false-exempt a parameter that is
+    # then never nulled — measured: `{"v": b"\x00"}` against
+    # `MATCH (n) WHERE n.x = 'MERGE {id: $v}' RETURN n` was forwarded untouched
+    # and the engine raised "Failed to parse query parameter 'v' value".
+    #
+    # Backtick-quoted IDENTIFIERS are deliberately KEPT here (unlike
+    # `_statement_writes`, which needs them gone): the identity key in the
+    # production `CREATE` spelling is backticked, and `_GATE_ID_FIELD_RE` has to
+    # see it.
+    gate_text = _GATE_LITERAL_OR_COMMENT_RE.sub(" ", statement)
+    spread = frozenset(_GATE_SPREAD_RE.findall(gate_text)) | frozenset(
+        _GATE_REPLACE_RE.findall(gate_text)
+    )
+    # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
+    rows = frozenset(_GATE_UNWIND_RE.findall(gate_text))
+    # Parameters that are MERGE KEYS or a CREATEd node's IDENTITY `id`: never
+    # nulled here (see the notes above).
+    merge_keys = frozenset(
+        name
+        for group in _GATE_MERGE_KEY_RE.findall(gate_text)
+        for name in _GATE_PARAM_RE.findall(group)
+    ) | frozenset(
+        name
+        for group in _GATE_CREATE_MAP_RE.findall(gate_text)
+        for name in _GATE_ID_FIELD_RE.findall(group)
+    )
+    # Row FIELDS used as merge keys — never nulled inside a row map either.
+    merge_key_fields = frozenset(
+        field
+        for group in _GATE_MERGE_KEY_RE.findall(gate_text)
+        for field in _GATE_ROW_FIELD_RE.findall(group)
+    )
+    # Row FIELDS a statement consumes STRUCTURALLY rather than storing as a
+    # property: `n += r.props` (a map-of-properties the engine ACCEPTS) and
+    # `UNWIND r.inputs AS inp` (a list of dicts never stored at all). If one of
+    # these is judged by `_annotator_value_ok` it is nulled, and both shapes are
+    # legitimate: measured on #7406, `props` -> None turned every
+    # `n += r.props` into `n += null`, and `inputs` -> None killed source
+    # promotion. Every OTHER row field stays a property value and still degrades.
+    structural_fields = frozenset(
+        _GATE_ROW_MERGED_RE.findall(gate_text)
+    ) | frozenset(_GATE_ROW_UNWOUND_RE.findall(gate_text))
+    degraded: list = []
+
+    def _walk(value, path, shape, _depth: int = 0):
+        if shape == "rows" and isinstance(value, (list, tuple)):
+            if _depth >= _PERSISTABLE_MAX_DEPTH:
+                # Same bound as `_writable_at_parse`, and for the same reason:
+                # this recursion is the only boundary on the replay path, so a
+                # self-referential or absurdly deep container must DEGRADE
+                # rather than raise a RecursionError AFTER the wipe. Checked on
+                # entry to a container (not before the branches) so a deep
+                # SCALAR leaf is still written — every hop here descends.
+                degraded.append(path)
+                return None
+            changed = False
+            out = []
+            for i, row in enumerate(value):
+                # A row is a MAP only when it IS one. `UNWIND` does NOT require
+                # maps: `UNWIND $ids AS pid` with a list of id STRINGS is the
+                # shape `TortoiseSDK._mark_dirty` uses, and
+                # `UNWIND $names AS name` the shape longmem's ingest uses.
+                # Passing "map" for every row sent a scalar row into the
+                # shape-mismatch degrade, so every id became null, the MATCH
+                # below matched nothing, and `ep_dirty` was never set — worse,
+                # an EXISTING `ep_dirty = true` was cleared. Measured both ways
+                # against the raw handle. A scalar row is a value position.
+                walked = _walk(
+                    row,
+                    f"{path}[{i}]",
+                    "map" if isinstance(row, dict) else None,
+                    _depth + 1,
+                )
+                if walked is not row:
+                    changed = True
+                out.append(walked)
+            return out if changed else value
+        if shape == "map" and isinstance(value, dict):
+            if _depth >= _PERSISTABLE_MAX_DEPTH:
+                degraded.append(path)
+                return None
+            changed = False
+            out = {}
+            for k, v in value.items():
+                # BOTH key rules, held in ONE predicate on the key's own
+                # encoding (see `_map_key_ok`): the DRIVER raises before
+                # dispatch on an empty/backtick key, and the ENGINE parse-rejects
+                # a key carrying a NUL or a lone surrogate. Either way the entry
+                # cannot be stored under any name, so DROP it and record it —
+                # the same "degrade the offending entry, keep the rest" policy
+                # as a corrupt value — rather than null the whole map and lose
+                # the keys that are fine.
+                if not _map_key_ok(k):
+                    # The DRIVER raises on this key before dispatch, so the
+                    # entry cannot be stored under ANY name. DROP it and record
+                    # it — the same "degrade the offending entry, keep the
+                    # rest" policy as a corrupt value — rather than null the
+                    # whole map and lose the keys that are fine.
+                    degraded.append(f"{path}.<key {k!r}>")
+                    changed = True
+                    continue
+                if k in merge_key_fields:                    # A row field this statement MERGEs on: a null is refused
+                    # by the engine, so leave it exactly as it is.
+                    out[k] = v
+                    continue
+                walked = _walk(
+                    v,
+                    f"{path}.{k}",
+                    # A row field the statement merges or unwinds is STRUCTURAL:
+                    # a container there is a map-of-properties or a rows list,
+                    # never a stored property value, so walk it instead of
+                    # judging it. A plain field keeps the value-position rule.
+                    (
+                        "map"
+                        if isinstance(v, dict)
+                        else ("rows" if isinstance(v, (list, tuple)) else None)
+                    )
+                    if k in structural_fields
+                    else None,
+                    _depth + 1,
+                )
+                if walked is not v:
+                    changed = True
+                out[k] = walked
+            return out if changed else value
+        if shape is not None:
+            # `SET n += $p` requires a MAP and `UNWIND $rows` a LIST OF MAPS;
+            # anything else is refused by the engine ("Property values can only
+            # be of primitive types", "Type mismatch: expected Map"). Both
+            # conforming cases are handled by the branches above, so reaching
+            # here means the shape does not match — degrade, never forward.
+            degraded.append(path)
+            return None
+        if _value_ok(value):
+            return value
+        if is_read and isinstance(value, (dict, list, tuple)) and _writable_at_parse(value):
+            # Shape-only reject on a read: the engine accepts a CONTAINER as a
+            # bare parameter (measured), so leave it EXACTLY as it is. Only a
+            # container — a bare SCALAR that reached here was refused by BOTH
+            # `_annotator_value_ok` and `_engine_coerces`, i.e. its `str()` is
+            # not a literal, and the engine parse-rejects it on a read too
+            # (measured: `Decimal("NaN")`, `complex(1, 2)`). Exempting every
+            # scalar `_writable_at_parse` happens not to enumerate was
+            # forwarding exactly those.
+            return value
+        degraded.append(path)
+        return None
+
+    changed = False
+    out = None
+    # A statement that is KNOWN to write nothing cannot STORE a value, so a
+    # shape-only reject (a map) is a harmless parameter there and must be
+    # forwarded — see `_writable_at_parse`. A statement we do NOT know (empty) is
+    # NOT a read: degrade conservatively, as before. Parse-time rejects degrade
+    # on both.
+    is_read = bool(statement) and not _statement_writes(statement)
+    for key, value in params.items():
+        if key in merge_keys:
+            # A MERGE key: left EXACTLY as it is. A null here is refused by the
+            # engine, so degrading it would convert one abort into another.
+            continue
+        shape = "rows" if key in rows else ("map" if key in spread else None)
+        walked = _walk(value, str(key), shape)
+        if walked is not value:
+            if out is None:
+                out = dict(params)
+            out[key] = walked
+            changed = True
+    if not changed:
+        return params
+    logger.warning(
+        "#7369: degraded %d parameter value(s) FalkorDB cannot write (%s) to "
+        "null before dispatch; statement=%r. Degrading rather than raising "
+        "on purpose: the folds that build these values run on replay paths "
+        "whose pass-1a/1b carry no per-event try/except, so a raise would "
+        "abort the rebuild AFTER the wipe.",
+        len(degraded), ", ".join(str(p) for p in degraded[:8]),
+        " ".join((cypher or "").split())[:120],
+    )
+    return out
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -2034,7 +2460,9 @@ class _GuardedGraph:
         # dead socket is still an op the capture generated). No-op (one
         # ContextVar read) when no capture is active.
         record_graph_op(cypher)
-        return self._g.query(cypher, params=params, timeout=timeout)
+        return self._g.query(
+            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
+        )
 
     def ro_query(self, cypher: str, params=None, timeout=None):
         # Same refusal for the read-only verb: the raw handle this wrapper
@@ -2042,7 +2470,9 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.ro_query(cypher, params=params, timeout=timeout)
+        return self._g.ro_query(
+            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
+        )
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
@@ -2050,7 +2480,8 @@ class _GuardedGraph:
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
         return self._g._query(
-            cypher, params=params, timeout=timeout, read_only=read_only
+            cypher, params=_journal_safe_params(params, cypher),
+            timeout=timeout, read_only=read_only,
         )
 
     def profile(self, cypher: str, params=None):
@@ -2058,12 +2489,12 @@ class _GuardedGraph:
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.profile(cypher, params=params)
+        return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.explain(cypher, params=params)
+        return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
         # #3595 (review round 2, P2): the raw Redis command channel carries
@@ -2570,6 +3001,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _PERSISTABLE_MAX_DEPTH,
     _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
@@ -2696,15 +3128,243 @@ def _annotator_value_ok(val) -> bool:
     return True
 
 
+# The driver sends a parameter it cannot encode natively by INLINING
+# ``str(value)`` into the query header, and the engine parses THAT. So "will the
+# engine accept this value" is exactly "is ``str(value)`` a Cypher literal" —
+# the model `numeric_domain` already states for numbers ("the driver inlines
+# ``str(value)``", numeric_domain.py). Measured on the real engine:
+#
+#   ACCEPTED  Decimal("0.25")->"0.25"   np.int64(7)->"7"
+#             Fraction(5,1)->"5"         np.bool_(True)->"True"
+#   REJECTED  Decimal("NaN")->"NaN"     Decimal("Infinity")->"Infinity"
+#             Fraction(5,2)->"5/2"       complex(1,2)->"(1+2j)"
+#             np.datetime64("1970-01-02")->"1970-01-02"
+#
+# A TYPE allowlist cannot express that set, which is why the first two
+# attempts at this predicate each missed a member and had to be widened: the
+# review that caught `Decimal` was followed by one catching `np.bool_` (a
+# supported surface — `_sanitize_props` admits it) and `Fraction(5, 2)` (which
+# the widened `numbers.Number` test forwarded into a guaranteed parse reject).
+# Modelling the transport closes the class instead of enumerating it.
+_LITERAL_NUMBER_RE = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_LITERAL_BOOLS = frozenset({"True", "False"})
+
+
+def _engine_coerces(val) -> bool:
+    """True when the driver inlines ``val`` and the engine parses it as a literal.
+
+    `_annotator_value_ok` answers "is this ALREADY a persistable property
+    primitive" — NARROWER than what the engine accepts. Judging the difference
+    by the primitive test NULLED values the engine stores happily, which is
+    silent data loss, not a guard firing: measured through `_GuardedGraph`
+    against the raw handle, the boundary had stored `None` where the raw write
+    stored `7` (np.int64), `translated 0.25` (Decimal), and dropped
+    `np.bool_(True)` on a supported live surface.
+
+    This asks the TRANSPORT's question instead of a type question, so a new
+    coercible type cannot be missed and a non-coercible one cannot be
+    forwarded: everything the engine refuses in the table above is refused
+    here, and everything it accepts is preserved. `str()` is suppressed because
+    a value whose own `__str__` raises is not encodable either.
+
+    Honest limit: this is an APPROXIMATION of the engine's literal grammar, not
+    the grammar — it is exact for every value this codebase can produce, and
+    only an object with a hand-written `__str__` can diverge (measured:
+    `__str__ -> "true"` and `" 7"` are nulled though the engine parses them).
+    That residual is one-directional — it DEGRADES rather than forwarding a
+    parse reject — and is not JSON-reachable, which is the safe way round.
+    """
+    with contextlib.suppress(Exception):
+        text = str(val)
+        return bool(_LITERAL_NUMBER_RE.match(text)) or text in _LITERAL_BOOLS
+    return False
+
+
+def _map_key_ok(key) -> bool:
+    """False for a map key the DRIVER cannot encode or the ENGINE cannot parse.
+
+    The driver renders a key as a BACKTICKED string — `key.decode()` for bytes,
+    else `str(key)` — and RAISES on an empty key ("Cypher map key cannot be
+    empty") and on one containing a backtick, BEFORE the statement is sent. The
+    engine then parse-rejects a key carrying a NUL or a lone surrogate, exactly
+    as it does for a value. Both are aborts, not degradations, and on the replay
+    path they land after the wipe: measured, a PointAdded whose property KEY
+    carries a NUL reaches `_EntityHandlers._persist_extra_props` and aborted a
+    `rebuild_all`.
+
+    Both rules are modelled HERE, on the KEY's own encoding, and not by reusing
+    the value predicate: a key is inlined as a backticked string, so a bytes or
+    numeric key is perfectly fine (`str(key)` renders it) even though the value
+    predicate would refuse it — dropping those would be data loss.
+    """
+    try:
+        text = key.decode() if isinstance(key, bytes) else str(key)
+        text.encode("utf-8")
+    except Exception:
+        return False  # undecodable bytes, or a lone surrogate
+    return text != "" and "`" not in text and "\x00" not in text
+
+
+def _value_ok(val, _depth: int = 0) -> bool:
+    """True when the engine STORES ``val`` as a property VALUE.
+
+    Arrays recurse with the TRANSPORT leaf predicate, deliberately NOT with
+    `_is_persistable_prop_value`'s type allowlist: `[np.int64(7)]`,
+    `[Decimal("0.25")]`, `[np.bool_(True)]` are all stored by the engine (raw
+    handle measured) but the allowlist refuses the LEAF, so on a WRITE the
+    whole array was nulled — silent data loss, the same class as the scalar
+    fix one level down. Recursing here instead of deferring to
+    `_annotator_value_ok`'s own array branch also carries the finiteness and
+    NUL/surrogate rules down to every leaf, which that branch does not.
+    """
+    if isinstance(val, (list, tuple)):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
+        # `None` is EXCLUDED at leaf level here, though `_annotator_value_ok`
+        # accepts it: a TOP-LEVEL null clears the property (and replay must
+        # match the live write by clearing it), but FalkorDB REFUSES a null
+        # INSIDE a stored array ("Property values can only be of primitive
+        # types or arrays of primitive types", measured). `create_point(...,
+        # tags=["a", None])` aborted on the raw handle for exactly this.
+        return all(v is not None and _value_ok(v, _depth + 1) for v in val)
+    return _annotator_value_ok(val) or _engine_coerces(val)
+
+
+def _writable_at_parse(val, _depth: int = 0) -> bool:
+    """False only for what the engine rejects while PARSING a parameter.
+
+    #7174 merge (measured 2026-10-06 on the embedded engine, which agrees with
+    the real one on all six probes): the boundary's refusal has TWO failure
+    modes and they are NOT the same shape, so they must not be applied
+    alike.
+
+      * PARSE rejects — a non-finite float, a string carrying NUL or a lone
+        surrogate, and **bytes**. Measured: rejected on a READ and a WRITE
+        alike, because the engine parses every parameter regardless of clause.
+        These must degrade EVERYWHERE.  →  this predicate.
+      * SHAPE rejects — a map / set / over-deep array. Measured: rejected ONLY
+        when the value is STORED as a property (``SET n.v = $v``,
+        ``SET n += $p``); as a bare parameter on a statement that writes
+        nothing it is ACCEPTED. Degrading it there nulls a legitimate
+        structure for no reason — the false refusal #7174's anti-overfix guard
+        exists to catch, and the same over-degradation class the module
+        docstring records nulling ``$turns``.  →  gated on the write clause.
+    """
+    if isinstance(val, float):
+        return math.isfinite(val)
+    if isinstance(val, (bytes, bytearray)):
+        return False
+    if isinstance(val, str):
+        if "\x00" in val:
+            return False
+        try:
+            val.encode("utf-8")
+        except UnicodeEncodeError:
+            return False  # lone surrogate (driver rejects at encode)
+    # RECURSE: the engine parses the WHOLE parameter, so a container holding a
+    # parse-reject anywhere inside is rejected as a unit. Testing only the top
+    # level let `{"ids": ["ok", "bad\x00id"]}` through on a read, which the
+    # engine then refused with "Failed to parse query parameter 'ids' value" —
+    # the abort-after-wipe this gate exists to prevent, re-opened by the very
+    # exemption added for maps.
+    #
+    # BOUNDED, like the sibling `_is_persistable_prop_value` (entities.py:74).
+    # This predicate's contract is "DEGRADES, never raises", and an unbounded
+    # walk breaks it twice over: a self-referential container recurses forever,
+    # and a deep one exhausts the stack. `_guard_numeric_params` refuses those
+    # first on the normal path but is a NO-OP under `_TOLERATE_ALTERED_NUMBERS`
+    # — the replay context this gate exists for — so here the walk is the only
+    # boundary, and a RecursionError would abort the rebuild AFTER the wipe.
+    #
+    # The bound is checked INSIDE the container branches, not before them: this
+    # predicate is "False only for what the engine rejects while PARSING", and a
+    # SCALAR leaf 32 levels down is parsed exactly like one at the top. Guarding
+    # first refused a deep-but-writable container the sibling accepts — a false
+    # refusal baked into the fix. Checking on entry to a container still
+    # terminates a cycle (every hop descends).
+    if isinstance(val, (set, frozenset)):
+        # A set is NOT a shape-only reject. Measured: the engine refuses it
+        # while PARSING the parameter (`Failed to parse query parameter`), on a
+        # read exactly as on a write, so there is no statement it can be
+        # forwarded on and #7174's read-path exemption does not reach it.
+        return False
+    if isinstance(val, (list, tuple)):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
+        return all(_writable_at_parse(item, _depth + 1) for item in val)
+    if isinstance(val, dict):
+        if _depth >= _PERSISTABLE_MAX_DEPTH:
+            return False
+        return all(
+            _map_key_ok(k)
+            and _writable_at_parse(k, _depth + 1)
+            and _writable_at_parse(v, _depth + 1)
+            for k, v in val.items()
+        )
+    # Any other LEAF: accepted exactly when the engine parses its literal — the
+    # SAME predicate the boundary uses, not a second type enumeration. The
+    # enumeration that used to be here (float finiteness, bytes, NUL strings,
+    # set) left every other leaf on `return True`, so a CONTAINER holding one —
+    # `{"k": Decimal("NaN")}`, `[complex(1, 2)]`, an `np.float32('nan')` — was
+    # forwarded on a read and the engine aborted with "Failed to parse query
+    # parameter", which is the class this predicate exists to close, re-opened
+    # one level down. Measured on the real engine.
+    return _annotator_value_ok(val) or _engine_coerces(val)
+
+
 def _writable_id(val) -> bool:
-    """True when ``val`` is a str FalkorDB can take as a query parameter.
+    """True when ``val`` is a NON-EMPTY str FalkorDB can take as a parameter.
 
     The ``id`` rides as a Cypher parameter exactly like a dim value, so it
     needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
     with such an id aborts ``rebuild_all`` after the wipe (review P1; the
     pre-existing PointRevised fold had the same latent hole).
+
+    The EMPTY STRING is refused (#7369 review P2): ``_annotator_value_ok("")``
+    is True, but an empty identity is not an identity, and every call site it
+    replaced rejected it (``if not name:``, ``if not eid:``, ``if not url``).
+    Without this, swapping those guards for ``_writable_id`` ADMITTED the empty
+    string — the four entity folds would create ``:Subject {name:""}`` for a
+    record whose ``name`` was absent (it defaults to ``""``). Refusing it here
+    keeps the rule in ONE home rather than repeating ``... and val`` at every
+    call site.
     """
-    return isinstance(val, str) and _annotator_value_ok(val)
+    return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
+
+
+def _log_identity_skip(what: str, value, label: str = "identity") -> None:
+    """WARN, ONCE, that an unwritable identity made a record be SKIPPED (#7369).
+
+    The boundary change turned what used to be a LOUD abort into a SKIP. The
+    folds run on replay paths whose pass-1a/1b carry no per-event
+    ``try/except``, so before the gate an unwritable identity raised AFTER
+    ``_wipe_all_nodes``; now the fold drops the record instead. A drop with no
+    log is invisible: an operator cannot tell a deliberate degrade from data
+    loss, which is precisely the risk this change exists to manage.
+
+    This is the ONE place the skip is reported, and it uses the SAME
+    ``logger.warning`` mechanism the point-id skips already use
+    (``FalkorProjection.apply`` / ``rebuild``) — the codebase keeps one way of
+    announcing a dropped record, not two. ``what`` names the record family and
+    ``label`` the identity's role (MERGE key vs property) so the message says
+    WHICH identity was refused.
+
+    An ABSENT identity (``None``/``""``) is NOT logged: the folds default
+    missing identity fields to ``""`` and skip them by design (an event with
+    no subject is ordinary, not a degrade), so logging those would spam the
+    operator with the healthy case and drown the corrupt one. Only a TRUTHY
+    value ``_writable_id`` refuses — the NUL/lone-surrogate-bearing class this
+    gate exists for — is an anomaly worth a warning.
+    """
+    if not value:
+        return
+    logger.warning(
+        "#7369: skipping %s — %s %r is not a writable identity (empty, or "
+        "NUL/lone-surrogate bearing); the record is dropped rather than "
+        "reaching FalkorDB and aborting a replay that has already wiped the "
+        "graph",
+        what, label, value,
+    )
 
 
 def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
@@ -3273,10 +3933,11 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # and the live node held the producer's — three values for one
             # retraction. The gate is ``_usable_instant`` — the SAME predicate
             # the graph arm (``_retract``) uses, deliberately shared rather
-            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
-            # empty string: with two spellings, a record carrying ``ts=""``
+            # than re-spelled: with two spellings, a record carrying ``ts=""``
             # had this fold write ``""`` while the graph arm wrote no column
-            # at all (both are now "no usable instant stated").
+            # at all (both are now "no usable instant stated"). (Until #7369's
+            # round-3 fix ``_writable_id`` ACCEPTED ``""``; it no longer does,
+            # but the shared predicate stays the single home for the rule.)
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
             if _usable_instant(ev.get("ts")):
@@ -4488,7 +5149,7 @@ class FalkorProjection(
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
             # #331 (review r4): str-only ids (non-str would break Cypher params).
-            if not isinstance(p.get("id"), str):
+            if not _writable_id(p.get("id")):
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with missing point "
                     "id (event_id=%s)", t, ev.get("event_id"))
@@ -4533,8 +5194,12 @@ class FalkorProjection(
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
             # promotions (PointRetracted-style lifecycle event).
             p = ev.get("point")
-            if isinstance(p, dict) and p.get("id"):
+            if isinstance(p, dict) and _writable_id(p.get("id")):
                 self._upsert(p)
+            elif isinstance(p, dict):
+                # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
+                # the skip must be observable (see `_log_identity_skip`).
+                _log_identity_skip("PointPromoted", p.get("id"), "id")
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -4549,7 +5214,7 @@ class FalkorProjection(
             # operator→claim conversion on rebuild).  Heals the pre-existing
             # R16 emitter shape (promote_point, since #785) too.
             p = ev.get("point")
-            if isinstance(p, dict) and p.get("id"):
+            if isinstance(p, dict) and _writable_id(p.get("id")):
                 self._upsert(_promotion_point_with_operator(p))
             else:
                 oid = ev.get("id") or ev.get("event_id")
@@ -5793,7 +6458,7 @@ class FalkorProjection(
                 # nothing to index by; skip rather than KeyError in
                 # _upsert_point_props.
                 # #331 (review r4): str-only ids.
-                if not isinstance(p.get("id"), str):
+                if not _writable_id(p.get("id")):
                     logger.warning(
                         "rebuild: skipping %s with missing point id "
                         "(event_id=%s)", t, ev.get("event_id"))
@@ -6045,7 +6710,7 @@ class FalkorProjection(
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
-                if isinstance(p, dict) and p.get("id"):
+                if isinstance(p, dict) and _writable_id(p.get("id")):
                     if isinstance(p["id"], str):
                         # #2488: promote stamps updatedAt inline (the CAS
                         # below re-applies the snapshot) — a same-id promote
@@ -6078,13 +6743,18 @@ class FalkorProjection(
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
+                elif isinstance(p, dict):
+                    # #7369: a truthy-but-unwritable id is skipped, not folded
+                    # — the skip must be observable (see `_log_identity_skip`).
+                    _log_identity_skip(
+                        "PointPromoted (rebuild)", p.get("id"), "id")
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
                 # the canonical nested-operator shape — for the capture path
                 # this event is the operator's only durable record.
                 p = ev.get("point")
-                if isinstance(p, dict) and p.get("id"):
+                if isinstance(p, dict) and _writable_id(p.get("id")):
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
                     op_p = _promotion_point_with_operator(p)
@@ -6644,7 +7314,12 @@ class FalkorProjection(
         # locks survive rebuilds, and promote_point still sees them.
         for props in batch_snapshot:
             bid = props.get("id")
-            if not bid:
+            # #7369: `bid` is the Batch MERGE key, and this restore runs AFTER
+            # `_wipe_all_nodes` with no per-record try/except (unlike the
+            # sibling onboarding/config restores), so a value the driver cannot
+            # take aborts a rebuild that has already wiped the graph.
+            if not _writable_id(bid):
+                _log_identity_skip("Batch", bid, "id (MERGE key)")
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(
@@ -6830,7 +7505,10 @@ class FalkorProjection(
         # journaled capture no longer depends on this snapshot.
         for props in session_snapshot:
             sid = props.get("id")
-            if not sid:
+            # #7369: `sid` is the Session MERGE key — same post-wipe exposure
+            # as the Batch restore above.
+            if not _writable_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(
@@ -7203,7 +7881,7 @@ class FalkorProjection(
                 # #331 (review r3): parity with apply()/pass 1a — edge
                 # wiring indexes by p["id"]; skip rather than KeyError.
                 # #331 (review r4): str-only ids.
-                if not isinstance(p.get("id"), str):
+                if not _writable_id(p.get("id")):
                     logger.warning(
                         "rebuild: skipping edge wiring for event with "
                         "missing point id (event_id=%s)",

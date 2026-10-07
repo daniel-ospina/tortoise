@@ -373,9 +373,18 @@ boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive tit
   line now counts only surfaces actually read and names any advisory shortfall.)
 - `exit 1` **COLLISION** — a hit on a blocking surface; do **not** dispatch, coordinate on the named
   surface first. An advisory-surface match is reported but never blocks.
-- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (gh auth/network) **or an
-  open-PR list was truncated at its completeness cap**. This is **not** clean. Fix the surface and
-  re-run; never treat it as a pass.
+- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (**fix the surface**) **or
+  an open-PR list was truncated at its completeness cap** (**widen with `--pr-limit`**). This is
+  **not** clean; never treat it as a pass.
+  ⛔ **EXIT 2 HAS A THIRD CAUSE WITH NO `VERDICT` LINE, AND ITS REMEDY IS NOT `gh auth/network`:** if
+  the number you passed is an **OPEN PULL REQUEST**, the pre-flight refuses before computing any
+  verdict — it prints only the refusal on stderr and emits **no report at all**. A PR number is not a
+  work item, and an exit 0 there would authorise a dispatch on work that PR already belongs to (#7009,
+  the #7477 case — measured: `collision_preflight.py 7477` read CLEAN while #7455 was held on four
+  surfaces). **The remedy is to re-run with the ISSUE number.** A caller keying its remedy on
+  `VERDICT: INCOMPLETE` misses this cause entirely, and keying on the exit code alone cannot tell it
+  from the surface cause. The `--repo`-omitted ambiguity refusal is a further verdict-less exit 2 whose
+  remedy is `--repo owner/name`.
 
 **OPEN** PR lists are enumerated to completeness (`--pr-limit`, default 1000); a list longer than its
 cap is reported **TRUNCATED** and the run is `exit 2` — a partial list is never CLEAN. The
@@ -491,6 +500,33 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/t
 # Run specific test file (docker lane)
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_directional_impl_fix.py -v
 ```
+
+> **Private lane instance (#5084) — use this when more than one lane is testing.**
+> The docker lane above points *every* lane at ONE long-lived container. Test graphs are
+> minted per run and reaped by a session-end sweep whose server-global pass is deferred
+> while any peer session is live, so under fleet concurrency the shared instance
+> accumulates leftovers: measured 2026-10-06 it had **restarted 213 times** (it was 46
+> when #5084 was filed on 2026-09-24), and a single-file run showed graphs appearing from
+> *other* lanes' sessions. `tools/test_lane.py` gives the lane its own throwaway container
+> — for every test that takes its target from `TORTOISE_DB_URI`, its graphs die with the
+> container, so no lane can leave residue on another's target. **Not yet the whole suite**:
+> tests that build their URI through `tests/_live_utils.py` key on
+> `TORTOISE_TEST_DOCKER_PORT` (default 6379) and a `falkordb` password, so they still address
+> the shared instance and their graphs still accumulate there. Closing that seam is #5084's
+> remaining work — the tool is the isolation half, not the whole fix.
+>
+> ```bash
+> eval "$(uv run python tools/test_lane.py uri)" || exit 1   # start + export TORTOISE_DB_URI
+> uv run pytest tests/ -q
+> uv run python tools/test_lane.py status          # it prints the URI again
+> uv run python tools/test_lane.py down            # remove it
+> ```
+>
+> Isolation, **not** speed: the same single test measured 90.59 s privately vs 92.66 s on
+> the shared container, so use the shared lane when that is what you are testing. The tool
+> can only ever act on the container derived from the worktree you run it in — it has no
+> `--name` or `--slug` override, so one lane cannot remove (or silently adopt) another
+> lane's `fdb-lane-<slug>`.
 
 ### Documentation Filing
 

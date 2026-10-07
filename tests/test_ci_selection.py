@@ -1093,6 +1093,21 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_test_lane_tool_change_selects_core_not_tier1():
+    # #5084 review P1: tools/test_lane.py owns tests/test_test_lane_tool.py
+    # (`core`). Without the CORE_ALSO entry the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallowed the path, so a tool-only change
+    # selected NO surface and fell back to tier-1 smoke — the tests that pin
+    # the tool's fail-closed ownership guard (never remove a shared instance;
+    # never remove a peer lane's container) would not run on the PR editing
+    # that guard. Same silent-drop class as #4069/#6138/#4174 above.
+    r = _sel(["tools/test_lane.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_test_lane_tool.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_queue_conflict_census_tool_change_selects_core_not_tier1():
     # #6138 review P1: tools/queue_conflict_census.py owns
     # tests/test_queue_conflict_census.py (`core`). Without the CORE_ALSO entry
