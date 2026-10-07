@@ -8005,13 +8005,11 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     breakdown is not a complete partition of the row. It says nothing about
     ``cost_usd``'s own completeness — that is ``calls_without_cost``'s question.
 
-    Both counters CAN be non-zero together, but only at the MERGE seams
-    (``_merge_cost_accumulator`` / ``_rollup_llm``), where a bucket merge and
-    the cross-stage sum overflow independently. At THIS per-call seam the two
-    are mutually exclusive: a session-total overflow sends the charge down the
-    charge-less path below, which bumps ``calls_without_cost`` alone, so the
-    per-route branch is unreachable in that state and the surviving breakdown
-    still reconciles with the (already bounded) total.
+    Both counters CAN be non-zero together, but not because of one call: a
+    session-total overflow sends that charge down the charge-less path below,
+    so ITS per-route branch is unreachable. Across calls the accumulator can
+    hold both — an earlier route overflow beside a later session-total
+    overflow — so never read the two as exclusive at the ROW level.
     """
     acc = stats.setdefault("cost", {})
     # #5854: normalise BOTH provider token fields before the first mutation
@@ -8139,8 +8137,8 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     ``by_stage`` sub-total (a charge seen per call, or a bucket sum merged
     into an existing stage here) could not represent its finite total, and
     it says nothing about ``cost_usd``'s own completeness — that stays
-    ``calls_without_cost``'s question, which is why this seam can leave BOTH
-    non-zero while the per-call seam cannot. Each call keeps the
+    ``calls_without_cost``'s question, and the two answer different questions
+    so a row may legitimately carry both. Each call keeps the
     ``(provider, model)`` route that served it, so a mid-stage failover is
     never misattributed to the configured primary. The ``by_stage`` buckets
     use the pricing-envelope shape (``tools/longmem_eval/usage.py`` /

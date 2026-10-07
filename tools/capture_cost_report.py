@@ -235,6 +235,10 @@ def _overflow_disclosure_lines(count: int, indent: str = "  ") -> list[str]:
     not guaranteed to run either way (when the session sum overflowed too,
     the two totals can still agree), so the line states only what is true of
     every row that carries the counter.
+
+    Its closing pointer is to the ``calls served without a charge`` line,
+    which BOTH callers print — keep that line in any new branch that renders
+    this disclosure, or the pointer dangles.
     """
     if not count:
         return []
@@ -288,6 +292,10 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
         add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
         add(f"  captures behind those calls       : {dist['unattributed_captures']}")
+        # the referent the disclosure line points at must EXIST on this branch
+        # too — a pointer to a line this path never prints is worse than no
+        # pointer, and this is the path where the reader has least else to go on
+        add(f"  calls served without a charge     : {dist['calls_without_cost']}")
         lines.extend(_overflow_disclosure_lines(dist["route_cost_overflows"]))
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")

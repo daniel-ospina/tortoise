@@ -2155,6 +2155,39 @@ def test_two_per_call_overflows_are_both_counted():
     assert cost["route_cost_overflows"] == 2, cost
 
 
+def test_both_counters_coexist_with_no_merge_seam_involved():
+    """#5868 — the two counters are NOT mutually exclusive at the row level.
+
+    They are exclusive per CALL (a session-total overflow takes the
+    charge-less path, so that call's per-route branch cannot also fire), but
+    an accumulator can hold both from DIFFERENT calls with no merge seam
+    anywhere: a route overflow on one call, a session-total overflow on a
+    later one. Pinned because the tempting shorthand — "both only at a merge
+    seam" — is what a future maintainer would cite to treat them as
+    exclusive, and it is false at this very seam.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    stats: dict = {}
+    for provider, model, charge in (
+            (_PROVIDER, _MODEL, 1.5e308),                  # route A, +1
+            ("deepseek", "deepseek-v4-flash", -1.5e308),   # route C, -
+            (_PROVIDER, _MODEL, 1.5e308),      # route A, +2 -> ROUTE overflow
+            (_PROVIDER, "gpt-4o-2024-08-06", 1.5e308)):    # -> SESSION overflow
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10,
+            cost_usd=charge, provider=provider, model=model)
+
+    cost = stats["cost"]
+    assert math.isfinite(cost["cost_usd"]) and cost["cost_usd"] == 1.5e308, cost
+    assert cost["route_cost_overflows"] == 1, cost   # the ROUTE sub-total
+    assert cost["calls_without_cost"] == 1, cost     # the SESSION total
+
+    props = _rolled_row(cost)
+    assert props["route_cost_overflows"] == 1, props
+    assert props["calls_without_cost"] == 1, props
+
+
 def test_two_bucket_merge_overflows_are_both_counted():
     """#5868 — the MERGE counter is a running SUM too.
 
@@ -2845,6 +2878,9 @@ def test_report_cli_discloses_an_unrepresentable_subtotal_without_a_price(
         "priced_sessions"] == 0
     # ... and it still discloses the dropped sub-total
     assert "by_stage sub-totals unrepresentable: 3" in text, text
+    # ... TOGETHER WITH the line that disclosure points the reader at — a
+    # pointer into this branch is only honest if its referent is here too
+    assert "calls served without a charge" in text, text
 
     clean = dict(unpriced)
     clean["properties"] = dict(unpriced["properties"],
