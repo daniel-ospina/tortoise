@@ -597,9 +597,35 @@ test('#4946 (a11y) wiring: a close after the opener unmounted parks focus on the
   }
 })
 
+test('#4946 (a11y) wiring: a close with the opener still mounted does NOT jump to the heading (EXECUTED)', async () => {
+  // The other half of the fallback branch: when `restoreFocus` SUCCEEDS (the
+  // opener is still mounted, i.e. every Cancel / backdrop / Escape close),
+  // focus must go to the opener — never to the section heading. Without this,
+  // an unconditional fallback would silently land focus on the heading and
+  // regress #2392 on the ordinary close path.
+  const focused = []
+  globalThis.document = {
+    getElementById: (id) => ({ focus: () => focused.push(id) }),
+  }
+  try {
+    const { closeFn, calls, states } = await runOpenClose({ restoreReturns: { restore: {} } })
+    closeFn()
+    assert.equal(calls.restore, 1, 'the close must still ask the opener to take focus back')
+    assert.deepEqual(focused, [], 'a live opener must not be followed by a heading jump')
+    assert.deepEqual(states[0], { open: false, busy: false, error: '', result: null },
+      'the reset must still happen on the live-opener path')
+  } finally {
+    delete globalThis.document
+  }
+})
+
 test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', () => {
   // The fallback in closeGithubDisconnect only works if the heading is
   // focusable; the executed fallback itself is pinned by the test above.
-  assert.match(mainJsx, /<h3 id="settings-github-heading" tabIndex=\{-1\}>/,
+  // Match against the COMMENT-STRIPPED source: a raw `mainJsx` match is
+  // satisfied by the pattern parked in a comment while the real heading loses
+  // its `tabIndex` (#4637). Every other JSX assertion in this file already
+  // reads `stripComments(mainJsx)`.
+  assert.match(stripComments(mainJsx), /<h3 id="settings-github-heading" tabIndex=\{-1\}>/,
     'the heading must carry tabIndex -1 so the close fallback can focus it (#3890 pattern)')
 })
