@@ -4478,7 +4478,7 @@ class TortoiseSDK:
         predicate (it predates #7405 and the eval's UNWRAPPED direct writes rely
         on the outer loop), so a MISCONF on a ``create_point`` write may nest;
         the outer loop engages only once this inner loop EXHAUSTS, bounding it at
-        4 inner x 4 outer attempts.
+        4 inner x 3 outer attempts (12).
 
         Observability (#7405 P1-1): the retry count is accumulated in
         ``self._graph_write_retry_count`` (private, monotonic) so a caller that

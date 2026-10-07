@@ -56,13 +56,17 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #:     write path: ``ERR another write is in progress, retry the query``.
 #:     This is a SEPARATE engine code path from the constraint-path abort
 #:     above (``src/graph_core.rs::execute_query_write``, raised before the
-#:     slot is claimed), and it is the refusal the SDK's own wrapped
-#:     statements actually receive — ``_advance_ep_version``'s ``MERGE`` and
-#:     ``create_point``'s bare ``CREATE`` both take the write path, so without
-#:     this clause a contended ``create_point`` write is raised instead of
-#:     retried (the #7405 loss). Same *did-not-land* semantics as the other
-#:     two: the engine's own concurrency test documents the message as
-#:     retryable, and the message itself instructs a retry.
+#:     slot is claimed), and on the **v6 Rust core** it is the refusal the
+#:     SDK's own wrapped statements actually receive — ``_advance_ep_version``'s
+#:     ``MERGE`` and ``create_point``'s bare ``CREATE`` both take the write
+#:     path, so without this clause a contended ``create_point`` write is
+#:     raised instead of retried (the #7405 loss). Version scope: all three
+#:     clauses are v6 literals, and the repo's pinned
+#:     ``falkordb-server:v4.20.4`` is the older **C** core, which emits
+#:     ``Encountered different graph value when opened key <name>`` for the same
+#:     race. Same *did-not-land* semantics as the other two: the engine's own
+#:     concurrency test documents the message as retryable, and the message
+#:     itself instructs a retry.
 #: All three are **retryable**, but ONLY on the write path — see
 #: :func:`retryable_aborted_write` for the layering, and
 #: :func:`retryable_transient` for why they are deliberately NOT in the

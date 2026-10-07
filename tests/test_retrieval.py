@@ -812,6 +812,8 @@ def test_retryable_transient_predicate_matrix():
     assert retryable_transient(redis_exc.ResponseError(
         "Write query aborted: another write is in progress")) is False
     assert retryable_transient(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is False
+    assert retryable_transient(redis_exc.ResponseError(
         "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
