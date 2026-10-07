@@ -349,7 +349,7 @@ carries none of these magnitudes. **Not in this checkout:** the file lives on br
 - PostgreSQL — [Numeric Types](https://www.postgresql.org/docs/current/datatype-numeric.html),
   [Monetary Types](https://www.postgresql.org/docs/current/datatype-money.html).
 - Crunchy Data — [Working with Money in Postgres](https://www.crunchydata.com/developers/playground/working-with-money-in-postgres).
-- ISO — [ISO 4217:2015](https://www.iso.org/standard/64758.html); [Wikipedia ISO 4217](https://en.wikipedia.org/wiki/ISO_4217).
+- ISO — **ISO 4217:2015** (the currency-code standard; cited by number, because ISO's site rejects automated clients and a link there can never be checked) — see [Wikipedia ISO 4217](https://en.wikipedia.org/wiki/ISO_4217).
 - [Adyen currency codes & minor units](https://docs.adyen.com/development-resources/currency-codes).
 - [Chicago Manual of Style — `M`/`MM`](https://www.chicagomanualofstyle.org/qanda/data/faq/topics/Abbreviations/faq0094.html);
   [Corporate Finance Institute — MM (Millions)](https://corporatefinanceinstitute.com/resources/fixed-income/mm-millions/).
