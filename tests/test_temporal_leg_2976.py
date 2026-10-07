@@ -502,15 +502,25 @@ def test_window_tail_placement_keeps_picks_out_of_the_head():
     # visible head item. That is the shape the tail placement avoids (the
     # proxy does NOT show it is end-to-end worse — see the module
     # docstring); this pins both shapes so a placement regression is caught.
-    base = [(f"cluster{i}", 0.0) for i in range(60)]
-    base[45] = ("gold_a", 0.0)
-    base[50] = ("gold_b", 0.0)
+    #
+    # #3019: both legs carry DISTINCT DESCENDING scores. A constant-scored leg
+    # is membership-only under the tie-agnostic fusion (every member collapses
+    # to rank 0), so with all-zero scores this test would be decided by the
+    # `(-score, id)` tie-break rather than by the leg's RANKS — it would still
+    # pass while exercising nothing about placement.
+    base = [(f"cluster{i}", float(60 - i)) for i in range(60)]
+    base[45] = ("gold_a", 15.0)
+    base[50] = ("gold_b", 10.0)
+    # Counterfactual: the picks fused at leg ranks 0..N (``placement="head"``).
     rank_zero = rrf_fusion(
-        [base, [("gold_a", 0.0), ("gold_b", 0.0)]],
+        [base, [("gold_a", 1.0), ("gold_b", 0.0)]],
         strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
     assert list(rank_zero)[:2] == ["gold_a", "gold_b"]
+    # Shipped wiring: the same picks BELOW the head slice, so their leg rank is
+    # 10/11 and the head keeps ranks 0..9.
     tail = rrf_fusion(
-        [base, [*base[:10], ("gold_a", 0.0), ("gold_b", 0.0)]],
+        [base, [(pid, float(20 - i)) for i, (pid, _) in enumerate(base[:10])]
+         + [("gold_a", 0.0), ("gold_b", -1.0)]],
         strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
     assert list(tail)[:2] == ["cluster0", "cluster1"], list(tail)[:4]
 
