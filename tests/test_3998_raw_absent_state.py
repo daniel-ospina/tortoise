@@ -1122,6 +1122,10 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
     # hold. Python folds the type away (`1 == True`), the graph does not.
     s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) SET s.flag = true", params={"u": RAW_URL})
+    planted_flag = s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.flag", params={"u": RAW_URL}
+    ).result_set[0][0]
+    assert planted_flag is True, "the fixture did not plant the bool"
     same = s.create_source(RAW_URL, "conversation", contentHash="h1", flag=1)
     assert "flag" not in same, (
         f"a DENIED write was acknowledged with a value never stored: "
@@ -1153,6 +1157,24 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     s.create_source(RAW_URL, "document", contentHash="h1")
     with pytest.raises(ValueError, match="server-managed"):
         s.update_entity(RAW_URL, __runId="TENANT_FORGED")
+    # The two routes the entity-update guard does NOT cover (#5196 round 4, P1):
+    # the open DOCUMENT passthrough (#228), and the ingest bundle — `entities`
+    # items are splatted into `create_document(**item)`.
+    with pytest.raises(ValueError, match="server-managed"):
+        s.create_document("doc-forge-5196", "note", __runId="DOC_FORGED")
+    from tortoise.exceptions import BundleValidationError
+
+    with pytest.raises(BundleValidationError) as exc:
+        s.ingest({"entities": [{"type": "document",
+                                "name": "bundle-forge-5196",
+                                "documentKind": "note",
+                                "__runId": "BUNDLE_FORGED"}]})
+    assert any("__runId" in v["message"] for v in exc.value.violations), (
+        exc.value.violations)
+    forged = s._get_proj().g.query(
+        "MATCH (n:Source) WHERE n.__runId IN ['DOC_FORGED','BUNDLE_FORGED'] "
+        "RETURN count(n)").result_set[0][0]
+    assert forged == 0, f"{forged} node(s) carry a forged merge-run token"
     s._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _source_props(s).get("__runId") != "TENANT_FORGED", (
         "a forged merge-run token survived the rebuild")

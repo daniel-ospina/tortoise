@@ -2653,6 +2653,17 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # never a Point property. Reject it here as the fail-closed boundary: a
     # tenant-supplied prop of this name must not be able to reach a writer that
     # could turn it into a structural graph fact on replay.
+    # #5196 round 3/4: the index-merge run token is WRITTEN to the node by
+    # `_upsert_source`'s `run_clause`, so it is DECLARED — but it is
+    # server-minted, so it must be refused at the props boundary. This is the
+    # fail-closed backstop the MCP boundary's comment already claims exists: the
+    # MCP set alone left the OPEN document passthrough writable
+    # (`_upsert_document` passes no `allow_keys`, #228), and it was measured:
+    # `create_document(__runId="DOC_FORGED")` persisted the forged token.
+    if "__runId" in props:
+        raise ValueError(
+            "'__runId' is a server-managed field and cannot be set via props."
+        )
     if "contains_session" in props:
         raise ValueError(
             "'contains_session' is a server-managed capture field and cannot "
@@ -10780,6 +10791,18 @@ class TortoiseSDK:
                     "message": f"ingest: {section}[{index}] {_rsk} is "
                                f"server-managed and cannot be set on bundle items",
                 })
+        # #5196 round 4, P1: `__runId` is the same shape as `_server_id` above —
+        # a server-minted key that the bundle route could still set, because
+        # `entities` items are splatted into `create_document(**item)` and the
+        # document writer is the #228 open passthrough. Measured before this:
+        # a bundle entity carrying `__runId` landed `BUNDLE_FORGED` on a node.
+        # Rejecting it HERE makes the refusal a Phase-1 abort (zero mutation).
+        if "__runId" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] __runId is "
+                           f"server-managed and cannot be set on bundle items",
+            })
         # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
         # is read from the :Source by `resolve_source_versions` and carried in
         # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
@@ -21243,8 +21266,7 @@ class TortoiseSDK:
         """Does `stored` REPRESENT the value this call passed? (create echo only)
 
         Deliberately different from `_same_journal_value` (the journal
-        repeat-safety predicate) in exactly one way, and the difference is the
-        point:
+        repeat-safety predicate) in TWO ways, and the differences are the point:
 
         * CONTAINERS compare structurally, whatever Python type they came back
           as. `_persist_extra_props` stores a `tuple` as an array and the reader
@@ -24706,7 +24728,8 @@ class TortoiseSDK:
         # is RECORDED (fail-safe polarity: an unnecessary record is cheaper
         # than a lost change).
         try:
-            payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
+            payload = {k: v for k, v in ev.items()
+                       if k not in ("_merge_run_id", "__runId")}
             _new_hash = payload.get("contentHash")
             _old_hash = (_stored_before or {}).get("contentHash")
             if _stored_before is None or (not _old_hash and _new_hash):
