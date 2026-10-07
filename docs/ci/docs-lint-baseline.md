@@ -53,8 +53,10 @@ alone let a new dead link that **timed out** instead of erroring pass the
 required check. Both maps are now parsed, on both the `check` and the `update`
 side, and `timeout_map` is a required key of the report — so the differ sees
 exactly the findings that make lychee exit non-zero. The committed snapshot as
-generated records no timeout entries, so a timed-out link in a changed file
-fails the check until a re-baseline records it (the fail-closed direction).
+generated records no timeout entries, so a **new** timed-out link in a changed
+file fails the check until a re-baseline records it (the fail-closed direction).
+A target that IS already in the snapshot carries no status in its key, so a
+timeout on it keys to its recorded entry and stays known.
 The two halves are compared differently: a
 markdownlint finding is counted as a **multiset**, because how many times a rule
 fires in a file is a property of that file, so several findings can share a key
@@ -76,10 +78,14 @@ Two measured instances motivated it:
 ## The end state — a ceiling, never a floor
 
 This snapshot is **not an amnesty**, and it is not a fix. It is bounded, and the
-bound is enforced: `tests/test_docs_lint_baseline.py` pins a **ceiling** on both
-counts, so a PR cannot append the findings it introduces and bump
-`snapshot.counts` to make its own change pass. The snapshot may shrink freely;
-growing it requires raising that ceiling in the same change, out loud.
+bound is enforced: `tests/test_docs_lint_baseline.py` pins a **content digest**
+of each list, so a PR cannot append the findings it introduces and bump
+`snapshot.counts` to make its own change pass. The snapshot may shrink freely; an
+append, a delete or a swap all require raising a pinned digest in the same
+change, out loud. A **ceiling** on each count is pinned alongside the digests —
+EXACT for the deterministic markdownlint half, and the maximum observed across
+generations for the drift-prone lychee half, which therefore has a little slack —
+so the ceiling is a second, PARTIAL bound and the digest is the universal one.
 
 - Every finding removed from the codebase must be removed from the snapshot.
 - The entry count must never grow. A genuinely new entry is a new failure, not a
@@ -89,8 +95,10 @@ growing it requires raising that ceiling in the same change, out loud.
   runs) — so slack above the observed range cannot hide an append. The same test
   pins a **content digest** of each list, because a ceiling bounds only the
   count: a PR could otherwise delete one legitimate entry and append the finding
-  it introduced, keeping the count constant. Append, delete and swap therefore
-  all require a ceiling *and* a digest raised in the same change, out loud.
+  it introduced, keeping the count constant. So the **digest** is what every
+  append, delete and swap must raise in the same change, out loud; a growth must
+  additionally clear the ceiling — and for lychee, where that ceiling carries
+  slack, the digest is the only bound that bites.
 - **#7534** owns the burn-down. Note its **population**: this snapshot covers ALL
 tracked markdown — 11,238 findings in 650 of the 838 tracked files. The `docs/`
 subtree holds 8,980 of those in 514 files; the remaining 2,258 in 136 files sit

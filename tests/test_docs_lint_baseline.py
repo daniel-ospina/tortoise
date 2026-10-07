@@ -1319,6 +1319,20 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
     git("commit", "-qm", "pure rename")
     assert run_guard(pr_step, {"BASE_SHA": rename_base}) == 0
     assert run_guard(mh_step, {}) == 0
+    # A `.md` containing a NUL byte is BINARY to git, which then emits `Binary
+    # files ... differ` with NO `+` lines at all — while cli2 still lints the file
+    # and honours a directive inside it. The guard passes `--text` for exactly
+    # this, and this case is the only thing that makes that flag load-bearing:
+    # measured both ways, the guard is SILENT on this file without it (#7542
+    # review round 8 found the flag unpinned — `grep -rn -- '--text' tests/` had
+    # no reference, so all 60 cases passed with it removed).
+    nul_base = git("rev-parse", "HEAD").stdout.strip()
+    nul = repo / "docs" / "nul.md"
+    nul.write_bytes(b"# a\n\x00\n<!-- markdownlint-disable MD001 -->\n### b\n")
+    git("add", "-A")
+    git("commit", "-qm", "nul-bearing file with a suppression directive")
+    assert run_guard(pr_step, {"BASE_SHA": nul_base}) != 0
+    assert run_guard(mh_step, {}) != 0
     # A LARGE diff must not skip the guard: `grep -q` in a PIPE exited at its first
     # match, and under `set -o pipefail` the SIGPIPE to `git diff` made the
     # pipeline non-zero, so a large markdown diff reported no directive at all.
@@ -1370,16 +1384,91 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     # as if it pinned the property; a vacuous assert is worse than none. #7542
     # review round 6 called it and this removes it rather than re-wording it.)
 
-    for name in ("Link check (changed files)", "Link check (main health, changed files)"):
-        with_block = _by_name(name)["with"]
-        assert with_block.get("format") == "json", name
-        assert with_block.get("fail") is False, name
-        assert with_block.get("failIfEmpty") is False, name
-        assert "lychee" in str(with_block.get("output", "")), name
+    # Exact per-step pairing. Both loops here used to accept EITHER file on
+    # EITHER differ (and only a substring for the action's `output`), so a
+    # copy-paste that made the PR differ read the main-health report passed —
+    # and each differ's expected-file count must come from ITS OWN detector, or
+    # the cardinality check validates the wrong population (#7542 review round 8).
+    # A mismatch does fail closed at runtime (a missing file is rc 2), so this is
+    # a lost regression net rather than a hole.
+    pairing = (
+        (
+            "Link check (changed files)",
+            "Docs lint baseline (changed files)",
+            "lychee-pr.json",
+            "steps.changed.outputs.count",
+        ),
+        (
+            "Link check (main health, changed files)",
+            "Docs lint baseline (main health)",
+            "lychee-mh.json",
+            "steps.changed_mh.outputs.count",
+        ),
+    )
+    for action_name, differ_name, report, count_expr in pairing:
+        with_block = _by_name(action_name)["with"]
+        assert with_block.get("format") == "json", action_name
+        assert with_block.get("fail") is False, action_name
+        assert with_block.get("failIfEmpty") is False, action_name
+        assert str(with_block.get("output", "")).endswith(report), action_name
+        step = _by_name(differ_name)
+        assert f'--lychee-output "$RUNNER_TEMP/{report}"' in step["run"], differ_name
+        assert step["env"]["EXPECTED_MD_FILES"] == "${{ " + count_expr + " }}", differ_name
 
-    for name in ("Docs lint baseline (changed files)", "Docs lint baseline (main health)"):
-        run = _by_name(name)["run"]
-        assert "lychee-pr.json" in run or "lychee-mh.json" in run
+
+def test_normalize_path_strips_the_ci_list_prefix():
+    """The list the workflow hands the differ is `./`-prefixed (see the `docs` job).
+
+    `parse_markdownlint` runs this on every finding path, so a no-op version
+    re-keys everything: `./docs/x.md` then never equals the snapshot's
+    `docs/x.md`, and every finding in the population reads as NEW. That is
+    fail-CLOSED but a wholesale false red, and the 60-case suite did not see it
+    (#7542 review round 8 — a no-op mutant survived).
+    """
+    assert dlb.normalize_path("./docs/x.md") == "docs/x.md"
+    assert dlb.normalize_path("././docs/x.md") == "docs/x.md"
+    assert dlb.normalize_path("docs/x.md") == "docs/x.md"
+
+
+def test_collapse_makes_a_reflow_not_a_new_finding():
+    """cli2's `[Context: ...]` detail is copied from the SOURCE line.
+
+    Reflowing a paragraph changes the spacing inside that detail without changing
+    what is wrong, so collapsing whitespace keeps the key stable and the differ
+    does not charge a reflow as a new finding — the churn #7435 exists to stop. A
+    no-op mutant survived all 60 cases (#7542 review round 8).
+    """
+    assert dlb._collapse("a  b") == "a b"
+    assert dlb._collapse("a\n  b") == "a b"
+    assert dlb._collapse(" a ") == "a"
+
+
+def test_a_generated_marker_names_the_generator_without_a_map_entry(tmp_path: Path):
+    """The FIX-TARGET contract is not only the `GENERATED_DOCS` map.
+
+    A doc carrying a `generated_from:` marker names its generator as the fix
+    target even when the path is not mapped, and falls back to a generic message
+    when the head names no `tools/*.py`. Disabling that sniff still passed every
+    case (#7542 review round 8), so the contract rested on nothing — and it is
+    deliberately latent, which is exactly why it needs a test rather than a
+    reader's trust.
+    """
+    doc = tmp_path / "docs" / "gen.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "---\ngenerated_from: tools/thing.py\n---\n\n# Gen\n", encoding="utf-8"
+    )
+    assert dlb.generated_target("docs/gen.md", tmp_path) == "tools/thing.py"
+    # The marker without a `tools/*.py` reference still names a generator target.
+    doc.write_text(
+        "---\ngenerated_from: something else\n---\n\n# Gen\n", encoding="utf-8"
+    )
+    named = dlb.generated_target("docs/gen.md", tmp_path)
+    assert named is not None and named.startswith("<a generator"), named
+    # No marker at all is not generated, and a missing file is not generated.
+    doc.write_text("# Gen\n\nhand written\n", encoding="utf-8")
+    assert dlb.generated_target("docs/gen.md", tmp_path) is None
+    assert dlb.generated_target("docs/nope.md", tmp_path) is None
 
 
 def test_snapshot_exists_is_consistent_and_announces_its_end_state():
