@@ -560,6 +560,13 @@ def test_gate_fails_closed_on_a_non_test_file_in_the_tests_field() -> None:
         ["config/v4-mechanisms.yml"],
         ["README.md"],
         ["tests/__init__.py"],
+        # ⚠️ These two discriminate the OPERANDS (cycle-13 P1): with
+        # `startswith("test")` (no underscore), `tools/testdb_canary_classify.py`
+        # was accepted as a test; with `endswith("test.py")` (no underscore),
+        # `tests/conftest.py` was. Both are real repo files and neither is
+        # collected by pytest, so both must be rejected.
+        ["tools/testdb_canary_classify.py"],
+        ["tests/conftest.py"],
     ):
         row = {
             "id": "x",
@@ -761,6 +768,7 @@ def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
     }
     cases = {
         "row is not a mapping": (["not a dict"], "not a mapping"),
+        "id missing": ([{"name": "x", "state": "not-implemented", "tracking_issue": 5006}], "no string id"),
         "id is not a string": ([{**good, "id": 1}], "no string id"),
         "id is empty": ([{**good, "id": ""}], "no string id"),
         "duplicate id": ([good, dict(good)], "duplicate id"),
@@ -801,6 +809,108 @@ def test_gate_fails_closed_on_a_descriptive_state() -> None:
         ]
     )
     assert any("NEITHER" in e for e in errors), errors
+
+
+def test_gate_accepts_the_issue_number_one_and_a_symlinked_root(tmp_path) -> None:
+    """Positive pins: the accepted LOWER bound, and a symlinked root.
+
+    `tracking_issue: 1` is a legitimate issue number — cycle 12 pinned the `0`
+    boundary from above, but nothing asserted that `1` is ACCEPTED, so mutating
+    `issue <= 0` to `issue <= 1` survived (cycle-13 P2).
+
+    A symlinked `root` must resolve, not report every declared path absent —
+    mutating `root.resolve()` to `root` survived (cycle-13 P2), and the failure
+    direction here is a WRONG verdict (a present mechanism claimed absent).
+    """
+    assert gate_errors(
+        [
+            {
+                "id": "x",
+                "name": "x",
+                "declared_in": ["config/v4-mechanisms.yml"],
+                "state": "not-implemented",
+                "tracking_issue": 1,
+            }
+        ]
+    ) == []
+
+    real = tmp_path / "real"
+    (real / "src").mkdir(parents=True)
+    (real / "src" / "impl.py").write_text("x = 1\n")
+    (real / "docs").mkdir()
+    (real / "docs" / "design.md").write_text("x\n")
+    (real / "tests").mkdir()
+    (real / "tests" / "test_x.py").write_text("x\n")
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["src/impl.py"],
+        "tests": ["tests/test_x.py"],
+    }
+    assert gate_errors([row], root=linked) == []
+
+
+def test_gate_reports_exactly_one_violation_for_a_neither_row() -> None:
+    """The NEITHER branch must not ALSO report a tracking-issue error.
+
+    Dropping the `continue` after the NEITHER branch survived, because every
+    assertion was `any(...)`-shaped: the row stayed red while gaining a
+    spurious "not-implemented with no real tracking_issue" for a state that is
+    not `not-implemented` (cycle-13 P2).
+    """
+    errors = gate_errors(
+        [
+            {
+                "id": "x",
+                "name": "x",
+                "declared_in": ["config/v4-mechanisms.yml"],
+                "state": "maybe",
+            }
+        ]
+    )
+    assert len(errors) == 1, errors
+    assert "NEITHER" in errors[0]
+
+
+def test_gate_does_not_swallow_an_unlisted_probe_exception(monkeypatch) -> None:
+    """The probe converts only the THREE named classes into a verdict.
+
+    Broadening the `except` to `Exception` survived, silently turning any
+    unexpected error into "does not exist" (cycle-13 P2).
+    """
+    real_resolve = Path.resolve
+
+    def boom(self, *args, **kwargs):
+        if self.name == "fanout.py":
+            raise TypeError("not a filesystem error")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    with pytest.raises(TypeError):
+        gate_errors(
+            [
+                {
+                    "id": "x",
+                    "name": "x",
+                    "declared_in": ["config/v4-mechanisms.yml"],
+                    "state": "implemented",
+                    "code": ["tortoise/fanout.py"],
+                    "tests": ["tests/test_fanout_cap.py"],
+                }
+            ]
+        )
+
+
+def test_load_registry_refuses_a_non_mapping_document(tmp_path) -> None:
+    """`load_registry` guards the document shape (cycle-13 P2)."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("- a\n- b\n")
+    with pytest.raises(AssertionError):
+        load_registry(bad)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
