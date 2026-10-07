@@ -2745,21 +2745,22 @@ def test_sweep_resolutions_clears_nothing_on_a_blind_run():
     assert sweep_resolutions(blind_with_evidence) == []
 
 
+
 def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch):
     """#5331 / #4495: the backup sweep is the PRODUCTION caller of the graph
-    storage meter.
+    storage meter — ONE reading per ORG per period.
 
-    `graph_storage.measure_and_record_graph_storage` shipped in #5696 and had
+    `graph_storage.measure_and_record_graph_storage` shipped in #5696 with
     **zero** production callers — no scheduler, no cron, no request path — so
-    no org-period ever carried a storage figure. The owner ruled on
-    2026-09-27 (#4495) that storage is denominated in MB/GB with purchased
-    overage, REPLACING the node cap; a byte allowance can only be enforced
-    against a byte reading, so without a caller producing that reading the
-    ruling is unimplementable. The sweep already enumerates orgs and opens a
-    projection per graph, so it is the natural (and near-free) seam.
+    no org-period ever carried a storage figure. The owner ruled on 2026-09-27
+    (#4495) that storage is denominated in MB/GB with purchased overage,
+    REPLACING the node cap; a byte allowance can only be enforced against a
+    byte reading, so with no caller the ruling is unimplementable.
 
-    This is the tripwire for the exact regression that left the meter dormant:
-    it FAILS if the sweep stops measuring.
+    This is the tripwire for that dormancy. It FAILS if the sweep stops
+    measuring, and — critically — it runs the **REAL** meter over the exact
+    object the sweep hands over, because a spy on the recording function alone
+    verifies the SHAPE of a call and never its EFFECT.
     """
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
@@ -2775,56 +2776,119 @@ def test_backup_sweep_is_the_storage_meter_caller_5331(shared_proj, monkeypatch)
         import tortoise.backup_sweep as bs_mod
         from tortoise.graph_storage import measure_projection_storage
 
-        calls: list[tuple] = []
-        real_meter = bs_mod.measure_and_record_graph_storage
+        seen: list[tuple] = []
 
-        def _capture(p, org_id, **kw):
-            # Capture, then delegate to the REAL meter so the ledger path is
-            # not bypassed.
-            calls.append((org_id, p))
-            return real_meter(p, org_id, **kw)
+        def _capture(p, **kw):
+            # Capture, then delegate to the REAL meter — never bypass it.
+            seen.append((p,))
+            return measure_projection_storage(p, **kw)
 
-        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _capture)
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _capture)
         r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                              config=_config())
         assert r["results"]["team_st"]["status"] == "backed_up", r["results"]
 
-        # 1. The meter is CALLED — once per swept graph, for the right org.
-        assert len(calls) == 1, (
-            f"storage meter called {len(calls)}x, want 1 — the sweep stopped "
+        # 1. The meter IS called, once for this org's one graph.
+        assert len(seen) == 1, (
+            f"storage meter called {len(seen)}x, want 1 — the sweep stopped "
             f"being the meter's production caller (#5331)")
-        org_seen, proj_seen = calls[0]
-        assert org_seen == "team_st", org_seen
 
         # 2. ⛔ THE P0 TRIPWIRE. The meter reads `proj.db` and `proj.graph_name`
         #    — NOT `.g`. A projection carrying only `.g` yields a FAILED reading
-        #    (`"no graph handle / graph name supplied"`) and records NOTHING, so
-        #    the whole feature is a silent no-op. Spying on
-        #    `measure_and_record_graph_storage` alone cannot see that: it
-        #    replaces the very function whose argument handling is in question.
-        #    So run the REAL meter over the exact object the sweep handed over.
+        #    ("no graph handle / graph name supplied") and records NOTHING, so
+        #    the feature is a silent no-op. A spy on the recording function
+        #    cannot see that: it replaces the very function whose argument
+        #    handling is in question. So run the REAL meter over the real object.
+        proj_seen = seen[0][0]
         reading = measure_projection_storage(proj_seen)
         assert reading.ok, (
             f"the sweep handed the meter a projection it cannot read: "
-            f"{reading.error!r} — expected `db` and `graph_name` on it, got "
+            f"{reading.error!r} — it reads `db`/`graph_name`, got "
             f"{sorted(vars(proj_seen))}")
         assert reading.graph_name == _team_graph("team_st"), reading.graph_name
-
-        # 3. And the reading is for THIS org's own graph — never a foreign one.
-        measured_graph = getattr(proj_seen, "g", None)
-        assert measured_graph is not None, "meter got a projection with no graph"
-        assert getattr(measured_graph, "name", None) == _team_graph("team_st"), (
-            f"meter measured {getattr(measured_graph, 'name', None)!r}, expected "
-            f"{_team_graph('team_st')!r} — the reading is on the wrong graph")
+        assert getattr(getattr(proj_seen, "g", None), "name", None) == \
+            _team_graph("team_st"), "the reading is on the wrong graph"
 
 
-def test_backup_sweep_survives_a_failing_storage_meter_5331(shared_proj, monkeypatch):
-    """#5331: the storage measurement is FAIL-SOFT — a metering fault must never
-    abort a backup.
+def test_sweep_records_one_summed_storage_reading_per_org_5331(shared_proj, monkeypatch):
+    """#5331: a MULTI-GRAPH org gets ONE summed reading, not last-graph-wins.
 
-    Backup durability outranks metering: a dropped storage reading costs one
-    period's overage accounting (recoverable on the next sweep), whereas an
-    aborted backup is an unprotected graph. This pins that precedence.
+    The metering ledger keys on ``(org_id, period_start)`` — a GAUGE with no
+    graph dimension — and `_sweep_graph_list` puts `default` FIRST. So a
+    per-graph write lets a small or empty custom graph overwrite the default's
+    bytes, silently understating the org. An org's storage is the SUM of its
+    graphs. This test fails if the aggregation is dropped (the recorded total
+    would then be whichever graph was visited last).
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_sum', tier:'pro'})")
+        proj.db.select_graph(_team_graph("team_sum")).query(
+            "CREATE (p:Point {id:'pt-sum', content:'s', pointKind:'claim'})")
+        ns = "team_team_sum_g_c1"
+        reg.query("CREATE (g:Graph {id:'g_c1', org_id:'team_sum', kind:'custom',"
+                  " namespace:$ns, status:'active'})", params={"ns": ns})
+        proj.db.select_graph(ns).query(
+            "CREATE (p:Point {id:'pt-c1', content:'c', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import GraphStorageReading, measure_projection_storage
+
+        per_graph: list[str] = []
+        real_measure = measure_projection_storage
+
+        def _fake_measure(p, **kw):
+            name = getattr(p, "graph_name", "")
+            per_graph.append(name)
+            # Distinct, known values so the SUM is distinguishable from the LAST
+            # graph's value (the bug: last-graph-wins would record 3.0, not 8.0).
+            total = 5.0 if name == _team_graph("team_sum") else 3.0
+            return GraphStorageReading(
+                graph_name=name, total_mb=total, samples=100, repeats=1,
+                readings_mb=(total,), min_mb=total, max_mb=total,
+                spread_mb=0.0, indices_mb=None, node_attributes_mb={},
+                ok=True, error=None, measured_at="2026-10-07T00:00:00Z")
+
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _fake_measure)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                             config=_config())
+        assert r["results"]["team_sum"]["status"] == "backed_up", r["results"]
+
+        # Both graphs of the org were measured...
+        assert len(per_graph) == 2, per_graph
+        # ...and EXACTLY ONE reading was written for the org (the ledger's grain).
+        assert len(recorded) == 1, (
+            f"expected 1 per-org ledger write, got {len(recorded)} — per-graph "
+            f"writes make the last graph win (#5331)")
+        org_id, reading = recorded[0]
+        assert org_id == "team_sum", org_id
+        # THE ASSERTION THAT CATCHES LAST-GRAPH-WINS: the SUM, not 3.0.
+        assert reading.total_mb == 8.0, (
+            f"recorded {reading.total_mb} MB — expected the SUM 8.0; "
+            f"recording only the last graph's 3.0 would understate the org")
+
+        assert real_measure is not None  # keep the real import meaningful
+
+
+def test_sweep_logs_and_survives_a_failed_storage_reading_5331(
+        shared_proj, monkeypatch, caplog):
+    """#5331: a FAILED reading is VISIBLE and never aborts the backup.
+
+    Two guards in one, because both failures were real: (a) the meter is TOTAL
+    by contract, so a discarded non-ok reading is a silent no-op — the exact way
+    the meter stayed dormant (DEBUG-only logging); the failure must reach a
+    WARNING. (b) Backup durability outranks metering: the backup must still
+    complete.
     """
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
@@ -2833,19 +2897,37 @@ def test_backup_sweep_survives_a_failing_storage_meter_5331(shared_proj, monkeyp
         proj = shared_proj
         reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query("CREATE (t:Team {id:'team_sf', tier:'pro'})")
-        team_g = proj.db.select_graph(_team_graph("team_sf"))
-        team_g.query("CREATE (p:Point {id:'pt-sf', content:'s', pointKind:'claim'})")
+        proj.db.select_graph(_team_graph("team_sf")).query(
+            "CREATE (p:Point {id:'pt-sf', content:'s', pointKind:'claim'})")
         store = MemoryStorage()
 
         import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import _failed_reading
 
-        def _boom(p, org_id, **kw):
-            raise RuntimeError("injected metering failure")
+        def _fail(p, **kw):
+            return _failed_reading(
+                getattr(p, "graph_name", ""), 100, 1,
+                "2026-10-07T00:00:00Z", "injected measurement failure")
 
-        monkeypatch.setattr(bs_mod, "measure_and_record_graph_storage", _boom)
-        r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
-                             config=_config())
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _fail)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
 
-        # The backup still happened, despite the meter exploding.
+        import logging
+        with caplog.at_level(logging.WARNING, logger="tortoise.backup_sweep"):
+            r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                 config=_config())
+
+        # (b) the backup still happened despite the failed reading.
         assert r["results"]["team_sf"]["status"] == "backed_up", r["results"]
-        assert store.list("backups/"), "no backup object written under a failing meter"
+        assert store.list("backups/"), "no backup object written under a failed meter"
+
+        # (a) the failure is LOUD, and the failed reading is not recorded.
+        assert "storage metering FAILED" in caplog.text, (
+            "a failed storage reading must log at WARNING — a silent no-op is "
+            f"how the meter stayed dormant. Got: {caplog.text!r}")
+        assert recorded == [], (
+            "a FAILED reading must not be written to the ledger — a fabricated "
+            "zero would be read as a real storage figure")

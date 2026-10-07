@@ -312,6 +312,68 @@ def _failed_reading(graph_name: str, samples: int, repeats: int,
     )
 
 
+def combine_graph_storage_readings(
+        readings: Any, *, graph_name: str = "") -> GraphStorageReading | None:
+    """Fold per-graph readings into ONE reading at the ledger's grain (#5331).
+
+    The metering ledger keys on ``(org_id, period_start)`` — a GAUGE with no
+    graph dimension — so recording each graph of an org separately makes the
+    LAST one win. An org's storage is the SUM of its graphs', so a multi-graph
+    org would otherwise be understated by a label that silently replaces the
+    default graph's bytes with a small or empty custom graph's.
+
+    Sums ``total_mb``/``indices_mb``, takes ``min_mb`` as the min and
+    ``max_mb`` as the sum of maxima, and re-derives ``spread_mb``. Returns
+    ``None`` for an empty input (nothing to record), and a FAILED reading when
+    every input failed — so a partial failure still records the graphs that
+    did measure, and a total failure is visible rather than a silent zero.
+    """
+    ok = [r for r in readings if getattr(r, "ok", False)]
+    if not readings:
+        return None
+    if not ok:
+        first = readings[0]
+        return _failed_reading(
+            graph_name or getattr(first, "graph_name", ""),
+            getattr(first, "samples", SAMPLES_DEFAULT),
+            getattr(first, "repeats", 1),
+            getattr(first, "measured_at", ""),
+            "; ".join(
+                f"{getattr(r, 'graph_name', '?')}: {getattr(r, 'error', 'failed')}"
+                for r in readings)[:300],
+        )
+    total = sum(float(r.total_mb) for r in ok)
+    lo = min(float(r.min_mb) for r in ok)
+    hi = sum(float(r.max_mb) for r in ok)
+    indices = [float(r.indices_mb) for r in ok
+               if getattr(r, "indices_mb", None) is not None]
+    merged_nodes: dict[str, float] = {}
+    for r in ok:
+        for k, v in (getattr(r, "node_attributes_mb", None) or {}).items():
+            merged_nodes[k] = merged_nodes.get(k, 0.0) + float(v)
+    first = ok[0]
+    return GraphStorageReading(
+        graph_name=graph_name or str(getattr(first, "graph_name", "")),
+        total_mb=total,
+        samples=int(getattr(first, "samples", SAMPLES_DEFAULT)),
+        repeats=int(getattr(first, "repeats", 1)),
+        # Per-repeat totals have no meaning once summed across graphs — the
+        # summed total is the whole figure; keep the range honestly labeled.
+        readings_mb=tuple(float(r.total_mb) for r in ok),
+        min_mb=lo,
+        max_mb=hi,
+        spread_mb=max(0.0, hi - lo),
+        indices_mb=(sum(indices) if indices else None),
+        node_attributes_mb=merged_nodes,
+        ok=True,
+        error=None,
+        measured_at=str(getattr(first, "measured_at", "")),
+        estimated=True,
+        excludes=tuple(getattr(first, "excludes", EXCLUDED_OVERHEAD)),
+        precision_note=str(getattr(first, "precision_note", PRECISION_NOTE)),
+    )
+
+
 def measure_graph_storage(client: Any, graph_name: Any, *,
                           samples: Any = SAMPLES_DEFAULT,
                           repeats: Any = 1) -> GraphStorageReading:
