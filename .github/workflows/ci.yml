@@ -762,6 +762,19 @@ jobs:
           # stays a non-failure), and it matches zero characters, so the bare
           # form is unaffected.
           #
+          # TWO greps, because cli2's directive regexes are not all line-scoped.
+          # `disable`/`disable-line`/`disable-next-line` are matched line by line,
+          # so the opener must sit on the same added line. `configure-file` — and
+          # `capture`/`restore`, which re-arm a captured disabled state — are
+          # matched against the WHOLE document joined with newlines, and their
+          # `\s*` spans them, so `<!--\nmarkdownlint-configure-file {...}\n-->`
+          # is honoured by cli2 while a same-line opener anchor never sees it.
+          # Measured end-to-end before this split: the guard exited 0, cli2
+          # reported `0 issues`, and the differ read `0 new` on a genuinely new
+          # finding. The second grep therefore drops the opener anchor and accepts
+          # that prose naming one of those three words is a false positive — this
+          # is whole-file suppression, so it fails CLOSED.
+          #
           # `--text` because git treats a `.md` containing a NUL byte as BINARY
           # and prints `Binary files ... differ` with no `+` lines at all, while
           # cli2 still lints that file and honours a directive inside it
@@ -772,7 +785,8 @@ jobs:
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line)' "$RUNNER_TEMP/added-md.txt" \
+             || grep -qiE '^\+.*markdownlint-(configure-file|capture|restore)' "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi
@@ -900,7 +914,8 @@ jobs:
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line)' "$RUNNER_TEMP/added-md-mh.txt" \
+             || grep -qiE '^\+.*markdownlint-(configure-file|capture|restore)' "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi

@@ -1333,6 +1333,52 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
     git("commit", "-qm", "nul-bearing file with a suppression directive")
     assert run_guard(pr_step, {"BASE_SHA": nul_base}) != 0
     assert run_guard(mh_step, {}) != 0
+    # cli2 matches `configure-file` against the WHOLE document joined with
+    # newlines (its regex is `<!--\s*markdownlint-(…|configure-file)`), so a
+    # MULTI-LINE comment suppresses with the opener on a different line and a
+    # same-line `<!--` anchor never sees it. Measured end-to-end before the split:
+    # guard exit 0, cli2 `0 issues`, differ `0 new` on a genuinely new MD001
+    # (#7542 review round 9 — the one live fail-open the review found).
+    cf_base = git("rev-parse", "HEAD").stdout.strip()
+    doc.write_text(
+        '# a\n\n<!--\nmarkdownlint-configure-file { "MD001": false }\n-->\n### b\n',
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "multi-line configure-file")
+    assert run_guard(pr_step, {"BASE_SHA": cf_base}) != 0
+    assert run_guard(mh_step, {}) != 0
+    # The single-line form must keep failing too (the split must not trade one
+    # for the other), and it is the reason the alternation is tested at all:
+    # removing `|configure-file` from BOTH regexes left the whole suite green.
+    single_base = git("rev-parse", "HEAD").stdout.strip()
+    doc.write_text(
+        '# a\n\n<!-- markdownlint-configure-file { "MD001": false } -->\n### b\n',
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "single-line configure-file")
+    assert run_guard(pr_step, {"BASE_SHA": single_base}) != 0
+    assert run_guard(mh_step, {}) != 0
+    # `capture`/`restore` re-arm a captured DISABLED state, so an added `restore`
+    # suppresses a finding that an `enable` had brought back — and it is in the
+    # same cross-line class, hence the second grep. The base already carries the
+    # disable/enable pair, so only `capture` and `restore` are added here.
+    doc.write_text(
+        "# a\n\n<!-- markdownlint-disable MD001 -->\n"
+        "<!-- markdownlint-enable MD001 -->\n### b\n",
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "disable then enable")
+    restore_base = git("rev-parse", "HEAD").stdout.strip()
+    doc.write_text(
+        "# a\n\n<!-- markdownlint-disable MD001 -->\n"
+        "<!-- markdownlint-capture -->\n"
+        "<!-- markdownlint-enable MD001 -->\n"
+        "\n<!-- markdownlint-restore -->\n### b\n",
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "capture/restore re-arms a suppression")
+    assert run_guard(pr_step, {"BASE_SHA": restore_base}) != 0
+    assert run_guard(mh_step, {}) != 0
     # A LARGE diff must not skip the guard: `grep -q` in a PIPE exited at its first
     # match, and under `set -o pipefail` the SIGPIPE to `git diff` made the
     # pipeline non-zero, so a large markdown diff reported no directive at all.
@@ -1376,9 +1422,23 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     differ 123 for both "found issues" and "fatal error".
     """
     changed_lint = _by_name("Markdownlint (changed files)")["run"]
-    assert "mdlint-pr.txt" in changed_lint
     main_lint = _by_name("Markdownlint (main health, changed files)")["run"]
-    assert "mdlint-mh.txt" in main_lint
+    for lint, report in (
+        (changed_lint, "mdlint-pr.txt"),
+        (main_lint, "mdlint-mh.txt"),
+    ):
+        # The REDIRECT is the load-bearing part: `cat "$RUNNER_TEMP/mdlint-*.txt"`
+        # also names the file, so a substring assertion stays green with the whole
+        # capture deleted. And the capture must be exempt from `-e` — GitHub's
+        # default `run:` shell is `bash -e`, cli2 exits 123 under xargs when it
+        # finds issues, so without the `set +e` wrapper the STEP fails and the
+        # differ never runs, restoring the pre-#7435 behaviour where every
+        # inherited finding reds the check. Both mutants survived the full suite
+        # (#7542 review round 9).
+        assert f'> "$RUNNER_TEMP/{report}" 2>&1' in lint, report
+        assert "set +e" in lint and "set -e" in lint, report
+        # ... and the wrapper must BRACKET the xargs, not merely appear somewhere.
+        assert "xargs" in lint[lint.index("set +e") :], report
     # (No `assert ".rc" not in lint` here. No step writes a `.rc` file — the status
     # is captured in a shell variable — so that assert could not fail and only read
     # as if it pinned the property; a vacuous assert is worse than none. #7542
