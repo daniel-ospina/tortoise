@@ -45,6 +45,12 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
+from .graph_storage import (
+    _failed_reading,
+    combine_graph_storage_readings,
+    measure_projection_storage,
+    record_graph_storage,
+)  # #5331 metering ledger
 from .hosted_backup import (
     _delete_backup_objects,
     _is_supabase_source,
@@ -616,6 +622,103 @@ def _sweep_graph_list(source, org_id: str) -> list[dict[str, Any]]:
     return graphs
 
 
+def _record_org_storage(db, org_id: str, graphs: list[dict[str, Any]]) -> None:
+    """Measure every graph of *org_id* and record ONE reading (#5331).
+
+    The metering ledger keys on ``(org_id, period_start)`` — a GAUGE with no
+    graph dimension — so this runs ONCE per org, over the SUM of the org's
+    graphs. Recording per graph would make the LAST graph visited win, and
+    ``_sweep_graph_list`` puts ``default`` first: a data-rich default would be
+    replaced by a small or empty custom graph's bytes, understating exactly the
+    cap input this exists to supply.
+
+    ⛔ The projection MUST carry ``db`` and ``graph_name``: the meter reads
+    ``proj.db`` and ``proj.graph_name``, NOT ``.g`` (``measure_projection_storage``).
+    A projection with only ``.g`` yields a FAILED reading and records nothing,
+    silently — so do not "simplify" it away.
+
+    Owner ruling (2026-09-27, #4495/#5331): storage is denominated in MB/GB with
+    purchased overage, REPLACING the node cap. A byte allowance can only be
+    enforced against a byte reading; the meter merged in #5696 had ZERO
+    production callers, so no org-period ever carried a figure. This is it.
+
+    Best-effort by contract — metering must NEVER abort a backup. Backup
+    durability outranks metering: a dropped reading recovers on the next sweep,
+    an aborted backup is an unprotected graph.
+    """
+    readings = []
+    try:
+        for graph in graphs:
+            gname = graph.get("graph_name") or ""
+            if not gname:
+                # ⛔ A skipped graph must FAIL the aggregate, not vanish from it.
+                # Dropping it here would leave `len(ok) == len(readings)` and
+                # record the survivors' sum as the org's figure — the same
+                # silent understatement the aggregator is guarded against, just
+                # one layer up (an `_invalid` custom row emits graph_name="").
+                readings.append(_failed_reading(
+                    str(graph.get("graph_id") or "?"), 0, 0, "",
+                    "no graph name resolved (invalid Graph row)"))
+                continue
+            try:
+                g = db.select_graph(gname)
+            except Exception as e:
+                logger.warning(
+                    "storage metering: cannot open %s/%s — skipping", org_id, gname,
+                    exc_info=True)
+                readings.append(_failed_reading(gname, 0, 0, "", e))
+                continue
+            # NOT wrapped in try/except-of-always: a non-ok reading is the real
+            # failure signal and must be visible (a discarded reading is how
+            # this meter stayed dormant). The meter is total by contract; the
+            # guard below is belt-and-braces for an unexpected raise.
+            try:
+                readings.append(measure_projection_storage(
+                    SimpleNamespace(g=g, db=db, graph_name=gname)))
+            except Exception as e:
+                # ⛔ THE THIRD SKIP PATH — and until review round 1 it was the ONE
+                # that dropped the graph instead of failing the aggregate. Its two
+                # siblings above append `_failed_reading` for exactly this reason:
+                # with nothing appended, `len(ok) == len(readings)`, so `combine`
+                # returns ok=True and the SURVIVORS' sum is written as the ORG's
+                # figure — the same silent understatement the aggregator and the
+                # guard at the top of this loop exist to prevent. MEASURED before
+                # this fix: a two-graph org whose data-rich graph raised recorded
+                # `('org_a', 5.0, True)` — the SMALL graph's bytes as the org's.
+                # (The meter is total by contract, so this is belt-and-braces for
+                # an unexpected raise; belt-and-braces that fails OPEN is worse
+                # than none, because it is the opposite of what the docstring and
+                # the commit message promise.)
+                logger.exception(
+                    "storage metering: measurement raised for %s/%s — failing "
+                    "the aggregate", org_id, gname)
+                readings.append(_failed_reading(gname, 0, 0, "", e))
+        combined = combine_graph_storage_readings(readings, graph_name=org_id)
+        if combined is None:
+            logger.debug("storage metering: no measurable graph for %s", org_id)
+            return
+        if not combined.ok:
+            logger.warning(
+                "storage metering FAILED for %s: %s — no reading recorded for "
+                "this period", org_id, combined.error)
+            # ⛔ NEVER write a failed reading — total OR partial. Its total is a
+            # placeholder zero, and the read side maps an ABSENT row to
+            # `graph_storage_mb = 0.0` too (`metering._zero_view`), so neither a
+            # zero nor a survivor-sum may be written: both understate the cap
+            # input. All-or-nothing is chosen because a PARTIAL total looks
+            # measured — the one signal that distinguishes a real reading from a
+            # gap (`graph_storage_measured_at is None`, `samples == 0`) would be
+            # absent. A consumer of this ledger for a CAP must therefore treat
+            # an absent/zero reading as UNMEASURED, not as "no storage".
+            return
+        record_graph_storage(org_id, combined)
+    except Exception:
+        # The backup must survive any metering fault (#5331 fail-soft).
+        logger.exception(
+            "storage metering failed for %s — continuing (never aborts a backup)",
+            org_id)
+
+
 def _backup_graph(
     *,
     db,
@@ -656,6 +759,13 @@ def _backup_graph(
     except Exception as e:
         return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": str(e)}
+    # NOTE (#5331): graph-storage metering is per-ORG, not per-graph — see
+    # `_record_org_storage`, called once at the end of `_sweep_org`. It must
+    # not be done here: the metering ledger is a per-(org, period) GAUGE, so
+    # recording per graph makes the LAST graph visited win and understates a
+    # multi-graph org by replacing its default graph's bytes with a small
+    # custom graph's.
+
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
@@ -906,6 +1016,13 @@ def _sweep_org(
         graph_results[graph["graph_id"]] = gr
         if gr.get("status") == "backed_up":
             any_backed_up = True
+
+    # ── #5331: storage metering — ONE reading per ORG per period, over the SUM
+    #    of this org's graphs. Deliberately here and not in `_backup_graph`:
+    #    the ledger is a per-(org, period) gauge, so per-graph writes would let
+    #    the last graph visited overwrite the org's true figure. Independent of
+    #    the per-graph size guard, so oversized graphs are still measured.
+    _record_org_storage(db, org_id, graphs)
 
     # Legacy flat-pool drain: pre-#2313 org-level artifacts (and any
     # straggler from pre-T5 on-demand endpoints) are pruned org-wide under

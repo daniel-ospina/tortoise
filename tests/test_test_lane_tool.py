@@ -1,0 +1,921 @@
+"""#5084: `tools/test_lane.py` — the private per-lane FalkorDB.
+
+These are pure unit tests: nothing here talks to Docker (every docker-touching
+function is monkeypatched), because the properties that must hold are the
+tool's CONTRACT, not Docker's behaviour:
+
+  * the container it acts on is ALWAYS derived from the worktree — there is no
+    argument, flag, or function parameter that can name another lane's
+    container (the whole point: a wrong `down` in the wrong lane would take out
+    another lane's private test DB, and the shared dev/test instances must not
+    be removable by it either), and
+  * ``uri`` prints an ``eval``-able export line on stdout, with diagnostics on
+    stderr only — the documented ``eval "$(uv run python tools/test_lane.py
+    uri)"`` usage silently breaks if a diagnostic lands on stdout.
+
+Where a function's real body is the safety property (``container_state``,
+``_graph_count``, ``_container_publishes``, ``repo_root``), it is tested
+DIRECTLY. Stubbing such a function to test its caller pins the caller and
+leaves the property itself free to regress.
+"""
+from __future__ import annotations
+
+import inspect
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tools import test_lane as tl  # noqa: E402
+
+
+class _R:
+    """Just enough of a CompletedProcess for the docker seam."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+@pytest.fixture
+def lane(monkeypatch):
+    """Pin the lane's container name so tests do not depend on the CWD."""
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
+    return "fdb-lane-0123456789"
+
+
+# ── the ownership guard (the part that must never be wrong) ────────────────
+
+@pytest.mark.parametrize("name", [
+    "fdb-lane-0123456789",
+    "fdb-lane-abcdef",
+])
+def test_is_managed_accepts_this_tool_s_containers(name):
+    assert tl.is_managed(name) is True
+
+
+@pytest.mark.parametrize("name", [
+    "falkordb",            # the shared dev/test instance (127.0.0.1:6379)
+    "falkordb-16379",      # the orchestration graph instance
+    "fdb-6599",            # another lane's private container (not ours)
+    "w6213-fdb",           # ditto
+    "fdb-5084-e",          # ditto
+    "myfdb-lane-x",        # the prefix must start the name
+    "fdb-lane",            # no slug
+    "",                    # never treat the empty name as managed
+])
+def test_is_managed_refuses_every_other_container(name):
+    assert tl.is_managed(name) is False
+
+
+def test_a_protected_name_sharing_the_prefix_is_still_refused(monkeypatch):
+    """`PROTECTED_NAMES` must be load-bearing, not decoration: if a shared
+    instance ever acquired the `fdb-lane-` prefix, the guard still has to
+    refuse it."""
+    monkeypatch.setattr(tl, "PROTECTED_NAMES", tl.PROTECTED_NAMES | {"fdb-lane-shared"})
+    assert tl.is_managed("fdb-lane-shared") is False
+    assert tl.is_managed("fdb-lane-other") is True
+
+
+def test_the_protected_names_are_the_shared_instances_this_lane_must_never_touch():
+    """`PROTECTED_NAMES` documents the shared instances; today it is the PREFIX
+    rule that refuses them, which is why the discriminating test is the
+    prefix-collision one above (this one pins the constant's contents, and that
+    the refusal holds however it is achieved)."""
+    for shared in ("falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb"):
+        assert shared in tl.PROTECTED_NAMES
+        assert tl.is_managed(shared) is False
+
+
+def test_stop_refuses_an_unmanaged_lane_name_and_never_calls_docker(monkeypatch):
+    """The guard must fire BEFORE any docker call — a refusal that had already
+    inspected (or worse, removed) the container would defeat the point."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("stop() reached docker for a protected name")
+
+    monkeypatch.setattr(tl, "lane_name", lambda: "falkordb")
+    monkeypatch.setattr(tl, "container_state", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.stop()
+    assert "refusing to remove" in str(exc.value)
+
+
+def test_stop_reports_absent_for_a_managed_container_that_is_not_running(lane, monkeypatch):
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    assert tl.stop() == "absent"
+
+
+# ── no name is a parameter: the promise is structural, not argparse-deep ────
+
+def test_no_function_parameter_can_select_a_container():
+    """The CLI being locked is not enough: `stop(name)`/`start(slug)` accepted
+    a peer's container name too (`is_managed` passes it — a peer's name IS
+    `fdb-lane-<sha1(path)[:10]>`). The fix is structural: the target is
+    derived inside the function, so the only parameter left is a property of
+    THIS lane. Re-adding a name/slug/image parameter fails here."""
+    assert list(inspect.signature(tl.stop).parameters) == []
+    assert list(inspect.signature(tl.start).parameters) == ["port"]
+    assert list(inspect.signature(tl.lane_name).parameters) == []
+
+
+def test_no_flag_can_target_another_lanes_container():
+    """Removing only `--name` left `--slug`, which still mapped to
+    `fdb-lane-<peer>` (a peer's slug is a computable `sha1(path)[:10]`). Both
+    overrides are gone, so neither spelling can name another lane's container."""
+    for flag, value in (("--name", "fdb-lane-peer-slug"),
+                        ("--slug", "peer-slug")):
+        with pytest.raises(SystemExit) as exc:
+            tl.main(["down", flag, value])
+        assert exc.value.code == 2, f"argparse must reject {flag} (usage error)"
+
+
+@pytest.mark.parametrize("argv", [
+    ["down", "--port", "16390"],
+    ["down", "--graph", "g"],
+    ["list", "--port", "16390"],
+    ["list", "--graph", "g"],
+    ["status", "--port", "16390"],   # reads a port, never chooses one
+])
+def test_a_command_that_ignores_a_flag_must_not_accept_it(argv):
+    """`down --port 16390` exited 0, which reads as "down that port". A command
+    that does not use a flag must reject it loudly. (`status --graph` IS used,
+    and is asserted accepted below.)"""
+    with pytest.raises(SystemExit) as exc:
+        tl.main(argv)
+    assert exc.value.code == 2
+
+
+def test_status_still_accepts_the_flag_it_does_use(monkeypatch, capsys):
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 1)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    assert tl.main(["status", "--graph", "other_graph"]) == 0
+    _out, err = capsys.readouterr()
+    assert "other_graph" in err
+
+
+def test_lane_name_is_derived_from_this_worktree(monkeypatch):
+    monkeypatch.setattr(tl, "repo_root", lambda: "/tmp/wt-under-test")
+    assert tl.lane_name() == tl.container_name(tl.slug_for("/tmp/wt-under-test"))
+
+
+def test_repo_root_ignores_an_inherited_git_work_tree(tmp_path, monkeypatch):
+    """`rev-parse --show-toplevel` honours `GIT_WORK_TREE`, so an inherited env
+    var silently retargets the tool at a peer worktree's container. The scrub is
+    the fix, and this pins it.
+
+    The decoy is a REAL repository: a non-existent path makes git fail and fall
+    back to the CWD, which would let the unscrubbed code pass this test.
+    """
+    decoy = tmp_path / "decoy-worktree"
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True)
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    assert tl.repo_root().resolve() == ROOT.resolve()
+    assert tl.lane_name() == tl.container_name(tl.slug_for(ROOT))
+
+
+# ── naming / URI shape ─────────────────────────────────────────────────────
+
+def test_slug_is_deterministic_and_worktree_specific(tmp_path):
+    a, b = tmp_path / "wt-a", tmp_path / "wt-b"
+    a.mkdir()
+    b.mkdir()
+    assert tl.slug_for(a) == tl.slug_for(a), "same worktree must reuse ONE container"
+    assert tl.slug_for(a) != tl.slug_for(b)
+    assert len(tl.slug_for(a)) == 10
+
+
+def test_container_name_is_prefixed_and_derived_from_the_slug():
+    assert tl.container_name("0123456789") == "fdb-lane-0123456789"
+    assert tl.is_managed(tl.container_name("0123456789"))
+
+
+def test_uri_matches_the_shape_the_docker_lane_expects():
+    """The lane parses `docker://` URIs, so the shape is load-bearing."""
+    assert tl.uri_for(16399) == (
+        "docker://:@127.0.0.1:16399/tortoise_test_matrix"
+    )
+    assert tl.uri_for(16399, "some_graph") == (
+        "docker://:@127.0.0.1:16399/some_graph"
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, 65536, "16399"])
+def test_uri_for_refuses_a_port_that_is_not_a_port(bad):
+    """`uri_for` builds the eval-ed string, so its contract must be as strict as
+    the CLI's (`cmd_up` range-checks `--port`; a library caller does not)."""
+    with pytest.raises(SystemExit) as exc:
+        tl.uri_for(bad)
+    assert "not a valid TCP port" in str(exc.value)
+
+
+# ── docker-state classification (tested directly — see the module docstring) ─
+
+@pytest.mark.parametrize("rc,stdout,stderr,expected", [
+    (0, "running\n", "", "running"),
+    (0, "exited\n", "", "exited"),
+    (0, "", "", "unknown"),                      # no status is not a status
+    (1, "", "Error: No such object: fdb-lane-x", "absent"),
+    (1, "", "Error: No such container: fdb-lane-x", "absent"),
+    (1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+     "unknown"),                                 # daemon down != no container
+    (1, "", "permission denied while trying to connect", "unknown"),
+    (1, "", "error: context \"ops\" not found", "unknown"),   # a broken
+    (1, "", 'error during connect: dial tcp: lookup host: no such host',
+     "unknown"),
+    (1, "", "open /etc/docker/ca.pem: no such file or directory", "unknown"),
+    # context is not an absent container, and neither is a DNS or TLS failure:
+    # only Docker's "no such container"/"no such object" phrasings are read as
+    # absence, so anything unrecognised fails CLOSED to `unknown`.
+])
+def test_container_state_distinguishes_absent_from_unknown(monkeypatch, rc, stdout, stderr, expected):
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(rc, stdout, stderr))
+    assert tl.container_state("fdb-lane-x") == expected
+
+
+def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
+    """`graphs=0` is a claim about the container; a failed exec is not evidence
+    for it. `status`/`up` must print `unknown` instead."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
+    assert tl._graph_count("fdb-lane-x") is None
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "g1\ng2\ng3\n", ""))
+    assert tl._graph_count("fdb-lane-x") == 3
+
+
+def test_published_scan_asks_for_all_containers(monkeypatch):
+    """The scan must ask for the full list (`-a`/`--all`) rather than running
+    containers only, so a container this tool did not start is still seen as an
+    owner of the port."""
+    seen = {}
+
+    def _fake(*args, **kwargs):
+        seen["args"] = args
+        return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp", "")
+
+    monkeypatch.setattr(tl, "_docker", _fake)
+    assert tl._container_publishes(16390) is True
+    assert set(seen["args"]) & {"-a", "--all"}, "must not scan running-only"
+    assert tl._container_publishes(16490) is False
+
+
+def test_published_port_reads_the_mapping_docker_reports(monkeypatch):
+    """`_published_port` produces the port in the eval-ed URI, so its real body
+    is exercised directly rather than stubbed at every call site. The first
+    element of the result says whether docker ANSWERED at all — a failed query
+    and "no mapping" are different facts, and only the second licenses treating
+    a container as unaddressable."""
+    cases = [
+        (_R(0, "127.0.0.1:16390\n", ""), (True, 16390)),
+        (_R(0, "[::1]:16391\n", ""), (True, 16391)),    # IPv6, same suffix parse
+        (_R(0, "", ""), (True, None)),                  # answered: no mapping
+        (_R(1, "", "No such container"), (False, None)),  # could not ask
+        (_R(1, "", "docker port timed out after 60s"), (False, None)),
+    ]
+    for result, expected in cases:
+        monkeypatch.setattr(tl, "_docker", lambda *a, _r=result, **k: _r)
+        assert tl._published_port("fdb-lane-x") == expected
+
+
+def test_docker_calls_time_out_instead_of_hanging(monkeypatch):
+    """`subprocess.run` without a timeout can block forever, and a wedged daemon
+    is this tool's expected failure mode. A timeout must come back as the same
+    non-zero shape every caller already handles."""
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+    monkeypatch.setattr(tl.subprocess, "run", _timeout)
+    r = tl._docker("inspect", "fdb-lane-x")
+    assert r.returncode == 1
+    assert "timed out" in r.stderr
+    # ... and the callers read that as "unknown", never as "absent".
+    assert tl.container_state("fdb-lane-x") == "unknown"
+
+
+def test_docker_absence_is_not_inferred_from_a_missing_binary(monkeypatch):
+    """The `FileNotFoundError` handler used to forward `str(exc)`, which for the
+    REAL shape is "[Errno 2] No such file or directory: 'docker'" — its
+    "no such" made `container_state` answer `absent`, so `down` exited 0 and
+    reported no container while the lane's container was still running. The stub
+    raises the real three-argument shape on purpose: a
+    `FileNotFoundError("docker")` has no "no such" in it and would let the
+    broken code pass."""
+    def _missing(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    monkeypatch.setattr(tl.subprocess, "run", _missing)
+    r = tl._docker("inspect", "fdb-lane-x")
+    assert r.returncode != 0
+    # The INVARIANT is the classification, not the wording of the synthetic
+    # stderr: with the absence matcher narrowed to Docker's own
+    # "no such container/object" phrasings, even forwarding the raw errno text
+    # ("[Errno 2] No such file or directory: 'docker'") no longer misclassifies.
+    # The matcher itself is pinned by the "no such host"/"no such file" cases in
+    # test_container_state_distinguishes_absent_from_unknown.
+    assert tl.container_state("fdb-lane-x") == "unknown"
+
+
+def test_an_unrunnable_docker_binary_also_fails_closed(monkeypatch):
+    """`OSError` is broader than `FileNotFoundError`: a docker that exists but
+    cannot be executed (permissions) must not escape as a traceback either."""
+    def _denied(*_a, **_k):
+        raise PermissionError(13, "Permission denied", "docker")
+
+    monkeypatch.setattr(tl.subprocess, "run", _denied)
+    r = tl._docker("ps")
+    assert r.returncode != 0 and "could not run docker" in r.stderr
+    assert tl.container_state("fdb-lane-x") == "unknown"
+
+
+def test_git_failure_is_not_read_as_a_worktree(monkeypatch, capsys):
+    """`repo_root` was the last unbounded `subprocess.run` on the hot path — a
+    hung or missing git must fall back, not hang the lane."""
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(tl.subprocess, "run", _timeout)
+    assert tl.repo_root() == Path.cwd()
+    assert "did not answer" in capsys.readouterr().err
+
+
+def test_the_git_fallback_message_names_the_actual_cause(monkeypatch, capsys):
+    """A guard's text must be followable at the moment it trips: "did not answer
+    within 30s" is wrong (and misleading) when git is simply not installed."""
+    def _missing(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(tl.subprocess, "run", _missing)
+    assert tl.repo_root() == Path.cwd()
+    err = capsys.readouterr().err
+    assert "not available on PATH" in err
+    assert "did not answer" not in err
+
+
+def test_wait_ready_derives_each_call_timeout_from_the_remaining_budget(lane, monkeypatch):
+    """The clock is driven explicitly, so the remaining budget is a KNOWN value
+    at each docker call: 2.9 s (=> timeout 2) and then 0.4 s (=> timeout 1).
+    `seen == [2, 1]` admits ONLY a derived timeout — a constant 1 would give
+    `[1, 1]`, and a per-call `timeout=READY_TIMEOUT` would give `[3, 3]`.
+    """
+    clock = iter([100.0, 100.1, 100.1, 102.6, 102.6, 105.2])
+    seen = []
+
+    def _never(*_a, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 3)
+    monkeypatch.setattr(tl.time, "monotonic", lambda: next(clock, 999.0))
+    monkeypatch.setattr(tl.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(tl, "_docker", _never)
+    assert tl._wait_ready("fdb-lane-x") is False
+    assert seen == [2, 1], f"expected the 2.9s then 0.4s budgets, got {seen}"
+
+
+def test_list_reports_a_failed_docker_ps_instead_of_claiming_none_exist(monkeypatch, capsys):
+    """A failed `docker ps` yields empty stdout, which must NOT be reported as
+    "no fdb-lane-* containers" — absence inferred from a failure, the exact
+    inference the rest of this module refuses to make."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    assert tl.main(["list"]) == 1
+    _out, err = capsys.readouterr()
+    assert "docker ps failed" in err
+    assert "no fdb-lane-* containers" not in err
+
+
+# ── port selection ─────────────────────────────────────────────────────────
+
+def test_pick_port_skips_ports_already_taken(monkeypatch):
+    monkeypatch.setattr(tl, "port_is_free", lambda p: p != tl.PORT_RANGE[0])
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
+    monkeypatch.setattr(tl, "_container_publishes", lambda _p, _s=None: False)
+    assert tl.pick_port(*tl.PORT_RANGE) == tl.PORT_RANGE[0] + 1
+
+
+def test_pick_port_skips_ports_published_by_a_container(monkeypatch):
+    """A port can be free on the host yet already published (another lane's
+    container), which would make `docker run -p` fail."""
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
+    monkeypatch.setattr(tl, "_container_publishes",
+                        lambda p, _s=None: p == tl.PORT_RANGE[0])
+    assert tl.pick_port(*tl.PORT_RANGE) == tl.PORT_RANGE[0] + 1
+
+
+def test_pick_port_raises_when_the_range_is_exhausted(monkeypatch):
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: False)
+    monkeypatch.setattr(tl, "_published_scan", lambda: "")
+    monkeypatch.setattr(tl, "_container_publishes", lambda _p, _s=None: False)
+    with pytest.raises(SystemExit) as exc:
+        tl.pick_port(16390, 16392)
+    assert "no free port" in str(exc.value)
+
+
+def test_published_scan_is_none_when_docker_cannot_be_asked(monkeypatch):
+    """`_published_scan` must not collapse "docker failed" into an empty table:
+    the empty-table claim is exactly what fail-open is made of."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    assert tl._published_scan() is None
+
+
+def test_container_publishes_fails_closed_when_it_takes_the_scan(monkeypatch):
+    """The NO-SCAN path must not turn a failed `docker ps -a` into "not
+    published". Leaving it permissive for callers that omit the table was the
+    P1 fail-open still reachable by default."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    with pytest.raises(SystemExit) as exc:
+        tl._container_publishes(16390)
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_pick_port_takes_the_docker_scan_once(monkeypatch):
+    """One `docker ps -a` per selection, not one per candidate: the range is 110
+    ports wide, and a per-candidate scan is 110 docker invocations on a host
+    this tool exists because it is overloaded."""
+    calls = {"n": 0}
+
+    def _scan():
+        calls["n"] += 1
+        return ""
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", _scan)
+    monkeypatch.setattr(tl, "_container_publishes",
+                        lambda p, _s=None: p < tl.PORT_RANGE[0] + 5)
+    assert tl.pick_port(16390, 16399) == 16395
+    assert calls["n"] == 1, "the docker scan must be taken once per selection"
+
+
+def test_repo_root_warns_and_falls_back_when_git_fails(monkeypatch, capsys):
+    """A non-zero `rev-parse` is the SAME fact as a timeout (git could not
+    answer), so it must warn rather than silently yield a cwd-derived slug."""
+    monkeypatch.setattr(tl.subprocess, "run",
+                        lambda *a, **k: _R(128, "", "fatal: not a git repository"))
+    monkeypatch.chdir(tl.Path.cwd())
+    root = tl.repo_root()
+    _out, err = capsys.readouterr()
+    assert root == tl.Path.cwd()
+    assert "falling back to the current directory" in err
+
+
+def test_pick_port_fails_closed_when_the_docker_scan_fails(monkeypatch):
+    """A FAILED `docker ps -a` must NOT be read as "nothing is published".
+
+    Ignoring the return code yields `False` for every port on a timed-out scan,
+    and `pick_port` then returns a port `docker run -p` refuses."""
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", lambda: None)
+    with pytest.raises(SystemExit) as exc:
+        tl.pick_port(16390, 16392)
+    assert "docker ps -a" in str(exc.value)
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_start_refuses_when_a_stale_container_cannot_be_removed(monkeypatch):
+    """A failed `rm` on a stale container must surface as a REMOVAL failure —
+    not as `docker run`'s "name already in use", which reads as a run problem
+    rather than the removal problem it is."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda _n: "FAILED to remove it — check `docker ps -a`")
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "could not be removed" in str(exc.value)
+
+
+def test_remove_and_describe_refuses_a_protected_name(monkeypatch):
+    """`_remove_and_describe` takes an arbitrary name, so its guard has to be on
+    the NAME — call-site discipline is not an invariant the suite can check."""
+    def _must_not_run(*a, **k):          # a removal must not reach docker here
+        raise AssertionError("_docker called for a protected name")
+    monkeypatch.setattr(tl, "_docker", _must_not_run)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("falkordb-16379")
+    assert "refusing to remove" in str(exc.value)
+
+
+def test_remove_and_describe_refuses_a_peer_lane_container(monkeypatch):
+    """Ownership is an INVARIANT, not call-site discipline: even another lane's
+    `fdb-lane-*` is not this worktree's to delete, however it is spelled."""
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-aaaaaaaaaa")
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("_docker called for a peer lane's container")
+    monkeypatch.setattr(tl, "_docker", _must_not_run)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("fdb-lane-bbbbbbbbbb")
+    assert "not ours to delete" in str(exc.value)
+
+
+# ── the eval contract ──────────────────────────────────────────────────────
+
+def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    rc = tl.main(["uri"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "export TORTOISE_DB_URI='docker://:@127.0.0.1:16399/tortoise_test_matrix'\n"
+    assert "fdb-lane-x" in err, "the human-readable diagnostic belongs on stderr"
+
+
+def test_uri_command_says_unknown_rather_than_zero_graphs(monkeypatch, capsys):
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: None)
+    assert tl.main(["uri"]) == 0
+    _out, err = capsys.readouterr()
+    assert "graphs=unknown" in err
+
+
+def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
+    """`uri --port N` is the natural spelling.
+
+    The flags must be declared on the SUBcommand: declared on the root parser
+    they die in argparse before reaching any guard.
+    """
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", port))
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    assert tl.main(["uri", "--port", "16401"]) == 0
+    out, _err = capsys.readouterr()
+    assert "127.0.0.1:16401" in out
+
+
+def test_start_refuses_when_docker_state_is_unknown(monkeypatch):
+    """A docker failure is not evidence that no container exists: guessing
+    `absent` there would remove a container that may belong to another lane."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called despite an unknown state")
+
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "cannot determine the state" in str(exc.value)
+
+
+def test_an_invalid_graph_name_is_refused_before_a_container_exists(monkeypatch):
+    """Ordering again: `uri --graph 'bad name'` must not leave a running
+    container (and a claimed port) behind."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("start() ran before the graph name was validated")
+
+    monkeypatch.setattr(tl, "start", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.main(["uri", "--graph", "bad name"])
+    assert "refusing graph name" in str(exc.value)
+
+
+def test_status_reports_the_published_port(monkeypatch, capsys):
+    """`status` must state the port the container actually publishes (the one a
+    lane needs for its URI), never a placeholder."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 3)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    assert tl.main(["status"]) == 0
+    _out, err = capsys.readouterr()
+    assert "127.0.0.1:16390" in err
+    assert ":0/" not in err, "a placeholder port must never be printed"
+
+
+def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
+    """A script checking the exit code must be able to tell "could not ask"
+    from an answer, and a failed `docker port` must not read as "no port"."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    assert tl.main(["status"]) == 1
+    assert "unknown" in capsys.readouterr().err
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
+    # A FAILED `docker port` is not an answer either: without this, a caller
+    # keying the exit code reads "could not ask" as success.
+    assert tl.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "port=unknown" in err
+    assert ":0/" not in err
+
+
+def test_status_fails_closed_when_the_graph_count_fails(monkeypatch, capsys):
+    """`status`'s whole job is the answer, so BOTH of its queries must fail
+    closed — a failed `GRAPH.LIST` used to print `graphs=unknown` and exit 0."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: None)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    assert tl.main(["status"]) == 1
+    assert "graphs=unknown" in capsys.readouterr().err
+
+
+def test_status_fails_when_a_running_container_publishes_no_port(monkeypatch, capsys):
+    """`start()` calls this identical state a hard error; `status` must not call
+    it success, and it cannot report a URI it does not have."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
+    assert tl.main(["status"]) == 1
+    assert "port=none" in capsys.readouterr().err
+
+
+def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch):
+    """The reuse path must RETURN, not fall through: falling through would
+    `docker rm -f` + recreate a live lane container, destroying the test graphs
+    of the run that is using it — the opposite of what reuse is for."""
+    removed = []
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda n: removed.append(n) or "removed it")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("`docker run` must not be reached on the reuse path")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert removed == [], "a running lane container must never be removed"
+
+
+def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
+    """Every printed URI goes through `uri_for`, which is why the remote-daemon
+    warning lives there and not in `pick_port` — a future direct print of a
+    loopback URI would otherwise drop the warning silently."""
+    monkeypatch.setenv("DOCKER_HOST", "ssh://build-host")
+    uri = tl.uri_for(16390)
+    _out, err = capsys.readouterr()
+    assert "DOCKER_HOST is set" in err
+    assert uri == "docker://:@127.0.0.1:16390/tortoise_test_matrix"
+
+
+def test_start_refuses_a_port_it_cannot_move_a_live_lane_to(lane, monkeypatch):
+    """Honour-or-refuse: a running container's published port cannot be changed,
+    so an explicit `--port` that disagrees must FAIL — silently ignoring it would
+    make the flag a lie, and recreating the container would destroy the graphs of
+    the run using it."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("no docker call may touch a live lane container")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+
+    with pytest.raises(SystemExit) as e:
+        tl.start(port=16391)
+    assert "already running on port 16390" in str(e.value)
+
+
+def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
+    """The guard must be an EQUALITY, not a refusal of the flag: asking for the
+    port the lane already publishes is not a conflict."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda n: (_ for _ in ()).throw(
+                            AssertionError("must not remove a live lane")))
+    assert tl.start(port=16390) == ("fdb-lane-0123456789", 16390)
+
+
+def test_docker_forwards_its_timeout_to_subprocess(monkeypatch):
+    """Every docker call must stay BOUNDED — the module exists because a wedged
+    daemon must not hang the lane. Nothing pinned the forwarding, so dropping
+    `timeout=timeout` would make every call unbounded with the suite green."""
+    seen = {}
+
+    def _fake(cmd, **kwargs):
+        seen.update(kwargs)
+        return _R(0, "ok", "")
+    monkeypatch.setattr(tl.subprocess, "run", _fake)
+    tl._docker("ps")
+    assert seen.get("timeout") == tl.DOCKER_TIMEOUT
+
+
+def test_repo_root_bounds_the_git_call(monkeypatch):
+    """A hung `git` must not hang the lane: the timeout forwarding IS the bound,
+    and nothing pinned it either."""
+    seen = {}
+
+    def _fake(cmd, **kwargs):
+        seen.update(kwargs)
+        return _R(0, "/tmp/wt\n", "")
+    monkeypatch.setattr(tl.subprocess, "run", _fake)
+    tl.repo_root()
+    assert seen.get("timeout") == tl.GIT_TIMEOUT
+
+
+def test_repo_root_falls_back_when_git_cannot_be_executed(monkeypatch, capsys):
+    """git present but unrunnable (PermissionError/ENOEXEC) is the SAME fact as
+    absent. It used to escape as a traceback, contradicting the fallback the
+    docstring documents (and which `_docker` already handles for its own calls)."""
+    def _boom(*_a, **_k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(tl.subprocess, "run", _boom)
+    root = tl.repo_root()
+    _out, err = capsys.readouterr()
+    assert root == tl.Path.cwd()
+    assert "could not be run" in err
+
+
+# ── start(): the port handed to the caller must be the PUBLISHED one ───────
+
+def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatch):
+    """`-p 0:6379` lets Docker choose the port, so echoing the requested value
+    would print a URI pointing at nothing."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))
+    seen = []
+
+    def _fake(*args, **kwargs):
+        seen.append((args, kwargs))
+        return _R(0, "PONG")
+    monkeypatch.setattr(tl, "_docker", _fake)
+    assert tl.start() == ("fdb-lane-0123456789", 16400)
+
+    runs = [(argv, kw) for argv, kw in seen if argv[:2] == ("run", "-d")]
+    assert runs, "`docker run` must have been invoked"
+    argv, kwargs = runs[0]
+    # The two fail-closed properties the module ADVERTISES, pinned to the argv
+    # rather than to the prose: bind LOOPBACK only, and leave persistence OFF.
+    # Without these, `-p 127.0.0.1:{port}:6379` could become `-p {port}:6379`
+    # (all interfaces) with the whole suite still green.
+    assert "127.0.0.1:16399:6379" in argv
+    assert "REDIS_ARGS=--appendonly no --save ''" in argv
+    # Positional pins are not enough on their own: `docker run` must also keep
+    # the image-pull budget. Dropping it re-bounds a cold pull to the 60 s
+    # DOCKER_TIMEOUT, so a first run with no local image fails as
+    # "docker run failed: timed out after 60s" while the suite stays green.
+    assert kwargs.get("timeout") == tl.IMAGE_PULL_TIMEOUT
+
+
+def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch):
+    """The ordering IS the guard: validation must precede `container_state` (a
+    docker call) and the stale-container `docker rm`, or an invalid value still
+    reaches docker. Both seams are booby-trapped here, so this test fails if the
+    check is ever moved below them again."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before port validation")
+
+    monkeypatch.setattr(tl, "container_state", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    for bad in (0, -1, 65536):
+        with pytest.raises(SystemExit) as exc:
+            tl.start(port=bad)
+        assert "not a valid TCP port" in str(exc.value)
+
+
+def test_start_removes_only_a_container_this_tool_manages(lane, monkeypatch):
+    """The stale-container `rm` must satisfy the ownership guard (a real
+    refusal, not an `assert` — `python -O` strips those).
+
+    `_docker` is stubbed: with the guard reverted this test must fail as an
+    ASSERTION, not by reaching a real `docker rm` in the operator's daemon.
+    """
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was reached for an unmanaged container")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "is_managed", lambda _n: False)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "refusing to remove unmanaged" in str(exc.value)
+
+
+def test_start_refuses_to_reuse_a_running_container_that_is_wedged(lane, monkeypatch):
+    """The reuse path must not hand back a URI without checking the server
+    answered, or a wedged long-lived container would be reused indefinitely."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: False)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "never answered PING" in str(exc.value)
+
+
+def test_a_failed_port_query_never_removes_a_container(lane, monkeypatch):
+    """A failed QUERY is not evidence that a container is broken. On the reuse
+    path the container may be perfectly healthy and is not ours to delete, so
+    the tool must refuse instead of reaping it."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("a failed port query led to a removal")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "could not determine which port" in str(exc.value)
+
+
+def test_a_failed_port_query_on_a_fresh_container_says_so_and_cleans_up(lane, monkeypatch):
+    """The other half: a container we JUST created and cannot address has
+    nothing to hand back, so it is removed — and the message names the failed
+    query rather than claiming it publishes no port."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
+    monkeypatch.setattr(tl, "_remove_and_describe", lambda _n: "removed it")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    msg = str(exc.value)
+    assert "could not report its published port" in msg
+    assert "publishes no port" not in msg
+    assert "removed it" in msg
+
+
+def test_wait_ready_is_bounded_in_wall_time(lane, monkeypatch):
+    """A PING loop bounded in iterations is unbounded if each iteration can
+    block; the bound is the deadline."""
+    calls = []
+
+    def _never(*_a, **_k):
+        calls.append(1)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 0)
+    monkeypatch.setattr(tl, "_docker", _never)
+    assert tl._wait_ready("fdb-lane-x") is False
+    assert calls == [], "a zero deadline must not issue a single docker call"
+
+
+def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monkeypatch):
+    """`_remove_and_describe`'s whole point is that the cleanup's result is READ
+    — reverting it to an unverified "removed it" must not leave the suite green."""
+    monkeypatch.setattr(tl, "is_managed", lambda _n: True)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "container busy"))
+    assert "FAILED to remove it" in tl._remove_and_describe("fdb-lane-0123456789")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
+    assert tl._remove_and_describe("fdb-lane-0123456789") == "removed it"
+
+
+def test_cleanup_refuses_an_unmanaged_name(lane, monkeypatch):
+    """Every removal intent passes the ownership check."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("cleanup reached docker for an unmanaged name")
+
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("falkordb")
+    assert "refusing to remove" in str(exc.value)
+
+
+def test_stop_refuses_on_an_unknown_daemon_state(lane, monkeypatch):
+    """`start` refused on `unknown` but `stop` went straight to `rm -f` — which
+    pays two 60s timeouts to learn nothing on a wedged daemon."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("stop() reached docker with an unknown state")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.stop()
+    assert "cannot determine the state" in str(exc.value)
+
+
+def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, monkeypatch):
+    """A container that cannot be addressed must not be left running."""
+    calls = []
+
+    def _fake(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "exec":
+            return _R(0, "PONG", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
+    monkeypatch.setattr(tl, "_docker", _fake)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "it publishes no port" in str(exc.value)
+    assert ("rm", "-f", "fdb-lane-0123456789") in calls
+
+
+def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
+    """`stop` must not return "removed" when `docker rm` failed."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
+    with pytest.raises(SystemExit) as exc:
+        tl.stop()
+    assert "failed to remove" in str(exc.value)
+
+
+# ── the eval contract must not be injectable ───────────────────────────────
+
+@pytest.mark.parametrize("bad", [
+    "o'brien",            # would close the single-quoted export line
+    "a b",
+    "x; rm -rf /",
+    "$(whoami)",
+    "graf\nh",
+    "",
+])
+def test_uri_for_refuses_a_graph_name_that_would_break_the_eval_line(bad):
+    with pytest.raises(SystemExit) as exc:
+        tl.uri_for(16399, bad)
+    assert "refusing graph name" in str(exc.value)

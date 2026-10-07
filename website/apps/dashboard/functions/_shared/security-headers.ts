@@ -87,10 +87,20 @@ const csp = (...directives: string[]): string => directives.join("; ");
 /**
  * Static-asset default for both Pages projects, and the Function HTML of the
  * pre-#3501 pages. See the file header for why `'unsafe-inline'` is here.
+ *
+ * `https://static.ads-twitter.com` (the X/Twitter conversion tag `uwt.js`) is
+ * here because the consent-gated container `GTM-WQR34GSC` injects it — it is not
+ * a build input of anything in this repo, which is why `git grep ads-twitter`
+ * finds nothing and why its absence from this list read as an accident rather
+ * than a gap. It stays in `script-src` only, and only in this RELAXED value: the
+ * X pixel beacons through an `<img>` (`img-src` already allows `https:`), and it
+ * falls back to that same image pixel when `connect-src` blocks its sendBeacon.
+ * See #7633 and `src/securityHeaders.test.js`, which reddens if this origin is
+ * dropped OR if the policy is widened further (a wildcard / `'unsafe-eval'`).
  */
 export const RELAXED_CSP = csp(
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
