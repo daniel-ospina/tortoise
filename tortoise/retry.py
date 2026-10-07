@@ -53,6 +53,36 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 _GRAPH_REPLACED_RE = re.compile(r"graph was deleted or replaced", re.IGNORECASE)
 
 
+def retryable_aborted_write(exc: BaseException) -> bool:
+    """Retryable ONLY for write refusals whose outcome is definitively *did not land*.
+
+    Deliberately narrower than :func:`retryable_transient`, and it exists because
+    that predicate is NOT safe for a NON-IDEMPOTENT statement. ``create_point``
+    issues a bare ``CREATE`` with a client-minted id and there is **no uniqueness
+    constraint on ``Point.id``** (a plain index only, so a duplicate is accepted);
+    the eval lane documents the same hazard independently — *"create_point uses
+    CREATE (not MERGE), so re-running ingest over the same fresh graph would
+    duplicate points"* (``tools/longmem_eval/ingest.py``, ``_point_exists``).
+
+    ``retryable_transient`` also returns True for redis ``TimeoutError`` /
+    ``ConnectionError``, where the server may have APPLIED the write and only the
+    reply was lost — re-issuing those on a bare ``CREATE`` can mint two points
+    with one id, and ``get_point`` would silently return one of them, breaking
+    ``derived == replay(journal)``. Both arms below instead mean the engine
+    ABORTED the statement, so nothing was applied and re-issuing cannot duplicate:
+
+    - the graph was replaced underneath the running query (#7405) — the verb is
+      *aborting*, and the replaced key discards anything written into the old one;
+    - persistence refused the write (``MISCONF`` / ``Can't persist``) — a write
+      refusal, not a completed write.
+    """
+    import redis.exceptions as _re
+
+    if isinstance(exc, _re.ResponseError):
+        return bool(_MISCONF_RE.search(str(exc)) or _GRAPH_REPLACED_RE.search(str(exc)))
+    return False
+
+
 class WriteStageRetriesExhausted(Exception):
     """Write-stage retry sentinel (R1, #1786/#1806).
 

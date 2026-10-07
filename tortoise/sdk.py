@@ -4458,10 +4458,10 @@ class TortoiseSDK:
         #7405 describes, which is why the re-resolve lives here rather than being
         left to each caller.
 
-        What this buys, stated honestly: a rebuild window lasting seconds now
-        heals in place. The window #7405 measured lasted **over an hour**, and no
-        bounded retry should wait that long — so on exhaustion the error still
-        surfaces (it always did; the *fail loudly* half was never missing). The
+        What this buys, stated honestly: a rebuild window lasting up to ~10 s now
+        heals in place (``base=2.0``, 3 retries). The window #7405 measured lasted
+        **over an hour**, and no bounded retry should wait that long — so on
+        exhaustion the original error still surfaces, **unchanged in type**. The
         durable win is the second half: the known-invalidated handle is **never
         left cached**, so the caller's next write re-resolves and is not
         permanently poisoned. That is what made the wedge a dead end.
@@ -4481,7 +4481,7 @@ class TortoiseSDK:
         from .retry import (
             WriteStageRetriesExhausted,
             call_with_predicate,
-            retryable_transient,
+            retryable_aborted_write,
         )
 
         def _reref(_exc: BaseException) -> None:
@@ -4490,14 +4490,19 @@ class TortoiseSDK:
 
         try:
             return call_with_predicate(
-                fn, predicate=retryable_transient, retries=3,
-                what=what, base=1.0, cap=8.0, on_retry=_reref)
-        except WriteStageRetriesExhausted:
+                fn, predicate=retryable_aborted_write, retries=3,
+                what=what, base=2.0, cap=8.0, on_retry=_reref)
+        except WriteStageRetriesExhausted as exc:
             # The last attempt re-resolved and then died, so the cache holds a
             # handle known to be dead. Drop it: the caller's NEXT write must
             # re-resolve rather than inherit the wedge (#7405's dead end).
             self._proj = None
-            raise
+            # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
+            # marker, not for create_point's contract: surface the ORIGINAL error,
+            # whose TYPE callers depend on — `_classify_db_failure` buckets the
+            # redis family as "db" and anything else as "structural", so a new
+            # wrapper type would silently misbucket every exhausted write.
+            raise (exc.__cause__ or exc) from None
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -5383,7 +5388,12 @@ class TortoiseSDK:
         # legacy `outdated` flag prop (#2491), so `status` is the complete
         # born-terminal surface.
         _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
-        _epv = self._advance_ep_version(proj)
+        # THE FIRST WRITE in this method is `_advance_ep_version`, which stamps the
+        # epoch the CREATE below reuses — so a stale handle fails THERE, and wrapping
+        # only the CREATE would leave this path unretried and the cached handle
+        # un-dropped, making the retry dead code in the failure mode it targets
+        # (#7405 review P0). Both writes therefore go through the helper.
+        _epv = self._advance_ep_version()
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
                                 "now": now, "embedding": embedding,
                                 "_epv": _epv}
@@ -14332,7 +14342,7 @@ class TortoiseSDK:
             claim_ids = [r[0] for r in rows]
         return op_ids, claim_ids
 
-    def _advance_ep_version(self, proj) -> int:
+    def _advance_ep_version(self) -> int:
         """Advance the graph-wide EP epoch and return the new value (#1163).
 
         Split out of :meth:`_mark_dirty` (#2952) so a create path can stamp
@@ -14340,11 +14350,14 @@ class TortoiseSDK:
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
         """
-        rows = proj.g.query(
-            "MERGE (m:EpMeta) "
-            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-            "RETURN m.ep_version"
-        ).result_set
+        rows = self._graph_write_with_retry(
+            lambda: self._get_proj().g.query(
+                "MERGE (m:EpMeta) "
+                "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+                "RETURN m.ep_version"
+            ).result_set,
+            what="_advance_ep_version MERGE(:EpMeta)",
+        )
         return int(rows[0][0]) if rows else 1
 
     def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
@@ -14393,7 +14406,7 @@ class TortoiseSDK:
         # guard's discriminator). A caller that already advanced it (a CREATE
         # that stamped ep_dirty_at inline) passes the value in.
         if ep_version is None:
-            ep_version = self._advance_ep_version(proj)
+            ep_version = self._advance_ep_version()
         # Operators targeting the mutated points, then the claims those
         # operators target (shared 1-hop reverse-BFS — delete_point's
         # pre-delete neighbor capture uses the same helper, #1916).

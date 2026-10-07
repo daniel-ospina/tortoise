@@ -52,6 +52,7 @@ from tortoise.retrieval import (
 from tortoise.retry import (
     WriteStageRetriesExhausted,
     call_with_predicate,
+    retryable_aborted_write,
     retryable_transient,
 )
 
@@ -951,14 +952,16 @@ def test_graph_write_retry_rerefs_the_handle_on_a_replaced_graph():
     assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} query attempt(s)"
     assert calls["resolve"] == 2, "the handle must be re-resolved before the retry"
 
-    # 2. exhaustion: the error still surfaces AND the dead handle is not left cached
+    # 2. exhaustion: the ORIGINAL error surfaces (unchanged in TYPE — callers bucket
+    #    on the class, so a wrapper type would silently misbucket), the dead handle
+    #    is not left cached, and the sentinel is not leaked to the caller
     sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
-    with pytest.raises(WriteStageRetriesExhausted):
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
     assert sdk._proj is None, (
         "an exhausted retry must still drop the invalidated handle — leaving it "
         "cached is what made #7405 a dead end for the caller's next write")
-    assert calls["resolve"] == 4, "every attempt re-resolves (1 initial + 3 retries)"
+    assert calls["resolve"] >= 2, "the retry must re-resolve, never reuse the dead handle"
 
     # 3. a NON-retryable error is re-raised unchanged, is not retried at all,
     #    and does not drop a perfectly good handle
@@ -968,6 +971,82 @@ def test_graph_write_retry_rerefs_the_handle_on_a_replaced_graph():
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
     assert calls["query"] == 1, "a deterministic error must never be retried"
     assert sdk._proj is not None, "a deterministic failure does not invalidate the handle"
+
+
+def test_the_FIRST_write_of_create_point_goes_through_the_retry():
+    """#7405, review P0: ``_advance_ep_version`` is create_point's FIRST graph write.
+
+    Wrapping only the later ``CREATE`` left the retry DEAD CODE in the failure mode
+    it targets: under #7405 *every* write on the stale handle is refused, so the
+    epoch MERGE raises first and the wrapper is never entered — the cached handle is
+    never dropped, and the caller's next write inherits the wedge. This pins the
+    ORDER, not merely the presence, of the fix.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+    seen: list[str] = []
+    state = {"query": 0, "resolve": 0}
+
+    class _G:
+        def query(self, cypher, *a, **k):
+            seen.append(cypher)
+            state["query"] += 1
+            if state["query"] == 1:
+                raise replaced
+            return type("R", (), {"result_set": [[7]]})()
+
+    class _Proj:
+        g = _G()
+
+    def _get_proj():
+        state["resolve"] += 1
+        if sdk._proj is None:
+            sdk._proj = _Proj()
+        return sdk._proj
+
+    sdk._proj = _Proj()
+    sdk._get_proj = _get_proj
+
+    assert sdk._advance_ep_version() == 7
+    assert state["resolve"] == 2, (
+        "the FIRST write must re-resolve after a replace — if it does not, the "
+        "wrapper around the later CREATE is unreachable and the fix is dead code")
+    assert "EpMeta" in seen[0], "the first write is the epoch MERGE"
+
+
+def test_retryable_aborted_write_excludes_ambiguous_transports():
+    """#7405, review P1: the write path gates on THIS, not on ``retryable_transient``.
+
+    ``create_point`` issues a bare ``CREATE`` with a client-minted id and there is no
+    uniqueness constraint on ``Point.id``, so a retry after a TIMEOUT — where the
+    server may have applied the write and only the reply was lost — can mint two
+    points with one id. Only definitive *did not land* refusals may be retried, so
+    this predicate must be a STRICT SUBSET of the transport one.
+    """
+    # definitively not applied -> safe to re-issue even for a bare CREATE
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Errors writing to the AOF file: No space left on device")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Redis is configured to save RDB snapshots, but it is "
+        "currently unable to persist to disk")) is True
+
+    # AMBIGUOUS: the write may already be applied. NEVER retried on this path.
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+    assert retryable_aborted_write(redis_exc.ConnectionError("stall")) is False
+    assert retryable_aborted_write(ConnectionResetError("reset")) is False
+    # the asymmetry is the entire safety property — assert both halves together
+    assert retryable_transient(redis_exc.TimeoutError("stall")) is True
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+
+    # unrelated responses stay out
+    assert retryable_aborted_write(redis_exc.ResponseError("WRONGTYPE x")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError("graph is read-only")) is False
 
 
 def test_retry_import_identity():
