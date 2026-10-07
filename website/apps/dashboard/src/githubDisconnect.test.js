@@ -146,27 +146,6 @@ test('#4946: disconnecting hides the opener but keeps the outcome dialog open', 
   assert.ok(/not confirmed/i.test(html), 'the honest warning is reachable after the flip')
 })
 
-test('#4946 (P1 placement): main.jsx renders the control OUTSIDE the connected branch', () => {
-  // `probeTags` evaluates the tag in isolation, so it cannot see WHERE the tag
-  // sits — re-nesting it in the connected arm passed the whole suite. Pin the
-  // placement structurally: after the connected/disconnected ternary, and not
-  // wrapped in a `githubConnected &&` gate, so the dialog cannot be unmounted
-  // by the flag the disconnect itself flips.
-  const stripped = stripComments(mainJsx)
-  const sectionAt = stripped.indexOf('aria-labelledby="settings-github-heading"')
-  assert.ok(sectionAt > -1, 'the GitHub-connect home must exist')
-  const section = stripped.slice(sectionAt, stripped.indexOf('settings-memory-heading', sectionAt))
-  assert.equal((section.match(/<GithubDisconnectControl/g) || []).length, 1,
-    'exactly one control in the GitHub-connect home')
-  const controlAt = section.indexOf('<GithubDisconnectControl')
-  const disconnectedArm = section.indexOf('Connect GitHub to bring issues and repo docs')
-  assert.ok(disconnectedArm > -1 && disconnectedArm < controlAt,
-    'the control must render AFTER the connected/disconnected ternary — inside the connected arm the '
-    + 'outcome panel unmounts the moment github_connected flips false (#4946 P1)')
-  assert.ok(!/githubConnected\s*&&/.test(section.slice(disconnectedArm, controlAt)),
-    'the control must not be gated on githubConnected — the dialog has to survive the flag flipping false')
-})
-
 test('#4946: the opener only opens — it never disconnects', () => {
   let opens = 0
   let confirms = 0
@@ -245,6 +224,18 @@ test('#4946: the outcome panel replaces the confirm actions and offers a close',
   assert.ok(!html.includes(REQUIRED_COPY), 'the confirm copy is gone once the outcome is known')
 })
 
+test('#4946: the outcome panel\'s Close only closes — it must not re-request the disconnect', () => {
+  let closes = 0
+  let confirms = 0
+  const props = {
+    ...baseProps, open: true, result: { revoked: true, revoke_reason: 'revoked' },
+    onClose: () => { closes += 1 }, onConfirm: () => { confirms += 1 },
+  }
+  buttonByLabel(props, 'Close').props.onClick()
+  assert.equal(closes, 1, 'Close must dismiss')
+  assert.equal(confirms, 0, 'Close must not re-POST the disconnect')
+})
+
 // ── a11y (the #2392 / #4029 dialog conventions) ────────────────────────────
 test('#4946 (a11y): the dialog autoFocuses Cancel, never the affirmative CTA', () => {
   const buttons = collect(GithubDisconnectControl({ ...baseProps, open: true }), 'button')
@@ -273,6 +264,41 @@ test('#4946 (a11y): the dialog is a focusable, Escape-closable modal with a back
   assert.equal(closes, 2, 'the backdrop must close the dialog')
 })
 
+test('#4946 (a11y): no close path, and no second confirm, fires while the request is in flight', () => {
+  // The `!busy` guards: a user who dismisses mid-request would abandon a dialog
+  // whose POST still completes and still flips the connection — the inverse of
+  // the honest control #4946 exists to enforce.
+  let closes = 0
+  let confirms = 0
+  const busy = {
+    ...baseProps, open: true, busy: true,
+    onClose: () => { closes += 1 }, onConfirm: () => { confirms += 1 },
+  }
+  dialogOf(busy).props.onKeyDown({ key: 'Escape' })
+  backdropOf(busy).props.onClick()
+  buttonByLabel(busy, 'Cancel').props.onClick()
+  buttonByLabel(busy, 'Disconnecting…').props.onClick({ currentTarget: null })
+  assert.equal(closes, 0, 'no close path may fire while the request is in flight')
+  assert.equal(confirms, 0, 'a second confirm must not fire while in flight')
+  // …and the controls are disabled, so a click cannot even reach the guards.
+  for (const label of ['Cancel', 'Disconnecting…']) {
+    assert.equal(buttonByLabel(busy, label).props.disabled, true, `${label} must be disabled while busy`)
+  }
+  assert.equal(buttonByLabel(busy, 'Disconnect GitHub').props.disabled, true,
+    'the opener must be disabled while busy')
+})
+
+test('#4946 (a11y): confirming moves focus into the dialog container (#4029 reclaim)', () => {
+  let focused = 0
+  let confirms = 0
+  const container = { focus: () => { focused += 1 } }
+  const event = { currentTarget: { closest: (sel) => (sel === '[role="dialog"]' ? container : null) } }
+  buttonByLabel({ ...baseProps, open: true, onConfirm: () => { confirms += 1 } }, 'Disconnect')
+    .props.onClick(event)
+  assert.equal(focused, 1, 'the confirm must focus the dialog container (which is why tabIndex -1 is load-bearing)')
+  assert.equal(confirms, 1, 'the confirm must still make the request')
+})
+
 test('#4946 (a11y): the busy transition is announced on a polite live region', () => {
   const statusOf = (props) => collect(GithubDisconnectControl(props), 'span')
     .find((s) => s.props.role === 'status')
@@ -286,6 +312,74 @@ test('#4946 (a11y): the busy transition is announced on a polite live region', (
 
 // ── the wiring main.jsx ships, compiled and EXECUTED ───────────────────────
 const MAIN_IMPORTS = importsFromMain(mainJsx, ['GithubDisconnectControl'])
+
+// The GitHub-connect home as ONE JSX expression, so the control's placement can
+// be EXECUTED rather than reasoned about from text. A structural text guard
+// ("is it after the ternary?") is defeated by a differently-spelled gate —
+// `githubConnected ? (…) : null`, `!githubConnected || (…)`, or nesting in the
+// OTHER arm — all of which reintroduce the #4946 P1 unmount. Rendering the
+// region cannot be satisfied by any of them.
+const GH_SECTION = (() => {
+  const stripped = stripComments(mainJsx)
+  const start = stripped.indexOf('<section className="settings-home" aria-labelledby="settings-github-heading">')
+  assert.ok(start > -1, 'the GitHub-connect section must exist in main.jsx')
+  const end = stripped.indexOf('</section>', start)
+  assert.ok(end > start, 'the GitHub-connect section must close')
+  return stripped.slice(start, end + '</section>'.length)
+})()
+
+async function renderGithubSection(connected, state) {
+  globalThis.__gdSection = {
+    loading: false, githubConnected: connected, reposNote: '3 repos available',
+    onConnectGithub: () => {}, github: { busy: false }, githubError: '',
+    githubDisconnect: state,
+    onOpenGithubDisconnect: () => {}, onCloseGithubDisconnect: () => {}, onConfirmGithubDisconnect: () => {},
+  }
+  const [{ html }] = await evalExpressions([`(${GH_SECTION})`], {
+    imports: MAIN_IMPORTS,
+    bindings: {
+      loading: 'globalThis.__gdSection.loading',
+      githubConnected: 'globalThis.__gdSection.githubConnected',
+      reposNote: 'globalThis.__gdSection.reposNote',
+      onConnectGithub: 'globalThis.__gdSection.onConnectGithub',
+      github: 'globalThis.__gdSection.github',
+      githubError: 'globalThis.__gdSection.githubError',
+      githubDisconnect: 'globalThis.__gdSection.githubDisconnect',
+      onOpenGithubDisconnect: 'globalThis.__gdSection.onOpenGithubDisconnect',
+      onCloseGithubDisconnect: 'globalThis.__gdSection.onCloseGithubDisconnect',
+      onConfirmGithubDisconnect: 'globalThis.__gdSection.onConfirmGithubDisconnect',
+    },
+  })
+  return html
+}
+
+test('#4946 (P1 placement, EXECUTED): the dialog survives github_connected flipping false', async () => {
+  const connected = await renderGithubSection(true, { open: false, busy: false, error: '', result: null })
+  assert.ok(connected.includes('>Disconnect GitHub</button>'),
+    'the opener must render while connected — any gate that hides it makes the disconnect unreachable')
+  assert.ok(!connected.includes('role="dialog"'), 'no dialog before the opener is used')
+
+  // The state the disconnect itself produces: the flag flipped false while the
+  // outcome panel is on screen. Nesting the control in EITHER ternary arm fails
+  // one of these two assertions.
+  const flipped = await renderGithubSection(false, {
+    open: true, busy: false, error: '', result: { revoked: false, revoke_reason: 'network' },
+  })
+  assert.ok(flipped.includes('role="dialog"'),
+    'the dialog must SURVIVE github_connected flipping false — the outcome panel unmounts otherwise (#4946 P1)')
+  assert.ok(/not confirmed/i.test(flipped), 'the honest warning stays readable after the flip')
+  assert.ok(!flipped.includes('>Disconnect GitHub</button>'), 'the opener is gone once disconnected')
+})
+
+test('#4946 (a11y): main.jsx reclaims focus to the dialog while the request is in flight', () => {
+  // A React effect the node suite cannot execute; pin the two facts that make it
+  // work — that it is keyed on the disconnect busy state, and the id it targets.
+  const src = stripComments(mainJsx)
+  const at = src.indexOf('if (!githubDisconnect.open || !githubDisconnect.busy) return')
+  assert.ok(at > -1, 'the busy-reclaim effect must exist in main.jsx')
+  assert.match(src.slice(at, at + 600), /getElementById\('github-disconnect-dialog'\)/,
+    'the reclaim must target the dialog container (the reason tabIndex -1 is load-bearing)')
+})
 
 async function wiringProbe(state, connected = true) {
   const calls = { open: 0, close: 0, confirm: 0 }
