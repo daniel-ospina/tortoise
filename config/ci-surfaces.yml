@@ -1069,6 +1069,7 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  - test_v4_declared_mechanisms.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
