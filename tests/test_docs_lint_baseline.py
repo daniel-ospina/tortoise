@@ -155,18 +155,90 @@ def test_markdownlint_key_is_line_number_independent():
 
 
 def test_markdownlint_keys_still_distinguish_same_rule_at_different_columns():
-    """`(path, rule, column, detail)` — collapsing columns would merge findings.
+    """`(path, rule, column, detail)` — collapsing ANY component merges findings.
 
     If every MD032 in a file collapsed to one key, fixing one and adding another
     would net to zero and pass. The column plus the offending line's text keeps
-    two findings of the same rule distinct.
+    two findings of the same rule distinct — so each case below holds the PATH and
+    the RULE fixed and varies ONLY the component under test. An earlier version
+    varied the path as well, and then `path|rule` alone kept every key distinct,
+    so the column and the detail were pinned by NOTHING: dropping either one
+    still passed (#7542 review round 7).
     """
-    report = (
-        MARKDOWNLINT_REPORT
-        + 'docs/x.md:200:5 error MD032/blanks-around-lists Lists should be surrounded by blank lines [Context: "- b"]\n'
+    # Only the COLUMN differs.
+    column_only = (
+        'docs/x.md:200:5 error MD032/blanks-around-lists '
+        'Lists should be surrounded by blank lines [Context: "- b"]\n'
+        'docs/x.md:200:9 error MD032/blanks-around-lists '
+        'Lists should be surrounded by blank lines [Context: "- b"]\n'
     )
-    keys = _md_keys(report)
-    assert len(keys) == len(set(keys)) == 3
+    keys = _md_keys(MARKDOWNLINT_REPORT + column_only)
+    assert len(keys) == len(set(keys)) == 4, keys
+    # Only the DETAIL (the offending line's text) differs.
+    detail_only = (
+        'docs/x.md:200:5 error MD032/blanks-around-lists '
+        'Lists should be surrounded by blank lines [Context: "- b"]\n'
+        'docs/x.md:200:5 error MD032/blanks-around-lists '
+        'Lists should be surrounded by blank lines [Context: "- c"]\n'
+    )
+    keys = _md_keys(MARKDOWNLINT_REPORT + detail_only)
+    assert len(keys) == len(set(keys)) == 4, keys
+
+
+def test_the_digested_policy_name_set_is_pinned_so_a_name_cannot_vanish():
+    """A name REMOVED from the set is a suppression route, not a tidy-up.
+
+    `_config_digest` digests a tracked file whose basename is in this set, so
+    dropping a name silently stops digesting configs of that shape — and a PR that
+    both drops the name and adds `docs/.markdownlint.yaml` with `MD001: false`
+    suppresses findings while every digest stays byte-identical. `ci_selection`
+    still selects the FULL matrix for that path, so the pin RUNS and is simply
+    blind: no other test can see the removal (#7542 review round 7). The set is a
+    hand-maintained tuple, so this literal is the only thing that makes a change
+    to it visible in the diff and forces the decision to be made out loud.
+
+    It is deliberately a SUPERSET — it includes names cli2 does not read (see the
+    #7534 deferral), which is the fail-CLOSED direction: an inert file reds the
+    pin, rather than a real one slipping through.
+    """
+    assert dlb.LINTER_CONFIG_NAMES == frozenset({
+        ".markdownlint-cli2.jsonc",
+        ".markdownlint-cli2.yaml",
+        ".markdownlint-cli2.yml",
+        ".markdownlint-cli2.cjs",
+        ".markdownlint-cli2.mjs",
+        ".markdownlint.jsonc",
+        ".markdownlint.json",
+        ".markdownlint.yaml",
+        ".markdownlint.yml",
+        ".markdownlint.cjs",
+        ".markdownlint.mjs",
+        ".markdownlintrc",
+        ".markdownlintignore",
+        ".lycheeignore",
+        "lychee.toml",
+    })
+
+
+def test_run_lychee_refuses_an_unshaped_document(tmp_path: Path):
+    """The generator's fail-closed shape check must be WIRED, not merely defined.
+
+    `test_update_rejects_a_lychee_document_the_check_would_reject` calls
+    `_require_lychee_shape` directly, and every `update` test monkeypatches
+    `_run_lychee` — so deleting the one call that wires the two together left the
+    whole suite green while `update` wrote a snapshot the CHECK refuses, which is
+    the exact regression its docstring describes (#7542 review round 7). This
+    drives `_run_lychee` itself against a stub binary, which is the call the
+    generator actually makes.
+    """
+    stub = tmp_path / "lychee"
+    stub.write_text('#!/bin/sh\nprintf \'{"total": 0}\\n\'\n', encoding="utf-8")
+    stub.chmod(0o755)
+    doc = tmp_path / "docs" / "x.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# x\n", encoding="utf-8")
+    with pytest.raises(dlb.FailClosed):
+        dlb._run_lychee(["docs/x.md"], tmp_path, str(stub))
 
 
 def test_lychee_target_is_portable_not_an_absolute_checkout_path(tmp_path: Path):

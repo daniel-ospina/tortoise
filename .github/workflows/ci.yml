@@ -733,7 +733,11 @@ jobs:
           # A changed file that ADDS a markdownlint suppression directive hides the
           # very findings this check exists to catch: cli2 reports 0 issues, the
           # differ sees 0 new, and a suppressed new finding passes. A PRE-EXISTING
-          # directive is part of the baselined debt; only an ADDED one is rejected.
+          # directive is part of the baselined debt; only an ADDED one is rejected
+          # — and a MOVED one re-adds the line it removed, because git's patch
+          # format has no line-move detection, so a pure reorder is refused too.
+          # That is a deliberate false positive (fail closed); the remedy is to
+          # leave a baselined directive where it is.
           # (A same-PR rule change in any .markdownlint* config, or in
           # .lycheeignore, is caught by the snapshot's linter-policy digest.)
           #

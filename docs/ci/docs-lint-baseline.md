@@ -148,12 +148,14 @@ not scanned as text: a text pattern is evaded by a spelling the parser still
 honours (a JSONC `\u` escape, a YAML flow mapping), and a config that cannot be
 parsed fails closed. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
-finding is not a fixed one. A pre-existing directive is part of the baselined
-debt and is unaffected: the guard reacts only to **added** lines, and when a
-directive is merely *moved*, git's diff over a commit RANGE aligns it as
-unchanged and moves the surrounding lines instead — measured in four
-arrangements, and note that a `git diff --no-index` comparison does NOT behave
-this way and will mislead you. The guard greps the added-markdown diff read from
+finding is not a fixed one. A **pre-existing** directive is baselined debt — but
+the guard reacts to any added line that *looks* like one, and git's patch format
+has no line-move detection: moving a directive emits it as a `-`/`+` pair, so a
+pure reorder is refused too. That is a deliberate FALSE POSITIVE, fail-closed,
+measured in 11 arrangements (every one refused) — the remedy is to leave a
+baselined directive where it is, and the alternative (failing only on a NET
+increase) is strictly weaker, because a swap that adds a suppression where none
+was still hides a new finding. The guard greps the added-markdown diff read from
 a **file**, never a pipe, because `grep -q` exits at its first match and the
 resulting SIGPIPE under `set -o pipefail` made the pipeline non-zero — silently
 skipping the guard on a large diff. It matches **case-insensitively**, because
