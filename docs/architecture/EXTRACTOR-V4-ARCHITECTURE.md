@@ -1025,13 +1025,13 @@ The contention + confidence model **is a recorded decision** (`ONTOLOGY.md` §3.
 
 > ### ✅ REOPEN CLOSED — the owner ruled on 2026-10-06: we KEEP EP confidence; `proof_count` and `Trend` are NOT adopted
 >
-> ✅ **`OVERRIDES:` posted on `#2730`** — for **this ruling** the marker lives on the **issue**, per §16's rule (below); the issue comment carries the full text. ⚠️ The rule is **not** yet true file-wide — line 52 still inlines a marker for a different ruling (that one is dated 2026-09-26), so this is narrowed to the case at hand rather than stated as a general convention. **Do not re-open this by re-reading the five challenges below — they are kept as history.**
+> ✅ **`OVERRIDES:` posted on `#2730`** — for **this ruling** the marker lives on the **issue**, per §16's rule (below); the issue comment carries the full text. ⚠️ The rule is **not** yet true file-wide — the inline `OVERRIDES:` block near the top of this file (the **postpaid-billing → prepaid-credits** ruling, dated 2026-09-26) is the exception, so this is narrowed to the case at hand rather than stated as a general convention. **Do not re-open this by re-reading the five challenges below — they are kept as history.**
 >
 > ⚠️ **Two claims, and only one is established — stated so the ruling cannot be overclaimed later.**
 >
-> **(1) The representational difference is a FACT.** Hindsight's edge constraint is seven types — `temporal, semantic, entity, causes, caused_by, enables, prevents` — **none adversarial**, and its `contradict` verdict was never persisted as an edge (§11). It therefore **structurally cannot** store an attack. We can and do (typed `IMPL`/`NAND`). *"Can it represent a contention at all"* is settled **by construction** — and that is the load-bearing part of the ruling.
+> **(1) The representational difference is a FACT.** Hindsight's edge constraint is seven types — `temporal, semantic, entity, causes, caused_by, enables, prevents` — **none adversarial**, and its `contradict` verdict was never persisted as an edge (§11). It therefore **structurally cannot** store a contention **as a typed relation** — that is a fact about its schema, not a claim that it cannot hold two opposing statements at all (§11 records that it refuses to erase them *in prose*). We can and do store one as a typed relation (typed `IMPL`/`NAND`). *"Can it represent a contention at all"* is settled **by construction** — and that is the load-bearing part of the ruling.
 >
-> **(2) The outcome difference is UNMEASURED.** That propagation over a typed graph produces *better answers* than scalar drift remains **argument, not measurement** (§12 says so explicitly, and it stays true). Challenges **1** (they built it and deleted it in ~4 months) and **4** (justify the cost on audit, adjudication, or propagation) still want a **measurement**. **Nothing here may be read as *"we proved propagation beats scalar drift."***
+> **(2) The outcome difference is UNMEASURED.** That propagation over a typed graph produces *better answers* than scalar drift remains **argument, not measurement** — the two challenge answers below say so explicitly, and it stays true. Challenges **1** (they built it and deleted it in ~4 months) and **4** (justify the cost on audit, adjudication, or propagation) still want a **measurement**. **Nothing here may be read as *"we proved propagation beats scalar drift."***
 >
 > **The ruling closes the DIRECTION, not the MEASUREMENT.**
 
@@ -1139,7 +1139,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 - **Whether the neighbourhood lookup changes extraction's output is UNMEASURED — and the new ordering makes it moot.** The old design put the lookup before extraction so extraction would emit *"attach to A"*; S3 now resolves authoritatively instead (§4.2), so the question is no longer load-bearing. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
 - The `~8.6 Objects/session` figure is **inferred**, not directly measured — `extractedFrom` points at `:Source`, which carries no `id`, so Objects could not be grouped per session.
 - **Nothing measures how much of the surviving 2,963 non-`the` Objects is still junk** — `PR #465` proves a non-`the` Object can also be a bare reference.
-- The `^the <X>` regex is a **floor**, not the whole fix.
+- The `^the <X>` **pattern** is a **floor**, not the whole fix.
 
 ---
 
