@@ -263,13 +263,28 @@ These are requirements on the derivation, not evidence of an implementation that
 
 ### 7.1 Required surface approvals — approval required, not approved
 
-A design that assumes a field the write path cannot accept cannot be built. Three surfaces accept a point
-property; each needs a decision, and **none is approved**:
+**⛔ THE FIELD BELONGS ON `create_entity`, NOT ON `create_point`.** The approved MCP surface
+(`docs/product/canonical-mcp-tools.md`, row 10) has **`create_entity` absorbing `create_point`**,
+`create_event`, `create_object`, `create_subject`, `create_document` and `diary_write`, and design
+decision #4 of that document says why: *"**Points, Events, Sources, Subjects, Objects and Documents are
+all entities** (ontology §1), so one `create_entity` with `type=` covers the whole creator family **with
+the right fields per type**."* The SDK list agrees and collapses `create_point` plus four siblings into
+**`create_entity(type=)`** (`docs/product/beta-sdk-surface.md`, row 12).
+
+**⇒ A numeric value is the *"right fields per type"* case.** The field therefore rides the surface
+migration tracked by **#4282** — **Phase 2** (the SDK) then **Phase 3.1** (the 26 tools implemented on the
+frozen SDK) — and **adds no tool and no method**, so it **does not re-cut the frozen manifest** and
+`tools/surface-guard.py` is untouched. A lane that adds this field to `create_point` would have its work
+discarded at Phase 2.
+
+A design that assumes a field the write path cannot accept cannot be built. **S1 and S2 do not reject the
+field today**, because both filter by **deny-list** rather than allow-list; what each needs is
+**declaration**, not permission:
 
 | # | Surface | Current state | What is needed |
 | --- | --- | --- | --- |
-| **S1** | MCP tool `tortoise_create_point` (`tortoise/mcp_server.py:787`; registry entry `tortoise/tool_registry.py:61`) | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:715`); unknown keys pass through. | Declare the value field so it is accepted and documented; no boundary rejection blocks it. |
-| **S2** | SDK `TortoiseSDK.create_point` (`tortoise/sdk.py:2354`) | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:849`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
+| **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:787`; registry entry `tortoise/tool_registry.py:61`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:715`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
+| **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:2354`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:849`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
 | **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:269`, `extra="forbid"` at `:272`) | Closed: a customer **cannot send an amount today**. | Add the value field to the `Point` model, or decide explicitly that the field is server-derived and never client-supplied — a contract change. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
@@ -284,8 +299,9 @@ document* — no code, schema, graph or gate changes here — not the requiremen
 
 The work cannot begin at the derivation. The dependency order is:
 
-1. **Owner decisions** — the three surfaces (§7.1) and the open register (§3). Nothing below starts before
-   these.
+1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
+   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1; only **S3** (the
+   HTTP commit validator) is a genuine contract change, and it is closed today.
 2. **Declare the field** on the accepted schema: the Point property list and the HTTP `Point` model. No
    behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and checked against the words it came
