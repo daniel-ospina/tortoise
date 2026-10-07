@@ -918,7 +918,22 @@ jobs:
           # keeps the whole decision on the single line a reader (and the
           # workflow pin in tests/test_ci_selection.py) inspects.
           XDIST_WORKERS=0
-          if [ "${{ matrix.half }}" = "a" ] && [ -n "${TORTOISE_DB_URI:-}" ]; then
+          # ⛔ DISABLED 2026-10-06 — the `-n` admission made `test (a)` RED on main.
+          # Evidence: on 3bbb61c26, shard `a` FAILED while shards (b)-(i) ALL PASSED,
+          # and `a` is the only shard that had `-n`. Failing test:
+          # tests/test_migration_drift_gate.py::test_duplicate_branch_flags_out_of_order_after_rename
+          # (AssertionError). That file is NOT touched by #6269 and PASSES 3/3 SERIAL on
+          # the same commit — so the parallelism, not the code under test, is the trigger.
+          # Mechanism: the module keeps a module-global mutable fixture dir
+          # (`FIXTURES = _tmp()`, tests/test_migration_drift_gate.py:33) and
+          # `_write_fixture_migrations` DELETES every `*.sql` in it (:39-40) while
+          # `_stub_curl` rewrites `stub-curl.sh` in the same directory (:48) — shared
+          # mutable state that a concurrent worker can trip. NOT PROVEN to be the exact
+          # trigger; re-admit `-n` only WITH a shard-level run under `-n` as the gate.
+          # The guard below is kept INTACT and inert rather than deleted, so re-admitting
+          # is a one-line change and the D3 shape (one shard + docker shape only) is
+          # preserved for whoever fixes the isolation.
+          if false && [ "${{ matrix.half }}" = "a" ] && [ -n "${TORTOISE_DB_URI:-}" ]; then
             XDIST_WORKERS="$PYTEST_XDIST_WORKERS"
           fi
           echo "#6136 xdist: -n $XDIST_WORKERS --dist loadscope (half=${{ matrix.half }} uri=${TORTOISE_DB_URI:-<unset>})"
