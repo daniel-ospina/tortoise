@@ -891,6 +891,27 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("could not be read", out)
         self.assertNotIn("It names no closing issue", out)
 
+    def test_open_pr_own_number_with_a_closing_reference_names_it(self):
+        """The linked arm of the refusal message is exercised (#7009).
+
+        The message's `where` clause has three arms — a NAMED linked issue, an
+        UNREADABLE field, and a field that names nothing. The last two are pinned
+        by their own tests; without this one, a regression in the linked arm's
+        join or separator would leave the suite green, and that arm is the one
+        most PRs hit (this repo puts `Closes #N` in the body).
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "Closes #999.", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+            "closingIssuesReferences": [{"number": 999}],
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertIn("It closes #999.", out)
+        self.assertNotIn("VERDICT", out)
+
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
         # make — and on a TERMINAL PR it is still history, not in-flight work.
