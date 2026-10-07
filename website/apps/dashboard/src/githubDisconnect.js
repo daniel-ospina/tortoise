@@ -49,17 +49,26 @@ const REASON_TEXT = {
  */
 export function disconnectReasonText(reason) {
   if (!reason) return 'the endpoint reported no reason'
-  if (REASON_TEXT[reason]) return REASON_TEXT[reason]
+  if (Object.hasOwn(REASON_TEXT, reason)) return REASON_TEXT[reason]
   const http = /^http_(\d+)$/.exec(reason)
   if (http) {
     const code = Number(http[1])
-    // A 4xx (404/422) means GitHub did not recognise the token — it may be
-    // gone already. A 5xx means GitHub could not process the request, so the
-    // token is most likely still live: saying "may already be gone" there
-    // would be the wrong reassurance.
-    return code >= 500
-      ? `GitHub could not process the revocation (it answered ${code}), so the token is probably still live`
-      : `GitHub answered ${code} to the revocation request, so the token may already be gone`
+    // Match the HTTP range to what GitHub actually established. 404/422 mean it
+    // did not recognise the token (it may be gone); 401/403 mean it rejected
+    // the REQUEST before touching the token, so the token is certainly still
+    // live; a 5xx means it could not process the call. Saying "may already be
+    // gone" for any of the latter two is the wrong reassurance — the exact
+    // failure #4946 exists to remove.
+    if (code === 404 || code === 422) {
+      return `GitHub answered ${code} to the revocation request, so the token may already be gone`
+    }
+    if (code === 401 || code === 403) {
+      return `GitHub rejected the revocation request (it answered ${code}), so the token is still live — this server's GitHub app credentials may be wrong`
+    }
+    if (code >= 500) {
+      return `GitHub could not process the revocation (it answered ${code}), so the token is probably still live`
+    }
+    return `GitHub answered ${code} to the revocation request, so whether the token is still live is unknown`
   }
   return `the endpoint reported "${reason}"`
 }

@@ -201,17 +201,32 @@ test('#4946: the idempotent no-op does not claim a revocation that never happene
 })
 
 test('#4946: every server revoke_reason degrades to honest words, never to undefined', () => {
-  for (const reason of ['not_connected', 'undecryptable', 'not_configured', 'network', 'http_404', 'something_new']) {
+  // Includes Object.prototype keys (a JSON body can carry any string): an
+  // unguarded `REASON_TEXT[reason]` lookup would return a native function and
+  // render it into the copy.
+  for (const reason of ['not_connected', 'undecryptable', 'not_configured', 'network', 'http_404',
+    'constructor', 'toString', '__proto__', 'something_new']) {
     const text = disconnectReasonText(reason)
     assert.ok(typeof text === 'string' && text.length > 0, `${reason} must render words`)
     assert.ok(!/undefined/.test(text), `${reason} must not render "undefined"`)
+    assert.ok(!/native code/.test(text), `${reason} must not leak a prototype member: ${text}`)
   }
   assert.equal(disconnectReasonText(''), 'the endpoint reported no reason')
   assert.ok(/404/.test(disconnectReasonText('http_404')), 'the 4xx arm names the status')
-  // A 5xx must NOT imply the token is gone — GitHub could not process the call,
-  // so the token is most likely still live.
-  assert.ok(/still live/.test(disconnectReasonText('http_500')),
-    'a 5xx must not read as "may already be gone"')
+  // 404/422: GitHub did not recognise the token — it may be gone.
+  assert.ok(/may already be gone/.test(disconnectReasonText('http_422')),
+    '422 means the token was not recognised')
+  // 401/403: the REQUEST was rejected before the token was touched — it is live.
+  // Assert the SPECIFIC arm, not merely the words "still live", which the
+  // generic fallback also contains.
+  for (const code of ['http_401', 'http_403']) {
+    const text = disconnectReasonText(code)
+    assert.ok(!/may already be gone/.test(text), `${code} must not imply the token is gone`)
+    assert.ok(/app credentials/.test(text), `${code} must name the rejected request: ${text}`)
+  }
+  // A 5xx means GitHub could not process the call, so the token is most likely live.
+  assert.ok(/probably still live/.test(disconnectReasonText('http_500')),
+    'a 5xx must read as probably still live, not as an unknown or as gone')
   assert.ok(/"something_new"/.test(disconnectReasonText('something_new')),
     'an unknown reason is reported verbatim rather than dropped')
 })
@@ -582,10 +597,9 @@ test('#4946 (a11y) wiring: a close after the opener unmounted parks focus on the
   }
 })
 
-test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', async () => {
-  // The fallback above only works if the heading is focusable.
+test('#4946 (a11y): the GitHub-connect heading is a programmatic focus target', () => {
+  // The fallback in closeGithubDisconnect only works if the heading is
+  // focusable; the executed fallback itself is pinned by the test above.
   assert.match(mainJsx, /<h3 id="settings-github-heading" tabIndex=\{-1\}>/,
     'the heading must carry tabIndex -1 so the close fallback can focus it (#3890 pattern)')
-  const { closeFn } = await runOpenClose({ restoreReturns: { restore: null } })
-  assert.equal(typeof closeFn, 'function')
 })
