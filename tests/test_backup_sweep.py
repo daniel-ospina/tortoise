@@ -3091,9 +3091,13 @@ def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
         # SELF-SUFFICIENCY (review round 2, P3): `recorded == []` alone is
         # one-sided. `_record_org_storage` swallows every Exception, so a fault
         # that aborts it EARLY also records nothing and would leave this test
-        # green — MEASURED: injecting a raise right after `readings = []` kept it
-        # passing. Assert the healthy survivor was actually handed to the meter,
-        # so "nothing recorded" is accepted only when something WAS measured.
+        # green. MEASURED: injecting a raise as the FIRST statement INSIDE the
+        # swallowed `try:` kept it passing. (Placement matters for reproducing
+        # that: a raise placed before the `try:` propagates instead of being
+        # swallowed, so it errors on the pre-fix tree too and demonstrates
+        # nothing.) Assert the healthy survivor was actually handed to the meter
+        # — this gates on the meter being CALLED; the positive control below
+        # covers the other half, that a reading that IS measured gets recorded.
         assert survivor in measured, (
             f"[{label}] the survivor {survivor!r} never reached the meter, so this "
             f"case proves nothing about the aggregate (measured={measured})")
@@ -3101,6 +3105,21 @@ def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
             f"[{label}] a skipped graph MUST fail the aggregate — recording the "
             f"survivors' sum as the ORG's figure is the silent understatement "
             f"this rule exists to prevent. Got: {recorded}")
+
+    # POSITIVE CONTROL (review round 3, P3): every case above asserts that NOTHING
+    # was recorded, so a broken recording path would satisfy all of them. MEASURED
+    # on the previous revision: forcing `combined = None`, or discarding the
+    # survivor's reading, each left this test GREEN. With no skip at all the org's
+    # figure MUST be recorded — that is the half the witness assertions cannot see.
+    recorded.clear()
+    measured.clear()
+    monkeypatch.setattr(bs_mod, "measure_projection_storage", _measure_ok)
+    bs_mod._record_org_storage(_Db(None), "org_a",
+                               [{"graph_id": "f", "graph_name": "g_ok4"}])
+    assert [r[1].total_mb for r in recorded] == [1.0], (
+        f"a sweep with NO skip must record the org's figure — without this the "
+        f"block above is satisfied by any recording path that is broken "
+        f"outright. Got: {recorded}")
 
 
 def test_combine_graph_storage_readings_unit_5331():
