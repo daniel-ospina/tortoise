@@ -3993,20 +3993,38 @@ def journal_object_surviving_keys(
                 id_to_name.pop(old, None)
             name_to_id[name] = oid
             id_to_name[oid] = name
-        elif t == "EntityMutated" and ev.get("op") == "delete":
+        elif t == "EntityMutated":
             rid, label = ev.get("id"), ev.get("label")
             if not isinstance(rid, str):
                 continue
-            # `_delete_entity_by_id` is scoped to the record's own canonical
-            # label, falling back to the legacy id-wide delete for a missing/
-            # unknown one (#3860). Only those remove an Object.
+            # `_delete_entity_by_id` / `_fold_entity_mutation` are scoped to
+            # the record's own canonical label, falling back to the legacy
+            # id-wide path for a missing/unknown one (#3860). Only those touch
+            # an Object.
             if (isinstance(label, str)
                     and label in _CANONICAL_ENTITY_LABELS
                     and label != "Object"):
                 continue
-            nm = id_to_name.pop(rid, None)
-            if nm is not None and name_to_id.get(nm) == rid:
-                name_to_id.pop(nm, None)
+            if ev.get("op") == "delete":
+                nm = id_to_name.pop(rid, None)
+                if nm is not None and name_to_id.get(nm) == rid:
+                    name_to_id.pop(nm, None)
+            elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
+                # `state` carries the full APPLIED map, so a rename moves the
+                # MERGE key the supersede sweep matches on
+                # (`_fold_entity_mutation`). Ignoring it would leave the OLD
+                # name in the surviving set and silently exempt a later
+                # name-only supersede `rebuild_all` refuses.
+                state = ev.get("state")
+                newname = (state.get("name")
+                           if isinstance(state, dict) else None)
+                if isinstance(newname, str) and newname:
+                    old = id_to_name.get(rid)
+                    if old is not None:
+                        if name_to_id.get(old) == rid:
+                            name_to_id.pop(old, None)
+                        id_to_name[rid] = newname
+                        name_to_id[newname] = rid
     return frozenset(id_to_name), frozenset(name_to_id)
 
 
