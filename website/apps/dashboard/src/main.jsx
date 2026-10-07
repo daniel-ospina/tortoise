@@ -502,26 +502,10 @@ function SettingsTab(props) {
         {loading ? (
           <p className="dim">Loading GitHub status…</p>
         ) : githubConnected ? (
-          <>
-            <p className="dim small">
-              <span className="live">Connected</span>{reposNote ? ` — ${reposNote}. ` : '. '}
-              Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
-            </p>
-            {/* #4946 item 3: the disconnect control. The server endpoint landed
-                in #5598 with no caller; this home owns the OAuth connection
-                state, so the control (and its consequence copy) live here. */}
-            <div style={{ marginTop: '0.5rem' }}>
-              <GithubDisconnectControl
-                open={githubDisconnect.open}
-                busy={githubDisconnect.busy}
-                error={githubDisconnect.error}
-                result={githubDisconnect.result}
-                onOpen={onOpenGithubDisconnect}
-                onClose={onCloseGithubDisconnect}
-                onConfirm={onConfirmGithubDisconnect}
-              />
-            </div>
-          </>
+          <p className="dim small">
+            <span className="live">Connected</span>{reposNote ? ` — ${reposNote}. ` : '. '}
+            Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
+          </p>
         ) : (
           <>
             <p className="dim small">
@@ -540,6 +524,24 @@ function SettingsTab(props) {
             {githubError && <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{githubError}</p>}
           </>
         )}
+        {/* #4946 item 3: the disconnect control. Its OPENER renders only while
+            connected, but the dialog lives OUTSIDE the connected arm — a
+            successful disconnect flips `github_connected` false, and an outcome
+            panel nested in the connected arm would unmount before the user
+            could read it (the honest "revocation was not confirmed" warning in
+            particular). This home owns the OAuth connection state. */}
+        <div style={{ marginTop: '0.5rem' }}>
+          <GithubDisconnectControl
+            connected={githubConnected}
+            open={githubDisconnect.open}
+            busy={githubDisconnect.busy}
+            error={githubDisconnect.error}
+            result={githubDisconnect.result}
+            onOpen={onOpenGithubDisconnect}
+            onClose={onCloseGithubDisconnect}
+            onConfirm={onConfirmGithubDisconnect}
+          />
+        </div>
       </section>
 
       {/* ── Home 3: Memory sources — the ONLY live home of the four source
@@ -1078,6 +1080,24 @@ function App() {
   const [githubDisconnect, setGithubDisconnect] = React.useState({
     open: false, busy: false, error: '', result: null,
   })
+  // #2392 (a11y): focus-restore holder for the disconnect dialog — the opener
+  // is captured at the gesture and every close hands focus back instead of
+  // dropping it on <body>.
+  const githubDisconnectRestoreRef = React.useRef(null)
+  // #4029 (a11y) applied to #4946: while the disconnect request is in flight
+  // BOTH dialog buttons are disabled, which drops focus to <body>. Reclaim it
+  // for the dialog container (tabIndex -1), guarded on activeElement === body so
+  // focus the user moved is never stolen.
+  React.useEffect(() => {
+    if (!githubDisconnect.open || !githubDisconnect.busy) return
+    const raf = requestAnimationFrame(() => {
+      if (typeof document === 'undefined') return
+      if (document.activeElement !== document.body) return
+      const dlg = document.getElementById('github-disconnect-dialog')
+      if (dlg) dlg.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [githubDisconnect.open, githubDisconnect.busy])
   // #2392 (a11y): focus-restore holder — the opener is captured at the gesture
   // and every non-logout close hands focus back instead of dropping it on
   // <body>.
@@ -2608,12 +2628,15 @@ function claimIntentInFlight() {
   }
 
   function openGithubDisconnect() {
+    rememberFocusedTrigger(githubDisconnectRestoreRef)
     setGithubDisconnect((s) => ({ ...s, open: true, error: '', result: null }))
   }
 
   // Every close path (Cancel, backdrop, Escape, the outcome panel's Close): a
-  // pure local close — no request, and any stale response state is dropped.
+  // pure local close — no request, and any stale response state is dropped —
+  // that also hands focus back to the opener (#2392).
   function closeGithubDisconnect() {
+    restoreFocus(githubDisconnectRestoreRef)
     setGithubDisconnect({ open: false, busy: false, error: '', result: null })
   }
 

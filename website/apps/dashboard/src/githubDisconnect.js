@@ -51,7 +51,16 @@ export function disconnectReasonText(reason) {
   if (!reason) return 'the endpoint reported no reason'
   if (REASON_TEXT[reason]) return REASON_TEXT[reason]
   const http = /^http_(\d+)$/.exec(reason)
-  if (http) return `GitHub answered ${http[1]} to the revocation request, so the token may already be gone`
+  if (http) {
+    const code = Number(http[1])
+    // A 4xx (404/422) means GitHub did not recognise the token — it may be
+    // gone already. A 5xx means GitHub could not process the request, so the
+    // token is most likely still live: saying "may already be gone" there
+    // would be the wrong reassurance.
+    return code >= 500
+      ? `GitHub could not process the revocation (it answered ${code}), so the token is probably still live`
+      : `GitHub answered ${code} to the revocation request, so the token may already be gone`
+  }
   return `the endpoint reported "${reason}"`
 }
 
@@ -64,6 +73,13 @@ export function disconnectReasonText(reason) {
  */
 export function disconnectOutcomeMessage(result) {
   const r = result || {}
+  // The endpoint's idempotent no-op: it reports `revoked: true` when there was
+  // NO stored token to revoke (`revoke_reason: 'not_connected'`). Nothing was
+  // revoked at GitHub — claiming otherwise is the cosmetic lie #4946 exists to
+  // remove, so this arm must come first.
+  if (r.revoked && r.revoke_reason === 'not_connected') {
+    return 'GitHub is disconnected. There was no stored token to revoke, so nothing was sent to GitHub.'
+  }
   if (r.revoked) {
     return "GitHub is disconnected — Tortoise's access is revoked and the stored token is cleared."
   }
@@ -89,7 +105,7 @@ function focusDialogContainer(e) {
  * switches the dialog to the outcome panel; `error` keeps it open on a failed
  * request so the retry is armed.
  */
-export function GithubDisconnectControl({ open, busy, error, result, onOpen, onClose, onConfirm }) {
+export function GithubDisconnectControl({ connected, open, busy, error, result, onOpen, onClose, onConfirm }) {
   const h = React.createElement
   // A trailing `display:flex` row rather than `.new-key-actions`, which
   // `index.css` scopes to the destructive `.graph-delete-modal` / wide
@@ -134,9 +150,17 @@ export function GithubDisconnectControl({ open, busy, error, result, onOpen, onC
   return h(
     React.Fragment,
     null,
-    h('button', {
-      type: 'button', className: 'ghost', onClick: () => onOpen(), disabled: busy,
-    }, GITHUB_DISCONNECT_OPENER),
+    // The opener is gated on `connected`, but the DIALOG is not: a successful
+    // disconnect flips `github_connected` false, and a dialog nested inside the
+    // connected branch would unmount before the user could read the outcome
+    // panel (the honest "revocation was not confirmed" warning in particular).
+    // The caller renders this control OUTSIDE the connected branch for exactly
+    // that reason.
+    connected
+      ? h('button', {
+        type: 'button', className: 'ghost', onClick: () => onOpen(), disabled: busy,
+      }, GITHUB_DISCONNECT_OPENER)
+      : null,
     open
       ? h(
         'div',

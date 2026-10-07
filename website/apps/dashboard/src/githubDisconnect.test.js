@@ -12,9 +12,9 @@
 //
 // Both halves are EXECUTED, not grepped. The control is a `createElement` module
 // (importable without a JSX transform), rendered with `react-dom/server`; the
-// `main.jsx` call site and the `disconnectGithub` handler are compiled and run
-// through the shared `jsxSourceProbe` (the #4637 lesson: five review cycles of
-// text pins passed while the rendered card said something else).
+// `main.jsx` call site and the `disconnectGithub` / open / close handlers are
+// compiled and run through the shared `jsxSourceProbe` (the #4637 lesson: five
+// review cycles of text pins passed while the rendered card said something else).
 //
 // Class-B mutation evidence (run, observed RED, reverted) is listed in the PR.
 import { test } from 'node:test'
@@ -34,6 +34,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(HERE, 'main.jsx'), 'utf8')
 
 const baseProps = {
+  connected: true,
   open: false, busy: false, error: '', result: null,
   onOpen() {}, onClose() {}, onConfirm() {},
 }
@@ -65,6 +66,8 @@ function textOf(node) {
   return ''
 }
 
+const labelsOf = (props) => collect(GithubDisconnectControl(props), 'button').map((b) => textOf(b.props.children))
+
 function buttonByLabel(props, label) {
   const button = collect(GithubDisconnectControl(props), 'button')
     .find((b) => textOf(b.props.children) === label)
@@ -73,19 +76,23 @@ function buttonByLabel(props, label) {
 }
 
 // ── the copy of record ─────────────────────────────────────────────────────
-test('#4946: the consequence copy states the re-authorization consequence', () => {
-  // Spelled out here as the independent copy of record — a change to the
-  // module's constant alone must fail this test.
-  assert.ok(/re-?connecting requires authoriz\w+ github/i.test(GITHUB_DISCONNECT_CONSEQUENCE),
-    `the copy must state the consequence (a new GitHub authorization) — got: ${GITHUB_DISCONNECT_CONSEQUENCE}`)
-  // It must not claim indexed data is removed — a disconnect clears no memory.
-  assert.ok(/stay in your graph/i.test(GITHUB_DISCONNECT_CONSEQUENCE),
-    'the copy must say indexed issues/docs survive the disconnect')
+// Spelled out here as the INDEPENDENT copy of record (the accountDeletion
+// `DELETE_ACCOUNT_WARNING` pattern): a change to the module's own constant
+// alone must fail this test. A regex pair is not enough — it left the
+// token-clearing promise (the substance of #4946's revoke-then-clear decision)
+// unpinned.
+const REQUIRED_COPY =
+  "Disconnecting revokes Tortoise's access to GitHub and clears the stored token. "
+  + 'Issues and docs you have already indexed stay in your graph. '
+  + 'Re-connecting requires authorizing GitHub again.'
+
+test('#4946: the consequence copy is the copy of record, verbatim', () => {
+  assert.equal(GITHUB_DISCONNECT_CONSEQUENCE, REQUIRED_COPY)
 })
 
 test('#4946: the open dialog renders the consequence copy verbatim', () => {
   const html = render({ ...baseProps, open: true })
-  assert.ok(html.includes(GITHUB_DISCONNECT_CONSEQUENCE),
+  assert.ok(html.includes(REQUIRED_COPY),
     'the confirm dialog must render the consequence copy verbatim')
 })
 
@@ -95,10 +102,24 @@ test('#4946: the dialog renders only when opened, and offers exactly two ruled a
     'no dialog before the control is used')
   const open = render({ ...baseProps, open: true })
   assert.ok(open.includes('role="dialog"'), 'the confirm must be a real dialog')
-  const labels = collect(GithubDisconnectControl({ ...baseProps, open: true }), 'button')
-    .map((b) => textOf(b.props.children))
-  assert.deepEqual(labels, ['Disconnect GitHub', 'Cancel', 'Disconnect'],
+  assert.deepEqual(labelsOf({ ...baseProps, open: true }),
+    ['Disconnect GitHub', 'Cancel', 'Disconnect'],
     'exactly the opener plus the two actions')
+})
+
+test('#4946: disconnecting hides the opener but keeps the outcome dialog open', () => {
+  // The opener must not survive the connection flipping false...
+  assert.deepEqual(labelsOf({ ...baseProps, connected: false, open: false }), [],
+    'no opener once GitHub is disconnected')
+  // ...but the DIALOG must. main.jsx renders this control OUTSIDE the connected
+  // branch precisely because the post-disconnect refresh flips
+  // `github_connected` false while the outcome panel is still on screen; nesting
+  // it in that branch unmounted the honest warning before it could be read.
+  const html = render({
+    ...baseProps, connected: false, open: true, result: { revoked: false, revoke_reason: 'network' },
+  })
+  assert.ok(html.includes('role="dialog"'), 'the outcome dialog survives the disconnect')
+  assert.ok(/not confirmed/i.test(html), 'the honest warning is reachable after the flip')
 })
 
 test('#4946: the opener only opens — it never disconnects', () => {
@@ -128,14 +149,13 @@ test('#4946: a failed disconnect surfaces inside the still-open dialog', () => {
   const html = render({ ...baseProps, open: true, error: 'Could not disconnect GitHub — try again.' })
   assert.ok(html.includes('role="alert"'), 'the failure must be announced')
   assert.ok(html.includes('Could not disconnect GitHub'), 'the reason must be shown')
-  assert.ok(html.includes(GITHUB_DISCONNECT_CONSEQUENCE),
-    'the confirm copy stays while the retry is armed')
+  assert.ok(html.includes(REQUIRED_COPY), 'the confirm copy stays while the retry is armed')
 })
 
 // ── the honest outcome (the whole point of the issue) ──────────────────────
 test('#4946: a confirmed revocation reads as clean; an unconfirmed one does NOT', () => {
   const clean = disconnectOutcomeMessage({ connected: false, revoked: true, revoke_reason: 'revoked' })
-  assert.ok(/revoked/i.test(clean), `a confirmed revoke must say so — got: ${clean}`)
+  assert.ok(/access is revoked/i.test(clean), `a confirmed revoke must say so — got: ${clean}`)
 
   const unconfirmed = disconnectOutcomeMessage({ connected: false, revoked: false, revoke_reason: 'http_422' })
   assert.ok(!/^GitHub is disconnected —/.test(unconfirmed),
@@ -146,6 +166,16 @@ test('#4946: a confirmed revocation reads as clean; an unconfirmed one does NOT'
     'the unconfirmed outcome must point at GitHub\'s own settings')
 })
 
+test('#4946: the idempotent no-op does not claim a revocation that never happened', () => {
+  // The endpoint reports `revoked: true` with `revoke_reason: 'not_connected'`
+  // when NO token was stored — nothing was sent to GitHub. Rendering the clean
+  // "access is revoked" string here would be exactly the cosmetic lie #4946
+  // exists to remove.
+  const noop = disconnectOutcomeMessage({ connected: false, revoked: true, revoke_reason: 'not_connected' })
+  assert.ok(!/access is revoked/i.test(noop), `nothing was revoked — got: ${noop}`)
+  assert.ok(/no stored token to revoke/i.test(noop), `the no-op must say what happened — got: ${noop}`)
+})
+
 test('#4946: every server revoke_reason degrades to honest words, never to undefined', () => {
   for (const reason of ['not_connected', 'undecryptable', 'not_configured', 'network', 'http_404', 'something_new']) {
     const text = disconnectReasonText(reason)
@@ -153,20 +183,21 @@ test('#4946: every server revoke_reason degrades to honest words, never to undef
     assert.ok(!/undefined/.test(text), `${reason} must not render "undefined"`)
   }
   assert.equal(disconnectReasonText(''), 'the endpoint reported no reason')
-  assert.ok(/404/.test(disconnectReasonText('http_404')), 'the HTTP arm names the status')
+  assert.ok(/404/.test(disconnectReasonText('http_404')), 'the 4xx arm names the status')
+  // A 5xx must NOT imply the token is gone — GitHub could not process the call,
+  // so the token is most likely still live.
+  assert.ok(/still live/.test(disconnectReasonText('http_500')),
+    'a 5xx must not read as "may already be gone"')
   assert.ok(/"something_new"/.test(disconnectReasonText('something_new')),
     'an unknown reason is reported verbatim rather than dropped')
 })
 
 test('#4946: the outcome panel replaces the confirm actions and offers a close', () => {
-  const labels = collect(GithubDisconnectControl({
-    ...baseProps, open: true, result: { revoked: true, revoke_reason: 'revoked' },
-  }), 'button').map((b) => textOf(b.props.children))
-  assert.deepEqual(labels, ['Disconnect GitHub', 'Close'],
+  assert.deepEqual(labelsOf({ ...baseProps, open: true, result: { revoked: true, revoke_reason: 'revoked' } }),
+    ['Disconnect GitHub', 'Close'],
     'after the response the confirm/cancel pair gives way to a single close')
   const html = render({ ...baseProps, open: true, result: { revoked: true, revoke_reason: 'revoked' } })
-  assert.ok(!html.includes(GITHUB_DISCONNECT_CONSEQUENCE),
-    'the confirm copy is gone once the outcome is known')
+  assert.ok(!html.includes(REQUIRED_COPY), 'the confirm copy is gone once the outcome is known')
 })
 
 // ── a11y (the #2392 / #4029 dialog conventions) ────────────────────────────
@@ -193,10 +224,11 @@ test('#4946 (a11y): the busy transition is announced on a polite live region', (
 // ── the wiring main.jsx ships, compiled and EXECUTED ───────────────────────
 const MAIN_IMPORTS = importsFromMain(mainJsx, ['GithubDisconnectControl'])
 
-async function wiringProbe(state) {
+async function wiringProbe(state, connected = true) {
   const calls = { open: 0, close: 0, confirm: 0 }
   globalThis.__gdWiring = {
     state,
+    connected,
     open: () => { calls.open += 1 },
     close: () => { calls.close += 1 },
     confirm: () => { calls.confirm += 1 },
@@ -205,6 +237,7 @@ async function wiringProbe(state) {
     tag: 'GithubDisconnectControl',
     imports: MAIN_IMPORTS,
     bindings: {
+      githubConnected: 'globalThis.__gdWiring.connected',
       githubDisconnect: 'globalThis.__gdWiring.state',
       onOpenGithubDisconnect: 'globalThis.__gdWiring.open',
       onCloseGithubDisconnect: 'globalThis.__gdWiring.close',
@@ -227,7 +260,7 @@ test('#4946 wiring: the three action props are distinct, real handlers', async (
     'each action must reach its own handler — a swapped pair would show here')
 })
 
-test('#4946 wiring: the control\'s props are driven by the disconnect state', async () => {
+test('#4946 wiring: the control\'s props are driven by the disconnect state, not literals', async () => {
   const { props } = await wiringProbe({
     open: true, busy: true, error: 'boom', result: { revoked: false, revoke_reason: 'network' },
   })
@@ -236,6 +269,13 @@ test('#4946 wiring: the control\'s props are driven by the disconnect state', as
   assert.equal(props.error, 'boom', 'the error must reach the control')
   assert.deepEqual(props.result, { revoked: false, revoke_reason: 'network' },
     'the endpoint response must reach the control for the honest outcome panel')
+  assert.equal(props.connected, true, 'the connection state must reach the control')
+
+  // The CLOSED half too — without it a hardcoded `open={true}` (a permanently
+  // open confirm dialog whenever GitHub is connected) survives every test.
+  const closed = await wiringProbe({ open: false, busy: false, error: '', result: null }, false)
+  assert.equal(closed.props.open, false, 'the closed state must reach the control')
+  assert.equal(closed.props.connected, false, 'a disconnected control must be told so')
 })
 
 /**
@@ -272,13 +312,14 @@ function extractFunction(name) {
 async function runDisconnectGithub(apiImpl) {
   const seen = []
   const updates = []
+  const refreshes = []
   globalThis.__gdApi = apiImpl
   globalThis.__gdSet = (updater) => {
     updates.push(typeof updater === 'function'
       ? updater({ open: true, busy: false, error: 'stale', result: null })
       : updater)
   }
-  globalThis.__gdRefresh = () => { seen.push(['refresh']); return Promise.resolve() }
+  globalThis.__gdRefresh = () => { refreshes.push(1); return Promise.resolve() }
   const [{ value: fn }] = await evalExpressions([`(${extractFunction('disconnectGithub')})`], {
     bindings: {
       api: 'globalThis.__gdApi',
@@ -289,30 +330,63 @@ async function runDisconnectGithub(apiImpl) {
   })
   assert.equal(typeof fn, 'function')
   await fn()
-  return { updates }
+  return { updates, refreshes, seen }
 }
 
 test('#4946 wiring: disconnectGithub POSTs the landed endpoint and refreshes (EXECUTED)', async () => {
+  const { updates, refreshes } = await runDisconnectGithub(async (path, opts) => {
+    return { connected: false, revoked: true, revoke_reason: 'revoked' }
+  })
+  assert.equal(updates[0].busy, true, 'the request arms the busy state')
+  assert.equal(updates[0].error, '', 'a new attempt clears the stale error')
+  assert.deepEqual(updates[1], {
+    open: true, busy: false, error: 'stale', result: { connected: false, revoked: true, revoke_reason: 'revoked' },
+  }, 'the response body is kept for the honest outcome panel')
+  assert.equal(refreshes.length, 1,
+    'a successful disconnect must refresh the onboarding projection so the card stops saying Connected')
+})
+
+test('#4946 wiring: the request goes to the disconnect endpoint with the team scope (EXECUTED)', async () => {
   const seen = []
-  const { updates } = await runDisconnectGithub(async (path, opts) => {
+  await runDisconnectGithub(async (path, opts) => {
     seen.push([path, opts])
     return { connected: false, revoked: true, revoke_reason: 'revoked' }
   })
   assert.deepEqual(seen[0], ['/v1/onboarding/github/disconnect?org_id=org_1',
     { method: 'POST', useSession: true }],
   'the handler must POST the endpoint #5598 landed, with the team scope')
-  assert.equal(updates[0].busy, true, 'the request arms the busy state')
-  assert.equal(updates[0].error, '', 'a new attempt clears the stale error')
-  assert.deepEqual(updates[1], {
-    open: true, busy: false, error: 'stale', result: { connected: false, revoked: true, revoke_reason: 'revoked' },
-  }, 'the response body is kept for the honest outcome panel')
 })
 
 test('#4946 wiring: a failed disconnect keeps the dialog open with the reason (EXECUTED)', async () => {
-  const { updates } = await runDisconnectGithub(async () => { throw new Error('HTTP 500') })
+  const { updates, refreshes } = await runDisconnectGithub(async () => { throw new Error('HTTP 500') })
   const last = updates[updates.length - 1]
   assert.equal(last.busy, false, 'the in-flight state must clear on failure')
   assert.equal(last.error, 'HTTP 500', 'the server reason must reach the dialog')
   assert.equal(last.open, true, 'a failed attempt keeps the dialog open for a retry')
   assert.equal(last.result, null, 'a failure must not produce an outcome panel')
+  assert.equal(refreshes.length, 0, 'a failed disconnect must not claim the connection changed')
+})
+
+test('#4946 (a11y) wiring: open captures the trigger and close restores focus (EXECUTED)', async () => {
+  const calls = { remember: 0, restore: 0 }
+  globalThis.__gdFocus = {
+    remember: () => { calls.remember += 1 },
+    restore: () => { calls.restore += 1 },
+  }
+  const [{ value: openFn }, { value: closeFn }] = await evalExpressions([
+    `(${extractFunction('openGithubDisconnect')})`,
+    `(${extractFunction('closeGithubDisconnect')})`,
+  ], {
+    bindings: {
+      rememberFocusedTrigger: 'globalThis.__gdFocus.remember',
+      restoreFocus: 'globalThis.__gdFocus.restore',
+      setGithubDisconnect: '() => {}',
+      githubDisconnectRestoreRef: '{}',
+    },
+  })
+  openFn()
+  assert.equal(calls.remember, 1, 'the opener must capture the trigger for focus restore (#2392)')
+  assert.equal(calls.restore, 0, 'opening must not restore focus')
+  closeFn()
+  assert.equal(calls.restore, 1, 'every close must hand focus back to the opener (#2392)')
 })
