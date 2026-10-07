@@ -952,10 +952,36 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     from tortoise.projection.entities import _SOURCE_NODE_PROP_NAMES
 
     s, _events = sdk
+
+    def _keys_at(prop: str, val: str) -> set:
+        rows = s._get_proj().g.query(
+            f"MATCH (n:Source {{{prop}: $v}}) RETURN properties(n)",
+            params={"v": val},
+        ).result_set
+        return set(rows[0][0]) if rows else set()
+
     s.create_source(RAW_URL, "document", contentHash="h1", title="t",
                     source_path="/tmp/x.md")
     s.get_source_reliability(RAW_URL)          # the reliability cache writer
     produced = set(_source_props(s))
+
+    # #5196 review round 2, P2: the docstring above says "each producer below is
+    # invoked for real", but only two were — and the two the declaration's own
+    # comment names as the reason several keys must be present (the DOCUMENT
+    # writer and the session-capture writer) were never driven. A new undeclared
+    # key on either could not fail here, which is the "derive the surface from
+    # what I happened to edit" failure this test exists to replace.
+    doc = s.create_document("cov-doc-5196", "note")
+    doc_keys = _keys_at("url", doc["id"])     # `_upsert_document` MERGEs on url
+    assert doc_keys, "the document writer produced no :Source"
+    produced |= doc_keys
+
+    s._materialize_session_source(
+        "cov-5196", None, "2026-01-01T00:00:00+00:00")   # the session writer
+    sess_keys = _keys_at("url", "session:cov-5196")
+    assert sess_keys, "the session-capture writer produced no :Source"
+    produced |= sess_keys
+
     assert produced, "the fixture produced no :Source — the assertion would be vacuous"
     undeclared = sorted(produced - set(_SOURCE_NODE_PROP_NAMES))
     assert not undeclared, (
@@ -969,6 +995,76 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
         f"the reliability cache was dropped from the read bag: "
         f"{sorted(chain[0]['source'] if chain else {})}"
     )
+
+
+def test_a_url_only_source_stub_is_guarded_like_any_other_source(sdk):
+    """#5196 review round 2, P1: the two `:Source` guards resolved with
+    `MATCH (n:Source {id:$id})`, while the WRITE resolves a canonical label by its
+    PRIMARY key then its SECONDARY — `("id", "url")` for `:Source` — falling
+    through to `url` on an id miss. A url-only STUB was therefore WRITABLE while
+    invisible to the guards. Measured before this fix:
+
+        update_entity(<stub url>, text=<2 KB>)   → NOT refused, payload live
+        update_entity(<stub url>, content=...)   → NOT refused, ruling B bypassed
+
+    `test_the_declaration_covers_an_id_less_source_stub` pinned only the ALLOWED
+    half (a declared key on a stub must not be refused), so this gap was
+    unmeasured rather than absent.
+
+    (1) FAILS if either refusal is missing: acceptance IS the payload landing.
+    (2) REACHABLE: the stub is minted by the real `link_source_to_entity` path
+        and asserted to carry `url` and no `id`.
+    """
+    s, _events = sdk
+    body = "STUB_PAYLOAD " + ("z" * 2000)
+    _memory(s)
+    obj = s.create_entity("Object", "the doc's subject")["node"]["id"]
+    s.link_source_to_entity(RAW_URL, obj, "Object")
+    stubs = s._get_proj().g.query(
+        "MATCH (n:Source {url:$u}) RETURN n.id", params={"u": RAW_URL}
+    ).result_set
+    assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
+
+    with pytest.raises(ValueError, match="retired field"):
+        s.update_entity(RAW_URL, content=body)
+    with pytest.raises(ValueError, match="cannot be set on a :Source"):
+        s.update_entity(RAW_URL, text=body)
+
+    after = dict(s._get_proj().g.query(
+        "MATCH (n:Source {url:$u}) RETURN properties(n)", params={"u": RAW_URL}
+    ).result_set[0][0])
+    assert "text" not in after and "content" not in after, sorted(after)
+    assert body not in repr(after), "the stub route carried the payload"
+
+
+def test_a_create_echo_does_not_return_props_the_call_never_wrote(sdk):
+    """#5196 review round 2, P1: `_get_entity(_echo_written=...)` first returned
+    the WHOLE node bag, so `create_source` on a MERGE-hit handed the caller a
+    legacy payload that every filtered read withholds — measured, a 2400-byte
+    `text` returned through the MCP tool `tortoise_create_source`.
+
+    A create echo is a WRITE ACKNOWLEDGEMENT: it may return what THIS CALL wrote,
+    never bytes the caller did not write and cannot read anywhere else.
+
+    (1) FAILS if the create return carries `text`/`content`.
+    (2) REACHABLE: the payload is planted with raw Cypher and asserted on the
+        node first, so there is genuinely something to leak.
+    """
+    s, _events = sdk
+    body = "LEGACY " + ("y" * 2400)
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) SET s.text=$b, s.content=$b",
+        params={"u": RAW_URL, "b": body},
+    )
+    on_node = dict(s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN properties(s)", params={"u": RAW_URL}
+    ).result_set[0][0])
+    assert on_node.get("text") == body, "the fixture did not plant the payload"
+
+    again = s.create_source(RAW_URL, "conversation", contentHash="h1")
+    assert "text" not in again and "content" not in again, sorted(again)
+    assert body not in repr(again), "the create echo handed back the legacy raw"
 
 
 def test_the_declaration_covers_an_id_less_source_stub(sdk):
@@ -1146,23 +1242,36 @@ def test_absence_survives_a_rebuild(sdk):
     assert raw_availability(props).permanent is True
 
 
-def test_a_url_only_stub_does_not_block_a_point_update(sdk):
-    """The D10 guard's target predicate must be the one the WRITE uses.
+def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sdk):
+    """CORRECTED BY MEASUREMENT (#5196 review round 2, P1).
 
-    `_update_entity` resolves `:Source` by `{id: $id}`
-    (`_CANONICAL_ENTITY_ID_PROPS`), so a `:Source` that carries `url` and no
-    `id` is unreachable by the write. Resolving the guard by
-    `url = $id OR id = $id` therefore protects a node the write cannot reach: a
-    url-only STUB whose `url` happens to equal a Point's id refused that Point's
-    own `content` update — an error message naming a node the caller was never
-    touching. Ruling B (#3998) applies the retirement to every `:Source` the
-    write CAN reach, and `{id: $id}` covers exactly that set.
+    This test previously asserted that a url-only `:Source` stub whose `url`
+    equals a Point's id is UNREACHABLE by `update_entity`, and therefore that the
+    guard must not widen to `url = $id`. **That premise is measurably false.**
+    The write resolves each canonical label by its PRIMARY key then its SECONDARY
+    (`("id", "url")` for `:Source`), and it does not stop after the first label
+    that matches, so it writes to BOTH:
 
-    (1) FAILS if the guard is widened back to `url = $id OR id = $id`: the stub
-        minted below then refuses the Point's update, so the final assertion is
-        never reached and `update_entity` raises instead.
-    (2) REACHABLE: the stub comes from the public `extractedFrom` link and the
+        update_entity(pid, format="transcript")
+        → stub  keys: [..., 'format']     ← the :Source WAS written
+        → point keys: [..., 'format']
+
+    A guard that followed the old premise therefore left a url-only stub
+    writable-but-unguarded: measured, `update_entity(<stub url>, text=<2 KB>)`
+    persisted the payload live and into the journal.
+
+    (1) FAILS if the guard ignores the reachable colliding stub: a retired field
+        is accepted and lands on a `:Source`, violating ruling B.
+    (2) REACHABLE: the stub is minted by the public `extractedFrom` link and the
         update goes through the public `update_entity`.
+
+    KNOWN CONSEQUENCE, deliberate and narrow: because the write reaches the
+    colliding `:Source` too, a D10-retired field is refused even though the
+    caller's `id` names the Point. The alternative is letting `content` land on a
+    `:Source`. The shape needs a Point id to equal a `:Source` url — nonsense
+    data (a Point id is not a URL), which is why this is bounded. The structural
+    fix is to stop the label loop at the first match so one id cannot mutate two
+    nodes; that belongs to #4649's OR-SET write, not here.
     """
     s, _events = sdk
     pid = s.create_point("statement", "point A content")["id"]
@@ -1176,6 +1285,16 @@ def test_a_url_only_stub_does_not_block_a_point_update(sdk):
     assert stub[0][0] != pid, (
         "the stub carries `id` == the Point's id, so it does not exercise the "
         "url-only shape this test exists to pin")
-    # The Point's own declared field is still writable.
-    s.update_entity(pid, content="edited point A content")
-    assert s.get_point(pid)["content"] == "edited point A content"
+    # A DECLARED field is still writable, and this asserts the measurement the
+    # correction above rests on — that the write reaches the colliding stub.
+    s.update_entity(pid, format="transcript")
+    assert s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.format", params={"u": pid}
+    ).result_set[0][0] == "transcript", (
+        "the write no longer reaches the colliding stub — the guard's premise "
+        "would then need re-deriving from this measurement")
+    assert s.get_point(pid)["format"] == "transcript"
+    # A D10-retired field IS refused, because the write would put it on the
+    # `:Source` above — ruling B applies to every `:Source` the write reaches.
+    with pytest.raises(ValueError, match="retired field"):
+        s.update_entity(pid, content="edited point A content")

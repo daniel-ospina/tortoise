@@ -21230,7 +21230,7 @@ class TortoiseSDK:
             proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
             proj.create_managed_by(canonical_id, props["managedBy"])
-        entity = self._get_entity(canonical_id, _echo_written=True)
+        entity = self._get_entity(canonical_id, _echo_written=dict(props))
         if _return_apply_result:
             # #5024 P2-2: the conditional-MERGE QueryResult travels on THIS
             # call's return value to `create_source` (the only consumer),
@@ -21238,16 +21238,22 @@ class TortoiseSDK:
             return entity, apply_result
         return entity
 
-    def _get_entity(self, id_val: str, *, _echo_written: bool = False) -> dict:
-        """``_echo_written=True`` (#228/#5196): return the properties the WRITE
-        stored, without the #3998 read filter. The create path uses it because a
-        create return is a WRITE ACKNOWLEDGEMENT to the caller that performed the
-        write — not a read. `_create_entity` used to answer with a filtered read,
-        so `create_document(..., project=...)` returned an object missing the
-        prop it had just persisted and `test_create_document_persists_arbitrary_props`
-        (#228) went red on the #3998 branch. The filter is unchanged on every
-        real read path (`tortoise_get_entity`, `get_provenance_chain`,
-        `entityProfile`, `tortoise_traverse`).
+    def _get_entity(self, id_val: str, *, _echo_written: dict | None = None) -> dict:
+        """``_echo_written=<the properties this call wrote>`` (#228/#5196): the
+        CREATE path's return value.
+
+        A create return is a WRITE ACKNOWLEDGEMENT to the caller that performed
+        the write, so it echoes the keys THIS CALL wrote — a read does not, and
+        #3998's fail-closed filter therefore cannot serve them. That is why
+        `create_document(..., project=...)` returned an object missing the prop it
+        had just persisted, reddening the pinned #228 contract.
+
+        Only keys that are BOTH in `_echo_written` and present on the node are
+        added back. A MERGE onto a pre-existing payload-bearing `:Source` — the
+        population this surface exists for — must NOT hand the caller properties
+        it never wrote and that every read withholds: measured, echoing the whole
+        node handed a legacy 2400-byte `text` straight back through the MCP tool
+        `tortoise_create_source` (#5196 review round 2, P1).
         """
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
         # excluded from entity resolution — only Point/Subject/Object/Document/
@@ -21266,8 +21272,13 @@ class TortoiseSDK:
         # same leak, one function away, which is why the filter now lives in one
         # place (`projection.entities.filter_source_props`) instead of being
         # re-stated per read path.
-        if resolved[0].get("label") == "Source" and not _echo_written:
+        if resolved[0].get("label") == "Source":
+            _raw = resolved[0]["properties"]
             _props, _denied = filter_source_props(_props)
+            if _echo_written:
+                for _k in _echo_written:
+                    if _k in _raw and _k not in _props:
+                        _props[_k] = _raw[_k]
             if _denied:
                 _logger.warning(
                     "get_entity: a :Source node for %r carries %d undeclared "
@@ -21275,6 +21286,33 @@ class TortoiseSDK:
                     "graph indexes the raw, it is not the raw store). Run "
                     "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
         return _props
+
+    def _source_reachable_by(self, g, id_val: str) -> int:
+        """Count the `:Source` nodes the WRITE below would reach for `id_val`.
+
+        #5196 review round 2, P1: both `:Source` guards resolve with a
+        `MATCH (n:Source {id:$id})` while the write resolves a canonical label by
+        its PRIMARY key then its SECONDARY (`secondary_entity_id_props`). For
+        `:Source` that is `("id", "url")`, and the write falls through to `url`
+        on an `id` miss — so a url-only STUB was writable while invisible to the
+        guards, and both the undeclared-payload refusal and ruling B (D10 retired
+        fields) were bypassable through `tortoise_update_entity`.
+
+        The order mirrors the write's own discipline: the PRIMARY key is tried
+        first (byte-identical MATCH text and #327 index plan) and the secondary
+        only on a miss.
+        """
+        _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
+        _hit = g.query(
+            f"MATCH (n:Source {{{_src_id_prop}:$id}}) RETURN count(n)",
+            params={"id": id_val},
+        ).result_set[0][0]
+        if _hit:
+            return _hit
+        return g.query(
+            "MATCH (n:Source {url:$id}) RETURN count(n)",
+            params={"id": id_val},
+        ).result_set[0][0]
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -21344,18 +21382,15 @@ class TortoiseSDK:
         # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
         # and it SURVIVED `rebuild_all`.
         if props:
-            # The predicate MUST be the one the write below uses
-            # (`{label: {_ENTITY_ID_PROP[label]: $id}}`), or the guard protects a
-            # node the write cannot reach: an earlier version resolved by
-            # `n.url = $id OR n.id = $id`, so a `:Source` STUB (minted by
-            # `_link_source`, which carries `url` and no `id`) was refused a
-            # declared update whose write would have been a no-op anyway — an
-            # error message naming a node the caller was never touching.
-            _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
-            _is_source = self._get_proj().g.query(
-                f"MATCH (n:Source {{{_src_id_prop}:$id}}) RETURN count(n)",
-                params={"id": id_val},
-            ).result_set[0][0]
+            # The predicate MUST be the one the write below uses. The write
+            # resolves a canonical label by its PRIMARY key then its SECONDARY
+            # (`secondary_entity_id_props`), so a url-only `:Source` STUB (minted
+            # by `_link_source`, carrying `url` and no `id`) IS reachable and MUST
+            # be guarded. Measured on the previous `{id:$id}`-only predicate: a
+            # stub ACCEPTED `update_entity(text=<2 KB>)`, persisting the payload
+            # live and into the EntityMutated journal, while the guard reported
+            # itself satisfied.
+            _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
                 _managed = sorted(
                     k for k in props
@@ -21446,20 +21481,11 @@ class TortoiseSDK:
         # as an open third door.
         _retired_hit = proj._DOC_RETIRED_KEYS.intersection(props)
         if _retired_hit:
-            # The predicate MUST be the one the write below uses
-            # (`{label: {_ENTITY_ID_PROP[label]: $id}}`), or the guard protects
-            # a node the write cannot reach: a url-only `:Source` STUB (minted by
-            # `_link_source`/`_mint_source_stub`, which carry `url` and no `id`)
-            # would be refused a declared update whose write is a no-op anyway —
-            # an error message naming a node the caller was never touching. The
-            # sibling guard above resolved this same trap for the managed-props
-            # path; every `:Source` the write CAN reach is still covered, which
-            # is the whole of ruling B.
-            _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
-            _is_source = proj.g.query(
-                f"MATCH (s:Source {{{_src_id_prop}:$id}}) RETURN count(s)",
-                params={"id": id_val},
-            ).result_set[0][0]
+            # Same predicate discipline as the managed-props guard above, and for
+            # the same measured reason: the write reaches a url-only `:Source`
+            # stub, so the guard must too — otherwise the D10 retired fields land
+            # on a live `:Source` while the guard reads as satisfied.
+            _is_source = self._source_reachable_by(proj.g, id_val)
             if _is_source:
                 raise ValueError(
                     "retired field(s) "
