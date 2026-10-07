@@ -492,6 +492,26 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/t
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_directional_impl_fix.py -v
 ```
 
+> **Private lane instance (#5084) — use this when more than one lane is testing.**
+> The docker lane above points *every* lane at ONE long-lived container. Test graphs are
+> minted per run and reaped by a session-end sweep whose server-global pass is deferred
+> while any peer session is live, so under fleet concurrency the shared instance
+> accumulates leftovers: measured 2026-10-06 it had **restarted 213 times** (it was 46
+> when #5084 was filed on 2026-09-24), and a single-file run showed graphs appearing from
+> *other* lanes' sessions. `tools/test_lane.py` gives the lane its own throwaway container
+> — its graphs die with the container, so no lane can leave residue on another's target:
+>
+> ```bash
+> eval "$(uv run python tools/test_lane.py uri)"   # start + export TORTOISE_DB_URI
+> uv run pytest tests/ -q
+> uv run python tools/test_lane.py status          # it prints the URI again
+> uv run python tools/test_lane.py down            # remove it
+> ```
+>
+> Isolation, **not** speed: the same single test measured 90.59 s privately vs 92.66 s on
+> the shared container, so use the shared lane when that is what you are testing. The tool
+> can only remove `fdb-lane-*` containers — `down --name falkordb` is refused by design.
+
 ### Documentation Filing
 
 For topic-to-file routing, see `docs/00_index.md`. When in doubt, open `docs/00_index.md`.
