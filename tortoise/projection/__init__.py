@@ -2055,14 +2055,22 @@ _GATE_ROW_UNWOUND_RE = re.compile(
 # (as _retract/_apply_revise already do via _writable_id) — so the boundary
 # leaves them untouched and does not manufacture a null key.
 _GATE_MERGE_KEY_RE = re.compile(r"MERGE[^{}]*\{([^{}]*)\}", re.I)
-# A param bound to the `id` FIELD of a node property map is that node's
-# IDENTITY, whatever the clause. Nulling it does not degrade a property — it
-# writes an UNMATCHABLE `{id: null}` node that no later statement can address.
-# Measured: `create_point(..., id="a\x00b")` went from a RAISE on the raw handle
-# to a silent `(:Point {id: null})` with the boundary on. `MERGE` maps are
-# covered whole by `_GATE_MERGE_KEY_RE`; this covers the `id` field of a
-# `CREATE` map, whose production spelling is BACKTICKED (```CREATE (n:Point
-# {`id`: $id``)```) — hence the gate text below keeps backticked identifiers.
+# A CREATE property map carries the node's IDENTITY in its `id` field, exactly
+# as a MERGE map does — and nulling it does not degrade a property, it writes an
+# UNMATCHABLE `{id: null}` node. Measured: `create_point(..., id="a\x00b")`
+# went from a RAISE on the raw handle to a silent `(:Point {id: null})`.
+#
+# WRITE clauses ONLY — deliberately NOT `MATCH`. There is nothing to write in a
+# lookup, a null simply matches nothing, and protecting the id there would
+# FORWARD a parse reject instead of degrading it: measured, `get_point`,
+# `delete_point`, `traverse` and the replay fold `_fold_entity_mutation` all
+# raised again on a NUL id (the fold inside `rebuild_all`'s pass-1b, which has
+# no per-event try/except), where they had degraded before. The trade is only
+# ever right where the value becomes an identity that is WRITTEN.
+#
+# The production spelling is BACKTICKED (```CREATE (n:Point {`id`: $id})```),
+# hence the gate text below keeps backticked identifiers.
+_GATE_CREATE_MAP_RE = re.compile(r"CREATE[^{}]*\{([^{}]*)\}", re.I)
 _GATE_ID_FIELD_RE = re.compile(r"`?id`?\s*:\s*\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 # A MERGE key can also be a ROW FIELD rather than a parameter — ``MERGE (t:Point
@@ -2217,13 +2225,17 @@ def _journal_safe_params(params, cypher=None):
     )
     # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
     rows = frozenset(_GATE_UNWIND_RE.findall(gate_text))
-    # Parameters that are MERGE KEYS or a node's IDENTITY `id`: never nulled
-    # here (see the note above).
+    # Parameters that are MERGE KEYS or a CREATEd node's IDENTITY `id`: never
+    # nulled here (see the notes above).
     merge_keys = frozenset(
         name
         for group in _GATE_MERGE_KEY_RE.findall(gate_text)
         for name in _GATE_PARAM_RE.findall(group)
-    ) | frozenset(_GATE_ID_FIELD_RE.findall(gate_text))
+    ) | frozenset(
+        name
+        for group in _GATE_CREATE_MAP_RE.findall(gate_text)
+        for name in _GATE_ID_FIELD_RE.findall(group)
+    )
     # Row FIELDS used as merge keys — never nulled inside a row map either.
     merge_key_fields = frozenset(
         field
@@ -2282,16 +2294,15 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = {}
             for k, v in value.items():
-                # BOTH key rules, because they are different failure modes: the
-                # DRIVER raises before dispatch on an empty/backtick key, and
-                # the ENGINE parse-rejects a key carrying a NUL or a lone
-                # surrogate (measured: `{"a\x00b": 1}` through
-                # `_persist_extra_props` aborted a `rebuild_all`). Either way
-                # the entry cannot be stored under any name, so DROP it and
-                # record it — the same "degrade the offending entry, keep the
-                # rest" policy as a corrupt value — rather than null the whole
-                # map and lose the keys that are fine.
-                if not _map_key_ok(k) or not _writable_at_parse(k, _depth + 1):
+                # BOTH key rules, held in ONE predicate on the key's own
+                # encoding (see `_map_key_ok`): the DRIVER raises before
+                # dispatch on an empty/backtick key, and the ENGINE parse-rejects
+                # a key carrying a NUL or a lone surrogate. Either way the entry
+                # cannot be stored under any name, so DROP it and record it —
+                # the same "degrade the offending entry, keep the rest" policy
+                # as a corrupt value — rather than null the whole map and lose
+                # the keys that are fine.
+                if not _map_key_ok(k):
                     # The DRIVER raises on this key before dispatch, so the
                     # entry cannot be stored under ANY name. DROP it and record
                     # it — the same "degrade the offending entry, keep the
@@ -3170,22 +3181,28 @@ def _engine_coerces(val) -> bool:
 
 
 def _map_key_ok(key) -> bool:
-    """False for a map key the DRIVER refuses to ENCODE — it RAISES, not degrades.
+    """False for a map key the DRIVER cannot encode or the ENGINE cannot parse.
 
-    `falkordb/helpers.py::stringify_param_value` raises `ValueError` for an
-    empty key ("Cypher map key cannot be empty") and for a key containing a
-    backtick ("... cannot contain a backtick"), BEFORE the statement is sent.
-    That is an abort, not a degraded property, and on the replay path it lands
-    after the wipe. Reachable from the live surface — `update_point(**props)`
-    with a tenant key carrying a backtick — and from a corrupt journal record
-    via `_persist_extra_props`. The engine has no spelling for such a key, so
-    the ENTRY is dropped (see `_walk`), never nulled.
+    The driver renders a key as a BACKTICKED string — `key.decode()` for bytes,
+    else `str(key)` — and RAISES on an empty key ("Cypher map key cannot be
+    empty") and on one containing a backtick, BEFORE the statement is sent. The
+    engine then parse-rejects a key carrying a NUL or a lone surrogate, exactly
+    as it does for a value. Both are aborts, not degradations, and on the replay
+    path they land after the wipe: measured, a PointAdded whose property KEY
+    carries a NUL reaches `_EntityHandlers._persist_extra_props` and aborted a
+    `rebuild_all`.
+
+    Both rules are modelled HERE, on the KEY's own encoding, and not by reusing
+    the value predicate: a key is inlined as a backticked string, so a bytes or
+    numeric key is perfectly fine (`str(key)` renders it) even though the value
+    predicate would refuse it — dropping those would be data loss.
     """
     try:
-        text = str(key)
+        text = key.decode() if isinstance(key, bytes) else str(key)
+        text.encode("utf-8")
     except Exception:
-        return False
-    return text != "" and "`" not in text
+        return False  # undecodable bytes, or a lone surrogate
+    return text != "" and "`" not in text and "\x00" not in text
 
 
 def _value_ok(val, _depth: int = 0) -> bool:

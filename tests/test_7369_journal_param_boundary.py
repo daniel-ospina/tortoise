@@ -1408,3 +1408,34 @@ def test_the_IDENTITY_param_is_never_nulled_in_a_CREATE_map():
         {"id": "x", "c": "a\x00b"}, "CREATE (n:Point {`id`: $id, content: $c})"
     )
     assert out["c"] is None, out["c"]
+
+    # ...and the OTHER direction, which the first cut of this fix broke by
+    # protecting the id in EVERY clause. A MATCH writes nothing, so a null there
+    # simply matches nothing and the lookup SUCCEEDS; protecting it forwarded a
+    # parse reject instead. Measured: `get_point`, `delete_point`, `traverse`
+    # and `_update_entity` all raised again on a NUL id, and the replay fold
+    # `_fold_entity_mutation` raised inside `rebuild_all`'s pass-1b — which has
+    # no per-event try/except, so the rebuild stopped half-built.
+    for match in (
+        "MATCH (n:Point {id:$id}) RETURN properties(n)",
+        "MATCH (n:Point {id:$id}) DETACH DELETE n",
+        "MATCH (n:Point {id:$id})-[:IMPL]->(m) RETURN m",
+        "MATCH (n:Point {id:$id}) SET n += $props RETURN count(n)",
+    ):
+        assert _journal_safe_params({"id": corrupt}, match)["id"] is None, match
+
+
+def test_a_map_key_is_judged_by_the_KEY_encoding_not_the_value_predicate():
+    """#7406 review: reusing the value predicate over-rejected whole key classes.
+
+    A key is inlined as a BACKTICKED string, so the driver renders `bytes` via
+    `decode()` and everything else via `str()` — a bytes, numeric or `nan` key
+    is therefore perfectly writable, while a NUL-bearing one is not (the engine
+    parse-rejects it). Judging keys with the VALUE predicate dropped the former
+    class: measured, `{b"foo": 1}` and `{nan: 1}` lost the entry although the
+    engine stores both.
+    """
+    for key in ("plain", b"foo", 7, 3.5, float("nan"), "a b", "a'b", "ü"):
+        assert _map_key_ok(key) is True, key
+    for key in ("", "a`b", "a\x00b"):
+        assert _map_key_ok(key) is False, key
