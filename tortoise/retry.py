@@ -46,12 +46,24 @@ _NETWORK_ERRNOS = frozenset({
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 
 #: Write refusals where the engine ABORTED the statement, so the outcome is
-#: definitively *did not land* (#7405). Two measured messages:
+#: definitively *did not land* (#7405). Three measured messages, from two
+#: engine code paths:
 #:   - a rebuild/replace aborts an in-flight query: ``graph was deleted or
 #:     replaced while the query was running, aborting``;
-#:   - a concurrent writer holds the write lock: ``Write query aborted: another
-#:     write is in progress``.
-#: Both are **retryable**, but ONLY on the write path — see
+#:   - a concurrent writer holds the write lock, reported on the constraint
+#:     path: ``Write query aborted: another write is in progress``;
+#:   - a concurrent writer holds the slot, reported on the ``GRAPH.QUERY``
+#:     write path: ``ERR another write is in progress, retry the query``.
+#:     This is a SEPARATE engine code path from the constraint-path abort
+#:     above (``src/graph_core.rs::execute_query_write``, raised before the
+#:     slot is claimed), and it is the refusal the SDK's own wrapped
+#:     statements actually receive — ``_advance_ep_version``'s ``MERGE`` and
+#:     ``create_point``'s bare ``CREATE`` both take the write path, so without
+#:     this clause a contended ``create_point`` write is raised instead of
+#:     retried (the #7405 loss). Same *did-not-land* semantics as the other
+#:     two: the engine's own concurrency test documents the message as
+#:     retryable, and the message itself instructs a retry.
+#: All three are **retryable**, but ONLY on the write path — see
 #: :func:`retryable_aborted_write` for the layering, and
 #: :func:`retryable_transient` for why they are deliberately NOT in the
 #: transport predicate (putting them there made one error retryable at two
@@ -65,7 +77,8 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #: exists to prevent, so the whole refusal clause must be present.
 _ABORTED_WRITE_RE = re.compile(
     r"graph was deleted or replaced while the query was running, aborting"
-    r"|(?:write query )?aborted:\s*another write is in progress",
+    r"|(?:write query )?aborted:\s*another write is in progress"
+    r"|another write is in progress, retry the query",
     re.IGNORECASE)
 
 
@@ -88,7 +101,11 @@ def retryable_aborted_write(exc: BaseException) -> bool:
     ABORTED the statement, so nothing was applied and re-issuing cannot duplicate:
 
     - the graph was replaced underneath the running query, or a concurrent writer
-      held the write lock (#7405) — both are the engine's own *aborting* refusal;
+      held the write slot (#7405) — the engine's own *aborting* refusal, reported
+      on two code paths (the constraint path's ``Write query aborted: …`` and the
+      ``GRAPH.QUERY`` write path's ``another write is in progress, retry the
+      query``), both with the same *did not land* semantics (see
+      ``_ABORTED_WRITE_RE`` for why the write-path clause exists);
     - persistence refused the write (``MISCONF`` / ``Can't persist``) — a write
       refusal, not a completed write.
 

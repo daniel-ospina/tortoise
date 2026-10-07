@@ -936,15 +936,20 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
         handle fails according to `behaviour(call_index)`.
 
         ``_get_proj`` HONOURS the ``sdk._proj`` cache the way the real method
-        does, and appends the id of whatever it returns. Returning a fixed local
-        object instead would make ``len(set(handles)) == 1`` a TAUTOLOGY: every
-        element would be the same object by construction, so no production change
-        could falsify it (measured: reintroducing ``self._proj = None`` on the
-        retry path left the old version of this test GREEN).
+        does, and appends whatever it returns to ``handles``. Returning a fixed
+        local object instead would make ``len({id(h) for h in handles}) == 1``
+        a TAUTOLOGY: every element would be the same object by construction, so
+        no production change could falsify it (measured: reintroducing
+        ``self._proj = None`` on the retry path left the old version of this
+        test GREEN).
         """
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         calls = {"query": 0, "resolve": 0}
-        handles: list[int] = []
+        # Hold the OBJECTS, not their addresses: the mutation this assertion
+        # exists to kill is `self._proj = None`, which drops the last strong
+        # reference, so an id-only list could see the address reused and pass
+        # for the wrong reason (allocator behaviour, not a test property).
+        handles: list[object] = []
 
         class _G:
             def query(self, *a, **k):
@@ -955,7 +960,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
             calls["resolve"] += 1
             if sdk._proj is None:
                 sdk._proj = type("_Proj", (), {"g": _G()})()
-            handles.append(id(sdk._proj))
+            handles.append(sdk._proj)
             return sdk._proj
 
         sdk._proj = None
@@ -969,7 +974,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
     assert sdk._graph_write_with_retry(
         lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
     assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} attempt(s)"
-    assert len(set(handles)) == 1, (
+    assert len({id(h) for h in handles}) == 1, (
         "the retry must reuse the same (stateless) handle — no re-resolution")
     assert sdk._graph_write_retry_count == 1, (
         "the inner retry must be observable: the eval's ingest_retries folds "
@@ -1009,7 +1014,9 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
     sdk = TortoiseSDK.__new__(TortoiseSDK)
     seen: list[str] = []
     state = {"query": 0, "resolve": 0}
-    handles: list[int] = []
+    # Hold the OBJECTS, not their addresses — see the sibling test above for
+    # why an id-only list is unsound when the mutation frees the reference.
+    handles: list[object] = []
 
     class _G:
         def query(self, cypher, *a, **k):
@@ -1021,13 +1028,14 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
 
     def _get_proj():
         # Same honest cache contract as the sibling test above: a re-resolve
-        # must produce a DIFFERENT id, so `len(set(handles)) == 1` (and the
-        # `state['resolve'] == 1` assertion) can actually fail if production
+        # must produce a DIFFERENT object, so
+        # `len({id(h) for h in handles}) == 1` — and the
+        # `state['resolve'] == 1` assertion — can actually fail if production
         # re-resolves on the retry path.
         state["resolve"] += 1
         if sdk._proj is None:
             sdk._proj = type("_Proj", (), {"g": _G()})()
-        handles.append(id(sdk._proj))
+        handles.append(sdk._proj)
         return sdk._proj
 
     sdk._proj = None
@@ -1040,7 +1048,7 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
         "one resolve; the retry reuses the same (stateless) handle — no "
         "cache-drop. If the FIRST write is not wrapped, the abort escapes and "
         "the wrapper around the later CREATE is unreachable (dead code)")
-    assert len(set(handles)) == 1, "the same handle was reused across attempts"
+    assert len({id(h) for h in handles}) == 1, "the same handle was reused across attempts"
     assert sdk._graph_write_retry_count == 1
     assert "EpMeta" in seen[0], "the first write is the epoch MERGE"
 
@@ -1090,9 +1098,9 @@ def test_aborted_write_predicate_is_anchored_on_the_abort_context():
     ``Point.id``), so a false positive is exactly the duplicate-point failure
     this PR exists to prevent. The unanchored alternation matched any message
     containing the phrases — measured: three crafted non-abort diagnostics all
-    returned True. Only the two MEASURED engine refusals may match.
+    returned True. Only the MEASURED engine refusals may match.
     """
-    # the two messages the engine actually emits still match
+    # the engine's abort refusals, on both code paths, still match
     assert retryable_aborted_write(redis_exc.ResponseError(
         "graph was deleted or replaced while the query was running, aborting")) is True
     assert retryable_aborted_write(redis_exc.ResponseError(
@@ -1106,6 +1114,40 @@ def test_aborted_write_predicate_is_anchored_on_the_abort_context():
         "graph was deleted or replaced appears in this unrelated diagnostic")) is False
     assert retryable_aborted_write(redis_exc.ResponseError(
         "metrics report saw another write is in progress counters")) is False
+
+
+def test_aborted_write_predicate_covers_the_graph_query_write_path():
+    """#7405 (P2): the ``GRAPH.QUERY`` write-path slot refusal is retryable.
+
+    The engine reports a contended slot on two distinct paths and the predicate
+    previously matched only one. The constraint path (_B_) emits
+    ``Write query aborted: another write is in progress``; the ``GRAPH.QUERY``
+    write path (``execute_query_write``) emits
+    ``ERR another write is in progress, retry the query``. That second message
+    is the one ``create_point``'s bare ``CREATE`` and ``_advance_ep_version``'s
+    ``MERGE`` actually receive, so missing it left a contended write raised
+    instead of retried — the write-loss this PR targets. The engine's own
+    concurrency test documents the message as retryable and the message itself
+    instructs a retry; the engine's comment at the raise site records that the
+    slot was NOT claimed, i.e. the same *did not land* semantics.
+    """
+    # the write-path refusal, exactly as the engine emits it (with the ERR
+    # protocol prefix the client surfaces as part of the ResponseError text)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress, retry the query")) is True
+    # casing is not a contract
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Another write is in progress, retry the query")) is True
+
+    # still anchored: the phrase alone is NOT enough — the engine's clause is
+    # ``another write is in progress, retry the query``; a bare status mention
+    # without the retry instruction must not gate a non-idempotent re-issue.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
 
 
 def test_retry_import_identity():

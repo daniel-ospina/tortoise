@@ -892,21 +892,27 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # session-parallel pool below runs Phase B extraction only).
         # ══════════════════════════════════════════════════════════════
         _inner_a0 = getattr(sdk, "_graph_write_retry_count", 0)
-        _phase_a = call_with_predicate(
-            partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
-                    s_node=s_node, session=session,
-                    session_date=session_date,
-                    point_created_at=point_created_at,
-                    chunk_turns=chunk_turns),
-            predicate=retryable_transient,
-            retries=ingest_write_retries,
-            what=f"session raw-leg write for {qid} s{si}",
-            marker_armed=write_marker_armed,
-            on_retry=partial(_bump_retry, _retries_a))
+        try:
+            _phase_a = call_with_predicate(
+                partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
+                        s_node=s_node, session=session,
+                        session_date=session_date,
+                        point_created_at=point_created_at,
+                        chunk_turns=chunk_turns),
+                predicate=retryable_transient,
+                retries=ingest_write_retries,
+                what=f"session raw-leg write for {qid} s{si}",
+                marker_armed=write_marker_armed,
+                on_retry=partial(_bump_retry, _retries_a))
+        finally:
+            # the fold is in a `finally` so the invariant holds on the ERROR
+            # path too: if the phase raises, the inner retries HAPPENED and
+            # must still be observed. On the success path the delta is
+            # identical to the post-call fold it replaces.
+            stats["ingest_retries"] += _retries_a["n"] + (
+                getattr(sdk, "_graph_write_retry_count", 0) - _inner_a0)
         stats["sessions"] += _phase_a["sessions"]
         stats["chunks"] += _phase_a["chunks"]
-        stats["ingest_retries"] += _retries_a["n"] + (
-            getattr(sdk, "_graph_write_retry_count", 0) - _inner_a0)
         hb.stage(f"s{si}:extract")
 
         return {
@@ -1071,20 +1077,24 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # #1786 (R1): same FINAL-attempt delta semantics as phase A — the
         # counters reflect the last successful attempt (a retried partial
         # write is approximate; recall@k is live-graph-derived, unaffected).
-        _written, _noops, _deletions = call_with_predicate(
-            partial(_write_v2_phase_c, sdk, qid=qid, si=si, sid=sid,
-                    s_node=s_node, session_date=session_date or None,
-                    all_evidence_turns=all_evidence_turns, turns=turns,
-                    payload=payload, out=out, ev_sessions=ev_sessions,
-                    evidence_turns=evidence_turns,
-                    gold_answer=gold_answer),
-            predicate=retryable_transient,
-            retries=ingest_write_retries,
-            what=f"payload write for {qid} s{si}",
-            marker_armed=write_marker_armed,
-            on_retry=partial(_bump_retry, _retries_c))
-        stats["ingest_retries"] += _retries_c["n"] + (
-            getattr(sdk, "_graph_write_retry_count", 0) - _inner_c0)
+        # The delta fold is in a `finally` (same reason as phase A): an error
+        # path must still observe the inner retries that happened.
+        try:
+            _written, _noops, _deletions = call_with_predicate(
+                partial(_write_v2_phase_c, sdk, qid=qid, si=si, sid=sid,
+                        s_node=s_node, session_date=session_date or None,
+                        all_evidence_turns=all_evidence_turns, turns=turns,
+                        payload=payload, out=out, ev_sessions=ev_sessions,
+                        evidence_turns=evidence_turns,
+                        gold_answer=gold_answer),
+                predicate=retryable_transient,
+                retries=ingest_write_retries,
+                what=f"payload write for {qid} s{si}",
+                marker_armed=write_marker_armed,
+                on_retry=partial(_bump_retry, _retries_c))
+        finally:
+            stats["ingest_retries"] += _retries_c["n"] + (
+                getattr(sdk, "_graph_write_retry_count", 0) - _inner_c0)
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += _written.get(k, 0)
