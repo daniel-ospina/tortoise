@@ -11,12 +11,57 @@ aboutSubjects: tortoise-write-path-integrity, tortoise-declared-vs-stored
 
 # WS-A — One write contract for the five doors
 
-**Parent:** #2820 (WS-A write-path integrity) · **Status:** design v5, awaiting owner approval
+**Parent:** #2820 (WS-A write-path integrity) · **Status:** design v5 rev-f — **restated as remaining work**
 **Design-side of:** #2795, #2813, #2814 · **Related:** #2788, #2742, #2825, #2873
+**Status measured at:** `5e06016e7` (2026-10-07)
 
 > #2820 gate: *"Workstreams A/B/C all require owner approval of a written design before implementation."*
-> This document is that design. **Nothing here is implemented until approved.** §6 lists the open
-> decisions; §3's fixes are mechanical once the decisions land.
+> This document is that design.
+
+## Status at 2026-10-07 — most of this design has already shipped
+
+This design sat unapproved for four weeks while the code moved ahead of it. Its central thesis was
+**right**, and it was **acted on without it**: the defect class recurred and was fixed the same way the
+design prescribes. What remains is narrower than the body below.
+
+**Landed** (measured at `origin/main` `5e06016e7`):
+
+| Design item | Landed by | Evidence |
+|---|---|---|
+| **D2** — `Point` gains the open-set preserve mechanism | **#2958** (2026-09-17) | `_persist_extra_props` is called from `_upsert_point_props` (`tortoise/projection/entities.py:1102`), with `_POINT_HANDLED:649`, `_POINT_DENY:715`, `_POINT_LIST_PROPS:756` |
+| **D2's declaration** (partial) | — | `_POINT_DECLARED_PROPS:731` — a bare `frozenset` of **names**: no type, no `source`, no `replay_source`, no `payload_writable` |
+| **D4** — report the unrestorable, do not drop silently | #2795 indicator 4 | the undeclared-prop drift warning and the "must be REPORTED, not dropped silently" comment (`entities.py:1108-1125`) |
+| **D5** — config survives rebuild | **#2814**, **#2943** | the pre-wipe snapshot is now a **durable sidecar** that survives a crash mid-replay — this *exceeds* the design, which specified an in-memory list |
+| **D5 / OD8** — `config_reset` marker | #2814 | `sdk.py:25580 _config_reset_state`, `projection.read_config_reset` |
+| **D6** — the four fields into product capture | **#2813** (2026-09-21) | `tortoise/sdk.py:7175+` reads the whitelist off the payload |
+| **OD6(a)** — `ConfidenceChanged` is emitted | **#2884** (2026-09-21) | `ep.py:225,307,1445`; `dream.py:314,317,540`; folded at `entities.py:135-145` |
+
+**Still unbuilt — the actual scope of this document:**
+
+- **D1** — `tortoise/projection/contract.py` **does not exist.** `POINT_PROPS` appears only as a string in
+  a warning message; `NON_PERSISTABLE_PROPS` does not exist. The *typed* declaration carrying
+  `replay_source` is this design's central deliverable and it is genuinely absent.
+- **D7** — none of the durability guards exist: no `replay_source`-completeness test, no hash golden
+  vector, no `CONTENT_HASH_VERSION`, no declaration-parity diff.
+- **`ONTOLOGY.md` §4.1** still lacks `search_keys` and `source_turn_id`.
+
+**Landed by the same mechanism, after this document was written:** E4 (**#5007**) added `span_start` and
+`span_end` to the capture passthrough. The design's *"four fields"* is now **six**
+(`sdk.py:634-641 _CAPTURE_PASSTHROUGH_ORDER`, under #2949). E4 is a **second worked instance of this
+design's thesis** — the class recurred, and it was fixed by *declaring the prop*. It is adopted below.
+
+**Two claims in the body that the four weeks falsified:**
+
+1. §2.1 and §D2 say `_persist_extra_props` *"is **never wired for `Point`**"*. **False at HEAD** — see D2 above.
+2. §2.1 says door 2 `_extract_session_v2` is a *"silent drop"*. **False at HEAD** — #2813 landed it.
+
+Everything below is retained as the **reasoning record** — the decisions and their evidence — with the
+status above applied. Where the body asserts a gap that has since closed, this table governs.
+
+> **Lesson, recorded because it cost four weeks:** this document pinned **no ref**, so its citations still
+> resolved and its claims still read as current — nothing in it said which snapshot it described. Its
+> sibling #3015 *did* pin a ref (`a76f98fb6`), so its staleness was **visible**, and it landed. **A design
+> document must pin the ref it describes.** This document now pins `5e06016e7`.
 >
 > **v2** incorporated a fresh-context design review (13 findings). Load-bearing corrections: D2's
 > mechanism is specified (a naive passthrough would crash on dict-valued structural keys), D4 gains an
@@ -112,7 +157,7 @@ reaches the graph, with no error raised.
 | # | Door | Entry point | Acceptance rule | `quote`/`when`/`search_keys`/`source_turn_id`? |
 |---|------|-------------|-----------------|---|
 | 1 | Commit endpoint | `hosted_api._execute_commit_writes` (`:7936`) | Layer-1 validate; unknown field → **422** | **yes** — enumerated at `:8100-8135` |
-| 2 | v2 product capture | `sdk._extract_session_v2` (`:3809-3813`) | none | **no** — silent drop |
+| 2 | v2 product capture | `sdk._extract_session_v2` | `_CAPTURE_PASSTHROUGH_ORDER` (#2949) | **yes** — six fields since E4 #5007. *("silent drop" was true when written; **#2813 landed it** — see the status table)* |
 | 3 | M2 / EventAPI | `extractor.py` / `mining.py` → `projection._upsert_point_props` | fixed SET list | **no** — silent drop, even live |
 | 4 | Direct SDK | `sdk.create_point` | `SET n += $props` | **yes** — but **lost on rebuild** (#2795) |
 | 5 | Eval harness | `tools/longmem_eval/ingest_v2._write_payload` | fixed kwargs | **yes** — but **lost on rebuild** (#2795) |
@@ -154,7 +199,7 @@ The extractor is shared between product and eval; the **persistence writer was f
 benchmark-driven extraction improvement (#1533, #1535, #1538, #1539, #1544, #1763, #2165) was applied to
 the contract + extractor + **eval writer**, and only sometimes to the product writer. Decisive:
 
-```
+```text
 $ git show --stat d4da83c57   # #1535 — atomic points, search_keys, speaker via source-turn
  tortoise/commit_schema.py       |  28 +   ← contract gains search_keys + source_turn_id
  tortoise/extractor_v2.py        | 201 +   ← extractor emits them
@@ -435,6 +480,13 @@ Consequently D7's parity check is **one-directional**: *every prop in the respon
 
 ### D2 — Replay preserves what it does not recognise — with an explicit skip-set and precedence
 
+**LANDED (#2958, 2026-09-17).** `_persist_extra_props` **is** now wired for `Point`
+(`entities.py:1102`), with `_POINT_HANDLED:649`, `_POINT_DENY:715`, `_POINT_LIST_PROPS:756` and the
+undeclared-prop drift warning. The paragraph below that says it *"is never wired for `Point`"* is the
+pre-#2958 state and is retained only as the reasoning record. **What remains of D2 is its declaration
+half: `_POINT_DECLARED_PROPS:731` is a bare `frozenset` of names — no type, no `source`, no
+`replay_source`. That typed registry is D1's job, and D1 is unbuilt.**
+
 > **Class-level, not instance-level.** The review surfaced the deeper framing: the (a) payload fields
 > are dropped because **`Point` has no *open-set* preserve mechanism**, not because of a skip-set
 > membership decision. `_persist_extra_props` — the deny-list preserve mechanism used by
@@ -515,6 +567,7 @@ the fix is to make it an explicit input to one writer, not a second writer.
 outgoing `CORRECTS` edge that `supersede()` writes.
 
 Verified:
+
 - no production Cypher reads the node property; the only two reads are eval tests self-labelled
   `# (observability)` (`tests/test_ingest_v2_consolidation.py:330`, `tests/test_longmem_runner.py:2008`);
 - it is excluded from the content hash as an "LLM artifact" (`commit_schema.py:1054`);
@@ -537,6 +590,10 @@ it through the arbitrary-props lane). `reason` therefore goes on an explicit
 **`NON_PERSISTABLE_PROPS` deny-list**, applied with a warning in the shared writer.
 
 ### D5 — Node classes: derived vs authoritative (fixes #2814)
+
+> **LANDED (#2814), and exceeded (#2943).** The pre-wipe snapshot is now a **durable sidecar** that
+> survives a crash mid-replay — the design specified an in-memory list, which did not. The
+> `config_reset` marker exists (`sdk.py:25580 _config_reset_state`). Retained below as the reasoning record.
 
 `rebuild_all` currently runs `MATCH (n) DETACH DELETE n` (`projection/__init__.py:1301`) — wiping
 configuration along with derived data.
@@ -580,6 +637,10 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 
 ### D6 — Wire the four fields into product capture
 
+> **LANDED (#2813, 2026-09-21).** `_extract_session_v2` now reads the whitelist off the payload
+> (`sdk.py:7175+`). The passthrough is now **six** fields — E4 (#5007) added `span_start`/`span_end`
+> through this same declaration (`sdk.py:634-641 _CAPTURE_PASSTHROUGH_ORDER`, #2949).
+
 `_extract_session_v2` passes `quote`, `when` (+ `validFrom`), `search_keys`, `source_turn_id` to
 `create_point`. The mechanical half of #2813; a no-op once D1 lands.
 
@@ -611,26 +672,35 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 
 | Issue | How | Status |
 |---|---|---|
-| #2795 rebuild drops live-only props | D1 (`content_hash` **derived**) + D2 (passthrough for the rest, primitive-filtered) | **closed for the declared props** — v1 missed `content_hash`. **Two known exceptions, both reported rather than repaired, per #2795's 4th indicator:** unjournaled EP state (**#2884**) and `tags` (**#2897** — journaled but ignored). Indicator 4 is satisfied only once `rebuild_all` reports the `none` bucket |
-| #2813 capture drops E3 fields; eval lane diverges | D1 + D3 + D6 — one writer, one declaration, instrumentation as input; D7 guards it | **closed in principle** |
-| #2814 rebuild wipes config | D5 — snapshot+restore, `config_reset` marker, guard preserved | **closed in principle** |
+| #2795 rebuild drops live-only props | D2 open-set passthrough (LANDED #2958) + D1 registry (unbuilt) | **passthrough landed; the typed registry is not.** Reporting half (indicator 4) landed. `tags` (**#2897**) remains genuinely unreplayed |
+| #2813 capture drops E3 fields; eval lane diverges | D6 landed (#2813); D3 (eval writer) and D1/D7 unbuilt | **product half LANDED**; the eval-writer consolidation (D3) is still open |
+| #2814 rebuild wipes config | D5 — snapshot+restore, `config_reset` marker, guard preserved | **LANDED** — and exceeded by the durable sidecar (#2943) |
 | #2788 (event state nothing reads) | out of scope — same class, separate fix | — |
 | #2742 (import-time snapshot drift) | out of scope — D1's parity test is the same pattern | — |
 
 ---
 
-## 5. Sequencing
+## 5. Sequencing — the remaining work
+
+Steps 2, 3 and 6 of the original sequence **have landed** (D2 #2958, D6 #2813, D5 #2814/#2943), and
+step 5's *reporting* half landed with #2795 indicator 4. What is left:
 
 | # | Step | Closes | Risk |
 |---|---|---|---|
-| 1 | **D1** — `contract.py` + declaration-parity test. No behaviour change. | — | none |
-| 2 | **D2** — skip-set + primitive filter + precedence + `content_hash` derivation + drift warning + prop-durability test. **Lands in the shared writer ⇒ also fixes door 3's live drop.** | #2795 | medium — touches the replay *and* live writer |
-| 3 | **D6** — wire the four fields into product capture + response ⊆ node test. | #2813 (product half) | low |
+| 1 | **D1** — `tortoise/projection/contract.py`: the **typed** per-prop declaration (`source`, `replay_source`, `payload_writable`, `derive`) + the declaration-parity diff against `ONTOLOGY.md` §4.1. Replaces the bare `_POINT_DECLARED_PROPS` name-set. No behaviour change. | — | low — additive; nothing consumes it yet |
+| 2 | **D7** — the durability guards over D1: `replay_source`-completeness, derived-props-recomputed-not-copied, hash golden vector, `CONTENT_HASH_VERSION`, `none`-bucket-is-reported. | #2795 indicator 4 (filed half) | low |
+| 3 | **`ONTOLOGY.md` §4.1** — add `search_keys` + `source_turn_id` (still absent at `5e06016e7`). | — | none |
 | 4 | **D3** — shared writer + instrumentation input; delete `_write_payload`; repoint LongMemEval. | #2813 (eval half) | **high** — benchmark comparability; baselines re-blessed here (OD5) |
-| 5 | **D4** — deny-list + remove the eval `reason=` write + re-point the two observability tests. | — | low |
-| 6 | **D5** — snapshot+restore + `config_reset` marker + guard test. | #2814 | medium — touches the P0 guard surface |
+| 5 | **D4 remainder** — the `NON_PERSISTABLE_PROPS` deny-list + remove the eval `reason=` write. | — | low |
 
-Steps 1–3 are independently shippable. Step 6 is independent of 1–5. Step 5 can ride with step 4.
+**Steps 1–3 are one small PR and are the whole of what this document still asks for.** Step 4 is the
+larger, higher-risk consolidation and can be deferred independently. Step 5 now depends on D1, since the
+deny-list is a field of the declaration D1 introduces.
+
+**Process weight:** the design's own changelog records that review cycles 5–6 each *introduced more
+defects than they fixed*, because edits to a declaration block must update every consumer. D1's typed
+registry **removes** that failure mode rather than adding machinery — the parity test is the seam, and
+`_POINT_DECLARED_PROPS`'s untyped name-set is exactly the artifact that cannot be diffed.
 
 ---
 
