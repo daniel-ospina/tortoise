@@ -2170,21 +2170,48 @@ def test_two_per_call_overflows_are_both_counted():
 def test_the_merge_carriage_carries_more_than_one_event():
     """#5868 — the ``_merge_cost_accumulator`` carriage SUMS its source.
 
-    The single-event fixture pins deletion (a dropped carriage reads 0) but
-    not an assignment or a clamp-to-1 at the carriage line. A source CAN
-    carry several events — ``_two_per_call_overflows_batch`` proves the
-    per-call seam produces 2 — and an undercount here re-opens the silent
-    ``cost_usd != sum(by_stage)`` gap the counter exists to close.
+    Two halves, because they kill different mutants. A real multi-event source
+    pins deletion (a dropped carriage reads 0) and a clamp-to-1; a PRE-SEEDED
+    target is what makes ``+= src`` distinguishable from ``= src`` at all —
+    with an empty target both read the same, which is how the assignment
+    mutant survived a single-source fixture.
+
+    An undercount here re-opens the silent ``cost_usd != sum(by_stage)`` gap
+    the counter exists to close, and a source genuinely CAN carry several
+    events (``_two_per_call_overflows_batch`` proves the per-call seam
+    produces 2).
     """
     from tortoise.extractor_v2 import _merge_cost_accumulator
 
-    batch = _two_per_call_overflows_batch()
+    # (a) a real 2-event source: 2 in, 2 out (every route bucket above is
+    # finite, so no merge-seam event is added)
     usage: dict = {}
-    _merge_cost_accumulator(usage, {"cost": batch, "attempts": 7})
-
-    # 2 in, 2 out: every route bucket above is finite, so no merge-seam event
-    # is added and the value can only be the carried sum
+    _merge_cost_accumulator(usage, {"cost": _two_per_call_overflows_batch(),
+                                    "attempts": 7})
     assert usage["cost"]["route_cost_overflows"] == 2, usage["cost"]
+
+    def _src(label: str, events: int) -> dict:
+        # The merge seam is what is under test, so this SOURCE is stated
+        # directly rather than accumulated, and its route is unique to
+        # ``label`` — so its bucket merges into an EMPTY target and the merge
+        # adds no event of its own.
+        return {"cost": {
+            "cost_usd": 0.0, "calls": 1, "prompt_tokens": 100,
+            "completion_tokens": 10, "calls_without_cost": 0,
+            "route_cost_overflows": events,
+            "by_route": {label: {"m": {
+                "calls": 1, "prompt_tokens": 100, "completion_tokens": 10,
+                "cost_usd": 1e-9, "usage_present": True,
+                "calls_without_cost": 0, "calls_without_usage": 0}}}},
+            "attempts": 1}
+
+    # (b) pre-seed the target with 1 event, then carry 2 more: the total must
+    # be 1 + 2 == 3. An ``= src`` at the carriage line reads 2.
+    seeded: dict = {}
+    _merge_cost_accumulator(seeded, _src("p1", 1))
+    assert seeded["cost"]["route_cost_overflows"] == 1, seeded["cost"]
+    _merge_cost_accumulator(seeded, _src("p2", 2))
+    assert seeded["cost"]["route_cost_overflows"] == 3, seeded["cost"]
 
 
 def test_the_rollup_carriage_carries_more_than_one_event_across_stages():
