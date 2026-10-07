@@ -21238,6 +21238,43 @@ class TortoiseSDK:
             return entity, apply_result
         return entity
 
+    @staticmethod
+    def _echo_matches(stored, passed) -> bool:
+        """Does `stored` REPRESENT the value this call passed? (create echo only)
+
+        Deliberately different from `_same_journal_value` (the journal
+        repeat-safety predicate) in exactly one way, and the difference is the
+        point:
+
+        * CONTAINERS compare structurally, whatever Python type they came back
+          as. `_persist_extra_props` stores a `tuple` as an array and the reader
+          returns a `list`, so a type-strict test would DROP a prop the write
+          really stored — and because the key is undeclared, every read withholds
+          it, leaving the caller no path to the value it just persisted (#228).
+          `_same_journal_value` must NOT do this: for repeat-safety a tuple-vs-
+          list re-check is deliberately re-recorded.
+        * SCALARS stay type-strict, because Python folds the type away
+          (`True == 1 == 1.0`) while the graph stores a bool and an int as
+          distinct values. Measured: a DENIED `flag=1` write echoed `1` for a
+          node holding `True` — an acknowledgement of a value never stored.
+        * Anything the graph cannot persist is not a match and must NOT raise:
+          a numpy array in a boolean context raises `ValueError`, which would
+          escape from a post-write, pre-journal path.
+        """
+        if isinstance(stored, (list, tuple)) and isinstance(passed, (list, tuple)):
+            return len(stored) == len(passed) and all(
+                TortoiseSDK._echo_matches(x, y)
+                for x, y in zip(stored, passed, strict=True))
+        if isinstance(stored, dict) and isinstance(passed, dict):
+            return stored.keys() == passed.keys() and all(
+                TortoiseSDK._echo_matches(stored[k], passed[k]) for k in stored)
+        if type(stored) is not type(passed):
+            return False
+        try:
+            return bool(stored == passed)
+        except Exception:            # non-persistable (e.g. an array) — not a match
+            return False
+
     def _get_entity(self, id_val: str, *, _echo_written: dict | None = None) -> dict:
         """``_echo_written=<the properties this call wrote>`` (#228/#5196): the
         CREATE path's return value.
@@ -21248,12 +21285,13 @@ class TortoiseSDK:
         `create_document(..., project=...)` returned an object missing the prop it
         had just persisted, reddening the pinned #228 contract.
 
-        Only keys that are BOTH in `_echo_written` and present on the node are
-        added back. A MERGE onto a pre-existing payload-bearing `:Source` — the
-        population this surface exists for — must NOT hand the caller properties
-        it never wrote and that every read withholds: measured, echoing the whole
-        node handed a legacy 2400-byte `text` straight back through the MCP tool
-        `tortoise_create_source` (#5196 review round 2, P1).
+        Only keys that are BOTH in `_echo_written` and present on the node with a
+        value that REPRESENTS the one this call passed are added back (`_echo_matches`)
+        — so the echo is the acknowledgement of THIS write, and a MERGE onto a
+        pre-existing payload-bearing `:Source` — the population this surface exists
+        for — cannot hand the caller properties it never wrote. Measured: echoing the
+        whole node handed a legacy 2400-byte `text` straight back through the MCP
+        tool `tortoise_create_source`.
         """
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
         # excluded from entity resolution — only Point/Subject/Object/Document/
@@ -21279,13 +21317,17 @@ class TortoiseSDK:
                 # #5196 review round 3, P1: echoing the NODE's value for any key
                 # the caller merely NAMED let a caller harvest the whole
                 # undeclared payload — measured, one `create_source` naming
-                # `text`/`snippet`/`chunks`/... returned all seven legacy props,
+                # `text`/`snippet`/`chunks`/`blob` returned all four legacy props,
                 # including a 2 KB body, from a node whose write DENIED them.
-                # The echo therefore carries a key only when the node holds
-                # EXACTLY the value this call passed: that is what "this call
-                # wrote it" means, and a denied key can never satisfy it.
+                # The echo now carries a key only when the node's value
+                # REPRESENTS the value this call passed. Because the echo returns
+                # `_v` (the caller's own value, never the node's bytes), a denied
+                # key can only surface when the node's stored value already
+                # equals what the caller supplied — a value-equality oracle over
+                # data the caller already had, not a disclosure.
                 for _k, _v in _echo_written.items():
-                    if _k in _raw and _k not in _props and _raw[_k] == _v:
+                    if (_k in _raw and _k not in _props
+                            and self._echo_matches(_raw[_k], _v)):
                         _props[_k] = _v
             if _denied:
                 _logger.warning(

@@ -3570,6 +3570,15 @@ _SOURCE_NODE_PROP_NAMES: frozenset = _EntityHandlers._SOURCE_NODE_PROPS
 # (what a caller may set).
 _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     "rawState", "rawStateAt",
+    # `__runId` is DECLARED (it is written to the node by `_upsert_source`'s
+    # `run_clause`) but must stay CALLER-UNSETTABLE. `_update_entity` uses the
+    # declaration as its WRITE allowlist, so declaring it without listing it here
+    # made it writable through the MCP tool `tortoise_update_entity`: measured,
+    # `update_entity(url, __runId="TENANT_FORGED")` was accepted, journalled into
+    # the EntityMutated record and SURVIVED `rebuild_all` (#5196 round 3, P2).
+    # This is the "put this IN FRONT of the declaration, never instead of it"
+    # rule the comment below states.
+    "__runId",
 })
 
 # The IDENTITY keys of a `:Source` — also refused to a caller-supplied map.

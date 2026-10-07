@@ -1284,6 +1284,12 @@ ERR_INVALID = -32003
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
     "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5196 round 3: the index-merge run token is written to the node by
+    # `_upsert_source`'s `run_clause`, so it is DECLARED — but it is
+    # server-minted and must stay caller-unsettable. Declaring it without
+    # refusing it here made it writable through `tortoise_update_entity`
+    # (measured: accepted, journalled, and surviving `rebuild_all`).
+    "__runId",
     # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
     # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
     # `embedding` ITSELF is deliberately NOT here — `create_point` has a

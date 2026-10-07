@@ -984,13 +984,16 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     assert sess_keys, "the session-capture writer produced no :Source"
     produced |= sess_keys
 
-    # the index-merge writer (`_index_source_merge`) — it minted `__runId`, which
-    # this test could not see, so the declaration's own invariant was unchecked
-    # for that producer (#5196 review round 3, P2).
+    # the index-merge writer (`_upsert_source`'s `run_clause`) — it minted
+    # `__runId`, which this test could not see, so the declaration's own invariant
+    # was unchecked for that producer (#5196 review round 3, P2).
     s.create_source(RAW_URL + "?merge", "document", contentHash="h1",
                     _merge_run_id="cov-rid-5196")
     merge_keys = _keys_at("url", RAW_URL + "?merge")
     assert merge_keys, "the index-merge writer produced no :Source"
+    assert "__runId" in merge_keys, (
+        "the writer no longer emits `__runId` — the declaration entry for it is "
+        "now dead and this test would not notice")
     produced |= merge_keys
 
     assert produced, "the fixture produced no :Source — the assertion would be vacuous"
@@ -1114,6 +1117,48 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
         f"{ {k: str(again[k])[:24] for k in harvested} }"
     )
     assert body not in repr(again), "the create echo handed back the legacy body"
+
+    # #5196 round 3, P3: the echo must not acknowledge a value the node does NOT
+    # hold. Python folds the type away (`1 == True`), the graph does not.
+    s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) SET s.flag = true", params={"u": RAW_URL})
+    same = s.create_source(RAW_URL, "conversation", contentHash="h1", flag=1)
+    assert "flag" not in same, (
+        f"a DENIED write was acknowledged with a value never stored: "
+        f"{same.get('flag')!r} (the node holds the bool True)")
+
+    # ...and the other direction: a TUPLE the write persisted reads back as a
+    # LIST, and the echo must still acknowledge it — the key is undeclared, so
+    # every read withholds it and the caller would have no path to it (#228).
+    doc = s.create_document("echo-tuple-5196", "note", tags=("a", "b"))
+    assert list(doc.get("tags") or []) == ["a", "b"], (
+        f"a tuple persisted as an array was not echoed: {doc.get('tags')!r}")
+    assert "tags" in doc, "the key itself was dropped from the echo"
+
+
+def test_the_merge_run_token_is_not_caller_settable(sdk):
+    """#5196 review round 3, P2: `__runId` had to be DECLARED (the writer puts it
+    on the node), but declaring it in `_SOURCE_NODE_PROPS` ALSO made it writable,
+    because that set doubles as `_update_entity`'s WRITE allowlist. Measured
+    before this fix: `update_entity(url, __runId="TENANT_FORGED")` was accepted,
+    journalled, and SURVIVED `rebuild_all`.
+
+    (1) FAILS if the token is accepted, or if a forged value survives a rebuild.
+    (2) REACHABLE: the refusal goes through the public route, and the contrast is
+        asserted — a declared-but-unsettable key is refused as server-managed,
+        while a DECLARED key is still updatable, so this cannot pass by the route
+        refusing everything.
+    """
+    s, events = sdk
+    s.create_source(RAW_URL, "document", contentHash="h1")
+    with pytest.raises(ValueError, match="server-managed"):
+        s.update_entity(RAW_URL, __runId="TENANT_FORGED")
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _source_props(s).get("__runId") != "TENANT_FORGED", (
+        "a forged merge-run token survived the rebuild")
+    # The contrast: the route still accepts a DECLARED property.
+    s.update_entity(RAW_URL, format="transcript")
+    assert _source_props(s)["format"] == "transcript"
 
 
 def test_a_same_state_recheck_does_not_move_the_stamp_live(sdk):
