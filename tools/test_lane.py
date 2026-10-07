@@ -132,6 +132,13 @@ def repo_root() -> Path:
     ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) `rev-parse`
     reports the OTHER tree, so the tool would compute a peer lane's container
     name and act on it with no flag involved.
+
+    The fallback to ``Path.cwd()`` (git timed out, or is absent from PATH) is
+    deliberate but DEGRADES the contract: invoked from a subdirectory it yields
+    a different slug than the worktree root, so ``down`` would report ``absent``
+    while the real lane container stays behind (and ``uri`` would start a second
+    one). The stderr warning is the signal, not a detail — run from the worktree
+    root, or restore git, and the derived name is the worktree's again.
     """
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_WORK_TREE")}
@@ -469,6 +476,15 @@ def _remove_and_describe(name: str) -> str:
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
+    # The strongest form of "the target is not a parameter": this tool removes
+    # exactly the container ITS OWN worktree derives, and nothing else — not
+    # even a peer lane's `fdb-lane-*`. Ownership is then an invariant the code
+    # enforces, instead of call-site discipline the suite cannot check.
+    if name != lane_name():
+        raise SystemExit(
+            f"test-lane: refusing to remove {name!r} — this worktree's container "
+            f"is {lane_name()!r}; a peer lane's database is not ours to delete"
+        )
     rm = _docker("rm", "-f", name)
     return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")

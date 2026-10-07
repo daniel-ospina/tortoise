@@ -465,6 +465,19 @@ def test_remove_and_describe_refuses_a_protected_name(monkeypatch):
     assert "refusing to remove" in str(exc.value)
 
 
+def test_remove_and_describe_refuses_a_peer_lane_container(monkeypatch):
+    """Ownership is an INVARIANT, not call-site discipline: even another lane's
+    `fdb-lane-*` is not this worktree's to delete, however it is spelled."""
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-aaaaaaaaaa")
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("_docker called for a peer lane's container")
+    monkeypatch.setattr(tl, "_docker", _must_not_run)
+    with pytest.raises(SystemExit) as exc:
+        tl._remove_and_describe("fdb-lane-bbbbbbbbbb")
+    assert "not ours to delete" in str(exc.value)
+
+
 # ── the eval contract ──────────────────────────────────────────────────────
 
 def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
