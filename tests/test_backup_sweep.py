@@ -2933,6 +2933,7 @@ def test_sweep_logs_and_survives_a_failed_storage_reading_5331(
             "zero would be read as a real storage figure")
 
 
+
 def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
         shared_proj, monkeypatch, caplog):
     """#5331: a PARTIAL measurement failure records NOTHING and says so.
@@ -2964,8 +2965,11 @@ def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
         import tortoise.backup_sweep as bs_mod
         from tortoise.graph_storage import GraphStorageReading, _failed_reading
 
+        measured: list[str] = []
+
         def _default_fails(p, **kw):
             name = getattr(p, "graph_name", "")
+            measured.append(name)
             if name == _team_graph("team_pt"):  # the DEFAULT graph fails
                 return _failed_reading(name, 100, 1, "2026-10-07T00:00:00Z",
                                        "injected default-graph failure")
@@ -2985,9 +2989,16 @@ def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
         with caplog.at_level(logging.WARNING, logger="tortoise.backup_sweep"):
             r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                  config=_config())
+
         # The backup itself is unaffected — metering never aborts a backup.
         assert r["results"]["team_pt"]["status"] == "backed_up", r["results"]
         assert store.list("backups/"), "backup object must still be written"
+
+        # SELF-SUFFICIENCY: both graphs must actually have been handed to the
+        # meter, or this test would also pass via the ALL-failed path and prove
+        # nothing about PARTIAL handling.
+        assert len(measured) == 2, (
+            f"expected both of the org's graphs to be measured, got {measured}")
 
         # The partial total (100.0 from the custom graph alone) must NOT land.
         assert recorded == [], (
@@ -2998,3 +3009,58 @@ def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
             f"how the meter stayed dormant. Got: {caplog.text!r}")
         # ...and the warning must NAME the graph that failed.
         assert _team_graph("team_pt") in caplog.text, caplog.text
+
+
+def test_combine_graph_storage_readings_unit_5331():
+    """#5331: DIRECT unit test for the aggregator — the three fixes cycle 3 and 4
+    made (summed range ends, `None`-propagating index share, least-precise
+    samples) were otherwise unasserted: reverting any of them left every
+    integration test green, and the ledger's `min <= total <= max` check accepts
+    the wrong range silently. No DB, no fixtures.
+    """
+    from tortoise.graph_storage import (
+        GraphStorageReading,
+        _failed_reading,
+        combine_graph_storage_readings,
+    )
+
+    def _r(name, total, lo, hi, *, samples=100, indices=None, ok=True):
+        return GraphStorageReading(
+            graph_name=name, total_mb=total, samples=samples, repeats=1,
+            readings_mb=(total,), min_mb=lo, max_mb=hi, spread_mb=hi - lo,
+            indices_mb=indices, node_attributes_mb={}, ok=ok,
+            error=None if ok else "boom", measured_at="2026-10-07T00:00:00Z")
+
+    # Two graphs each reporting [90, 110]. The honest aggregate is [180, 220] —
+    # NOT min(mins)=90 (which would publish a 55% understatement).
+    c = combine_graph_storage_readings(
+        [_r("a", 100.0, 90.0, 110.0), _r("b", 100.0, 90.0, 110.0)],
+        graph_name="org_x")
+    assert c.ok, c.error
+    assert c.total_mb == 200.0, c.total_mb
+    assert c.min_mb == 180.0, f"both range ends must be summed, got min={c.min_mb}"
+    assert c.max_mb == 220.0, c.max_mb
+    assert c.spread_mb == 40.0, c.spread_mb
+    assert c.graph_name == "org_x"
+
+    # An UNKNOWN index share (None) must not be silently dropped from the sum.
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, indices=0.5),
+         _r("b", 1.0, 1.0, 1.0, indices=None)]).indices_mb is None
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, indices=0.5),
+         _r("b", 1.0, 1.0, 1.0, indices=0.25)]).indices_mb == 0.75
+
+    # Precision: the LEAST-precise input wins (never claim more than you have).
+    assert combine_graph_storage_readings(
+        [_r("a", 1.0, 1.0, 1.0, samples=100),
+         _r("b", 1.0, 1.0, 1.0, samples=10)]).samples == 10
+
+    # A partial failure yields a FAILED reading naming the graph that failed.
+    partial = combine_graph_storage_readings(
+        [_r("a", 100.0, 100.0, 100.0), _failed_reading("b", 100, 1, "", "boom")])
+    assert not partial.ok, "a partial total must not read as ok"
+    assert "b" in (partial.error or ""), partial.error
+
+    # No input → nothing to record.
+    assert combine_graph_storage_readings([]) is None

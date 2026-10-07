@@ -239,7 +239,12 @@ class GraphStorageReading:
 
     ``total_mb`` is the best estimate (the MEDIAN of the per-repeat totals);
     ``min_mb``/``max_mb``/``spread_mb`` are the observed range across those
-    repeats, and ``readings_mb`` keeps every individual total. ``samples`` is
+    repeats, and ``readings_mb`` keeps every individual total — the per-REPEAT
+    totals for a single-graph reading, and the per-GRAPH totals when the reading
+    came from `combine_graph_storage_readings` (whose per-repeat dimension has
+    no meaning once summed across graphs); `as_dict` publishes it as
+    ``graph_storage_readings_mb``, so read the provenance before interpreting it.
+    ``samples`` is
     the ``SAMPLES`` value sent to FalkorDB; ``repeats`` is how many times the
     command ran.
 
@@ -328,8 +333,8 @@ def combine_graph_storage_readings(
     ``sum(sub-maxes)`` would publish a lower bound far below anything the org
     could actually hold.) ``indices_mb`` stays ``None`` if ANY graph's share is
     unknown — summing only the known ones would report a precise-looking share
-    that understates the org. ``samples``/``repeats`` take the MAX across
-    graphs, so the combined reading never claims more precision than its
+    that understates the org. ``samples``/``repeats`` take the MIN across
+    graphs — a combined reading must not claim more precision than its
     least-precise input.
 
     ``readings_mb`` is REPURPOSED here: for a single graph it holds the
@@ -370,8 +375,8 @@ def combine_graph_storage_readings(
     return GraphStorageReading(
         graph_name=graph_name or str(getattr(first, "graph_name", "")),
         total_mb=total,
-        samples=max(int(getattr(r, "samples", SAMPLES_DEFAULT)) for r in ok),
-        repeats=max(int(getattr(r, "repeats", 1)) for r in ok),
+        samples=min(int(getattr(r, "samples", SAMPLES_DEFAULT)) for r in ok),
+        repeats=min(int(getattr(r, "repeats", 1)) for r in ok),
         readings_mb=tuple(float(r.total_mb) for r in ok),
         min_mb=lo,
         max_mb=hi,
@@ -581,8 +586,12 @@ def measure_and_record_graph_storage(
         _selfhost_transport: bool = False) -> GraphStorageReading:
     """Measure an open projection and record it for *org_id* (both fail-soft).
 
-    The end-to-end entry point: one call produces the reading AND puts it on
-    the per-org ledger. Returns the reading in every case, so the caller can
+    ⛔ SINGLE-GRAPH helper, NOT an org's entry point. The production path for an
+    org's storage figure is ``backup_sweep._record_org_storage``, which measures
+    EVERY graph of the org and records ONE combined reading (see
+    `combine_graph_storage_readings`). Calling this per graph would reintroduce
+    last-graph-wins on a ``(org_id, period_start)`` gauge and understate a
+    multi-graph org. Returns the reading in every case, so the caller can
     inspect what was measured. The return value does NOT report the ledger
     write: a dropped write is signalled to the operator by ``record_graph_storage``
     logging at WARNING, not by a changed return value.

@@ -46,6 +46,7 @@ from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
 from .graph_storage import (
+    _failed_reading,
     combine_graph_storage_readings,
     measure_projection_storage,
     record_graph_storage,
@@ -650,13 +651,22 @@ def _record_org_storage(db, org_id: str, graphs: list[dict[str, Any]]) -> None:
         for graph in graphs:
             gname = graph.get("graph_name") or ""
             if not gname:
-                continue  # un-nameable row — already failed closed by the sweep
+                # ⛔ A skipped graph must FAIL the aggregate, not vanish from it.
+                # Dropping it here would leave `len(ok) == len(readings)` and
+                # record the survivors' sum as the org's figure — the same
+                # silent understatement the aggregator is guarded against, just
+                # one layer up (an `_invalid` custom row emits graph_name="").
+                readings.append(_failed_reading(
+                    str(graph.get("graph_id") or "?"), 0, 0, "",
+                    "no graph name resolved (invalid Graph row)"))
+                continue
             try:
                 g = db.select_graph(gname)
-            except Exception:
+            except Exception as e:
                 logger.warning(
                     "storage metering: cannot open %s/%s — skipping", org_id, gname,
                     exc_info=True)
+                readings.append(_failed_reading(gname, 0, 0, "", e))
                 continue
             # NOT wrapped in try/except-of-always: a non-ok reading is the real
             # failure signal and must be visible (a discarded reading is how
@@ -677,10 +687,15 @@ def _record_org_storage(db, org_id: str, graphs: list[dict[str, Any]]) -> None:
             logger.warning(
                 "storage metering FAILED for %s: %s — no reading recorded for "
                 "this period", org_id, combined.error)
-            # ⛔ NEVER write a failed reading. Its total is a placeholder zero,
-            # and the ledger's read side cannot tell a fabricated zero from a
-            # genuinely empty graph — recording it would hand the cap a fake
-            # figure. A missing reading is honest; a zero is not.
+            # ⛔ NEVER write a failed reading — total OR partial. Its total is a
+            # placeholder zero, and the read side maps an ABSENT row to
+            # `graph_storage_mb = 0.0` too (`metering._zero_view`), so neither a
+            # zero nor a survivor-sum may be written: both understate the cap
+            # input. All-or-nothing is chosen because a PARTIAL total looks
+            # measured — the one signal that distinguishes a real reading from a
+            # gap (`graph_storage_measured_at is None`, `samples == 0`) would be
+            # absent. A consumer of this ledger for a CAP must therefore treat
+            # an absent/zero reading as UNMEASURED, not as "no storage".
             return
         record_graph_storage(org_id, combined)
     except Exception:
