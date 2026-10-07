@@ -608,7 +608,7 @@ jobs:
         # independent. Repo-wide, fail-closed. `=======` is deliberately NOT
         # matched:
         # 7 equals is a valid setext H1 underline (a real false positive at
-        # website/apps/dashboard/node_modules/js-tokens/README.md:238), and a
+        # a vendored dependency README — the tree was tracked until #3768), and a
         # real conflict block always carries the <</>> markers anyway.
         run: |
           set +e
