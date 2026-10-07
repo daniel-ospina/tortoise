@@ -426,6 +426,45 @@ def test_published_scan_is_none_when_docker_cannot_be_asked(monkeypatch):
     assert tl._published_scan() is None
 
 
+def test_container_publishes_fails_closed_when_it_takes_the_scan(monkeypatch):
+    """The NO-SCAN path must not turn a failed `docker ps -a` into "not
+    published". Leaving it permissive for callers that omit the table was the
+    P1 fail-open still reachable by default."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    with pytest.raises(SystemExit) as exc:
+        tl._container_publishes(16390)
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_pick_port_takes_the_docker_scan_once(monkeypatch):
+    """One `docker ps -a` per selection, not one per candidate: the range is 110
+    ports wide, and a per-candidate scan is 110 docker invocations on a host
+    this tool exists because it is overloaded."""
+    calls = {"n": 0}
+
+    def _scan():
+        calls["n"] += 1
+        return ""
+    monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
+    monkeypatch.setattr(tl, "_published_scan", _scan)
+    monkeypatch.setattr(tl, "_container_publishes",
+                        lambda p, _s=None: p < tl.PORT_RANGE[0] + 5)
+    assert tl.pick_port(16390, 16399) == 16395
+    assert calls["n"] == 1, "the docker scan must be taken once per selection"
+
+
+def test_repo_root_warns_and_falls_back_when_git_fails(monkeypatch, capsys):
+    """A non-zero `rev-parse` is the SAME fact as a timeout (git could not
+    answer), so it must warn rather than silently yield a cwd-derived slug."""
+    monkeypatch.setattr(tl.subprocess, "run",
+                        lambda *a, **k: _R(128, "", "fatal: not a git repository"))
+    monkeypatch.chdir(tl.Path.cwd())
+    root = tl.repo_root()
+    _out, err = capsys.readouterr()
+    assert root == tl.Path.cwd()
+    assert "falling back to the current directory" in err
+
+
 def test_pick_port_fails_closed_when_the_docker_scan_fails(monkeypatch):
     """A FAILED `docker ps -a` must NOT be read as "nothing is published".
 

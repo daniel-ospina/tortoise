@@ -22,16 +22,22 @@ from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container that dies
 with the lane, so nothing it does can contaminate another lane and no peer's
 leftovers can contaminate it.
 
-SCOPE — THIS IS NOT YET THE WHOLE SUITE (measured 2026-10-07; do not oversell)
----------------------------------------------------------------------------
-Tests that build their URI through ``tests/_live_utils.py`` key on
+SCOPE — NOT THE WHOLE SUITE (measured 2026-10-07; do not oversell)
+------------------------------------------------------------------------
+Tests that resolve their target from ``TORTOISE_DB_URI`` are isolated by
+exporting it — **440 test modules reference that variable**. Tests that build a
+URI through ``tests/_live_utils.py`` instead key on
 ``TORTOISE_TEST_DOCKER_PORT`` (default 6379) and a ``falkordb`` password, so they
-address the SHARED instance and their graphs still accumulate there. This tool
-exports neither variable, and it starts the private container without
-``requirepass``, so the seam's default password could not authenticate against it
-even if the port were exported. Measured 2026-10-07: **9 test modules import that
-seam.** Closing that gap is #5084's remaining work; this tool is the isolation
-half of it, not the whole fix.
+still address the SHARED instance: **46 test modules import that module** and
+**~90 mention a literal ``:6379``**. This tool exports neither variable, and it
+starts the private container without ``requirepass``, so the seam could not
+authenticate against it even if the port were exported. Closing that seam is
+#5084's remaining work; this tool is the isolation half of it, not the whole fix.
+
+(An earlier revision of this note said "9 modules". That number came from a
+grep for one import spelling and counted the modules that use only the seam's
+SKIP guard — the set the tool already isolates. The counts above are the
+measured ones.)
 
 MEASURED TRADE-OFF (do not oversell this tool)
 ----------------------------------------------
@@ -154,7 +160,17 @@ def repo_root() -> Path:
         print("test-lane: `git` is not available on PATH — falling back to "
               "the current directory", file=sys.stderr)
         return Path.cwd()
-    return Path(out.stdout.strip()) if out.stdout.strip() else Path.cwd()
+    root = out.stdout.strip()
+    if out.returncode != 0 or not root:
+        # A non-zero `rev-parse` (not a repository, dubious ownership, a bad
+        # worktree) is the SAME FACT as a timeout: git could not answer. Falling
+        # back silently here would contradict the warning contract above and
+        # hand back a slug that is not this worktree's.
+        print(f"test-lane: `git rev-parse` exited {out.returncode} with no "
+              f"worktree — falling back to the current directory "
+              f"({(out.stderr or '').strip()[:120]})", file=sys.stderr)
+        return Path.cwd()
+    return Path(root)
 
 
 def slug_for(path: Path | str) -> str:
@@ -213,6 +229,12 @@ def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
     """
     if not isinstance(port, int) or not (0 < port < 65536):
         raise SystemExit(f"test-lane: {port!r} is not a valid TCP port")
+    if os.environ.get("DOCKER_HOST"):
+        # Every printed URI comes through here — which is why the warning lives
+        # here and not in `pick_port`: `start()`'s reuse path and `status` also
+        # print a URI without ever selecting a port.
+        print("test-lane: DOCKER_HOST is set — the printed 127.0.0.1 URI names "
+              "that daemon's loopback, not this host's", file=sys.stderr)
     return f"docker://:@127.0.0.1:{port}/{_validate_graph(graph)}"
 
 
@@ -272,9 +294,20 @@ def _published_scan() -> str | None:
 
 
 def _container_publishes(port: int, scan: str | None = None) -> bool:
-    """Whether `port` is already published, reusing a caller's scan when given."""
+    """Whether `port` is already published, reusing a caller's scan when given.
+
+    When it takes the scan itself, a FAILED scan RAISES rather than returning
+    False: "not published" is a claim about docker's answer, and a failure is not
+    one. The fail-open is therefore closed structurally, for every caller — not
+    only for the one that remembers to pass a table in.
+    """
     table = _published_scan() if scan is None else scan
-    return table is not None and f":{port}->" in table
+    if table is None:
+        raise SystemExit(
+            "test-lane: `docker ps -a` failed — cannot tell which ports are "
+            "already published; refusing to guess (check the docker daemon)"
+        )
+    return f":{port}->" in table
 
 
 def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
@@ -286,9 +319,8 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
     `docker run -p` then refuses — the fail-open this module's rule ("a failure
     is never read as permission") exists to forbid.
     """
-    if os.environ.get("DOCKER_HOST"):
-        print("test-lane: DOCKER_HOST is set — the printed 127.0.0.1 URI names "
-              "that daemon's loopback, not this host's", file=sys.stderr)
+    # The scan is hoisted into `pick_port`: one `docker ps -a` per selection, not
+    # one per candidate (the range is 110 ports wide).
     scan = _published_scan()
     if scan is None:
         raise SystemExit(
