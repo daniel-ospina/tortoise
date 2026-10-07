@@ -21230,7 +21230,7 @@ class TortoiseSDK:
             proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
             proj.create_managed_by(canonical_id, props["managedBy"])
-        entity = self._get_entity(canonical_id)
+        entity = self._get_entity(canonical_id, _echo_written=True)
         if _return_apply_result:
             # #5024 P2-2: the conditional-MERGE QueryResult travels on THIS
             # call's return value to `create_source` (the only consumer),
@@ -21238,7 +21238,17 @@ class TortoiseSDK:
             return entity, apply_result
         return entity
 
-    def _get_entity(self, id_val: str) -> dict:
+    def _get_entity(self, id_val: str, *, _echo_written: bool = False) -> dict:
+        """``_echo_written=True`` (#228/#5196): return the properties the WRITE
+        stored, without the #3998 read filter. The create path uses it because a
+        create return is a WRITE ACKNOWLEDGEMENT to the caller that performed the
+        write — not a read. `_create_entity` used to answer with a filtered read,
+        so `create_document(..., project=...)` returned an object missing the
+        prop it had just persisted and `test_create_document_persists_arbitrary_props`
+        (#228) went red on the #3998 branch. The filter is unchanged on every
+        real read path (`tortoise_get_entity`, `get_provenance_chain`,
+        `entityProfile`, `tortoise_traverse`).
+        """
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
         # excluded from entity resolution — only Point/Subject/Object/Document/
         # Event/Source resolve (index-backed union). On a cross-label id
@@ -21256,7 +21266,7 @@ class TortoiseSDK:
         # same leak, one function away, which is why the filter now lives in one
         # place (`projection.entities.filter_source_props`) instead of being
         # re-stated per read path.
-        if resolved[0].get("label") == "Source":
+        if resolved[0].get("label") == "Source" and not _echo_written:
             _props, _denied = filter_source_props(_props)
             if _denied:
                 _logger.warning(

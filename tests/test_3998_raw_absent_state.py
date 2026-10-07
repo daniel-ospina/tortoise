@@ -697,15 +697,17 @@ def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
     """#5196, P1: the two contracts pinned together so neither can move alone.
 
     `create_document` is a CALLER PASSTHROUGH by design (#228 —
-    `test_create_document_persists_arbitrary_props` pins it), so an undeclared
-    prop is WRITTEN. Reading is the opposite contract (#3998/D30): every read
-    path filters through `_SOURCE_NODE_PROP_NAMES`. The defect was the ROOT
-    bag, which bypassed the filter and served the bytes straight back —
-    measured, a 2400-byte `text` returned through `entityProfile`.
+    `test_create_document_persists_arbitrary_props` pins it): an undeclared prop
+    is WRITTEN and echoed back on the create return, because a create return is a
+    write acknowledgement to the caller that performed the write. Reading is the
+    opposite contract (#3998/D30): every read path filters through
+    `_SOURCE_NODE_PROP_NAMES`. The defect was the ROOT bag, which bypassed the
+    filter and served the bytes straight back — measured, a 2400-byte `text`
+    returned through `entityProfile`.
 
-    (1) FAILS on EITHER half: if the prop does not reach the node the #228
-        passthrough was closed (a contract break, not a fix); if a read path
-        serves it the #3998 leak is back.
+    (1) FAILS on EITHER half: if the prop does not reach the node, or is missing
+        from the create return, #228's passthrough was closed (a contract break,
+        not a fix); if a read path serves it, the #3998 leak is back.
     (2) REACHABLE: both halves run through public routes (`create_document`,
         `entityProfile`, `tortoise_traverse`) against a real node.
     """
@@ -716,11 +718,12 @@ def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
     doc = s.create_document("doc-undeclared-5196", "note",
                             text=body, transcript=body, summary="kept")
     did = doc["id"]
-    # Half 1 — #228: the writer is an open passthrough, so the prop reaches the
-    # node. NOTE the RETURN value is deliberately NOT asserted here: it is built
-    # from a filtered read, so `create_document` currently withholds the props it
-    # just wrote — `test_create_document_persists_arbitrary_props` (#228) is RED
-    # on this branch for that reason (measured; pre-existing, reported on #5196).
+    # Half 1 — #228: the prop lands on the node AND rides the create return,
+    # which is a write acknowledgement, not a read.
+    assert doc.get("text") == body, (
+        "the create return dropped a prop the call had just written — #228's "
+        "contract, which a filtered read of the node cannot serve"
+    )
     rows = s._get_proj().g.query(
         "MATCH (n:Source {id:$i}) RETURN properties(n)", params={"i": did}
     ).result_set
