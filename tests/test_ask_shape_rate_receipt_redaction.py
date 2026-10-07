@@ -218,8 +218,20 @@ def test_no_credential_reaches_the_committed_receipt_body(monkeypatch,
         f"{secret!r} leaked (case-insensitive) into the receipt body")
     # The receipt stays a real, readable receipt — the redaction must not
     # have destroyed it.
-    assert json.loads(written)["instrument"] == "tools/ask_shape_rate.py"
-    assert str(out) in written
+    parsed = json.loads(written)
+    assert parsed["instrument"] == "tools/ask_shape_rate.py"
+    # The receipt records its own path, compared in the WRITER'S redaction.
+    # ``receipt_path`` is a VALUE, and over-redacting a VALUE that contains a
+    # registered token is the documented, fail-closed behaviour (see the
+    # ``_redact_receipt`` docstring and the sibling
+    # ``test_a_short_credential_cannot_rename_the_receipt_schema`` test), so
+    # the RAW path is not guaranteed to survive verbatim: pytest's TMPDIR is
+    # random, and when it contains a registered token — e.g. ``pw`` from this
+    # file's own ``docker://:pw@…`` fixtures, which register process-wide in
+    # ``_SUBSTRATE_SECRETS`` — the writer redacts the path too. Asserting the
+    # raw path made this test fail whenever TMPDIR happened to collide (main
+    # RED at 6c437070f, 4 failures in one shard, green on re-run — #6960).
+    assert parsed["receipt_path"] == _redact_substrate_text(str(out))
 
 
 def _decoded_strings(value):
