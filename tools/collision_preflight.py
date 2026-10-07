@@ -526,14 +526,23 @@ _JEV_CLAIM_QUESTION = (
 class NotAWorkItem(Exception):
     """The queried number is a PULL REQUEST, not a work item (#7009).
 
-    Deliberately NOT a `SurfaceError`. Every `SurfaceError` raised while a
-    surface is scanned is caught by that surface's own handler, turned into a
-    PER-SURFACE advisory note, and leaves the verdict and the exit code
-    untouched — which is right for "this one surface could not be measured" and
-    wrong for "you asked about the wrong object". Measured: raising
-    `SurfaceError` here printed the refusal correctly and still returned
-    `VERDICT: CLEAN`, i.e. it closed nothing. This class therefore propagates
-    past every per-surface handler to `main`, which turns it into exit 2.
+    Deliberately NOT a `SurfaceError`. A `SurfaceError` raised while a surface
+    is scanned is caught by that surface's own handler and turned into a
+    PER-SURFACE advisory note — right for "this one surface could not be
+    measured", wrong for "you asked about the wrong object". At THIS call site
+    the handler would additionally MISLABEL the failure: it records the surface
+    as incomplete under a closing-reference-source reason and prescribes "fix gh
+    auth/network", a remedy unrelated to the actual problem and one that no
+    amount of retrying resolves.
+
+    (An earlier version of this docstring claimed that raising `SurfaceError`
+    here still returned `VERDICT: CLEAN`. That is FALSE at this call site — the
+    blocking open-PR scan's handler yields exit 2, not 0 — and it contradicted
+    the raise-site comment, which said the opposite. Corrected: a wrong reason
+    for a right decision is still a defect, because the next reader inherits it.)
+
+    This class therefore carries a DISTINCT identity through to `main`, which
+    turns it into exit 2 rather than into a mislabelled advisory note.
 
     `EXIT_INCOMPLETE` is the protocol's existing "do not start on a guess"
     verdict, so this needs no new exit code, flag or gate.
@@ -2817,14 +2826,8 @@ def scan_pr_surface(
             f" — PR is {terminal}: immutable history, not in-flight work "
             "(non-blocking)"
         )
-        # 1. SELF, FIRST (#3504 class 4; #4567's ordering root cause).
-        if identity.owns_branch(head):
-            surface.add(_pr_ref(pr),
-                        "your own PR (its head branch is one of --self-branch) — "
-                        "not a competing claim", "weak")
-            continue
-        # 2. The PR *is* the issue (#7009): the caller passed a PULL REQUEST
-        #    number. A pull request number IS an issue number on GitHub, so this
+        # 0. INPUT VALIDITY, BEFORE THE SELF/OWNERSHIP CHECKS (#7009).
+        #    The PR *is* the issue: the caller passed a PULL REQUEST number. A pull request number IS an issue number on GitHub, so this
         #    is not an exotic input error — and the verdict it produces describes
         #    the PULL REQUEST, never the work item.
         #
@@ -2840,43 +2843,60 @@ def scan_pr_surface(
         #    work, which is the failure this whole pre-flight exists to prevent.
         #
         #    So a self-match must REFUSE, not be filed as a `weak` hit and
-        #    forgotten. `SurfaceError` is the existing channel for "this surface
-        #    could not be measured" and already maps to exit 2 — the protocol's
-        #    own "do not start on a guess" verdict — so this needs no new exit
-        #    code, no new flag and no new gate. The refusal is placed ONLY where
-        #    the work item can be named: with no closing reference there is no
-        #    issue to redirect to, and the previous (weak) behaviour is kept.
+        #    forgotten. The refusal needs no new exit code, no new flag and no
+        #    new gate: `EXIT_INCOMPLETE` is the protocol's existing "do not start
+        #    on a guess" verdict, and `NotAWorkItem` reaches it without being
+        #    mislabelled as a broken surface.
+        #
+        #    ORDERING IS LOAD-BEARING, which is why this sits at 0 and not at 2:
+        #    it is an INPUT-VALIDITY test, not a match test, so the "self before
+        #    match" ordering (#4567) does not apply to it. Placed AFTER the
+        #    self-check it is UNREACHABLE for the one PR that matters — `main()`
+        #    auto-declares the current branch for the documented `--repo .`
+        #    invocation, so when the open PR belongs to the lane running the gate
+        #    (exactly the #7477 shape) the self-arm matches first, files a `weak`
+        #    hit and continues, and the run returns `VERDICT: CLEAN`, exit 0.
+        #    Measured both ways: `--self-branch <PR head>` and auto-detect each
+        #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
+        #    branch can suppress is not a refusal.
+        if terminal is None and str(pr.get("number")) == str(issue):
+            linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+            # The refusal is UNCONDITIONAL within the open case. It does not
+            # depend on the PR naming a linked issue, because the defect is
+            # not "we could not name the work item" — it is "the number you
+            # passed is not a work item". Gating on a closing reference left
+            # the fail-open intact for exactly the PR that exposed it: #7477
+            # references (#7455) in its TITLE (this repo's convention) and
+            # carries NO closing keyword, so its closing field is empty and a
+            # `linked`-gated refusal fell straight through (measured).
+            where = (
+                " It closes " + ", ".join(f"#{n}" for n in linked) + "."
+                if linked else
+                " It names no closing issue, so resolve the work item by hand"
+                " (this repo's convention puts it in the title as `(#N)`)."
+            )
+            raise NotAWorkItem(
+                f"#{issue} is an OPEN PULL REQUEST, not a work item. A pull "
+                f"request number is also an issue number, so any verdict "
+                f"computed here describes the PR and NOT the issue it belongs "
+                f"to — and an exit 0 would authorise a dispatch on work this "
+                f"PR belongs to.{where} Re-run with the issue number this PR "
+                f"belongs to."
+            )
+        # 1. SELF (#3504 class 4; #4567's ordering root cause).
+        if identity.owns_branch(head):
+            surface.add(_pr_ref(pr),
+                        "your own PR (its head branch is one of --self-branch) — "
+                        "not a competing claim", "weak")
+            continue
+        # 2. A TERMINAL PR whose number == the issue keeps the old (weak)
+        #    behaviour, and that is load-bearing:
+        #    `test_closed_pr_own_number_is_weak_not_blocking` pins it — a number
+        #    whose object is a CLOSED/MERGED PR is immutable history, not
+        #    in-flight work, so CLEAN is the CORRECT answer for it. Refusing
+        #    there would turn a right answer into a refusal. The hazard is
+        #    entirely the NON-TERMINAL case, which block 0 has already refused.
         if str(pr.get("number")) == str(issue):
-            # TERMINAL PRs keep the old behaviour, and that is load-bearing:
-            # `test_closed_pr_own_number_is_weak_not_blocking` pins it — a number
-            # whose object is a CLOSED/MERGED PR is immutable history, not
-            # in-flight work, so CLEAN is the CORRECT answer for it. Refusing
-            # there would turn a right answer into a refusal. The hazard is
-            # entirely the NON-TERMINAL case: an OPEN PR's number names a live
-            # work item, and a verdict about the PR says nothing about it.
-            if terminal is None:
-                linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
-                # The refusal is UNCONDITIONAL within the open case. It does not
-                # depend on the PR naming a linked issue, because the defect is
-                # not "we could not name the work item" — it is "the number you
-                # passed is not a work item". Gating on a closing reference left
-                # the fail-open intact for exactly the PR that exposed it: #7477
-                # references (#7455) in its TITLE (this repo's convention) and
-                # carries NO closing keyword, so its closing field is empty and a
-                # `linked`-gated refusal fell straight through (measured).
-                where = (
-                    " It closes " + ", ".join(f"#{n}" for n in linked) + "."
-                    if linked else
-                    " It names no closing issue, so resolve the work item by hand"
-                    " (this repo's convention puts it in the title as `(#N)`)."
-                )
-                raise NotAWorkItem(
-                    f"#{issue} is an OPEN PULL REQUEST, not a work item. A pull "
-                    f"request number is also an issue number, so any verdict "
-                    f"computed here describes the PR and NOT the issue it belongs "
-                    f"to — and an exit 0 would authorise a dispatch on work this "
-                    f"PR belongs to.{where} Re-run against the issue number (#7009)."
-                )
             surface.add(_pr_ref(pr),
                         f"PR number == issue ({issue}): this PR *is* the issue, "
                         "not separate in-flight work (non-blocking)", "weak")

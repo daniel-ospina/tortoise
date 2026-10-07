@@ -790,6 +790,42 @@ class CollisionPreflightTest(unittest.TestCase):
         # refusal to run — the run reached the surfaces and named the object.
         self.assertIn("#3061", out)
 
+    def test_open_pr_own_number_REFUSES_even_when_its_branch_is_the_callers(self):
+        """The refusal must not be suppressible by the caller's OWN branch (#7009).
+
+        Regression for the fail-open found in review. The self/ownership check
+        ran FIRST and `continue`d, so when the open PR's head branch was also one
+        of `--self-branch` the self-arm matched, filed a `weak` hit, and the run
+        fell through to `VERDICT: CLEAN` (exit 0) — a refusal the caller's own
+        branch could suppress.
+
+        That is not an exotic input: `main()` auto-declares the current branch
+        for the documented `--repo .` invocation, so the case that broke was the
+        PR belonging to the lane RUNNING the gate — exactly the #7477 shape that
+        motivated the change. Measured before this fix, both via `--self-branch
+        <PR head>` and via auto-detect: RC=0, `CLEAN`, refusal absent.
+
+        Declaring the branch is how the tool models auto-detect here: both paths
+        reach the same `identity.owns_branch` predicate, so pinning the declared
+        form pins the mechanism (an auto-detect test would only re-assert that
+        `main()` populates the same set).
+
+        The refusal is an INPUT-VALIDITY test, not a match test, so the
+        "self before match" ordering (#4567) does not apply to it.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool(
+            self_branches=("fix/2712-pin-preflight-test",))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # Anti-vacuity: it must still name the object, not blanket-refuse.
+        self.assertIn("#3061", out)
+
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
         # make — and on a TERMINAL PR it is still history, not in-flight work.
@@ -2203,10 +2239,16 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("closingIssuesReferences", hits_block)
 
     def test_pr_that_is_the_issue_is_decided_before_any_match_test(self):
-        # The OTHER ordering arm (#4567). A PR whose NUMBER is the issue is that
-        # issue's own PR, not separate in-flight work — and it must be decided
-        # before any match test, so an undeclared head branch does not turn it
-        # into a COLLISION.
+        # A PR whose NUMBER is the issue is ambiguous input: the number names BOTH
+        # an open PR and the issue, and the tool cannot tell which object the
+        # caller meant. It must therefore NOT answer CLEAN — exit 0 is this
+        # protocol's instruction to DISPATCH, so a silent CLEAN authorises
+        # starting work the PR may already belong to (the #7009 fail-open).
+        #
+        # It is still decided BEFORE any match test, which is the ordering this
+        # test exists for (#4567): an undeclared head branch must not turn it into
+        # a COLLISION. Exit 2 is neither CLEAN nor COLLISION — it is "could not be
+        # completed, do not start on a guess" — so both properties hold at once.
         self.gh_fixtures(open_prs=[{
             "number": ISSUE, "title": f"feat: do the thing (#{ISSUE})",
             "body": f"Closes #{ISSUE}",
@@ -2215,11 +2257,15 @@ class CollisionPreflightTest(unittest.TestCase):
             "closingIssuesReferences": [{"number": ISSUE}],
         }])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("*is* the issue", out)
-        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
-        self.assertNotIn("matched issue-number", hits_block)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # The ordering property is now guaranteed MORE strongly, not less: the
+        # refusal short-circuits before any surface is scanned, so the run emits
+        # no report at all — hence no `HITS` block to inspect and no match-test
+        # hit that could have fired. Assert the absence of the report itself.
+        self.assertNotIn("HITS", out)
+        self.assertNotIn("matched issue-number", out)
 
     def test_found_clone_is_not_the_callers_checkout(self):
         # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
