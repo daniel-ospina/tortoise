@@ -21276,9 +21276,17 @@ class TortoiseSDK:
             _raw = resolved[0]["properties"]
             _props, _denied = filter_source_props(_props)
             if _echo_written:
-                for _k in _echo_written:
-                    if _k in _raw and _k not in _props:
-                        _props[_k] = _raw[_k]
+                # #5196 review round 3, P1: echoing the NODE's value for any key
+                # the caller merely NAMED let a caller harvest the whole
+                # undeclared payload — measured, one `create_source` naming
+                # `text`/`snippet`/`chunks`/... returned all seven legacy props,
+                # including a 2 KB body, from a node whose write DENIED them.
+                # The echo therefore carries a key only when the node holds
+                # EXACTLY the value this call passed: that is what "this call
+                # wrote it" means, and a denied key can never satisfy it.
+                for _k, _v in _echo_written.items():
+                    if _k in _raw and _k not in _props and _raw[_k] == _v:
+                        _props[_k] = _v
             if _denied:
                 _logger.warning(
                     "get_entity: a :Source node for %r carries %d undeclared "
@@ -21302,17 +21310,23 @@ class TortoiseSDK:
         first (byte-identical MATCH text and #327 index plan) and the secondary
         only on a miss.
         """
-        _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
-        _hit = g.query(
-            f"MATCH (n:Source {{{_src_id_prop}:$id}}) RETURN count(n)",
-            params={"id": id_val},
-        ).result_set[0][0]
-        if _hit:
-            return _hit
-        return g.query(
-            "MATCH (n:Source {url:$id}) RETURN count(n)",
-            params={"id": id_val},
-        ).result_set[0][0]
+        # #5196 review round 3, P2: derive the key set from the SAME declaration
+        # the write and the fold use (#3860's one-table rule), not a hardcoded
+        # `url`. Today `_CANONICAL_ENTITY_SECONDARY_ID_PROPS` yields exactly
+        # `("url",)`, so this is a drift guard rather than a live hole: a future
+        # secondary key would otherwise reopen the url-stub bypass silently.
+        from tortoise.projection import secondary_entity_id_props
+
+        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
+                 *secondary_entity_id_props("Source"))
+        for _k in _keys:
+            _hit = g.query(
+                f"MATCH (n:Source {{{_k}:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _hit:
+                return _hit
+        return 0
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,

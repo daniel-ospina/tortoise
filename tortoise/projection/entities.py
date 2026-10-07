@@ -625,6 +625,14 @@ class _EntityHandlers:
         "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
         # availability (#3998 — the third value on the source record)
         "rawState", "rawStateAt",
+        # transient merge token (`_index_source_merge`'s `s.__runId = $rid`).
+        # Declared because the declaration is "the single source of truth for
+        # what may be on this node" and this IS written to the node: measured,
+        # `create_source(url, k, _merge_run_id="RID")` leaves `__runId` on the
+        # node. It is read back only by raw Cypher and removed best-effort, so
+        # declaring it is what keeps the coverage invariant true (#5196
+        # review round 3, P2).
+        "__runId",
         # declared metadata
         "title", "format", "name", "team", "credibilityTier", "is_episodic",
         "sourcePath", "_searchText", "provenance_spans",
@@ -3419,7 +3427,17 @@ class _EntityHandlers:
             # (``raw_state='present'`` is the "the raw came back" write).
             "           s.rawState = CASE WHEN $rawState IS NULL THEN s.rawState "
             "                        ELSE $rawState END, "
+            # #5196 review round 3, P2: a SAME-state write must not move the
+            # stamp. `_source_payload_is_noop` ignores `rawStateAt` (it is
+            # minted per call), so bumping it here mutated the live node while
+            # journalling nothing — `rebuild_all` then reverted the stamp and
+            # live != replay, the divergence this lane exists to remove.
+            # `_prev_props` is the PRE-WRITE state captured atomically above,
+            # so this comparison cannot be perturbed by the `s.rawState`
+            # assignment in the previous line.
             "           s.rawStateAt = CASE WHEN $rawState IS NULL THEN s.rawStateAt "
+            "                         WHEN $rawState = _prev_props.rawState "
+            "                              THEN s.rawStateAt "
             "                         ELSE coalesce($rawStateAt, $now) END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "

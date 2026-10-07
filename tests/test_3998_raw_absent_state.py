@@ -88,6 +88,8 @@ ALLOWED_SOURCE_NODE_PROPS = frozenset({
     "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
     # availability (#3998 — the third value on the record)
     "rawState", "rawStateAt",
+    # the transient index-merge token (`_index_source_merge`)
+    "__runId",
     # declared metadata
     "title", "format", "name", "team", "credibilityTier", "is_episodic",
     "sourcePath", "_searchText", "provenance_spans",
@@ -982,6 +984,15 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     assert sess_keys, "the session-capture writer produced no :Source"
     produced |= sess_keys
 
+    # the index-merge writer (`_index_source_merge`) — it minted `__runId`, which
+    # this test could not see, so the declaration's own invariant was unchecked
+    # for that producer (#5196 review round 3, P2).
+    s.create_source(RAW_URL + "?merge", "document", contentHash="h1",
+                    _merge_run_id="cov-rid-5196")
+    merge_keys = _keys_at("url", RAW_URL + "?merge")
+    assert merge_keys, "the index-merge writer produced no :Source"
+    produced |= merge_keys
+
     assert produced, "the fixture produced no :Source — the assertion would be vacuous"
     undeclared = sorted(produced - set(_SOURCE_NODE_PROP_NAMES))
     assert not undeclared, (
@@ -1065,6 +1076,76 @@ def test_a_create_echo_does_not_return_props_the_call_never_wrote(sdk):
     again = s.create_source(RAW_URL, "conversation", contentHash="h1")
     assert "text" not in again and "content" not in again, sorted(again)
     assert body not in repr(again), "the create echo handed back the legacy raw"
+
+
+def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
+    """#5196 review round 3, P1: the echo re-added a key the caller merely NAMED
+    and took the NODE's value for it, so ONE `create_source` naming the payload
+    spellings returned every undeclared prop the node already held — measured,
+    all seven, including a 2 KB body — on a call whose write DENIED them.
+
+    (1) FAILS if any denied key comes back: the caller learns bytes it did not
+        write and that no read path will serve it.
+    (2) REACHABLE: the payload is planted with raw Cypher and asserted on the
+        node first, and the call goes through the public `create_source`.
+    """
+    s, _events = sdk
+    body = "LEGACY_BODY " + ("B" * 2000)
+    planted = {"text": body, "snippet": body, "chunks": body, "blob": body}
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    sets = ", ".join(f"s.{k}=${k}" for k in planted)
+    s._get_proj().g.query(
+        f"MATCH (s:Source {{url:$u}}) SET {sets}",
+        params={"u": RAW_URL, **planted},
+    )
+    on_node = dict(s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN properties(s)", params={"u": RAW_URL}
+    ).result_set[0][0])
+    assert on_node.get("text") == body, "the fixture did not plant the payload"
+
+    # One call NAMING every planted key, with a placeholder value.
+    again = s.create_source(
+        RAW_URL, "conversation", contentHash="h1",
+        **{k: "placeholder" for k in planted},
+    )
+    harvested = sorted(k for k in planted if k in again)
+    assert not harvested, (
+        f"the create echo harvested denied key(s) {harvested} from the node: "
+        f"{ {k: str(again[k])[:24] for k in harvested} }"
+    )
+    assert body not in repr(again), "the create echo handed back the legacy body"
+
+
+def test_a_same_state_recheck_does_not_move_the_stamp_live(sdk):
+    """#5196 review round 3, P2: `rawStateAt` is ignored by
+    `_source_payload_is_noop` (it is minted per call), but the ON MATCH clause
+    still BUMPED it on every state-carrying write — so a same-state re-check
+    mutated the live node while journalling nothing, and a rebuild reverted the
+    stamp: live != replay, the divergence this lane exists to remove.
+
+    (1) FAILS if the live stamp moves across the re-checks, or if the rebuilt
+        stamp differs from the live one.
+    (2) REACHABLE: the state is genuinely written first (its stamp asserted),
+        and every re-check carries the SAME state.
+    """
+    s, events = sdk
+    s.create_source(RAW_URL, "document", contentHash="h0")
+    s.create_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
+    first = _source_props(s)["rawStateAt"]
+    assert first, "the state write did not stamp rawStateAt"
+
+    for _ in range(3):
+        s.create_source(RAW_URL, "document", contentHash="h0",
+                        raw_state=RAW_DELETED)
+    live = _source_props(s)["rawStateAt"]
+    assert live == first, "a same-state re-check moved the stamp on the live node"
+
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    replayed = _source_props(s)["rawStateAt"]
+    assert replayed == live, (
+        f"live {live!r} != replay {replayed!r} — the journal does not reproduce "
+        f"the stamp the live node carries"
+    )
 
 
 def test_the_declaration_covers_an_id_less_source_stub(sdk):
