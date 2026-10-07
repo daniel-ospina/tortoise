@@ -41,8 +41,13 @@ does), which would fail unrelated PRs on inherited findings. The one exception i
 lychee's `error:` placeholder (it could not extract a URL at all): there the
 target has no distinguishing content, so the offending line's own text is used
 as the identity — otherwise two different broken links in one file would collapse
-to one key and a swap would pass. Findings are counted as a **multiset**, not a
-set: several findings can share a key, and adding a third still fails.
+to one key and a swap would pass. The two halves are compared differently: a
+markdownlint finding is counted as a **multiset**, because how many times a rule
+fires in a file is a property of that file, so several findings can share a key
+and adding a third still fails; a lychee finding is compared as a **set** of
+`path|link_target` keys, because how many times a link appears in the run is a
+property of the run's population, not of the tree — a link that appears twice in
+one file must never read as a new finding (#7475).
 
 Two measured instances motivated it:
 
