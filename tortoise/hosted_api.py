@@ -26321,6 +26321,10 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #5868: a per-route by_stage sub-total that could not represent a charge.
+    # Without this key the disclosure is stripped here — the documented #3359
+    # loss mode — and the row's cost_usd-vs-by_stage gap stays unexplained.
+    "route_cost_overflows",
     # #3359: capture_graph_ops — the per-session physical graph work.
     # NAMESPACED (``graph_ops_*``) so these generic names do not widen the
     # global filter for EVERY event: the flat allowlist has no per-event
@@ -27768,6 +27772,11 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # token can sit beside a valid sibling and a valid charge, so the
         # call is not usage-less.)
         "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
+        # #5868: provider charges a per-route ``by_stage`` bucket could not
+        # REPRESENT (finite charges, unrepresentable sub-total). ``cost_usd``
+        # still contains them, so this — not ``calls_without_cost`` — is what
+        # explains a ``cost_usd != sum(by_stage)`` divergence.
+        "route_cost_overflows": int(llm.get("route_cost_overflows", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the

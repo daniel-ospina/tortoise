@@ -357,7 +357,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     Returns ``{n, n_rows, p50, p95, max, total_usd, provider_reported_usd,
     map_priced_usd, unpriced_sessions, priced_sessions, fully_priced,
     calls_without_cost, calls_without_usage, calls_without_tokens,
-    deadline_aborts,
+    deadline_aborts, route_cost_overflows,
     unattributed_calls, unattributed_captures, unmetered_attempts,
     excluded_no_calls, excluded_unmeasured, source, map_version,
     heaviest}``.
@@ -406,6 +406,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     without_cost_total = 0
     without_usage_total = 0
     without_tokens_total = 0
+    route_cost_overflows_total = 0
     deadline_aborts = 0
     unattributed_total = 0
     unattributed_captures = 0
@@ -453,6 +454,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         without_cost_total += without
         without_usage_total += without_usage
         without_tokens_total += without_tokens
+        route_cost_overflows_total += _as_int(props.get("route_cost_overflows"))
         measured = _measured_calls(props)
         # #3824: calls the writer disclosed as made-but-unrolled (F2 — the
         # row exists, the roll-up did not). They are ATTEMPTS with no
@@ -581,6 +583,12 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         "calls_without_cost": without_cost_total,
         "calls_without_usage": without_usage_total,
         "calls_without_tokens": without_tokens_total,
+        # #5868: a row whose ``by_stage`` breakdown dropped a charge it could
+        # not represent. ``cost_usd`` is still the authoritative total — this
+        # only says ``sum(by_stage)`` is short of it, so a consumer reading the
+        # breakdown (rather than the row total) knows the gap is measured, not
+        # silent.
+        "route_cost_overflows": route_cost_overflows_total,
         "deadline_aborts": deadline_aborts,
         "excluded_no_calls": excluded_no_calls,
         "excluded_unmeasured": excluded_unmeasured,

@@ -7826,8 +7826,19 @@ def _bounded_cost_sum(current, delta) -> tuple[float, bool]:
     return float(current or 0.0), False
 
 
-def _merge_cost_bucket(tgt: dict, src: dict) -> None:
-    """Merge one cost-envelope bucket into another of the same shape."""
+def _merge_cost_bucket(tgt: dict, src: dict) -> bool:
+    """Merge one cost-envelope bucket into another of the same shape.
+
+    Returns ``landed`` — ``False`` when the merged ``cost_usd`` was
+    unrepresentable and the previous finite value was kept.
+
+    #5868: the caller needs that signal. The bucket already discloses the
+    drop through its own ``calls_without_cost``, but a bucket-level counter is
+    read by nobody at ROW level — the enclosing accumulator has to observe it
+    too, exactly as ``_accumulate_call_cost`` observes the per-call lane
+    overflow, or the emitted row reads as reconciled while its ``by_stage`` is
+    short.
+    """
     tgt["calls"] += int(src.get("calls", 0) or 0)
     tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
     tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
@@ -7842,6 +7853,7 @@ def _merge_cost_bucket(tgt: dict, src: dict) -> None:
     tgt["calls_without_tokens"] += int(src.get("calls_without_tokens", 0) or 0)
     tgt["usage_present"] = bool(
         tgt["usage_present"] and src.get("usage_present", True))
+    return _cost_landed
 
 
 def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
@@ -7877,11 +7889,19 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["calls_without_tokens"] = (
         int(acc.get("calls_without_tokens", 0))
         + int(src.get("calls_without_tokens", 0) or 0))
+    # #5868: the merged accumulator's per-route drops (observed per call in
+    # ``_accumulate_call_cost``) ride along, and a bucket merge that cannot
+    # represent its SUM is one more of them.
+    acc["route_cost_overflows"] = (
+        int(acc.get("route_cost_overflows", 0))
+        + int(src.get("route_cost_overflows", 0) or 0))
     for provider, models in (src.get("by_route") or {}).items():
         for model, bucket in (models or {}).items():
-            _merge_cost_bucket(
-                acc.setdefault("by_route", {}).setdefault(provider, {})
-                .setdefault(model, _empty_cost_bucket()), bucket)
+            if not _merge_cost_bucket(
+                    acc.setdefault("by_route", {}).setdefault(provider, {})
+                    .setdefault(model, _empty_cost_bucket()), bucket):
+                acc["route_cost_overflows"] = (
+                    int(acc.get("route_cost_overflows", 0)) + 1)
 
 
 def _normalise_token_count(value) -> int | None:
@@ -7966,6 +7986,15 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     ``calls_without_tokens`` — the same sibling-counter shape as the other
     two, so a malformed measurement is an ABSENCE the row names rather than a
     shaped number it cannot distinguish from a real one.
+
+    #5868: ``calls_without_cost`` answers ONE question — "is the SESSION total
+    missing a charge?" — and a per-route overflow does not make it yes. When
+    two FINITE charges on one route overflow that route's bucket while the
+    session total stays representable, the charge IS in ``cost_usd`` and is
+    missing only from the ``by_route`` breakdown; the accumulator therefore
+    records ``route_cost_overflows`` (its own counter, never a bump of
+    ``calls_without_cost``, which would claim the total is short and send the
+    report to reprice from the very breakdown that dropped the charge).
     """
     acc = stats.setdefault("cost", {})
     # #5854: normalise BOTH provider token fields before the first mutation
@@ -8045,6 +8074,20 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
         else:
             # a per-route overflow is disclosed, never written as ``inf``
             lane["calls_without_cost"] += 1
+            # #5868: the accumulator observes the route-level disclosure too.
+            # This is a DIFFERENT fact from ``calls_without_cost``, which is
+            # why it gets its own name rather than bumping that counter: the
+            # charge IS in the session total (this branch ran instead of the
+            # session-overflow one above), it is missing only from the
+            # ``by_route``/``by_stage`` breakdown — so ``cost_usd`` no longer
+            # reconciles with ``sum(by_stage)``, and the emitted row must say
+            # so. Bumping ``calls_without_cost`` here would instead assert
+            # that the session TOTAL dropped a charge, which is false, and
+            # would flip ``cost_per_session_distribution`` off the
+            # authoritative provider total onto the very breakdown that
+            # dropped the charge.
+            acc["route_cost_overflows"] = (
+                int(acc.get("route_cost_overflows", 0)) + 1)
     if not has_usage:
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)
@@ -8104,6 +8147,14 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
         # and would take the emitted row off the analytics sink.
         llm_stats["calls_without_cost"] = (
             int(llm_stats.get("calls_without_cost", 0)) + 1)
+    # #5868: the by_route breakdown's own drops, rolled like every other
+    # disclosure counter so the emitted row can explain a
+    # ``cost_usd != sum(by_stage)`` divergence instead of leaving it silent.
+    # (``calls_without_cost`` above cannot carry it: that counter answers "is
+    # ``cost_usd`` complete?", and it IS.)
+    llm_stats["route_cost_overflows"] = (
+        llm_stats.get("route_cost_overflows", 0)
+        + int(cost.get("route_cost_overflows", 0) or 0))
     # #3359: a call that returned NO usage block at all (no tokens, no
     # charge) is a different disclosure from one that returned tokens but no
     # charge — roll it too, so the emitted row can say so at session level.
@@ -8120,9 +8171,12 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     by_stage = llm_stats.setdefault("by_stage", {})
     for provider, models in (cost.get("by_route") or {}).items():
         for model, bucket in (models or {}).items():
-            _merge_cost_bucket(
-                by_stage.setdefault(stage, {}).setdefault(provider, {})
-                .setdefault(model, _empty_cost_bucket()), bucket)
+            if not _merge_cost_bucket(
+                    by_stage.setdefault(stage, {}).setdefault(provider, {})
+                    .setdefault(model, _empty_cost_bucket()), bucket):
+                # #5868: this merge could not represent its sum either
+                llm_stats["route_cost_overflows"] = (
+                    int(llm_stats.get("route_cost_overflows", 0)) + 1)
 
 
 def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:

@@ -1360,6 +1360,8 @@ class DistinctStageCostModel:
             "calls_without_usage": 0,
             "calls_without_tokens": 0,
             "deadline_aborts": 0,
+            # #5868: no per-route sub-total overflowed in this stub's payload.
+            "route_cost_overflows": 0,
             # #3824: the call-evidence disclosure. Zero here because this
             # stub's calls DO reach a roll-up — the deep-equal below then
             # pins the whole payload, so a dropped or renamed key fails even
@@ -1815,6 +1817,164 @@ def test_rollup_does_not_reintroduce_a_non_finite_total():
     assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
 
 
+# ── #5868: a per-route overflow is disclosed AT THE ROW, not only in a bucket ─
+
+def _mixed_sign_two_route_capture() -> dict:
+    """Four calls whose SESSION total lands finite while a ROUTE bucket does
+    not — the #5868 shape, through the real accumulator.
+
+    Route A takes two ``+1.5e308`` charges with a negative on each of two
+    other routes between/after them. The session total never overflows
+    (``1.5e308 - 1.5e308 + 1.5e308 - 1.5e308 == 0.0`` — finite AND correct),
+    while route A's bucket sub-total (``3e308``) is unrepresentable and drops
+    its second charge. Returns the ``cost`` accumulator of the one stage.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    stage: dict = {}
+    for provider, model, charge in (
+            (_PROVIDER, _MODEL, 1.5e308),          # route A, +1
+            ("deepseek", "deepseek-v4-flash", -1.5e308),   # route C, -
+            (_PROVIDER, _MODEL, 1.5e308),          # route A, +2 -> overflows
+            (_PROVIDER, "gpt-4o-2024-08-06", -1.5e308)):    # route D, -
+        _accumulate_call_cost(
+            stage, prompt_tokens=100, completion_tokens=10,
+            cost_usd=charge, provider=provider, model=model)
+    return stage["cost"]
+
+
+def _rolled_row(stage_cost: dict, *, stage: str = "s1"):
+    """``_rollup_llm`` -> ``_capture_cost_props``: the emitted row."""
+    from tortoise import hosted_api as ha
+    from tortoise.extractor_v2 import _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0, "by_stage": {}}
+    _rollup_llm(llm, {"cost": stage_cost, "attempts": 4}, stage=stage)
+    return ha._capture_cost_props("sess-5868", {"stats": {"llm": llm}})
+
+
+def _sum_by_stage(props: dict) -> float:
+    return sum(
+        bucket["cost_usd"]
+        for providers in props["by_stage"].values()
+        for models in providers.values()
+        for bucket in models.values())
+
+
+def test_per_route_overflow_is_disclosed_at_the_row_level():
+    """#5868 — the session accumulator must OBSERVE a per-route overflow.
+
+    `_accumulate_call_cost` guards a per-route overflow in the route bucket
+    and discloses it THERE, but before this fix nothing carried that fact up:
+    the emitted row read as fully reconciled (``calls_without_cost == 0``)
+    while its own ``by_stage`` was short by the dropped charge, so
+    ``cost_usd`` did not reconcile with ``sum(by_stage)`` and NOTHING on the
+    row said why.
+
+    The fix is a disclosure, not a measurement change: ``cost_usd`` stays the
+    correct finite session total and the session
+    ``calls_without_cost == 0`` stays TRUE (the total contains every charge).
+    What is new is ``route_cost_overflows``, which names the charges the
+    per-route breakdown could not represent.
+
+    REDs on: incrementing only the bucket counter and leaving the session
+    accumulator blind to it.
+    """
+    cost = _mixed_sign_two_route_capture()
+
+    # the SESSION total is finite and CORRECT — no measurement was lost
+    assert math.isfinite(cost["cost_usd"]), cost
+    assert cost["cost_usd"] == 0.0, cost
+    # ... and the "is cost_usd complete?" counter correctly says it is
+    assert cost.get("calls_without_cost", 0) == 0, cost
+    # the route bucket dropped a charge and disclosed it there
+    lane = cost["by_route"][_PROVIDER][_MODEL]
+    assert lane["calls_without_cost"] == 1, lane
+    # ... and the session accumulator observed it
+    assert cost["route_cost_overflows"] == 1, cost
+
+    props = _rolled_row(cost)
+    assert props["route_cost_overflows"] == 1, props
+    # the row genuinely does NOT reconcile — and now has the field that says
+    # why, instead of that gap being silent
+    assert _sum_by_stage(props) != props["cost_usd"], props
+    # ... and the report reader surfaces it rather than dropping it
+    assert costing.cost_per_session_distribution(
+        [props])["route_cost_overflows"] == 1
+    # every field still survives the analytics allowlist (the #3359 loss mode)
+    from tortoise import hosted_api as ha
+    assert set(props) <= ha._ALLOWED_ANALYTICS_PROPS
+
+
+def test_route_overflow_does_not_read_as_an_incomplete_session_total():
+    """#5868 — the OTHER counter must not be touched to fix this.
+
+    A row-level ``calls_without_cost > 0`` asserts "``cost_usd`` is missing a
+    charge" — false here, since the session total kept every charge. The
+    consumer gates on exactly that field: with it at 0 it trusts the
+    provider total; bumping it flips the session onto the very ``by_stage``
+    breakdown that dropped the charge. This pins both halves.
+    """
+    props = _rolled_row(_mixed_sign_two_route_capture())
+    assert props["calls_without_cost"] == 0, props
+
+    trusted = costing.cost_per_session_distribution([props])
+    assert trusted["source"] == "provider", trusted
+    assert trusted["max"] == props["cost_usd"] == 0.0, trusted
+
+    # the naive propagation the issue warned about, shown to move the number
+    naive = dict(props, calls_without_cost=1)
+    flipped = costing.cost_per_session_distribution([naive])
+    assert (flipped["max"], flipped["source"]) != (
+        trusted["max"], trusted["source"]), (
+        "propagating the BUCKET disclosure into the session counter must not "
+        f"be a no-op, or this guard is vacuous: {flipped!r}")
+
+
+def test_bucket_merge_overflow_is_disclosed_too():
+    """#5868 — the SAME asymmetry at the ``_merge_cost_bucket`` seam.
+
+    ``_merge_cost_accumulator`` (kind_classifier: per-batch accumulators →
+    one adjudication accumulator) sums per-route buckets, and THAT sum can
+    overflow while the accumulator's own session total lands: four batches
+    whose charges cancel overall but collide inside route A's bucket. Neither
+    per-call accumulator overflowed, so counting only the
+    ``_accumulate_call_cost`` lane branch would miss this seam entirely.
+
+    REDs on: counting only the per-call lane branch.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost, _merge_cost_accumulator
+
+    usage: dict = {}
+    for provider, model, charge in (
+            (_PROVIDER, _MODEL, 1.5e308),
+            ("deepseek", "deepseek-v4-flash", -1.5e308),
+            (_PROVIDER, _MODEL, 1.5e308),
+            (_PROVIDER, "gpt-4o-2024-08-06", -1.5e308)):
+        batch: dict = {}
+        _accumulate_call_cost(
+            batch, prompt_tokens=100, completion_tokens=10,
+            cost_usd=charge, provider=provider, model=model)
+        # no SINGLE batch overflowed — every charge above is finite
+        assert "route_cost_overflows" not in batch["cost"], batch["cost"]
+        _merge_cost_accumulator(usage, batch)
+
+    # the merged session total landed (the charges cancel)
+    acc = usage["cost"]
+    assert math.isfinite(acc["cost_usd"]) and acc["cost_usd"] == 0.0, acc
+    assert acc.get("calls_without_cost", 0) == 0, acc
+    # route A's merged bucket could NOT represent 1.5e308 + 1.5e308
+    assert acc["by_route"][_PROVIDER][_MODEL]["calls_without_cost"] == 1, acc
+    assert acc["route_cost_overflows"] == 1, acc
+
+    # and it rolls to the emitted row like its sibling disclosures
+    props = _rolled_row(acc)
+    assert props["route_cost_overflows"] == 1, props
+    assert props["by_stage"]["s1"][_PROVIDER][_MODEL][
+        "calls_without_cost"] == 1, props["by_stage"]
+
+
 # ── #5854: the token fields are validated, never shaped ─────────────────────
 
 def _one_token_call(usage: dict):
@@ -2178,6 +2338,7 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         "calls_without_cost": 0, "calls_without_usage": 0,
         "calls_without_tokens": 0,
         "deadline_aborts": 0, "by_stage": {},
+        "route_cost_overflows": 0,
         "unattributed": props["unattributed"],
     }
 

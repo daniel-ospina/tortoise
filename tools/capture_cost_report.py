@@ -22,6 +22,8 @@ $0 one.
         calls_without_usage,  # calls that carried no usage block at all
         deadline_aborts,      # billed upstream, unpriceable here
         unattributed,         # #3824: calls made, no roll-up survived
+        route_cost_overflows, # #5868: charges a by_stage bucket could not
+                              # represent, so sum(by_stage) < cost_usd
         by_stage: {stage: {provider: {model: {calls, prompt_tokens,
                     completion_tokens, cost_usd, usage_present,
                     calls_without_cost, calls_without_usage}}}},
@@ -258,6 +260,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
         add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
         add(f"  captures behind those calls       : {dist['unattributed_captures']}")
+        add(f"  by_stage charges unrepresentable  : "
+            f"{dist['route_cost_overflows']}")
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -295,6 +299,9 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         f"(across {dist['unattributed_captures']} capture(s)) — counted in "
         "the attempts line below, not additional to it")
     add(f"  calls served without a charge  : {dist['calls_without_cost']}")
+    add(f"  by_stage charges unrepresentable: "
+        f"{dist['route_cost_overflows']} — cost_usd is authoritative; "
+        "sum(by_stage) is short by these")
     add(f"  attempts with no meterable reply: {dist['unmetered_attempts']}")
     add(f"  sessions tokens we could not price: {dist['unpriced_sessions']}")
     add("")
