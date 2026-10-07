@@ -785,6 +785,11 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        # The REMEDY text is part of the contract and nothing pinned it: mutation
+        # showed restoring the old hardcoded "Re-run against the issue number
+        # (#7009)." left every refusal test green.
+        self.assertIn("Re-run with the issue number", out)
+        self.assertNotIn("#7009", out)
         # The refusal is delivered on STDERR WITH NO REPORT: `main()` prints it
         # and returns before `format_report` runs. Pin the WHOLE guarantee, not
         # just "not CLEAN": the module docstring and AGENTS.md both promise a
@@ -896,20 +901,22 @@ class CollisionPreflightTest(unittest.TestCase):
 
         The message's `where` clause has three arms — a NAMED linked issue, an
         UNREADABLE field, and a field that names nothing. The last two are pinned
-        by their own tests; without this one, a regression in the linked arm's
-        join or separator would leave the suite green, and that arm is the one
-        most PRs hit (this repo puts `Closes #N` in the body).
+        by their own tests; without this one the linked arm would be unpinned,
+        and that arm is the one most pull requests hit (this repo puts
+        `Closes #N` in the body). TWO linked issues, deliberately: with one, the
+        `", ".join` separator is unexercised, so a regression in it would leave
+        this test green (measured — `" and "` passed a single-issue version).
         """
         self.gh_fixtures(open_prs=[{
             "number": 3061, "title": "fix(battery): restore the pin test",
-            "body": "Closes #999.", "state": "open",
+            "body": "Closes #999, closes #1000.", "state": "open",
             "headRefName": "fix/2712-pin-preflight-test",
-            "closingIssuesReferences": [{"number": 999}],
+            "closingIssuesReferences": [{"number": 999}, {"number": 1000}],
         }])
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
-        self.assertIn("It closes #999.", out)
+        self.assertIn("It closes #999, #1000.", out)
         self.assertNotIn("VERDICT", out)
 
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):

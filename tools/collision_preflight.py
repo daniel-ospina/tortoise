@@ -224,9 +224,10 @@ Exit codes
                     surface never decides it, however it is shaped
     2  INCOMPLETE   NOT clean, and NOT a collision. MULTIPLE CAUSES, and a
                     caller must distinguish them because the remedies differ:
-                    (a) >= 1 BLOCKING surface could not be queried, or was
-                        TRUNCATED at its completeness cap (its remedy is to raise
-                        `--pr-limit`, not to fix gh auth). A surface that can never
+                    (a) >= 1 BLOCKING surface could not be queried (remedy: fix
+                        the surface — the report ends `fix gh auth/network and
+                        re-run`), or was TRUNCATED at its completeness cap
+                        (remedy: raise `--pr-limit`). A surface that can never
                         produce a blocking hit is EXEMPT and its failure is only
                         REPORTED: it has no ability to prevent a duplicate, so its
                         failure cannot conceal one (#5251). Rendered as a report
@@ -3074,9 +3075,10 @@ def scan_pr_surface(
     leaves the verdict CLEAN.
 
     RAISES `NotAWorkItem` for an open PR number, in ADDITION to `SurfaceError`.
-    On the CLI path both reach `main()` (exit 2); a PROGRAMMATIC caller of this
-    function or of `run_preflight` must catch `NotAWorkItem` itself, because it
-    is deliberately not absorbed by the per-surface handlers.
+    On the CLI path both produce exit 2, but ONLY `NotAWorkItem` reaches
+    `main()` — a `SurfaceError` is absorbed by the per-surface handler and
+    rendered as `VERDICT: INCOMPLETE`. A PROGRAMMATIC caller of this function or
+    of `run_preflight` must therefore catch `NotAWorkItem` itself.
 
     #4567 found this order
     inverted: the keyword test ran first and `continue`d unconditionally, so the
@@ -3158,10 +3160,12 @@ def scan_pr_surface(
                 linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
             except SurfaceError:
                 # `unreadable` is carried so the message below does NOT assert a
-                # fact the tool cannot know. An absent field supports "it names no
-                # closing issue"; an UNREADABLE one does not, and claiming it
-                # would be a wrong reason for a right decision — the defect class
-                # this very change is about.
+                # fact the tool cannot know. THIS branch is reached when the field
+                # is ABSENT or malformed — its contents are unknown — so "it names
+                # no closing issue" would be a claim about contents the tool never
+                # read. That wording belongs to the present-and-empty field, which
+                # is a KNOWN "closes nothing". A wrong reason for a right decision
+                # is the defect class this very change is about.
                 linked = []
                 unreadable = True
             # The refusal is UNCONDITIONAL within the open case. It does not
