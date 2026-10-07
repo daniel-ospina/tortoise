@@ -2121,14 +2121,13 @@ def test_a_batch_overflow_rides_the_merge_seam_into_the_accumulator():
     assert props["route_cost_overflows"] == 1, props
 
 
-def test_two_per_call_overflows_are_both_counted():
-    """#5868 — the PER-CALL counter is a running SUM, not a flag.
+def _two_per_call_overflows_batch() -> dict:
+    """A stage accumulator carrying TWO per-call route overflows (route A and
+    route B) while its own session total stays FINITE and complete.
 
-    Two routes each drop a charge in the SAME accumulator (the session total
-    stays finite throughout), so an ``= 1`` assignment ships an undercount
-    while the session-overflow half of the guard still works. The only test
-    that reached >=2 events before this went through the ``_rollup_llm``
-    seam, so an assignment at this seam was invisible.
+    The multi-event SOURCE a carriage seam must SUM. Every other fixture here
+    carries at most one, which leaves `+= src` indistinguishable from `= src`
+    or from clamping src to 1 at the carriage lines.
     """
     from tortoise.extractor_v2 import _accumulate_call_cost
 
@@ -2144,15 +2143,71 @@ def test_two_per_call_overflows_are_both_counted():
         _accumulate_call_cost(
             stats, prompt_tokens=100, completion_tokens=10,
             cost_usd=charge, provider=provider, model=model)
-
     cost = stats["cost"]
+    assert cost["route_cost_overflows"] == 2, cost
+    assert cost.get("calls_without_cost", 0) == 0, cost
+    return cost
+
+
+def test_two_per_call_overflows_are_both_counted():
+    """#5868 — the PER-CALL counter is a running SUM, not a flag.
+
+    Two routes each drop a charge in the SAME accumulator (the session total
+    stays finite throughout), so an ``= 1`` assignment ships an undercount
+    while the session-overflow half of the guard still works. The only test
+    that reached >=2 events before this went through the ``_rollup_llm``
+    seam, so an assignment at this seam was invisible.
+    """
+    cost = _two_per_call_overflows_batch()
+
     # the session total is finite and complete at every step ...
     assert math.isfinite(cost["cost_usd"]), cost
     assert cost["cost_usd"] == pytest.approx(1.1e308), cost
-    # (lazy key on a raw accumulator with no charge-less call: absent == 0)
-    assert cost.get("calls_without_cost", 0) == 0, cost
     # ... and BOTH routes dropped a per-call charge
     assert cost["route_cost_overflows"] == 2, cost
+
+
+def test_the_merge_carriage_carries_more_than_one_event():
+    """#5868 — the ``_merge_cost_accumulator`` carriage SUMS its source.
+
+    The single-event fixture pins deletion (a dropped carriage reads 0) but
+    not an assignment or a clamp-to-1 at the carriage line. A source CAN
+    carry several events — ``_two_per_call_overflows_batch`` proves the
+    per-call seam produces 2 — and an undercount here re-opens the silent
+    ``cost_usd != sum(by_stage)`` gap the counter exists to close.
+    """
+    from tortoise.extractor_v2 import _merge_cost_accumulator
+
+    batch = _two_per_call_overflows_batch()
+    usage: dict = {}
+    _merge_cost_accumulator(usage, {"cost": batch, "attempts": 7})
+
+    # 2 in, 2 out: every route bucket above is finite, so no merge-seam event
+    # is added and the value can only be the carried sum
+    assert usage["cost"]["route_cost_overflows"] == 2, usage["cost"]
+
+
+def test_the_rollup_carriage_carries_more_than_one_event_across_stages():
+    """#5868 — the ``_rollup_llm`` carriage SUMS across stages.
+
+    ``_rollup_llm`` runs once per stage into the SAME ``llm_stats``, so the
+    carriage must ACCUMULATE rather than assign. Two stages, one carrying 2
+    events and one carrying 1, land on different keys so no bucket merge
+    fires: the total can only come from the carriage itself.
+    """
+    from tortoise.extractor_v2 import _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0, "by_stage": {}}
+    _rollup_llm(llm, {"cost": _two_per_call_overflows_batch(), "attempts": 7},
+                stage="s1")
+    assert llm["route_cost_overflows"] == 2, llm
+    # route A/B live under (_PROVIDER, _MODEL) and openrouter; stage s2 gets a
+    # different stage key, so its buckets merge into EMPTY ones and add nothing
+    _rollup_llm(llm, {"cost": _mixed_sign_two_route_capture(), "attempts": 4},
+                stage="s2")
+
+    assert llm["route_cost_overflows"] == 3, llm
 
 
 def test_both_counters_coexist_with_no_merge_seam_involved():
@@ -2160,32 +2215,77 @@ def test_both_counters_coexist_with_no_merge_seam_involved():
 
     They are exclusive per CALL (a session-total overflow takes the
     charge-less path, so that call's per-route branch cannot also fire), but
-    an accumulator can hold both from DIFFERENT calls with no merge seam
-    anywhere: a route overflow on one call, a session-total overflow on a
-    later one. Pinned because the tempting shorthand — "both only at a merge
-    seam" — is what a future maintainer would cite to treat them as
-    exclusive, and it is false at this very seam.
+    an accumulator can hold both from DIFFERENT calls, in EITHER ORDER, with
+    no merge seam anywhere. Pinned in both orderings because the tempting
+    shorthand — "both only at a merge seam" — is what a future maintainer
+    would cite to treat them as exclusive, and a guard written from either
+    side ("don't bump the route counter once a call lacked a charge", or the
+    reverse) is invisible to a fixture that only exercises one order.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    def _run(*calls):
+        stats: dict = {}
+        for provider, model, charge in calls:
+            _accumulate_call_cost(
+                stats, prompt_tokens=100, completion_tokens=10,
+                cost_usd=charge, provider=provider, model=model)
+        return stats["cost"]
+
+    # (1) route overflow first, session overflow later
+    route_first = _run(
+        (_PROVIDER, _MODEL, 1.5e308),                  # route A, +1
+        ("deepseek", "deepseek-v4-flash", -1.5e308),   # route C, -
+        (_PROVIDER, _MODEL, 1.5e308),      # route A, +2 -> ROUTE overflow
+        (_PROVIDER, "gpt-4o-2024-08-06", 1.5e308))     # -> SESSION overflow
+    # (2) the REVERSE order — session overflow first, route overflow later.
+    #     The session total must be brought back down before route A can take
+    #     two charges without the session sum overflowing again.
+    session_first = _run(
+        ("openrouter", "warm-up", 1.0e308),           # session 1.0e308
+        ("openrouter", "warm-up", 1.0e308),           # -> SESSION overflow
+        ("deepseek", "deepseek-v4-flash", -1.0e308),   # session back to 0
+        (_PROVIDER, _MODEL, 1.5e308),                  # route A, +1
+        ("deepseek", "gpt-4o-2024-08-06", -1.5e308),   # session back to 0
+        (_PROVIDER, _MODEL, 1.5e308))                  # route A, +2 -> ROUTE overflow
+
+    for label, cost in (("route-then-session", route_first),
+                        ("session-then-route", session_first)):
+        assert math.isfinite(cost["cost_usd"]), (label, cost)
+        assert cost["route_cost_overflows"] == 1, (label, cost)
+        assert cost["calls_without_cost"] == 1, (label, cost)
+
+    # ... and both facts reach the emitted row
+    props = _rolled_row(route_first)
+    assert props["route_cost_overflows"] == 1, props
+    assert props["calls_without_cost"] == 1, props
+
+
+def test_two_session_total_overflows_are_both_counted():
+    """#5868 — the SIBLING counter's running sum at the session-overflow seam.
+
+    ``calls_without_cost`` is bumped with ``+= 1`` when a FINITE charge cannot
+    be added to the session total. No existing test produces two such
+    overflows in one accumulator, so an ``= 1`` assignment there undercounts a
+    multi-overflow session silently. (Pre-existing coverage gap in the counter
+    family this change touches — the production code is correct as-is; this
+    only pins it.)
     """
     from tortoise.extractor_v2 import _accumulate_call_cost
 
     stats: dict = {}
-    for provider, model, charge in (
-            (_PROVIDER, _MODEL, 1.5e308),                  # route A, +1
-            ("deepseek", "deepseek-v4-flash", -1.5e308),   # route C, -
-            (_PROVIDER, _MODEL, 1.5e308),      # route A, +2 -> ROUTE overflow
-            (_PROVIDER, "gpt-4o-2024-08-06", 1.5e308)):    # -> SESSION overflow
+    for _ in range(3):
         _accumulate_call_cost(
-            stats, prompt_tokens=100, completion_tokens=10,
-            cost_usd=charge, provider=provider, model=model)
+            stats, prompt_tokens=100, completion_tokens=10, cost_usd=1e308,
+            provider=_PROVIDER, model=_MODEL)
 
     cost = stats["cost"]
-    assert math.isfinite(cost["cost_usd"]) and cost["cost_usd"] == 1.5e308, cost
-    assert cost["route_cost_overflows"] == 1, cost   # the ROUTE sub-total
-    assert cost["calls_without_cost"] == 1, cost     # the SESSION total
-
-    props = _rolled_row(cost)
-    assert props["route_cost_overflows"] == 1, props
-    assert props["calls_without_cost"] == 1, props
+    assert math.isfinite(cost["cost_usd"]) and cost["cost_usd"] == 1e308, cost
+    assert cost["calls"] == 3, cost
+    # the first charge landed; the SECOND and THIRD each overflowed the total
+    assert cost["calls_without_cost"] == 2, cost
+    # a session-total overflow is not a breakdown overflow
+    assert cost.get("route_cost_overflows", 0) == 0, cost
 
 
 def test_two_bucket_merge_overflows_are_both_counted():
