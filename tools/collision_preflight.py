@@ -3140,7 +3140,17 @@ def scan_pr_surface(
         #    Measured both ways: `--self-branch <PR head>` and auto-detect each
         #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
         #    branch can suppress is not a refusal.
-        if terminal is None and str(pr.get("number")) == str(issue):
+        #    use_closing_field is TRUE ONLY on the BLOCKING open-PR surface, and the
+        #    guard below is scoped by it deliberately. Without that scope the refusal
+        #    also fires from the ADVISORY closed-PR sample — whose elements can carry a
+        #    non-terminal `state` — and an advisory surface would then be able to force
+        #    exit 2, which is the one thing such a surface must never do (the authority
+        #    split `test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported`
+        #    pins). It would also print "is an OPEN PULL REQUEST" about a PR drawn from
+        #    the CLOSED sample. Caught by review at round 6; the whole refusal had been
+        #    live on both surfaces since round 1 because no test put a number==issue PR
+        #    on the advisory surface.
+        if use_closing_field and terminal is None and str(pr.get("number")) == str(issue):
             linked = []
             unreadable = False
             # The message decoration must NOT be able to pre-empt the refusal.
