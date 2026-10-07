@@ -80,6 +80,8 @@ jobs:
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
 
+      - uses: ./.github/actions/install-cpu-torch
+
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
 

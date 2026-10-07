@@ -186,14 +186,25 @@ jobs:
   packaging-smoke:
     runs-on: ubuntu-latest
     if: ${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}
+    # #2240: `issues: write` is for the failure alert at the end of this job —
+    # a failed pack smoke leaves `deploy-api` SKIPPED, so without an alert here
+    # the deploy is blocked in silence. `contents: read` and `packages: read` are
+    # pre-existing and untouched: `contents: read` is checkout, and `packages:
+    # read` is NOT needed here (this job never pulls from GHCR — the base image
+    # is a Docker Hub `python:3.12-slim-bookworm` and the `type=gha` cache is the
+    # Actions cache service, governed by `cache-mode`, not by the token scope).
+    # It is left in place only because removing it is out of scope for #2240.
     permissions:
       contents: read
       packages: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v3
       - name: Build hosted image
+        id: build-image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -210,6 +221,7 @@ jobs:
           cache-from: type=gha,scope=deploy-pack-smoke
           cache-to: type=gha,scope=deploy-pack-smoke,mode=max
       - name: In-container pack assertion (no boot, no secrets)
+        id: pack-assert
         run: |
           docker run --rm --entrypoint python tortoise-hosted:smoke -c '
           from pathlib import Path
@@ -223,10 +235,39 @@ jobs:
           assert Path("/app/tests/sample_transcript.txt").exists(), "transcript missing"
           print(f"hosted image pack smoke OK: {len(reg.packs)} >= {bound}")
           '
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────
+      # A failure HERE leaves `deploy-api` skipped, i.e. the deploy is blocked
+      # silently — the same shape as the 4.6-day stall #2240 is about. Same
+      # script, same substrate, per-step key; see the long note on the
+      # `deploy-api` site for the token and ordering rationale.
+      - name: Alert on failure (out-of-band) — packaging-smoke (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::packaging-smoke failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job packaging-smoke \
+            --steps "buildx=${{ steps.buildx.outcome }} build-image=${{ steps.build-image.outcome }} pack-assert=${{ steps.pack-assert.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
   deploy-api:
     runs-on: ubuntu-latest
     needs: packaging-smoke
+    # #2240: the failure alert files/updates a GitHub issue through the shared
+    # substrate, which asserts the writer is `github-actions[bot]` — so this job
+    # needs `issues: write`. `contents: read` MUST be spelled out: specifying ANY
+    # permission sets every unspecified one to `none` (measured in-tree at
+    # supabase-deploy.yml:68-72), which would strip the token `actions/checkout`
+    # and every `gh` read below rely on. This is the ONLY privilege the alert
+    # needs; it writes no code, no schema and no Fly state.
+    permissions:
+      contents: read
+      issues: write
     # #1929: the pack smoke is a deploy gate UNLESS bypassed — a skipped
     # smoke (skip-pack-smoke input / var, incident-fix deploys) must not
     # skip the deploy itself; a FAILED smoke leaves the deploy skipped and
@@ -270,6 +311,7 @@ jobs:
           # 0.12.2 → 0.12.3) can flag the lock as stale under --check (#493).
           version: '0.12.3'
       - name: Dependency parity gate — pyproject ↔ uv.lock ↔ requirements.txt (#494)
+        id: parity
         # Fail-closed: the image installs ONLY from requirements.txt, so a
         # drifted lock or hand-edited requirements file must never deploy.
         # Comment lines + the "." line (uv exports the root project as a
@@ -282,6 +324,7 @@ jobs:
           diff -u /tmp/committed-reqs.txt /tmp/expected-reqs.txt
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
+        id: verify-secrets
         # #4334: every secret is bound in `env:` and referenced as a QUOTED
         # shell variable. `${{ secrets.X }}` must never appear in a `run:`
         # body — GitHub substitutes it into the shell SOURCE before bash
@@ -396,6 +439,7 @@ jobs:
       # transition produce, #4568). Exit-2 (missing/empty secret list, unparsable
       # manifest) can never be bypassed and always blocks the deploy.
       - name: Check Fly secret provenance (fail-closed)
+        id: provenance
         run: |
           # Which GitHub Actions secrets does THIS run actually carry? No CI token
           # can list repository secrets, so the checker is told. A declared
@@ -543,9 +587,19 @@ jobs:
       # prod) recurred 2026-08-13 (claim_membership, 13-17 min window). No
       # if: guard — a missing token/error must fail the deploy.
       - name: Check migration drift (fail-closed)
-        run: bash .github/scripts/check-migration-drift
+        # #2240: `id` so the failure alert can name the step, and the gate's own
+        # stdout is TEED to a file so the alert can carry the blocking versions
+        # and the ordered remediation it already prints — without a second read
+        # of prod (which could name a different blocking set than this run).
+        # `pipefail` is what keeps the STEP red: without it the pipeline's status
+        # is `tee`'s (0) and a blocked deploy would read green.
+        id: drift
+        run: |
+          set -o pipefail
+          bash .github/scripts/check-migration-drift 2>&1 | tee "$DRIFT_REPORT_FILE"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DRIFT_REPORT_FILE: ${{ runner.temp }}/migration-drift-report.txt
       # Fly machine guard (#1896): fail-closed check that no orphan or
       # crash-looping machine serves production traffic. The 2026-08-28
       # incident: orphan 080d6e1a0d2928 (empty process group — NOT part of
@@ -557,6 +611,7 @@ jobs:
       # #1719) — exit-2 via missing FLY_API_TOKEN is never bypassable (token
       # hard-required in Verify secrets).
       - name: Check Fly machines (orphan + crash-loop guard, fail-closed)
+        id: fly-machines
         # ALWAYS runs. The skip translates ONLY exit-1 (fleet violations) for
         # incident-fix deploys (warning emitted, never silent); exit-2
         # (could-not-determine: API error, malformed shape, missing token) can
@@ -591,6 +646,7 @@ jobs:
           SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
           DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
+        id: set-secrets
         # #4334: every secret is bound in `env:` and referenced as a QUOTED
         # shell variable; the flyctl argv is a bash ARRAY (`"${ARGS[@]}"`).
         # Never interpolate `${{ secrets.X }}` into the run text: GitHub
@@ -789,6 +845,7 @@ jobs:
           [ -n "$TURNSTILE_SECRET_KEY" ] && ARGS+=(TURNSTILE_SECRET_KEY="$TURNSTILE_SECRET_KEY")
           flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq
       - name: Deploy (retry through Fly lease/API races)
+        id: deploy
         # Uses app-scoped deploy token (#660). NOTE (verified 2026-08-09):
         # app-scoped deploy tokens CAN still manage this app's secrets —
         # the security win is APP-scoping (org-wide blast radius → one app),
@@ -829,6 +886,64 @@ jobs:
             --state "SKIP_FLY_MACHINES_GUARD=$FLY_MACHINES_IN/$FLY_MACHINES_VAR" \
             --state "SKIP_FLY_SECRET_PROVENANCE=$PROVENANCE_IN/$PROVENANCE_VAR"
 
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────────
+      # WHY THIS STEP EXISTS
+      #   This job had NO failure observability: no `if: failure()` step in the
+      #   whole workflow, `post-deploy-verify` is skipped exactly when this job
+      #   fails, the availability watchdog reads a STALE build as UP (it accepts
+      #   the 401 a stale build still answers), and `deploy-api` is not a required
+      #   branch-protection context. So a fail-closed gate stopped the pipeline
+      #   silently for 4.6 days (2026-08-30 → 09-04, 22 runs, zero alerts) and a
+      #   further ~2 days (2026-09-29 → 10-01).
+      #   It is ONE notifier for the JOB, not one per gate: ≥8 steps here are
+      #   fail-closed, and a per-gate alert would leave the same silence on the
+      #   others. The step ids above are what make per-step attribution possible.
+      # ORDER — LAST in the job, deliberately
+      #   `if: failure()` (not `always()`) so it never fires on a cancelled or
+      #   green run. It is the job's LAST step so a failure of the `if: always()`
+      #   gate audit ABOVE is reported too — placed before the audit it could only
+      #   see failures that had already happened, and an audit-only failure would
+      #   then be silent (a red run with no issue and no page, which is the shape
+      #   this whole change exists to remove). A red run's last act should be to
+      #   tell someone, not to file a bypass report.
+      #   `failure()` cannot mask the failure it reports — the job is already red —
+      #   and it cannot fail-open: the ledger leg fails the step loudly when it
+      #   cannot file.
+      # RESIDUAL, named rather than papered over
+      #   This is an IN-JOB notifier, so it cannot report a job that never reached
+      #   its last step: a runner loss, a `timeout-minutes` kill or a cancellation
+      #   (`cancel-in-progress`) ends the job before `if: failure()` is evaluated.
+      #   A 4th job with `needs: [all three]` + `if: failure()` would cover those,
+      #   but cross-job `steps.*.outcome` is not available, so it would lose the
+      #   per-step attribution this design exists for — and it still would not
+      #   fire on a cancel. If `actions/checkout` fails, the script this step calls
+      #   was never fetched, so the guard below emits a named `::error::` and exits —
+      #   the run is red with a reason, but the out-of-band alert itself cannot run.
+      #   Closing that would mean a second, inline filer in the workflow (duplicated
+      #   substrate, no dedupe discipline), which is the machinery this design
+      #   deliberately avoids: these are platform failures, not deploy-gate ones.
+      # TOKEN
+      #   `GH_TOKEN` is the ACTIONS token, deliberately: the dedupe search keys
+      #   on `author:app/github-actions`, so a PAT writes as its own owner,
+      #   matches nothing, and would file a DUPLICATE issue on every failing run
+      #   (#2706). The substrate refuses a non-Actions author rather than
+      #   degenerating.
+      - name: Alert on failure (out-of-band) — deploy-api (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::deploy-api failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job deploy-api \
+            --steps "parity=${{ steps.parity.outcome }} verify-secrets=${{ steps.verify-secrets.outcome }} provenance=${{ steps.provenance.outcome }} drift=${{ steps.drift.outcome }} fly-machines=${{ steps.fly-machines.outcome }} set-secrets=${{ steps.set-secrets.outcome }} deploy=${{ steps.deploy.outcome }}" \
+            --drift-report "$DRIFT_REPORT_FILE"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRIFT_REPORT_FILE: ${{ runner.temp }}/migration-drift-report.txt
   # ── Post-deploy verification (own job; #4538 decision, option b) ──────────
   #
   # WHY THIS IS A SEPARATE JOB
@@ -857,10 +972,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-api
     if: ${{ needs.deploy-api.result == 'success' }}
+    # #2240: `issues: write` is for the failure alert at the end of this job —
+    # a red here means the release is LIVE and unhealthy, and nothing else in
+    # the pipeline reports that out-of-band. `contents: read` MUST be spelled
+    # out: declaring ANY permission sets the unspecified ones to `none`.
+    permissions:
+      contents: read
+      issues: write
     steps:
       # Own checkout: this job runs the repo script below.
       - uses: actions/checkout@v4
       - name: Post-deploy DB health verification (post-release; does not gate the deploy)
+        id: health-gate
         # The deploy pipeline previously certified a GREEN deploy while the
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
         # 200 with status:degraded). Verify the release on BOTH planes:
@@ -906,7 +1029,15 @@ jobs:
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
         run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
-      - name: Bypass report — DB health verification (#1719, #4759)
+      # ⛔ QUOTED DELIBERATELY. Unquoted, the `, #4759)` is eaten as a YAML
+      # comment (` #` starts one inside a plain scalar), so the step's real name
+      # became `Bypass report — DB health verification (#1719,` — and the alert's
+      # `step_label` map must equal the name GitHub actually renders, or the
+      # issue names a step that does not exist. The same unquoted `, #NNNN)`
+      # pattern costs ~15 other step names across the repo their tails; that is a
+      # pre-existing cosmetic class, NOT swept in here (nothing references them).
+      - name: "Bypass report — DB health verification (#1719, #4759)"
+        id: bypass-report
         # #4759: uniform reporting. The old step said SKIPPED only in this step's
         # log, so a reader of the run SUMMARY saw a green/skipped step and could
         # not tell the gate apart from one that passed. This keeps the
@@ -928,6 +1059,7 @@ jobs:
             --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
             --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
       - name: Assert the RUNNING machine env honours every fly-toml-env declaration (#5656)
+        id: machine-env
         # The second half of #4568. `check-fly-secret-drift.py` proves every name
         # has a declared managing source, and that no Fly SECRET shadows a
         # declared `[env]` name — all BUILD-TIME surfaces. Nothing read the
@@ -973,3 +1105,22 @@ jobs:
         run: |
           bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
             --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"
+      # ── Out-of-band failure alert (#2240) ──────────────────────────────
+      # A red here means the release is LIVE and unhealthy, and nothing else
+      # reports that out-of-band. Same script, same substrate, per-step key; see
+      # the long note on the `deploy-api` site for the token and ordering
+      # rationale — this one is LAST in its job too.
+      - name: Alert on failure (out-of-band) — post-deploy-verify (#2240)
+        if: failure()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::error::post-deploy-verify failed AND the alert script is not on disk (checkout failed?) — the out-of-band alert could not run; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 1
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job post-deploy-verify \
+            --steps "health-gate=${{ steps.health-gate.outcome }} bypass-report=${{ steps.bypass-report.outcome }} machine-env=${{ steps.machine-env.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

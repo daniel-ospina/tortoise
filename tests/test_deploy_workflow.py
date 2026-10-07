@@ -911,3 +911,315 @@ def test_bypass_values_are_env_bound_never_interpolated_into_shell():
         # env binding (and the gate it belongs to) by `_lane` / `_assert_lane` —
         # the generic per-site association check, of which the old `*_SET_AT`-only
         # loop was one case.
+
+
+# ── #2240: the deploy job's out-of-band failure alert ──────────────────────
+#
+# `deploy-api` had NO failure observability: no `if: failure()` step anywhere in
+# the workflow, `post-deploy-verify` skipped exactly when the deploy fails, the
+# availability watchdog reads a stale build as UP (a stale build still answers
+# 401), and `deploy-api` is not a required context. Measured cost: 4.6 days of a
+# dead deploy lane (2026-08-30 → 09-04, 22 runs) with zero notifications, and
+# again ~2 days (2026-09-29 → 10-01).
+#
+# These three guards are deliberately DERIVED, never restated: the step-id map
+# lives in the alert script and the labels live in the workflow, so a rename on
+# either side has to fail here rather than silently file an alert under a stale
+# key (or a key with no step behind it).
+
+# Three alert sites, one script. They are mutually exclusive at runtime —
+# `deploy-api` is gated on `packaging-smoke`'s result and `post-deploy-verify` on
+# `deploy-api`'s, so a skipped job cannot also fail — which is exactly why a
+# notifier in `deploy-api` alone would have left a failed PACK SMOKE (which
+# silently blocks the whole deploy) unobserved.
+_ALERT_SITE_PREFIX = "Alert on failure (out-of-band)"
+_ALERT_JOBS = ("packaging-smoke", "deploy-api", "post-deploy-verify")
+_ALERT_SCRIPT = (
+    Path(__file__).resolve().parent.parent / ".github" / "scripts" / "deploy-api-alert.sh"
+)
+
+# Jobs that may fail alone WITHOUT an out-of-band alert, each with the reason.
+# Empty on purpose: every job here can fail alone and block the deploy, so every
+# job ends with the alert. A new job must therefore either carry the alert or be
+# added here WITH a reason — the point is that adding a silent job is a decision
+# someone makes, not an oversight (round-3 review, P2-4).
+_ALERT_EXEMPT_JOBS: dict[str, str] = {}
+
+
+def _shell_code(run: str) -> str:
+    """`run` with comment-only lines dropped.
+
+    A guard must read the COMMAND, not the prose around it: a body whose only
+    `set -o pipefail` is inside a comment (or on a commented-out branch) is not
+    armed, and would otherwise satisfy an `in run` assertion silently.
+    """
+    return "\n".join(
+        line for line in run.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _alert_script_text() -> str:
+    assert _ALERT_SCRIPT.is_file(), f"alert script not found: {_ALERT_SCRIPT}"
+    return _ALERT_SCRIPT.read_text(encoding="utf-8")
+
+
+def _step_label_map() -> dict[str, str]:
+    """`id -> human label` as the ALERT SCRIPT declares it (the source of truth)."""
+    text = _alert_script_text()
+    body = _region(text, "step_label() {", "\n}\n")
+    return dict(re.findall(r"^\s{4}([a-z][a-z-]*)\)\s+printf '%s' '(.*)' ;;$", body, re.M))
+
+
+def _job_note_map() -> dict[str, str]:
+    """`job -> what a red in it means`, as the alert script declares it."""
+    body = _region(_alert_script_text(), "job_block_note() {", "\n}\n")
+    return {m: "" for m in re.findall(r"^\s{4}([a-z][a-z-]*)\)$", body, re.M)}
+
+
+def _alert_sites() -> list[tuple[str, str, dict]]:
+    """`(job, step-name, step)` for every out-of-band alert step in the workflow."""
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    sites = []
+    for job_name, job in doc["jobs"].items():
+        for step in job.get("steps", []):
+            if str(step.get("name", "")).startswith(_ALERT_SITE_PREFIX):
+                sites.append((job_name, step["name"], step))
+    return sites
+
+
+def _workflow_step_ids() -> dict[str, str]:
+    """`id -> name` for every step in the workflow that declares an `id`."""
+    return {s["id"]: n for n, s in _steps().items() if "id" in s}
+
+
+def _alert_passed_ids(run: str) -> list[str]:
+    """The step ids the alert step passes, in order.
+
+    Parsed as `<id>=${{ … }}` pairs, NOT by whitespace: the outcome interpolation
+    contains spaces (`${{ steps.drift.outcome }}`), so a naive `.split()` reads
+    `steps.drift.outcome` and `}}` as ids. Pinning the `${{` shape here is also
+    what the `steps.<id>.outcome` assertion below relies on.
+    """
+    m = re.search(r"--steps\s+\"([^\"]*)\"", run)
+    assert m, "the alert step must pass --steps (the per-step attribution)"
+    return re.findall(r"([A-Za-z][\w-]*)=\$\{\{", m.group(1))
+
+
+def test_failed_deploy_jobs_alert_out_of_band():
+    """#2240 — every job of `deploy-hosted` that can fail alone ends with an alert.
+
+    The three things that must hold TOGETHER at EVERY site, and each of which
+    alone is insufficient: the step exists on `failure()`; the job may actually
+    write the issue (`issues: write` + the spelled-out `contents: read`, because
+    declaring ANY permission sets the unspelled ones to `none`); and it uses the
+    ACTIONS token, never a PAT — a PAT writes as its own owner, the dedupe search
+    keys on `author:app/github-actions`, and every failing run would file a
+    duplicate (#2706), silently.
+
+    The three SITES matter as much as the mechanism: `packaging-smoke` and
+    `post-deploy-verify` each fail while the other jobs are SKIPPED, so a
+    notifier only inside `deploy-api` would leave a failed pack smoke — which
+    silently blocks the whole deploy — exactly as unobserved as the 4.6-day
+    stall this issue is about.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    sites = _alert_sites()
+    assert {job for job, _n, _s in sites} == set(_ALERT_JOBS), (
+        f"every job that can fail while its siblings are skipped must carry the "
+        f"alert; got {sorted(job for job, _n, _s in sites)}, want {sorted(_ALERT_JOBS)}"
+    )
+    # DERIVED from the workflow, not restated: every job of this workflow must
+    # either end with the alert or be an explicit, reasoned exemption. Without
+    # this, a 4th job added tomorrow can fail alone in total silence — which is
+    # the defect #2240 exists to remove (round-3 review, P2-4).
+    assert set(_jobs()) == set(_ALERT_JOBS) | set(_ALERT_EXEMPT_JOBS), (
+        f"deploy-hosted jobs {sorted(_jobs())} != alert sites "
+        f"{sorted(_ALERT_JOBS)} + exemptions {sorted(_ALERT_EXEMPT_JOBS)} — a new "
+        f"job must either carry the out-of-band alert or be added to "
+        f"_ALERT_EXEMPT_JOBS with a reason"
+    )
+    for job_name, step_name, step in sites:
+        assert step.get("if") == "failure()", (
+            f"{step_name!r} must be `if: failure()` — not `always()` (which would "
+            f"fire on cancelled and green runs) and not a bare step (which is "
+            f"ANDed with success())"
+        )
+        run = step.get("run", "")
+        # The EXACT path, not a bare basename: `bash scripts/deploy-api-alert.sh`
+        # would resolve through the `scripts/` symlink, which does not exist on a
+        # fresh runner — the step would die with "No such file" and the alert would
+        # be silently absent.
+        assert "bash .github/scripts/deploy-api-alert.sh" in run, (
+            f"{step_name!r} must invoke `bash .github/scripts/deploy-api-alert.sh` "
+            f"by its exact path (a symlinked or basename form is not on the runner)"
+        )
+        # `--job` must name THIS job: it is half of the dedupe key AND it selects
+        # the "what a red here means" sentence, so a copy-paste neighbour would
+        # file a pack-smoke failure under `deploy-api`'s key and tell the reader
+        # the wrong consequence.
+        m = re.search(r"--job\s+(\S+)", run)
+        assert m and m.group(1) == job_name, (
+            f"{step_name!r} passes --job {m.group(1) if m else '<none>'!r}, but it lives "
+            f"in job {job_name!r} — the key and the consequence sentence would be "
+            f"another job's"
+        )
+
+        perms = doc["jobs"][job_name].get("permissions") or {}
+        assert perms.get("issues") == "write", (
+            f"{job_name} must declare `issues: write` — the repo's default "
+            f"workflow permission is read, and the substrate files an issue"
+        )
+        assert perms.get("contents") == "read", (
+            f"{job_name}: `contents: read` must be spelled out — specifying ANY "
+            f"permission sets every unspecified one to `none`, which would strip "
+            f"the token actions/checkout and the job's `gh` reads rely on"
+        )
+        env = step.get("env") or {}
+        assert env.get("GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}", (
+            f"{job_name}: the alert must write with the ACTIONS token. A PAT writes "
+            f"as its own owner, so the `author:app/github-actions` dedupe search "
+            f"never matches and EVERY failing run files a fresh duplicate (#2706)"
+        )
+        # The page leg: dropping these bindings would leave the issue as the only
+        # signal, and an issue alone has demonstrably not reached a human here (the
+        # watchdog records 11h19m of silence with one incident issue).
+        for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+            assert env.get(var) == f"${{{{ secrets.{var} }}}}", (
+                f"{step_name!r} must bind {var} (same-named secret): without it the "
+                f"page leg silently disappears and the issue is the only signal"
+            )
+
+    # ORDERING: the alert is the job's LAST step, so a failure of the `if:
+    # always()` gate audit is reported too. An alert placed before the audit can
+    # only see failures that already happened — an audit-only failure would then
+    # be a red run with no issue and no page, the exact shape #2240 removes.
+    for job_name, step_name, _step in sites:
+        names = [s.get("name") or "" for s in doc["jobs"][job_name]["steps"]]
+        assert names[-1] == step_name, (
+            f"{step_name!r} must be the LAST step of {job_name} (it is at index "
+            f"{names.index(step_name)} of {len(names)}) — otherwise a failure of a "
+            f"later `if: always()` step is never reported"
+        )
+
+
+def test_alert_step_ids_match_the_script_and_the_workflow():
+    """The `--steps` ids, the script's map and the workflow's `id:`s agree EXACTLY.
+
+    Three surfaces have to line up for per-step attribution to work: each site
+    passes `id=${{ steps.<id>.outcome }}`, the script maps `<id>` to a human label,
+    and the step carrying `<id>` has that `name`. A rename on any side would
+    otherwise let the alert file under a key with no step behind it (or attribute
+    a failure to the wrong step), and both directions are checked here — over the
+    UNION of the sites, so dropping a site's id list is caught too.
+    """
+    declared = _step_label_map()
+    wf_ids = _workflow_step_ids()
+    passed: list[str] = []
+    for _job, step_name, step in _alert_sites():
+        run = step.get("run", "")
+        site_ids = _alert_passed_ids(run)
+        assert site_ids, f"{step_name!r} must pass --steps (the per-step attribution)"
+        assert len(site_ids) == len(set(site_ids)), f"duplicate ids in --steps: {site_ids}"
+        # The outcome interpolation must be `steps.<id>.outcome` for the SAME id —
+        # not a copy-pasted neighbour, which would attribute every failure to one
+        # step.
+        for sid in site_ids:
+            assert f"steps.{sid}.outcome" in run, (
+                f"{step_name!r} passes {sid!r} but never reads `steps.{sid}.outcome`"
+            )
+        passed.extend(site_ids)
+
+    assert len(passed) == len(set(passed)), f"an id is passed by two sites: {passed}"
+    assert set(passed) == set(declared), (
+        f"--steps and step_label() disagree — passed-not-declared: "
+        f"{sorted(set(passed) - set(declared))}, declared-not-passed: "
+        f"{sorted(set(declared) - set(passed))}"
+    )
+    assert set(passed) == set(wf_ids), (
+        f"the workflow's `id:` set and the sites' `--steps` set must be EQUAL in "
+        f"both directions — passed-not-declared: {sorted(set(passed) - set(wf_ids))}, "
+        f"declared-not-passed: {sorted(set(wf_ids) - set(passed))}. A new `id:` on an "
+        f"alert-job step that is not added to that site's `--steps` would file under "
+        f"the job-level key with 'failed step: not reported' — silently losing the "
+        f"per-step attribution this change exists for (round-5 review, P3-3)"
+    )
+    for sid in passed:
+        assert declared[sid] == wf_ids[sid], (
+            f"step {sid!r}: the script labels it {declared[sid]!r} but the workflow "
+            f"names that step {wf_ids[sid]!r} — the alert would name a step that "
+            f"does not exist"
+        )
+
+
+def test_alert_job_notes_cover_every_alert_site():
+    """The script's per-job "what a red here means" table covers exactly the sites.
+
+    The three sites are NOT interchangeable: a failed `deploy-api` means nothing
+    shipped, a failed `packaging-smoke` means the deploy was SKIPPED, and a failed
+    `post-deploy-verify` means the release is LIVE and unhealthy. A single
+    hard-coded sentence would be wrong at two of the three, and a stale entry
+    after a job rename would be wrong silently — so the set is pinned both ways.
+    """
+    notes = _job_note_map()
+    site_jobs = {job for job, _n, _s in _alert_sites()}
+    assert site_jobs == set(notes), (
+        f"job_block_note() and the alert sites disagree — sites-not-noted: "
+        f"{sorted(site_jobs - set(notes))}, noted-not-a-site: {sorted(set(notes) - site_jobs)}"
+    )
+    assert site_jobs == set(_ALERT_JOBS), (
+        f"the alert sites moved: {sorted(site_jobs)} vs {sorted(_ALERT_JOBS)}"
+    )
+
+
+def test_drift_report_seam_carries_the_gates_own_report():
+    """The drift case must carry the gate's OWN output, not a second reading.
+
+    The gate already prints the blocking versions, the OUT-OF-ORDER subset and the
+    ordered remediation; re-running it from the alert could name a DIFFERENT
+    blocking set than the run being reported. So the gate's stdout is teed to a
+    file in the SAME step, and the alert is handed that path.
+    """
+    steps = _steps()
+    drift = steps["Check migration drift (fail-closed)"]
+    alert = next(s for _j, n, s in _alert_sites() if n.endswith("deploy-api (#2240)"))
+    run = drift.get("run", "")
+
+    assert drift.get("id") == "drift", "the drift step needs `id: drift` for attribution"
+    assert "check-migration-drift" in run, "the drift step must still run the gate"
+    assert "tee" in run and "DRIFT_REPORT_FILE" in run, (
+        "the gate's stdout must be teed to $DRIFT_REPORT_FILE so the alert carries "
+        "the report the RUN produced"
+    )
+    # `set -o pipefail` is what makes the STEP fail when the gate fails: without it
+    # the step's status is `tee`'s (0), so a blocked deploy reads GREEN and the
+    # alert never fires — a fail-OPEN, not merely a silence.
+    #
+    # ⛔ Pinned as the FIRST EXECUTABLE LINE, not as a substring. `re.search` takes
+    # the first match, so ANY non-executed occurrence ahead of the pipeline — a
+    # trailing comment (`true  # set -o pipefail`), a heredoc body, `echo "set -o
+    # pipefail"` — satisfied the substring form while pipefail was NOT armed
+    # (round-4 review, P2-2). Requiring the arming to be the first line of code
+    # also subsumes the ordering check: nothing can precede it, the pipeline
+    # included.
+    code = _shell_code(run)
+    first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+    assert first == "set -o pipefail", (
+        f"the drift step's FIRST executable line must be exactly `set -o pipefail` "
+        f"(found {first!r}) — without it armed first the step's status is tee's "
+        f"(0) and a blocked deploy reads GREEN. A comment, a heredoc body or an "
+        f"echo does not arm it."
+    )
+    assert not re.search(r"set\s+\+o\s+pipefail", code), (
+        "`set +o pipefail` would disarm the seam it exists to arm"
+    )
+
+    drift_path = (drift.get("env") or {}).get("DRIFT_REPORT_FILE")
+    alert_path = (alert.get("env") or {}).get("DRIFT_REPORT_FILE")
+    assert drift_path and alert_path, "both steps must bind DRIFT_REPORT_FILE"
+    assert drift_path == alert_path, (
+        f"the alert reads {alert_path!r} but the gate writes {drift_path!r} — the "
+        f"report would silently never reach the issue"
+    )
+    assert "--drift-report" in alert.get("run", ""), (
+        "the alert step must pass the report path as --drift-report"
+    )
