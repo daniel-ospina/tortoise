@@ -39,6 +39,16 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict]:
         return None, {}
     label, props = rows[0][0], rows[0][1]
     parsed = dict(props)
+    if label == "Source":
+        # #3998 (D30): the ROOT is a read path too. `_parse_node` filters the
+        # CONNECTED nodes; filtering only there left the same `:Source` root
+        # handing its raw payload straight back — measured, a document created
+        # with a 2400-byte `text` returned that `text` on the root through
+        # `entityProfile` AND `tortoise_traverse`, while `get_entity` correctly
+        # withheld it. A guarantee that holds on one read path and not another
+        # is not a guarantee, so the root takes the same filter as its
+        # neighbours.
+        parsed = _filter_source_props(parsed)
     parsed["type"] = label
     return label, parsed
 

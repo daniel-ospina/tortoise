@@ -652,6 +652,192 @@ def test_the_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
     assert ent["url"] == RAW_URL
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 1b. #5196 — the paths the fix was still one function away from
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_the_root_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
+    """#5196, P1: the SAME pre-existing payload, read through the two shipped
+    TOOLS. `_parse_node` filtered the CONNECTED nodes only, and `_resolve_root`
+    returned `properties(n)` VERBATIM — so the ROOT handed the bytes straight
+    back through `entityProfile` (MCP `tortoise_entity_profile`) and through
+    `tortoise_traverse`, while `get_entity` withheld them.
+
+    (1) FAILS if the root bag is the raw stored property map: `text` comes back
+        (measured before the fix: a 2400-byte `text` returned on the root).
+    (2) REACHABLE: the payload is written with raw Cypher, exactly as the
+        pre-guard writer did, so the node genuinely holds it before the read.
+    """
+    from tortoise.navigation import entityProfile, tortoise_traverse
+
+    s, _events = sdk
+    body = "LEGACY_PAYLOAD " + ("old raw bytes. " * 150)
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) SET s.content=$b, s.text=$b",
+        params={"u": RAW_URL, "b": body},
+    )
+    gname = s._get_proj().g.name
+
+    prof = entityProfile(s._get_proj().db, gname, RAW_URL, hops=1)
+    root = prof["entity"]
+    assert "content" not in root and "text" not in root, sorted(root)
+    assert body not in repr(prof), "entityProfile handed the raw payload back"
+    # The filter must not eat the declared surface or the synthetic `type` key
+    # (`type` is not a stored property, so it is set AFTER the filter).
+    assert root.get("url") == RAW_URL and root.get("type") == "Source", root
+
+    trav = tortoise_traverse(s._get_proj().db, gname, RAW_URL, max_hops=1)
+    troot = trav["entity"]
+    assert "content" not in troot and "text" not in troot, sorted(troot)
+    assert body not in repr(trav), "tortoise_traverse handed the raw payload back"
+
+
+def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
+    """#5196, P1: the two contracts pinned together so neither can move alone.
+
+    `create_document` is a CALLER PASSTHROUGH by design (#228 —
+    `test_create_document_persists_arbitrary_props` pins it), so an undeclared
+    prop is WRITTEN. Reading is the opposite contract (#3998/D30): every read
+    path filters through `_SOURCE_NODE_PROP_NAMES`. The defect was the ROOT
+    bag, which bypassed the filter and served the bytes straight back —
+    measured, a 2400-byte `text` returned through `entityProfile`.
+
+    (1) FAILS on EITHER half: if the prop does not reach the node the #228
+        passthrough was closed (a contract break, not a fix); if a read path
+        serves it the #3998 leak is back.
+    (2) REACHABLE: both halves run through public routes (`create_document`,
+        `entityProfile`, `tortoise_traverse`) against a real node.
+    """
+    from tortoise.navigation import entityProfile, tortoise_traverse
+
+    s, _events = sdk
+    body = "DOC_PROP " + ("payload bytes. " * 190)
+    doc = s.create_document("doc-undeclared-5196", "note",
+                            text=body, transcript=body, summary="kept")
+    did = doc["id"]
+    # Half 1 — #228: the writer is an open passthrough, so the prop reaches the
+    # node. NOTE the RETURN value is deliberately NOT asserted here: it is built
+    # from a filtered read, so `create_document` currently withholds the props it
+    # just wrote — `test_create_document_persists_arbitrary_props` (#228) is RED
+    # on this branch for that reason (measured; pre-existing, reported on #5196).
+    rows = s._get_proj().g.query(
+        "MATCH (n:Source {id:$i}) RETURN properties(n)", params={"i": did}
+    ).result_set
+    assert rows, "the document :Source was not written"
+    assert dict(rows[0][0]).get("text") == body, "the prop did not reach the node"
+    # Half 2 — #3998/D30: no READ path serves an undeclared prop, and the
+    # declared metadata is still served (the filter is not a blanket denial).
+    gname = s._get_proj().g.name
+    prof = entityProfile(s._get_proj().db, gname, did, hops=1)
+    assert body not in repr(prof), "entityProfile served the undeclared prop"
+    assert "text" not in prof["entity"], sorted(prof["entity"])
+    assert prof["entity"].get("summary") == "kept", sorted(prof["entity"])
+
+    trav = tortoise_traverse(s._get_proj().db, gname, did, max_hops=1)
+    assert body not in repr(trav), "tortoise_traverse served the undeclared prop"
+    assert "text" not in trav["entity"], sorted(trav["entity"])
+
+
+def test_a_bundle_item_cannot_set_the_raw_state(sdk):
+    """`raw_state` is a DECLARED parameter of `create_source`, so a bundle item
+    splats it onto the sanctioned keyword and never reaches `**props`, where
+    `_sanitize_props` rejects it — the same shape as `_server_id`. Without a
+    shape-time reject, the ingest bundle was the one route that could set (and
+    clear) the absent-raw state.
+
+    (1) FAILS if the bundle is ACCEPTED — acceptance means the state was set.
+    (2) REACHABLE: the identical bundle without the key is accepted and writes
+        the source, so the refusal is caused by the key and not by the bundle.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    s, _events = sdk
+    s.ingest({"sources": [{"url": RAW_URL, "sourceKind": "conversation"}]})
+    assert _source_props(s).get(RAW_STATE_PROP) is None, (
+        "the control bundle must not record a state"
+    )
+
+    for key in ("raw_state", "rawState", "rawStateAt"):
+        bad = {"sources": [{"url": RAW_URL + "-" + key,
+                            "sourceKind": "conversation", key: RAW_DELETED}]}
+        with pytest.raises(BundleValidationError) as exc:
+            s.ingest(bad)
+        assert any(key in v["message"] for v in exc.value.violations), (
+            f"{key} was not named in the violation: {exc.value.violations}"
+        )
+
+
+def test_a_state_carrying_recheck_is_repeat_safe(sdk):
+    """`rawStateAt` is minted on EVERY state-carrying call and was compared in
+    `_source_payload_is_noop`, so a re-check that found the SAME state looked
+    "changed" — the journal grew by one per identical re-check (measured
+    before: +5 for five repeats) while the no-state control appended 0.
+
+    (1) FAILS if the journal grows across the repeats: §9.6 bounds a version at
+        "three timestamps and a hash", so a no-op re-check must not be one.
+    (2) REACHABLE: the state is genuinely written first (asserted +1), so this
+        cannot pass by the state never being recorded at all.
+    """
+    s, events = sdk
+
+    def _records() -> int:
+        return sum(
+            1 for p in sorted(events.glob("*.jsonl"))
+            for line in p.read_text().splitlines() if line.strip()
+        )
+
+    s.create_source(RAW_URL, "document", contentHash="h0")
+    n0 = _records()
+    s.create_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
+    n1 = _records()
+    assert n1 == n0 + 1, "the state change must ride the journal"
+    assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
+
+    for _ in range(5):
+        s.create_source(RAW_URL, "document", contentHash="h0",
+                        raw_state=RAW_DELETED)
+    assert _records() == n1, (
+        "a state-carrying re-check that found the same state still appended a "
+        "journal record — the re-check is not repeat-safe"
+    )
+
+
+def test_the_raw_reference_is_deterministic_for_a_multi_source_point(sdk):
+    """`_raw_entry_for_point` ran `RETURN properties(src) LIMIT 1` with NO
+    `ORDER BY`, so for a Point with more than one `extractedFrom` source the
+    answer was ENGINE order — unspecified. Measured before the fix: with
+    `a.example.com` and `b.example.com` linked, the HIGHER key won; the order
+    is now pinned to the source's identity.
+
+    (1) FAILS if the chosen source is not the lowest identity key, i.e. if the
+        choice is left to the engine again.
+    (2) REACHABLE: the fixture links TWO sources, so the choice is genuinely
+        ambiguous (asserted, so a one-source fixture cannot pass vacuously).
+    """
+    s, _events = sdk
+    a = "https://a.test/order-5196"
+    b = "https://b.test/order-5196"
+    # Insert in REVERSE identity order — an unambiguous fixture only proves
+    # nondeterminism when the engine's natural order is a WRONG answer.
+    s.create_source(b, "document")
+    s.create_source(a, "document")
+    pt = s.create_point("statement", "body", extractedFrom=[b, a])
+    pid = pt["id"]
+    s._get_proj()._link_source(pid, [b, a], label="Source")
+
+    linked = sorted(
+        r[0] for r in s._get_proj().g.query(
+            "MATCH (p:Point {id:$p})-[:extractedFrom]->(src:Source) "
+            "RETURN src.url", params={"p": pid}).result_set
+    )
+    assert linked == [a, b], f"the fixture is not ambiguous: {linked}"
+
+    seen = {s._raw_entry_for_point(pid)["source_id"] for _ in range(5)}
+    assert len(seen) == 1, f"the raw reference varies between calls: {seen}"
+    assert seen == {a}, f"expected the lowest identity key {a!r}, got {seen}"
+
+
 def test_declared_metadata_values_are_not_length_bounded_the_stated_residual(sdk):
     """⚠️ PINS THE STATED RESIDUAL, so it is a known bound rather than an
     implied one. The closed surface establishes that the node's property set is

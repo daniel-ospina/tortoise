@@ -36,9 +36,17 @@ is **a third value on that record, not a fourth kind of source**.
     This module introduces **no retention window of any length**. Absence is
     *recorded*, never *scheduled*.
 
-⛔ FAIL-CLOSED ON READ, STRICT ON WRITE
-    A *writer* that passes a value outside the vocabulary is a caller bug, and
-    is refused loudly (:func:`validate_raw_state`). A *reader* that meets one
+⛔ FAIL-CLOSED ON READ, STRICT AT THE WRITE BOUNDARY
+    A *caller* that passes a value outside the vocabulary is a caller bug, and
+    is refused loudly (:func:`validate_raw_state`) — AT THE TENANT BOUNDARY.
+    That is the only route a caller has to the state (`rawState`/`rawStateAt`
+    are refused as props), and it is where strictness actually lives: the
+    projection's replay fold writes the journalled value verbatim and does NOT
+    re-validate. The journalled value is trusted because it was validated
+    before it was journalled, so this is a claim about the write BOUNDARY, not
+    about every writer — stated this way because the earlier wording ("STRICT
+    ON WRITE") read as covering the fold too, which it does not.
+    A *reader* that meets a bad value anyway
     (an old row, a hand-edited node, a future value) must never **fail open**:
     an unrecognised recorded state resolves to :data:`RAW_UNRECOGNISED` —
     explicitly *not* "present" — because "we cannot interpret what was
@@ -200,7 +208,15 @@ def raw_availability(props: object) -> RawState:
     * a mapping of ``:Source`` node properties (reads :data:`RAW_STATE_PROP`);
     * a bare state string;
     * ``None`` ⇒ :data:`RAW_PRESENT` — NOTHING is recorded, which is the shape
-      of every source that has never been observed to be absent;
+      of every source that has never been observed to be absent. This conflates
+      THREE cases, deliberately: a source that has a raw, a source that was
+      never fetched, and a source whose state was never recorded all resolve
+      ``available: True``. The module records *observed* absence, so it cannot
+      distinguish "we looked and it was there" from "we never looked" — and a
+      url-only stub with no raw reads as available. Stated here because the
+      consequence is not obvious from the constant's name; the conflation is
+      NOT resolved by this module (#3998 R1: absence is only ever recorded,
+      never scheduled).
     * **anything else — a recorded ``""``, a value outside the vocabulary, a
       non-string, or a mapping whose lookup raises — ⇒
       :data:`RAW_UNRECOGNISED`**, which is ``absent``. ``""`` is deliberate:

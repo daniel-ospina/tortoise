@@ -2748,6 +2748,14 @@ class _EntityHandlers:
         # so that extra props land on the Source node regardless of edge
         # success). D10 retired keys (content/doc_status/objectKind) are denied
         # here — the fixed clause above already covers every other doc key.
+        #
+        # This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
+        # persists_arbitrary_props` (#228) pins the document route as a caller
+        # passthrough. It is therefore NOT the same contract as `_upsert_source`
+        # (which passes `_SOURCE_EXTRA_PROPS`), and the disagreement between the
+        # two is resolved on the READ side, where #3998/D30 is authoritative:
+        # every read path filters through `_SOURCE_NODE_PROP_NAMES` — including
+        # the ROOT bag, which used to bypass it (#5196, P1).
         self._persist_extra_props(
             "MATCH (n:Source {url: $id})", {"id": did},
             ev, self._SOURCE_HANDLED | self._DOC_RETIRED,
@@ -3546,10 +3554,10 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     "rawState", "rawStateAt",
 })
 
-# The IDENTITY keys of a `:Source` — also refused to a caller-supplied map, and
-# also dropped on replay (#3998 review round 5). `create_source` treats these as
-# server-managed (it MERGEs on `url` and mints `canonicalUrl`/`urlAliases`), so a
-# caller map must not move them: measured, `update_entity(src_url, url=<2 KB
+# The IDENTITY keys of a `:Source` — also refused to a caller-supplied map.
+# `create_source` treats these as server-managed (it MERGEs on `url` and mints
+# `canonicalUrl`/`urlAliases`), so a caller map must not move them: measured,
+# `update_entity(src_url, url=<2 KB
 # body>)` rewrote the MERGE key, and after a rebuild produced DUPLICATE `:Source`
 # nodes and an EMPTY provenance chain for the Point — i.e. the payload route and
 # a silent provenance loss at once. (`id` is already refused by

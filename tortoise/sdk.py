@@ -10765,6 +10765,21 @@ class TortoiseSDK:
                 "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
+        # #3998/#5196: `raw_state` (and its spellings) is the SAME shape as
+        # `_server_id` immediately above — it is a DECLARED parameter of
+        # `create_source`, so the `**item` splat binds the sanctioned keyword
+        # and the key never lands in `**props`, where the sanitizer would
+        # reject it. Without this, the ingest bundle was the one route that
+        # could still set the absent-raw state, which the props route refuses
+        # on purpose (a tenant payload must not be able to set OR CLEAR a
+        # recorded absence). Rejected on every spelling.
+        for _rsk in ("raw_state", "rawState", "rawStateAt"):
+            if _rsk in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_rsk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
         # is read from the :Source by `resolve_source_versions` and carried in
         # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
@@ -12981,7 +12996,15 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
-            "RETURN properties(src) LIMIT 1",
+            # Order pinned so a MULTI-SOURCE Point resolves the SAME entry on
+            # every call. `LIMIT 1` with no `ORDER BY` is engine order, so the
+            # returned `raw` reference could change between two calls with
+            # nothing written in between. The key is the source's own identity
+            # — the same first term the sibling provenance read pins, which
+            # enumerates its own key terms at the ORDER BY there.
+            "RETURN properties(src) "
+            "ORDER BY coalesce(src.url, src.id, '') "
+            "LIMIT 1",
             params={"pid": point_id},
         ).result_set
         if not rows:
@@ -24662,6 +24685,18 @@ class TortoiseSDK:
         # leaving it in the comparison suppressed repeat-safety entirely
         # (measured: the no-op still emitted a `SourceCreated`).
         "updatedAt",
+        # #3998/#5196: the SAME class, for the same reason. `create_source`
+        # mints `rawStateAt` on every state-carrying call and REJECTS it as a
+        # prop (`rawStateAt` is server-managed), so the caller asserts the
+        # STATE and never the instant. Comparing it made a state-carrying
+        # re-check that found the SAME state look "changed", so the journal
+        # grew by one on every identical re-check — measured, the no-state
+        # control appended 0 while `raw_state="deleted"` appended +1 per call.
+        # §9.6 bounds a version at "three timestamps and a hash", and a
+        # re-check that changes nothing must stay repeat-safe. The STATE key
+        # `rawState` stays compared (see `_fixed_compared` below): it is the
+        # fact that must ride the journal, and it still does.
+        "rawStateAt",
     })
 
     @staticmethod
@@ -24771,14 +24806,13 @@ class TortoiseSDK:
         # `format`/`source_path` update lands live, and `contentHash` is the
         # gate every other fixed field rides.
         #
-        # #3998: `rawState`/`rawStateAt` join them for exactly this reason.
-        # Their `ON MATCH` clause is `s.rawState = CASE WHEN $rawState IS NULL
-        # THEN s.rawState ELSE $rawState END` (and the same shape for
-        # `rawStateAt`) — a NON-hash-diff write that mutates the node whenever
-        # the incoming state is non-null, which is the availability analogue of
-        # the `format`/`source_path` update above. Membership in
-        # `_SOURCE_HANDLED` is what keeps them out of the open passthrough; it is
-        # NOT a statement that they never change, and reading it as one
+        # #3998: `rawState` joins them for exactly this reason. Its `ON MATCH`
+        # clause is `s.rawState = CASE WHEN $rawState IS NULL THEN s.rawState
+        # ELSE $rawState END` — a NON-hash-diff write that mutates the node
+        # whenever the incoming state is non-null, which is the availability
+        # analogue of the `format`/`source_path` update above. Membership in
+        # `_SOURCE_HANDLED` is what keeps it out of the open passthrough; it is
+        # NOT a statement that it never changes, and reading it as one
         # suppressed the record. Measured before this line: a second
         # `create_source(url, kind, contentHash="h1")` then
         # `create_source(url, kind, raw_state="deleted")` moved the live node
@@ -24787,8 +24821,14 @@ class TortoiseSDK:
         # and the source came back PRESENT — `KeyError: 'rawState'` on the read.
         # The state must ride the journal like every other source fact; this
         # comparison is what lets the fail-safe emit arm see it as a change.
+        #
+        # `rawStateAt` is deliberately NOT here. It is a producer-minted
+        # instant, so it belongs with `ingestedAt`/`updatedAt` in
+        # `_SOURCE_NOOP_IGNORED_KEYS`. Comparing it never protected the state
+        # (that is `rawState`'s job, and `rawState` stays); it only made every
+        # state-carrying re-check look like a change and grew the journal.
         _fixed_compared = {"format", "source_path", "contentHash",
-                           "rawState", "rawStateAt"}
+                           "rawState"}
         # The writer's OWN passthrough predicate (`_persist_extra_props`): a
         # payload key outside this skip-set, with a persistable non-None value,
         # is what actually lands on the node.
