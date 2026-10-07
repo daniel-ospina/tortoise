@@ -1191,6 +1191,19 @@ def test_an_added_suppression_directive_is_rejected(tmp_path: Path):
     git("commit", "-qam", "uppercase suppression")
     assert run_guard(pr_step, {"BASE_SHA": case_base}) != 0
     assert run_guard(mh_step, {}) != 0
+    # cli2's matcher is a JS regex whose `\s` includes U+FEFF and the Unicode
+    # space family, so ONE zero-width character before `markdownlint-` suppressed
+    # a finding while an ASCII-only `[[:space:]]*` gap class missed it — and the
+    # bypass is INVISIBLE in the rendered diff. Measured: cli2 0.23.3 honours
+    # `<!--<U+FEFF>markdownlint-disable MD001 -->`, and grep missed it in every
+    # locale (C included).
+    bom_base = git("rev-parse", "HEAD").stdout.strip()
+    doc.write_text(
+        "# a\n\n<!--\ufeffmarkdownlint-disable MD001 -->\n### b\n", encoding="utf-8"
+    )
+    git("commit", "-qam", "zero-width suppression")
+    assert run_guard(pr_step, {"BASE_SHA": bom_base}) != 0
+    assert run_guard(mh_step, {}) != 0
     # A PURE RENAME of a file that ALREADY carries a directive must NOT fail: with
     # rename detection off a `git mv` reads as the whole file being added, so a
     # pre-existing directive looked new — a false failure on a no-op change.

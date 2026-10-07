@@ -1030,6 +1030,32 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_nested_linter_policy_file_selects_a_surface_not_tier1():
+    # #7435 review P2: cli2 reads a `.markdownlint*` config from ANY directory on
+    # the path to a linted file and lets a more specific config OVERRIDE the repo
+    # one, so `docs/.markdownlint.json` turns a rule off for every doc beneath it.
+    # That path was DROPPED — `docs/` is a NON_PYTHON_PREFIXES entry and the
+    # basename matches no SOURCE_PATTERNS row — so a policy-only PR selected the
+    # 31-file tier-1 smoke set, where
+    # `test_committed_policy_map_matches_the_checkout` never runs, while the `docs`
+    # job's differ steps were skipped for want of a changed `.md`. The policy
+    # change then landed with the snapshot unmoved.
+    #
+    # Keeping the path sends it down the existing fail-closed `unknown` branch,
+    # which selects the FULL matrix — the behaviour a ROOT policy file already
+    # had, so this ADDS coverage and narrows none.
+    # Mutation check: dropping the `_is_linter_policy_path` claim makes both
+    # nested cases come back surfaces=[], full=False.
+    for path in ("docs/.markdownlint.json", "website/.markdownlintrc"):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+    # A ROOT policy file keeps the full matrix it already selected.
+    assert _sel([".markdownlint-cli2.jsonc"])["full"] is True
+    # An ordinary nested doc is still docs-only (tier 1) — not swept into `full`.
+    assert _sel(["docs/notes.md"])["surfaces"] == []
+
+
 def test_queue_resweep_tool_change_selects_core_not_tier1():
     # tools/queue_resweep.py owns tests/test_queue_resweep.py (82 hermetic cases
     # pinning dry-run-by-default, the never-touch-a-queued-PR rule, and the

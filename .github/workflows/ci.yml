@@ -748,13 +748,21 @@ jobs:
           # directive is not a false failure. `--find-renames`, not
           # `--no-renames`: with rename detection off a pure `git mv` of a file
           # that already carries a directive reads as the WHOLE file being added,
-          # failing a change that added nothing.
+          # failing a change that added nothing. The gap class is
+          # `[^[:alnum:]>-]*`, NOT `[[:space:]]*`: cli2's matcher is a JS regex
+          # whose `\s` includes U+FEFF, so ONE zero-width BOM before
+          # `markdownlint-` suppressed a finding while an ASCII-only whitespace
+          # class missed it (measured in every locale, C included). The class
+          # still excludes `>` (a closed comment), `-` (`<!---` is not a directive
+          # to cli2 either) and alphanumerics (prose that NAMES the directive
+          # stays a non-failure), and it matches zero characters, so the bare
+          # form is unaffected.
           if ! git diff --find-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
               > "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qiE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi
@@ -870,16 +878,18 @@ jobs:
             > "$RUNNER_TEMP/changed-md.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
             > "$RUNNER_TEMP/changed-md.txt"
-          # Same suppression-directive guard as the PR path (see its comment): the
-          # grep reads a FILE, not a pipe, so a large diff cannot skip it by
-          # SIGPIPE; it is case-insensitive like cli2's own parser; and
-          # `--find-renames` keeps a pure rename from reading as an added file.
+          # Same suppression-directive guard as the PR path (see its comment,
+          # including why the gap class is `[^[:alnum:]>-]*` and not
+          # `[[:space:]]*`): the grep reads a FILE, not a pipe, so a large diff
+          # cannot skip it by SIGPIPE; it is case-insensitive like cli2's own
+          # parser; and `--find-renames` keeps a pure rename from reading as an
+          # added file.
           if ! git diff --find-renames -U0 HEAD^ HEAD -- '*.md' \
               > "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
           fi
-          if grep -qiE '^\+.*<!--[[:space:]]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line|configure-file)' "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
             exit 1
           fi

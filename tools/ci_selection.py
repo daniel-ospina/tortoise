@@ -805,6 +805,29 @@ def _is_safe_root_file(path: str) -> bool:
     return "/" not in path and path in ROOT_NON_PYTHON_FILES
 
 
+# Linter-policy files, by BASENAME at ANY DEPTH (#7435).
+#
+# cli2 reads a `.markdownlint*` config from any directory on the path to a linted
+# file, and a more specific config OVERRIDES the repo one — so a nested
+# `docs/.markdownlint.json` turns a rule off for every doc beneath it. That makes
+# such a file a POLICY change wherever it sits, but the prefix fallback below
+# dropped it (`docs/` is in NON_PYTHON_PREFIXES): a policy-only PR then selected
+# tier-1, where `test_committed_policy_map_matches_the_checkout` never runs, AND
+# the `docs` job's differ steps were skipped for want of a changed `.md` — so the
+# change landed with the snapshot unmoved and moved no ledger.
+#
+# A PREFIX, not the differ's exact basename set: a future `.markdownlint-*` name
+# cannot silently fall outside the rule, which is the drift the hand-maintained
+# duplicate tuples elsewhere in this file exist to warn about.
+_LINTER_POLICY_PREFIXES = (".markdownlint", ".lycheeignore")
+
+
+def _is_linter_policy_path(path: str) -> bool:
+    """Whether a path is a linter-policy file, at any depth, by basename."""
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith(_LINTER_POLICY_PREFIXES) or name == "lychee.toml"
+
+
 # website/ paths that ARE selection-relevant (#3332).
 #
 # Superseded by the generic rule in select() (`_selection_relevant`): a path that
@@ -1163,6 +1186,11 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         if c.startswith(TOOL_CARVEOUTS) or c.startswith(SITE_CARVEOUTS):
             return True
         if _selection_relevant(c):
+            return True
+        # #7435: a linter-policy file is a CLAIM too (see
+        # `_is_linter_policy_path`), so it is kept BEFORE the
+        # `_is_safe_root_file` fallback below.
+        if _is_linter_policy_path(c):
             return True
         if _is_safe_root_file(c):
             return False
