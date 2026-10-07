@@ -229,6 +229,39 @@ const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
 const BEACON_SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
 const BEACON_RUM_ORIGIN = 'https://cloudflareinsights.com'
 
+// ── the consent-gated ad-tag origin (#7633) ─────────────────────────────────
+//
+// The X/Twitter conversion tag is `https://static.ads-twitter.com/uwt.js`. It is
+// injected by the consent-gated container `GTM-WQR34GSC` — NOT by any page here —
+// which is why `git grep ads-twitter` matches nothing in-tree and why its absence
+// from `script-src` looked like an accident rather than a gap. That absence was
+// the whole defect: the tag was requested, CSP-blocked on BOTH origins, silently
+// never fired, and logged a console violation on a page whose contract is zero
+// console errors — with no red check anywhere.
+//
+// The surface is bounded by `website/consent.js`, which is loaded by the
+// pre-#3501 pages ONLY (see its references): it loads GTM when consent is
+// `granted`, so the SPA document — `STRICT_CSP` — never reaches it, and the origin
+// belongs in the two RELAXED policies and NOWHERE ELSE. Admitting it to a strict
+// policy would be gratuitous: a wider `script-src` on the surface that USES the
+// session, for a tag that never loads there.
+
+/** The X conversion tag's script origin, as a bare host source. */
+const X_TAG_SCRIPT_ORIGIN = 'https://static.ads-twitter.com'
+
+/** The policies entitled to admit it — the ones a consent-granted GTM can reach. */
+const CONSENT_TAG_POLICIES = new Set(['marketing.RELAXED_CSP', 'dashboard.RELAXED_CSP'])
+
+/**
+ * `script-src` of a policy value as tokens. Absent directive returns `null` so a
+ * caller can tell "no script-src" (which falls back to `default-src`) from an
+ * empty one — both would admit nothing here, but only one is a policy edit.
+ */
+function scriptSrcTokens(value) {
+  const directive = value.split('; ').find((d) => d === 'script-src' || d.startsWith('script-src '))
+  return directive === undefined ? null : directive.replace(/^script-src\s*/, '').split(/\s+/).filter(Boolean)
+}
+
 /**
  * The pinned value of every policy expression, keyed the same way as the scan in
  * §4b. The per-directive checks can only prove the beacon is PRESENT; they say
@@ -247,9 +280,9 @@ const BEACON_RUM_ORIGIN = 'https://cloudflareinsights.com'
  */
 const PINNED_POLICIES = {
   'marketing.RELAXED_CSP':
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.RELAXED_CSP':
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.STRICT_CSP':
     "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.ADMIN_CSP':
@@ -1470,6 +1503,84 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
     `policies that would block the edge-injected beacon:\n  ${wrong.join('\n  ')}\n` +
       `(if Cloudflare Web Analytics was turned OFF per #4706, flip this expectation ` +
       `— do not re-add the origins)`,
+  )
+})
+
+// ── 4c. the consent-gated ad-tag origin is admitted exactly where GTM loads ──
+//
+// #7633's failure was silent in BOTH directions: the origin that had to be present
+// was absent, and nothing said so — the tag was requested, blocked, and never
+// fired, with every check green. This is the seam that case revealed. It reddens if
+// the X tag origin is DROPPED (the tag is blocked again, detectable otherwise only
+// by driving a real browser), and if `script-src` is WIDENED (a wildcard host, a
+// bare scheme, `'unsafe-eval'`, or `'unsafe-inline'` on a policy that does not
+// legitimately declare it). `PINNED_POLICIES` catches a byte change; this one says
+// WHICH change and why it matters, at the moment it happens.
+test('the consent-gated X tag origin is in the RELAXED policies, and only those', () => {
+  // Values derived from the modules' own exports, as in §4b, so a SIXTH policy
+  // expression cannot escape by not being added to a hand-kept list here.
+  const modules = { dashboard: loadDashboardHeaders(), marketing: loadMarketingHeaders() }
+  const NON_POLICY_EXPORTS = new Set(['dashboard.cspNonce'])
+  const values = {}
+  for (const [mod, exported] of Object.entries(modules)) {
+    for (const [key, value] of Object.entries(exported)) {
+      if (value === undefined || NON_POLICY_EXPORTS.has(`${mod}.${key}`)) continue
+      values[`${mod}.${key}`] = typeof value === 'function' ? value('TESTNONCE') : value
+    }
+  }
+  assert.deepEqual(
+    Object.keys(values).sort(),
+    Object.keys(PINNED_POLICIES).sort(),
+    'this test must scan exactly the pinned policy set — a policy it cannot resolve ' +
+      'would let the assertions below pass over a surface they never read',
+  )
+
+  const missing = []
+  const overbroad = []
+  for (const [name, policy] of Object.entries(values)) {
+    const tokens = scriptSrcTokens(policy)
+    if (tokens === null) {
+      missing.push(`${name}: no script-src directive (it would fall back to default-src)`)
+      continue
+    }
+    if (CONSENT_TAG_POLICIES.has(name)) {
+      if (!tokens.includes(X_TAG_SCRIPT_ORIGIN)) {
+        missing.push(
+          `${name}: script-src omits ${X_TAG_SCRIPT_ORIGIN} — the GTM-injected X tag is blocked again (#7633)`,
+        )
+      }
+    } else if (tokens.includes(X_TAG_SCRIPT_ORIGIN)) {
+      overbroad.push(
+        `${name}: script-src admits ${X_TAG_SCRIPT_ORIGIN}, but \`consent.js\` (and so GTM) never loads on this surface`,
+      )
+    }
+    // Widening checks, over EVERY policy. A TOKEN match, so a prefix impostor
+    // (`${X_TAG_SCRIPT_ORIGIN}.evil.test`) cannot satisfy the presence check above —
+    // and a wildcard/scheme token here would let ANY origin satisfy it.
+    for (const token of tokens) {
+      const lower = token.toLowerCase()
+      if (token === '*' || token.endsWith('*') || /^(https?|data|blob):$/.test(lower)) {
+        overbroad.push(`${name}: script-src carries the broadening token ${token}`)
+      }
+      if (lower === "'unsafe-eval'") {
+        overbroad.push(`${name}: script-src carries 'unsafe-eval'`)
+      }
+      if (lower === "'unsafe-inline'" && !CONSENT_TAG_POLICIES.has(name)) {
+        overbroad.push(
+          `${name}: script-src carries 'unsafe-inline', which only the pre-#3501 RELAXED policies declare`,
+        )
+      }
+    }
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `the consent-gated X conversion tag is blocked again:\n  ${missing.join('\n  ')}`,
+  )
+  assert.deepEqual(
+    overbroad,
+    [],
+    `script-src was widened beyond what was reviewed (#7633):\n  ${overbroad.join('\n  ')}`,
   )
 })
 
