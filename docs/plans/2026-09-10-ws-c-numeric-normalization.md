@@ -18,8 +18,9 @@ governingAgreement: "#2817"
 **Feeds:** #2782 (money representation) · **Related:** #2813, #2795, #2818, #2730, #2725, #2687, #2453, #2747, #3011
 
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
-> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**; **S3** (the HTTP
-> validator) is the one genuine contract change, and it needs an **explicit decision**.
+> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**. **S3** (the HTTP
+> validator) needs **no change either**, under the owner's 2026-10-07 decision: the field is
+> **server-derived and never client-supplied**, so the `Point` model is untouched (§2.3, §3/OD5).
 
 **Revision note (v2, 2026-10-06).** v1 was written parser-first: it made a locale-aware numeric parser the
 foundation and reified each value as a tagged union of five `valueKind`s. **That foundation is withdrawn.**
@@ -221,7 +222,12 @@ ablation has the verbatim route ahead of the derived one by 15.9 / 22.0 pts (ext
 separator/currency rule for values carrying a currency anchor. It is the **only** route to detecting T2's
 regression inside this design, and it would be the right call if detection ever became a grounded
 requirement. It departs from §4's blanket exclusion, so taking it later requires a fresh owner decision
-and a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
+and a marked `OVERRIDES:` line naming the misparse mode it reintroduces. *(The **other** route to
+detection — a separate deterministic numeric-fidelity check — was scoped and refused on **measurement**,
+not preference: it would have been a third copy of value-identity logic against the recorded decision at
+`docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28`, and it was blind in its own target case
+(`_resolve_source_turn` fails exactly when the number was rewritten). Detection's home is the span
+carried by #2684 — not this design.)*
 
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
 against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and the
@@ -231,7 +237,8 @@ text** may be ours and is not borrowed authority.
 ⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
 No such check is proposed by this design (see the restated requirement above) — a
 lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
-against (§9). The owner rejected the anchored narrower form (b) on 2026-10-07 (§2.3).
+against (§9). The owner rejected the anchored narrower form (b) on 2026-10-07 (recorded above in this
+section).
 
 ### 2.4 Representation facts carried over
 
@@ -358,7 +365,7 @@ These are requirements on the derivation, not evidence of an implementation that
 
 ## 7. Sequencing and required approvals
 
-### 7.1 Surface changes — declaration for S1/S2, a decision for S3
+### 7.1 Surface changes — declaration for S1/S2, and none for S3 under the 2026-10-07 decision
 
 **⛔ THE FIELD BELONGS ON `create_entity`, NOT ON `create_point`.** The approved MCP surface
 (`docs/product/canonical-mcp-tools.md`, row 10) has **`create_entity` absorbing `create_point`**,
@@ -382,7 +389,7 @@ field today**, because both filter by **deny-list** rather than allow-list; what
 | --- | --- | --- | --- |
 | **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:1366`; registry entry `tortoise/tool_registry.py:101`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:1285`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
 | **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:4937`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:2596`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
-| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today**. | Add the value field to the `Point` model, or decide explicitly that the field is server-derived and never client-supplied — a contract change. |
+| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-derived and never client-supplied**: there is no client value to accept, so nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design requires **no** surface change at all. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
 is fixed (`_upsert_point_props`, `tortoise/projection/entities.py:801`), but Point carries the **same
@@ -400,10 +407,11 @@ being approved.
 The work cannot begin at the derivation. The dependency order is:
 
 1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
-   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1; only **S3** (the
-   HTTP commit validator) is a genuine contract change, and it is closed today.
-2. **Declare the field** on the accepted schema: the Point property list and the HTTP `Point` model. No
-   behaviour change.
+   these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1. **S3 is resolved
+   too** by the 2026-10-07 decision: the field is server-derived and never client-supplied, so the HTTP
+   `Point` model is untouched and this design requires **no** surface change.
+2. **Declare the field** on the accepted schema: the Point property list. (The HTTP `Point` model is
+   **untouched** — the field is server-derived and never client-supplied, §7.1/S3.) No behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
    it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
