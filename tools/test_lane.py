@@ -105,15 +105,12 @@ def is_managed(name: str) -> bool:
 GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
-def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
-    """The URI shape the docker lane's tests expect (`docker://` + loopback).
+def _validate_graph(graph: str) -> str:
+    """Reject a graph name that would corrupt the eval-ed export line.
 
-    No password: this tool starts the container without `requirepass` (it is
-    loopback-bound and disposable), so the URI carries an empty password.
-
-    The graph name is validated because this string is printed into a single
-    quoted `export` line that the documented usage `eval`s: an unvalidated name
-    would make the line invalid shell (or inject into it).
+    Called BEFORE a container is created (an invalid name must not leave a
+    running container behind) and again inside `uri_for`, so the contract holds
+    for every caller and not just the CLI.
     """
     if not GRAPH_NAME_RE.match(graph):
         raise SystemExit(
@@ -121,7 +118,16 @@ def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
             f"{GRAPH_NAME_RE.pattern} (it is interpolated into an eval-ed "
             f"export line)"
         )
-    return f"docker://:@127.0.0.1:{port}/{graph}"
+    return graph
+
+
+def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
+    """The URI shape the docker lane's tests expect (`docker://` + loopback).
+
+    No password: this tool starts the container without `requirepass` (it is
+    loopback-bound and disposable), so the URI carries an empty password.
+    """
+    return f"docker://:@127.0.0.1:{port}/{_validate_graph(graph)}"
 
 
 def port_is_free(port: int) -> bool:
@@ -157,13 +163,30 @@ def _container_publishes(port: int) -> bool:
 
 
 def container_state(name: str) -> str:
+    """`running` | `stopped` | `absent` | `unknown`.
+
+    `absent` (the container does not exist) is deliberately distinguished from
+    `unknown` (docker itself failed — daemon down, permission): reporting the
+    first when the second is true is how `status` would claim a lane has no
+    container when it merely could not ask.
+    """
     r = _docker("inspect", "--format", "{{.State.Status}}", name, check=False)
-    return (r.stdout or "").strip() if r.returncode == 0 else "absent"
+    if r.returncode == 0:
+        return (r.stdout or "").strip() or "unknown"
+    err = f"{r.stderr or ''}{r.stdout or ''}".lower()
+    return "absent" if ("no such" in err or "not found" in err) else "unknown"
 
 
-def _graph_count(name: str) -> int:
+def _graph_count(name: str) -> int | None:
+    """Graphs in a container, or None when docker could not be asked.
+
+    None rather than 0: `graphs=0` is a claim about the container, and a failed
+    `docker exec` is not evidence for it.
+    """
     r = _docker("exec", name, "redis-cli", "--no-auth-warning", "GRAPH.LIST",
                 check=False)
+    if r.returncode != 0:
+        return None
     return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
 
 
@@ -199,11 +222,17 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
         if published is None:
             raise SystemExit(f"test-lane: {name} is running but publishes no port")
         return name, published
+    if state == "unknown":
+        raise SystemExit(
+            f"test-lane: cannot determine the state of {name} — is the docker "
+            f"daemon running? (refusing to guess: removing a container that may "
+            f"belong to another lane would be unforgivable)"
+        )
     if state != "absent":
-        # Defence in depth: this is the one remove path that does not go through
-        # `stop()`, so assert the same invariant rather than relying on the
-        # caller having built the name from `container_name()`.
-        assert is_managed(name), f"refusing to remove unmanaged {name!r}"
+        # Defence in depth, and NOT an `assert`: this guard must survive
+        # `python -O`, so it is a real refusal rather than a stripped one.
+        if not is_managed(name):
+            raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
         _docker("rm", "-f", name, check=False)
 
     chosen = port if port is not None else pick_port()
@@ -223,15 +252,20 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
         if "PONG" in (ping.stdout or ""):
             published = _published_port(name)
             if published is None:
+                # Never leave behind a container nobody can address.
+                _docker("rm", "-f", name, check=False)
                 raise SystemExit(
-                    f"test-lane: {name} answered PING but publishes no port"
+                    f"test-lane: {name} answered PING but publishes no port; "
+                    f"removal attempted"
                 )
             return name, published
         time.sleep(1)
     logs = _docker("logs", "--tail", "20", name, check=False)
-    _docker("rm", "-f", name, check=False)
+    rm = _docker("rm", "-f", name, check=False)
+    fate = ("removed it" if rm.returncode == 0
+            else "FAILED to remove it — check `docker ps -a`")
     raise SystemExit(
-        f"test-lane: {name} never answered PING; removed it. Logs:\n"
+        f"test-lane: {name} never answered PING; {fate}. Logs:\n"
         f"{logs.stdout}{logs.stderr}"
     )
 
@@ -260,10 +294,12 @@ def stop(name: str) -> str:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    slug = args.slug or slug_for(repo_root())
-    name, port = start(slug, args.port)
-    print(f"test-lane: {name} on 127.0.0.1:{port} "
-          f"(graphs={_graph_count(name)})", file=sys.stderr)
+    _validate_graph(args.graph)      # refuse BEFORE a container exists
+    name, port = start(slug_for(repo_root()), args.port)
+    graphs = _graph_count(name)
+    shown = "unknown" if graphs is None else str(graphs)
+    print(f"test-lane: {name} on 127.0.0.1:{port} (graphs={shown})",
+          file=sys.stderr)
     print(f"export TORTOISE_DB_URI='{uri_for(port, args.graph)}'")
     return 0
 
@@ -275,13 +311,14 @@ def cmd_uri(args: argparse.Namespace) -> int:
 def _target_name(args: argparse.Namespace) -> str:
     """The container this invocation acts on.
 
-    ONLY the worktree-derived name: an explicit `--name` used to be accepted
-    here, which made `down --name fdb-lane-<peer>` able to delete ANOTHER
-    lane's live container — the exact cross-lane destruction this tool exists
-    to prevent (review P1-2). The library-level `stop()` keeps its refusal for
-    the non-`fdb-lane-*` family as defence in depth, and is unit-tested.
+    ALWAYS the worktree-derived name. There is no override — not `--name` and
+    not `--slug`: a review round removed only `--name`, and the next one showed
+    that `down --slug <peer>` still targeted another lane's live container, since
+    a peer's slug is a computable `sha1(path)[:10]` and `is_managed()` can only
+    reject the non-`fdb-lane-*` family. `stop()` keeps that family refusal as
+    defence in depth, and it is unit-tested directly.
     """
-    return container_name(args.slug or slug_for(repo_root()))
+    return container_name(slug_for(repo_root()))
 
 
 def cmd_down(args: argparse.Namespace) -> int:
@@ -295,7 +332,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     state = container_state(name)
     print(f"{name}: {state}", file=sys.stderr)
     if state == "running":
-        print(f"  graphs={_graph_count(name)}", file=sys.stderr)
+        graphs = _graph_count(name)
+        print(f"  graphs={'unknown' if graphs is None else graphs}", file=sys.stderr)
         published = _published_port(name)
         if published is not None:
             print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
@@ -318,15 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Private throwaway FalkorDB for the docker test lane (#5084)",
     )
     # The flags live on the SUBcommands so the natural spelling works:
-    # `uri --port 16390`. (Declaring them on the root only accepted them BEFORE
-    # the subcommand, which silently made a post-subcommand flag fail in
-    # argparse instead of at the code that guards it.) There is deliberately NO
-    # `--name`: an explicit container name could target a PEER lane's
-    # `fdb-lane-<other-slug>` and delete its live isolated DB (review P1-2), so
-    # `down` can only ever act on the container derived from this worktree.
+    # `uri --port 16390`. There is deliberately NO override of WHICH container
+    # this tool acts on — not `--name`, not `--slug`: either would let one lane
+    # delete (or silently adopt) another lane's `fdb-lane-<slug>`, which is the
+    # cross-lane destruction this whole tool exists to prevent. The target is
+    # always derived from this worktree.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--slug", default=None,
-                        help="lane slug (default: derived from this worktree path)")
     common.add_argument("--port", type=int, default=None,
                         help="publish on this loopback port (default: first free)")
     common.add_argument("--graph", default=DEFAULT_GRAPH,

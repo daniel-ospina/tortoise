@@ -510,7 +510,9 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 >
 > Isolation, **not** speed: the same single test measured 90.59 s privately vs 92.66 s on
 > the shared container, so use the shared lane when that is what you are testing. The tool
-> can only remove `fdb-lane-*` containers — `down --name falkordb` is refused by design.
+> can only ever act on the container derived from the worktree you run it in — it has no
+> `--name` or `--slug` override, so one lane cannot remove (or silently adopt) another
+> lane's `fdb-lane-<slug>`.
 
 ### Documentation Filing
 

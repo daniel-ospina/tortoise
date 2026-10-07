@@ -143,19 +143,47 @@ def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
     assert "127.0.0.1:16401" in out
 
 
-def test_down_offers_no_way_to_target_another_lanes_container():
-    """Review P1-2: `--name` was an escape hatch that could remove a PEER
-    lane's live `fdb-lane-<other-slug>`. It is gone: `down` can only ever act
-    on this worktree's own container, and argparse now rejects the flag."""
-    with pytest.raises(SystemExit) as exc:
-        tl.main(["down", "--name", "fdb-lane-peer-slug"])
-    assert exc.value.code == 2, "argparse must reject --name (usage error)"
+def test_no_flag_can_target_another_lanes_container():
+    """Review round 2: removing only `--name` left `--slug`, which still mapped
+    to `fdb-lane-<peer>` (a peer's slug is a computable `sha1(path)[:10]`). Both
+    overrides are gone, so neither spelling can name another lane's container."""
+    for flag, value in (("--name", "fdb-lane-peer-slug"),
+                        ("--slug", "peer-slug")):
+        with pytest.raises(SystemExit) as exc:
+            tl.main(["down", flag, value])
+        assert exc.value.code == 2, f"argparse must reject {flag} (usage error)"
 
 
 def test_target_name_is_always_derived_from_this_worktree(monkeypatch):
     monkeypatch.setattr(tl, "repo_root", lambda: "/tmp/wt-under-test")
-    args = argparse.Namespace(slug=None, graph=tl.DEFAULT_GRAPH)
+    args = argparse.Namespace(graph=tl.DEFAULT_GRAPH)
     assert tl._target_name(args) == tl.container_name(tl.slug_for("/tmp/wt-under-test"))
+
+
+def test_start_refuses_when_docker_state_is_unknown(monkeypatch):
+    """A docker failure is not evidence that no container exists: guessing
+    `absent` there would remove a container that may belong to another lane."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called despite an unknown state")
+
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.start("slug")
+    assert "cannot determine the state" in str(exc.value)
+
+
+def test_an_invalid_graph_name_is_refused_before_a_container_exists(monkeypatch):
+    """Ordering again: `uri --graph 'bad name'` must not leave a running
+    container (and a claimed port) behind."""
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("start() ran before the graph name was validated")
+
+    monkeypatch.setattr(tl, "start", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.main(["uri", "--graph", "bad name"])
+    assert "refusing graph name" in str(exc.value)
 
 
 def test_status_reports_the_published_port_not_the_requested_one(monkeypatch, capsys):
