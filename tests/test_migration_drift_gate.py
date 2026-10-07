@@ -526,11 +526,13 @@ def test_clean_run_has_no_remediation_markers():
 # timing-dependent race, so these are deterministic on a loaded host and under
 # both BSD and GNU coreutils. The `ls | head -n1` site at `:126` is guarded with
 # `|| true` and is deliberately NOT pinned here: it needs thousands of matching
-# files to exceed the buffer, and the test that observed the CI red stages three
-# ~40-byte migrations, whose `ls` listing is ~60 bytes — far too small to
-# SIGPIPE (0/20 runs non-zero at 2 files vs 20/20 at 2600). So the specific
-# trigger of that red is UNIDENTIFIED; what these tests establish is the defect
-# CLASS, and that these three paths now fail loudly pre-fix and pass post-fix.
+# files to exceed the buffer, while the test that observed the CI red stages a
+# handful of tiny migrations — orders of magnitude below that, so it cannot
+# reach the site. (The boundary between 2 files and 2600 is measured; the exact
+# listing sizes are not load-bearing and are deliberately not quoted here.) So
+# the specific trigger of that red is UNIDENTIFIED; what these tests establish is
+# the defect CLASS, and that these three paths now fail loudly pre-fix and pass
+# post-fix.
 #
 # False-negative floor, stated because it bounds what these can promise: every
 # fixture must EXCEED the pipe capacity, so on a host whose default capacity were
@@ -609,8 +611,8 @@ def test_large_api_error_body_still_reports_exit_2():
 
     Regression for #6136. The error path piped the Management API body through
     `head -c 400`; a body larger than the pipe buffer SIGPIPE'd `printf`, so
-    `set -e` aborted the script with 141 — no diagnostic at all, and not the
-    documented 2 (could-not-determine), which callers rely on to fail closed.
+    `set -e` ended the script at 141 instead of the documented 2
+    (could-not-determine) that callers rely on to fail closed.
     """
     big = FIXTURES / "big-api-error-body.txt"
     big.write_text("x" * 262144 + "\n")
