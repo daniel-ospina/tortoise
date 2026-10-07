@@ -20,6 +20,7 @@ Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -48,6 +49,7 @@ def sdk():
         db_path, namespace=f"test_aops_{os.urandom(4).hex()}")
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _build_rule_graph(sdk: TortoiseSDK) -> dict:

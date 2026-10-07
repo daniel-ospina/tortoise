@@ -4,7 +4,7 @@
 // tags/meta_title/meta_description from the article content + Tortoise SEO
 // strategy. The editor calls this with the user's PKCE session (Bearer token);
 // the function verifies the session + blog_admins membership (same fail-closed
-// port as functions/admin/[[path]].ts). The post body is used ONLY to build
+// port as website/apps/dashboard/functions/admin/[[path]].ts). The post body is used ONLY to build
 // the prompt and is never echoed back (prompt-injection surface stays
 // server-side).
 //

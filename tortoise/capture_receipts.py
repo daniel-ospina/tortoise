@@ -1,0 +1,55 @@
+"""Per-harness capture receipt / last-error STATE key names — ONE definition.
+
+The dashboard's capture-status surface reads these server-written onboarding
+state keys (never client state):
+
+* ``session_capture_receipt_<harness>`` records a durable hosted 2xx capture
+  under an authenticated agent credential, ATTRIBUTED to ``<harness>``. The
+  attribution is the caller's declaration, not a server observation: on a
+  fresh ``session_id`` it is ``body.harness`` (an agent self-report), and on a
+  re-capture it is the Session's STORED harness when the Session has one (itself
+  recorded from the declaration that first stamped it) or the current caller's
+  ``body.harness`` when it does not (``stored or claimed``) — a caller
+  declaration either way. No credential→harness binding exists (``tt_``/``tk_``
+  keys carry no harness, `#3700`), so nothing here proves the server OBSERVED
+  which harness captured. The bare ``session_capture_receipt`` is the
+  harness-unproven key (legacy no-harness hooks, session-JWT captures).
+* ``session_capture_last_error_<harness>`` carries the last non-2xx attempt's
+  detail (the per-harness failure sub-line). Same conclusion, same resolution:
+  every capture surface — the REST endpoint and the MCP
+  ``tortoise_session_capture`` tool (``tortoise/mcp_server.py``) — resolves the
+  harness with ``hosted_api._observed_capture_harness`` (stored or claimed)
+  before writing the key (#3681 / #4898). That helper is the single resolver;
+  its own docstring carries the credential and stored-harness rules.
+
+The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
+and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
+(it reads no last-error key). The hosted API still spells every per-harness key
+name literally in its two onboarding default-state dicts
+(``DEFAULT_ONBOARDING_STATE`` and ``_ONBOARDING_DEFAULT_STATE``) — that
+enumeration is legitimate and must stay, because the dashboard needs a
+REGISTERED row per harness even before any capture arrives and THIS module owns
+only the key format, not the harness list. Those literals are pinned to these
+formatters by ``tests/test_5051_capture_receipt_key_registry.py``, so changing a
+key name here fails there instead of silently drifting the registry (an
+unregistered key is dropped by the ``_update_onboarding_state`` allowlist
+filter).
+"""
+from __future__ import annotations
+
+__all__ = ["capture_last_error_key", "capture_receipt_key"]
+
+
+def capture_receipt_key(harness: str | None) -> str:
+    """Receipt state key for a harness — per-harness when present, the bare
+    legacy key for no-harness hooks (T1-P3 None-guard)."""
+    return f"session_capture_receipt_{harness}" if harness else \
+        "session_capture_receipt"
+
+
+def capture_last_error_key(harness: str | None) -> str | None:
+    """Per-harness last-error state key. No bare variant is registered — a
+    legacy no-harness hook has no per-harness dashboard row to read it."""
+    if not harness:
+        return None
+    return f"session_capture_last_error_{harness}"

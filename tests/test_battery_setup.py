@@ -22,7 +22,16 @@ from tests._embedded import skip_if_no_falkor
 CONFIG = Path(__file__).parent.parent / "battery" / "config"
 GOLDS = CONFIG.parent / "golds"
 
-FIXED_EMBEDDING = [0.1, 0.2, 0.3]
+# #4280: the stored width must be the store's index width. `create_point`
+# routes through `encode_for_store(content, required_embedding_dim)`, and an
+# INDEXED store (a `TORTOISE_DB_URI` server lane) refuses a vector its 384-dim
+# Point HNSW index cannot hold — a 3-wide stub was degraded to no vector there,
+# so the naive path (`create_point`) and the batched path (which takes this stub
+# directly) stopped agreeing. The stub is padded to EMBEDDING_DIM; both paths
+# then store the same vector on BOTH lanes.
+from tortoise.embeddings import EMBEDDING_DIM as _EMBEDDING_DIM  # noqa: E402
+
+FIXED_EMBEDDING = [0.1, 0.2, 0.3] + [0.0] * (_EMBEDDING_DIM - 3)
 
 
 def _embedding_fn(content: str) -> list[float] | None:

@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import signal
+import socket
 import sys
 import tempfile
+import time
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,6 +52,7 @@ def db_env():
         os.environ.pop("TORTOISE_DB_URI", None)
     else:
         os.environ["TORTOISE_DB_URI"] = old_uri
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def _run_context():
@@ -62,6 +67,167 @@ def _delenv_falkordb(monkeypatch):
     so tests asserting embedded behavior must clear them explicitly."""
     for k in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"):
         monkeypatch.delenv(k, raising=False)
+
+
+def _embedded_daemon_alive(db_path: str) -> bool:
+    """True while a LIVE redis-server still serves the embedded store.
+
+    Pins the DAEMON, not the registry: redislite's ``<db>.settings`` registry
+    is removed only by the client that STARTED the daemon, so registry-
+    absence is order-dependent (an attaching client shuts the daemon down but
+    leaves the registry behind). A surviving registry whose pidfile names a
+    live pid IS the leak; a vanished pidfile is itself proof the daemon
+    exited (Redis removes its own pidfile on graceful shutdown), so its
+    absence must not read as failure.
+
+    Fail-CLOSED, because this is an assertion oracle: a registry or pidfile
+    that cannot be read is "undetermined", and undetermined must read as
+    alive so the pin reds loudly. Returning False there would let a live leak
+    pass the assertion silently — the one direction an oracle may not fail.
+    Non-object shapes count as unreadable too: a top-level JSON list/str/int
+    has no `.get`, so the read stays inside the handler that maps any such
+    failure to True, and a non-string `pidfile` (a corrupt registry can hold a
+    list, or an oversized integer — which `os.path.exists` would RAISE on
+    `OverflowError`, since an `int` is taken as a file descriptor) is True as
+    well. And a non-positive pid: ``os.kill(0, 0)`` probes the caller's own
+    process GROUP and ``os.kill(-1, 0)`` broadcasts, so a corrupt pid of
+    ``0``/``-1`` would otherwise report a healthy daemon (the same guard
+    `embedded_reaper._owner_records` carries, for the same reason).
+    """
+    import json
+
+    settings = db_path + ".settings"
+    if not os.path.exists(settings):
+        return False
+    try:
+        with open(settings) as fh:
+            reg = json.load(fh)
+        pidfile = reg.get("pidfile")
+    except Exception:
+        # unreadable registry, or a non-object top level — undetermined
+        return True
+    if pidfile is not None and not isinstance(pidfile, str):
+        return True  # corrupt field — undetermined, fail closed
+    if not pidfile or not os.path.exists(pidfile):
+        return False  # Redis unlinks its pidfile on graceful shutdown
+    try:
+        with open(pidfile) as fh:
+            pid = int(fh.read().strip())
+    except Exception:
+        return True  # torn/unparseable pidfile — undetermined, fail closed
+    if pid <= 0:
+        return True  # 0/-1 would probe our own process group
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, other uid — fail closed
+    return True
+
+
+def _registry_field(db_path: str, field: str) -> str | None:
+    """A string field of the daemon's own `.settings` registry, or None.
+
+    Non-string values are None rather than passed through: a corrupted
+    registry must not raise out of the reclaim (its sibling oracle
+    `_embedded_daemon_alive` hardens the same input, and a raise would turn a
+    clean red into an ERROR *and* leave the daemon unreclaimed).
+    """
+    import json
+
+    try:
+        with open(db_path + ".settings") as fh:
+            value = json.load(fh).get(field)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _pid_is_this_daemon(pid: int, unixsocket: str | None) -> bool:
+    """True only when `pid` really is a redis-server for THIS daemon.
+
+    The identity check the production reaper uses (#1642 FIX 5), reused here
+    because the reclaim must never signal a process it has not identified: a
+    pidfile can outlive its daemon, and a recycled pid belongs to an
+    unrelated process.
+
+    Both sides of the socket-dir comparison are realpath'd:
+    `_socket_dir_from_cmdline` returns a resolved path, while the registry's
+    `unixsocket` is redislite's raw `mkdtemp` path — on macOS those differ by
+    the `/private` prefix for every tempdir, so comparing them unresolved
+    makes this gate always False and silently disables the fallback it guards.
+
+    With no `unixsocket` on record the identity degrades to "is a
+    redis-server", so it is only a weak guard there; the socket path is the
+    identity that makes pid reuse impossible.
+    """
+    from tortoise.embedded_reaper import _cmdline, _socket_dir_from_cmdline
+
+    if "redis-server" not in _cmdline(pid):
+        return False
+    if unixsocket is None:
+        return True  # weak identity — see docstring
+    return _socket_dir_from_cmdline(pid) == os.path.dirname(os.path.realpath(unixsocket))
+
+
+def _reclaim_leaked_daemon(db_path: str) -> int | None:
+    """Reclaim a leaked daemon; return None when there was none.
+
+    Used as the SUBJECT of the pin's assertion
+    (`leaked_pid = _reclaim_leaked_daemon(db_path)` then `assert leaked_pid is
+    None`), so the cleanup runs before the assert can fire. That ordering is
+    load-bearing rather than tidy: on the reverted build the shared-release
+    branch reclaims nothing, so a red pin would otherwise bequeath the very
+    orphan it reports — one per retry, on a leg whose leak threshold is 0
+    (#4496 review, P2).
+
+    Returns the reclaimed pid, or -1 for a live daemon whose pid could not be
+    determined (still a red — the value is only ever a diagnostic here).
+
+    Reclaimed through the registry's OWN `unixsocket` rather than by signal:
+    `SHUTDOWN NOSAVE` on that path can only reach the server listening on it,
+    so pid reuse cannot make this helper kill an unrelated process on the
+    socket path. The pidfile pid is only a fallback, and only after
+    `_pid_is_this_daemon` identifies it as a redis-server for this exact
+    socket dir (#4496 review cycles 2 and 3).
+    """
+    if not _embedded_daemon_alive(db_path):
+        return None
+    # `pidfile` is the registry's PATH to the pidfile; the pid is its content.
+    pid = None
+    pidfile = _registry_field(db_path, "pidfile")
+    if pidfile:
+        try:
+            with open(pidfile) as fh:
+                pid = int(fh.read().strip())
+        except Exception:
+            pid = None
+        if pid is not None and pid <= 0:
+            pid = None
+    unixsocket = _registry_field(db_path, "unixsocket")
+    if unixsocket:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2.0)
+                sock.connect(unixsocket)
+                sock.sendall(b"SHUTDOWN NOSAVE\r\n")
+        except (OSError, TypeError):
+            pass
+        for _ in range(25):  # the daemon exits asynchronously
+            if not _embedded_daemon_alive(db_path):
+                return pid if pid is not None else -1
+            time.sleep(0.2)
+    if pid is not None and _pid_is_this_daemon(pid, unixsocket):
+        for attempt in range(10):  # SIGTERM first, then SIGKILL
+            try:
+                os.kill(pid, signal.SIGTERM if attempt == 0 else signal.SIGKILL)
+            except OSError:
+                break
+            time.sleep(0.2)
+            if not _embedded_daemon_alive(db_path):
+                break
+    return pid if pid is not None else -1
 
 
 class TestCliContext:
@@ -365,6 +531,242 @@ class TestCliOnboardDbTarget:
         assert rc == 0
         assert "Embedded mode initialized" in out
         assert "Embedded engine active" not in out  # no fallback gate — explicit choice
+
+    def test_init_closes_the_embedded_daemon_it_opened(self, monkeypatch, tmp_path):
+        """#4579: `tortoise init` closes the embedded clients it opens.
+
+        `_cmd_init` is an in-process entry point (`_cmd_onboard` invokes it
+        directly; agents/tests call `main(["init"])`) and it opens TWO
+        clients on ONE embedded daemon — the reachability probe projection
+        and the welcome-write `TortoiseSDK`. Left open, the #3653 co-tenant
+        release path withdraws each `.tortoise-owners` record WITHOUT
+        shutting the daemon down, so the daemon outlives the call
+        uninstrumented with its registry data dir present — exactly the
+        class #3767 deliberately refuses to fast-kill (the `test-slow (b)`
+        red leg before this fix).
+
+        The assertion pins the DAEMON, not merely the registry. redislite's
+        `<db>.settings` registry is removed only by the client that STARTED
+        the daemon, so registry-absence is order-dependent (an attaching
+        client shuts the daemon down but leaves the registry behind). If the
+        registry survives, a READABLE pid must be dead; a vanished pidfile is
+        itself proof the daemon exited (Redis removes its own pidfile on
+        graceful shutdown), so its absence is not the failure signal. Both
+        close orders therefore pass, and the unfixed code fails on the
+        positive assertion (no clean SAVE = no db file).
+        """
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db_path = str(tmp_path / "init-closed.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _delenv_falkordb(monkeypatch)
+        import gc
+
+        from tortoise import __main__ as m
+
+        # #4579: the leaked daemon (unfixed code) was reclaimed only by a GC
+        # pass, and the projection/sdk wrappers are cyclic
+        # (`_GuardedGraph._proj` back-ref), so a collection landing in this
+        # window could SAVE-close the leak and let the mutation pass. Disable
+        # GC across call+asserts so the explicit close is the ONLY thing that
+        # can shut the daemon down — the pin is deterministic, not GC-timing
+        # dependent.
+        _gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            rc = m._cmd_init(mock.Mock(
+                path=None, cmd="init", yes=True, api_key=None, no_index=True))
+            assert rc == 0
+
+            # POSITIVE: the clean close saved the RDB to the target path (init
+            # does not flush it synchronously; the file appears on the SAVE
+            # shutdown). With no close the file is absent while a live daemon
+            # still holds the store, so this reds the mutation deterministically.
+            assert os.path.exists(db_path), "init did not save the embedded db"
+
+            # NEGATIVE: no LIVE daemon survives the call (see
+            # `_embedded_daemon_alive` for why the DAEMON, not the registry,
+            # is the subject). `_reclaim_leaked_daemon` is the subject of the
+            # assertion so that a red pin reclaims what it reports.
+            leaked_pid = _reclaim_leaked_daemon(db_path)
+            assert leaked_pid is None, (
+                f"init leaked its embedded redis-server (pid {leaked_pid}, "
+                f"{db_path}, #4579): once the co-tenant release withdraws the "
+                "owner record it becomes an uninstrumented, dir-present "
+                "orphan the #3767 reaper refuses to fast-kill")
+        finally:
+            if _gc_was_enabled:
+                gc.enable()
+
+    def test_init_daemon_is_closed_when_subprocess_run_is_mocked(
+            self, monkeypatch, tmp_path):
+        """#4496: an embedded init inside a mocked `subprocess.run` still closes.
+
+        Dozens of tests fake git detection with `mock.patch("subprocess.run")`
+        — this file alone does it in ten places — and `_cmd_init`'s close asks
+        the reaper whether a co-tenant still holds the daemon. That probe reads
+        `ps`; under the mock its stdout is a MagicMock, and the unguarded parse
+        raised `TypeError` out of `_process_start_time`, a helper whose
+        contract is "epoch seconds, or None when undeterminable". The raise
+        propagated through `_owner_records` into `cotenant_holds_server`,
+        whose deliberate fail-closed `except Exception: return True` then
+        reported a PHANTOM co-tenant: the last of init's two clients took the
+        shared branch (pool disconnect only, no shutdown) and the daemon
+        survived UNINSTRUMENTED with its data dir present — the exact
+        `candidate / path_based=False / unattributed=True / dir_missing=False`
+        shape `test-slow (b)` reports at threshold 0, and the class #3767
+        deliberately refuses to fast-kill.
+
+        The leak is ORDER-DEPENDENT, which is why the LEG was the
+        reproduction and a single file was not: `record_owner` resolves our
+        own pid's start time at most ONCE per process (`_own_start_cache`),
+        so only a re-run with that cache already warm stamps a REAL start —
+        and only a real stamp makes `_owner_records` consult `ps` at close
+        time. An "unknown" stamp short-circuits to the pid-liveness arm and
+        never reaches the parser. Warm the cache explicitly so the pin does
+        not depend on which tests ran first.
+
+        `subprocess.run` stays mocked across the whole call, because the close
+        runs inside `_cmd_init` — before the caller's `with` block exits. That
+        is the real sequence the leg exercises.
+        """
+        import gc
+        import time
+
+        from tortoise import __main__ as m
+        from tortoise import embedded_lifecycle as el
+        from tortoise import embedded_reaper as R
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        db_path = str(tmp_path / "init-under-mock.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        # The full-run condition: a prior test already resolved our start.
+        monkeypatch.setitem(el._own_start_cache, os.getpid(), time.time())
+        # …and the per-sweep ps cache must not answer for our pid either, or
+        # `_process_start_time` would return the cached float and never parse.
+        monkeypatch.delitem(R._PROC_INFO_CACHE, os.getpid(), raising=False)
+
+        # Same GC-independence as the sibling pin: the wrappers are cyclic, so
+        # a collection landing in this window could SAVE-close the daemon and
+        # let an unfixed build pass. The explicit close must be the only seam.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with mock.patch("subprocess.run") as fake_run:
+                fake_run.return_value.returncode = 1  # not a git repo
+                rc = m._cmd_init(mock.Mock(
+                    path=None, cmd="init", yes=True, api_key=None,
+                    no_index=True))
+            assert rc == 0
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+        leaked_pid = _reclaim_leaked_daemon(db_path)
+        assert leaked_pid is None, (
+            f"init leaked its embedded redis-server (pid {leaked_pid}, "
+            "#4496) under a mocked subprocess.run: the reaper's ps probe "
+            "raised, cotenant_holds_server read that as a co-tenant, and the "
+            "last client declined the shutdown — leaving an uninstrumented, "
+            "dir-present orphan the #3767 reaper refuses to fast-kill")
+
+    @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
+    def test_init_releases_the_probe_when_a_later_step_raises(
+            self, monkeypatch, tmp_path, exc):
+        """#4579: a failure raised AFTER the probe binds still releases it.
+
+        Both embedded error arms are pinned. An `ImportError` from a statement
+        that runs after `_proj = FalkorProjection(db_path)` (`_proj.g.query`,
+        the `_mark_embedded_opened` import, the fallback-notice import) lands
+        in the `except ImportError` arm, declared BEFORE `except Exception`;
+        any other exception (`RuntimeError` here) lands in the
+        `except Exception` arm. Either way the probe must be closed, or the
+        cyclic probe outlives the call and its daemon is left uninstrumented
+        with its data dir present — exactly the class #3767 refuses to
+        fast-kill. The SDK mark is forced to raise so both arms are exercised
+        deterministically.
+
+        GC is disabled so the release is attributable to the explicit close,
+        not to a `weakref.finalize` GC-close.
+        """
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db_path = str(tmp_path / "init-mark-error.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _delenv_falkordb(monkeypatch)
+
+        import gc
+
+        import tortoise.sdk as _sdk
+
+        def _boom(_path):
+            raise exc("simulated failure after the probe bound")
+
+        monkeypatch.setattr(_sdk, "_mark_embedded_opened", _boom)
+
+        from tortoise import __main__ as m
+
+        _gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            rc = m._cmd_init(mock.Mock(
+                path=None, cmd="init", yes=True, api_key=None, no_index=True))
+            assert rc == 1
+
+            # The probe was released on the error return: no LIVE daemon may
+            # survive it. Same order-independent daemon pin as the success-path
+            # test above (a vanished pidfile is proof the daemon exited).
+            leaked_pid = _reclaim_leaked_daemon(db_path)
+            assert leaked_pid is None, (
+                f"init leaked its embedded redis-server (pid {leaked_pid}, "
+                f"{db_path}) on an error return that followed the probe bind "
+                "(#4579)")
+        finally:
+            if _gc_was_enabled:
+                gc.enable()
+
+    @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
+    def test_init_closes_the_uri_probe_on_a_connect_error(self, monkeypatch, exc):
+        """#4579: the URI-mode probe is released on both error returns.
+
+        URI mode has no local daemon, so the pin is the probe's `close()` —
+        dropping either `_close_probe()` call there would leak the client
+        connection. `FalkorProjection.from_uri` is faked so no server is
+        needed and the post-bind query can raise on demand.
+        """
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:16399/uri_probe")
+        _delenv_falkordb(monkeypatch)
+
+        import tortoise.projection as _proj_mod
+
+        closed = []
+
+        class _FakeProbe:
+            def __init__(self):
+                self.g = mock.Mock()
+
+            def close(self):
+                closed.append(True)
+
+        def _from_uri(_target):
+            probe = _FakeProbe()
+
+            def _raise(*_a, **_kw):
+                raise exc("simulated connect failure")
+
+            probe.g.query = _raise
+            return probe
+
+        monkeypatch.setattr(
+            _proj_mod, "FalkorProjection", mock.Mock(from_uri=_from_uri))
+
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+        assert rc == 1
+        assert closed == [True], (
+            "the URI probe was not released on the error return (#4579)")
 
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the

@@ -1,11 +1,13 @@
 // Shared admin-gate auth for blog API endpoints (#1861/#1863/#1865) — zero-dep.
 //
-// Single home for the session-verification + blog_admins membership checks
-// that the admin SPA endpoints need. Ported from functions/admin/[[path]].ts
-// (which keeps its own copy — it predates this module); keep the two in sync
-// or migrate the gate to import this. Fail-closed: no session / not admin →
-// null/false, never a soft pass. Cookie name sb-tortoise-auth-token matches
-// the app's custom storage key (supabase.ts).
+// Single home for the bearer-session verification + blog_admins membership
+// checks the blog API endpoints need. The blog admin SPA gate used to share this
+// shape, but #4171 moved that gate to the app origin where it resolves the BFF
+// `__Host-session` cookie and checks `is_admin()` with the user's own token — so
+// there is no longer a second copy to keep in sync. Fail-closed: no session / not
+// admin → null/false, never a soft pass. Cookie name sb-tortoise-auth-token
+// matches the app's custom storage key (supabase.ts), still used by the admin
+// console's data layer (SCOPE.md §4 W2, backlog #4178).
 //
 // ZERO-DEPENDENCY (plain TS, no imports).
 

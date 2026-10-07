@@ -581,3 +581,64 @@ def test_sdk_validates_before_any_graph_work():
         sdk.volunteer_context(
             [{"role": "user", "content": "hi"}], max_pointers=99)
     assert sdk._get_proj() is proj_before  # nothing was torn down
+
+
+# ── #2385 item 1: the INJECTED BLOCK carries the contestation flag ─────────
+
+def test_injected_block_marks_a_contested_pointer_flag_first():
+    """#2385 item 1 + plan §E2E-9 1a: the injected ``block`` — not only the
+    ``why`` entry — must carry the contested flag. The block is the ONLY
+    channel a model sees when ``why`` is off, so a contested belief riding it
+    unmarked reads as a settled current belief (the graph-poison
+    amplification the finding names: planted content above the gate is
+    indistinguishable from settled memory)."""
+    sdk = _fresh_sdk()
+    planted = _plant_contested(
+        sdk,
+        "Acme security review was due May 1 and has not shipped",
+        "Acme security review shipped on April 30 per the release log",
+    )
+    window = [
+        {"role": "user", "content": "What's the status of the Acme security "
+                                    "review?"},
+        {"role": "assistant", "content": "Let me check."},
+        {"role": "user", "content": "Has it shipped?"},
+    ]
+    r = sdk.volunteer_context(window, session_id="sess_acme_flag", why=True)
+    bullet = next((line for line in r["block"].splitlines()
+                   if f"point/{planted['claim']}" in line), None)
+    assert bullet is not None, f"contested claim must ride the block: {r['block']!r}"
+    assert "contested" in bullet, f"block must flag the dispute: {bullet!r}"
+    # The flag is a boolean-derived mark — never graph text.
+    assert "\n" not in bullet
+
+
+def test_injected_block_marks_a_superseded_predecessor():
+    """#2385 item 1 + plan §E2E-9 1a: a superseded predecessor that surfaces
+    as a pointer must ride the block flagged ``superseded`` + "see what
+    changed" — it may never read as the current belief.
+
+    Reachability note: the terminal EP read returns ``has_ep=false`` for a
+    superseded point, so the 0.7 gate currently keeps a predecessor out of the
+    pointer pool entirely (the supersession arm's hits are dropped at stage 4
+    — see ``test_superseded_predecessor_never_surfaces_as_current``). The mark
+    is therefore pinned at the seam that renders it, so the block cannot ship
+    unmarked the moment that gate changes.
+    """
+    from tortoise.volunteer import _pointer_flag, build_block
+    cand = {"id": "pt_old", "superseded": True, "contested": False}
+    flag = _pointer_flag(cand)
+    assert "superseded" in flag and "see what changed" in flag
+    # A superseded-but-also-contested point carries BOTH marks, deterministically.
+    both = _pointer_flag({"superseded": True, "contested": True})
+    assert both.index("superseded") < both.index("contested")
+    block = build_block(
+        [{"id": "pt_old", "label": "Tier pricing", "synopsis": "$99"}],
+        [{"label": "Tier pricing", "band": "high"}], [flag])
+    bullet = next(line for line in block.splitlines() if "point/pt_old" in line)
+    assert "point/pt_old [superseded — see what changed]" in bullet
+    # An unflagged pointer is byte-identical to the pre-#2385 grammar.
+    plain = build_block(
+        [{"id": "pt_live", "label": "Tier pricing", "synopsis": "$129"}],
+        [{"label": "Tier pricing", "band": "high"}], [""])
+    assert "- **Tier pricing** → point/pt_live — $129" in plain

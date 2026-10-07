@@ -1,8 +1,10 @@
 // #1623: plan display data for the dashboard Billing page — a build-time
 // import of product/pricing.json (single source of truth, same file the
 // server's tier limits and the marketing product.html pricing grid read).
-// Unlike product.html's hand-maintained mirror (which needs a parity test,
-// tests/test_website_static.py), this IS the file — no drift possible.
+// The imported DATA cannot drift — this IS the file. The tier DISPLAY names
+// below (TIER_LABELS) are a separate hand-maintained map, guarded against
+// product.html's `labels` map by
+// tests/test_website_static.py::TestDisplayLabelParity (#4336).
 //
 // Price ids are NOT here: they stay server-resolved (STRIPE_PRICE_IDS via
 // /v1/team's checkout_price_ids — the client never hardcodes Stripe ids,
@@ -13,10 +15,12 @@ export const PLAN_TIERS = ['free', 'solo', 'pro', 'team']
 
 // anon = unclaimed zero-email teams (internal tier, #1082) — never shown in
 // the grid; the current-plan card humanizes it as Free.
+// #4336: the `pro` tier renders as "Builder" — the internal tier key stays
+// `pro` (Stripe price ids, pricing.json keys, quota/tier code).
 export const TIER_LABELS = {
   free: 'Free',
   solo: 'Solo',
-  pro: 'Pro',
+  pro: 'Builder',
   team: 'Team',
   anon: 'Free',
 }
@@ -43,6 +47,11 @@ export function planOptions() {
       price: t.price_usd_monthly ?? 0,
       limits: [graphs, users, `${fmtInt(t.included_write_ops_per_month ?? 0)} write ops/mo`, nodes, `${fmtInt(t.max_api_keys ?? 0)} API keys`],
       overage: Boolean(t.overage),
+      // #4815: the disclosure a metered tier must show on the plan card the
+      // user upgrades from. The STRING is pricing.json's own
+      // `display.overage_line` (never a second hardcoded copy of the price);
+      // null for a non-metered tier, so the card renders no line at all.
+      overageLine: t.overage ? (pricing.display?.overage_line ?? null) : null,
       popular: tier === 'pro',
     }
   }).filter(Boolean)

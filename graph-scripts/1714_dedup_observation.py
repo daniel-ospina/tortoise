@@ -26,19 +26,37 @@ Usage:
 
     --dry-run  report only (DEFAULT — no writes)
     --merge    perform the supersede merges (opt-in)
-    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
     Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/1714_dedup_observation.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/1714_dedup_observation.py`"
+    )
+
 import argparse
 import os
-import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+# #2901: the ONE canonical non-current predicate (tortoise/live.py) — status
+# in the canonical terminal vocabulary OR the legacy ``outdated=true`` flag.
+# Never inline a status subset here (the pre-fix three-status list
+# ``superseded/retracted/archived`` omitted ``outdated`` / ``deprecated``, so an
+# outdated keyed statement was treated as the current twin of a legacy
+# observation).
+from tortoise.live import _terminal_excluded  # noqa: E402
+
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 
 
 def _resolve_uri(args_uri: str) -> str:
@@ -102,7 +120,7 @@ def scan_observation_duplicates(proj) -> dict:
     stmt_rows = proj.g.query(
         "MATCH (n:Point {pointKind:'statement'}) "
         "WHERE n.github_url IS NOT NULL AND n.github_url <> '' "
-        "AND (n.status IS NULL OR NOT (n.status IN ['superseded','retracted','archived'])) "
+        f"AND {_terminal_excluded('n.status')} "
         "RETURN n.id, n.github_url, n.status",
     ).result_set
     statements_by_url: dict[str, list[str]] = {}

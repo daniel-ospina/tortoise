@@ -14,6 +14,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  TRASH_GRACE_DAYS,
   trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
@@ -138,13 +139,13 @@ const TOMB = (id, deletedAt) => ({ graph_id: id, name: id, kind: 'custom', delet
 
 test('trashDaysLeft: counts whole days from deleted_at to now', () => {
   const now = new Date(T0).toISOString()
-  // Deleted exactly 4 days ago → 3 days left of the 7-day window.
+  // Deleted exactly 4 days ago → the rest of the window.
   const old = new Date(T0 - 4 * 86400000).toISOString()
-  assert.equal(trashDaysLeft(old, now), 3)
-  // Deleted just now → 7 days left.
-  assert.equal(trashDaysLeft(now, now), 7)
-  // Deleted 7+ days ago → 0 (past window; purge clears on cadence).
-  const aged = new Date(T0 - 8 * 86400000).toISOString()
+  assert.equal(trashDaysLeft(old, now), TRASH_GRACE_DAYS - 4)
+  // Deleted just now → the full window.
+  assert.equal(trashDaysLeft(now, now), TRASH_GRACE_DAYS)
+  // Deleted past the window → 0 (past window; purge clears on cadence).
+  const aged = new Date(T0 - (TRASH_GRACE_DAYS + 1) * 86400000).toISOString()
   assert.equal(trashDaysLeft(aged, now), 0)
 })
 

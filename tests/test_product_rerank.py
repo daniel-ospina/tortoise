@@ -1,4 +1,4 @@
-"""A7/#2976 — product reranker seam: tri-state gate, budget guard, one impl.
+"""A7/#2976 — ask-lane (eval-only) reranker seam: tri-state gate, budget guard, one impl.
 
 Hermetic (no DB, no model, no network): the cross-encoder is never loaded —
 the deterministic in-repo ``FakeScorer`` is injected through the
@@ -158,13 +158,23 @@ def test_guard_reason_is_empty_when_the_set_fits():
 
 def test_guard_estimate_agrees_with_the_assembly_accounting():
     """The guard reads the SAME estimator ``assemble_context`` enforces, so
-    the two can never disagree about what fits."""
-    from tortoise.retrieval import estimate_tokens, render_context
+    the two can never disagree about what fits — ASCII and non-ASCII alike.
+    #4105: assembly charges a CJK/emoji surcharge, so the guard must too, or
+    a set the guard accepts is whole-hit-dropped at assembly (the silent
+    truncation the guard exists to forbid)."""
+    from tortoise.retrieval import estimate_tokens, estimate_tokens_ask, render_context
     text = render_context(HITS, question_date="2026-01-01")
     assert rerank.context_budget_overrun(
-        HITS, question_date="2026-01-01")[1] == estimate_tokens(text)
+        HITS, question_date="2026-01-01")[1] == estimate_tokens_ask(text)
     assert len(text.encode("utf-8")) == rerank.context_budget_overrun(
         HITS, question_date="2026-01-01")[2]
+    # non-ASCII: the guard must charge the surcharge too
+    cjk = [{"id": f"c{i}", "content": "中" * 3000} for i in range(5)]
+    cjk_text = render_context(cjk, question_date="2026-01-01")
+    assert rerank.context_budget_overrun(
+        cjk, question_date="2026-01-01")[1] == estimate_tokens_ask(cjk_text)
+    assert rerank.context_budget_overrun(
+        cjk, question_date="2026-01-01")[1] > estimate_tokens(cjk_text)
 
 
 # ── 4. optional-dep inertness + one implementation ─────────────────────────

@@ -281,6 +281,16 @@ Style `.legal-accept` at ~14px dim text (`.text-dim` token) with margin; keep th
 apps/
 ```
 
+> **SUPERSEDED by #3620 (2026-09-16).** This mechanism never worked, and the
+> "verified" claim in Step 3(a) was false. `wrangler pages deploy` reads **no**
+> ignore file — the Pages upload path uses a hardcoded `IGNORE_LIST`, the string
+> `wranglerignore` appears in 0 files across every installed bundle, and the
+> file itself was served at `https://tortoise.premiselabs.co/.wranglerignore`
+> with a `200` while `apps/` was served anyway. The file was **deleted** in
+> #3620 and replaced by a staged upload root plus post-deploy 404 assertions in
+> `deploy-pages.yml`. Treat every `.wranglerignore` reference in this plan as
+> history, not as a working exclusion.
+
 **Step 2: Stage onboarding prompt BEFORE any deploy (mirror CI; P2-6)** — `cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md && test -s website/onboarding-prompt.md` (same step deploy-pages.yml runs; guarantees the local/CI tree is deploy-consistent and `premiselabs.co/onboarding-prompt.md` stays markdown).
 
 **Step 3: Verify upload scope deterministically (P1-3)** — `wrangler@4 pages deploy` (and `pages upload`) have NO `--dry-run`/`--list-files` flags (verified via `--help`), so verify scope TWO ways:

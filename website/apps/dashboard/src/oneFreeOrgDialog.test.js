@@ -42,7 +42,7 @@ const flat = mainJsx.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' 
 function dialogBlock() {
   const start = flat.indexOf('role="dialog" aria-modal="true" aria-labelledby={createTeamMode')
   assert.notEqual(start, -1, 'the create-organization dialog must still exist')
-  const end = flat.indexOf('{team && team.tier !== \'team\'', start)
+  const end = flat.indexOf('{team && headerUpgradeEligible(team)', start)
   assert.notEqual(end, -1, 'the dialog block must end before the tier badge')
   return flat.slice(start, end)
 }

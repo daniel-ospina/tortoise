@@ -8,7 +8,9 @@ deployed surface:
          /blogpost /blog-extra NOT redirected
   E2E-11 /blog/feed.xml + /blog/sitemap.xml valid XML (published-only)
   E2E-12 /admin/* → 302 /auth?next=<path> (no session; no content leaked;
-         #3080 return-to so login comes BACK to the console)
+         #3080 return-to so login comes BACK to the console). Asserted on the
+         APP origin — the console's home since #4171 (#4409); the marketing
+         host's own `302 → app.*/admin` hand-off is asserted separately.
   E2E-8  agent API rejects bad actors (401 no/invalid key; no anonymous write)
   E2E-14 sanitized SSR (no <script> in rendered post bodies)
   robots.txt lists the blog sitemap
@@ -16,25 +18,44 @@ deployed surface:
 Harness contract (follows test_legal_pages.py):
   - RUN_BLOG_E2E=1 REQUIRED — first statement is a runtime module skip; bare
     collection never errors.
-  - BASE_URL / TORTISE_HOST env (defaults point at production; local runs pass
-    http://127.0.0.1:8788 and TORTISE_HOST=http://127.0.0.1:8788).
+  - BASE_URL / TORTISE_HOST / APP_HOST env (BASE_URL and TORTISE_HOST default
+    to http://127.0.0.1:8788; APP_HOST defaults to https://app.premiselabs.co,
+    so a LOCAL run MUST pass it — otherwise the ALLOW_PROD guard skips the module
+    rather than letting it call production).
 
-Run locally against a wrangler pages dev preview:
+Run locally against a `wrangler pages dev` preview of the MARKETING project:
   RUN_BLOG_E2E=1 BASE_URL=http://127.0.0.1:8788 \
-    TORTISE_HOST=http://127.0.0.1:8788 pytest tests/e2e/test_blog.py -v
+    TORTISE_HOST=http://127.0.0.1:8788 APP_HOST=http://127.0.0.1:8788 \
+    pytest tests/e2e/test_blog.py -v
+
+  That covers the blog legs only. The two ADMIN-GATE probes assert on the origin
+  that SERVES the gate; the marketing preview does not (its `/admin` branch
+  redirects to the hardcoded `APP_ORIGIN`), so they self-skip when APP_HOST and
+  TORTISE_HOST are the same server. To exercise the gate, run the dashboard
+  harness instead: `tests/e2e/auth/test_admin_app_origin.py`.
 
 Post-deploy (CI / manual):
   RUN_BLOG_E2E=1 BASE_URL=https://premiselabs.co \
-    TORTISE_HOST=https://tortoise.premiselabs.co pytest tests/e2e/test_blog.py -v
+    TORTISE_HOST=https://tortoise.premiselabs.co \
+    APP_HOST=https://app.premiselabs.co pytest tests/e2e/test_blog.py -v
+
+Write-path tests (#4220): the two tests that CREATE rows are marked
+``blog_write`` and are NOT run by the deploy job — a deploy must not mutate
+production content. They run on demand against a chosen target:
+  RUN_BLOG_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
+    TORTISE_HOST=https://tortoise.premiselabs.co BLOG_E2E_AGENT_KEY=... \
+    pytest tests/e2e/test_blog.py -v -m blog_write
+Also available as the `Blog write E2E (manual)` workflow (workflow_dispatch).
+Both write tests DELETE the row they created (agent API DELETE, in a
+``finally:``) and assert it is gone — see #4220.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
-import uuid
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import pytest
 import requests
@@ -45,11 +66,29 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Harness contract (test_legal_pages.py convention): no production assertions
-# pre-merge — ALLOW_PROD=1 is required to point at https:// URLs.
+# pre-merge — ALLOW_PROD=1 is required to point at https:// URLs. APP is in this
+# guard because it is the only origin whose DEFAULT is an https production URL:
+# a local run that passes only BASE_URL/TORTISE_HOST would otherwise keep its
+# default and make live calls to app.premiselabs.co.
 COMPANY = os.environ.get("BASE_URL", "http://127.0.0.1:8788").rstrip("/")
 TORTISE = os.environ.get("TORTISE_HOST", "http://127.0.0.1:8788").rstrip("/")
-if os.environ.get("ALLOW_PROD") != "1" and (COMPANY.startswith("https://") or TORTISE.startswith("https://")):
-    pytest.skip("ALLOW_PROD=1 required for https targets (no production assertions pre-merge)")
+# The BFF/session origin (#4054/#4171). The admin console is SERVED here — the
+# marketing origin only redirects to it — so any assertion about the gate's
+# behaviour belongs on this origin. Local runs point every host at one wrangler
+# server (APP_HOST=http://127.0.0.1:8788), in which case the host split does not
+# exist and the cross-host leg is skipped (see `_SEPARATE_HOSTS`).
+APP = os.environ.get("APP_HOST", "https://app.premiselabs.co").rstrip("/")
+_SEPARATE_HOSTS = APP != TORTISE
+if os.environ.get("ALLOW_PROD") != "1" and any(
+    h.startswith("https://") for h in (COMPANY, TORTISE, APP)
+):
+    # `allow_module_level` is REQUIRED: without it pytest raises
+    # "Using pytest.skip outside of a test" and INTERRUPTS collection, so a local
+    # run that omitted APP_HOST errored out instead of running (or skipping).
+    pytest.skip(
+        "ALLOW_PROD=1 required for https targets (no production assertions pre-merge)",
+        allow_module_level=True,
+    )
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "tortoise-blog-e2e"
 
@@ -138,13 +177,25 @@ def test_robots_txt_lists_blog_sitemap() -> None:
     assert f"{TORTISE}/blog/sitemap.xml" in r.text
 
 
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST: that one server is the marketing project, "
+    "which does not serve the admin gate (it redirects /admin to APP_ORIGIN)",
+)
 def test_admin_gate_redirects_unauthenticated() -> None:
-    """E2E-12 + #3080: /admin/* without a session → 302 /auth?next=<path>.
+    """E2E-12 + #3080: the ADMIN GATE, /admin/* without a session → 302 /auth?next=<path>.
+
+    Asserted on the APP origin: that is where the console is served since #4171
+    (`website/apps/dashboard/functions/admin/[[path]].ts`). This test used to hit
+    the MARKETING host and expect the bounce — that stopped being true when the
+    gate moved (#4171), and it spent the interval failing on `status != 302`.
+    Repointed at the origin that owns the behaviour so the assertion tests the
+    gate rather than the redirect in front of it (#4409).
 
     The return-to is load-bearing: without it the post-login redirect always
     landed on the app root, so /admin was unreachable by navigation.
     """
-    r = SESSION.get(f"{TORTISE}/admin/blog", timeout=20, allow_redirects=False)
+    r = SESSION.get(f"{APP}/admin/blog", timeout=20, allow_redirects=False)
     assert r.status_code == 302
     loc = r.headers.get("location", "")
     assert "/auth" in loc
@@ -154,15 +205,56 @@ def test_admin_gate_redirects_unauthenticated() -> None:
     assert nxt == "/admin/blog", f"unexpected return-to: {nxt!r}"
     # Open-redirect guard: a path, never an absolute or protocol-relative URL.
     assert nxt.startswith("/") and not nxt.startswith("//"), f"unsafe return-to: {nxt!r}"
-    # No admin content in the redirect target body
-    a = SESSION.get(loc, timeout=20)
+    # No admin content in the redirect target body (loc is root-relative, so
+    # resolve it against APP — requests needs an absolute URL).
+    a = SESSION.get(urljoin(f"{APP}/", loc), timeout=20)
     assert "Review queue" not in a.text
 
 
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST (local single-server run): no host split to assert",
+)
+def test_marketing_admin_redirects_to_the_app_origin() -> None:
+    """#4171/#4409: the marketing host hands /admin to the origin that serves it.
+
+    Single hop (W2 forbids a chain) and a 302, not a 301 (§12: a new branch for a
+    moved surface must stay reclaimable). The destination is the console ROOT, so
+    a deep path is normalised rather than carried — the console's own routes are
+    hash-based (`#/edit/:id`), and a fragment is preserved by the user agent
+    across the redirect.
+    """
+    r = SESSION.get(f"{TORTISE}/admin/blog", timeout=20, allow_redirects=False)
+    assert r.status_code == 302, (
+        f"marketing /admin/blog -> {r.status_code}; want a single-hop 302 "
+        "(§12: a NEW branch for the moved surface is 302, never 301)"
+    )
+    loc = r.headers.get("location", "")
+    assert loc == f"{APP}/admin", (
+        f"marketing /admin/blog -> {loc!r}; want exactly {APP + '/admin'!r} "
+        "(a chained or off-origin target is the failure this guards)"
+    )
+    # The console is reachable at the destination (the gate answers, not 404).
+    a = SESSION.get(f"{APP}/admin", timeout=20, allow_redirects=False)
+    assert a.status_code in (200, 302), f"{APP}/admin -> {a.status_code}, console unreachable"
+
+
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST: that one server is the marketing project, "
+    "which does not serve the admin gate (it redirects /admin to APP_ORIGIN)",
+)
 def test_admin_gate_return_to_is_scoped_to_admin() -> None:
-    """#3080: the return-to allowlist only ever yields a same-origin /admin path."""
+    """#3080: the return-to allowlist only ever yields a same-origin /admin path.
+
+    Asserted on the APP origin for the same reason as its sibling above: the
+    `next=` return-to is minted by the admin GATE, which lives on the app origin.
+    The marketing host answers `/admin*` with a bare `Location: <app>/admin` and
+    no query, so probing it here could never satisfy `nxt.startswith("/admin")`
+    (#4409).
+    """
     for path in ("/admin", "/admin/", "/admin/blog", "/admin/assets/x.js"):
-        r = SESSION.get(f"{TORTISE}{path}", timeout=20, allow_redirects=False)
+        r = SESSION.get(f"{APP}{path}", timeout=20, allow_redirects=False)
         assert r.status_code == 302, f"{path} → {r.status_code}"
         loc = r.headers.get("location", "")
         nxt = parse_qs(urlparse(loc).query).get("next", [""])[0]
@@ -194,6 +286,20 @@ def test_purge_endpoint_rejects_unauthenticated() -> None:
     assert r.status_code == 401, f"purge no-session → {r.status_code}"
 
 
+def test_agent_api_rejects_unauthenticated_delete() -> None:
+    """#4220: the new DELETE surface is not an anonymous delete.
+
+    Mutates nothing (no key → no write), so it runs on every deploy — the
+    destructive surface gets a fail-closed check on each one. Falsifiable: a
+    change that let DELETE fail open would return 200/404 here, not 401.
+    """
+    url = f"{TORTISE}/blog/api/posts/any-slug"
+    no_key = SESSION.delete(url, timeout=20)
+    assert no_key.status_code == 401, f"delete no-key → {no_key.status_code}"
+    bad_key = SESSION.delete(url, headers={"X-Agent-Key": "invalid-key"}, timeout=20)
+    assert bad_key.status_code == 401, f"delete bad-key → {bad_key.status_code}"
+
+
 # ── #1864/#1865/#1866: crawler-visibility lifecycle + meta contract ─────────
 # These need a VALID agent key (provisioned in blog_agent_keys with
 # agent_name='blog-e2e'; pass the raw key as BLOG_E2E_AGENT_KEY). Without it
@@ -206,52 +312,108 @@ NO_AGENT_KEY = pytest.mark.skipif(
     not AGENT_KEY,
     reason="BLOG_E2E_AGENT_KEY required (provision blog-e2e key in blog_agent_keys)",
 )
+# #4220: the deploy job runs this file with `-m "not blog_write"`. A test that
+# creates/publishes prod content must not run on every deploy — it mutates the
+# editorial queue and, if it fails mid-run, leaves residue. These two run on
+# demand (workflow_dispatch / explicit local invocation).
+BLOG_WRITE = pytest.mark.blog_write
 
 
+def _delete_post(url: str, slug: str) -> requests.Response:
+    """DELETE one of our own posts via the agent API (#4220)."""
+    return SESSION.delete(f"{url}/{slug}", headers=AGENT_HEADERS, timeout=20)
+
+
+def _unpublish_best_effort(url: str, slug: str) -> None:
+    """PATCH status=draft, ignoring failure (#4316).
+
+    DELETE is DRAFT-ONLY (the recorded lifecycle has no published→deleted
+    transition), so a caller that may be facing a PUBLISHED row — the pre-clean
+    of a run killed mid-lifecycle — must unpublish first, or the pre-clean's
+    DELETE 409s and leaves the stale slug to collide with its own create.
+    Best-effort: an absent row 404s, which is the normal case.
+    """
+    with contextlib.suppress(Exception):
+        SESSION.patch(f"{url}/{slug}", json={"status": "draft"},
+                      headers=AGENT_HEADERS, timeout=20)
+
+
+def _delete_post_verified(url: str, slug: str) -> None:
+    """Delete `slug` and assert the row is GONE, not merely unpublished (#4220).
+
+    404 on the first call is tolerated — the row may never have been created
+    (e.g. the test failed before its POST). A 200 is then re-probed: if the
+    DELETE had only unpublished, or silently no-op'd, the second call would
+    return 200 again rather than 404. The re-probe is the falsifiable half.
+    """
+    first = _delete_post(url, slug)
+    assert first.status_code in (200, 404), f"cleanup DELETE → {first.status_code} {first.text[:200]}"
+    if first.status_code == 200:
+        again = _delete_post(url, slug)
+        assert again.status_code == 404, (
+            f"{slug} still present after DELETE ({again.status_code}) — residue would accumulate"
+        )
+
+
+@BLOG_WRITE
 @NO_AGENT_KEY
 def test_agent_api_meta_length_contract() -> None:
     """#1866: agent API rejects meta fields beyond the editor/SSR contract
     (60/155) — a 61/156-char value must 400, boundary 60/155 must 200."""
     url = f"{TORTISE}/blog/api/posts"
     long_title = "meta contract e2e " + "x" * 30
-    slug = f"meta-contract-{abs(hash(long_title)) % 100000}"
+    # #4220: a DETERMINISTIC slug. The old `abs(hash(long_title)) % 100000`
+    # re-randomised per process (PYTHONHASHSEED), so every run minted a NEW
+    # slug — a fresh row per deploy with no name to clean up. One stable slug
+    # keeps residue bounded to a single row even if a run is killed outright.
+    slug = "meta-contract-e2e"
 
-    # Create with over-limit meta fields → 400 validation
-    r = SESSION.post(
-        url,
-        json={
-            "title": long_title,
-            "body": "body",
-            "slug": slug,
-            "meta_title": "t" * 61,
-            "meta_description": "d" * 156,
-        },
-        headers=AGENT_HEADERS,
-        timeout=20,
-    )
-    assert r.status_code == 400, f"over-limit meta → {r.status_code}"
-    body = r.json()
-    assert "meta_title" in body, f"expected meta_title error, got {body}"
-    assert "meta_description" in body, f"expected meta_description error, got {body}"
+    # #4220: pre-clean — a crashed prior run can leave this exact slug behind,
+    # and then the boundary POST below would 409 instead of 201. Absent is the
+    # normal case, so the result is not asserted here.
+    _unpublish_best_effort(url, slug)  # #4316: DELETE is draft-only
+    _delete_post(url, slug)
 
-    # Boundary values (60/155) → accepted
-    r = SESSION.post(
-        url,
-        json={
-            "title": long_title,
-            "body": "body",
-            "slug": slug,
-            "meta_title": "t" * 60,
-            "meta_description": "d" * 155,
-        },
-        headers=AGENT_HEADERS,
-        timeout=20,
-    )
-    assert r.status_code == 201, f"boundary meta → {r.status_code}"
-    # Cleanup — the row is draft; drafts are invisible to crawlers either way,
-    # but unpublish (already draft) and let the row sit in the review queue.
+    try:
+        # Create with over-limit meta fields → 400 validation
+        r = SESSION.post(
+            url,
+            json={
+                "title": long_title,
+                "body": "body",
+                "slug": slug,
+                "meta_title": "t" * 61,
+                "meta_description": "d" * 156,
+            },
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 400, f"over-limit meta → {r.status_code}"
+        body = r.json()
+        assert "meta_title" in body, f"expected meta_title error, got {body}"
+        assert "meta_description" in body, f"expected meta_description error, got {body}"
+
+        # Boundary values (60/155) → accepted
+        r = SESSION.post(
+            url,
+            json={
+                "title": long_title,
+                "body": "body",
+                "slug": slug,
+                "meta_title": "t" * 60,
+                "meta_description": "d" * 155,
+            },
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"boundary meta → {r.status_code}"
+    finally:
+        # #4220: delete the row we created and verify it is gone. The old
+        # note — "let the row sit in the review queue" — was the defect.
+        _delete_post_verified(url, slug)
 
 
+@BLOG_WRITE
 @NO_AGENT_KEY
 def test_publish_lifecycle_crawler_visibility() -> None:
     """#1864 + #1865: the crawler-visibility lifecycle —
@@ -267,10 +429,20 @@ def test_publish_lifecycle_crawler_visibility() -> None:
     # (already covered by test_admin_gate_redirects_unauthenticated).
     # The X-Robots-Tag on non-published blog responses is asserted below.
 
-    run_seed = os.environ.get('RUN_ID', uuid.uuid4().hex)
+    # #4220: a stable slug by default (an explicit RUN_ID still overrides).
+    # A per-run random slug minted a NEW row every run; one stable slug bounds
+    # residue to a single row if a run is killed outright.
+    run_seed = os.environ.get("RUN_ID") or "crawler"
     slug = f"lifecycle-e2e-{run_seed[:8]}"
     url = f"{TORTISE}/blog/api/posts"
     title = f"Lifecycle E2E {slug}"
+
+    # #4220: pre-clean — a crashed prior run can leave this slug PUBLISHED, which
+    # would fail the "draft → 404" assertion below. Unpublish (DELETE is
+    # draft-only — #4316) then delete it first (absent is the normal case, so
+    # the result is not asserted here).
+    _unpublish_best_effort(url, slug)
+    _delete_post(url, slug)
 
     def create() -> None:
         r = SESSION.post(
@@ -335,6 +507,69 @@ def test_publish_lifecycle_crawler_visibility() -> None:
         in_feed, in_sitemap = article_in_feed_sitemap()
         assert not in_feed and not in_sitemap, "unpublished leaked into feed/sitemap"
     finally:
-        # Best-effort cleanup: leave the row as a draft (never republish).
+        # #4220: take the row off the public surface first (best-effort — it may
+        # still be PUBLISHED if the run died mid-lifecycle), then DELETE it and
+        # verify it is gone. The old cleanup stopped at the unpublish and left
+        # the row in the production review queue forever.
         with contextlib.suppress(Exception):
             unpublish_agent()
+        _delete_post_verified(url, slug)
+
+
+@BLOG_WRITE
+@NO_AGENT_KEY
+def test_delete_refuses_a_published_post() -> None:
+    """#4316 P1: DELETE is DRAFT-ONLY — a published post must survive it.
+
+    The recorded lifecycle (plan §W4) is draft → published → archived
+    (terminal): there is no published→deleted transition. `created_by` is the
+    CREATOR while an operator publishes with `published_by`, so without the
+    draft-only guard the agent key could irreversibly destroy an
+    operator-approved, LIVE article.
+
+    Falsifiable in both directions: pre-fix, the DELETE returns 200 and the
+    article disappears; and the still-served assertion catches a 409 that
+    deleted anyway (a refusal that is not real).
+    """
+    url = f"{TORTISE}/blog/api/posts"
+    slug = "lifecycle-e2e-published-delete"
+
+    def patch(payload: dict) -> requests.Response:
+        return SESSION.patch(f"{url}/{slug}", json=payload, headers=AGENT_HEADERS, timeout=20)
+
+    # Pre-clean: a crashed prior run can leave this slug published (DELETE is
+    # draft-only) or draft. Unpublish, then delete; absent is the normal case.
+    _unpublish_best_effort(url, slug)
+    _delete_post(url, slug)
+
+    try:
+        r = SESSION.post(
+            url,
+            json={"title": f"Delete guard {slug}", "body": "live body", "slug": slug},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"create → {r.status_code} {r.text[:200]}"
+        r = patch({"status": "published"})
+        assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
+
+        refused = _delete_post(url, slug)
+        assert refused.status_code == 409, (
+            f"DELETE published → {refused.status_code} (want 409) {refused.text[:200]}"
+        )
+        assert refused.json().get("error") == "published", refused.text[:200]
+
+        # The refusal must be REAL: the published article is still served.
+        live = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        assert live.status_code == 200, (
+            f"published post gone after a refused DELETE ({live.status_code}) — the guard deleted it anyway"
+        )
+
+        # And the draft-only guard is a status gate, not a broken delete: once
+        # unpublished, the same call removes the row.
+        assert patch({"status": "draft"}).status_code == 200, "unpublish failed"
+        assert _delete_post(url, slug).status_code == 200, "draft DELETE after unpublish failed"
+    finally:
+        with contextlib.suppress(Exception):
+            patch({"status": "draft"})
+        _delete_post_verified(url, slug)

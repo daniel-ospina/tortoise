@@ -2,7 +2,9 @@
 
 Covers the issue's verification checklist:
 - event emitted per call (exactly one, incl. the middleware re-dispatch guard)
-- all 4 status categories produced (ok / validation_error / auth_error / exec_error)
+- the 4 status categories produced here (ok / validation_error / auth_error /
+  exec_error; the emission also carries timeout / cancelled / refused — see
+  ``_emit_mcp_tool_call_telemetry``)
 - validation vs exec error classification (pydantic → validation_error with
   '<error_type>:<field>' kind; everything else → exec_error with class name)
 - latency present and measured around the tool execution
@@ -17,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -292,6 +295,10 @@ class TestRealWritePath:
         # Force the local JSONL fallback (no Supabase configured).
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        # #3820 (cycle-2 P1): the canonical key name too — `SUPABASE_SERVICE_KEY`
+        # is LEGACY, and an ambient production `SUPABASE_SERVICE_ROLE_KEY` would
+        # otherwise make this "no Supabase" premise false.
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         fallback = tmp_path / "analytics_fallback.jsonl"
         monkeypatch.setattr(hosted_api, "_ANALYTICS_FALLBACK_PATH", str(fallback))
 
@@ -318,6 +325,15 @@ class TestOverhead:
     wrapper's own cost (perf_counter, dict build, branch) plus the tool body —
     the tool body is a trivial echo, so p95 of the total approximates the
     wrapper+dispatch overhead budget.
+
+    ⚠️ This is an ABSOLUTE p95 budget for a quiet CI host. It is NOT the same
+    quantity as the F2 guard in ``tests/test_transport_wait_bound.py::
+    test_mcp_wait_bound_fast_path_overhead_is_bounded``, which measures the
+    seam's INCREMENTAL (delta) median against the unwrapped ``_original_call_tool``
+    and deliberately does not assert p95. Neither substitutes for the other, and
+    on a heavily loaded box the absolute budget is not reproducible: at load ~150
+    the unwrapped ``origin/main`` baseline alone measures 7.6–16.5 ms p95, so a
+    failure here on a shared host is machine load, not necessarily a regression.
     """
 
     pytestmark = pytest.mark.asyncio
@@ -335,3 +351,51 @@ class TestOverhead:
         durations.sort()
         p95 = durations[int(len(durations) * 0.95) - 1]
         assert p95 < 5.0, f"p95 latency {p95:.3f}ms exceeded the 5ms budget"
+
+
+class TestSchedulingGuardFailSafe:
+    """#4023: the *scheduling* guards — executor submit and thread start.
+
+    ``TestFailSafe`` above covers the emitter raising and the *writer* raising.
+    Neither covers the two SCHEDULING branches of
+    ``_emit_mcp_tool_call_telemetry`` — and that is exactly where #4020's real
+    incident lived: on the (unmerged) ask emitter a ``Thread.start()`` failure
+    escaped a function documented never to raise and turned a pinned 504 into a
+    500. The mcp_server site carries the same guards; these tests pin that both
+    branches are load-bearing rather than merely present.
+    """
+
+    @pytest.mark.asyncio
+    async def test_executor_scheduling_failure_is_swallowed(self, monkeypatch):
+        """``loop.run_in_executor`` raising must not escape the emitter."""
+        from tortoise import mcp_server
+
+        class _Loop:
+            def is_closed(self) -> bool:
+                return False
+
+            def run_in_executor(self, *a, **k):
+                raise RuntimeError("executor submit exploded")
+
+        monkeypatch.setattr(asyncio, "get_running_loop", lambda: _Loop())
+        # Documented never to raise — a scheduling failure must be swallowed.
+        mcp_server._emit_mcp_tool_call_telemetry(
+            "t1", "tortoise_status", "ok", 3, None)
+
+    def test_thread_start_failure_is_swallowed(self, monkeypatch):
+        """``Thread.start()`` raising must not escape the emitter (#4020 shape)."""
+        from tortoise import mcp_server
+
+        def _no_loop():
+            raise RuntimeError("no running event loop")
+
+        # Force the daemon-thread branch: no event loop is running.
+        monkeypatch.setattr(asyncio, "get_running_loop", _no_loop)
+
+        def _raising_start(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", _raising_start)
+        # Documented never to raise — a Thread.start() failure must not escape.
+        mcp_server._emit_mcp_tool_call_telemetry(
+            "t1", "tortoise_status", "ok", 3, None)

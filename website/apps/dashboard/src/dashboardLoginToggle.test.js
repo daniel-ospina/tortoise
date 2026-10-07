@@ -51,6 +51,24 @@ test('#2475: switch state + label derive from team.dashboard_key_login (the /v1/
     'disabled ✓ must be gated on dashboard_key_login === false')
 })
 
+test('#3136: the disable RECOMMENDATION renders only while the setting is ON', () => {
+  // Part-1 defect: the paragraph was ungated (permission-only guard), so a
+  // team that already had dashboard_key_login === false still read
+  // "We recommend disabling…". It must render inside the ON branch only, and
+  // the OFF state must explain the consequence instead of nagging.
+  const flat = src.replace(/\s+/g, ' ')
+  assert.ok(
+    flat.includes('{team.dashboard_key_login !== false && ( <p> We recommend disabling your API key as a dashboard sign-in'),
+    'recommendation copy must be gated on dashboard_key_login !== false')
+  assert.ok(
+    flat.includes('{team.dashboard_key_login === false && ( <p> Your API key can no longer sign in to this dashboard.'),
+    'the OFF state must render the consequence line, not the recommendation')
+  // exactly one occurrence — a second ungated copy would re-open #3136
+  assert.equal(
+    flat.split('We recommend disabling your API key as a dashboard sign-in').length - 1, 1,
+    'the recommendation copy must appear exactly once (inside the ON gate)')
+})
+
 test('#2475: toggle handler flips the CURRENT state and merges the server PATCH result (never a literal)', () => {
   const body = toggleBody()
   // next is derived from the live team flag — flipping OFF sends enabled:false.

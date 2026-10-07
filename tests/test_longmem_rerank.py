@@ -37,6 +37,32 @@ from tools.longmem_eval.run import (  # noqa: E402, RUF100
     run_main,
 )
 
+#: C4 (#2517): the ONE vocabulary of ``match_source`` legs the eval lane
+#: asserts against. The authoritative closed set is
+#: ``tortoise.search_engine.SearchResult.match_source``'s ``Literal``;
+#: ``test_match_source_legs_match_the_literal`` fails closed on drift, so
+#: this tuple can never silently fall one leg behind ("session" is the C4
+#: source-session re-injection leg).
+_MATCH_SOURCE_LEGS = ("fts", "vector", "structural", "rrf", "tfidf",
+                      "session")
+
+
+def test_match_source_legs_match_the_literal():
+    """The reader vocabulary and the engine's ``Literal`` are ONE set.
+
+    ``get_type_hints`` (not ``field.type``): ``search_engine.py`` has
+    ``from __future__ import annotations``, so the dataclass field's
+    ``.type`` is the *string* "Literal[...]" and ``get_args()`` on it
+    returns ``()`` — a permanently-red assertion.
+    """
+    from typing import get_args, get_type_hints
+
+    from tortoise.search_engine import SearchResult
+
+    literal_legs = get_args(
+        get_type_hints(SearchResult)["match_source"])
+    assert set(_MATCH_SOURCE_LEGS) == set(literal_legs)
+
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
 
@@ -71,6 +97,9 @@ def _reset_rerank_state(force_sparse_tfidf):
     rerank._fail_cache.clear()
     EmbeddingModel._reset()
     # force_sparse_tfidf (tests/conftest.py) pins EmbeddingModel.get -> None.
+    # #4718: that pin now trips the CLI's dense-leg gate, which is REQUIRED by
+    # default, so every run_main call in this module passes the explicit
+    # --skip-preflight waiver (see the CLI section below).
     yield
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()
@@ -310,8 +339,7 @@ def test_retrieve_rerank_orders_and_caps(tmp_path, monkeypatch):
         cap = Counter(h["session_id"] for h in ret["hits"] if h["session_id"])
         assert max(cap.values(), default=0) <= 2   # E2E-10 cap
         for h in ret["hits"]:
-            assert h["match_source"] in (
-                "fts", "vector", "structural", "rrf", "tfidf")
+            assert h["match_source"] in _MATCH_SOURCE_LEGS
         # recall-retention guard: evidence must SURVIVE the rerank
         # (precision stage != recall stage — the reranker must not drop the
         # answer)
@@ -566,7 +594,7 @@ def test_retrieve_rerank_leg_mix_partition(tmp_path, monkeypatch):
         # provenance legs are untouched (rerank is additive, never a rewrite)
         for leg in lm:
             if leg != "rerank":
-                assert leg in ("fts", "vector", "structural", "rrf", "tfidf")
+                assert leg in _MATCH_SOURCE_LEGS
         # off-path: no bucket + identical leg-mix
         assert "rerank" not in base["match_source_counts"]
         assert base["match_source_counts"] == \
@@ -609,8 +637,20 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
         assert moved > 0, (
             "the forced-reorder scorer moved nothing — this test would be "
             "vacuous; check the rerank pool wiring")
-        # the overlay flag is stamped exactly on the moved hits
-        assert moved == sum(1 for f in flags if f)
+        # #3274: KEPT, and deliberately not deleted. The moved-vs-flags
+        # equality is NOT a tautology on this path even though both values
+        # ORIGINATE in the same `rank != i` branch: they reach this assertion
+        # by DIFFERENT routes — `moved` goes rerank_hits -> stats ->
+        # rerank_pass.update(stats), while the flags go rerank_hits ->
+        # selected -> pool -> ret["hits"] — so a transport/re-wiring bug
+        # breaks it. Demonstrated by mutating retrieve.py's
+        # `rerank_pass["moved"] = len(pool)`: this assertion FAILS (moved=4
+        # vs flags=2), and no other test in the suite asserts
+        # rerank_pass["moved"] at all.
+        assert moved == sum(1 for f in flags if f), (
+            "the pass-level counter and the per-hit stamps reach this point "
+            "by different paths and must still agree"
+        )
         assert any(flags), "the moved hits must carry the overlay flag"
         assert all(h["match_source"] for h in ret["hits"])  # provenance kept
     finally:
@@ -644,8 +684,20 @@ def test_rerank_flags_stamped_on_reorder():
     # only the hit that moved UP is mmr_promoted
     assert by_id["h1"].get("mmr_promoted") is True
     assert "mmr_promoted" not in by_id["h0"]
-    assert stats["moved"] == 2 == sum(
-        1 for h in selected if h.get("reranked"))
+    # #3274: derive the movement from the TWO ORDERINGS (input `hits` vs
+    # output `selected`) rather than from the flag branch that also produced
+    # `stats["moved"]`. Only the `moved == sum(reranked)` leg of the previous
+    # assertion — `stats["moved"] == 2 == sum(1 for h in selected if
+    # h.get("reranked"))` — was self-referential; its `== 2` literal did have
+    # force (it fails for moved=1 or 3). This replaces the self-referential
+    # leg with a check that reads the orderings independently.
+    in_pos = {h["id"]: i for i, h in enumerate(hits)}
+    moved_ids = {h["id"] for pos, h in enumerate(selected)
+                 if in_pos[h["id"]] != pos}
+    assert moved_ids == {"h1", "h0"}, (
+        "both hits changed position, derived from hits-vs-selected; "
+        f"got {sorted(moved_ids)}")
+    assert stats["moved"] == len(moved_ids) == 2
 
 
 # ── Task 3: CLI thread-through + fail-fast ─────────────────────────────────
@@ -655,7 +707,8 @@ def _run_cli(tmp_path, *extra, monkeypatch=None):
         _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--output", str(out), *extra])
+                       "--mock", "--skip-preflight",
+                       "--output", str(out), *extra])
     return report, out
 
 
@@ -663,7 +716,8 @@ def test_cli_rerank_smoke(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--output", str(out)])
     rr = report["rerank"]
     assert rr["enabled"] is True
     assert rr["model"] == rerank.RERANK_MODEL_DEFAULT
@@ -688,7 +742,8 @@ def test_cli_rerank_off_report_has_no_rerank_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_RERANK", "1")  # leaked env + explicit
     out = tmp_path / "report.json"                  # --no-rerank: the
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--no-rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--no-rerank",
+                       "--output", str(out)])
     assert "rerank" not in report
     assert "rerank" not in report["latency_ms"]     # zero-keys contract covers
     assert "rerank" not in report["retrieval"]      # ALL report surfaces
@@ -701,15 +756,18 @@ def test_cli_rerank_off_report_has_no_rerank_keys(tmp_path, monkeypatch):
 def test_cli_rerank_invalid_lambda_fails_fast(tmp_path, capsys):
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-lambda", "1.5",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-lambda", "1.5",
                   "--output", str(tmp_path / "r.json")])
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-cap", "0",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-cap", "0",
                   "--output", str(tmp_path / "r.json")])
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-pool", "0",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-pool", "0",
                   "--output", str(tmp_path / "r.json")])
     # no checkpoint written, no questions executed
 
@@ -717,7 +775,8 @@ def test_cli_rerank_invalid_lambda_fails_fast(tmp_path, capsys):
 def test_cli_rerank_boundary_values_accepted(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--rerank", "--rerank-cap", "1",
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--rerank-cap", "1",
                        "--rerank-lambda", "0.0",
                        "--output", str(tmp_path / "r2.json")])
     assert report["rerank"]["per_session_cap"] == 1
@@ -732,7 +791,8 @@ def test_cli_rerank_all_degraded(tmp_path, monkeypatch):
                         lambda model=None: (None, "load failed: outage"))
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--output", str(out)])
     rr = report["rerank"]
     assert rr["degraded_n"] == 5
     assert rr["applied_fraction"] == 0.0
@@ -749,17 +809,17 @@ def test_env_out_of_range_fails_fast(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_RERANK_CAP", "0")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
     monkeypatch.delenv("TORTOISE_LME_RERANK_CAP", raising=False)
     monkeypatch.setenv("TORTOISE_LME_RERANK_LAMBDA", "1.5")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
     monkeypatch.delenv("TORTOISE_LME_RERANK_LAMBDA", raising=False)
     monkeypatch.setenv("TORTOISE_LME_RERANK_POOL", "0")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
 
 
 def test_env_parse_garbage_and_negative(tmp_path, monkeypatch):
@@ -788,7 +848,8 @@ def test_effective_pool_recorded_truthfully(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--rerank-pool", "40",
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--rerank-pool", "40",
                        "--k", "5,10,20,50", "--output", str(out)])
     assert report["rerank"]["pool_size"] == 50
 

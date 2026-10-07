@@ -14,6 +14,8 @@ aboutObjects: tortoise
 > **Inputs:** align `01-align.md` (PROCEED; Rails 1/2 + named couplings) · research `02-research-brief.md` · scope `03-scope.md` (12 E2E) · test-design `04-test-design.md` (#1992, 17 surfaces) · UX decisions `05-ux-decisions.md`.
 > **Authoritative decomposition source:** the W1-W12 list in the epic issue body (FINAL WORKSTREAM LIST section, R2-1/R2-2 amendment) + this plan's substeps below. Where this plan and the issue body differ, the issue's CONSISTENCY RESOLUTION ROUND 2 + this plan's decisions govern.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 # 1. User Journeys

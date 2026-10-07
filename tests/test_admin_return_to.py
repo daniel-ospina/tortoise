@@ -1,10 +1,11 @@
 """#3080 — the /admin return-to guard.
 
-The blog admin gate (`website/functions/admin/[[path]].ts`) bounces an
-unauthenticated request to `/auth?next=<path>&stale=1` so the post-login
+The blog admin gate (`website/apps/dashboard/functions/admin/[[path]].ts`)
+bounces an unauthenticated request to `/auth?next=<path>&stale=1` so the post-login
 redirect comes back to the console. Before #3080 the bounce was a bare `/auth`,
 so every login landed on the app root and `/admin` was unreachable by
-navigation.
+navigation. #4171 moved the gate to the app origin (same-origin with the
+`__Host-session` cookie); the return-to contract is unchanged.
 
 `website/signup.html` turns that `next` into the post-login destination, which
 is an open-redirect sink unless the value is constrained, so the allowlist is
@@ -24,55 +25,184 @@ regex test would miss the three defects the review cycles actually caught:
 
 Node is optional (the repo's convention — see test_cross_subdomain_cookie_sync):
 the test skips cleanly when node is unavailable.
+
+#3952 extends the subject from reachability to RENDERABILITY: the URL the gate
+returns you to must be able to load its own bundle. The console SPA is built
+with an absolute `base: '/admin/'`; a relative base resolved against the
+document URL, so the extensionless `/admin` (the form the gate emits in
+`next=`) requested `/assets/index-*.js` and rendered blank. The three #3952 tests
+at the end of this file pin the build base, the committed snapshot's asset
+resolution, and that the referenced files actually exist.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SIGNUP = REPO_ROOT / "website" / "signup.html"
-GATE = REPO_ROOT / "website" / "functions" / "admin" / "[[path]].ts"
+# #4054: the /auth page moved to the APP Pages project with the rest of the BFF.
+SIGNUP = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "signup.html"
+# #4171: the gate moved to the app origin with the console itself.
+GATE = REPO_ROOT / "website" / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts"
+# #3930: the SPA's half of the return-to contract (main.jsx's bounceToAuth
+# delegates to this module) and the /welcome producer.
+APP_PROJECT = REPO_ROOT / "website" / "apps" / "dashboard"
+SPA_BOUNCE_JS = APP_PROJECT / "src" / "authBounce.js"
+WELCOME_FN = APP_PROJECT / "functions" / "welcome.ts"
 
 ORIGIN = "https://tortoise.premiselabs.co"
 APP_ORIGIN = "https://app.premiselabs.co"
 
 _EARLY = "#3080: admin return-to."
-_HEAD_GATE = "#1494: hard gate"
+# #3501: the synchronous `readValidSession` hard gate became an async
+# `/api/session` probe (the BFF cookie is HttpOnly, so the browser cannot read
+# it). The marker in the page was renamed with it.
+_HEAD_GATE = "#1494/#3501: session probe"
 
 
 def _script_after(html: str, marker: str) -> str:
+    """The first `<script>` body after `marker`.
+
+    UNIQUENESS IS ASSERTED (#3930 cycle-7 review): without it, a SECOND copy of a
+    block — an easy accident when merging, and the one the browser executes LAST —
+    is invisible to the whole suite because this helper keeps returning the
+    first. Proven: duplicating the early block with a broken composition line
+    left the file at 72 passed while the page's effective
+    `__DASHBOARD_BASE_URL` was the broken copy. The marker must also appear
+    exactly once, or `find` could anchor on a decoy.
+    """
+    assert html.count(marker) == 1, (
+        f"marker {marker!r} appears {html.count(marker)} times in signup.html — "
+        "the block was duplicated and this helper would silently pin the first one"
+    )
     i = html.find(marker)
     assert i != -1, f"block gone from signup.html: {marker!r}"
     start = html.find("<script>", i)
     assert start != -1, f"no <script> after marker {marker!r}"
     end = html.find("</script>", start)
     assert end != -1, f"unterminated <script> after marker {marker!r}"
-    return html[start + len("<script>") : end]
+    body = html[start + len("<script>") : end]
+    # A duplicated <script> BODY (same marker, one count) is not covered by the
+    # count above. Counted on the RAW page, deliberately: `<!-- -->` inside a
+    # LIVE <script> is a JS line comment (Annex B), so lines between the markers
+    # DO execute — stripping HTML comments first would hide exactly that
+    # duplicate (cycle-9 review). The cost is that a copy parked in a real HTML
+    # comment is also rejected; that is the fail-loud direction, and the remedy is
+    # to delete the dead copy rather than to keep it.
+    assert html.count(body) == 1, (
+        f"the script body after marker {marker!r} appears more than once in "
+        "signup.html — delete the duplicate (a copy inside `<!-- -->` within a "
+        "live <script> is a JS line comment and still executes)"
+    )
+    return body
+
+
+def _strip_js_line_comments(src: str) -> str:
+    """Drop `//`-to-EOL comments so a PIN cannot be satisfied by a comment that
+    merely QUOTES the pinned line (cycle-7 review: the static call-site pin —
+    `window.location.href = claimFunnelUrl();` — stayed green when the call site
+    was reverted and a comment quoting that string was left behind).
+
+    Deliberately NOT quote-aware: it can only ever REMOVE text, so the worst case
+    is a missed match, and these anchors are whole code lines that contain no
+    `//` before the anchor.
+    """
+    return "\n".join(line.split("//")[0] for line in src.splitlines())
+
+
+def _strip_comments(html: str) -> str:
+    """Blank out HTML `<!-- -->` comments so the extractors below read CODE.
+
+    HTML comments only: a `//` or `/* */` stripper that is not quote-aware can eat
+    the rest of a line from a `//` INSIDE a JS string, which would break the
+    extracted source rather than the pin. A decoy left in a JS comment instead
+    makes the uniqueness assert below FIRE (fail-loud), which is the safe
+    direction — the node side strips JS comments because it pins a different
+    thing.
+    """
+    out = []
+    i, n = 0, len(html)
+    while i < n:
+        if html.startswith("<!--", i):
+            end = html.find("-->", i)
+            i = n if end == -1 else end + 3
+        else:
+            out.append(html[i])
+            i += 1
+    return "".join(out)
 
 
 def _function(html: str, name: str) -> str:
-    """Extract a top-level `function <name>() { ... }` by brace counting."""
-    start = html.find(f"function {name}(")
+    """Extract THE `function <name>() { ... }` by brace counting.
+
+    Comment-stripped first, and the declaration must be UNIQUE: JS hoisting makes
+    the LAST duplicate the one that runs, so on raw HTML a decoy declaration in an
+    HTML comment — or a second, later declaration — would let the harness test a
+    function the page never calls (the node side pins the same property).
+    """
+    src = _strip_comments(html)
+    count = src.count(f"function {name}(")
+    assert count == 1, f"function {name} declared {count} times in signup.html — the harness cannot tell which one runs"
+    start = src.find(f"function {name}(")
     assert start != -1, f"function {name} not found in signup.html"
-    i = html.find("{", start)
+    i = src.find("{", start)
     assert i != -1, f"no body for {name}"
     depth, j = 0, i
-    while j < len(html):
-        if html[j] == "{":
+    while j < len(src):
+        if src[j] == "{":
             depth += 1
-        elif html[j] == "}":
+        elif src[j] == "}":
             depth -= 1
             if depth == 0:
-                return html[start : j + 1]
+                return src[start : j + 1]
         j += 1
     raise AssertionError(f"unbalanced braces in {name}")
+
+
+def _page_base_src(html: str) -> str:
+    """The page's OWN base assignment statements, extracted verbatim.
+
+    `WELCOME_URL`/`DASHBOARD_URL` are computed at the top of the big script —
+    they are NOT inside any extracted helper — so a harness that injects them
+    instead is testing its own arithmetic. Substituting the real statements makes
+    a regression in the page's assignment (e.g. dropping the `dashboardBase(...)`
+    call) fail the suite.
+    """
+    src = _strip_comments(html)
+    welcome = re.search(r"const WELCOME_URL = ([^;]+);", src)
+    dash = re.search(r"const DASHBOARD_URL = ([^;]+);", src)
+    assert welcome and dash, (
+        "the page's WELCOME_URL/DASHBOARD_URL assignment shape changed — update this harness"
+    )
+    return f"const WELCOME_URL = {welcome.group(1)};\nconst DASHBOARD_URL = {dash.group(1)};"
+
+
+def _brace_block(html: str, marker: str) -> str:
+    """Extract an `if (...) { ... }` block starting at `marker` by brace counting."""
+    i = html.find(marker)
+    assert i != -1, f"block gone from signup.html: {marker!r}"
+    # Start at the statement, not the comment: `marker` may name a prose comment.
+    i = html.find("if (", i)
+    assert i != -1, f"no `if (` after marker {marker!r}"
+    j = html.find("{", i)
+    assert j != -1, f"no body after marker {marker!r}"
+    depth, k = 0, j
+    while k < len(html):
+        if html[k] == "{":
+            depth += 1
+        elif html[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[i : k + 1]
+        k += 1
+    raise AssertionError(f"unbalanced braces after {marker!r}")
 
 
 def _blocks() -> dict[str, str]:
@@ -90,16 +220,72 @@ def _blocks() -> dict[str, str]:
     assert ": Request" not in server and ": string" not in server, (
         "TS annotations remain in the extracted returnToPath — update this harness"
     )
+    # #3955: serveShell was executed by NO test, which left two blank-page
+    # mechanisms unchecked: a missing /admin/assets/*.js answered 200 text/html,
+    # and a session that expires between the document and subresource loads
+    # handing the module an HTML redirect. Extract it (and its predicate) with
+    # the TS annotations stripped, prepending the two constants it reads from
+    # outside its own body (ADMIN_CSP comes from _shared/security-headers; HSTS
+    # is module-local).
+    shell = (
+        'const ADMIN_CSP = "default-src \'none\'";\nconst HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };\n'
+        + _function(gate_src, "isAssetRequest")
+        .replace("function isAssetRequest(request: Request): boolean {", "function isAssetRequest(request) {")
+        + "\n"
+        + _function(gate_src, "serveShell")
+        # `_function` anchors on `function serveShell(`, which sits INSIDE
+        # `async function ...` — so the prefix is DROPPED by extraction. It must
+        # be put back: serveShell awaits env.ASSETS.fetch, and `await` in a
+        # non-async function is a SyntaxError, not a silent success.
+        .replace("function serveShell(env: Env, request: Request): Promise<Response> {", "async function serveShell(env, request) {")
+    )
+    assert "function isAssetRequest(request) {" in shell, (
+        "isAssetRequest signature changed — update this harness"
+    )
+    assert "async function serveShell(env, request) {" in shell, (
+        "serveShell signature changed — update this harness"
+    )
+    assert ": Request" not in shell and ": Env" not in shell, (
+        "TS annotations remain in the extracted serveShell — update this harness"
+    )
     return {
-        "early": _script_after(html, _EARLY),
+        # The dashboard-origin validator and the base composer live in the FIRST
+        # inline script. The early block calls only `dashboardOrigin`, so only that
+        # is prepended here; `claim` gets both.
+        "early": _function(html, "dashboardOrigin") + "\n" + _script_after(html, _EARLY),
         "headGate": _script_after(html, _HEAD_GATE),
-        "claim": _function(html, "claimRedirectTarget") + "\n" + _function(html, "gotrueRedirectTarget"),
+        # #3501: `gotrueRedirectTarget` (a GoTrue `redirect_to`) is retired — the
+        # BFF `/auth/start` owns the redirect. `oauthNextPath` is the same-origin
+        # PATH handed to it as `next`. #3930: the claim helpers
+        # (claimCardUrl/isConsoleReturnTo/claimPending) are extracted too — the
+        # return-to no longer wins over a pending claim outside the console.
+        "claim": _function(html, "dashboardOrigin")
+        + "\n"
+        + _function(html, "dashboardBase")
+        + "\n"
+        + _page_base_src(html)
+        + "\n"
+        + "\n".join(
+            _function(html, name)
+            for name in (
+                "claimCardUrl",
+                "isConsoleReturnTo",
+                "claimFunnelUrl",
+                "claimPending",
+                "claimRedirectTarget",
+                "oauthNextPath",
+            )
+        ),
+        "consumer": _brace_block(html, "Session probe consumer"),
         "gate": _function(gate_src, "gateDecision")
         + "\n"
-        + _function(gate_src, "sessionKindForStatus")
+        + _function(gate_src, "tokenReasonKind")
         + "\n"
         + _function(gate_src, "adminKindForResponse"),
         "server": server,
+        # #3955: the shell/server-response path. Executed against a fake
+        # env.ASSETS so the two blank-page mechanisms are pinned behaviourally.
+        "shell": shell,
     }
 
 
@@ -108,15 +294,16 @@ const fs = require('fs');
 const path = require('path');
 const dir = process.argv[2];
 const blocks = [];
-for (const n of ['early.js', 'headgate.js', 'claim.js', 'gate.js', 'server.js']) {
+for (const n of ['early.js', 'headgate.js', 'claim.js', 'consumer.js', 'gate.js', 'server.js', 'shell.js']) {
   blocks.push(fs.readFileSync(path.join(dir, n), 'utf8'));
 }
-const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], gateSrc = blocks[3], serverSrc = blocks[4];
+const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], consumerSrc = blocks[3], gateSrc = blocks[4], serverSrc = blocks[5], shellSrc = blocks[6];
 const cases = JSON.parse(fs.readFileSync(path.join(dir, 'cases.json'), 'utf8'));
 const ORIGIN = process.argv[3];
 const APP = process.argv[4];
 
-function mkEnv(search, cookie, session) {
+function mkEnv(search, cookie, session, origin) {
+  origin = origin || ORIGIN;
   // Model a real cookie jar: `Max-Age=0` DELETES the cookie. A naive
   // append-only mock would keep the deleted value and produce false failures.
   const jar = {};
@@ -142,8 +329,8 @@ function mkEnv(search, cookie, session) {
   };
   const win = {
     location: {
-      search: search, hash: '', hostname: 'tortoise.premiselabs.co',
-      origin: ORIGIN, protocol: 'https:', href: '',
+      search: search, hash: '', hostname: new URL(origin).hostname,
+      origin: origin, protocol: 'https:', href: '', pathname: '/auth',
       replace: function (u) { navigations.push(u); },
     },
   };
@@ -152,47 +339,118 @@ function mkEnv(search, cookie, session) {
   return { win: win, doc: doc, cleared: cleared, navigations: navigations, cookie: function () { return doc.cookie; } };
 }
 
-function runEarly(search, cookie) {
-  const e = mkEnv(search, cookie);
+function runEarly(search, cookie, origin, seam) {
+  // #3930: /auth lives on the APP origin (#4054). The app-host cases pass it
+  // explicitly. `seam` pre-sets the #2744 __DASHBOARD_BASE_URL so the early
+  // block's own origin-validation and composition are exercised (they were not
+  // before).
+  const e = mkEnv(search, cookie, undefined, origin || ORIGIN);
+  if (seam !== undefined && seam !== null) e.win.__DASHBOARD_BASE_URL = seam;
   new Function('window', 'document', 'URLSearchParams', early)(e.win, e.doc, URLSearchParams);
   return { base: e.win.__DASHBOARD_BASE_URL || null, ret: e.win.__ADMIN_RETURN_TO || null, cookie: e.cookie() };
 }
 
-// Real page order: the early block runs, then the #1494 head gate.
+// Real page order: the early block runs, then the probe STARTER. The starter
+// only kicks off `GET /api/session`; the DECISION is the consumer's (below).
+// `fetch` is stubbed so the driver never touches the network.
 function runHeadGate(search, cookie, session) {
   const e = mkEnv(search, cookie, session);
   new Function('window', 'document', 'URLSearchParams', early)(e.win, e.doc, URLSearchParams);
-  new Function('window', 'document', 'URLSearchParams', headGate)(e.win, e.doc, URLSearchParams);
-  return { ret: e.win.__ADMIN_RETURN_TO || null, cleared: e.cleared.length, nav: e.navigations, stale: e.win.__ADMIN_STALE || false };
+  const fetched = [];
+  const never = { then: function () { return never; }, catch: function () { return never; } };
+  const fetchStub = function (url) { fetched.push(url); return never; };
+  new Function('window', 'document', 'URLSearchParams', 'fetch', headGate)(e.win, e.doc, URLSearchParams, fetchStub);
+  return { ret: e.win.__ADMIN_RETURN_TO || null, cleared: e.cleared.length, nav: e.navigations,
+           stale: e.win.__ADMIN_STALE || false, probe: !!e.win.__SESSION_PROBE, fetched: fetched };
 }
+
+// `claimSrc` now ENDS with the page's own base assignment, extracted from
+// signup.html (`_page_base_src`), so `WELCOME_URL`/`DASHBOARD_URL` are the ones
+// the page really computes — not values the harness injects.
 
 // Mimic the async post-session bounce: whatever claimRedirectTarget() returns is
 // assigned to window.location.href, so it must be a NAVIGATION target.
-function runTargets(ret, cookie) {
-  const e = mkEnv('', cookie);
+function runTargets(ret, cookie, seamBase) {
+  // #3930/#4054: the /auth page IS on the app origin, and `claimCardUrl()`
+  // reduces `window.__DASHBOARD_BASE_URL` to its ORIGIN — so the mock's origin
+  // must be the app origin (or the seam under test), never a tortoise-origin
+  // value the page could not compute.
+  const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
-  const DASHBOARD_URL = ret ? ORIGIN + ret : APP;
-  const WELCOME_URL = DASHBOARD_URL;
+  // PRODUCTION FIDELITY (#3930 review): the early block composes
+  // `dashboardOrigin(seam) + ret` ONLY when it has a return-to; with no `next` it
+  // returns first and leaves the RAW seam in place. Both are modelled here — and
+  // when there is no return-to the raw seam is deliberately NOT pre-reduced,
+  // because reducing it here would mean the page's own `dashboardBase(...)`
+  // assignment is never load-bearing (the cycle-5 gate caught exactly that).
+  const rawBase = seamBase ? (ret ? seamOrigin(seamBase) + ret : seamBase) : (APP + (ret || ''));
+  e.win.__DASHBOARD_BASE_URL = rawBase;
   const make = new Function(
-    'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
-    claimSrc + '\\nreturn { claim: claimRedirectTarget, oauth: gotrueRedirectTarget };',
+    'window', 'document', 'URLSearchParams',
+    claimSrc + '\\nreturn { claim: claimRedirectTarget, oauth: oauthNextPath, funnel: claimFunnelUrl };',
   );
-  const fns = make(e.win, e.doc, URLSearchParams, DASHBOARD_URL, WELCOME_URL);
-  return { nav: fns.claim(), oauth: fns.oauth() };
+  const fns = make(e.win, e.doc, URLSearchParams);
+  return { nav: fns.claim(), oauth: fns.oauth(), funnel: fns.funnel() };
 }
 
-const out = { early: [], headGate: [], claim: [], gate: [] };
-for (const c of cases.early) out.early.push(runEarly(c[0], c[1]));
+// A TEST-SIDE MODEL of the seam's origin rule, used ONLY to compose the value the
+// early block would have left in `window.__DASHBOARD_BASE_URL` when it has a
+// return-to. It IS a second copy of `dashboardOrigin` (same rule, `own` rebound to
+// APP) — an earlier comment claimed otherwise and was false (cycle-7 review). No
+// test can keep the two in step: they are compared only indirectly, because
+// `runTargets` feeds the shipped helper the MODEL's output. The shipped helper is
+// driven directly by `test_early_block_validates_and_composes_the_dashboard_base`,
+// which passes `localhost` and `[::1]` so the whole loopback allowlist — not just
+// `127.0.0.1` — is pinned there.
+function seamOrigin(raw) {
+  const own = APP;
+  if (typeof raw !== "string") return own;
+  let u;
+  try { u = new URL(raw); } catch (e) { return own; }
+  if (!u.origin || u.origin === "null") return own;
+  if (u.origin === own) return own;
+  if (u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]") return u.origin;
+  return own;
+}
+
+// #3501: the decision moved off the synchronous gate into the probe consumer.
+// A SYNCHRONOUS thenable stands in for the fetch promise so the callback's
+// effect is observable without an event loop.
+function runConsumer(status, ret, cookie, opts) {
+  opts = opts || {};
+  const e = mkEnv('', cookie, undefined, APP);
+  e.win.__ADMIN_RETURN_TO = ret || null;
+  if (opts.adminStale) e.win.__ADMIN_STALE = true;
+  if (opts.oauthError) e.win.__OAUTH_ERROR = true;
+  // PRODUCTION FIDELITY (#3930 review): see runTargets — the page derives
+  // DASHBOARD_URL/WELCOME_URL from `dashboardBase(__DASHBOARD_BASE_URL)`.
+  e.win.__DASHBOARD_BASE_URL = APP + (ret || '');
+  const make = new Function(
+    'window', 'document', 'URLSearchParams',
+    claimSrc + '\\nreturn { claim: claimRedirectTarget };',
+  );
+  const fns = make(e.win, e.doc, URLSearchParams);
+  const errors = [];
+  e.win.__SESSION_PROBE = { then: function (cb) { cb(status); } };
+  new Function('window', 'claimRedirectTarget', 'showError', consumerSrc)(
+    e.win, fns.claim, function (m) { errors.push(m); },
+  );
+  return { nav: e.navigations, errors: errors };
+}
+
+const out = { early: [], headGate: [], claim: [], funnel: [], consumer: [], gate: [], shell: [] };
+for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2], c[3]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
-for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1]));
+for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1], c[2]));
+for (const c of cases.funnel) out.funnel.push(runTargets(c[0], c[1], c[2]));
+for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
 
 // #3080: execute the gate's real decision table (not a substring check).
-const decide = new Function(gateSrc + '\\nreturn { gateDecision: gateDecision, sessionKindForStatus: sessionKindForStatus, adminKindForResponse: adminKindForResponse };')();
+const decide = new Function(gateSrc + '\\nreturn { gateDecision: gateDecision, tokenReasonKind: tokenReasonKind, adminKindForResponse: adminKindForResponse };')();
 for (const c of cases.gate) {
   out.gate.push(decide.gateDecision({ configured: c[0], token: c[1], session: c[2], admin: c[3] }));
 }
-out.sessionKind = {};
-out.sessionKind = cases.sessionStatus.map(function (c) { return decide.sessionKindForStatus(c[0], c[1]); });
+out.tokenReason = cases.tokenReason.map(function (c) { return decide.tokenReasonKind(c[0]); });
 out.adminKind = cases.adminResponse.map(function (c) { return decide.adminKindForResponse(c[0], c[1]); });
 
 // #3080: cross-allowlist agreement. Whatever the SERVER gate emits for a path
@@ -207,24 +465,66 @@ out.corpus = cases.corpus.map(function (e) {
   const c = runEarly('?next=' + encodeURIComponent(s), '');
   return { path: p, expected: e[1], server: s, clientRet: c.ret };
 });
-console.log(JSON.stringify(out));
+// #3955: execute serveShell against a fake env.ASSETS. Each case is
+// [pathname, assetStatus, assetContentType, shellOk]. The fake router answers the
+// requested URL with that status/type, and /admin/index.html with the shell
+// (200 text/html) unless shellOk is false (the 'build did not ship' shape).
+const shellFn = new Function(shellSrc + '\\nreturn { serveShell: serveShell, isAssetRequest: isAssetRequest };')();
+for (const c of cases.shell) {
+  const p = c[0], st = c[1], ct = c[2], shellOk = c[3];
+  const target = ORIGIN + p;
+  const env = {
+    ASSETS: {
+      fetch: async function (req) {
+        const u = typeof req === 'string' ? req : (req && req.url) || String(req);
+        if (u.indexOf('/admin/index.html') !== -1) {
+          return shellOk
+            ? new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+            : new Response('nope', { status: 404, headers: { 'content-type': 'text/plain' } });
+        }
+        return new Response('body', {
+          status: st,
+          headers: { 'content-type': ct },
+        });
+      },
+    },
+  };
+  out.shell.push({
+    path: p,
+    isAsset: shellFn.isAssetRequest({ url: target }),
+    status: null,
+    contentType: null,
+    _promise: shellFn.serveShell(env, { url: target }).then(function (r) { return r; }),
+  });
+}
+// Resolve asynchronously, then print (the driver's single stdout line must wait).
+(async function () {
+  for (const e of out.shell) {
+    const r = await e._promise;
+    e.status = r.status;
+    e.contentType = r.headers.get('content-type') || '';
+    delete e._promise;
+  }
+  console.log(JSON.stringify(out));
+})();
 """
 
 
 def _run(cases: dict) -> dict:
+    _require_node()
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    for key in ("early", "headGate", "claim", "gate"):
+    for key in ("early", "headGate", "claim", "funnel", "consumer", "gate"):
         cases.setdefault(key, [])
-    cases.setdefault("sessionStatus", [])
+    # #3955: the shell/server-response cases.
+    cases.setdefault("shell", [])
+    cases.setdefault("tokenReason", [])
     cases.setdefault("adminResponse", [])
     cases.setdefault("corpus", [])
     blocks = _blocks()
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
-        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("gate", "gate.js"), ("server", "server.js")):
+        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("consumer", "consumer.js"), ("gate", "gate.js"), ("server", "server.js"), ("shell", "shell.js")):
             (Path(td) / name).write_text(blocks[key], encoding="utf-8")
         (Path(td) / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
         driver = Path(td) / "driver.js"
@@ -243,10 +543,12 @@ def _run(cases: dict) -> dict:
 
 def test_next_is_honoured_for_admin_paths() -> None:
     """A well-formed /admin return-to becomes the post-login destination."""
-    cases = {"early": [[p, ""] for p in ("?next=/admin", "?next=/admin/blog", "?next=%2Fadmin%2Fblog", "?next=/admin/")], "headGate": [], "claim": []}
+    # /admin is served on the APP origin (functions/admin/[[path]].ts), so the
+    # page runs there and __DASHBOARD_BASE_URL resolves to the app origin.
+    cases = {"early": [[p, "", APP_ORIGIN] for p in ("?next=/admin", "?next=/admin/blog", "?next=%2Fadmin%2Fblog", "?next=/admin/")], "headGate": [], "claim": []}
     expected = ["/admin", "/admin/blog", "/admin/blog", "/admin/"]
     for result, want in zip(_run(cases)["early"], expected, strict=True):
-        assert result["base"] == ORIGIN + want, f"{result} != {ORIGIN + want}"
+        assert result["base"] == APP_ORIGIN + want, f"{result} != {APP_ORIGIN + want}"
         assert result["ret"] == want, f"__ADMIN_RETURN_TO not set: {result}"
 
 
@@ -283,37 +585,36 @@ def test_navigation_target_for_admins_is_the_console() -> None:
     forever.
     """
     (t,) = _run({"early": [], "headGate": [], "claim": [["/admin/blog", ""]]})["claim"]
-    assert t["nav"] == f"{ORIGIN}/admin/blog", t["nav"]
+    assert t["nav"] == f"{APP_ORIGIN}/admin/blog", t["nav"]
 
 
-def test_oauth_target_for_admins_is_absolute_auth_without_stale() -> None:
-    """GoTrue's redirect_to must be an absolute /auth url carrying the return-to.
+def test_oauth_next_path_is_the_admin_return_to() -> None:
+    """`/auth/start` must receive the return-to as `next`, as a same-origin PATH.
 
-    Three separate regressions are guarded here:
-      - relative → GoTrue drops it and the return-to is lost;
-      - `/admin` → the #access_token fragment never reaches the server, so the
-        gate bounces and the session is lost;
-      - `stale=1` → the auth page would clear the token that just arrived.
+    Under the BFF the PKCE verifier and the GoTrue `redirect_to` are the server's
+    business; the page contributes only the post-login destination. A PATH (not
+    an absolute URL) is what `/auth/start` stores and `/auth/callback`
+    re-validates with `safeNext`. The old rules still hold in spirit:
+      - the destination must survive the round-trip, or /admin is unreachable;
+      - it must not point at the auth page itself (a loop);
+      - `stale` must never ride it.
     """
     (t,) = _run({"early": [], "headGate": [], "claim": [["/admin/blog", ""]]})["claim"]
     oauth = t["oauth"]
-    parsed = urlparse(oauth)
-    assert oauth.startswith("https://"), f"GoTrue drops a relative redirect_to: {oauth!r}"
-    assert parsed.netloc == "tortoise.premiselabs.co", f"wrong host: {oauth!r}"
-    assert parsed.path == "/auth", f"the provider must return to /auth, not {parsed.path!r}"
-    q = parse_qs(parsed.query)
-    assert q.get("next") == ["/admin/blog"], f"return-to lost: {oauth!r}"
-    assert "stale" not in q, f"stale=1 would clear the fresh session: {oauth!r}"
+    assert oauth == "/admin/blog", f"the OAuth `next` must be the same-origin return-to, got {oauth!r}"
+    assert not oauth.startswith("http"), f"`next` must be a path, not an absolute URL: {oauth!r}"
+    assert "stale" not in oauth, f"stale would clear the fresh session: {oauth!r}"
+    assert oauth != "/auth", "`next` must not bounce back to the auth page"
 
 
 def test_targets_unchanged_without_an_admin_return_to() -> None:
-    """The non-admin funnel must be byte-identical to pre-#3080 behaviour."""
+    """The non-admin funnel must be unchanged: the app root, or the claim card."""
     (plain,) = _run({"early": [], "headGate": [], "claim": [[None, ""]]})["claim"]
     assert plain["nav"] == APP_ORIGIN, plain["nav"]
-    assert plain["oauth"] == APP_ORIGIN, plain["oauth"]
+    assert plain["oauth"] == "/", plain["oauth"]
     (claiming,) = _run({"early": [], "headGate": [], "claim": [[None, "tt_claim_pending=1"]]})["claim"]
     assert claiming["nav"] == f"{APP_ORIGIN}/?claim=1", claiming["nav"]
-    assert claiming["oauth"] == f"{APP_ORIGIN}/?claim=1", claiming["oauth"]
+    assert claiming["oauth"] == "/?claim=1", claiming["oauth"]
 
 
 # ── the redirect-loop breaker ──────────────────────────────────────────────
@@ -332,21 +633,39 @@ def test_stale_bounce_suppresses_forwarding_without_destroying_the_session() -> 
     (stale,) = _run({"early": [], "headGate": [["?next=%2Fadmin&stale=1", "", session]], "claim": []})["headGate"]
     assert stale["nav"] == [], f"looped back to the console: {stale['nav']}"
     assert stale["cleared"] == 0, "destroyed a session that may still be refreshable"
-    assert stale["stale"] is True, "stale not flagged — the async getSession bounce will re-loop"
+    assert stale["stale"] is True, "stale not flagged — the probe will re-loop"
+    assert stale["probe"] is False, "the stale bounce must not even start the probe"
+    # And the consumer must honour the flag too (the probe is suppressed, but a
+    # race must not forward either).
+    (suppressed,) = _run({"consumer": [[200, "/admin/blog", "", {"adminStale": True}]]})["consumer"]
+    assert suppressed["nav"] == [], f"the consumer forwarded despite the stale flag: {suppressed}"
 
 
 def test_valid_session_still_reaches_the_console() -> None:
-    """The loop breaker must not disable the happy path (and the OAuth landing)."""
-    session = {"access_token": "t", "expires_at": 4102444800}
-    (ok,) = _run({"early": [], "headGate": [["?next=%2Fadmin%2Fblog", "", session]], "claim": []})["headGate"]
-    assert ok["nav"] == ["/admin/blog"], ok["nav"]
-    assert ok["cleared"] == 0, "cleared a session the server had accepted"
-    assert ok["stale"] is False, "a healthy session was marked stale"
+    """A 200 from /api/session forwards to the return-to (the happy path)."""
+    (ok,) = _run({"consumer": [[200, "/admin/blog", "", {}]]})["consumer"]
+    assert ok["nav"] == [f"{APP_ORIGIN}/admin/blog"], ok["nav"]
+    assert ok["errors"] == [], f"a healthy session produced an error: {ok['errors']}"
 
 
 def test_no_session_stays_on_the_auth_card() -> None:
-    (none,) = _run({"early": [], "headGate": [["?next=%2Fadmin&stale=1", "", None]], "claim": []})["headGate"]
+    (none,) = _run({"consumer": [[401, "/admin", "", {}]]})["consumer"]
     assert none["nav"] == [], "bounced a visitor with no session"
+    assert none["errors"] == [], f"a 401 is not an error to display: {none['errors']}"
+
+
+def test_store_fault_does_not_sign_the_user_out() -> None:
+    """A 503 is 'we could not tell' — never 'signed out' (#3485).
+
+    The failure mode it guards is a login loop: treating a store fault as
+    signed-out forwards to /admin, which refuses, which bounces back.
+    """
+    (fault,) = _run({"consumer": [[503, "/admin/blog", "", {}]]})["consumer"]
+    assert fault["nav"] == [], f"a store fault bounced the visitor: {fault['nav']}"
+    assert fault["errors"], "a store fault must surface a retryable notice"
+    (network,) = _run({"consumer": [[0, "/admin/blog", "", {}]]})["consumer"]
+    assert network["nav"] == [], f"a network fault bounced the visitor: {network['nav']}"
+    assert network["errors"], "a network fault must surface a retryable notice"
 
 
 # ── static guards on the Function ──────────────────────────────────────────
@@ -376,6 +695,8 @@ def test_gate_bounces_with_an_allowlisted_return_to() -> None:
         (True, "t", "unauthenticated", "skipped", "auth"),
         # allowlist query failed → 503 (our config problem, not a verdict)
         (True, "t", "ok", "unavailable", "unavailable"),
+        # the is_admin() RPC rejected the minted token → re-authenticate
+        (True, "t", "ok", "unauthenticated", "auth"),
         # authenticated but not an admin → explicit 403
         (True, "t", "ok", "not-admin", "not-admin"),
         # the happy path
@@ -392,23 +713,22 @@ def test_gate_decision_matrix(configured: bool, token, session: str, admin: str,
     assert got == want, f"configured={configured} token={token} session={session} admin={admin} → {got!r}, want {want!r}"
 
 
-def test_session_status_mapping_matches_supabase() -> None:
-    """Only a bad USER token means "re-authenticate".
+def test_token_reason_mapping_separates_dead_from_fault() -> None:
+    """Only a genuinely DEAD session means "re-authenticate".
 
-    Supabase answers 401 "Invalid API key" when OUR apikey is rotated and 403
-    bad_jwt when the user's token is bad. Reading the 401 as a bad session would
-    emit stale=1 for every visitor on a key rotation — an outage-class failure
-    that must never look like a logout.
+    `getAccessTokenForSession` distinguishes `no_session` (the row is gone or the
+    refresh token is dead — re-auth) from `unavailable` (the store or the provider
+    is down — 503). Collapsing them is the #3485 class: a transient fault would
+    emit stale=1 for every visitor and log them out of the shared cookie, while a
+    dead session would 503 forever instead of bouncing to sign-in.
     """
     cases = [
-        (403, '{"error_code":"bad_jwt"}', "unauthenticated"),
-        (401, '{"error_code":"bad_jwt"}', "unauthenticated"),
-        (401, '{"message":"Invalid API key"}', "unavailable"),
-        (429, "", "unavailable"),
+        ("no_session", "unauthenticated"),
+        ("unavailable", "unavailable"),
     ]
-    got = _run({"sessionStatus": [[c[0], c[1]] for c in cases]})["sessionKind"]
-    for (status, body, want), actual in zip(cases, got, strict=True):
-        assert actual == want, f"HTTP {status} {body!r} → {actual!r}, want {want!r}"
+    got = _run({"tokenReason": [[c[0]] for c in cases]})["tokenReason"]
+    for (reason, want), actual in zip(cases, got, strict=True):
+        assert actual == want, f"{reason!r} → {actual!r}, want {want!r}"
 
 
 @pytest.mark.parametrize(
@@ -422,23 +742,24 @@ def test_admin_response_mapping(ok: bool, count: int, want: str) -> None:
 
 
 def test_verify_session_wires_the_classifier() -> None:
-    """The classifier leaf is tested behaviourally — pin its CALL SITE too.
+    """The classifier leaves are tested behaviourally — pin their CALL SITES too.
 
-    Without this, replacing `sessionKindForStatus(res.status, body)` with a
-    hardcoded `{kind: "unauthenticated"}` restores the #3080 bug (a rotated
-    apikey read as a per-user auth verdict) while the suite stays green.
+    Without this, replacing `tokenReasonKind(token.reason)` with a hardcoded
+    `{kind: "unavailable"}` (or "unauthenticated") restores half the #3485 class
+    while the behavioural suite stays green: a dead session would 503 forever, or
+    a store fault would sign the user out. Same for `adminKind`.
     """
     src = GATE.read_text(encoding="utf-8")
     i = src.find("async function verifySession")
     assert i != -1, "verifySession was removed"
     body = src[i : src.find("\nasync function", i + 10)]
-    assert "sessionKindForStatus(res.status, body)" in body, (
-        "verifySession no longer delegates to the status/body classifier (#3080)"
+    assert "tokenReasonKind(token.reason)" in body, (
+        "verifySession no longer delegates to the token-reason classifier (#3485)"
     )
     j = src.find("async function isAdmin")
     assert j != -1, "isAdmin was removed"
     abody = src[j : src.find("\nasync function", j + 10)]
-    assert "adminKindForResponse(false, 0)" in abody and "adminKindForResponse(true, rows.length)" in abody, (
+    assert "adminKind(true, isAdminUser ? 1 : 0)" in abody, (
         "isAdmin no longer delegates to the response classifier (#3080)"
     )
 
@@ -458,7 +779,13 @@ def test_gate_maps_every_decision_to_a_response() -> None:
     ):
         i = src.find(decision)
         assert i != -1, f"the gate no longer handles {decision}"
-        window = src[i : i + 160]
+        # #3955: the window is the case BODY, not a fixed byte count. It was 160
+        # chars until the auth branch grew an asset guard (a comment plus the
+        # guard plus the exit), which pushed `redirectToAuth(returnTo)` past the
+        # edge and reddened this pin for a change that made the gate STRONGER.
+        # Widened rather than reordered: the pin's intent is "this case returns
+        # that call", and a byte-count proxy for "the body" is what broke.
+        window = src[i : i + 900]
         assert call in window, f"{decision} does not return {call}: {window[:120]!r}"
 
 
@@ -502,22 +829,25 @@ def test_server_and_client_allowlists_agree() -> None:
         )
 
 
-def test_email_flows_use_the_gotrue_target_not_the_console() -> None:
-    """signUp/resend must not point GoTrue at the gated /admin.
+def test_email_flows_do_not_build_a_client_redirect_target() -> None:
+    """Signup/resend confirmation links are the BFF's business now.
 
-    WELCOME_URL is derived from the (now overloaded) __DASHBOARD_BASE_URL, so
-    using it as emailRedirectTo sent confirmation links to /admin — where the
-    fragment is invisible to the server, the gate bounces, and the stale branch
-    deletes the freshly-confirmed session.
+    `/auth/signup` and `/auth/resend` call GoTrue with the route's OWN
+    `${APP_ORIGIN}/auth/confirm` target, so the page must not build an
+    `emailRedirectTo` at all — the old "WELCOME_URL sent the confirmation link to
+    the gated /admin" bug (#3080) cannot recur because the page no longer chooses
+    the target.
     """
     src = SIGNUP.read_text(encoding="utf-8")
     for line in src.splitlines():
         stripped = line.strip()
-        if stripped.startswith("emailRedirectTo:") or stripped.startswith("options: { emailRedirectTo:"):
-            assert "gotrueRedirectTarget()" in stripped, (
-                f"emailRedirectTo must use the GoTrue target, not a navigation one: {stripped!r}"
-            )
-    assert "emailRedirectTo: WELCOME_URL" not in src, "a confirmation email still redirects to the console (#3080)"
+        assert not stripped.startswith("emailRedirectTo:"), (
+            f"the page still builds a GoTrue redirect target: {stripped!r}"
+        )
+        assert "options: { emailRedirectTo:" not in stripped, (
+            f"the page still builds a GoTrue redirect target: {stripped!r}"
+        )
+    assert "emailRedirectTo: WELCOME_URL" not in src
 
 
 def test_unguarded_stale_is_inert() -> None:
@@ -528,30 +858,35 @@ def test_unguarded_stale_is_inert() -> None:
     assert bare["cleared"] == 0, "a bare ?stale=1 wiped a healthy session"
 
 
-def test_oauth_call_site_uses_the_gotrue_target() -> None:
-    """The signInWithOAuth call site must hand GoTrue the /auth target.
+def test_oauth_call_site_uses_the_bff_start_route() -> None:
+    """The signInWithProvider call site must navigate to /auth/start.
 
-    Testing gotrueRedirectTarget() alone is not enough: reverting the call site
-    back to claimRedirectTarget() (the primary Google/GitHub path) would still
-    pass, because the function itself is fine.
+    Testing oauthNextPath() alone is not enough: a call site that kept building a
+    client-side GoTrue URL would still pass, because the function itself is fine.
+    `/auth/start` is what mints the server-side PKCE verifier, so the call site
+    is the load-bearing half.
     """
     src = SIGNUP.read_text(encoding="utf-8")
-    i = src.find("signInWithOAuth(")
-    assert i != -1, "signInWithOAuth call site not found"
-    block = src[i : i + 600]
-    assert "redirectTo: gotrueRedirectTarget()" in block, (
-        f"the OAuth call site does not use the GoTrue target: {block[:200]!r}"
+    i = src.find("function signInWithProvider")
+    assert i != -1, "signInWithProvider not found"
+    block = src[i : i + 900]
+    assert '"/auth/start?provider="' in block, (
+        f"the OAuth call site does not use the BFF start route: {block[:300]!r}"
+    )
+    assert "oauthNextPath()" in block, "the call site does not pass the return-to"
+    assert "signInWithOAuth" not in block, (
+        "the call site still builds a GoTrue URL client-side (its PKCE verifier is invisible to /auth/callback)"
     )
 
 
-def test_async_bounce_honours_the_stale_flag() -> None:
-    """The async getSession bounce must not re-enter the loop the head gate broke."""
+def test_probe_consumer_honours_the_stale_flag() -> None:
+    """The probe consumer must not re-enter the loop the bounce broke."""
     src = SIGNUP.read_text(encoding="utf-8")
-    i = src.find("supabaseClient.auth.getSession().then")
-    assert i != -1, "the async getSession bounce was removed"
-    block = src[i : i + 400]
+    i = src.find("if (window.__SESSION_PROBE)")
+    assert i != -1, "the session probe consumer was removed"
+    block = src[i : i + 1000]
     assert "__ADMIN_STALE" in block, (
-        "the async bounce ignores the stale flag — it will forward straight back to /admin (#3080)"
+        "the probe consumer ignores the stale flag — it will forward straight back to /admin (#3080)"
     )
 
 
@@ -563,13 +898,669 @@ def test_console_spa_carries_the_return_to() -> None:
     assert "window.location.replace(AUTH_URL)" not in src, (
         "the SPA still bounces to a bare /auth — re-login lands on the app root, not the console (#3080)"
     )
-    # The helper must send the PATHNAME only. /auth rejects a `next` containing
-    # ':' or '\\' anywhere, so pathname+search silently drops the return-to for
-    # e.g. /admin?t=12:00 — the #3080 symptom again.
+    # The helper must send the PATHNAME only — parity with the server gate's own
+    # `returnToPath()` (functions/admin/[[path]].ts), which is pathname-only. NOTE:
+    # this is NOT because `/auth` rejects ':' — an earlier version of this comment
+    # said so and it is false (`signup.html` rejects only '\' plus a non-leading
+    # '/', and explicitly ACCEPTS ':' because the gate emits colon paths; the same
+    # false claim was corrected in blog-admin's useAuth.ts). Pathname-only is the
+    # gate-parity choice; its cost is that /admin?t=12:00 loses the query.
     i = src.find("function authUrlWithReturn")
     assert i != -1, "authUrlWithReturn was removed"
     body = src[i : i + 700]
     assert "window.location.pathname" in body, "the helper does not use the pathname"
     assert "window.location.search" not in body, (
-        "the helper appends the query, which /auth rejects — dropping the return-to (#3080)"
+        "the helper appends the query; the gate's returnToPath() is pathname-only, "
+        "so the two halves would disagree (#3080)"
     )
+
+
+# ── #3952 — the console the gate returns you to must actually RENDER ──────
+
+DIST_INDEX = REPO_ROOT / "website" / "apps" / "blog-admin" / "dist" / "index.html"
+VITE_CONFIG = REPO_ROOT / "website" / "apps" / "blog-admin" / "vite.config.ts"
+
+# Vite emits exactly two asset-bearing tags into the shell: the module script and
+# the stylesheet link. Selecting by TAG (rather than by every `src`/`href` in the
+# document) is what scopes this to the refs Vite owns — a hand-authored favicon
+# `<link rel="icon">`, an `<a href>`, or a `#/route` fragment cannot be mistaken
+# for the bundle.
+_VITE_ASSET_TAG = re.compile(
+    r'<script\b[^>]*\bsrc="([^"]+)"'
+    r'|<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _require_node() -> None:
+    """Fail, don't skip, when node is absent.
+
+    `pytest.skip` would report the suite GREEN with every behavioural test in
+    this file silently unrun — the #3080/#3930/#3952 contract would evaporate
+    while CI stayed green. The sibling harness
+    (`tests/test_cross_subdomain_cookie_sync.py`) fails by name in the same
+    condition (#3786); this mirrors it.
+    """
+    if not shutil.which("node"):
+        pytest.fail(
+            "node is required for the auth-bounce behavioural contract "
+            "(this file executes the shipped page JS) — install node; a skip "
+            "here would hide the whole #3080/#3930 contract"
+        )
+
+
+def _console_asset_refs() -> list[str]:
+    """Vite-emitted asset refs in the COMMITTED console shell.
+
+    Also requires a JS module ref: the stylesheet alone would still satisfy a
+    shape check while `<div id="root">` stays empty and the console renders blank
+    — the exact outcome this guard exists to catch (#3952).
+    """
+    html = DIST_INDEX.read_text(encoding="utf-8")
+    refs = [a or b for a, b in _VITE_ASSET_TAG.findall(html) if not (a or b).startswith("data:")]
+    assert refs, f"no Vite-emitted asset references in {DIST_INDEX}"
+    assert any(r.endswith(".js") for r in refs), (
+        f"no JS module ref in {DIST_INDEX} — the shell would render no script and "
+        "the console would render blank (#3952)"
+    )
+    return refs
+
+
+@pytest.mark.parametrize(
+    "doc_url",
+    [
+        # The canonical console URL — and the exact form the gate's next= emits.
+        # BROKEN with the old relative base (prefix '/').
+        f"{ORIGIN}/admin",
+        # Trailing-slash form — renders today; must not regress.
+        f"{ORIGIN}/admin/",
+        # Even-depth shell route — happened to resolve correctly with './' too.
+        f"{ORIGIN}/admin/blog",
+        # Odd-depth shell route — BROKEN with the old relative base
+        # (prefix '/admin/blog/' → '/admin/blog/assets/...').
+        f"{ORIGIN}/admin/blog/edit",
+    ],
+)
+def test_console_bundle_resolves_under_admin_from_every_entry_path(doc_url: str) -> None:
+    """#3952: every entry path that serves the shell must be able to load its bundle.
+
+    A RELATIVE base ('./') resolves against the DOCUMENT URL (RFC 3986 §5.2.3
+    "Merge Paths"), so whether it worked depended on the document's segment depth.
+    At `/admin/` and
+    `/admin/blog` the base prefix is `/admin/`, so `./assets/...` resolved to the
+    real bundle. At the extensionless `/admin` — the canonical console URL, and the
+    very form the gate emits in its own `next=` — the prefix is `/`, so the shell
+    requested `/assets/index-...js`, which is never deployed (CI stages the SPA
+    into the app project's dist/admin/, so the bundle exists only at
+    /admin/assets/). Odd-depth forms
+    like `/admin/blog/edit` failed the same way. Result: `<div id="root"></div>`
+    with no script = blank page.
+
+    Scope of this assertion: it pins the COMMITTED build snapshot. It is not the
+    byte-identical deployed bundle — CI rebuilds with VITE_* env substitution, so
+    the deployed JS filename differs. The base that build derives from is pinned
+    by `test_vite_base_is_the_console_public_path` below; the staging/mount
+    destination is not asserted here (filed as #3954).
+    """
+    refs = _console_asset_refs()
+    # Non-vacuity: a bare `for` loop asserts nothing when the list is EMPTY, so a
+    # regression that stops finding the refs would leave this test green (the
+    # cycle-6 review proved it: stubbing the helper to `[]` gave 71/71 pass).
+    assert refs, "the console shell's asset refs were not found — this test would otherwise be vacuous"
+    for ref in refs:
+        resolved = urlparse(urljoin(doc_url, ref)).path
+        # The invariant is DOCUMENT-INDEPENDENCE: the bundle lives at one place,
+        # so resolving a reference from any entry path must name that same place.
+        # (Asserting merely "starts with /admin/" is too weak — under the old
+        # relative base `/admin/blog/edit` resolved to `/admin/blog/assets/...`,
+        # which is still under /admin/ but is not where the bundle is deployed.)
+        canonical = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
+        assert canonical.startswith("/admin/"), (
+            f"{ref!r} does not resolve under /admin/ — the console bundle is never "
+            "deployed outside /admin/assets/ (#3952)"
+        )
+        assert resolved == canonical, (
+            f"{doc_url} → {ref!r} resolves to {resolved!r}, but the bundle is deployed "
+            f"at {canonical!r} — resolution depends on the entry path, so a 404 and a "
+            "blank console are possible (#3952)"
+        )
+
+
+def test_console_bundle_files_are_present() -> None:
+    """#3952: the shell's refs must name files that actually exist in the snapshot.
+
+    A shape-only assertion stays green on the very outcome it exists to prevent: a
+    ref to a nonexistent hash is exactly the 404 that blanks the console.
+    """
+    refs = _console_asset_refs()
+    assert refs, "the console shell's asset refs were not found — this test would otherwise be vacuous"
+    for ref in refs:
+        resolved = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
+        rel = resolved.removeprefix("/admin/")
+        assert (DIST_INDEX.parent / rel).is_file(), (
+            f"the shell references {ref!r} but {rel!r} does not exist in "
+            f"{DIST_INDEX.parent} — the browser would 404 and the console would "
+            "render blank (#3952)"
+        )
+
+
+def test_vite_base_is_the_console_public_path() -> None:
+    """#3952: the base must be ABSOLUTE, and equal to the gate's mount path.
+
+    The base path is known and fixed, so the absolute form is the documented
+    treatment. Vite documents the relative form as the fallback "if you don't know
+    the base path in advance" (vite.dev/guide/build.html → "Relative base").
+
+    The expected value is derived from the gate Function's own directory
+    (`functions/admin/[[path]].ts` → `/admin/`), not hardcoded, so a rename of the
+    console route cannot silently diverge from the build base.
+    """
+    cfg = VITE_CONFIG.read_text(encoding="utf-8")
+    m = re.search(r"^\s*base:\s*['\"]([^'\"]*)['\"]", cfg, re.MULTILINE)
+    assert m, "no `base` in vite.config.ts — the SPA inherits the default '/'"
+    mount = f"/{GATE.parent.name}/"
+    assert m.group(1) == mount, (
+        f"vite base is {m.group(1)!r}, must be the absolute {mount!r} — the path the "
+        "gate Function mounts the console at. A relative base re-breaks the "
+        "extensionless /admin entry path (#3952)"
+    )
+
+
+# ── #3930 — the app-origin bounce must carry the requested PATHNAME ────────
+#
+# #3080 pinned the /admin return-to. #3930 is the generalisation: an
+# unauthenticated deep link to ANY real app pathname must survive the bounce.
+# The bounce is emitted in two independent places — the dashboard SPA's
+# `bounceToAuth` (now delegating to `src/authBounce.js`) and the server
+# Functions (`welcome.ts`; the /admin gate above) — and all of them land on the
+# SAME consumer: the early return-to block in signup.html.
+#
+# These tests therefore join the REAL producer to the REAL consumer rather than
+# re-implementing either: the SPA target is computed by importing the shipped
+# module through node, and the consumer is the executed early block.
+
+# #3930: the app origin's real pathnames. /welcome and /team are single pages;
+# /admin is the console subtree the gate serves at any depth.
+_APP_RETURN_PATHS = [
+    "/team",
+    "/team/",
+    "/welcome",
+    "/welcome/",
+    "/admin",
+    "/admin/",
+    "/admin/blog",
+    "/admin/sub/deep/path",
+]
+
+
+def _spa_bounce_target(pathname: str, search: str) -> str:
+    """Run the SHIPPED SPA bounce for (pathname, search).
+
+    Imports `website/apps/dashboard/src/authBounce.js` through node — the module
+    `main.jsx::bounceToAuth` delegates to — so this is the producer itself, not a
+    Python restatement of it. A change to the module's rules reds these tests.
+    """
+    node = shutil.which("node")
+    _require_node()
+    node = shutil.which("node")
+    script = (
+        "import { authBounceTarget } from " + json.dumps(SPA_BOUNCE_JS.as_uri()) + ";"
+        "process.stdout.write(authBounceTarget({ pathname: " + json.dumps(pathname)
+        + ", search: " + json.dumps(search) + ", errorHash: '' }));"
+    )
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"the SPA bounce module failed to load:\n{proc.stderr}"
+    return proc.stdout
+
+
+def test_app_return_to_survives_the_bounce() -> None:
+    """Every real app pathname is honoured, and its query rides along.
+
+    Every row is driven through the REAL producer (`authBounce.js`, imported
+    through node) and then through the REAL consumer (the executed early block)
+    — the two halves are joined, not restated. The query is load-bearing:
+    `/team?session_id=…` is Stripe's return handoff (the SPA reads it from
+    `location.search`) and `/welcome?reset=…` names the recovery panel.
+    """
+    cases = [
+        (path, search, path + search)
+        for path in _APP_RETURN_PATHS
+        for search in ("", "?x=1")
+    ] + [
+        ("/team", "?session_id=abc", "/team?session_id=abc"),
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+    ]
+    targets = [_spa_bounce_target(path, search) for path, search, _ in cases]
+    searches = [t[len("/auth"):] for t in targets]
+    rows = _run({"early": [[s, "", APP_ORIGIN] for s in searches]})["early"]
+    for (path, search, want), target, row in zip(cases, targets, rows, strict=True):
+        assert target.startswith("/auth"), f"{path}{search}: not a /auth target: {target}"
+        assert row["ret"] == want, f"{path}{search} → ret {row['ret']!r}, want {want!r}"
+        assert row["base"] == APP_ORIGIN + want, row
+
+
+def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
+    """The SPA's REAL bounce → the /auth page's REAL consumer → post-login nav.
+
+    Both halves are executed: the target comes from importing the shipped
+    `authBounce.js` through node, and the destination comes from executing
+    signup.html's early allowlist plus its real `claimRedirectTarget` /
+    `oauthNextPath`. A drift in either half (the #3930 symptom: a return-to
+    emitted but dropped) reds this test.
+    """
+    cases = [
+        ("/team", "?session_id=abc", "/team?session_id=abc"),
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/admin/blog", "", "/admin/blog"),
+    ]
+    targets = [_spa_bounce_target(pathname, search) for pathname, search, _ in cases]
+    for (pathname, _, _), target in zip(cases, targets, strict=True):
+        # The producer must emit a PATH, never an origin: `urlsplit` proves the
+        # target carries no scheme and no netloc. That is a STRING-SHAPE check,
+        # not a resolution — the same-origin property itself is asserted below
+        # on the consumer side (`row["base"] == APP_ORIGIN + want`), and by
+        # authBounce.test.js's resolution test, which resolves `next` against
+        # the app origin and requires the origin to be unchanged.
+        assert target.startswith("/auth"), f"{pathname}: not a /auth target: {target}"
+        resolved = urlsplit(target)
+        assert not resolved.scheme and not resolved.netloc, f"the bounce named an origin: {target}"
+
+    searches = [t[len("/auth"):] for t in targets]
+    rows = _run({"early": [[s, "", APP_ORIGIN] for s in searches]})["early"]
+    rets = [row["ret"] for row in rows]
+    for (_, _, want), row in zip(cases, rows, strict=True):
+        assert row["base"] == APP_ORIGIN + want, row
+    destinations = _run({"claim": [[ret, ""] for ret in rets]})["claim"]
+
+    for (pathname, search, want), ret, dest in zip(cases, rets, destinations, strict=True):
+        assert ret == want, f"the /auth page dropped the SPA's return-to: {pathname}{search} → {ret!r}"
+        assert dest["nav"] == APP_ORIGIN + want, f"post-login nav: {dest['nav']!r}, want {APP_ORIGIN + want!r}"
+        assert dest["oauth"] == want, f"the OAuth next: {dest['oauth']!r}, want {want!r}"
+
+
+def test_welcome_producer_next_is_accepted_by_the_auth_page() -> None:
+    """`welcome.ts`'s REAL emitted return-to must survive the consumer.
+
+    The anonymous bounce in `functions/welcome.ts` is
+    `/auth?next=<encodeURIComponent(url.pathname + url.search)>&stale=1`. The
+    allowlist used to be /admin-only, so that value was emitted and then dropped
+    — the visitor landed on the app root instead of the page they asked for.
+    Pinning the producer's expression (not just its output) is what keeps this
+    pair honest: a producer that started sending only the pathname would
+    silently lose `/welcome?reset=1`.
+
+    NOTE the `?reset` form: `welcome.ts` renders the recovery panel whenever a
+    `reset` param is PRESENT (any value), so `?reset=1` is one instance, not the
+    only one.
+    """
+    src = WELCOME_FN.read_text(encoding="utf-8")
+    m = re.search(r"`/auth\?next=\$\{encodeURIComponent\(([^)]*)\)\}&stale=1`", src)
+    assert m, "welcome.ts's anonymous bounce shape changed — update this harness"
+    assert m.group(1) == "url.pathname + url.search", (
+        f"the welcome bounce no longer carries pathname+search: {m.group(1)!r}"
+    )
+    for path, search, want in (
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/welcome", "?reset", "/welcome?reset"),
+        ("/welcome/", "?reset=0", "/welcome/?reset=0"),
+        ("/welcome", "", "/welcome"),
+    ):
+        search_str = "?next=" + quote(path + search, safe="") + "&stale=1"
+        row = _run({"early": [[search_str, "", APP_ORIGIN]]})["early"][0]
+        assert row["ret"] == want, f"welcome.ts emitted {want!r} and the /auth page read {row['ret']!r}"
+        assert row["base"] == APP_ORIGIN + want, row
+
+
+def test_spa_bounce_does_not_mint_the_server_stale_marker() -> None:
+    """A forged `stale=1` on an app deep link must not survive the SPA bounce.
+
+    `stale=1` arms the /auth page's no-forward loop-breaker and suppresses the
+    session probe. It is a SERVER-gate verdict; the SPA has none to report, so
+    forwarding a deep link's `stale=1` would let `/team?stale=1` show a
+    signed-in visitor the sign-in card.
+    """
+    target = _spa_bounce_target("/team", "?stale=1&session_id=abc")
+    assert "stale" not in target, f"the SPA bounce minted a stale marker: {target}"
+    assert _run({"early": [[target[len("/auth"):], "", APP_ORIGIN]]})["early"][0]["ret"] == (
+        "/team?session_id=abc"
+    )
+
+
+def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
+    """#3080's precedence, re-pinned for the widened allowlist.
+
+    The console has no claim card, so its return-to wins unconditionally. For
+    every OTHER return-to the pending claim is the visitor's unfinished intent
+    and must win — otherwise the #3930 widening would silently drop the claim
+    funnel (`/team` is a signed-out visitor's bounce target and would round-trip
+    them back to /auth).
+    """
+    rows = _run({
+        "claim": [
+            ["/admin/blog", ""],                       # console, no claim
+            ["/admin/blog", "tt_claim_pending=1"],      # console wins anyway
+            ["/team?session_id=abc", "tt_claim_pending=1"],   # claim wins
+            ["/welcome?reset=1", "tt_claim_pending=1"],       # claim wins
+            ["/team?session_id=abc", ""],               # no claim → the return-to
+        ],
+    })["claim"]
+    assert rows[0]["nav"] == APP_ORIGIN + "/admin/blog", rows[0]
+    assert rows[1]["nav"] == APP_ORIGIN + "/admin/blog", rows[1]
+    # The console branch of `oauthNextPath` is non-redundant ONLY in this row
+    # (console return-to AND a pending claim): without it the visitor is routed
+    # to the claim card instead of the console. Asserted, or deleting the branch
+    # leaves the suite green (review cycle 4).
+    assert rows[1]["oauth"] == "/admin/blog", rows[1]
+    assert rows[2]["nav"] == APP_ORIGIN + "/?claim=1", rows[2]
+    assert rows[2]["oauth"] == "/?claim=1", rows[2]
+    assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
+    assert rows[4]["nav"] == APP_ORIGIN + "/team?session_id=abc", rows[4]
+    assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
+
+
+def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
+    """The ANON_TEAM_NO_OWNER funnel destination, EXECUTED.
+
+    The call site sits inside the big script, which no harness extracts, so it is
+    the NAMED helper `claimFunnelUrl` precisely so it can be driven here.
+    """
+    rows = _run({"funnel": [
+        ["/admin", "", None],
+        ["/admin?tab=drafts", "", None],
+        ["/admin/blog", "", None],
+        ["/administrator", "", None],
+        ["/administer", "", None],
+        ["/team?session_id=abc", "", None],
+        [None, "", None],
+    ]})["funnel"]
+    # The console return-to wins, INCLUDING when it carries a query (the early
+    # block carries `u.search` on an allowed route). It is returned as the RAW
+    # same-origin PATH — a valid `window.location.href` target.
+    assert rows[0]["funnel"] == "/admin", rows[0]
+    assert rows[1]["funnel"] == "/admin?tab=drafts", rows[1]
+    assert rows[2]["funnel"] == "/admin/blog", rows[2]
+    # Every other value is the claim card — never the return-to.
+    for row in rows[3:]:
+        assert row["funnel"] == APP_ORIGIN + "/?claim=1", row
+    # STATIC half: the extracted helper is only load-bearing if the CALL SITE
+    # still calls it. Without this, reverting line ~1424 to the pre-#3930 inline
+    # ternary leaves the helper as dead code and the rows above still pass.
+    callsite = _strip_js_line_comments(_strip_comments(SIGNUP.read_text(encoding="utf-8")))
+    assert "window.location.href = claimFunnelUrl();" in callsite, (
+        "the ANON_TEAM_NO_OWNER funnel must navigate via the extracted "
+        "claimFunnelUrl() — an inline expression puts the decision back inside "
+        "the big script, where no harness can execute it (cycle-6 review)"
+    )
+    assert "window.location.href = isConsoleReturnTo() ?" not in callsite, (
+        "the console-vs-claim-card decision must not be re-inlined as a "
+        "`location.href =` ternary — that is the pre-#3930 form this pins"
+    )
+    assert "window.location.href = window.__ADMIN_RETURN_TO ||" not in callsite, (
+        "the pre-#3930 `__ADMIN_RETURN_TO || claimCardUrl()` expression is back at "
+        "a `location.href =` site"
+    )
+
+
+def test_early_block_validates_and_composes_the_dashboard_base() -> None:
+    """The early block's OWN base composition is validated on every path.
+
+    `__DASHBOARD_BASE_URL` is page-controlled (never read from the URL), but the
+    early block is what composes a return-to onto it, and it used to use
+    `window.location.origin` — discarding the #2744 preview port. Both the
+    composition and the origin validation live here, so they are driven here
+    rather than only through `claimCardUrl`.
+    """
+    loopback = "http://127.0.0.1:8790"
+    # A real return-to rides the seam's origin (the preview keeps its port).
+    rows = _run({"early": [
+        ["?next=/team?session_id=abc", "", APP_ORIGIN, loopback],
+        ["?next=/team", "", APP_ORIGIN, None],
+        ["?next=/team", "", APP_ORIGIN, "https://app.premiselabs.co"],
+        ["?next=/team", "", APP_ORIGIN, 42],
+        ["?next=/team", "", APP_ORIGIN, []],
+        ["?next=/team", "", APP_ORIGIN, loopback + "/prior"],
+        # The whole loopback allowlist, driven through the SHIPPED `dashboardOrigin`
+        # (not the driver's model): dropping `localhost` or `[::1]` from the page
+        # must red here (cycle-7 review).
+        ["?next=/team", "", APP_ORIGIN, "http://localhost:8790"],
+        ["?next=/team", "", APP_ORIGIN, "http://[::1]:8790"],
+        ["?next=/team", "", APP_ORIGIN, "https://localhost:8790"],
+    ]})["early"]
+    assert rows[0]["base"] == loopback + "/team?session_id=abc", rows[0]
+    assert rows[0]["ret"] == "/team?session_id=abc", rows[0]
+    assert rows[1]["base"] == APP_ORIGIN + "/team", rows[1]
+    assert rows[2]["base"] == APP_ORIGIN + "/team", rows[2]
+    # A non-string seam falls back to this document's origin.
+    for row in rows[3:5]:
+        assert row["base"] == APP_ORIGIN + "/team", row
+    # A seam already carrying a path keeps its ORIGIN but takes the NEW path —
+    # the prior path is replaced, never concatenated (no accretion).
+    assert rows[5]["base"] == loopback + "/team", rows[5]
+    assert loopback + "/prior" not in rows[5]["base"], rows[5]
+    # Every loopback spelling is honoured (a hole here is the #2744 preview
+    # landing on the auth origin instead of the dashboard).
+    assert rows[6]["base"] == "http://localhost:8790/team", rows[6]
+    assert rows[7]["base"] == "http://[::1]:8790/team", rows[7]
+    assert rows[8]["base"] == "https://localhost:8790/team", rows[8]
+    # Hostile bases must fall back to THIS document's origin — the value is what
+    # every later navigation sink reads. `blob:` is the case an "opaque origin"
+    # rule alone misses: it carries the INNER url's origin.
+    for hostile in (
+        "//evil.com",
+        "/\\evil.com",
+        "\\\\evil.com",
+        "\t//evil.com",
+        " //evil.com",
+        "http://evil.com",
+        "https://evil.com/x",
+        "https://user:pass@evil.com",
+        "blob:https://evil.com/x",
+        "blob:https://app.premiselabs.co/team",   # inner origin IS this page's
+        "blob:http://127.0.0.1:8790/team",
+        "filesystem:https://evil.com/temporary/x",
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "about:blank",
+        "not a url",
+    ):
+        (row,) = _run({"early": [["?next=/team", "", APP_ORIGIN, hostile]]})["early"]
+        assert row["base"] == APP_ORIGIN + "/team", (hostile, row)
+        assert row["ret"] == "/team", (hostile, row)
+
+
+def test_early_block_sanitises_the_base_without_a_return_to() -> None:
+    """With no `next` the early block returns before composing — the base it
+    leaves behind is still read by `DASHBOARD_URL`/`WELCOME_URL`, so a hostile
+    value must not survive to a navigation sink. The consumer reduces it."""
+    for hostile in ("javascript:alert(1)", "blob:https://evil.com/x", "//evil.com"):
+        (row,) = _run({"early": [["", "", APP_ORIGIN, hostile]]})["early"]
+        assert row["ret"] is None, (hostile, row)
+        # The early block leaves the raw value in place; the consumers reduce it.
+        (nav,) = _run({"claim": [[None, "tt_claim_pending=1", hostile]]})["claim"]
+        assert nav["nav"] == APP_ORIGIN + "/?claim=1", (hostile, nav)
+        (plain,) = _run({"claim": [[None, "", hostile]]})["claim"]
+        assert plain["nav"] == APP_ORIGIN, (hostile, plain)
+
+
+def test_claim_card_honours_the_dashboard_seam_origin() -> None:
+    """The #2744 seam still routes the claim card to the DASHBOARD, not to /auth.
+
+    In the split-origin local preview /auth and the dashboard are on different
+    ports, so `claimCardUrl()` must not inherit the port that served the auth
+    page. It reads the ORIGIN of `__DASHBOARD_BASE_URL` — which since #3930 may
+    itself carry a path+query — so a pathful base must contribute its origin
+    ONLY, never smear `…/team?session_id=abc/?claim=1` into the card URL.
+
+    Without this test the seam branch is unreachable in the harness (the driver
+    used to leave `__DASHBOARD_BASE_URL` unset, so only the fallback ran).
+    """
+    auth_port = "http://127.0.0.1:8788"
+    dash_port = "http://127.0.0.1:8790"
+    assert auth_port != dash_port
+    # `cases.claim` entries are [ret, cookie, seamBase].
+    rows = _run({
+        "claim": [
+            ["/team?session_id=abc", "tt_claim_pending=1", dash_port],
+            ["/team?session_id=abc", "tt_claim_pending=1", dash_port + "/team?session_id=abc"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "not a url"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "//evil.com"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "/\\evil.com"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "javascript:alert(1)"],
+        ],
+    })["claim"]
+    for row in rows[:2]:
+        assert row["nav"] == dash_port + "/?claim=1", row
+    # A malformed, protocol-relative, backslash-authority or non-special-scheme
+    # base must fall back to THIS document's origin, never off-site.
+    for row in rows[2:]:
+        assert row["nav"] == APP_ORIGIN + "/?claim=1", row
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "?next=/team/x",              # a single page owns no sub-paths
+        "?next=/welcome/x",
+        "?next=/welcomex",            # prefix confusion
+        "?next=/welcomes",            # prefix confusion (plural)
+        "?next=/administrator",
+        "?next=/",                    # the app root needs no return-to
+        "?next=/auth",                # a return-to to /auth would loop
+        "?next=/blog",                # off the allowlist
+        "?next=//evil.com",           # protocol-relative
+        "?next=/..//evil.com",        # resolves same-origin, serialises to //
+        "?next=/team/..//evil.com",
+        "?next=/team\\@evil.com",      # backslash authority trick
+        "?next=/%09/evil.example",    # TAB — WHATWG strips it, so it survives a leading-/ check
+        "?next=/team%0D%0ASet-Cookie:x=1",  # CRLF into the Location header
+        "?next=/admin/../blog",       # dot-segment escape out of the allowlist
+    ],
+)
+def test_app_hostile_or_off_allowlist_next_is_ignored(search: str) -> None:
+    """Anything outside the app allowlist leaves the default (the app root) alone.
+
+    These are the paths a forged `?next=` can take. None may change the
+    destination origin, and none may name a non-route on this origin.
+    """
+    (row,) = _run({"early": [[search, "", APP_ORIGIN]]})["early"]
+    assert row["base"] is None, f"unsafe app return-to honoured: {search!r} → {row['base']!r}"
+    assert row["ret"] is None, f"unsafe app return-to recorded: {search!r}"
+
+
+def test_dot_segments_resolving_into_the_allowlist_are_accepted_same_origin() -> None:
+    """`..` that normalises to an ALLOWLISTED route is fine — it cannot escape.
+
+    The consumer resolves before matching, so `/welcome/../team` becomes `/team`
+    (same origin, a real route). Only a resolution that leaves the allowlist —
+    or the origin — is dropped. Pinned so the reject-side tests above are not
+    read as "any dot-segment is hostile".
+    """
+    (row,) = _run({"early": [["?next=/welcome/../team", "", APP_ORIGIN]]})["early"]
+    assert row["ret"] == "/team", row
+    assert row["base"] == APP_ORIGIN + "/team", row
+
+
+# ── #3955: serveShell — the two blank-page mechanisms ────────────────────────
+#
+# serveShell was executed by NO test before this. Both mechanisms below are
+# silent-failure shapes: the browser refuses the module on MIME type, so the
+# console blanks while the server reports success. Each case is
+# [pathname, assetStatus, assetContentType, shellOk].
+
+
+def test_missing_asset_is_not_answered_with_the_html_shell() -> None:
+    """A 404 under /admin/assets/ must NOT fall through to the shell.
+
+    The passthrough cannot distinguish "real asset" from "client route", so a
+    request for a MISSING `/admin/assets/index-<stalehash>.js` used to fall
+    through and be answered `200 text/html`. The browser then refuses the module
+    ("expected a JavaScript module script but the server responded with a MIME
+    type of text/html") — a chunk dropped by a deploy presents as a blank
+    console with no signal. Assert on BOTH the status and the MIME type: the
+    status alone does not prove the shell was skipped.
+    """
+    (row,) = _run({"shell": [["/admin/assets/index-stale.js", 404, "text/html; charset=utf-8", True]]})["shell"]
+    assert row["isAsset"] is True, row
+    assert row["status"] == 404, f"a missing asset was not a real 404: {row}"
+    assert "text/html" not in row["contentType"], (
+        f"a missing asset was answered as HTML — the MIME-masked blank console: {row}"
+    )
+
+
+def test_real_asset_passes_through_with_its_own_type() -> None:
+    """The fix must not swallow the healthy path."""
+    (row,) = _run({"shell": [["/admin/assets/index-abc123.js", 200, "application/javascript", True]]})["shell"]
+    assert row["status"] == 200, row
+    assert "application/javascript" in row["contentType"], row
+
+
+def test_client_route_still_serves_the_html_shell() -> None:
+    """Anti-vacuity: a client route must STILL get the shell.
+
+    Without this, "the asset branch returns 404" is satisfied by answering
+    everything 404 — which would break the console entirely.
+    """
+    (row,) = _run({"shell": [["/admin/settings", 404, "text/html", True]]})["shell"]
+    assert row["isAsset"] is False, row
+    assert row["status"] == 200, row
+    assert "text/html" in row["contentType"], row
+
+
+def test_asset_404_beats_the_shell_even_when_the_shell_exists() -> None:
+    """Ordering: the asset branch is checked BEFORE the shell fallthrough."""
+    (row,) = _run({"shell": [["/admin/assets/gone.js", 404, "text/plain", True]]})["shell"]
+    assert row["status"] == 404, row
+    assert "text/html" not in row["contentType"], row
+
+
+def test_missing_spa_build_reports_503_not_a_blank_200() -> None:
+    """The pre-existing #3620 guard must survive the new branch."""
+    (row,) = _run({"shell": [["/admin/settings", 404, "text/html", False]]})["shell"]
+    assert row["status"] == 503, row
+
+
+def test_asset_predicate_covers_the_bundle_prefix() -> None:
+    """The predicate that guards BOTH mechanisms, exercised directly.
+
+    Mechanism 2 (a session expiring between the document and the subresource
+    loads) is closed by the SAME predicate gating the `auth` branch, so its
+    boundary is pinned here: `/admin/assets/...` is an asset, `/admin/assets`
+    (no trailing slash) and a client route are not.
+    """
+    rows = _run(
+        {
+            "shell": [
+                ["/admin/assets/index-abc.js", 200, "application/javascript", True],
+                ["/admin/assets/nested/chunk.css", 200, "text/css", True],
+                ["/admin/assets", 200, "text/html", True],
+                ["/admin/settings", 200, "text/html", True],
+            ]
+        }
+    )["shell"]
+    got = [r["isAsset"] for r in rows]
+    assert got == [True, True, False, False], got
+
+
+def test_auth_branch_guards_asset_requests() -> None:
+    """Mechanism 2 is closed in the gate, not only in the shell.
+
+    `onRequest` needs Supabase to execute, so the guard is pinned at the source:
+    the `auth` branch must consult `isAssetRequest` BEFORE emitting the HTML
+    redirect. A behavioural proxy (the predicate's boundary) is pinned by
+    test_asset_predicate_covers_the_bundle_prefix above; this pins that the
+    branch actually CALLS it — reverting the guard reddens this, not that.
+    """
+    src = GATE.read_text(encoding="utf-8")
+    auth = src.index('case "auth":')
+    redirect = src.index("return redirectToAuth(returnTo);", auth)
+    body = src[auth:redirect]
+    assert "isAssetRequest(request)" in body, (
+        "the auth branch no longer guards asset requests — a session expiring "
+        "mid-load would hand the module an HTML redirect (MIME blank page)"
+    )
+    assert body.index("isAssetRequest(request)") < body.index("return new Response("), body

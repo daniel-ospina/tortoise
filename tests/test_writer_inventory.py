@@ -56,7 +56,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -331,11 +331,12 @@ class TestCreateApiKeyExpiry2426:
 class TestRevokedKeysDoNotConsumeCap2481:
     """#2481 (SUPABASE lane) — revoked api_keys rows are audit tombstones,
     never max_api_keys budget consumers. Every cap seam counts via
-    quota._count_resource with `revoked_at is null` (+ expiry exclusion) —
-    revoked rows never count. PIN: revoke-then-mint succeeds at cap and a
-    pre-existing revoked-tombstone stack alone can never 402/409 a mint;
-    only a true ACTIVE overage still 402s/409s (active-key semantics
-    unchanged — the fake control plane's api_keys table is the SOR)."""
+    quota._count_resource with `revoked_at is null` (+ expiry and
+    non-bootstrap exclusions) — revoked rows never count. PIN: revoke-then-
+    mint succeeds at cap and a pre-existing revoked-tombstone stack alone
+    can never 402/409 a mint; only a true ACTIVE overage still 402s/409s
+    (active-key semantics unchanged — the fake control plane's api_keys
+    table is the SOR)."""
 
     def test_revoke_then_mint_succeeds_at_cap(self, team_client):
         """Team at max (2 active rows) revokes one key → the revoked row
@@ -382,6 +383,104 @@ class TestRevokedKeysDoNotConsumeCap2481:
         # then the legacy-mint 402 surface
         assert tc.delete(f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert tc.post("/v1/team/keys").status_code == 200
+
+
+class TestBootstrapKeysCapExempt4140:
+    """#4140 / R13 (SUPABASE lane) — bootstrap (24h session) rows are
+    cap-EXEMPT: they never hold a ``max_api_keys`` slot on the standalone
+    mint gate, while every DURABLE row (provisioned / recovery / NULL legacy
+    ``created_via``) still does. The bug: ``_count_resource("api_keys")``
+    counted bootstrap rows, so a free org (allowance 2) with one session key
+    could mint only one durable key before 402.
+
+    ``_count_resource`` reads the SAME ``active_api_keys`` liveness set the
+    recovery-mint lane uses and applies the bootstrap exclusion in PYTHON —
+    never a PostgREST ``created_via=neq.bootstrap`` filter, which drops NULL
+    rows and would over-exempt a legacy durable key (#4140 adversarial
+    T4).
+
+    NOTE: the production ``api_keys.created_via`` column is ``NOT NULL
+    DEFAULT 'provisioned'`` with a CHECK over {provisioned, bootstrap,
+    recovery} (migration 0007), so the NULL / near-miss-literal fixtures in
+    this class are SYNTHETIC — they pin the predicate's NULL-tolerance and
+    exact-literal match at the seam (the fake control plane is the SOR),
+    not a state the Supabase schema can hold. The registry lane, which has
+    no CHECK, is where a NULL legacy row genuinely occurs."""
+
+    @staticmethod
+    def _row(kid, *, created_via="provisioned", **kw):
+        return _key_row(id=kid, created_via=created_via, **kw)
+
+    def test_count_excludes_live_bootstrap(self, team_client):
+        from datetime import datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        tc, fake, _ = team_client  # noqa: RUF059
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        fake.seed("api_keys", [
+            self._row("b1", created_via="bootstrap", expires_at=future),
+            self._row("b2", created_via="bootstrap", expires_at=future),
+            self._row("d1", created_via="provisioned"),
+        ])
+        assert _count_resource("team-free-001", "api_keys") == 1
+
+    def test_count_includes_every_durable_class(self, team_client):
+        from datetime import datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        tc, fake, _ = team_client  # noqa: RUF059
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        fake.seed("api_keys", [
+            self._row("p", created_via="provisioned"),
+            self._row("r", created_via="recovery"),
+            self._row("n", created_via=None),          # legacy NULL → durable
+            self._row("other", created_via="agent_signup"),
+            # near-miss literals are NOT the exact exemption
+            self._row("cap", created_via="Bootstrap"),
+            self._row("sp", created_via="bootstrap "),
+            self._row("boot", created_via="bootstrap", expires_at=future),
+        ])
+        assert _count_resource("team-free-001", "api_keys") == 6
+
+    def test_count_excludes_expired_and_revoked_durable(self, team_client):
+        from datetime import datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        tc, fake, _ = team_client  # noqa: RUF059
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        fake.seed("api_keys", [
+            self._row("expired", created_via="provisioned", expires_at=past),
+            self._row("revoked", created_via="provisioned",
+                      revoked_at=past),
+            self._row("live", created_via="provisioned"),
+        ])
+        assert _count_resource("team-free-001", "api_keys") == 1
+
+    def test_standalone_mint_gate_ignores_bootstrap_and_blocks_at_cap(
+            self, team_client):
+        """Boundary: with free max_api_keys=2, two live bootstrap rows occupy
+        NO slot (both durable mints land); the third durable mint 402s."""
+        from datetime import datetime, timedelta
+        tc, fake, _ = team_client
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        fake.seed("api_keys", [
+            self._row("b1", created_via="bootstrap", expires_at=future),
+            self._row("b2", created_via="bootstrap", expires_at=future),
+        ])
+        assert tc.post("/v1/team/keys", json={"name": "d1"}).status_code == 200
+        assert tc.post("/v1/team/keys", json={"name": "d2"}).status_code == 200
+        assert tc.post("/v1/team/keys", json={"name": "d3"}).status_code == 402
+
+    def test_null_legacy_durable_still_consumes_a_slot(self, team_client):
+        """Over-exemption guard: a row with NULL created_via is DURABLE — two
+        of them fill the free cap and the next mint 402s. This is the
+        direction the predicate must fail closed on."""
+        tc, fake, _ = team_client
+        fake.seed("api_keys", [
+            self._row("n1", created_via=None),
+            self._row("n2", created_via=None),
+        ])
+        assert tc.post("/v1/team/keys").status_code == 402
 
 
 # ── GET /v1/team/keys (list_api_keys) ───────────────────────────────────────

@@ -14,6 +14,8 @@ aboutObjects: tortoise-hosted-platform
 
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 > "registry" naming is retained from the registry-era design — the content is
 > **per-team knowledge graphs** (control-plane metadata migrates to Supabase
 > under #669). Since #2313 the sweep covers EVERY active graph of a team
@@ -30,8 +32,14 @@ session only; keys stay revoked). The default graph can never be deleted.
 
 **Purge** (physical erasure) runs on demand via the internal endpoint:
 
-    curl -X POST $API/v1/internal/backups/purge \
-      -H "Authorization: Bearer $INTERNAL_KEY"
+    curl -m 300 -X POST $API/v1/internal/backups/purge \
+      -H "Authorization: Bearer $INTERNAL_KEY" \
+      -H "Content-Type: application/json"
+    # -m 300: /v1/internal/ is exempt from the app's 10 s transport wait bound
+    # (#4939), so THIS timeout is the only bound on the request. Always pass one.
+    # The JSON Content-Type is NOT what makes the body parse (the handler parses
+    # whatever is there) but send it anyway — a body sent without it is exactly
+    # how the mirror check below silently read the wrong bucket once.
     # optional {"grace_days": N} (1..365) for drills; default 7
 
 Per expired tombstone (deleted_at <= now - 7d; legacy tombstones with no
@@ -59,8 +67,9 @@ restore racing a purge cannot interleave. A lock timeout returns 503.
 wired by #2317) so past-window trash is erased within a day of expiry — the
 runbook's erase claim is honored by the scheduler, not by operator memory. A
 purge body of status ``errors`` (per-tombstone failures — row kept as the
-retry anchor) or a non-2xx response fails the driver run loudly (red job),
-never a silent skip.
+retry anchor), a non-2xx response, or the driver's own `-m 300` ceiling being
+hit fails the driver run loudly (red job) **and files a dedup'd `PURGE_FAILED`
+incident** (#4612) — never a silent skip, and no longer log-only.
 
 ## RPO / RTO contract (#2317)
 
@@ -75,6 +84,33 @@ false on every tier today). The driver cron (`registry-backup-cron.yml`,
 **Achieved freshness is MEASURED, not assumed** (best-practice gap 6d):
 - per-team/per-graph tri-state archive-age vs `BACKUP_STALE_THRESHOLD_MIN` —
   watcher poll → `GET /v1/internal/backups/status` → `per_team` (+ heartbeat);
+  the per-team census is gated by the SAME eligibility predicate the sweep
+  uses (`enumerate_eligible_orgs`: `tier != 'free' AND backup_enabled`), so an
+  org outside it reads `not_eligible`, not `never` — `never` means a backup
+  was OWED and is missing (#3658). On the watcher census, a non-eligible org
+  opens no DR incident (the driver's direct-R2 leg remains eligibility-blind —
+  it lists every `backups/*/` prefix). This holds while eligibility is
+  CONFIRMED: an unconfirmed eligibility read falls back to the last confirmed
+  set and reports `eligible_degraded` on the watcher heartbeat; a first-contact
+  failure fails OPEN (all orgs treated as targets), so a non-eligible org can
+  read `never` until the read recovers. An eligibility read is CREDIBLE only
+  if it names at least one org the watcher actually watches: an empty result,
+  or a set naming no known org (a padded, foreign, or character-iterated id),
+  counts as UNCONFIRMED — none of them can be told apart from a read that
+  answered with nothing, and treating any as confirmed would put every census
+  org in `not_eligible` and resolve the whole DR surface. The cost is the
+  mirror case — an all-free deployment, or a census read that misses the
+  eligible orgs, keeps the gate off (re-alerting the non-eligible tail), which
+  is the safe direction. (Residuals: a persistent eligibility-only read
+  failure can likewise withhold a newly-eligible org's alarm; and see #4315
+  below.) A SEPARATE
+  residual is shared with the sweep itself: `enumerate_eligible_orgs` is a
+  PostgREST row LIST with no pagination, so a silently SHORT read can classify
+  an org that HAS archives as `not_eligible` and close its live incidents (#4315
+  — self-healing on the next complete poll, but the blip suppresses a real alarm
+  and pushes a false resolution). It is NOT covered by the census's
+  `per_team = census ∪ r2_orgs` invariant, because eligibility is checked before
+  the archive read.
 - per-run sweep roll-up (totals/failures/streaks) — `/status` → `last_sweep`;
 - driver direct-R2 DEFAULT-graph age leg (app-down case) — files STALE with
   the measured age in minutes;
@@ -221,10 +257,10 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 
 ### Verify (operator runbook)
 
-1. Config contract present: `curl $API/v1/internal/backups/status` (internal
+1. Config contract present: `curl -m 20 $API/v1/internal/backups/status` (internal
    key) → `lock` block shows `enabled:true`; without `CF_API_TOKEN` it shows
    `status:unverifiable` — verify with (2)/(3) instead.
-2. Live drift check: `curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+2. Live drift check: `curl -m 60 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
    $API/v1/internal/backups/verify-lock` → expect `"status":"verified"`
    (`drift`/`absent` = the rule is missing or shorter than `BACKUP_LOCK_DAYS`).
 3. Rule-list check (no app/token needed): `npx wrangler r2 bucket lock list
@@ -242,8 +278,33 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
    confirm the sweep prune logs "bucket-locked … skipping" for in-window
    objects and still prunes the rest, and that an in-window object is pruned
    normally once the window passes.
-6. Mirror check: `curl … /v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
-   (same rule must protect the mirror).
+6. Mirror check: `curl -m 60 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+   -H "Content-Type: application/json" \
+   $API/v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
+   (same rule must protect the mirror). **Check the response's `bucket` field is
+   the MIRROR, not the primary** — a body that does not reach the handler falls
+   back to the primary bucket and still returns 200, which reads as a pass.
+
+> ⚠️ Every `/v1/internal/` curl in this runbook carries an explicit `-m`. The
+> app's 10 s transport wait bound does **not** cover this prefix (#4939), so the
+> client's own `--max-time` is the only bound — a command without one hangs with
+> nothing printed instead of refusing legibly.
+>
+> **The ride-along's budget arithmetic (#4612).** The hourly driver's own `-m`
+> ceilings are 20 (status) / **600** (sweep) / **300** (purge) / 120 (reconcile) /
+> 20 (heartbeat), and the app's purge→`run_graph_purge` path takes a per-org
+> `_sweep_org_lock` with `_ORG_LOCK_TIMEOUT_S = 300` — i.e. **a single contended
+> org can consume the purge leg's entire 300 s budget and end in a
+> `driver_timeout`**, which is why that shape means "may still be running
+> server-side (or queued behind a restore)", not "did nothing". Worst case a run
+> holds the job for roughly 600 + 300 + 120 s of leg ceilings plus overhead,
+> against the workflow's `timeout-minutes: 30` job ceiling — so the legs can
+> exhaust the driver's budget without the *job* being killed mid-file. A leg
+> timeout is therefore a **reported** condition, never a silent one: it files
+> `PURGE_FAILED`/`RECONCILE_FAILED` with the curl exit and the derived shape.
+> (Raising these bounds is a separate decision — moving the purge off the
+> synchronous request path to 202-and-poll is the better long-term shape and was
+> explicitly deferred on #4967; #4612 did **not** touch any bound.)
 
 ### Residuals (recorded with this decision)
 - A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
@@ -259,10 +320,10 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.
 - **Direct R2 leg (app-down leg):** the driver computes the DEFAULT graph's freshness from R2 prefixes (aws CLI) — nested `backups/{org_id}/default/` + legacy flat (`backups/{org_id}/2…`, the pre-#2313 default dumps; a legacy-flat classification index #2370 excludes C5-era custom flats when present) — independent of `/status`. A fresh CUSTOM graph can never mask a stale default (#2375).
-- **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{team}.json`, delete-to-resolve), GH-search fallback, pending-push retries.
+- **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{subject}.json` — `_` when the incident is subject-less, delete-to-resolve), GH-search fallback, pending-push retries.
 
 ## R2 layout
-- `backups/{org_id}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`) ≈ **35 objects/pool** — keep ALL dumps younger than 24 h, then the NEWEST per UTC day within the 7-day horizon, then the newest per ISO week (4). #2373: day-bucket anchors — the pre-#2373 implementation kept one anchor per UTC HOUR-bucket (~172 objects/pool over the horizon); #2319's lock-window math uses the ~35 figure. Pre-#2313 team-level flat objects (`backups/{org_id}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
+- `backups/{org_id}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` + `ledger.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). `ledger.json` (#5062) is the per-object ledger — `{key, bytes, sha256, written_at}` for the dump and manifest plus the store's own node/edge counts; the write path reads it back off the destination before the archive is accepted (coverage is the destination's answer, never the writer's counters). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`) ≈ **35 objects/pool** — keep ALL dumps younger than 24 h, then the NEWEST per UTC day within the 7-day horizon, then the newest per ISO week (4). #2373: day-bucket anchors — the pre-#2373 implementation kept one anchor per UTC HOUR-bucket (~172 objects/pool over the horizon); #2319's lock-window math uses the ~35 figure. Pre-#2313 team-level flat objects (`backups/{org_id}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
 - `ops/teams/{team}/state.json` — legacy transition-guard counts (mirror of the default graph's per-graph state; pre-#2313 consumers).
 - `ops/teams/{team}/graphs/{graph_id}/state.json` — per-graph transition-guard counts (#2313).
 - `ops/state.json` — team count (enumeration-delta guard) + sweep timestamps.
@@ -291,13 +352,21 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
 this run (APP_DOWN, WATCHER_DOWN, a per-team STALE from the direct-R2 leg, an
-R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE) exits
-1. (The converse does not hold: a hard driver/config failure — missing
-`GITHUB_TOKEN`, an unreadable R2 preflight, or a failed purge/reconcile
-ride-along — also exits 1 without filing. RED therefore means "broken or
-unverifiable", which is the point.) This is the actual fix for #2796: the
-31-day #2790 outage hid behind 40 consecutive `success` runs *after* the driver
-had already filed `STALE`.
+R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE, or a
+PURGE_FAILED/RECONCILE_FAILED ride-along) exits 1. (The converse does not hold
+**only** where filing is impossible by construction: the two pre-flight guards —
+a missing `GITHUB_TOKEN`, or a missing `INTERNAL_API_URL`/`FASTAPI_INTERNAL_KEY`
+— exit 1 with no incident, because with no token/key there is no filing path at
+all. **#4612 corrected this paragraph:** it previously listed "a failed
+purge/reconcile ride-along" as a further hard failure that "exits 1 without
+filing", which read as though silence were a property of the ride-along. It was
+not — it was an untracked failure class. The ride-along legs now file like every
+other detected condition, which is what the SRE alert contract requires (a real
+condition in an unattended job must map to a response class; dedup — not silence
+— is the answer to noise). A detected condition that *can* be filed is never
+allowed to be silent.) RED therefore means "broken or unverifiable", which is the
+point. This is the actual fix for #2796: the 31-day #2790 outage hid behind
+40 consecutive `success` runs *after* the driver had already filed `STALE`.
 
 **Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` — the
 top-level listing, any per-team listing — or a failed `get-object` of the
@@ -352,14 +421,47 @@ clears it, because unknown is not evidence the daemon is alive.
 `graph_totals.backed_up`, not `teams_backed_up`.
 
 **Dedup lifecycle:** incidents are create-once in R2
-(`ops/alerts/{kind}/{subject}.json`) with a GitHub-search fallback. A global
-incident exists under **both** `global.json` (driver) and `_.json` (the
-server-side `AlertStore`); resolve deletes **both**, so a recurrence is a new
-incident on either writer (#2844). Resolution is delete-to-resolve — the object
-is dropped so a recurring condition pages again instead of being swallowed. The
-412 create-race branch reads the recorded R2 object and its issue state: an
-open issue is a no-op, a closed **or deleted (404)** issue re-files, and a
-transient/rate-limited response is treated as open so a blip never duplicates.
+(`ops/alerts/{kind}/{subject}.json`, `_` when the incident is subject-less) with
+a GitHub-search fallback. **One incident = one create-once point (#2844):** the
+driver and the server-side `AlertStore` both write the canonical `_.json` for a
+subject-less incident, so the conditional write actually linearizes — two
+spellings meant two winners and two issues for one condition. The driver's
+pre-#2844 spelling `global.json` is retained as a **legacy alias**: every read
+path consults it and every resolve deletes every spelling, so objects already in
+R2 are adopted and cleaned up rather than stranded holding a closed issue's
+number. Adoption is qualified by issue state on **both** sides (#3127): the
+`driver` checks `gh_issue_open` and re-files when the recorded issue is closed
+or 404, and the `AlertStore` reads the issue's own state via
+`github_issue.issue_is_open_checked` — a sentinel naming a CLOSED or DELETED
+(404/410) issue is dropped and
+the incident re-filed. Positive evidence of closure is required: a failed state
+read, or no state reader wired, counts as OPEN. Refusing to adopt on a blip is
+the duplicate-issue defect #2844 exists to fix; adopting a stale sentinel is the
+silent-outage defect #3127 exists to fix — prefer the failure that pages. A state
+read is used rather than a search result because GH *search* is rate limited
+(~30/min) and matches titles heuristically, so "absent from the results" is not
+proof of closure. Subject-scoped incidents have exactly one key and are never
+crossed with another subject (#2375). Resolution is delete-to-resolve — the
+object is dropped so a recurring condition pages again instead of being
+swallowed. The 412 create-race branch reads the recorded R2 object and its issue
+state: an open issue is a no-op, a closed **or deleted (404)** issue re-files,
+and a transient/rate-limited response is treated as open so a blip never
+duplicates.
+
+**Resolution authority is evidence-gated (#3127):** only the writer whose probes
+cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
+`tortoise/alert_store.py`, mirrored by `kind_owner()` in `registry-cron.sh` and
+pinned across the language boundary by `test_kind_owner_contract_with_driver`.
+Anything else is refused and logged with the sentinel left intact. This exists
+because one shared object let the weaker probe win: the watcher's reachability
+check cannot distinguish "R2 unreachable" from
+"the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
+all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
+would then re-file on its next run: one duplicate issue + Telegram pair per
+hour. Each sentinel records the `writer` that filed it for diagnosis only — it
+is not an authority token, and a legacy object with no `writer` field resolves
+by the same `KIND_OWNERS` rule. See
+`docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
 
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries
@@ -401,9 +503,15 @@ asserts all five states, the unmeasurable-pool rule, the 0-team envelope, the
 stuck/unverifiable lock, unclassifiable-status and missing-token failsafes,
 redaction (DSN/header/prefix/quoted/newline-split shapes and the
 `compatible:`/`patch:`/`author:` false-positive guards, `last_sweep`, the purge
-body), self-heal tiers (incl. `SWEEP_NO_COVERAGE`),
+body **and the create-POST that publishes it**), self-heal tiers (incl.
+`SWEEP_NO_COVERAGE`), the ride-along's auto-filed `PURGE_FAILED`/`RECONCILE_FAILED`
+(filed on failure, both filed when both fail, resolved only on the leg's OWN
+success evidence, never on a skip, the truthful `driver_timeout` shape, and the
+wait-bound `504` named as an over-budget answer rather than an outage — #4612),
+the single declared ride-along curl-outcome vocabulary (`leg_shape`; the sweep
+leg keeps #5028's own `rc -eq 28` test),
 the dual-key delete, the multi-team tab-separated pool, the enabled+stale and
-enabled+unmeasurable cases, and
+enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
@@ -413,30 +521,223 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 
 **A 0-team sweep on the wrong dialect used to be indistinguishable from an empty deployment** — it enumerated the graph the #669 flip deleted and reported a benign `no_teams` for 31 days (#2823). The seam now REFUSES a registry-dialect source in the Supabase lane (`enum_failed`, loud — `tortoise/backup_sweep.py:212`), and the driver files `SWEEP_NO_COVERAGE` for an enabled-but-0-backup sweep whose 0 is not corroborated by a **measured-empty** R2 pool — the pool holds ≥1 team prefix, or could not be listed at all. Lane vars: `TORTOISE_CONTROL_PLANE` / `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (`.env.example` §Control plane).
 
+## Cohort spend cap ↔ provider credit balance (#3873)
+
+The beta's spend is bounded per-team and, in the running system, **unbounded in
+aggregate**: the only cohort-aggregate bound is the provider credit balance — a
+cliff that fails on **availability for every user at once**. `#3780` merged a real
+cohort dollar cap, but a cap only bounds aggregate spend **if the cap sits below
+the available balance**, and nothing in the repo can observe the balance.
+
+**The relation, stated once and enforced by process:**
+
+> **`TORTOISE_COHORT_COST_CAP_USD` must be set to a value STRICTLY BELOW the
+> provider's CURRENT credit balance, and that balance must be re-read after
+> EVERY top-up AND at EVERY billing-period rollover.**
+
+**The cap is PER-PERIOD; the balance is NOT.** The cap's measured spend is
+scoped to a window: `cohort_cost.enforce_cohort_cost_cap` resolves
+`period = metering._current_period(org_id)` (the subscription's own billing
+period, or the calendar month in UTC) and compares
+`get_cohort_spend_usd(ids, period)` against the cap
+(`tortoise/cohort_cost.py:453-460`; the refusal message reads "for this billing
+period"). So the measured spend **resets to zero at each rollover while the
+provider balance only ever falls** — and the rollover is an event nothing
+announces. Worked example: arm cap=25 with balance=30; period 1 spends 24, so
+the balance is now ~6; period 2 re-arms at a fresh 0 and the next 25 of spend is
+available to the cap while the balance it is supposed to sit under is **already
+below it**. The cliff then fires first, with **no top-up having occurred** —
+exactly the failure the paragraph below warns about. Re-reading only "after
+EVERY top-up" misses this, because the top-up is the *rarest* event and the
+rollover is the frequent one.
+
+**Why it is written down rather than assumed.** A cap set above the balance lets
+the cliff hit first — every lane starts refusing at once and the cap never fires,
+so the configured ceiling reads as protection while the actual bound is the
+provider's balance. No code path in this repo can see that balance (the metering
+alerts are **write-ops against a plan allowance**, never provider dollars), so the
+relationship cannot be checked from inside the system and must live here as an
+operator step. Re-reading after a top-up matters in both directions: a top-up that
+raises the balance does not disarm the cap, and a **spend-down** moves the balance
+toward the cap with no event to announce it.
+
+**Default posture (state it truthfully): the cap is OFF by default.**
+`cohort_cost.resolve_cohort_cost_cap` returns `None` when
+`TORTOISE_COHORT_COST_CAP_USD` is absent, and it is absent by default — it is
+**not** set in `deploy-hosted.yml` or `fly.toml`, only (commented out) in
+`.env.example`. So on an unarmed deployment the cohort-aggregate bound *is* the
+provider balance, and this relation is vacuous until the cap is armed.
+
+**Reading the balance — the exact endpoints** (a provider's own API; which one
+applies depends on which route the deployment resolves):
+
+| Provider route | Endpoint | Field | Credential |
+|---|---|---|---|
+| OpenRouter key limit (the deploy-default route) | `GET https://openrouter.ai/api/v1/key` | `limit_remaining` | the **existing inference key** — no new secret |
+| OpenRouter account credits | `GET https://openrouter.ai/api/v1/credits` | `total_credits`, `total_usage` | requires a **Management API key** (a separate credential, not provisioned) |
+| DeepSeek direct | `GET https://api.deepseek.com/user/balance` | `is_available`, `balance_infos[].total_balance`, `balance_infos[].currency` (**CNY** *or* **USD**) | the existing `DEEPSEEK_API_KEY` |
+
+On the OpenRouter key read, `limit_remaining` is only meaningful when a
+**key-level limit** is set; a key with no limit falls back to account credits, so
+treat it as a lower bound, not the account balance. Note the DeepSeek shape:
+`total_balance` is a member of `balance_infos[]`, **not** a top-level field, and
+`currency` is `CNY` *or* `USD` depending on the account — so read the currency
+the response actually reports rather than assuming CNY. The two providers expose
+two APIs and two currencies — a cap in USD must be compared to the balance in
+the **same** currency.
+
+**No number is set here.** The page threshold, whether a trip is advisory or also
+refuses, and whether a Management API key may be provisioned are owner decisions,
+not runbook values — this section records the *relation* only. The post-hoc
+counterpart is the `PROVIDER_BILLING_EXHAUSTED` incident (triage row below): it
+records the cliff after the provider's own refusal, and it is deliberately not a
+warning ahead of it.
+
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
-| NEVER_BACKED_UP | an active graph exists with no archive yet (custom-graph incidents carry `team:graph`) | Confirm graph is new/empty; if old, investigate |
+| NEVER_BACKED_UP | an ELIGIBLE active graph exists with no archive yet (custom-graph incidents carry `team:graph`); orgs the sweep does not target (`tier=='free'` or `backup_enabled=false`) are `not_eligible` and open nothing when eligibility is CONFIRMED (an unconfirmed read fails open and is flagged `eligible_degraded`) — #3658 | Confirm graph is new/empty; if old, investigate |
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
 | R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
-| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
+| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (deferred: #3033; the writer is tracked as **#3412**) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
 | SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
 | SWEEP_OFF_STALE | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{org_id}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m), a team prefix with no default archive at all, or a failed listing | Re-enable backups or declare a bounded pause; investigate why the flag is off. If a listing failed, check the R2 access key's `ListObjects` permission |
-| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
-| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) — reserved kind, **not yet emitted by the driver**; the enabled-but-0-teams case is now SWEEP_NO_COVERAGE (#2796) | Verify teams exist; otherwise expected pre-beta |
-| SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
+| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution. **Auto-resolves** on the next run whose pool is measured fresh and whose sweep backed up ≥1 team |
+| PURGE_FAILED | the hourly trash-purge ride-along did not complete (#4612): the purge leg did not answer **200 `status:ok`/`already_running`** — a non-2xx code, the driver's own `-m 300` ceiling being hit (`driver_timeout`), a response read without a body (`empty_response`), a request that never reached a response (`transport_error`), or a 200 carrying `status:errors` (per-org/per-graph purge failures). Subject-less. The incident body carries the HTTP code, curl's own exit, the derived shape, and the **redacted** response body | Expired trash is not being erased, or erasure is UNVERIFIED for this run, so tombstones can age past the recovery window. Triage the filed detail; a `driver_timeout` shape or a **504** means the purge may still be RUNNING server-side. A **504** — the failure the reporter observed on 2026-09-22 (#4412; the app-side cause was removed the next day by #4939's `/v1/internal/` exemption, so a 504 now most likely comes from the edge proxy) — is an over-budget answer from a control plane that IS answering, not a general outage, so it is retryable rather than a deadline on erasure. **Auto-resolves** on the next run whose purge answers 200 `status:ok`. `already_running` deliberately does NOT resolve it — it means the leg queued behind a held lock and proves nothing about erasure (#3127) |
+| RECONCILE_FAILED | the hourly reconcile ride-along did not complete (#4612): the leg did not complete a 2xx exchange — a non-2xx code, the driver's own `-m 120` ceiling being hit (`driver_timeout`), a response read without a body (`empty_response`), or a request that never reached a response (`transport_error`). Subject-less; body carries the HTTP code, curl's exit, the shape, and the redacted response | Stuck-pending re-provisioning and expired-bootstrap-key revocation are not running. Triage the filed detail; a **504** is a gateway timeout — an over-budget answer, not a general outage. **Auto-resolves** only on a COMPLETED 2xx exchange (curl exit 0 with a body): a 2xx received before a `-m` timeout is still recorded with curl exit 28, and resolving on the code alone would close a live incident on a transport failure |
+| NO_ELIGIBLE_TEAMS | team sweep enabled but the control plane enumerated **0 eligible (Pro) teams** (#655) | Almost always a control-plane/dialect problem, not an empty deployment — check `last_sweep.source` and the enumeration source (#2823/#2340). **Auto-resolves** when a conclusive sweep enumerates ≥1 team |
+| ENUM_DELTA | the team enumeration went `>0 → 0` between runs (#669) — a wiped enumeration source, i.e. the #2823 silent-degradation class | **Investigate before trusting any green run**: the same 0 that makes the sweep look idle is the incident. Suppressible during the registry flip via `TORTOISE_SUPPRESS_ENUM_DELTA=1`. **Auto-resolves** on the next conclusive run that enumerates ≥1 team (the guard only fires on the `>0 → 0` transition, so a fixed source clears it) |
+| GRAPH_NAME_RESOLUTION_FAIL | every enumerated team failed graph-name resolution (`resolution` results) — the control plane died between enumeration and the per-team phase (#669) | Check the control-plane read (`/status` → `last_sweep.source`, `graph_failures`). **Auto-resolves** on the next conclusive run in which at least one team's graph resolved |
+| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | **NOT EMITTED — superseded, not wired.** The enabled-but-0-teams case is SWEEP_NO_COVERAGE (#2796); this kind was never emitted by any surface. See "Kinds with no writer" below (tracked by #3033) |
+| SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately. Closes via **re-baseline** (or a manual close) |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
-| P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |
+| P0_GUARD_FAIL | a dump's manifest did not name the graph it was taken from — objects deleted. ⚠️ **the producer is currently unreachable (#3423): its check compares the manifest against the value it passed in**, so treat an open incident as operator-raised, not sweep-raised | Investigate the sweep. **Auto-resolves** on the next conclusive sweep in which that graph's dump passes the guard (the kind had no resolver before #3030, so it stayed open forever) |
 | RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
+| ANALYTICS_SINK_DEGRADED | #3820: the `analytics_events` write sink degraded. Subject-less (platform-level). Detail carries counts + a reason code only — `outcome` (`fallback` = the event is on the local JSONL; `dropped` = it reached no sink at all), `reason` (`fallback_dir_unavailable`/`fallback_append_failed`/`supabase_env_incomplete`), and `fallback`/`dropped`/`supabase`/`unconfigured` counts. Filed on the first `dropped`, or once the degraded streak reaches 3 consecutive writes; resolved by the next 2xx write (after a restart the FIRST 2xx write of the new process resolves the pre-restart incident — the resolve is probed once per process, not gated on the process-local latch). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a) — it files on a backups-disabled deployment too, and needs only the alert credentials (`DR_ISSUES_PAT` + `GH_REPO` + the R2 dedup seam); with no PAT the counter + WARNING are the residual. **D5b's absence half is IMPLEMENTED (#3944)** — a sink that silently STOPS emitting now files this same kind. The app writes a fixed-cadence CANARY through the real sink path (reserved event `_sink_canary` / org `__sink_canary__`, so canary rows stay out of every per-org analytics read) and publishes a last-**delivered** timestamp plus its own `Period+Grace` threshold (`silent_threshold_s` = 3x the canary period, default 900s) on `GET /v1/internal/backups/status` under `.analytics`. The hourly DR driver reads it and files when the integer second-count of `age_s` exceeds `silent_threshold_s` (the comparison truncates the fraction), or when `age_s` is **ABSENT** (no delivery since boot) and `uptime_s` exceeds the threshold. A **PRESENT but unmeasurable** `age_s` — a shape the app cannot emit, so only a non-compliant `/status` produces it — changes NOTHING: a present age proves a delivery happened, so it is neither stale (no false file) nor measurable (no false resolve) (the PROBE timer is in-process; the ALARM is external, because a check that dies with the process it monitors cannot report that process's death). The heartbeat is a **last-success**, never a last-attempt, stamp, and it travels `/status` — not the sink — so the sink cannot silence its own alarm. The two legs share this kind and the one R2 dedup object (`ops/alerts/ANALYTICS_SINK_DEGRADED/_.json`), so absence and degradation cannot double-file. The driver self-heals on a fresh heartbeat, which is the backstop the app's in-process resolve flag cannot be (it can be CLEAN while an incident is open); the resolve requires a **measured** `age_s`, so a cold start and an unmeasurable/malformed block leave an open incident UNTOUCHED — absence of evidence never closes one, and a crash-looping deploy that never reaches its first write cannot re-resolve it every hour. `unknown`/unmeasurable is NEVER stale: an absent or malformed block (an older app during a rolling deploy) and a deployment with no sink intended (selfhost/dev: neither `SUPABASE_URL` nor a service key) leave the kind untouched. The uptime fallback is reserved for an **absent** age; a present-but-unmeasurable one is not admitted into it, because a delivery demonstrably happened (a negative `age_s` from a pre-clamp revision used to fall through and FILE a false incident on a healthy sink). | Treat as a **sink outage, not a DR outage**: check the Fly secrets `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` and the Supabase project status / RLS on `analytics_events`. After the #3820 review, a `fallback` with reason `supabase_env_incomplete` means exactly ONE of the pair is set — #3677's own shape (a URL with the key resolving to `""`); check for a renamed key. `fallback` events are recoverable from `~/.tortoise/analytics_fallback.jsonl` (an ephemeral Fly rootfs — copy it off the machine before the next deploy/replacement). `dropped` events are gone. Cross-check `tortoise_analytics_events_total{outcome=…}` on `/metrics` **where a scrape exists** — in today's production nothing scrapes it, so the incident is the signal (#3820). **For the #3944 absence leg, read `.analytics` in `/status` first:** `canary_attempts: 0` with `uptime_s` past the threshold means the CANARY never ran (a lost heartbeat task, or a loop that never started) — the instrument is dead, not the sink; a **non-zero** `canary_attempts` with a growing `age_s` means the canary RAN and nothing landed — a saturated/refused telemetry-pool offload (the counter is incremented *before* the emit, so a refused offload lands here, not under zero attempts), a real sink outage, or a half-configured env. If the crash is `configured:false, intended:true`, exactly one credential is set. **Known residual:** a dead canary while real user traffic still delivers keeps the heartbeat fresh and files nothing — deliberate, because gating on `canary_attempts` would flap (the app's next delivered write would immediately resolve it and the driver would re-file hourly); the instrument's own liveness is the class tracked by #4573 (a disabled/never-run *receiver* also silences this alarm, and #4573 remains open for that). |
+| UNMETERED_INCREMENT | #3981: a metering increment was **dropped** so it never reached the ledger, and the request was SERVED (no calendar-month fallback; refusing a paying org is what the ruling forbids). Two causes, distinguishable by `error_type`: (a) **the org's metering window was unresolvable** — the original #3981 shape, which ALSO means the pre-spend admission gate had no input and the cohort cap was not evaluated; (b) **#4488: the `embed` lane had a non-empty tally and no resolvable org** — the encode work really happened and there was no row to attribute it to, with NO window involved, so do not go looking for a broken anchor. Subject is the org id, or `_` when the lane has no org context (the MCP/stdio lanes collapse such drops onto ONE subject and one throttle key, by design). Detail is a fixed, message-free vocabulary — `lane` (which swallow site: `write_op`/`object_write_op`/`subject_write_op`/`capture_ledger`/`mcp_write_op`/`ask_ledger`/`embed`) and `error_type` — because the incident body is durable. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual. Fires from every unmetered-drop handler, including the three import-guard fallbacks used when `tortoise.metering` itself is unavailable | Read `error_type` FIRST. Cause (a): investigate **why the org's window is unresolvable** — the anchor is half-known, unparseable, naive, inverted, or unreadable (`metering._current_period`); that window is also the pre-spend admission gate's only input, so it means the cohort cap was not evaluated for this org either. Cause (b): the encode ran without an org on the boundary — a `lane=embed` incident is an attribution gap to find and bind, not an anchor problem. **The incident says a drop happened; it cannot say how long** (it is create-once and deduped per (kind, org), so a changing count in its body would freeze stale). **Since #4779 the drop is also RECORDED durably** on `metering_unmetered_increments`, keyed `(org_id, lane, drop_class)` — read it to answer how many and since when: `SELECT * FROM public.metering_unmetered_for_org('<org>')` (or `metering.get_unmetered_increments(org_id)`). `increments` = how many were lost, `first_observed_at` = since when, and `last_observed_at` **stops advancing once the org is repaired** — that is how you tell an ongoing fault from a fixed one (the count itself is NEVER reset; it is the evidence). ⚠️ **There is no durable row for the `_` subject.** The record is FK-keyed to `organizations` (a row with no org could never be read alongside anything), so an **org-less** drop — the MCP/stdio lanes above, **and every cause-(b) `embed` drop of #4488** — is alert-only: the read returns `[]` for it. `[]` therefore means "this org has no represented drops", never "no org-less drops happened". ⚠️ **Nor is there a row for a drop reported by the three import-guard fallbacks.** When `tortoise.metering` itself cannot be imported, `hosted_api` / `mcp_server` / `ask_lane` call `alert_unmetered_increment` **directly** (`hosted_api._alert_unmetered`, `mcp_server._alert_unmetered`, `ask_lane`) — and the module that WRITES the record is the very one that failed, so no row exists however the subject looks up, org or `_`. For those drops the incident is the only trace. ⚠️ That count is a COUNT, not spend: the pre-spend cap keeps reading only `ask_cost_usd + capture_cost_usd`, so a repaired org still shows its historical drop count while the cap recovers normally. The increment is **not** recoverable from this incident — the ledger reads short for that window. The row class is `window_unresolvable` for BOTH causes (the alert path writes only that class, so a cause-(b) `embed` drop — which has no window — is still recorded under it); the sibling class `increment_write_unconfirmed` (the increment WRITE **raised** with the window known — a different fix: retry/repair the control plane, not the anchor) is represented on the same surface but does **not** file this incident — it is a WARNING at the writer plus its ledger row. Read the class name literally: a raise does **not** prove the increment was not written (#925's lost-response case — the write may have landed), so its `increments` is an **upper bound** on the loss, not a measured figure. The increment is **not** recoverable from this incident either way — the ledger reads short for that window. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/UNMETERED_INCREMENT/{org_or_underscore}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve). Deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue; a surviving object arming the window blocks Telegram (it pushes only on FILED) |
+| COHORT_CAP_UNENFORCEABLE | #3981: the pre-spend cohort cap was **not evaluated** because the requesting org's metering window is unresolvable — the org is served un-capped for this window (the accepted trade: a late cap beats refusing a paying org). Distinct kind from `COHORT_COST_CAP` (a cap that FIRED), deliberately not a superstring of it, because the R2-unreachable adoption path resolves by GitHub search on the org suffix. Subject is the org id; detail is `{error_type}` only. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a) | Confirm the org's anchor is genuinely unusable (same root cause as an `UNMETERED_INCREMENT` for the org — the two fire together when the anchor is broken). Decide whether the org must be capped anyway (fix the anchor, or a manual spend review) — nothing in `tortoise/` resolves this kind, so it is **manual close only**: close the GitHub issue **first**, then delete `ops/alerts/COHORT_CAP_UNENFORCEABLE/{org}.json` |
+| COHORT_COST_CAP | the pre-spend cohort cap **FIRED** for a capture — the request this lane serves is refused (402), and the refusal itself is the protection; the incident is the durable record. Subject is the org id, and dedup means a repeatedly-tripping cohort opens ONE incident. Formerly gated on the backup sweep (D5a); it now files on a sweep-disabled deployment too, needing only `DR_ISSUES_PAT` + `GH_REPO` + the R2 dedup seam | Confirm the cohort spend figure and that the requesting org is the one overspending (`metering_cohort_spend`), then either lift the cap (`TORTOISE_COHORT_COST_CAP_USD`) or let it ride down. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/COHORT_COST_CAP/{org}.json`. Nothing in `tortoise/` calls `resolve_incident` for this kind, so an incident left open with its object deleted re-arms as a new issue on the next trip |
+| ABUSE_DECISION_FAULT | #4872: a store call on the abuse **enforcement DECISION path** raised, so the evaluation could not complete — the lane is `window_sum`, `clean_window_episode_end`, `latest_flag_at`, or `rule_event_between`. **PLATFORM-SCOPED (subject `_`)**: the cause is a shared substrate fault (PostgREST schema-cache miss `PGRST202`, ACL `42501`, transport), so ONE incident covers every org. Detail is a bounded, message-free vocabulary — `lane`, `error_type`, `rule` (`point_create`/`key_create`), `subject_org` (**the FIRST org to fault — evidence, NOT scope**: the body is written create-once, so later orgs are not recorded), and `fallback` (what the swallow DID: `return_none`/`reflag`/`continuity_true`). TWO lanes push **TOWARD** a suspension — `continuity_true`, and the `clean_window_episode_end` leg (a failed guard read or clear write leaves the flag episode ARMED, so the stale anchor survives and a later over-threshold evaluation can still suspend); `window_sum`/`reflag` fall away from one. The same create-once rule as `subject_org` applies to `lane`/`fallback`: they name the FIRST faulting lane of the incident's life (an R1 `flag_org` failure can own the body while an R2 `suspend_org` failure in the same request is throttled), so the UNTHROTTLED ERROR records are the complete per-lane evidence. The ERROR record carries the resolved `kind` and the `exc_info` stack (the stack at most once per lane per 60s — a shared-substrate outage must not amplify logs); the PostgREST message is the diagnosis. **Not gated on `BACKUP_SWEEP_ENABLED`** (the un-gated `operator_alert` seam, D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | Identify the failing store call from `lane` and the substrate cause from `error_type`; `subject_org` names only the first org whose evaluation failed. This is OBSERVABILITY: it does not suspend anyone and does not repair the fault. Confirm the substrate fault (PostgREST logs / `pg_get_function_arguments` / a direct `service_role` call), then decide whether the affected orgs' missed enforcement must be applied by hand. The sibling `abuse_suspended` filing (`notify.py`) is still sweep-gated — see #4778. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_DECISION_FAULT/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve; deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue) |
+| ABUSE_ENFORCEMENT_FAULT | #4872: the abuse **enforcement ACTION** could not be applied — the lane is `suspend_org` (a stage-2 suspension did not land) or `flag_org` (a stage-1 flag row was not written, while the caller still returns `flag` and still notifies "flagged"). Kept a DIFFERENT kind from `ABUSE_DECISION_FAULT` because the incident body is written create-once: a transient evaluation-read blip must never mask a failed suspension. **PLATFORM-SCOPED (subject `_`)** for the same shared-substrate reason. Detail: `lane`, `error_type`, `rule`, `subject_org` (first org to fault, evidence not scope), `fallback` (`return_breach` = `_evaluate` returned `"breach"`, indistinguishable from "still inside the staging window"; `return_flag`). `lane`/`fallback` obey the same create-once rule as `subject_org`: they name the FIRST faulting lane for the incident's life, so read the UNTHROTTLED ERROR records for the full per-lane picture. The ERROR record names the resolved `kind` and carries the `exc_info` stack (bounded to one per lane per 60s). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | `lane=suspend_org` is the #4872 instance: the `abuse_suspend` RPC did not commit for a stage-2-eligible org (no `suspend` row in `abuse_events`). Determine WHY the call did not land from `error_type` + the ERROR record's `exc_info` (the PostgREST message), or by a direct `service_role` call / `pg_get_function_arguments('public.abuse_suspend')` / `NOTIFY pgrst, 'reload schema'` then retry. ⛔ **Do NOT "repair" the RPC blindly**: any org already flagged past the staging window with continuity satisfied suspends on its next `point_create` evaluation (403/-32006). Arming is an owner decision with the cause in hand. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_ENFORCEMENT_FAULT/_.json` (close, then delete-to-resolve) |
+| BILLING_NOTIFY_REFUSED | #4456: a Stripe billing notification was **dropped** — the #3498 offload seam REFUSED the submission (the telemetry pool's backlog was full, or a queued submission was cancelled before any worker ran it). The `WebhookEvent` idempotency marker commits **before** the notification, so Stripe's retry sees `is_first=False` and the notification is lost **permanently**: the org is never told its plan changed. Subject is **PLATFORM-SCOPED** (`""`, stored as `_`) by the #4456 plan — one Resend account serves every team AND the shared telemetry pool makes the refusal cross-tenant, so a per-org key would file N issues for one outage; the affected org travels in the detail, a fixed, message-free vocabulary — `op` (`billing_notify`), `event_type` (the Stripe event type), `org_id`. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` (or an unbuildable object store) the site's rate-limited **ERROR** line is the residual | The dropped notification is **not recoverable from this incident**. Confirm the org's current tier, then re-fire it manually (`notify_billing_event(kind, {org_id, tier}, …)`); and investigate why the seam refused — a wedged best-effort call parking all `CONTROL_PLANE_TELEMETRY_WORKERS` slots. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/BILLING_NOTIFY_REFUSED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve). Deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
+| PROVIDER_BILLING_EXHAUSTED | #3873: a serving model lane's provider refused on its **OWN budget/limit** — HTTP 402, or an OpenRouter 403 carrying a key-limit body signature (`model_adapters.is_billing_exhausted`). This is the POST-HOC record of the beta's aggregate spend bound (the provider credit balance) being reached: `RotatingModel` cooled the lane and rotated and, before this kind existed, told no operator. **It carries NO threshold** — the trigger is the provider's own refusal, an observed event, never a policy line, and the trip is **advisory only** (it never refuses a request; the refusal already happened). Subject is the **serving leg's provider slug** (`deepseek-direct`/`openrouter`/`venice`), not the platform sentinel and not an org: the alert names the leg that ACTUALLY refused (a hop can reach a leg that was not the configured primary), and per-leg dedup keeps a second lane's exhaustion visible instead of swallowing it under the first's open incident. Detail is a fixed, message-free vocabulary — `provider`, `error_type`, `status`, `has_alternative` (`true` = more than one lane was configured, so this lane is rotated AWAY from and the call continues on the rotation path; `false` = the refusal was raised with no alternative configured, i.e. the cliff for that call. ⚠️ `true` does **not** mean the call ultimately succeeded — every other lane can still refuse, which is the all-lanes-down shape). Filed through the un-gated `operator_alert` seam (D5a); with no `DR_ISSUES_PAT` the WARNING log is the residual | Confirm the provider's balance and top up — see **Cohort spend cap ↔ provider credit balance** below. The incident records that the cliff ARRIVED; it is not a warning ahead of it, and nothing here sets the cap. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/PROVIDER_BILLING_EXHAUSTED/{provider}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
+
+### How incidents CLOSE
+
+Every kind must have a resolution path, or it is alert rot — an alert that can
+never close destroys the signal value of every other alert on the same label.
+Three paths exist:
+
+1. **Producer-side clear** (`AlertStore.resolve_incident` → close the issue, push
+the resolved Telegram, delete the dedup object). The watcher drives this for the
+absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
+`R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
+(`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
+`GRAPH_NAME_RESOLUTION_FAIL`) — before #3030 those four had no resolver on any
+surface and stayed open forever (the live case was #2821).
+
+   ⚠️ **Clearing requires POSITIVE EVIDENCE, never the mere absence of an
+   emission** (review P0 on the first #3030 cut — it closed live alerts):
+   * a **global** guard clears only on a run that actually **looked** — at least
+     one team result carrying a graph map. A 0-team or a resolution-failed run is
+     exactly what `ENUM_DELTA`/`GRAPH_NAME_RESOLUTION_FAIL` report; clearing there
+     would silence the #2823 silent-degradation class and it could never re-fire
+     (the same run's ops-state write resets the `>0 → 0` transition it keys on).
+     (A **lock-busy** run is excluded for the same reason — its team results carry
+     `error` and no graph map.)
+   * **`P0_GUARD_FAIL`** clears only for a graph whose dump demonstrably **ran and
+     passed the guard** — the predicate is the result's `p0_checked` flag, not its
+     status name. `aborted_size_guard` and a pre-dump `error` return *before* the
+     guard and carry no flag, so their incident stays open; a **post-guard**
+     mirror failure returns `error` *with* the flag, and that one is cleared.
+   * a **blind** run (`enum_failed`/`error`/`already_running`) clears nothing; a
+     **`degraded`** run *did* look, so it clears the global guards it did not
+     re-emit while leaving the P0 incidents of its failed graphs open.
+   * the endpoint resolves only incidents that are **actually open** (one R2 LIST
+     per kind — never a read per graph, which at a few thousand graphs would add
+     minutes under the sweep lock).
+2. **Recovery-side clear** — the driver's self-heal legs (above). `PURGE_FAILED`
+and `RECONCILE_FAILED` clear on the ride-along leg's **own** success evidence
+(#4612): the purge leg only on a 200 `status:ok` (an `already_running` answer
+means the leg queued behind a held lock and is **not** evidence of erasure), the
+reconcile leg only on a **completed** 2xx exchange (curl exit 0 with a body — a
+2xx whose transfer then hit the `-m` ceiling is still a transport failure). A
+**SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty sweep)
+clears neither — no evidence was gathered, and the driver logs that it is leaving
+them unchanged.
+3. **Manual close only** — `DATA_LOSS_CANDIDATE` (a >50% node drop needs a human
+verdict: verify + re-baseline, or restore). `SIZE_GUARD_ABORT` closes through
+**re-baseline** (`POST /v1/internal/backups/re-baseline` resolves it together with
+`DATA_LOSS_CANDIDATE`). Any kind added here must name the verification the
+operator performs.
+
+A closed incident's dedup object is **deleted**, so a **recurrence files a new
+issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
+still-open issue only when the object's recorded issue is verifiably open. On the
+app side, a failed **close** makes `resolve_incident` **raise**: nothing is
+announced and nothing is deleted, and the failure is recorded on the dedup object
+so the next attempt **backs off for 60 minutes** (`close_cooldown_min`). That bound
+matters: the close posts its audit comment *before* the state PATCH, so an
+unbounded retry would re-post the comment and spend GitHub's write budget every
+poll for as long as the incident is stuck. Every leg that iterates (the watcher's
+polls, the sweep's resolver) retries it — the watcher keeps a subject whose close
+failed **pending** across polls, for teams and graphs alike, so a transient close
+failure cannot orphan an incident. **Two app-side paths have no automatic retry**
+— re-baseline and the monthly drill — so their responses carry
+`incidents_unresolved` when a close failed: re-run the action once GitHub
+recovers, or close the issue by hand. Nothing pages a human about a close failure
+(no `ALERTER_DOWN` writer yet — #3412; the cooldown also means the retry is quiet,
+so watch the logs/`incidents_unresolved`). The driver's `gh_close` mirrors the
+ordering — a non-2xx PATCH keeps the dedup object and marks the run red, so the
+next hourly run retries.
+
+Two residuals are known and tracked, not silently absorbed:
+
+* A graph **tombstoned/deleted after** its `P0_GUARD_FAIL` fired is no longer in
+  the run's graph map, so the resolver never revisits it — close it manually (or
+  via the trash/restore flow) until #3410 lands the open-set reconciliation.
+* A dedup object whose recorded issue was closed **out of band** (by hand) is not
+  re-verified on the app side, so that incident can stay silent until the object
+  is cleared — tracked as #3411, not a documented guarantee. Both writers delete
+  the object only after a confirmed close, but neither re-checks a recorded issue
+  it did not close itself.
+* `BACKUP_SET_MISSING` is resolvable only while the team is enumerable (it closes
+  from the team surface). A team fully removed — no `ops/teams/{team}/state.json`
+  — takes its incident off every walk, so a still-open one needs a manual close;
+  same class as #3410. While the state file lingers it stays open **without
+  churn** (the shrink poll deliberately does not resolve it and then re-open it).
+* The app requires the audit **comment** to land before closing (a failed comment
+  raises and blocks the close, retried next run); the driver treats a failed
+  comment as best-effort and closes anyway. Deliberate asymmetry: the app is the
+  alerting authority and keeps the full audit trail; the driver exists to make
+  the outage visible and prefers a clean close.
+
+### Kinds with no writer (`ALERTER_DOWN`, `LIVENESS_NO_WORK`)
+
+> **#3033 — the taxonomy above and the emitted taxonomy must match exactly.**
+> These two kinds are documented and unit-tested as if they were real alert
+> surfaces, but **no code in either language emits them**, so an operator reading
+> the triage table believes a condition will page when it will not.
+
+| Kind | Why there is no writer | Disposition |
+|---|---|---|
+| `ALERTER_DOWN` | The #596 plan (§3.8) specified it as *"`/status` reports `gh_ok:false` (daemon PAT dead)"* — but `/status` has **no `gh_ok` field** and no app-side GitHub-health tracking exists, so the driver has nothing to read. The real failure mode is visible as a **red workflow run** plus a stale `DRIVER_DOWN` / `SWEEP_NO_COVERAGE` signal | Implement only with a real app-side health signal (a new `/status` field); until then it stays unemitted and is excluded from the kind-completeness test |
+| `LIVENESS_NO_WORK` | Superseded by `SWEEP_NO_COVERAGE` (#2796) for the enabled-but-0-teams case; no surface ever emitted it | Kept only as a reserved name; excluded from the kind-completeness test |
+
+Both are listed in the table above (with a **NOT EMITTED** triage cell) so an
+operator is never sent to rotate a credential for an alert that cannot fire. The
+drift is caught mechanically: `tests/test_alert_store.py::test_documented_kinds_have_a_writer`
+parses this table and scans the emitters — a documented kind with no writer fails
+the suite unless it appears in this section.
 
 ## Restore / drill
 - **Drill endpoint:** `POST /v1/internal/backups/drill` `{org_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
-- **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing LIVENESS_NO_WORK/NEVER_BACKED_UP alarm's job). Manual drills never file incidents (an operator is present).
+- **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing `NEVER_BACKED_UP` / `SWEEP_NO_COVERAGE` alarm's job; `LIVENESS_NO_WORK` is a writer-less reserved name, see "Kinds with no writer"). Manual drills never file incidents (an operator is present).
 - **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
 - **Production restore (`drill:false`) is NOT in scope (501)** — restore-and-rotate machinery retired with the registry (#669).
 - **Rollout drill:** operator-invoked (documented commands in the drill workflow) or via the scheduled endpoint (`workflow_dispatch` against a seeded archive — the CI/schedule acceptance). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason (the drill record shows `no_candidates`). **Re-drill after any restore-path code change, R2 layout change, or key rotation.**
@@ -516,7 +817,7 @@ uv run python tools/rotate-backup-keys.py --role registry_stream \
 fly deploy --app tortoise-y4mjjq
 # 3. VERIFY the rotation run: drill the OLDEST archive (must restore with
 #    the RETAINED key — in-app, no manual decryption):
-#      curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+#      curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 #        -H "Content-Type: application/json" \
 #        -d '{"org_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
 #        https://api.premiselabs.co/v1/internal/backups/drill
@@ -550,7 +851,7 @@ post-overlap. Point the app at the store with `BACKUP_KEY_STORE=file` +
 **Verification (operator, post-setup):**
 ```bash
 # Trigger a drill against the oldest archive to confirm the key works:
-curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"org_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
   https://api.premiselabs.co/v1/internal/backups/drill

@@ -35,8 +35,9 @@ def llm_extraction_provider(monkeypatch):
     """Install the offline MockModel session extractor (#822).
 
     Mirrors test_hosted_api.py's module-scoped autouse fixture of the same
-    name EXACTLY — CI has no LLM provider key, so every /v1/sessions capture
-    fails closed 503 unless TORTOISE_SESSION_LLM_MOCK=1 is on. The machine-
+    name EXACTLY — CI has no LLM provider key, so without the seam every
+    /v1/sessions capture STORES its turns but skips LLM extraction
+    (`extraction_mode: "no-provider"`, #3892). The machine-
     model tests assert Session-node STAMP fields (machine_id/model/actor), not
     extractor output, so the offline seam is safe. Importing helpers from
     test_hosted_api does NOT inherit its autouse fixtures — this module needs

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tortoise — Welcome</title>
+  <meta name="description" content="Session and recovery bridge for Tortoise: sign in to your dashboard or reset your password.">
+  <meta name="theme-color" content="#060b14">
+  <meta name="robots" content="noindex,nofollow">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <!-- #3501: the client-side hard gate is REMOVED.
+       `readValidSession()` reads the legacy parent-domain `sb-tortoise-auth-token`
+       cookie — after first migrating any legacy localStorage session into it — and a
+       BFF login writes only the HttpOnly `__Host-session`, so a browser holding no
+       legacy session read as signed OUT and the gate bounced it back to /auth.
+       That is precisely the #3485 loop. Removing the bridge and the gate together fixed it.
+       (The legacy cookie is still live on other surfaces — see
+       docs/auth-architecture.md §2.1.)
+       /welcome is now decided SERVER-SIDE by functions/welcome.ts, which is the
+       only place that can legitimately see the session: signed-in visitors are
+       redirected to the app, signed-out visitors to /auth, and this page is
+       served ONLY for ?reset=1. The page therefore no longer participates in
+       the auth decision at all — it renders the reset panel and nothing else. -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --surface-hover: #12223d;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-hover: #0891b2;
+      --green: #4ade80;
+      --green-dim: rgba(74, 222, 128, 0.15);
+      --gold: #f59e0b;
+      --red: #ef4444;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; gap: 20px;
+      padding: 14px 24px; background: rgba(6, 11, 20, 0.92);
+      border-bottom: 1px solid var(--border, #1e293b);
+      backdrop-filter: blur(8px);
+    }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
+    .topbar .logo img { height: 40px; width: auto; display: block; }
+    .topbar nav { flex: 1; display: flex; gap: 16px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
+    .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
+    .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
+    .topbar .login:hover { background: var(--accent-hover, #0891b2); }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding-top: 80px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 560px;
+      padding: 2rem;
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .logo a {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .logo span {
+      color: var(--accent);
+    }
+
+    .loading-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-dim);
+    }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 1rem;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error-state {
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+
+    .error-state p {
+      color: var(--text-dim);
+      margin-bottom: 1rem;
+    }
+
+    .error-state a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    /* #863: password-reset landing (recovery links redirect here). */
+    #reset-panel {
+      text-align: center;
+      padding: 0.5rem 0;
+    }
+
+    #reset-panel h1 {
+      font-family: var(--serif, Georgia, serif);
+      font-size: 1.4rem;
+      font-weight: 400;
+      color: var(--text, #cbd5e1);
+      margin-bottom: 1.5rem;
+    }
+
+    #reset-panel .form-group {
+      margin-bottom: 1rem;
+      text-align: left;
+    }
+
+    #reset-panel .form-group label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim, #94a3b8);
+      margin-bottom: 0.375rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    #reset-panel .form-group input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--border, #1e293b);
+      border-radius: 8px;
+      background: var(--surface, #0d1a2d);
+      color: var(--text, #cbd5e1);
+      font-family: var(--mono, monospace);
+      font-size: 14px;
+    }
+
+    #reset-panel .form-group input:focus {
+      outline: none;
+      border-color: var(--accent, #06b6d4);
+    }
+
+    #reset-panel .btn-submit {
+      width: 100%;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent, #06b6d4);
+      color: var(--bg, #060b14);
+      font-family: var(--mono, monospace);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 1rem;
+    }
+
+    #reset-panel .btn-submit:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #reset-error {
+      text-align: center;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    #reset-error p {
+      color: var(--red, #ef4444);
+      margin: 0;
+    }
+
+    #reset-success {
+      padding: 1rem 0;
+    }
+
+    #reset-success p {
+      color: var(--green, #4ade80);
+      margin-bottom: 0.75rem;
+    }
+
+    #reset-success a {
+      color: var(--accent, #06b6d4);
+      text-decoration: none;
+    }
+  
+    /* Legal footer */
+    .legal-footer {
+      margin-top: auto;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      padding: 1.75rem 1.5rem 2.25rem;
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-family: var(--mono);
+    }
+    .legal-footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .legal-footer a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
+    <nav>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
+      <a href="/docs">Docs</a>
+    </nav>
+    <a class="login" href="https://app.premiselabs.co">Login</a>
+  </div>
+
+  <div class="container">
+    <div class="logo">
+      <a href="/">Premise <span>Labs</span></a>
+    </div>
+
+    <!-- Loading state -->
+    <div id="loading" class="loading-state" role="status" aria-live="polite">
+      <div class="loading-spinner"></div>
+      <p>Checking your session&hellip;</p>
+    </div>
+
+    <!-- Error state -->
+    <div id="error-state" class="error-state hidden" role="alert">
+      <p id="error-message">Welcome is temporarily unavailable.</p>
+      <p><a href="https://app.premiselabs.co">Go to dashboard</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
+    </div>
+
+    <!-- #863: password-reset landing — recovery emails redirect here
+         (origin + /welcome.html, the same allow-listed target the #801
+         signup confirmation flow uses). Recovery mode short-circuits the
+         session bridge: the reset panel is the only thing shown
+         mid-password-reset. method=post + action per the #527 form-safety
+         contract (no GET echo). -->
+    <div id="reset-panel" class="hidden">
+      <h1>Reset your password</h1>
+      <div id="reset-error" class="error-state hidden" role="alert">
+        <p id="reset-error-text"></p>
+        <p><a href="/auth?mode=login">Back to sign in</a></p>
+      </div>
+      <div id="reset-success" class="hidden" role="status">
+        <p id="reset-success-text"></p>
+        <p><a href="/auth?mode=login">Sign in with your new password →</a></p>
+      </div>
+      <form id="reset-form" method="post" action="/auth/update-password">
+        <div class="form-group">
+          <label for="reset-password">New password</label>
+          <input type="password" id="reset-password" name="reset-password" placeholder="••••••••" required autocomplete="new-password" minlength="8">
+        </div>
+        <div class="form-group">
+          <label for="reset-confirm">Confirm new password</label>
+          <input type="password" id="reset-confirm" name="reset-confirm" placeholder="••••••••" required autocomplete="new-password" minlength="8">
+        </div>
+        <button type="submit" class="btn-submit" id="btn-reset">Update password</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- #3501: the client-side auth bridge is GONE.
+       The page's session read resolved the legacy parent-domain
+       `sb-tortoise-auth-token` cookie — after first migrating any legacy localStorage
+       session into it — and a BFF login writes only the HttpOnly `__Host-session`, so a
+       browser holding no legacy session read as signed OUT and was bounced to /auth.
+       That was the #3485 loop's sibling, reproduced here by construction.
+       /welcome is now decided SERVER-SIDE (functions/welcome.ts): signed-in
+       visitors are redirected straight to the app, signed-out visitors to /auth,
+       and this page is served ONLY for ?reset=1 with a valid session. So the
+       reset panel is the only state this page can legitimately render. -->
+  <script>
+    (function () {
+      var loading = document.getElementById("loading");
+      var errorState = document.getElementById("error-state");
+      var panel = document.getElementById("reset-panel");
+      var input = document.getElementById("reset-password");
+      var confirmInput = document.getElementById("reset-confirm");
+      var form = document.getElementById("reset-form");
+      var errEl = document.getElementById("reset-error");
+      var errText = document.getElementById("reset-error-text");
+      var successEl = document.getElementById("reset-success");
+      var successText = document.getElementById("reset-success-text");
+      var inFlight = false;
+
+      // The server serves this page only for ?reset=1 with a valid session, and
+      // the BFF session cookie is HttpOnly — so this page cannot detect the BFF
+      // session itself. The panel is shown unconditionally rather than "detected".
+      if (loading) loading.classList.add("hidden");
+      if (errorState) errorState.classList.add("hidden");
+      if (panel) panel.classList.remove("hidden");
+      if (input) input.focus();
+
+      function showError(msg) {
+        if (errText) errText.textContent = msg;
+        if (errEl) errEl.classList.remove("hidden");
+        if (successEl) successEl.classList.add("hidden");
+      }
+
+      // Mirrors the server's policy for fast feedback. The SERVER is the gate —
+      // this check is convenience only.
+      function weakMessage(pw) {
+        if (!pw) return "Please choose a new password.";
+        if (pw.length < 8) return "Use at least 8 characters.";
+        if (!/[A-Za-z]/.test(pw)) return "Include at least one letter.";
+        if (!/\d/.test(pw)) return "Include at least one number.";
+        if (!/[^A-Za-z0-9]/.test(pw)) return "Include at least one symbol.";
+        return null;
+      }
+
+      if (form) {
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          if (inFlight) return;
+          var pw = input ? input.value : "";
+          var confirm = confirmInput ? confirmInput.value : "";
+          var localProblem = weakMessage(pw);
+          if (localProblem) { showError(localProblem); return; }
+          if (pw !== confirm) { showError("Passwords don't match."); return; }
+
+          if (errEl) errEl.classList.add("hidden");
+          inFlight = true;
+          fetch("/auth/update-password", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: pw }),
+          })
+            .then(function (res) {
+              return res.json().catch(function () { return {}; }).then(function (data) {
+                return { status: res.status, data: data };
+              });
+            })
+            .then(function (r) {
+              if (r.status === 200) {
+                if (form) form.classList.add("hidden");
+                if (errEl) errEl.classList.add("hidden");
+                if (successText) successText.textContent = "Password updated — sign in with your new password.";
+                if (successEl) successEl.classList.remove("hidden");
+                return;
+              }
+              if (r.status === 400) {
+                showError(r.data && r.data.message ? r.data.message
+                  : "That password was rejected. Try a different one.");
+                return;
+              }
+              if (r.status === 401) {
+                showError("This reset link has expired or is invalid. Request a new one.");
+                return;
+              }
+              // 503 (or anything else): the store/provider faulted. Say "try
+              // again" — NEVER "you are signed out". Conflating these is the
+              // #3485 class.
+              showError("Something went wrong. Please try again — or request a new reset link.");
+            })
+            .catch(function () {
+              showError("Something went wrong. Please try again — or request a new reset link.");
+            })
+            .then(function () { inFlight = false; });
+        });
+      }
+    })();
+  </script>
+
+  <footer class="legal-footer">
+    <a href="/faq">FAQ</a>
+    <a href="/privacy">Privacy Policy</a>
+    <a href="/tos">Terms of Service</a>
+    <a href="/license">License</a>
+    <a href="/dpa">DPA</a>
+    <a href="/security">Security</a>
+  </footer>
+<script src="/consent.js" defer></script>
+</body>
+</html>

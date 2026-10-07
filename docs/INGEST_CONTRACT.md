@@ -29,7 +29,7 @@ not yet visible in the shipped code at the time of writing, this doc says
 Related docs:
 
 - [Hosted quickstart](quickstart-cloud.md) — sign up, API key, MCP registration.
-- [Self-hosted quickstart](quickstart-selfhosted.md) — Docker / embedded, `TORTOISE_DB_URI`, transport modes.
+- [Self-hosted quickstart](quickstart-selfhosted.md) — Docker, `TORTOISE_DB_URI`, transport modes. (Embedded is the eval substrate, not a deployment path.)
 - [Ontology](ONTOLOGY.md) — point kinds, operator semantics, the edge vocabulary.
 - [Tortoise skill — how to use Tortoise](../skills/how-to-use-tortoise/SKILL.md) — agent-facing ingest guidance.
 

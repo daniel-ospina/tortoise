@@ -8,9 +8,10 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit) | `id`, `kind`, `content_hash` | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
-| `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
+| `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
+| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (non-`Point` labels: `restatus` when `status` is written, else `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
@@ -27,6 +28,141 @@
 > The EventAPI/CLI/ingest path emits its own legacy events (`PointAdded`,
 > `PointRetracted`, `PointsMerged`, `IngestStarted`) to the EventLog JSONL —
 > unchanged. Hosted/SDK tenants read the `:GraphEvent` stream below.
+
+### JSONL rebuild-journal record shapes (durability, not the `:GraphEvent` stream)
+
+The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
+journal that `rebuild_all` replays is a *second*, differently-shaped store:
+`_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
+`projection_version`) plus the record's own fields. Several folds carry props
+that the payload does not name:
+
+- **The seal annotation (`__TornTailSealed__`, #5917) — an annotation, not a
+  record.** When `EventLog.append` finds the journal ending on a fragment — an
+  unterminated line that is not valid JSON (a writer killed mid-append), or a
+  terminated line that is not valid JSON — it terminates and/or marks the
+  fragment before writing the new record, so the new record starts on a line of
+  its own while the fragment still reaches the torn-tail classifier. `read_all`
+  never returns it and it shifts no record index. It is deliberately **not
+  JSON**: every record begins `{"`, so a sentinel no record can begin with keeps
+  a *torn seal* unambiguous — a torn record fragment is still counted and
+  classified rather than being mistaken for an annotation. The journal's grammar
+  already admits non-JSON lines (a torn fragment is one).
+
+- **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
+  turn** (#5004) — the `point` snapshot now also carries the embedding, which
+  is a *node* property and stays one: `embedding` (the vector as stored, or an
+  explicit `null`), plus — on a **creating** record only — the identity the
+  vector was computed under, `embedding_model` / `embedding_revision` /
+  `embedding_text_hash`, and (turn records that preserved an older vector)
+  `embedding_preserved`. The identity keys describe the record; they are never
+  node properties (the fold's `_POINT_HANDLED` drops them). A re-emitted
+  snapshot (`PointPromoted`) carries the vector with **no** identity, and the
+  `embedding_verbatim` marker rides the snapshot — the replay SETs it as a
+  node property to reproduce the graph-only restore. **Presence is
+  ownership:** a record that owns the field writes the key (vector or explicit
+  `null`), and the replay restores / clears / leaves — it never re-encodes; a
+  record with the key ABSENT is legacy (strip-era) and recomputes. The paths
+  still outside the rule are enumerated — and must stay enumerated — in
+  `docs/durability-posture.md` → *Derived properties that are STORED, not
+  recomputed*; do not restate the list here (it has drifted once already).
+
+- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+  re-fetched source whose `contentHash` differs is a *new version of the same
+  identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
+  `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
+  `contentHash` (the NEW version), **`previousContentHash`** (the superseded
+  one — this is what makes the prior version addressable after the single
+  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
+  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  payload's own `updatedAt` (minted once by `create_source`, so the live node
+  and the record cannot disagree) is it, and the fold reads exactly that. The
+  record carries **no** recomputed ordinal — `version` is reproduced on replay
+  through the same hash-diff gate the live write used, so recording it too
+  would be a second derivation that can disagree. Folded by
+  `FalkorProjection._fold_source_versioned`, which **delegates to
+  `_upsert_source`** — the LIVE writer — so apply/replay parity holds by
+  construction rather than by a second, hand-maintained clause list (the first
+  cut kept its own clauses and drifted in `urlAliases`/`sourcePath`/
+  `canonicalUrl`, each a live != replay divergence). **JSONL-only** (not
+  in `_GRAPH_EVENT_TYPES`), in `_NO_POINT_FOLD`, and folded in **both**
+  `apply()` and `rebuild_all` pass 1b. `create_source`'s cadence is
+  per-**outcome**: this record for a real hash transition, `SourceCreated` for
+  a create or a JOINT-E2E stub completion, and **nothing at all** for a
+  re-check that found what we already hold (§9.6's cost bound — a version is
+  "three timestamps and a hash", so a no-op re-fetch must not be one). A
+  hashless re-check counts: a hashless create stores `contentHash = ''`, so
+  "no stored hash" alone must not select the create arm, or every re-ingest of
+  a hashless source would append a record.
+- **The `sourceVersionTransit` carrier on a Point snapshot** (#5256) — a Point created against a
+  `:Source` with a non-blank `contentHash` records the version it was read from as a list of
+  `[<raw extractedFrom ref>, <contentHash>]` pairs. It is the *transit* for the edge-authoritative
+  `r.sourceVersion` (stamped `ON CREATE` only — a re-link never advances it), so the replay re-stamps
+  the edge from the snapshot instead of re-reading the Source: that read is unjournalled (#5024) and
+  would record a version the Point was never read from. The key is the **raw** ref — the
+  journal-stable spelling — never a live-time resolution of it. **Honest-absent:** no Source, or a
+  Source whose hash is blank (empty or whitespace-only) or non-string, writes **no key at all** (never `''`, never `[]`).
+
+- **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
+  **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
+  `annotator_directness` (the payload above keeps the SHORT names
+  `bias`/`precision`/`consistency`/`directness` for the `:GraphEvent`
+  contract). The fold accepts either spelling (`_annotator_dims(aliases=True)`),
+  but an SDK-produced record always carries the long names.
+- **`PointRevised`** — `update_point(**props)` journals the caller's props
+  VERBATIM as extras, so an `annotator_*` key here is a node property of that
+  exact name (never aliased).
+- **`EntityLinked`** (#3664) — the capture entity-attachment record, written by
+  `session_link.link_entity` **only when the SDK has an `event_log_path`**
+  (JSONL-only: it is NOT in `_GRAPH_EVENT_TYPES`). Fields: `id` (source id;
+  also carried as `source_id`), `source_label`, `source_id`, `target_label`,
+  `target_id`, `edge_type`. Folded by `FalkorProjection._fold_entity_linked`
+  as an idempotent MERGE of the flat logical endpoints; `edge_type` and both
+  labels are validated against a frozen vocabulary (an unknown/malformed value
+  is a 0-row NO-OP, never interpolated into Cypher).
+- **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
+  live capture MERGE is a raw write). Four are emitted per capture, in this
+  order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
+  plus `harness` / `actor_user_id` when set, and `capture_lane` when a
+  journaling producer sets it (`_fold_session_recorded` already coalesces it;
+  no caller passes `capture_lane` to a journaling writer today, so nothing
+  emits it yet);
+  (2) a trailing record written by
+  `sdk._write_capture_turns` right after its batched turn statement, carrying
+  `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
+  `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
+  record written right after the live `SET s.capture_ok /
+  s.capture_extractor`, carrying `capture_ok` / `capture_extractor`.
+  Folded by
+  `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
+  `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
+  `actor_user_id` / `capture_lane` (first writer wins) and taking `turn_count`, `harness`,
+  `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
+  `capture_ok` and
+  `capture_extractor` from the latest record (last writer wins). Each later
+  record exists so a field is durable on the `apply()`-based engines too (the
+  opening record is emitted before any result is known and cannot carry them; a
+  null `capture_ok` would otherwise read as the legacy "presumed captured"
+  case at the #2335 retry gate).
+
+**Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
+four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
+`rebuild` / `recover_from_log` / `backup.restore`'s JSONL fallback), so a link
+whose endpoint is created LATER in the journal still folds. A link whose
+endpoint was HARD-DELETED after it is skipped instead (the record itself
+carries no `seq`; each engine pairs it with its journal position — the
+`(journal_seq, record)` index over its events list — and the hard-delete
+boundary is compared against that position), so a same-id re-creation does
+not resurrect the deleted link. On `rebuild_all` the
+sweep runs AFTER pass 2, so a `:Session` source recreated from a
+`contains_session` turn link exists before the fold.
+
+**No down-version guarantee for new folded record types.** An older binary
+rebuilding a journal written by a newer one warns `unrecognized event type 'X'
+— skipped` for a new type it does not know, and silently drops unknown
+`PointRevised` extras. The rebuild path has no pre-wipe allowlist analogous to
+`_assert_episodic_points_recreatable`; forward-only evolution of the JSONL
+record vocabulary is a known limitation, not a supported downgrade path.
 
 ## `:GraphEvent` node schema
 

@@ -187,6 +187,84 @@ class TestDe2e3:
         r2 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r2["filed"] == 0 and r2["duplicates"] == 1
 
+    def test_2892_hashless_fallback_after_rebuild(self, sdk, tmp_path):
+        """#2892: when a graph carries NO ``content_hash`` the bare hash MATCH
+        in ``_content_exists`` returns None and ``checkpoint()``'s Tier-1
+        dedup gate re-files already-present content as a NEW duplicate. The
+        A10 content+kind fallback (shared with ``create_point``) must resolve
+        the ORIGINAL id.
+
+        The hash-less state used to arise incidentally from a JSONL rebuild;
+        main's #2795 D2 now RECOMPUTES ``content_hash`` on replay, so this
+        test constructs the condition explicitly instead of depending on it."""
+        content = "the rebuilt graph must not duplicate this checkpoint item"
+        first = sdk.checkpoint(
+            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        assert first == {"filed": 1, "duplicates": 0}
+        pid = sdk.query(kind="checkpoint-item")[0]["id"]
+
+        rebuilt = sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert rebuilt["events"] > 0
+        # Precondition: the hash is ABSENT, the content is intact. A rebuild
+        # no longer produces this (main's #2795 D2 recomputes content_hash in
+        # ``projection/entities.py::_upsert_point_props``), so construct it
+        # explicitly — the property under test is "no hash, content present",
+        # whatever produced it. The old `assert row[0] is None` here fired as
+        # "fixture stale" the moment #2795 D2 landed, which is how this was
+        # caught; keep the assertion, move the setup.
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.content_hash = null",
+            params={"id": pid},
+        )
+        row = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.content",
+            params={"id": pid},
+        ).result_set[0]
+        assert row[0] is None, "fixture setup failed to clear content_hash"
+        assert row[1] == content
+
+        # The regression: resolve by content+kind, not None.
+        assert sdk._content_exists(content) == pid
+        # And Tier-1 dedup must reject the re-file (threshold=1.0 disables the
+        # Tier-2 semantic tier so only the hash gate is under test).
+        second = sdk.checkpoint(
+            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        assert second == {"filed": 0, "duplicates": 1}, second
+        count = sdk._get_proj().g.query(
+            "MATCH (n:Point {content:$c}) RETURN count(n)",
+            params={"c": content},
+        ).result_set[0][0]
+        assert count == 1, f"checkpoint filed a duplicate after rebuild ({count})"
+
+    def test_2949_hybrid_nonoperator_dedups_but_legacy_operator_excluded(
+            self, sdk):
+        """#2949 review: the shared ``_find_point_by_content`` predicate must
+        (a) still MATCH a non-operator Point that carries ``op_type`` — main's
+        inline ``n.is_operator = false`` did, and a bare ``op_type IS NULL``
+        conjunct made ``create_point(dedup=True)`` mint a DUPLICATE on an
+        idempotent re-write (exactly-once violated) — and (b) still EXCLUDE a
+        LEGACY operator (``op_type`` set, ``is_operator`` property ABSENT,
+        #943) so a dedup never resolves onto an operator node."""
+        # (a) hybrid non-operator: is_operator=false AND op_type set.
+        first = sdk.create_point("statement", "hybrid dedup probe",
+                                 dedup=True, op_type="IMPL")
+        second = sdk.create_point("statement", "hybrid dedup probe",
+                                  dedup=True, op_type="IMPL")
+        assert first["id"] == second["id"], (first["id"], second["id"])
+        hybrid_count = sdk._get_proj().g.query(
+            "MATCH (n:Point {content:'hybrid dedup probe'}) RETURN count(n)",
+        ).result_set[0][0]
+        assert hybrid_count == 1, f"hybrid non-operator duplicated ({hybrid_count})"
+
+        # (b) legacy operator: op_type set, is_operator property ABSENT.
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'legacy-op-2949', content:'legacy op probe', "
+            "pointKind:'statement', op_type:'NAND'})"
+        )
+        assert sdk._find_point_by_content(
+            "legacy op probe", pointKind="statement") is None
+        assert sdk._content_exists("legacy op probe") is None
+
 
 class TestDe2e3ReviewFixes:
     """#1071 code-review regressions."""
@@ -270,3 +348,81 @@ class TestDe2e3ReviewFixes:
             "MATCH (op:Point {label:'alreadyDecided'}) RETURN count(op)"
         ).result_set
         assert rows[0][0] == 0, "no alreadyDecided operator for live priors"
+
+    def test_5316_a_rival_pair_is_flagged_but_not_wired(self, sdk, monkeypatch):
+        """#5316: a tier-2 embedding hit does not by itself license the
+        alreadyDecided IMPL. A pair differing only by a load-bearing
+        connective is a RIVAL claim (D12/O4 `substituted_content`), so it is
+        flagged for review and left unwired."""
+        prior_id = _decision(sdk, content=PRIOR_AND, status="draft")["id"]
+        cand_id = _decision(sdk, content=CAND_RIVAL, status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, PRIOR_AND)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        # Behavioural first: on the unfixed code this is where the defect
+        # shows — the rival pair IS wired — rather than on the new key.
+        assert res["wired_draft_to_draft"] == 0, res
+        assert _already_decided_links(sdk, cand_id, prior_id) == 0, (
+            "a rival pair must not be wired as one decision"
+        )
+        assert res["boundary_blocked"] == 1, res
+        # The refusal is not a silent drop — the review queue still sees it.
+        assert any(c["id"] == cand_id
+                   for c in sdk.list_dedup_candidates(candidate_type="content"))
+
+    def test_5316_an_equivalent_pair_is_still_wired(self, sdk, monkeypatch):
+        """Positive control: the same tier-2 hit DOES wire when the pair
+        crosses no distinguishing dimension. Without this arm the test above
+        would also pass on a guard that simply never wires anything."""
+        prior_id = _decision(sdk, content=PRIOR_AND, status="draft")["id"]
+        cand_id = _decision(sdk, content=PRIOR_REORDERED, status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, PRIOR_AND)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        assert res["wired_draft_to_draft"] == 1, res
+        assert res["boundary_blocked"] == 0, res
+        assert _already_decided_links(sdk, cand_id, prior_id) == 1
+
+    def test_5316_an_unreadable_pair_fails_closed(self, sdk, monkeypatch):
+        """Fail-closed toward KEEP: when a tier-2 hit cannot carry the prior's
+        body there is nothing to compare, so the wire is refused rather than
+        assumed equivalent (the same asymmetry `fold_allowed` itself uses)."""
+        prior_id = _decision(sdk, status="draft")["id"]
+        cand_id = _decision(
+            sdk, content="We decided to move the FalkorDB default port to 16380.",
+            status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, None)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        assert res["wired_draft_to_draft"] == 0, res
+        assert res["boundary_blocked"] == 1, res
+
+
+PRIOR_AND = "We decided to ship the parser and the indexer."
+PRIOR_REORDERED = "We decided to ship the indexer and the parser."
+CAND_RIVAL = "We decided to ship the parser or the indexer."
+
+
+def _force_tier2_hit(sdk, monkeypatch, prior_id, existing_content):
+    """Pin the embedding tier to one above-threshold hit on `prior_id`.
+
+    `existing_content=None` omits the prior body, standing in for a tier-2 hit
+    that cannot carry it (the fail-closed arm of #5316).
+    """
+    orig = sdk._semantic_dedup
+
+    def fake_sd(candidates, threshold, pointKind="checkpoint-item",
+                return_pairs=False, similarity_out=False, exclude_ids=None):
+        if return_pairs:
+            pair = {"candidate": candidates[0][0],
+                    "candidate_id": candidates[0][0].get("id"),
+                    "existing": prior_id,
+                    "similarity": 0.95}
+            if existing_content is not None:
+                pair["existing_content"] = existing_content
+            return [pair]
+        return orig(candidates, threshold, pointKind=pointKind,
+                    return_pairs=return_pairs, similarity_out=similarity_out,
+                    exclude_ids=exclude_ids)
+
+    monkeypatch.setattr(sdk, "_semantic_dedup", fake_sd)

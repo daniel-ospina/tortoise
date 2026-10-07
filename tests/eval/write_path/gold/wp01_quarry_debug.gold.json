@@ -40,6 +40,36 @@
       "statement": "Routine trip to the break room coffee machine."
     }
   ],
+  "planted_operators": [
+    {
+      "expected_kind": "SUPPORTS",
+      "from": {
+        "planted_turn": 9,
+        "verbatim_anchor": "two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete"
+      },
+      "id": "wp01_quarry_debug_op_01",
+      "reason": "reproduction observation (t9) supports the root-cause claim (t10) \u2014 ONTOLOGY \u00a73.1 IMPL 'A supports/implies B' + \u00a78 supports|IMPL (evidence supports claim); the assistant turn states the relation explicitly ('Confirmed root cause:'). from = observation/evidence, to = claim.",
+      "relation_turn": 10,
+      "to": {
+        "planted_turn": 10,
+        "verbatim_anchor": "nothing prevents two workers from claiming one batch"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 12,
+        "verbatim_anchor": "A lease row keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion"
+      },
+      "id": "wp01_quarry_debug_op_02",
+      "reason": "the single-owner lease mechanism (t12) closes the duplicate-processing-race claim (t8) \u2014 ONTOLOGY \u00a73.9 mitigated_by (registered) + \u00a75 Problem-family note ('the problem is closed by an action'); MITIGATES is the write path's GRADED relevance dampener on the operator edge, never a refutation. from = the measure's claim, to = the problem claim. FLAGGED (scoping finding F1): core \u00a73.1 has no first-class point-to-point 'action reduces risk' operator, so the gold asserts the write path's MITIGATES form (mitigation Point on the operator edge).",
+      "relation_turn": 12,
+      "to": {
+        "planted_turn": 8,
+        "verbatim_anchor": "you have a duplicate-processing race"
+      }
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

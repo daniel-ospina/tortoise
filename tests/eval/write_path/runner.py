@@ -16,11 +16,28 @@ Blindness / grading discipline:
   hierarchy).  BPRE (the default mode) runs the mechanical arm only and
   records ``JUDGE_PIN_MECHANICAL`` — numbers are publishable against a
   pinned judge (the schema requires non-null judge_pin on publish).
-  NOTE (PR #2183 review): the full ``--judge salience`` mode is NOT yet
-  wired — the CLI exposes ``run`` / ``bless`` / ``validate-receipt`` only;
-  the blind SalienceJudge in judge.py is implemented + unit-tested but not
-  yet invoked by the runner (deferred to a later wave; the docstring claim
-  was removed when the option failed to exist).
+  ADDITIVE (issue #5085, D14 "two-number split"): ``--judge semantic`` runs
+  the blind banded judge BESIDE the mechanical arm and records a
+  ``semantic_judge`` block (per-unit bands + band-weighted score + band
+  distribution + its own ``SEMANTIC_JUDGE_PIN``).  It is opt-in, refused on
+  the deterministic m2 posture, and never enters ``metrics`` — the judged
+  lane cannot silently enter the CI gate.  (The earlier note that the
+  salience judge was "not yet wired" is now stale: the BLIND banded arm is
+  the wired one; the older FULL/PARTIAL/ABSENT ``SalienceJudge`` remains the
+  unit-tested protocol from #2098 and is not what the runner invokes.)
+  ADDITIVE (issue #5106): an OPTIONAL deterministic first-stage pre-screen
+  (``--prescreen lexical|nli``, OFF by default) may short-circuit only the
+  confident ends (``same_fact`` / ``likely_not``) before the LLM judge sees
+  them.  It fails OPEN (an abstain/error/unavailable result goes to the LLM
+  judge; no unit is ever dropped), it is not an exemption from the §J4
+  blindness guard, and with it off the receipt block is byte-identical to
+  the #5085 shape.  It reuses the already-declared ``embeddings`` extra —
+  no dependency is added (see ``prescreen.py`` for the recorded decision).
+  ``runner prescreen-audit`` measures it offline over any judged receipt
+  produced WITHOUT the pre-screen — a receipt that already ran the screen
+  carries the screen's own verdict on those units, so they are excluded from
+  the reported agreement (auditing them would score the screen against
+  itself; see ``audit_receipt``).
 * **Verbatim control lane**: every session's gold is ALSO graded against a
   control memory (the conversation written back verbatim).  Control macro
   survival is 1.0 by construction; anything less is a CORPUS/GRADER bug
@@ -57,6 +74,23 @@ failure_origin / commit / corpus_hash / judge_pin / resolved_config /
 cost_usd) plus the run detail an auditor needs to reproduce the number.
 Validated by ``validate_receipt`` before any commit.
 
+⚠️ **Key source — start the llm lane through the wrapper (#2718 / #4860).**
+This runner reads provider keys straight from the process env and never loads
+the repo ``.env`` (the repo's only ``.env`` loader,
+``mcp_server._load_dotenv``, is not imported here — and where it does run it
+only fills keys that are ABSENT, never overriding an ambient one). So a shell
+that exported ``OPENROUTER_API_KEY`` / ``DEEPSEEK_API_KEY`` is what gets
+billed. On 2026-09-23 the sealed #2552 run billed an exhausted ambient
+OpenRouter key (HTTP 403, 7/7 sessions aborted) while a healthy evals key sat
+in ``.env`` — and the receipt named no key. Always start the llm lane with
+``tools/run-with-eval-keys.sh``: it strips the ambient provider keys, loads
+the repo-root ``.env`` with override, prints the ``source`` + fingerprint of
+each key it set, and execs the command. Paste that block into the receipt::
+
+    PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 \
+      tools/run-with-eval-keys.sh \
+        .venv/bin/python -m tests.eval.write_path.runner run --out <receipt>
+
 Exit contract (CLI): 0 = completed non-regression, 1 = regression or
 runner_error (the CI-gate signal), 2 = inconclusive (nothing committed yet /
 config, corpus, or judge-pin drift — the umbrella aggregates receipts, never exit
@@ -83,6 +117,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tests.eval.write_path import corpus, grading, judge, schema  # noqa: E402
+from tests.eval.write_path import prescreen as prescreen_mod  # noqa: E402
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
 
@@ -187,7 +222,7 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
     for turn in conversation:
         role = turn.get("role", "user")
         content = turn.get("content", "")
-        if harness in ("codex", "pi"):
+        if harness == "codex":
             part_type = "input_text" if role == "user" else "output_text"
             record = {
                 "type": "response_item",
@@ -195,6 +230,18 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
                     "type": "message",
                     "role": role,
                     "content": [{"type": part_type, "text": content}],
+                },
+            }
+        elif harness == "pi":
+            # #3667: Pi has its OWN store shape (type == "message" →
+            # message.{role,content}), NOT codex's `payload` shape. The pi
+            # branch must render the REAL Pi record or the round-trip parses
+            # 0 turns and the graded pi lane is vacuous.
+            record = {
+                "type": "message",
+                "message": {
+                    "role": role,
+                    "content": [{"type": "text", "text": content}],
                 },
             }
         elif harness == "claude-desktop":
@@ -516,6 +563,293 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+# ── Additive banded semantic judge arm (issue #5085) ───────────────────────
+
+
+def _semantic_memory_contents(points: list[dict]) -> list[str]:
+    """The graded memory layer as judge-visible content strings.
+
+    Identical surface to the one the mechanical arm grades (the snapshot's
+    memory points, turn echo and operator nodes already excluded).
+    """
+    return [
+        p["content"]
+        for p in points
+        if isinstance(p.get("content"), str) and p["content"].strip()
+    ]
+
+
+def _model_id_family(model_id: str) -> str:
+    """Normalise a wire model id for the judge/extractor independence check.
+
+    The extractor's ``TORTOISE_EXTRACT_MODEL`` may name the direct lane
+    (``deepseek-v4-flash``) while a judge adapter carries the OpenRouter id
+    (``upstage/solar-pro4``) — only the final path segment identifies the
+    model, so comparisons run on that, lowercased.  Comparing a MODELS
+    registry KEY to a wire id instead is a namespace mismatch that can
+    assert an independence that does not hold.
+    """
+    return model_id.rsplit("/", 1)[-1].strip().lower()
+
+
+def _run_semantic_judge(
+    sdk,
+    selected: list[str],
+    root: Path,
+    *,
+    samples: int,
+    judge_model: str | None = None,
+    paraphrase_model: str | None = None,
+    temperature: float = judge.DEFAULT_JUDGE_TEMPERATURE,
+    judge_factory=None,
+    notes: list[str] | None = None,
+    prescreen: str = prescreen_mod.PRESCREEN_OFF,
+    prescreen_model: str | None = None,
+) -> dict:
+    """Run the ADDITIVE blind banded judge over every session's memory layer.
+
+    Returns the ``semantic_judge`` block recorded in the run report + receipt.
+    The mechanical metrics are untouched: this arm publishes BESIDE them (the
+    #5085 D14 "two-number split"), never inside ``metrics``, so the baseline
+    comparability surface is unchanged.
+
+    Raises ``judge.JudgeBlindnessError`` — the caller converts it into a
+    runner error, because judge-blindness is load-bearing (plan §J4: a
+    violation is a HARNESS failure, never a soft note).  Any other judge
+    exception is the caller's to capture into ``status: "failed"`` so an LLM
+    outage cannot invalidate the authoritative mechanical numbers.
+    """
+    notes = notes if notes is not None else []
+    model_name = judge_model or judge.DEFAULT_JUDGE_MODEL
+    para_name = paraphrase_model or model_name
+    # #5106: the deterministic first stage.  ``off`` (the default) builds no
+    # stage at all, so the arm — and its receipt block — is exactly the #5085
+    # shape.  The stage is consulted INSIDE ``judge_units`` (after the
+    # blindness guard, over the same probe surface) and can only skip
+    # confident work; it can never drop a unit or fail the arm closed.
+    screen = prescreen_mod.build_prescreen(
+        prescreen,
+        **({"model": prescreen_model} if prescreen_model else {}),
+    )
+    units: list[dict] = []
+    memory_by_session: dict[str, list[str]] = {}
+    cost_usd = 0.0
+    priced_calls = 0
+    judge_calls = 0
+    paraphrase_calls = 0
+    leak_retries = 0
+    leak_rejections = 0
+    logprob_samples: list[float] = []
+    judge_model_id = ""
+    prescreen_totals = {
+        "units_screened": 0,
+        "screened_same_fact": 0,
+        "screened_likely_not": 0,
+        "screen_errors": 0,
+        "probe_chars_removed": 0,
+        "sessions_fully_screened": 0,
+        "judge_calls_avoided": 0,
+    }
+    for session_id in selected:
+        gold = corpus.load_gold(session_id, root)
+        fixture = corpus.load_fixture(session_id, root)
+        snapshot = snapshot_session(sdk, session_id)
+        memory = _semantic_memory_contents(snapshot.get("points", []))
+        memory_by_session[session_id] = memory
+        anchors = [
+            u.get("survival", {}).get("via_anchor")
+            or u.get("verbatim_anchor")
+            or ""
+            for u in gold.get("salient_units", [])
+            if isinstance(u, dict)
+        ]
+        arm = judge.BandedSalienceJudge(
+            model_name=model_name,
+            model_factory=judge_factory,
+            paraphrase_model_name=para_name,
+            samples=samples,
+            temperature=temperature,
+            anchors=[a for a in anchors if a],
+        )
+        probes = arm.synthesize_probes(gold, fixture)
+        verdicts = arm.judge_units(probes, memory, prescreen=screen)
+        per_session_screen = arm.prescreen_audit()
+        for unit_id, record in verdicts.items():
+            units.append(
+                {
+                    "session_id": session_id,
+                    "unit_id": unit_id,
+                    "probe": probes.get(unit_id),
+                    **record,
+                }
+            )
+        cost_usd += arm.cost_usd
+        priced_calls += arm.cost_priced_calls
+        judge_calls += arm.judge_call_count
+        paraphrase_calls += arm.paraphrase_call_count
+        leak_retries += arm.leak_retries_used
+        leak_rejections += arm.leak_rejections
+        logprob_samples.extend(arm.logprob_samples)
+        judge_model_id = arm.judge_model_id
+        if per_session_screen is not None:
+            prescreen_totals["units_screened"] += per_session_screen["units_screened"]
+            prescreen_totals["screened_same_fact"] += per_session_screen["screened_same_fact"]
+            prescreen_totals["screened_likely_not"] += per_session_screen["screened_likely_not"]
+            prescreen_totals["screen_errors"] += per_session_screen["screen_errors"]
+            prescreen_totals["probe_chars_removed"] += per_session_screen["probe_chars_removed"]
+            prescreen_totals["sessions_fully_screened"] += per_session_screen["sessions_fully_screened"]
+            prescreen_totals["judge_calls_avoided"] += per_session_screen["judge_calls_avoided"]
+    # Two DIFFERENT error counters must both reach the receipt.  The stage's own
+    # ``audit()["errors"]`` catches failures the stage swallowed internally
+    # (both built-in stages fail OPEN inside ``screen()``); ``prescreen_errors``
+    # catches an exception that escaped a foreign stage.  Reporting only the
+    # latter read 0 on a run where the stage errored on EVERY unit.
+    screen_stage_audit = screen.audit() if screen is not None else None
+    screen_errors_total = prescreen_totals["screen_errors"] + int(
+        (screen_stage_audit or {}).get("errors") or 0
+    )
+    aggregate = judge.aggregate_banded(units)
+    # Self-preference bias (documented): the judge must not grade a model's
+    # own output.  Record the extractor model the run used, and state the
+    # independence honestly — including residual family overlap, if any.
+    extractor_model = (
+        os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
+        or "deepseek/deepseek-v4-flash"
+    )
+    # The comparison must be wire-id-vs-wire-id (see _model_id_family): the
+    # judge adapter's resolved id vs the extractor's resolved id.
+    independent = _model_id_family(judge_model_id) != _model_id_family(extractor_model)
+    independence = (
+        "judge model differs from the extractor's resolved model — the "
+        "default judge (upstage/solar-pro4) is a different provider family "
+        "from the deepseek extractor default; residual overlap is a shared "
+        "vendor only if an operator overrides --judge-model"
+        if independent
+        else "WARNING: judge model == extractor model — self-preference bias "
+             "is NOT mitigated on this run"
+    )
+    if (judge_calls + paraphrase_calls) and not priced_calls:
+        notes.append(
+            "semantic judge cost unavailable: the serving route reported no "
+            "charge (last_cost_usd is None) — recorded as 0.0, never a "
+            "fabricated figure"
+        )
+    notes.append(
+        "semantic judge (additive, NOT a gated metric): "
+        f"band-weighted={aggregate['band_weighted_score']} "
+        f"probability_mean={aggregate['probability_mean']} "
+        f"survival>=0.50={aggregate['semantic_survival_rate']} "
+        f"dist={aggregate['band_distribution']}"
+    )
+    return {
+        "status": "completed",
+        "pin": (
+            judge.SEMANTIC_JUDGE_PIN if screen is None
+            else judge.SEMANTIC_JUDGE_PIN_PRESCREEN
+        ),
+        "protocol": judge.SEMANTIC_PROMPT_VERSION,
+        "model": model_name,
+        "model_id": judge_model_id,
+        "paraphrase_model": para_name,
+        "extractor_model": extractor_model,
+        "model_independence": independence,
+        "temperature": temperature,
+        "samples": samples,
+        "orders": list(judge.PROMPT_ORDERS),
+        "band_thresholds": {
+            band: lower for lower, band in judge.BAND_THRESHOLDS
+        },
+        "band_weights": dict(judge.BAND_WEIGHTS),
+        "units": units,
+        "memory_by_session": memory_by_session,
+        "logprobs": judge.logprob_crosscheck_from_samples(logprob_samples),
+        "cost_usd": round(cost_usd, 6),
+        "cost_priced_calls": priced_calls,
+        # ``judge_calls`` counts VERDICT calls only (the paraphrase stage's
+        # calls are ``paraphrase_calls``); ``prompt_count`` would overstate it.
+        "judge_calls": judge_calls,
+        "paraphrase_calls": paraphrase_calls,
+        # Blindness audit: a paraphrase that echoed an anchor was rejected and
+        # re-synthesized this many times (0 on a clean run); a leak that
+        # survives the bounded retries raises and fails the run instead.
+        "paraphrase_leak_retries": leak_retries,
+        "paraphrase_leak_rejections": leak_rejections,
+        # #5106: present ONLY when the pre-screen ran — a default (screen-off)
+        # receipt block is byte-identical to the #5085 shape.  ``abstained``,
+        # ``unavailable`` and ``errors`` are the fail-open audit: an abstain is
+        # a unit the LLM judge still decided.
+        **({"prescreen": {
+            "name": prescreen,
+            **prescreen_totals,
+            # The SUM of the stage's internal errors and the arm's escape
+            # counter — see ``screen_errors_total`` above.
+            "screen_errors": screen_errors_total,
+            "units_total": len(units),
+            "abstained": len(units) - prescreen_totals["units_screened"],
+            "experimental": True,
+            "note": (
+                "deterministic first-stage pre-screen (off by default). It "
+                "only SKIPS the confident ends — same_fact requires an "
+                "entailment verdict AND the claim-critical guard; likely_not "
+                "requires a CONTRADICTION verdict, never merely the absence "
+                "of entailment. Any abstain/error/unavailable result goes to "
+                "the LLM judge (fail-open): no unit is dropped. No dependency "
+                "was added — the NLI stage reuses the already-declared "
+                "embeddings extra and reports unavailable when absent."
+            ),
+            "stage": screen_stage_audit,
+        }} if screen is not None else {}),
+        **aggregate,
+    }
+
+
+def _validate_semantic_units(units: object, issues: list[str]) -> None:
+    """Per-unit consistency for the additive ``semantic_judge`` block (#5085).
+
+    The band is DERIVED from the probability (``aggregate_banded`` writes it
+    back), so a receipt whose stored band disagrees with the banding function
+    is self-inconsistent — exactly the band-mapping drift the two-number
+    split must not publish.
+    """
+    if not isinstance(units, list):
+        return
+    labelled = "receipt.semantic_judge.units"
+    for index, unit in enumerate(units):
+        where = f"{labelled}[{index}]"
+        if not isinstance(unit, dict):
+            issues.append(f"{where}: expected an object, got {unit!r}")
+            continue
+        probability = unit.get("probability")
+        if (
+            isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not (0.0 <= float(probability) <= 1.0)
+        ):
+            issues.append(
+                f"{where}.probability: expected a fraction in [0, 1], "
+                f"got {probability!r}"
+            )
+            continue
+        expected_band = judge.band_for_probability(float(probability))
+        if unit.get("band") != expected_band:
+            issues.append(
+                f"{where}.band: {unit.get('band')!r} disagrees with "
+                f"band_for_probability({probability}) = {expected_band!r}"
+            )
+        votes_yes, votes_total = unit.get("votes_yes"), unit.get("votes_total")
+        if (
+            isinstance(votes_yes, int)
+            and not isinstance(votes_yes, bool)
+            and isinstance(votes_total, int)
+            and not isinstance(votes_total, bool)
+            and (votes_yes < 0 or votes_total < 0 or votes_yes > votes_total)
+        ):
+            issues.append(
+                f"{where}.votes: {votes_yes}/{votes_total} is not a valid "
+                "vote tally"
+            )
+
+
 def run_benchmark(
     *,
     root: Path = corpus.WRITE_PATH_DIR,
@@ -527,12 +861,28 @@ def run_benchmark(
     run_id: str | None = None,
     notes: list[str] | None = None,
     log: list[str] | None = None,
+    judge_mode: str = "mechanical",
+    judge_samples: int = judge.DEFAULT_JUDGE_SAMPLES,
+    judge_model: str | None = None,
+    paraphrase_model: str | None = None,
+    judge_temperature: float = judge.DEFAULT_JUDGE_TEMPERATURE,
+    judge_factory=None,
+    prescreen: str = prescreen_mod.PRESCREEN_OFF,
+    prescreen_model: str | None = None,
 ) -> dict:
     """Full benchmark run: preflight → replay → grade → aggregate.
 
     ``sdk`` may be an existing open SDK (tests own their hermetic graph) or
     None (the CLI opens one from the ambient env posture — namespace-scoped
     server graph under TORTOISE_DB_URI, transient embedded file otherwise).
+
+    ``judge_mode`` (issue #5085): ``"mechanical"`` (default) is the gated
+    BPRE lane — byte-identical to the pre-#5085 runner.  ``"semantic"``
+    ADDITIONALLY runs the blind banded judge and records its additive
+    ``semantic_judge`` block (per-unit bands + band-weighted score + band
+    distribution) in the report/receipt; it never touches ``metrics`` or the
+    ``judge_pin``, and it is REFUSED on the deterministic ``m2`` posture so
+    the CI lane can never silently acquire a non-reproducible number.
 
     Returns ``{"run_id", "date", "run_status", "verdict", "failure_origin",
      "commit", "corpus_hash", "judge_pin", "resolved_config", "cost_usd",
@@ -592,13 +942,52 @@ def run_benchmark(
                         if "corpus drift" in i
                         or i.startswith("manifest verification failed")]
         origin = "hash_mismatch" if drift_issues else "runner_error"
-        return _failed_report(
+        return summary_failed_report(
             run_id, date, commit, pf["fixtures_hash"], resolved_config,
-            origin=origin,
-            detail="; ".join(pf["issues"][:8]), log=log,
+            pf["issues"], origin=origin, label="preflight issues", log=log,
         )
     baseline = pf["baseline"]
     fixtures_hash = pf["fixtures_hash"]
+    if judge_mode not in ("mechanical", "semantic"):
+        raise ValueError(
+            f"unknown judge_mode {judge_mode!r} — one of ('mechanical', 'semantic')"
+        )
+    if prescreen not in prescreen_mod.PRESCREEN_NAMES:
+        raise ValueError(
+            f"unknown prescreen {prescreen!r} — one of {prescreen_mod.PRESCREEN_NAMES}"
+        )
+    if prescreen != prescreen_mod.PRESCREEN_OFF and judge_mode != "semantic":
+        # The pre-screen exists to skip work for the JUDGED arm; with the
+        # mechanical arm there is nothing to skip, and silently accepting the
+        # flag would suggest a number had changed when none could have.
+        raise ValueError(
+            f"--prescreen {prescreen!r} requires --judge semantic (the pre-screen "
+            "feeds the banded judge, which the mechanical arm never runs)"
+        )
+    if judge_mode == "semantic" and judge_samples < 3:
+        # The probability IS an agreement fraction; the owner floor is >=3
+        # independent judgements per unit per order.  Below 3 the grid cannot
+        # reach every band (and 1 sample collapses it to 0/1), so refuse rather
+        # than publish a degenerate number.
+        raise ValueError(
+            "judge_samples must be >= 3 for the semantic arm (the owner floor "
+            f"for an earned agreement fraction), got {judge_samples!r}"
+        )
+    if judge_mode == "semantic" and posture != "llm":
+        # Determinism: the CI lane replays byte-reproducibly on the m2 echo
+        # posture; an LLM-judged arm there would be neither meaningful (the
+        # echo memory carries the verbatim transcript) nor reproducible.
+        # Fail closed rather than silently admit a non-deterministic number.
+        return _failed_report(
+            run_id, date, commit, fixtures_hash, resolved_config,
+            origin="runner_error",
+            detail=(
+                "--judge semantic requires the llm extractor posture; the "
+                f"m2 deterministic lane is refused (posture={posture!r}) — "
+                "the judged lane must never enter the CI gate"
+            ),
+            log=log,
+        )
     selected = session_ids or corpus.session_ids(root)
     missing = [s for s in selected if s not in corpus.session_ids(root)]
     if missing:
@@ -614,6 +1003,7 @@ def run_benchmark(
         sdk = _open_hermetic_sdk(run_id)
     session_results: list[dict] = []
     runner_errors: list[str] = []
+    semantic_block: dict | None = None
     total_cost: float = 0.0
     cost_tracked: bool = True  # flipped False if any capture lacks a cost figure
     quote_spans_total: int = 0
@@ -639,8 +1029,7 @@ def run_benchmark(
                 )
                 if capture.get("ok") is not True:
                     runner_errors.append(
-                        f"{session_id}: capture ok=False "
-                        f"(errors={capture.get('errors')})"
+                        capture_failure_detail(session_id, capture)
                     )
                 # REVIEW-FIX (cost honesty): accumulate the extractor's
                 # reported cost when the capture telemetry carries it; a
@@ -704,8 +1093,9 @@ def run_benchmark(
         # surface is re-snapshotted once here (post-dream state).  Additive
         # AUDIT dimension carried on every run (both lanes) — NOT a
         # METRIC_VALUES member in this change (scoping note 2026-09-07-2514-).
-        # On the m2 echo lane it is structural 0 (no relation extraction) —
-        # expected and noted, never a quality bar.
+        # On the m2 echo lane the planted edges are graded by a cue-word
+        # relation stage, so the score is structurally low and not comparable
+        # with the llm lane's — expected and noted, never a quality bar.
         operator_audit = None
         if not runner_errors:
             golds = {sid: corpus.load_gold(sid, root) for sid in selected}
@@ -747,26 +1137,45 @@ def run_benchmark(
                         if d.get("owner_session") == sid
                     ]
                     result["planted_operators"] = owned
-                if operator_audit["planted"]:
-                    notes.append(
-                        f"operator-edge audit (#2514): "
-                        f"{operator_audit['edge_correct']}/"
-                        f"{operator_audit['planted']} planted operator edges graded "
-                        "edge_correct (audit dimension only — not yet a gated "
-                        "metric); the m2 echo lane has no relation extraction, "
-                        "so 0 is structural there, never a bar. #2552: endpoint "
-                        "anchors + mitigation reasons grade verbatim-first with "
-                        "the #2405-style paraphrase band — a correctly wired "
-                        "edge whose endpoint claim was distilled still grades "
-                        "edge_correct"
-                    )
+                # ``operator_audit_notes`` handles the None case itself, so this
+                # needs no guard of its own.
+                notes.extend(operator_audit_notes(operator_audit, posture))
+
+        # #5085 additive blind banded judge: runs INSIDE the try (it needs the
+        # open SDK and the post-dream memory layer) and only when the
+        # mechanical replay is sound — a broken capture must fail the run, not
+        # publish a judged number over a memory layer that was never written.
+        if judge_mode == "semantic" and not runner_errors:
+            try:
+                semantic_block = _run_semantic_judge(
+                    sdk, selected, root,
+                    samples=judge_samples,
+                    judge_model=judge_model,
+                    paraphrase_model=paraphrase_model,
+                    temperature=judge_temperature,
+                    judge_factory=judge_factory,
+                    notes=notes,
+                    prescreen=prescreen,
+                    prescreen_model=prescreen_model,
+                )
+            except judge.JudgeBlindnessError as exc:
+                # LOAD-BEARING (plan §J4): a blindness violation is a harness
+                # failure — fail the run, never publish a lexically-matched
+                # number produced while the judge could see the anchor.
+                runner_errors.append(f"semantic judge blindness violation: {exc}")
+            except Exception as exc:
+                semantic_block = {
+                    "status": "failed",
+                    "pin": (
+                        judge.SEMANTIC_JUDGE_PIN
+                        if prescreen == prescreen_mod.PRESCREEN_OFF
+                        else judge.SEMANTIC_JUDGE_PIN_PRESCREEN
+                    ),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
                 notes.append(
-                    "operator persistence (#2552): "
-                    f"{operator_audit['operators_provenanced']}/"
-                    f"{operator_audit['operators_total']} reified operator "
-                    "Points entered the retrievable memory layer "
-                    "(eventId-stamped) — a lower numerator is the structural "
-                    "drop the layer-2 WIRE fix closed"
+                    "semantic judge FAILED (additive arm only — the "
+                    f"mechanical metrics are unaffected): {type(exc).__name__}: {exc}"
                 )
     finally:
         if owned_sdk:
@@ -793,11 +1202,10 @@ def run_benchmark(
         runner_errors.append(f"sessions with no graded gold units: {no_gold}")
 
     if runner_errors:
-        report = _failed_report(
+        report = summary_failed_report(
             run_id, date, commit, fixtures_hash, resolved_config,
-            origin="runner_error",
-            detail="; ".join(runner_errors[:8]), log=log,
-            session_results=session_results,
+            runner_errors, origin="runner_error", label="runner_errors",
+            log=log, session_results=session_results,
         )
         report["metrics"] = _safe_metrics(session_results)
         report["judge_pin"] = judge_pin
@@ -866,10 +1274,80 @@ def run_benchmark(
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "operator_audit": operator_audit,
+        "semantic_judge": semantic_block,
         "session_results": session_results,
         "notes": notes,
         "log": log,
     }
+
+
+def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
+    """The operator-audit note(s) for a run report (#2514/#2552/#4807).
+
+    The m2-echo-lane caveat — "the m2 echo lane has no product relation
+    extraction, so its edge score is not comparable with the llm lane's and is
+    never a bar" — is **posture-scoped**. The m2 lane's relation stage is a
+    cue-word heuristic, not the product extractor, so its edge score is not
+    comparable with the llm lane's; on the llm lane the score IS a genuine
+    behavioural signal about emission fidelity, and printing the m2 lane's
+    excuse verbatim in that receipt frames a real result as a non-result in the
+    very artifact a reader consults.
+
+    #4807: the caveat is DERIVED, never a constant. Its numerator is
+    interpolated (``{audit['edge_correct']}/{audit['planted']}``), so the prose
+    must stay true for ANY value — a lane grading 2/15 must not sit beside a
+    hardcoded "0" (the pre-fix text read "2/15 ... so 0 is structural there",
+    a self-contradiction three words apart). The mechanism is likewise the
+    **product** extraction the lane lacks (``baselines/m2.json``'s own
+    justification wording), never "no relation extraction": the m2 lane's
+    cue-word stage DOES emit IMPL/NAND edges, and the edges it grades correct
+    are SUPPORTS edges.
+
+    The caveat is emitted ONLY when ``posture == "m2"``; any other value
+    (including a future lane) takes the llm-shaped note, whereas the
+    pre-refactor code emitted the caveat on every lane. The persistence
+    assertion (operators provenanced) rides BOTH lanes and is emitted whenever
+    an audit is passed. Pure (no graph, no env) so the posture gate is
+    unit-testable without a bench run.
+    """
+    notes: list[str] = []
+    if audit is None:
+        return notes
+    # ``audit["planted"]`` rather than ``.get`` deliberately preserves the
+    # pre-refactor fail-loud behaviour: an audit missing the key must not
+    # silently drop the edge note from a receipt whose job is honesty about
+    # the audit.
+    if audit["planted"]:
+        # The m2 clause names the mechanism the lane LACKS (product relation
+        # extraction — ``baselines/m2.json``'s wording) and refuses to compare
+        # its edge score with the llm lane's. It asserts no constant, so it
+        # stays true beside any interpolated numerator (#4807). The separator
+        # `); ` and the terminating `.` are load-bearing: the note must read as
+        # prose on both lanes. The committed m2 receipt keeps the OLD text; no
+        # test reads the receipts and no baseline carries `notes`, so this
+        # prose change reaches no hashed surface (#4807 verification).
+        tail = (
+            "; the m2 echo lane has no product relation extraction, so its "
+            "edge score is not comparable with the llm lane's and is never a "
+            "bar."
+            if posture == "m2" else "."
+        )
+        notes.append(
+            f"operator-edge audit (#2514): {audit['edge_correct']}/"
+            f"{audit['planted']} planted operator edges graded edge_correct "
+            f"(audit dimension only — not yet a gated metric){tail} "
+            "#2552: endpoint anchors + mitigation reasons grade verbatim-first "
+            "with the #2405-style paraphrase band — a correctly wired edge "
+            "whose endpoint claim was distilled still grades edge_correct"
+        )
+    notes.append(
+        "operator persistence (#2552): "
+        f"{audit['operators_provenanced']}/{audit['operators_total']} "
+        "reified operator Points entered the retrievable memory layer "
+        "(eventId-stamped) — a lower numerator is the structural drop the "
+        "layer-2 WIRE fix closed"
+    )
+    return notes
 
 
 def _safe_metrics(session_results: list[dict]) -> dict:
@@ -909,6 +1387,82 @@ def _failed_report(
         "notes": [],
         "log": log,
     }
+
+
+#: How many failure items the ``detail`` summary carries.  The remainder is
+#: carried in full by the run log, so no cause depends on fitting this bound.
+SUMMARY_BOUND = 8
+
+
+def failed_run_diagnostics(report: dict) -> list[str]:
+    """The diagnostic log lines a run must echo to stdout.
+
+    A ``completed`` run needs none: its artifact is the receipt.  A FAILED
+    run's ``log`` is the diagnosis, and stdio is the one channel that survives
+    independently of ``--out``.
+    """
+    if report.get("run_status") == "completed":
+        return []
+    return [str(line) for line in (report.get("log") or [])]
+
+
+def capture_failure_detail(session_id: str, capture: dict) -> str:
+    """The diagnostic line for ONE failed capture.
+
+    ``capture["errors"]`` is the customer-facing contract and is deliberately
+    generic: ``sdk._capture_resp_error_split`` maps an ``S1 chunk failed:
+    HTTPError: 403 …`` to *"Part of the extraction failed partway through.
+    Retry the capture — the retry will re-attempt it."*  The raw
+    ``S<t>: <TypeName>: <message>`` strings ride the ADDITIVE ``diagnostics``
+    list (``tortoise/sdk.py``, #2335 WI-2).  Carry BOTH, plus ``error``: the
+    ``capture_session`` result always carries ``diagnostics``, but the
+    lighter ``ok=False`` shapes on other seams put their message under
+    ``error`` alone, and a diagnostic that names nothing is the defect here.
+    """
+    return (
+        f"{session_id}: capture ok=False "
+        f"(errors={capture.get('errors')}; "
+        f"diagnostics={capture.get('diagnostics')}; "
+        f"error={capture.get('error')})"
+    )
+
+
+def summary_overflow_line(items: list, *, label: str) -> list[str]:
+    """The log line carrying what a ``detail`` summary dropped.
+
+    ``_failed_report`` is given a ``SUMMARY_BOUND``-bounded ``detail`` (a
+    concise summary for a human reading a receipt).  Items past the bound
+    would otherwise exist nowhere at all, so they ride the log — which is what
+    reaches stdout.  The bound is read from the one module constant rather
+    than taken as a parameter, so the summary and this tail cannot drift apart
+    and silently lose the items between them.
+    """
+    if len(items) <= SUMMARY_BOUND:
+        return []
+    return [
+        f"{label} (all {len(items)}): "
+        + "; ".join(str(i) for i in items[SUMMARY_BOUND:])
+    ]
+
+
+def summary_failed_report(
+    run_id: str, date: str, commit: str, fixtures_hash: str,
+    resolved_config: dict, items: list, *, origin: str, label: str,
+    log: list[str] | None = None, session_results: list[dict] | None = None,
+) -> dict:
+    """A ``_failed_report`` whose log carries ALL ``items``, not just the bound.
+
+    The single place a failure report is built from a list of causes, so the
+    summary/overflow pairing is exercised by the tests rather than re-derived
+    at each call site.
+    """
+    report = _failed_report(
+        run_id, date, commit, fixtures_hash, resolved_config,
+        origin=origin, detail="; ".join(str(i) for i in items[:SUMMARY_BOUND]),
+        log=log, session_results=session_results,
+    )
+    report["log"].extend(summary_overflow_line(items, label=label))
+    return report
 
 
 def _git_head_short() -> str:
@@ -1040,6 +1594,14 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             "operators_total": audit.get("operators_total"),
             "operators_provenanced": audit.get("operators_provenanced"),
         }
+    # #5085 additive banded semantic judge block.  Added ONLY when the arm ran
+    # (``--judge semantic``), so a mechanical-lane receipt is byte-identical to
+    # the pre-#5085 runner's — the gated ``metrics``/``judge_pin`` surface is
+    # untouched and the committed baselines stay comparable.
+    semantic = report.get("semantic_judge")
+    if semantic is not None:
+        receipt["semantic_judge"] = semantic
+        receipt["semantic_judge_pin"] = semantic.get("pin")
     return receipt
 
 
@@ -1090,6 +1652,73 @@ def validate_receipt(receipt: dict) -> list[str]:
         issues.append("receipt.cost_usd: expected a number")
     elif receipt.get("cost_usd") < 0:
         issues.append(f"receipt.cost_usd: expected ≥ 0, got {receipt.get('cost_usd')!r}")
+    # #5085 additive semantic block — validated only when present, so the
+    # mechanical-lane receipt's shape contract is unchanged.
+    semantic = receipt.get("semantic_judge")
+    if semantic is not None:
+        issues.extend(_validate_semantic_block(semantic, receipt))
+    return issues
+
+
+def _validate_semantic_block(semantic: object, receipt: dict) -> list[str]:
+    """Shape-validate the additive ``semantic_judge`` receipt block (#5085)."""
+    issues: list[str] = []
+    if not isinstance(semantic, dict):
+        return ["receipt.semantic_judge: expected an object"]
+    for key in ("pin", "status"):
+        value = semantic.get(key)
+        if not isinstance(value, str) or not value.strip():
+            issues.append(
+                f"receipt.semantic_judge.{key}: expected a non-empty string, got {value!r}"
+            )
+    top_pin = receipt.get("semantic_judge_pin")
+    if top_pin is not None and top_pin != semantic.get("pin"):
+        issues.append(
+            "receipt.semantic_judge_pin: does not match "
+            f"semantic_judge.pin ({top_pin!r} vs {semantic.get('pin')!r})"
+        )
+    if semantic.get("status") == "failed":
+        if not isinstance(semantic.get("error"), str) or not semantic["error"].strip():
+            issues.append("receipt.semantic_judge.error: a failed arm must name its error")
+        return issues
+    distribution = semantic.get("band_distribution")
+    if not isinstance(distribution, dict) or set(distribution) != set(judge.BAND_ORDER):
+        issues.append(
+            "receipt.semantic_judge.band_distribution: expected exactly the "
+            f"bands {list(judge.BAND_ORDER)}, got {distribution!r}"
+        )
+    elif any(
+        isinstance(count, bool) or not isinstance(count, int) or count < 0
+        for count in distribution.values()
+    ):
+        issues.append(
+            "receipt.semantic_judge.band_distribution: counts must be "
+            f"non-negative integers, got {distribution!r}"
+        )
+    else:
+        units_total = semantic.get("units_total")
+        if (
+            isinstance(units_total, int)
+            and not isinstance(units_total, bool)
+            and sum(distribution.values()) != units_total
+        ):
+            issues.append(
+                "receipt.semantic_judge.band_distribution: counts sum to "
+                f"{sum(distribution.values())}, which disagrees with "
+                f"units_total={units_total}"
+            )
+    _validate_semantic_units(semantic.get("units"), issues)
+    for key in ("band_weighted_score", "probability_mean",
+                "semantic_survival_rate", "same_fact_rate"):
+        value = semantic.get(key)
+        if value is None:
+            continue  # an empty corpus has no fraction — null, never a fake 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not (0.0 <= float(value) <= 1.0):
+            issues.append(
+                f"receipt.semantic_judge.{key}: expected a fraction in [0, 1] "
+                f"or null, got {value!r}"
+            )
     return issues
 
 
@@ -1113,6 +1742,41 @@ def _main(argv: list[str] | None = None) -> int:
                        help="write the run receipt JSON to this path")
     p_run.add_argument("--json", action="store_true",
                        help="emit the run report JSON on stdout")
+    # #5085 additive banded semantic judge (opt-in; off in the CI lane).
+    p_run.add_argument("--judge", choices=("mechanical", "semantic"),
+                       default="mechanical",
+                       help="mechanical (default, gated BPRE lane) or semantic "
+                            "(additionally run the blind banded judge and "
+                            "record its additive semantic_judge block)")
+    p_run.add_argument("--judge-samples", type=int,
+                       default=judge.DEFAULT_JUDGE_SAMPLES,
+                       help="independent judgements per unit per order "
+                            f"(default {judge.DEFAULT_JUDGE_SAMPLES}; the "
+                            "agreement fraction is the probability)")
+    p_run.add_argument("--judge-model", default=None,
+                       help="MODELS registry key for the blind judge "
+                            f"(default {judge.DEFAULT_JUDGE_MODEL}; keep it "
+                            "different from the extractor to blunt "
+                            "self-preference bias)")
+    p_run.add_argument("--paraphrase-model", default=None,
+                       help="MODELS registry key for the paraphrase stage "
+                            "(default: the judge model)")
+    p_run.add_argument("--judge-temperature", type=float,
+                       default=judge.DEFAULT_JUDGE_TEMPERATURE,
+                       help="sampling temperature for the judge's repeated "
+                            "judgements (0.0 makes every sample identical)")
+    # #5106 deterministic first-stage pre-screen (opt-in; OFF by default so
+    # the semantic_judge numbers stay comparable to #5085).
+    p_run.add_argument("--prescreen",
+                       choices=prescreen_mod.PRESCREEN_NAMES,
+                       default=prescreen_mod.PRESCREEN_OFF,
+                       help="deterministic first stage for the banded judge "
+                            "(#5106): off (default) | lexical (zero "
+                            "dependencies) | nli (reuses the already-declared "
+                            "embeddings extra; fails OPEN when absent)")
+    p_run.add_argument("--prescreen-model", default=None,
+                       help="NLI checkpoint for --prescreen nli (default "
+                            f"{prescreen_mod.DEFAULT_NLI_MODEL})")
 
     p_bless = sub.add_parser("bless", help="bless a baseline from a run receipt")
     p_bless.add_argument("--receipt", type=Path, required=True)
@@ -1135,22 +1799,92 @@ def _main(argv: list[str] | None = None) -> int:
     p_val = sub.add_parser("validate-receipt", help="validate a receipt document")
     p_val.add_argument("receipt", type=Path)
 
+    # #5085 calibration: build the ready-to-label band sample from a semantic
+    # run receipt, and/or report κ/α once the labels are filled in.
+    p_cal = sub.add_parser(
+        "calibrate",
+        help="build/verify the banded-judge calibration sample (κ/α pending "
+             "until a human labels it)",
+    )
+    p_cal.add_argument("--receipt", type=Path, default=None,
+                       help="a run receipt carrying a semantic_judge block")
+    p_cal.add_argument("--sample", type=Path, default=None,
+                       help="an existing calibration sample to report on")
+    p_cal.add_argument("--out", type=Path, default=None,
+                       help="write the built sample JSON here")
+    p_cal.add_argument("--n", type=int, default=30,
+                       help="sample size (owner floor: n >= 30)")
+
+    # #5106 measurement: recompute the pre-screen over a committed judged
+    # receipt.  The reference verdict is the LLM judge's own earned band, so
+    # the report carries the screen's accuracy loss, not just its coverage.
+    p_audit = sub.add_parser(
+        "prescreen-audit",
+        help="recompute the #5106 pre-screen over a judged receipt: units "
+             "screened, judge calls removed, agreement with the judge",
+    )
+    p_audit.add_argument("--receipt", type=Path, required=True,
+                         help="a run receipt carrying a semantic_judge block")
+    p_audit.add_argument("--prescreen",
+                         choices=(prescreen_mod.PRESCREEN_LEXICAL,
+                                  prescreen_mod.PRESCREEN_NLI),
+                         default=prescreen_mod.PRESCREEN_LEXICAL)
+    p_audit.add_argument("--prescreen-model", default=None)
+    p_audit.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
 
     if args.command == "run":
+        if args.prescreen != prescreen_mod.PRESCREEN_OFF and args.judge != "semantic":
+            parser.error(
+                f"--prescreen {args.prescreen} requires --judge semantic — the "
+                "pre-screen feeds the banded judged arm; the mechanical arm "
+                "has no judged calls to skip"
+            )
+        if args.judge == "semantic" and args.judge_samples < 3:
+            parser.error(
+                "--judge-samples must be >= 3 for --judge semantic "
+                f"(got {args.judge_samples}) — the unit probability is an "
+                "agreement fraction over independent judgements, and fewer "
+                "than 3 votes cannot reach every band"
+            )
         report = run_benchmark(
             root=args.root,
             session_ids=args.session,
             ep_pass=not args.no_ep_pass,
+            judge_mode=args.judge,
+            judge_samples=args.judge_samples,
+            judge_model=args.judge_model,
+            paraphrase_model=args.paraphrase_model,
+            judge_temperature=args.judge_temperature,
+            prescreen=args.prescreen,
+            prescreen_model=args.prescreen_model,
         )
         print(f"run_status={report['run_status']} verdict={report['verdict']} "
               f"failure_origin={report['failure_origin']} run_id={report['run_id']}")
         if report.get("metrics"):
             for key, value in report["metrics"].items():
                 print(f"  {key}: {value}")
+        semantic = report.get("semantic_judge")
+        if semantic and semantic.get("status") == "completed":
+            print("  semantic_judge (additive, NOT a gated metric):")
+            print(f"    band_weighted_score: {semantic['band_weighted_score']}")
+            print(f"    probability_mean:    {semantic['probability_mean']}")
+            print(f"    survival>=0.50:      {semantic['semantic_survival_rate']}")
+            print(f"    band_distribution:   {semantic['band_distribution']}")
+            print(f"    pin:                 {semantic['pin']}")
+        elif semantic:
+            print(f"  semantic_judge: {semantic.get('status')} "
+                  f"({semantic.get('error')})")
         if report.get("notes"):
             for note in report["notes"]:
                 print(f"  note: {note}")
+        # #4860: a failed run states WHY on stdout, not only inside the
+        # receipt.  `--json` already dumps the whole report, but that is an
+        # opt-in flag, so the default invocation printed the status line and
+        # nothing else while the cause lived only in the `--out` file.
+        for line in failed_run_diagnostics(report):
+            print(f"  log: {line}")
         receipt = build_receipt(report)
         issues = validate_receipt(receipt)
         print(f"receipt valid: {not issues}" + (f" ({'; '.join(issues)})" if issues else ""))
@@ -1270,6 +2004,98 @@ def _main(argv: list[str] | None = None) -> int:
             print("invalid:" + "\n  ".join(["", *issues]))  # #2174-lint RUF005
             return EXIT_RUNNER_ERROR
         print("valid")
+        return EXIT_OK
+
+    if args.command == "calibrate":
+        from tests.eval.write_path import calibration  # lazy: CLI-only
+
+        if args.receipt is None and args.sample is None:
+            parser.error("calibrate needs --receipt and/or --sample")
+        if args.receipt is not None:
+            receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
+            semantic = receipt.get("semantic_judge")
+            if not isinstance(semantic, dict) or semantic.get("status") != "completed":
+                print(
+                    "receipt carries no completed semantic_judge block — "
+                    "run with --judge semantic first",
+                    file=sys.stderr,
+                )
+                return EXIT_RUNNER_ERROR
+            sample = calibration.build_calibration_sample(
+                semantic, n=args.n, run_id=receipt.get("run_id")
+            )
+            if args.out is not None:
+                calibration.write_sample(sample, args.out)
+                print(f"calibration sample written: {args.out}")
+            print(f"bands_present={sample['bands_present']} "
+                  f"bands_missing={sample['bands_missing']} "
+                  f"n_units={sample['n_units']} band_span={sample['band_span']}")
+            report = calibration.calibration_report(sample)
+        else:
+            sample = calibration.load_sample(args.sample)
+            report = calibration.calibration_report(sample)
+        print("calibration report:")
+        print(json.dumps(report, indent=2))
+        print("labels_pending" if report["labels_pending"]
+              else "labels complete — κ/α reported above")
+        return EXIT_OK
+
+    if args.command == "prescreen-audit":
+        receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
+        semantic = receipt.get("semantic_judge")
+        if not isinstance(semantic, dict) or semantic.get("status") != "completed":
+            print(
+                "receipt carries no completed semantic_judge block — run with "
+                "--judge semantic first",
+                file=sys.stderr,
+            )
+            return EXIT_RUNNER_ERROR
+        screen = prescreen_mod.build_prescreen(
+            args.prescreen,
+            **({"model": args.prescreen_model} if args.prescreen_model else {}),
+        )
+        report = prescreen_mod.audit_receipt(semantic, screen)
+        print(f"prescreen={report['screen']} "
+              f"units_screened={report['units_screened']}/{report['units_total']} "
+              f"(same_fact={report['screened_same_fact']} "
+              f"likely_not={report['screened_likely_not']})")
+        print(f"judge_calls: {report['judge_calls_total_without_screen']} → "
+              f"{report['judge_calls_total_without_screen'] - report['judge_calls_saved']} "
+              f"(saved {report['judge_calls_saved']}; "
+              f"sessions_fully_screened={report['sessions_fully_screened']}/{report['sessions_total']}, "
+              f"{report['judge_calls_per_session']} calls/session)")
+        stage_audit = report["screen_audit"]
+        screen_errors = int(stage_audit.get("errors") or 0)
+        print(f"probe_chars_removed={report['probe_chars_removed']} "
+              f"agreement={report['agreement']} "
+              f"({report['agreement_n']}/{report['agreement_denominator']} judged) "
+              f"screen_errors={screen_errors}")
+        if report["reference_note"]:
+            print(f"⚠ {report['reference_note']}", file=sys.stderr)
+        if report["agreement"] is not None and report["agreement"] < 1.0:
+            print(f"disagreements (max 20): {report['disagreements']}")
+        # Fail CLOSED on the measurement.  A stage that cannot load abstains
+        # EVERY unit; a stage that loads but raises inside ``screen()`` (e.g. a
+        # ``--prescreen-model`` that is not a 3-class NLI head) is swallowed by
+        # the stage's own fail-open handler.  In BOTH cases the report reads
+        # ``units_screened=0, agreement=None`` — indistinguishable, by exit
+        # code, from a genuine "this stage screens nothing" measurement, which
+        # is exactly the number this tool exists to get right.  A PARTIAL fault
+        # does not refuse (the report is still informative); it is surfaced by
+        # the ``screen_errors`` count on every line.
+        vacuous = not stage_audit.get("available", True) or (
+            screen_errors > 0 and report["units_screened"] == 0
+        )
+        if vacuous:
+            reason = stage_audit.get("load_error") or (
+                f"the stage produced no verdict and failed on all "
+                f"{screen_errors} units it was asked about"
+            )
+            print("⚠ the stage produced NO verdicts, so this report is NOT a "
+                  f"measurement — {reason}", file=sys.stderr)
+            return EXIT_RUNNER_ERROR
+        if args.json:
+            print(json.dumps(report, indent=2))
         return EXIT_OK
 
     parser.error(f"unknown command {args.command!r}")

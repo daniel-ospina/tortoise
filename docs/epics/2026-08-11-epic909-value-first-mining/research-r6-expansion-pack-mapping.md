@@ -198,7 +198,7 @@ kindDefs:
     description: "A concrete scenario in which a user achieves a goal using the product"
     synonyms: ["use case"]                 # normalized aliases (lowercase, strip punctuation) — deterministic near-miss catch
     examples: ["As a PM I can see the roadmap so I can plan releases"]
-    nearMisses: [userJourney, jobToBeDone] # confusable kinds — prompt guidance + WARN/retry trigger
+    nearMisses: [userJourney, jobToBeDone] # confusable kinds — kind-classifier rerank input (not the S2/S4 extraction prompt)
     extractable: true                      # default true; false = registered but never minted by extraction
     storeAs: claim                         # claim|decision|entity|tag|event — default inferred from list placement
     enforcement: retry                     # warn|retry|block — overrides pack default (§3.5)

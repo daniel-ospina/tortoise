@@ -6,11 +6,17 @@
 # ci.yml's welcome-e2e job (secret-free); this job's UNIQUE value is the
 # live-prod browser run.
 #
-# The smoke targets the #801 server-first signup path: the form POSTs to
-# /v1/signup/email (hosted API → GoTrue Admin, email_confirm=true) — NO
-# confirmation email is sent, so the smoke does NOT consume the SMTP email
-# bucket (the pre-#801 "1 email-send per run" rationale is stale; the no-429
-# signal is the signup endpoint's own rate buckets).
+# The smoke targets the #801 server-first signup path AS IT IS SERVED AFTER
+# #4054: the form POSTs SAME-ORIGIN to the app origin's `/auth/signup`, which
+# proxies `POST {API_ORIGIN}/v1/signup/email` (hosted API → GoTrue Admin,
+# email_confirm=true) — NO confirmation email is sent, so the smoke does NOT
+# consume the SMTP email bucket (the pre-#801 "1 email-send per run" rationale
+# is stale; the no-429 signal is the signup endpoint's own rate buckets).
+#
+# The assertion moved to the BFF boundary when the BFF moved to the app origin:
+# the browser no longer calls Supabase for signup, and a Worker's outbound fetch
+# is invisible to `page.on("response")`, so watching for `v1/signup/email`
+# watched a URL the page never requests. See tests/e2e/test_welcome_page.py.
 name: welcome-e2e-monitor
 
 on:

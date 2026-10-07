@@ -1,10 +1,12 @@
-"""#1726 Slice 1 — hosted docs index job + Document-aware quota tests (Task 9).
+"""#1726 Slice 1 / D10 — hosted docs index job + Document-aware quota tests
+(Task 9).
 
 Hosted-API level (TestClient + real SDK on a temp store): POST /v1/index/docs
 mirrors /v1/index/github (kind-scoped per-team single-flight, cross-team poll
 404), the derived-constant documents gate (402 at cap where the points gate
-would NOT fire; transcript excluded; NULL-kind docs COUNT), unset-base
-fail-closed, and the ``github_docs_indexed`` state-key registration.
+would NOT fire; transcript excluded; NULL-kind Sources NOT counted — D10).
+Under D10 a document is a :Source, so the boundary is
+``documentKind IS NOT NULL AND <> 'transcript'``.
 """
 from __future__ import annotations
 
@@ -109,6 +111,7 @@ def client(tmp_path):
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         _INDEX_JOBS.clear()
         with TestClient(app) as tc:
@@ -159,16 +162,22 @@ def _team_sdk(client) -> TortoiseSDK:
 
 
 def _seed_documents(client, n: int, *, kind: str | None = "brief") -> None:
-    """Seed n Document nodes in the team graph (NULL kind when None)."""
+    """Seed n document Sources in the team graph (NULL kind when None).
+
+    D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed ``url``; the
+    ``:Document`` label is retired. ``kind=None`` seeds a Source with NO
+    ``documentKind`` — under D10 that is a session/connector/provenance node,
+    not a document, and must not be metered by the documents cap.
+    """
     sdk = _team_sdk(client)
     for i in range(n):
         if kind is None:
             sdk._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$title})",
+                "CREATE (s:Source {url:$id, id:$id, title:$title})",
                 params={"id": f"doc_seed_{i}", "title": f"seed {i}"})
         else:
             sdk._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$title, documentKind:$dk})",
+                "CREATE (s:Source {url:$id, id:$id, title:$title, documentKind:$dk})",
                 params={"id": f"doc_seed_{i}", "title": f"seed {i}",
                         "dk": kind})
     sdk.close()
@@ -562,11 +571,20 @@ def test_transcript_not_counted_docs_cap(client, tmp_path, monkeypatch,
     assert _docs_count(client) == 10  # 9 brief + 1 transcript + 1 new
 
 
-def test_null_kind_doc_counts(client, tmp_path, monkeypatch, ingest_base):
-    """NULL-kind Documents COUNT toward the cap — no leak (a frontmatter-
-    less docs-endpoint doc is a NULL-kind doc and counts)."""
+def test_null_kind_source_not_counted(client, tmp_path, monkeypatch,
+                                      ingest_base):
+    """D10 (ONTOLOGY v3.15 §4.4): only a Source with a non-NULL documentKind
+    is a document — a NULL-kind Source is a session/connector/provenance node
+    and does NOT consume the docs cap (the discriminator is ``documentKind IS
+    NOT NULL AND documentKind <> 'transcript'``, never the COALESCE-to-empty
+    form, which would meter ~2,193 never-metered Sources). The docs endpoint's
+    own docs always carry a documentKind ('brief' fallback) and DO count, so
+    the no-leak property survives."""
     _provision(client.db_path, org_id=client.org_id, max_points=1)
     _seed_documents(client, 10, kind=None)
+    # NULL-kind Sources are not documents → the cap counts nothing here.
+    assert _docs_count(client) == 0, \
+        "NULL-kind Sources must not be metered (D10: documentKind IS NOT NULL)"
     entries, blobs = _mk_files("docs/README.md")
     transport = MockGitHubDocsTransport(
         repos=["acme/repo1"],
@@ -579,9 +597,15 @@ def test_null_kind_doc_counts(client, tmp_path, monkeypatch, ingest_base):
 
     monkeypatch.setattr(GitHubDocsIndexer, "_get_client", _fake_get_client)
     r = client.tc.post("/v1/index/docs", json={"org": "acme"})
-    body = _poll_until(client.tc, r.json()["job_id"], "failed")
-    assert "documents limit reached" in body["error"], \
-        "NULL-kind docs COUNT — the discriminator is COALESCE(documentKind,'') != 'transcript'"
+    # The 10 NULL-kind Sources do not trip the gate — the job runs.
+    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    assert body.get("quota_hit") is False
+    assert body["documents_indexed"] == 1
+    # The ingested doc Source carries documentKind ('brief' fallback) → it IS
+    # a document and IS metered (a frontmatter-less docs-endpoint doc cannot
+    # escape the cap).
+    assert _docs_count(client) == 1, \
+        "an ingested doc Source carries documentKind and IS metered"
 
 
 # ── fail-closed sandbox ──────────────────────────────────────────
@@ -630,6 +654,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
         "org_id": "some-other-team", "tier": "free", "key_id": "k2",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
     assert rb.status_code == 404
@@ -638,6 +663,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
         "org_id": provisioned.org_id, "tier": "free", "key_id": "k1",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["status"] == "completed"

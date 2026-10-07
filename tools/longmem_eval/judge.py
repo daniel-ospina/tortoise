@@ -37,7 +37,17 @@ recorded at ~2% expected rate (1/50 in reval3). Tests pin
 ``NEAR_MISS_GRADING = "strict"`` and that the 3b6f954b shape grades False
 (tests/test_longmem_runner.py — issue #1949 section).
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/judge.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
+    )
 
 import enum
 import json
@@ -47,11 +57,12 @@ import urllib.request
 from typing import Protocol
 
 from tortoise.ingest import _PROVIDERS
+
 # #2185 seam: the canonical usage-sink fire helper (same contract as the
 # reader/product adapters — judge.py is tools-side; tortoise never imports it).
 from tortoise.models import _emit_usage_sink
 
-from .reader import _resolve_provider, _parse_model_spec
+from .reader import _parse_model_spec, _resolve_provider
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +85,7 @@ NEAR_MISS_GRADING = "strict"
 # Issue #2071 decision record — spot-check full-semantic grading
 # (owner decision 2026-08-31, docs/planning/2026-08-31-2071-scoping-package.md).
 #
-# The product-lane QA spot-check (tools/ask_spotcheck.py) previously graded
+# The eval-lane ask QA spot-check (tools/ask_spotcheck.py) previously graded
 # with a weaker lexical bar — word-overlap ``max(2, len(gold_words)//2)`` on
 # UNIQUE words — that is STRUCTURALLY UNREACHABLE for rubric-style long-gold
 # SSP questions (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w: a correct

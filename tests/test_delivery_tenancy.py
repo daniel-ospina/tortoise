@@ -454,7 +454,8 @@ def _run_mcp_graph_capture(tmp_path, db):
     from tortoise.mcp_server import tortoise_session_capture
     toks = [
         _current_org_id.set(tid),
-        _current_org_limits.set({"tier": "pro", "max_points": 100000}),
+        _current_org_limits.set({"tier": "pro", "max_points": 100000,
+                                 "max_sessions": None}),
         _current_graph_id.set(g["graph_id"]),
         _current_graph_namespace.set(g["namespace"]),
         _current_scopes.set(["graphs:read", "graphs:write"]),
@@ -547,7 +548,8 @@ def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
         toks.append((var, var.set(val)))
 
     _push(_current_org_id, tid)
-    _push(_current_org_limits, {"tier": "pro", "max_points": max_points})
+    _push(_current_org_limits, {"tier": "pro", "max_points": max_points,
+                               "max_sessions": None})
     if graph is not None:
         _push(_current_graph_id, graph["graph_id"])
         _push(_current_graph_namespace, graph["namespace"])

@@ -12,7 +12,9 @@ DE2E suite legs owned by this slice:
 - DE2E-7  L1 replay (duplicate:true, zero writes, zero write-ops billed),
           L2 supersede re-capture (supersede_point), Sessions A/B/C budget
           (soft-15 WARN, >25 held, >50 402, ceiling-only re-submission),
-          sessions quota (41st commit → 402), Layer-1 400/422 (incl.
+          sessions count = :Session nodes with the **41st commit LANDING**
+          (the old "41st → 402" leg was the flat 1000 cap, reopened and
+          superseded by #4010), Layer-1 400/422 (incl.
           commit_id_mismatch + calibration_mismatch + 51-point cap), 401,
           500 fail-closed
 - DE2E-10 byte-level privacy (no raw conversation in payload/telemetry/graph;
@@ -26,6 +28,7 @@ DE2E suite legs owned by this slice:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 
@@ -43,6 +46,7 @@ from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
 )
+from tortoise.file_indexer import hash_text
 from tortoise.hosted_api import app, get_current_org
 from tortoise.ids import content_hash
 from tortoise.sdk import TortoiseSDK
@@ -63,7 +67,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -94,19 +98,6 @@ def client_no_auth():
     """TestClient WITHOUT auth override — exercises the real 401 path."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
-            yield tc
-
-
-@pytest.fixture
-def client_quota40():
-    """Client whose team has max_sessions=40 (DE2E-7 quota fixture — direct
-    write convention: no tier gives 40)."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "test.db")
-        team40 = dict(TEST_TEAM)
-        team40["max_sessions"] = 40
-        app.dependency_overrides[get_current_org] = lambda: dict(team40)
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
             yield tc
 
@@ -147,6 +138,38 @@ def _session_counter(session_id: str, field: str):
         params={"sid": session_id},
     ).result_set
     return int(rows[0][0]) if rows else 0
+
+
+def _session_source_rows():
+    """Every agentSession Source in the tenant graph as (url, contentHash).
+
+    Queried by ``sourceKind`` rather than by a hard-coded url so a test can
+    observe the identity the write path actually minted (#4005) — the
+    pre-fix basename url and the post-fix canonical ``session:<id>`` are both
+    visible here.
+    """
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source {sourceKind:'agentSession'}) "
+        "RETURN s.url, s.contentHash",
+    ).result_set
+    return [(r[0], r[1]) for r in rows]
+
+
+def _session_source_meta(url: str):
+    """(contentHash, version, sourcePath) of one Source, or None."""
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source {url:$url}) "
+        "RETURN s.contentHash, s.version, s.sourcePath",
+        params={"url": url},
+    ).result_set
+    return rows[0] if rows else None
+
+
+def _all_source_urls():
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source) RETURN s.url",
+    ).result_set
+    return sorted(r[0] for r in rows)
 
 
 # ── Payload factory (mirrors the slice-5a client serializer, W-3) ───────────
@@ -196,7 +219,8 @@ def _raw_payload(n_points: int = 1, *, session_id: str = "s1",
                       "calibration_version": "v3"},
         "summary": "summary text",
         "story_arc": "arc text",
-        "provenance_refs": [{"path": "session.md", "spans": ["0-10"]}],
+        "provenance_refs": [{"path": "session.md", "spans": ["0-10"],
+                             "contentHash": hash_text("raw session transcript")}],
         "sources": [],
         "entities": [{"name": "Alpha", "kind": "Project",
                       "passes_frequency_gate": True}],
@@ -355,13 +379,15 @@ class TestFourNodeChain:
         assert rows[0][1] == "2026-08-11T10:00:00Z"
         assert rows[0][2] is True
 
-        # Document transcript (summary/story_arc/sessionId/sourcePath; NO content)
+        # Document transcript — D10: a :Source keyed url=doc_<hash>
+        # (summary/story_arc/sessionId/sourcePath; NO content/doc_status)
         rows = g.query(
-            "MATCH (d:Document) WHERE d.sessionId='s1' "
-            "RETURN d.documentKind, d.summary, d.story_arc, d.sourcePath, "
-            "d.is_episodic",
+            "MATCH (s:Source) WHERE s.sessionId='s1' "
+            "AND s.documentKind IS NOT NULL "
+            "RETURN s.documentKind, s.summary, s.story_arc, s.sourcePath, "
+            "s.is_episodic",
         ).result_set
-        assert rows, "Document missing"
+        assert rows, "Document Source missing"
         kind, summary, arc, srcpath, episodic = rows[0]
         assert kind == "transcript"
         assert summary == "summary text"
@@ -369,9 +395,9 @@ class TestFourNodeChain:
         assert srcpath == "session.md"  # basename only (privacy)
         assert episodic is True
 
-        # (Event)-[:produces]->(Document)
+        # (Event)-[:produces]->(document Source)
         n = g.query(
-            "MATCH (e:Event {eventId:$eid})-[:produces]->(d:Document) "
+            "MATCH (e:Event {eventId:$eid})-[:produces]->(d:Source) "
             "WHERE d.sessionId='s1' RETURN count(d)",
             params={"eid": eid},
         ).result_set[0][0]
@@ -379,15 +405,15 @@ class TestFourNodeChain:
 
         # Source bridge (sourceKind agentSession, contentHash, provenance_spans)
         rows = g.query(
-            "MATCH (s:Source {url:'session.md'}) RETURN s.sourceKind, "
+            "MATCH (s:Source {url:'session:s1'}) RETURN s.sourceKind, "
             "s.contentHash, s.provenance_spans, s.is_episodic",
         ).result_set
         assert rows and rows[0][0] == "agentSession"
         assert rows[0][1] and rows[0][2] == ["0-10"]
 
-        # (Document)<-[:references]-(Source)
+        # (document Source)<-[:references]-(session Source)
         n = g.query(
-            "MATCH (s:Source {url:'session.md'})-[:references]->(d:Document) "
+            "MATCH (s:Source {url:'session:s1'})-[:references]->(d:Source) "
             "WHERE d.sessionId='s1' RETURN count(d)",
         ).result_set[0][0]
         assert n >= 1
@@ -402,7 +428,7 @@ class TestFourNodeChain:
         assert rows[0][2] == "session.md"
         n = g.query(
             "MATCH (p:Point {id:'pt_0000000000000000000000000000000000000000000000000000000000000000'})"
-            "-[:extractedFrom]->(s:Source {url:'session.md'}) RETURN count(s)",
+            "-[:extractedFrom]->(s:Source {url:'session:s1'}) RETURN count(s)",
         ).result_set[0][0]
         assert n >= 1
 
@@ -649,7 +675,7 @@ class TestExternalSources:
         assert rows[0][1] == "T1" and rows[0][2] == "sha123"
         # session Source references the external Source (DE2E-5 chain)
         n = g.query(
-            "MATCH (a:Source {url:'session.md'})-[:references]->"
+            "MATCH (a:Source {url:'session:s1'})-[:references]->"
             "(b:Source {url:'https://example.com/pricing'}) RETURN count(b)",
         ).result_set[0][0]
         assert n >= 1
@@ -660,6 +686,386 @@ class TestExternalSources:
             "RETURN count(s)",
         ).result_set[0][0]
         assert n >= 1
+
+    def test_anchorless_recommit_preserves_stored_external_anchor(self, client):
+        """#4146: an anchorless re-commit of an external ``sources[]`` url must
+        NOT wipe its stored ``contentHash`` or bump ``version``.
+
+        This is the exact defect #4005 fixed for the SESSION Source (see
+        ``TestSessionSourceIndexIdentity``), still live in the external loop
+        immediately beside it: ``contentHash=src.contentHash or ""`` turned the
+        back-compat NULL into ``""``, so ``_upsert_source``'s ON MATCH took the
+        OVERWRITE branch — the preserve branch fires only WHEN ``$hash IS
+        NULL``, and ``s.contentHash <> $hash`` is TRUE for any stored non-empty
+        hash. Red before the fix: the anchor is wiped and the version bumped.
+        """
+        url = "https://example.com/pricing"
+        anchor = hash_text("pricing v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url,
+             "credibilityTier": "T1", "contentHash": anchor},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta is not None, "the external Source was never created"
+        assert meta[0] == anchor, meta
+        version = meta[1]
+
+        # back-compat client: same url, no contentHash at all, different
+        # summary so this is a real write (not an L1 replay)
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "credibilityTier": "T1"},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an anchorless re-commit wiped the stored external contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an anchorless re-commit bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_empty_string_anchor_is_treated_as_absent(self, client):
+        """#4146: an EMPTY-STRING anchor is an absent anchor, not a hash.
+
+        The field admits ``""`` (``contentHash: str | None`` with no
+        ``min_length``), so a client can send ``contentHash: ""`` and mean
+        "I have no anchor". A bare pass-through would let that wipe the stored
+        hash exactly like the bug; this pins the ``or None`` normalization.
+        """
+        url = "https://example.com/empty-anchor"
+        anchor = hash_text("v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": anchor},
+        ])
+        assert _commit(client, raw).status_code == 200
+        version = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": ""},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an EMPTY-STRING anchor wiped the stored contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an EMPTY-STRING anchor bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_anchored_recommit_still_updates_external_anchor(self, client):
+        """#4146: a re-commit carrying a NEW anchor must still update the stored
+        hash and bump the version.
+
+        The fix makes an ABSENT anchor preserve; it must never make a PRESENT
+        one inert. Measured: mutating the fix to an unconditional
+        ``contentHash=None`` turns this test, both preservation tests and
+        ``test_sources_external_chain`` red.
+        """
+        url = "https://example.com/pricing"
+        a1, a2 = hash_text("pricing v1"), hash_text("pricing v2")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a1},
+        ])
+        assert _commit(client, raw).status_code == 200
+        assert _session_source_meta(url)[0] == a1
+        v1 = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a2},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta[0] == a2, (
+            f"a NEW anchor did not update the stored hash: {meta[0]!r}"
+        )
+        assert meta[1] == v1 + 1, (
+            f"a NEW anchor did not bump the version: {meta[1]} != {v1 + 1}"
+        )
+
+
+# ── #4005 — the hosted session Source is a real index entry ───────────────
+
+class TestSessionSourceIndexIdentity:
+    """#4005 — identity + integrity of the hosted session ``:Source``.
+
+    Pre-fix the commit path minted it with ``url = os.path.basename(ref.path)``
+    and ``contentHash = content_hash(url)``: two raw files sharing a basename
+    on two machines COLLIDED on the single ``MERGE (s:Source {url:$url})``
+    key, and the stored hash could not detect that the raw had changed,
+    existed, or was absent. The identity is now the canonical
+    ``session:<session_id>`` (ONTOLOGY §4.6) — the SAME url the capture path
+    materializes and ``delete_session`` deletes — with the W-7 basename as a
+    property. Each behaviour below was RED before the fix.
+    """
+
+    def test_distinct_sessions_sharing_a_basename_get_distinct_urls(self, client):
+        """(i) two sessions whose raw file shares the basename ``session.md``
+        get DISTINCT Source urls (pre-fix both collapsed onto ``session.md``).
+
+        This is the two-machines case as far as identity can distinguish it:
+        the collision domain is the session id. Two machines that resolve the
+        SAME session id still share one Source — the limitation is pinned by
+        the next test."""
+        for sid in ("machine-a", "machine-b"):
+            raw = _raw_payload(1, session_id=sid)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+        urls = sorted(u for u, _ in _session_source_rows())
+        assert urls == ["session:machine-a", "session:machine-b"], urls
+
+    def test_same_session_id_is_one_identity_pinned_limitation(self, client):
+        """The limitation, pinned explicitly rather than implied-fixed: the
+        identity is the SESSION, not the basename. Two raws that resolve the
+        SAME session id (e.g. two machines both falling back to
+        ``derive_session_id`` -> ``file_<stem>``) address ONE Source."""
+        for summary in ("first raw", "different raw"):
+            raw = _raw_payload(1, summary=summary)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+        assert [u for u, _ in _session_source_rows()] == ["session:s1"]
+
+    def test_content_hash_is_of_raw_not_of_url(self, client):
+        """(ii) ``contentHash`` is the RAW's anchor, never ``hash(url)``.
+
+        (a) with no client anchor the server stores NO anchor — it must not
+        fabricate ``content_hash(url)``; (b) a supplied non-empty raw anchor
+        is stored verbatim and differs from ``content_hash(url)``.
+        """
+        raw = _raw_payload(1)
+        # legacy/back-compat client: basename-only ref, no raw anchor
+        raw["provenance_refs"] = [{"path": "session.md", "spans": ["0-10"]}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _session_source_rows()
+        assert len(rows) == 1, rows
+        url, stored = rows[0]
+        assert url == "session:s1", rows
+        assert not stored, stored
+        assert stored != content_hash(url), (
+            "contentHash is a hash of the Source url, not of the raw"
+        )
+
+        raw_text = "the raw session transcript: non-empty bytes"
+        raw = _raw_payload(1, summary="second capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                   "contentHash": hash_text(raw_text)}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _session_source_rows()
+        assert len(rows) == 1, rows
+        url, stored = rows[0]
+        assert stored == hash_text(raw_text)
+        assert stored != content_hash(url)
+
+    def test_anchor_stable_for_same_raw_changes_for_new_raw(self, client):
+        """(iii) the anchor is stable while the raw is unchanged and changes
+        when the raw changes, on the SAME Source url.
+
+        Every re-commit carries a DIFFERENT ``summary``, so it is a real write,
+        not an L1 replay — the pre-fix test used byte-identical payloads that
+        the server short-circuits with zero writes (a vacuous assertion,
+        #4005 review)."""
+
+        def _commit_raw(summary: str, raw_text: str):
+            raw = _raw_payload(1, summary=summary)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                       "contentHash": hash_text(raw_text)}]
+            resp = _commit(client, raw)
+            assert resp.status_code == 200, resp.text
+            assert resp.json().get("duplicate") is not True
+            rows = _session_source_rows()
+            assert len(rows) == 1, rows
+            return rows[0]
+
+        url_a, stored_a = _commit_raw("summary A1", "raw A: first capture")
+        assert url_a == "session:s1"
+        assert stored_a == hash_text("raw A: first capture")
+        v_a = _session_source_meta(url_a)[1]
+        # SAME raw, re-committed → SAME url, SAME anchor, NO version bump
+        url_a2, stored_a2 = _commit_raw("summary A2", "raw A: first capture")
+        assert url_a2 == url_a and stored_a2 == stored_a
+        assert _session_source_meta(url_a)[1] == v_a
+        # the raw changed → SAME url, DIFFERENT anchor, version bump (the
+        # contract create_source relies on)
+        url_b, stored_b = _commit_raw("summary B", "raw B: the raw changed")
+        assert url_b == url_a, (url_a, url_b)
+        assert stored_b == hash_text("raw B: the raw changed")
+        assert stored_b != stored_a
+        assert _session_source_meta(url_a)[1] == v_a + 1
+
+    def test_anchorless_recommit_preserves_stored_anchor(self, client):
+        """#4005 review P1: an anchorless re-commit must NOT wipe the stored
+        anchor or bump version.
+
+        Pre-fix ``contentHash=ref.contentHash or ""`` turned the back-compat
+        NULL into ``""``, so ``_upsert_source``'s conditional write took the
+        OVERWRITE branch (the preserve branch fires only WHEN ``$hash IS
+        NULL``) — the anchor was wiped and the version bumped."""
+        anchor = hash_text("raw v1")
+        raw = _raw_payload(1, summary="first capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                   "contentHash": anchor}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        url, stored = _session_source_rows()[0]
+        assert url == "session:s1" and stored == anchor
+        version = _session_source_meta(url)[1]
+
+        # back-compat client: no contentHash at all, different summary so this
+        # is a real write (not an L1 replay)
+        raw = _raw_payload(1, summary="second capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True
+        url2, stored2 = _session_source_rows()[0]
+        assert url2 == url
+        assert stored2 == anchor, (
+            "an anchorless re-commit wiped the stored contentHash"
+        )
+        assert _session_source_meta(url2)[1] == version, (
+            "an anchorless re-commit bumped the version"
+        )
+
+    def test_capture_commit_delete_agree_on_one_session_source(self, client):
+        """#4005 review P1: capture, commit and delete all address the SAME
+        ``:Source``.
+
+        Pre-fix the capture path materialized ``session:s1`` while the commit
+        path minted a basename node (``session.md``) — a SECOND agentSession
+        Source that ``delete_session`` never deleted (orphan on delete). With
+        one canonical identity the whole lifecycle is ONE node."""
+        from tortoise.hosted_api import app, get_current_org_session_ungated
+        app.dependency_overrides[get_current_org_session_ungated] = \
+            lambda: dict(TEST_TEAM)
+        try:
+            # 1) capture path — the hosted capture endpoint calls this helper
+            sdk = _team_sdk()
+            sdk._materialize_session_source(
+                "s1", None, "2026-08-11T10:00:00+00:00",
+                [{"role": "user", "content": "the raw transcript"}])
+            assert [u for u, _ in _session_source_rows()] == ["session:s1"]
+
+            # 2) commit path — SAME identity, no second Source
+            raw = _raw_payload(1)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                       "contentHash": hash_text("raw v1")}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+            rows = _session_source_rows()
+            assert [u for u, _ in rows] == ["session:s1"], rows
+
+            # 3) delete path — the canonical identity is what it removes
+            rd = client.delete("/v1/sessions/s1")
+            assert rd.status_code == 200, rd.text
+            assert _session_source_rows() == []
+        finally:
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
+
+    @pytest.mark.parametrize("path", [
+        "session.md",
+        "/Users/alice/notes/session.md",
+        "notes\\session.md",
+        "a/b/session.md",
+    ])
+    def test_layer1_accepted_source_ref_resolves_to_the_session_source(
+            self, client, path):
+        """Review P2: Layer-1 and the writer derive the basename through the
+        ONE shared primitive, so any path Layer-1 accepts produces an
+        ``extractedFrom`` that resolves to the session Source — never a
+        bare-basename Source minted by the fallback."""
+        raw = _raw_payload(1)
+        raw["provenance_refs"] = [{"path": path, "spans": []}]
+        raw["points"][0]["source_ref"] = "session.md"
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(s:Source {url:'session:s1'}) "
+            "RETURN count(s)",
+            params={"pid": raw["points"][0]["id"]},
+        ).result_set[0][0]
+        assert n >= 1
+        # D10: the commit mints a distinct document :Source (url=doc_<hash>)
+        # alongside the canonical session Source. The assertion's intent is
+        # that any Layer-1-accepted path still re-points extractedFrom at the
+        # session Source — NO bare-basename Source (the fallback's
+        # `session.md`) is ever minted.
+        doc_url = f"doc_{content_hash('s1:2026-08-11T10:00:00Z')}"
+        assert _all_source_urls() == sorted(["session:s1", doc_url]), \
+            _all_source_urls()
+
+    @pytest.mark.parametrize("path", [".", "..", "/", "a/.", "a/.."])
+    def test_basename_less_provenance_path_422s_before_any_write(
+            self, client, path):
+        """Review P1/P2: a basename-less path used to pass Layer-1 and then
+        either raise mid-write (a 500 after the Session/Document/Event landed)
+        or mint a bare-basename Source. It must 422 BEFORE any write."""
+        raw = _raw_payload(1)
+        raw["provenance_refs"] = [{"path": path, "spans": []}]
+        r = _commit(client, raw)
+        assert r.status_code == 422, r.text
+        assert _all_source_urls() == [], _all_source_urls()
+
+    def test_blank_session_id_422s_before_any_write(self, client):
+        """Review P1: ``session_id='   '`` passed ``min_length=1`` and then
+        raised inside the write AFTER the Session counters, Document and Event
+        were written — a redacted 500 with a non-converging retry."""
+        raw = _raw_payload(1)
+        raw["session_id"] = "   "
+        r = _commit(client, raw)
+        assert r.status_code == 422, r.text
+        assert _all_source_urls() == [], _all_source_urls()
+
+    def test_derivation_is_the_canonical_session_identity(self):
+        """Derivation: the identity is the canonical ``session:<id>`` — the
+        SAME url the capture path materializes and ``delete_session`` deletes —
+        and it can NEVER collide with ``derive_source_url``'s ``corpus://``
+        authority (review P1 #3)."""
+        from tortoise.file_indexer import (
+            derive_session_source_url,
+            derive_source_content_hash,
+            derive_source_url,
+            provenance_basename,
+        )
+
+        assert derive_session_source_url("s1") == "session:s1"
+        # the session id is the collision domain ...
+        assert derive_session_source_url("m1") != derive_session_source_url("m2")
+        # ... and a session id can never alias a corpus name: even an id equal
+        # to the corpus name yields `session:`, never `corpus://<name>/...`
+        assert derive_session_source_url("notes") != \
+            derive_source_url("/root/notes/session.md", "/root/notes",
+                              corpus_name="notes")
+        # a blank session id is a hard error (Layer-1 422s first)
+        for bad in ("", "   ", None):
+            with pytest.raises(ValueError):
+                derive_session_source_url(bad)
+        # the ONE shared basename primitive (W-7 + Windows separators)
+        assert provenance_basename("/Users/alice/notes/session.md") == "session.md"
+        assert provenance_basename("notes\\session.md") == "session.md"
+        assert provenance_basename("a/b/session.md") == "session.md"
+        for basename_less in ("", "/", ".", "..", "a/.", "a/.."):
+            assert provenance_basename(basename_less) == "", basename_less
+        # the anchor is a hash of the raw's CRLF-normalized text, never the url
+        assert derive_source_content_hash("") == ""
+        assert derive_source_content_hash(None) == ""
+        assert derive_source_content_hash("raw") == hash_text("raw")
+        assert derive_source_content_hash("a\r\nb") == \
+            derive_source_content_hash("a\nb")
 
 
 # ── DE2E-6 — NAND direction policy ─────────────────────────────────────────
@@ -740,6 +1146,16 @@ class TestMitigates:
         assert rows, "mitigation artifact missing"
         assert rows[0][0] == 0.4
         assert rows[0][1] == "statement"
+        # #4937 INVARIANT GUARD (the regression pin for the refusal itself is
+        # tests/test_sdk.py::test_mitigates_is_not_an_operator_kind): the
+        # payload spelling MITIGATES never materializes a peer operator kind —
+        # it attaches to the IMPL bridge above (mitigated_by), it is NOT a
+        # generic operator of kind MITIGATES. Holds on main too, so it guards
+        # the invariant rather than the #4937 diff.
+        peer = g.query(
+            "MATCH (o:Point {is_operator:true}) WHERE o.op_type = 'MITIGATES' "
+            "RETURN count(o)").result_set
+        assert peer[0][0] == 0
 
     def test_mitigates_target_missing_operator_422(self, client):
         ops = [
@@ -754,6 +1170,375 @@ class TestMitigates:
         r = _commit(client, _raw_payload(3, operators=ops))
         assert r.status_code == 422  # target ∉ emitted operator keys
         assert any("target" in k for k in r.json()["detail"]), r.json()["detail"]
+
+
+# ── #4970 — the resolved-id map on the hosted commit lane ─────────────────
+
+class TestRekeyedPointResolvedIds:
+    """#4970 — the hosted commit lane reproduced the #4716 two-id-space hole.
+
+    A payload point whose CONTENT already exists in the graph under a
+    DIFFERENT id re-keys inside ``create_point(..., dedup=True)`` (whose
+    return value the §5 loop IGNORED), while every downstream reference kept
+    the payload's ``pt_<sha>`` id. ``_load_commit_graph_state`` only loads
+    ``p.id IN <payload ids>``, so the prior node is invisible to
+    ``reconcile_payload`` and the point is marked ``action == "new"``; the
+    ``pt_<sha>`` node is then never created.
+
+    Six consumers read that payload id and every one dropped or mis-wrote
+    its edge. This is the residual the #4716 fix left behind — its Part 1
+    remap WAS scoped to the v2 CAPTURE commit; #4970 closed it by wiring the
+    same shared helper on the hosted lane:
+
+      1. §5's Session ``CONTAINS`` MERGE (the adjacent defect),
+      2. §5's ``supersede_point(prior, pid)`` — the successor id was never
+         minted, so the lifecycle guard raises and the commit fails closed,
+      3. §6's ``aboutObject`` MERGE (no match ⇒ no edge, no error),
+      4. §7's operator endpoints — ``create_operator`` raises and
+         ``apply_payload_operators`` swallows it as
+         ``operator write skipped (inputs missing?)``,
+      5. §7's MITIGATES reason, resolved from the SAME ref after the remap
+         (a graph id) while ``payload.points`` is keyed by payload id —
+         hence the map-aware reverse resolver,
+      6. §6b's ``supersedes_by`` successor ref (a ``pt_`` id BY
+         construction).
+
+    The fix is the general shape #4936/PR #5478 used: the writer RETURNS the
+    id it actually used and downstream stamping keys on the RESOLVED graph
+    id. Here §5 builds ``payload id -> resolved graph id`` and threads it
+    through the SAME shared ``commit_ops.remap_*`` helpers the capture path
+    uses (#4716) — no rival mechanism.
+
+    Before/after (this fixture, pre-seeded legacy node holding "point 0"):
+
+        before: IMPL edges [] · CONTAINS {pt_1...} · aboutObject {pt_1...}
+                · warning "operator write skipped (inputs missing?)"
+        after:  IMPL edges [(legacy, pt_1...)] · CONTAINS {legacy, pt_1...}
+                · aboutObject {legacy, pt_1...} · no warning
+    """
+
+    def test_rekey_keeps_operator_contains_and_about_object(self, client, caplog):
+        # The graph pre-exists holding the payload point's CONTENT under a
+        # legacy (auto-minted ULID) id — the re-key source.
+        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        assert legacy_id and not legacy_id.startswith("pt_"), legacy_id
+
+        p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
+        p1 = f"pt_{'1' * 64}"   # genuinely new
+        raw = _raw_payload(2, points=[
+            _point(0, id=p0, content="point 0", about_entities=["Alpha"]),
+            _point(1, id=p1, content="point 1", about_entities=["Alpha"]),
+        ], operators=[
+            {"src": p0, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+        ])
+        with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
+            r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        # (3) the operator edge was NOT silently dropped
+        assert "operator write skipped" not in caplog.text, caplog.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            "RETURN s.id, d.id",
+        ).result_set
+        assert [tuple(r) for r in rows] == [(legacy_id, p1)], rows
+        # (1) Session CONTAINS reaches BOTH points, the re-keyed one included
+        contained = {row[0] for row in g.query(
+            "MATCH (:Session {id:'s1'})-[:CONTAINS]->(p:Point) RETURN p.id",
+        ).result_set}
+        assert {legacy_id, p1} <= contained, contained
+        # (2) §6 aboutObject keys on the resolved id too
+        about = {row[0] for row in g.query(
+            "MATCH (p:Point)-[:aboutObject]->(:Object {name:'Alpha'}) "
+            "RETURN p.id",
+        ).result_set}
+        assert {legacy_id, p1} <= about, about
+        # the payload id names NO node — no phantom was minted (the re-key is
+        # real; the fix must not create a second point)
+        assert g.query("MATCH (p:Point {id:$id}) RETURN count(p)",
+                       params={"id": p0}).result_set[0][0] == 0
+
+    def test_rekey_keeps_the_supersession_successor_ref(self, client):
+        """§6b — ``supersedes_by`` is a payload ``pt_<sha>`` id BY
+        construction, so it shares the two-id-space hole: the successor point
+        re-keyed onto a pre-existing node under another id and
+        ``sdk.supersede(prior, '<payload id>')`` targeted a node that does not
+        exist — it RAISED and ``apply_supersessions`` swallowed it as
+        ``point supersede '<prior>' → '<payload id>' failed`` (not the
+        ``… ref '<payload id>' not found`` skip, which fires only when the
+        already-graph-id ``superseded`` side is absent) — so the CORRECTS fold
+        was lost. The §6b call now remaps
+        through the same map the operators use (capture-path parity), while
+        ``superseded`` — already a real graph id, and the record's lane
+        discriminator — is untouched."""
+        old_id = f"pt_{content_hash('gym at 6pm')}"
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+
+        # the successor CONTENT pre-exists under a legacy id → the new
+        # ``pt_<sha>`` payload id re-keys onto it in §5
+        new_id = point_content_id("gym at 5pm")
+        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+
+        r = _commit(client, _raw_payload(1, session_id="s2", points=[
+            {"id": new_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": old_id, "supersedes_by": new_id,
+             "evidence": "fact-value contradiction (later session value "
+                         "change)"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": legacy_id, "old": old_id}).result_set[0][0]
+        assert n == 1, f"CORRECTS fold lost on the re-keyed successor ({n})"
+
+    def test_rekey_resolves_the_mitigation_reason_content(self, client):
+        """§7's MITIGATES reason is resolved from the SAME ref the remap
+        rewrites: after ``remap_operator_endpoint_refs`` that ref is a GRAPH
+        id, while ``payload.points`` is keyed by PAYLOAD id — so a re-keyed
+        dampener's reason degraded to its bare graph id (the #4716 review P1
+        on the capture path, reproduced here). §7 hands the helper a
+        map-aware resolver (the reverse map) so the payload content still
+        resolves."""
+        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+        p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
+        p1 = f"pt_{'1' * 64}"   # genuinely new
+        raw = _raw_payload(2, points=[
+            _point(0, id=p0, content="point 0"),
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": p0, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+            # the dampener IS the re-keyed point
+            {"src": p0, "dst": p1, "op_type": "MITIGATES",
+             "target": {"src": p0, "dst": p1, "op_type": "IMPL"},
+             "strength": 0.4},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (op:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (op)-[:IMPL {idx:0}]->(:Point {id:$legacy}) "
+            "MATCH (op)-[:IMPL {idx:1}]->(:Point {id:$p1}) "
+            "MATCH (op)-[:mitigated_by]->(m:Point) "
+            "RETURN m.content",
+            params={"legacy": legacy_id, "p1": p1},
+        ).result_set
+        assert rows, "mitigation artifact missing on the re-keyed dampener"
+        content = rows[0][0]
+        # the reason is the PAYLOAD point's content (wrapped by
+        # mitigate_operator's display prefix) — never the bare resolved id
+        assert "point 0" in content, content
+        assert legacy_id not in content, content
+
+    def test_rekey_supersede_uses_the_resolved_successor_id(self, client):
+        """§5's supersede branch passed the never-minted ``supersede_id`` to
+        ``supersede_point`` when ``create_point`` re-keyed the successor onto
+        a pre-existing node — the lifecycle guard then raised and the whole
+        commit failed closed. The branch now supersedes the PRIOR with the
+        RESOLVED successor id."""
+        old_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        # the successor CONTENT pre-exists under a legacy id → the recomputed
+        # ``supersede_id`` re-keys onto it in §5
+        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+        r = _commit(client, _raw_payload(1, session_id="s2", points=[
+            {"id": old_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": legacy_id, "old": old_id}).result_set[0][0]
+        assert n == 1, f"CORRECTS fold lost on the re-keyed successor ({n})"
+        # the recomputed successor id names NO node — no phantom was minted
+        assert g.query("MATCH (p:Point {id:$id}) RETURN count(p)",
+                       params={"id": point_content_id("gym at 5pm")}
+                       ).result_set[0][0] == 0
+
+    def test_supersede_operator_ref_follows_the_successor(self, client):
+        """On the ``supersede`` reconcile action the payload point id IS the
+        PRIOR node's graph id, and §5 keys it to the RESOLVED successor — so a
+        payload operator ref naming that point lands on the SUCCESSOR. That is
+        deliberate and consistent with ``supersede_point``'s own edge transfer
+        (an operator edge on a superseded point belongs to its successor);
+        pinned here so the semantics are not incidental. This holds on the
+        ordinary (non-re-keyed) supersede path too, which is why it needs its
+        own test."""
+        prior_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": prior_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        successor_id = point_content_id("gym at 5pm")
+        p1 = f"pt_{'1' * 64}"
+        r = _commit(client, _raw_payload(2, session_id="s2", points=[
+            {"id": prior_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": prior_id, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            "RETURN s.id, d.id",
+        ).result_set
+        assert [tuple(r) for r in rows] == [(successor_id, p1)], rows
+        # the prior is terminal and carries no operator endpoint
+        assert g.query("MATCH (p:Point {id:$id}) RETURN p.status",
+                       params={"id": prior_id}).result_set[0][0] == "superseded"
+
+    def test_supersede_mitigation_reason_is_the_payload_content(self, client):
+        """§5 keys the map by PAYLOAD point id ONLY (one id space), so the
+        reverse-map winner is a real ``payload.points`` entry and the MITIGATES
+        reason resolves to the payload CONTENT rather than degrading to the
+        bare graph id (#4716 review P1). On the supersede path §5's map value
+        for ``pr.point.id`` IS the resolved successor, and the reverse lookup
+        returns the payload id — never ``supersede_id``, which has no
+        ``payload.points`` entry."""
+        prior_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": prior_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        successor_id = point_content_id("gym at 5pm")
+        p1 = f"pt_{'1' * 64}"
+        r = _commit(client, _raw_payload(2, session_id="s2", points=[
+            {"id": prior_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": prior_id, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+            {"src": prior_id, "dst": p1, "op_type": "MITIGATES",
+             "target": {"src": prior_id, "dst": p1, "op_type": "IMPL"},
+             "strength": 0.4},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (op:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (op)-[:IMPL {idx:0}]->(:Point {id:$succ}) "
+            "MATCH (op)-[:IMPL {idx:1}]->(:Point {id:$p1}) "
+            "MATCH (op)-[:mitigated_by]->(m:Point) "
+            "RETURN m.content",
+            params={"succ": successor_id, "p1": p1},
+        ).result_set
+        assert rows, "mitigation artifact missing on the superseded dampener"
+        content = rows[0][0]
+        assert "gym at 5pm" in content, content
+        # never the bare graph id (neither the prior nor the successor)
+        assert successor_id not in content and prior_id not in content, content
+
+    def test_payload_id_and_supersede_id_do_not_share_one_key_space(
+            self, client):
+        """#4970 review P2 — the §5 map is keyed by PAYLOAD point id ONLY.
+
+        ``point_content_id`` hashes CONTENT ONLY, while dedup matches
+        content+kind (#784), so two records in ONE payload can collide across
+        id spaces: a ``new`` point whose payload id is
+        ``pt_<hash("shared text")>`` and a ``supersede`` record whose NEW
+        content is that same text share the latter's server-recomputed
+        ``supersede_id``. Keying the map by ``supersede_id`` as well let the
+        second record OVERWRITE the first record's payload-id entry (last
+        writer wins), silently re-pointing the first record's aboutObject
+        edge at the SECOND record's successor. Here the first point dedup-hits
+        a pre-existing legacy node while the second's successor is minted at
+        the shared content-addressed id, so the two resolutions DIFFER and the
+        mis-route is observable rather than self-cancelling."""
+        shared = "shared text"
+        shared_id = point_content_id(shared)
+        # Pre-existing OBSERVATION holding the shared content under a legacy
+        # id: record A's write dedup-hits it, so A resolves to the legacy node
+        # (never to ``shared_id``).
+        legacy_observation = _team_sdk().create_point(
+            "observation", shared)["id"]
+        assert not legacy_observation.startswith("pt_"), legacy_observation
+        # Pre-existing DECISION to supersede, seeded at its own
+        # content-addressed id: the payload point below reuses that id with
+        # changed content, so reconcile takes the supersede path.
+        prior_old_id = point_content_id("old claim")
+        prior_decision = _team_sdk().create_point(
+            "decision", "old claim", id=prior_old_id)["id"]
+        assert prior_decision == prior_old_id
+
+        r = _commit(client, _raw_payload(
+            2, session_id="s1",
+            entities=[
+                {"name": "Alpha", "kind": "Project",
+                 "passes_frequency_gate": True},
+                {"name": "Beta", "kind": "Project",
+                 "passes_frequency_gate": True},
+            ],
+            points=[
+            {"id": shared_id, "content": shared, "pointKind": "observation",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            {"id": prior_old_id, "content": shared, "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Beta"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]))
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # A's aboutObject edge belongs on the legacy observation it RESOLVED
+        # to — the pre-fix map had ``shared_id`` overwritten by B and would
+        # route it onto B's successor node.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": legacy_observation},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Alpha"], rows
+        # B's successor — minted at the shared content-addressed id — carries
+        # B's own edge, and NOT A's.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": shared_id},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Beta"], rows
 
 
 # ── DE2E-7 — idempotency + budget + quota + Layer-1 ───────────────────────
@@ -824,7 +1609,7 @@ class TestReplayIdempotency:
         assert n >= 1
         # edge transfer: extractedFrom moved to the new point
         n = g.query(
-            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'session.md'}) "
+            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'session:s1'}) "
             "RETURN count(s)",
             params={"new": new_id},
         ).result_set[0][0]
@@ -954,6 +1739,178 @@ class TestE5PointSupersessions:
         r = _commit(client, raw)
         assert r.status_code == 200, r.text
         assert r.json()["duplicate"] is False
+
+
+# ── #5363 — the #4021 inverted-window refusal on the hosted COMMIT path ─────
+#
+# The refusal is a DETERMINISTIC payload error (the same payload re-raises), so
+# the fail-closed 500's "retry with the same client_commit_id" advice is wrong
+# for it — and because `_execute_commit_writes` created the successor BEFORE
+# calling `supersede_point`, the refusal also left a live orphan successor that
+# no retry could fix. These tests pin both halves: the 422 mapping (A) and the
+# per-action check that keeps the refusal from MINTING the successor it would
+# orphan (B) — scoped to that successor, not to the whole request: the chain
+# writes and any earlier point of the commit have already landed by then.
+
+_PREDECESSOR_ID = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+_SUPERSEDED_CONTENT = "the old 5K claim"
+_REVISING_CONTENT = "my 5K best is 27:12"
+_PREDECESSOR_VALID_FROM = "2026-08-01T00:00:00+00:00"
+_REVISING_WHEN = "2026-06-01T00:00:00+00:00"
+
+
+def _seed_inverted_window_predecessor() -> str:
+    """Seed the §5 supersede PREDECESSOR — the payload point id, live, non-
+    operator, carrying a stored window START the revising payload's `when`
+    precedes. A direct seed (conftest convention, cf. the E3 supersede test)
+    rather than a prior commit, so the stored `validFrom` is exact."""
+    _team_sdk()._get_proj().g.query(
+        "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+        "    p.content=$c, p.is_operator=false, p.status='live', "
+        "    p.content_hash='seed', p.validFrom=$vf",
+        params={"id": _PREDECESSOR_ID, "c": _SUPERSEDED_CONTENT,
+                "vf": _PREDECESSOR_VALID_FROM})
+    return _PREDECESSOR_ID
+
+
+def _inverted_window_commit(client):
+    """Commit the same payload point id with DIFFERENT content and a `when`
+    that precedes the seeded predecessor's `validFrom` — the §5 reconcile
+    action is `supersede`, the one `_execute_commit_writes` takes."""
+    return _commit(client, _raw_payload(1, points=[_point(
+        0, content=_REVISING_CONTENT, when=_REVISING_WHEN)]))
+
+
+class Test5363InvertedSupersedeWindow:
+    """#5363 — the #4021 refusal mapped to an actionable 422 and raised before
+    the point's successor is minted (so the refusal leaves no orphan successor,
+    the partial write a retry could never complete)."""
+
+    def test_inverted_window_422s_before_the_successor_is_minted(self, client):
+        """(B) + (A) together, on the real write path: the commit 422s naming
+        the conflict, the successor is NEVER minted, and the predecessor is
+        left untouched. Without the fix this is a 500 over an orphan successor.
+
+        Fails without the fix: the status is 500 (not 422) AND the successor
+        node exists (the `succ == []` assertion). The final forward-window leg
+        is the over-fix guard — it passes before and after, and exists so a
+        pre-check that refuses EVERY supersede reds this test rather than
+        shipping."""
+        old_pid = _seed_inverted_window_predecessor()
+        r = _inverted_window_commit(client)
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "supersede_window_inverted"
+        # actionable: the conflicting ids AND the two window bounds it refuses
+        assert detail["superseded"] == old_pid
+        assert detail["supersedes_by"] == point_content_id(_REVISING_CONTENT)
+        assert detail["successor_validFrom"] == _REVISING_WHEN
+        assert detail["predecessor_validFrom"] == _PREDECESSOR_VALID_FROM
+        assert "inverted window" in detail["errors"][0]
+        # the retry-advising 500 detail must NOT ride this response (a
+        # same-payload retry re-raises identically)
+        assert "retry" not in json.dumps(detail).lower()
+
+        g = _team_sdk()._get_proj().g
+        # NO partial write: the successor was never created (the orphan)
+        succ = g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id",
+            params={"c": _REVISING_CONTENT}).result_set
+        assert succ == [], f"orphan successor minted before the refusal: {succ}"
+        # NO partial write: the predecessor was not superseded or stamped
+        old = g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "live", f"predecessor mutated: {old}"
+        assert old[0][1] is None, f"predecessor validTo stamped: {old}"
+
+        # Over-fix guard: a `when` ON/AFTER the predecessor's `validFrom` is a
+        # legal window and must still commit (the check refuses the inversion,
+        # not supersession).
+        fwd = _commit(client, _raw_payload(1, points=[_point(
+            0, content=_REVISING_CONTENT, when="2026-09-01T00:00:00+00:00")]))
+        assert fwd.status_code == 200, fwd.text
+        after = g.query("MATCH (p:Point {id:$id}) RETURN p.status",
+                        params={"id": old_pid}).result_set
+        assert after and after[0][0] == "superseded", \
+            "the forward window did not take the supersede branch"
+
+    def test_refusal_escaping_the_precheck_is_still_a_422(self, client,
+                                                          monkeypatch):
+        """(A) alone: the boundary of last resort. With the pre-write check
+        disabled the #4021 refusal still reaches `supersede_point` after the
+        successor is minted (a race/uncatalogued path) — it must map to the
+        same 422, never the retry-advising 500.
+
+        Fails without the fix: the status is 500, not 422."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_prevalidate_supersede_window",
+                            lambda sdk, pr, *, now: None)
+        _seed_inverted_window_predecessor()
+        r = _inverted_window_commit(client)
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "supersede_window_inverted"
+        assert detail["superseded"] == _PREDECESSOR_ID
+        assert "retry" not in json.dumps(detail).lower()
+
+    def test_same_commit_dedup_sibling_is_never_a_false_422(self, client):
+        """#7000 review P2 — a VALID commit must NOT be refused because the
+        pre-check resolved the successor at T0 and could not see the
+        same-commit sibling `create_point` dedups onto.
+
+        Deterministic repro (no timing race): the predecessor's window starts
+        in the FUTURE (`validFrom = now + 30d`); payload point A is `new` with
+        content C and `when = now + 90d`; payload point B carries the
+        predecessor id with the SAME content C and NO `when` (→ reconcile
+        action `supersede`).
+
+        On the write path A is minted first, then B re-keys onto A (same
+        content+kind) and `supersede_point` reads A's stored `validFrom`
+        (`now + 90d` ≥ the predecessor's `now + 30d`) → the window is legal.
+        A T0 pre-check cannot see A, so it measured the successor's fallback
+        start as the hosted `now` (< `now + 30d`) and refused a commit the
+        writer accepts.
+
+        Fails before the fix: `assert 422 == 200` (the refusal body names the
+        hosted `now`, not A's window start)."""
+        from datetime import UTC, datetime, timedelta
+        _now = datetime.now(UTC)
+        pred_vf = (_now + timedelta(days=30)).isoformat()
+        sibling_when = (_now + timedelta(days=90)).isoformat()
+        content = "the 5K claim, restated once"
+        old_pid = _PREDECESSOR_ID
+        _team_sdk()._get_proj().g.query(
+            "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+            "    p.content=$c, p.is_operator=false, p.status='live', "
+            "    p.content_hash='seed-dedup', p.validFrom=$vf",
+            params={"id": old_pid, "c": _SUPERSEDED_CONTENT, "vf": pred_vf})
+
+        raw = _raw_payload(0, points=[
+            # A: NEW, content C, a future window start that LEGALLY follows the
+            # predecessor's. Deliberately id 7 — NOT the predecessor id.
+            _point(7, content=content, when=sibling_when),
+            # B: the predecessor id + the SAME content → supersede, whose
+            # successor (content C) already exists by the time B writes.
+            _point(8, id=old_pid, content=content),
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # the predecessor IS superseded, and its window ended at A's start
+        old = g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "superseded", f"not superseded: {old}"
+        assert old[0][1] == sibling_when, \
+            f"validTo {old[0][1]!r} != successor window start {sibling_when!r}"
+        # exactly ONE node carries the shared content — B re-keyed onto A
+        # (a second node would mean the dedup path never folded the sibling)
+        dup = g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id",
+            params={"c": content}).result_set
+        assert len(dup) == 1, f"expected one deduped successor, got {dup}"
 
 
 class Test6bEntitySupersessionGuards:
@@ -1267,21 +2224,22 @@ class TestBudgetDE2E7:
         ).result_set[0][0]
         assert n == 0, "items remain held client-side — never written"
 
-    def test_sessions_quota_41st_commit_402(self, client_quota40):
-        """Quota fixture: max_sessions=40 → 40 minimal commits → 41st commit
-        402; _count_resource('sessions') returns 40 (NOT the all-nodes count,
-        the #947 P0 regression)."""
+    def test_sessions_count_and_41st_commit_lands(self, client):
+        """#947 P0 (preserved): `_count_resource('sessions')` returns the
+        Session-node count, NOT the all-nodes count. #4010: the 41st commit
+        LANDS — sessions have no cap (the old fixture's direct
+        `max_sessions=40` write is no longer honoured as a cap)."""
         from tortoise.quota import count_org_usage
         sdk = _team_sdk()
         for i in range(40):
             raw = _raw_payload(1, session_id=f"qs{i}")
-            r = _commit(client_quota40, raw)
+            r = _commit(client, raw)
             assert r.status_code == 200, f"commit {i} failed: {r.text}"
         assert count_org_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 40
-        # 41st commit → 402
-        r = _commit(client_quota40, _raw_payload(1, session_id="qs40"))
-        assert r.status_code == 402
-        assert "sessions" in r.json()["detail"]
+        # 41st commit is STORED (was a 402 before #4010).
+        r = _commit(client, _raw_payload(1, session_id="qs40"))
+        assert r.status_code == 200, r.text
+        assert count_org_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 41
 
     def test_empty_commit_ok_zero_budget(self, client):
         """An empty derived commit is valid: 200, zero budget burn,
@@ -1292,6 +2250,158 @@ class TestBudgetDE2E7:
         body = r.json()
         assert body["nodes_created"] == 0 and body["held"] == []
         assert _session_counter("s1", "commit_count") == 1
+
+
+class TestCommitPointsGate:
+    """#4051 — the commit lane's pre-write org `max_points` gate.
+
+    Until #4010 the flat `max_sessions` bounded this lane's TOTAL node growth;
+    sessions are now unlimited for every tier, and `_count_resource("points")`
+    excludes the chain this lane mints (:Session, :Event, transcript :Source).
+    A free-tier key could therefore loop POST /v1/sessions/commit with a fresh
+    session_id — even `points: []` — and mint nodes no quota counted.
+    """
+
+    @staticmethod
+    def _set_max_points(limit: int) -> None:
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, "max_points": limit}
+
+    @staticmethod
+    def _seed_points(n: int) -> None:
+        for i in range(n):
+            _team_sdk()._get_proj().g.query(
+                "MERGE (p:Point {id:$pid}) "
+                "SET p.content='seed', p.is_episodic=false",
+                params={"pid": f"pt_seed_{i}"},
+            )
+
+    @staticmethod
+    def _point_count() -> int:
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (p:Point) RETURN count(p)").result_set
+        return int(rows[0][0])
+
+    @staticmethod
+    def _chain_counts(session_id: str) -> tuple[int, int, int]:
+        """(:Session, :Event, transcript :Source) minted for a session.
+
+        Counts by `sessionId` for Event/Source — the transcript :Source MERGE
+        is keyed by `url`, but stamps `s.sessionId` (D10: a document is a
+        :Source; the :Document label is retired).
+        """
+        g = _team_sdk()._get_proj().g
+        sess = g.query("MATCH (s:Session {id:$sid}) RETURN count(s)",
+                       params={"sid": session_id}).result_set[0][0]
+        ev = g.query("MATCH (e:Event {sessionId:$sid}) RETURN count(e)",
+                     params={"sid": session_id}).result_set[0][0]
+        src = g.query("MATCH (s:Source {sessionId:$sid}) RETURN count(s)",
+                      params={"sid": session_id}).result_set[0][0]
+        return int(sess), int(ev), int(src)
+
+    def test_at_max_points_refused_and_mints_nothing(self, client):
+        """#4051: with the org AT max_points, a `points: []` commit — the
+        cheapest possible loop iteration — 402s and mints no
+        Session/Event/transcript-Source/Point node."""
+        self._set_max_points(1)
+        self._seed_points(1)  # count == limit → the boundary is inclusive
+        before = self._point_count()
+        r = _commit(client, _raw_payload(0, session_id="sGateAt", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        detail = r.json()["detail"]
+        # Same structured refusal the capture/points lanes raise (#4614).
+        assert detail["code"] == "quota_exceeded"
+        assert detail["resource"] == "points"
+        assert detail["limit"] == 1
+        assert detail["used"] == 1
+        assert self._chain_counts("sGateAt") == (0, 0, 0), (
+            "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
+            "a :CommitRecord with status='partial' IS merged before the gate "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
+            "runs ahead of the gate at :13061); replay-safe, and invisible to "
+            "_chain_counts by design")
+        assert self._point_count() == before  # no partial Point either
+
+    def test_over_max_points_refused_and_mints_nothing(self, client):
+        """#4051: one over the limit (count > max_points) refuses too."""
+        self._set_max_points(1)
+        self._seed_points(3)
+        r = _commit(client, _raw_payload(0, session_id="sGateOver", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        assert r.json()["detail"]["resource"] == "points"
+        assert self._chain_counts("sGateOver") == (0, 0, 0)
+
+    def test_count_error_fails_closed(self, client, monkeypatch):
+        """#4051: a COUNTING FAILURE must never be a silent pass.
+
+        `_check_org_limit` documents "counting errors raise HTTP 500
+        (QuotaCheckError) — never a silent pass", and that is the property the
+        new gate site must inherit.
+
+        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
+        calls `_check_org_limit(org, "sessions")` (:13023) BEFORE the #4051
+        points gate (:13061), and BOTH call the same `enforce_org_limit` — so a
+        patch that fails EVERY resource makes the SESSIONS gate raise the 500
+        first and the request never reaches the new site. That was the first cut
+        of this test, and it pinned nothing: with only the points gate made to
+        swallow its 500 it stayed GREEN (verified by mutation). The patch below
+        raises for `resource == "points"` only, so the sessions gate passes and
+        the 500 can come from the new site alone.
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.quota import QuotaCheckError
+
+        # Patch the seam the gate CALLS, not the gate itself: `_check_org_limit`
+        # imports `enforce_org_limit` locally and catches QuotaCheckError around
+        # it to raise HTTP 500. Patching `_check_org_limit` instead would bypass
+        # that handler and the exception would escape the TestClient (which
+        # re-raises server exceptions) — proving nothing.
+        def _boom(org, resource, *, slot_credit=0, **kwargs):
+            if resource != "points":
+                return  # the sessions gate must PASS — see the docstring
+            raise QuotaCheckError("count unavailable")
+
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)
+        r = _commit(client, _raw_payload(1, session_id="sGateErr", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 500, r.text
+
+    def test_one_under_max_points_still_commits(self, client):
+        """#4051 boundary: at max_points - 1 the same payload lands — a normal
+        commit is untouched by the gate (regression)."""
+        self._set_max_points(1)
+        # count == 0 == limit - 1 → admitted
+        r = _commit(client, _raw_payload(0, session_id="sGateUnder", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 200, r.text
+        assert r.json()["nodes_created"] == 0
+        sess, ev, src = self._chain_counts("sGateUnder")
+        assert (sess, ev, src) == (1, 1, 1)
+
+    def test_replayed_commit_not_re_gated(self, client):
+        """#4051 replay interaction: a fully_written re-POST returns 200
+        duplicate even when the org is AT max_points. The gate sits after
+        every replay return, so a replay (zero writes) is never 402'd —
+        #1727's lesson.
+
+        The first commit is an empty payload so the test does NOT load the
+        embedding model (which can exceed the 10s transport bound in a
+        targeted run). The cap is then reached by a direct Point seed.
+        """
+        self._set_max_points(1)
+        raw = _raw_payload(0, session_id="sGateReplay", points=[],
+                           entities=[], provenance_refs=[])
+        r1 = _commit(client, raw)
+        assert r1.status_code == 200, r1.text
+        # push the org AT max_points AFTER the first commit landed
+        self._seed_points(1)
+        r2 = _commit(client, dict(raw))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is True
+        # the replay minted nothing beyond the first commit's chain
+        assert self._chain_counts("sGateReplay") == (1, 1, 1)
 
 
 class TestLayer1:
@@ -1412,13 +2522,16 @@ class TestPrivacy:
             "OR n.url CONTAINS '/Users/' RETURN n.content, n.sourcePath, n.url",
         ).result_set
         assert not rows, f"privacy leak: {rows}"
-        # basename-only: the Document.sourcePath + Source url are basenames
+        # basename-only: the document Source's sourcePath is the basename,
+        # and the Source identity is the canonical session-scoped permalink
+        # (no absolute path).
         rows = g.query(
-            "MATCH (d:Document) WHERE d.sessionId='s1' RETURN d.sourcePath",
+            "MATCH (s:Source) WHERE s.sessionId='s1' "
+            "AND s.documentKind IS NOT NULL RETURN s.sourcePath",
         ).result_set
         assert rows and rows[0][0] == "session.md"
         rows = g.query(
-            "MATCH (s:Source {url:'session.md'}) RETURN count(s)",
+            "MATCH (s:Source {url:'session:s1'}) RETURN count(s)",
         ).result_set
         assert rows[0][0] >= 1
 

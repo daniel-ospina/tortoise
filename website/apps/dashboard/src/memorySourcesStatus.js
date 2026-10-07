@@ -15,6 +15,41 @@ export function formatRelativeTime(isoAt, nowMs) {
   return new Date(t).toLocaleDateString()
 }
 
+// ── #1924: source-switch derivations ─────────────────────────────────
+// A memory-source switch is ON when its persisted ENABLE flag is not
+// explicitly false AND the source's own on-fact holds (an unsaved wantOn
+// counts too — that is the not-yet-connected / not-yet-indexed path where the
+// row reveals its Connect / Index action instead of running a job).
+//
+// The ENABLE flag is INDEPENDENT of github_connected: before #1924 the Issues
+// off-toggle wrote github_connected=false, so hiding issues also disconnected
+// the connection (killing the docs source and forcing a fresh OAuth to
+// re-enable). Absent/undefined is treated as ON, so state written before these
+// keys existed keeps the pre-#1924 behavior.
+function sourceSwitchOn(enabledFlag, onFact, wantOn) {
+  if (enabledFlag === false) return false
+  return !!wantOn || !!onFact
+}
+
+// Issues: the on-fact is the GitHub CONNECTION (issues need a token).
+export function issuesSourceOn(state, wantOn) {
+  return sourceSwitchOn(
+    state && state.issues_enabled,
+    !!(state && state.github_connected),
+    wantOn,
+  )
+}
+
+// Docs: the on-fact is the INDEXED record — docs stay on across reloads once
+// indexed, and the off-toggle is what the pre-#1924 switch lacked.
+export function docsSourceOn(state, wantOn) {
+  return sourceSwitchOn(
+    state && state.docs_enabled,
+    !!(state && state.github_docs_indexed),
+    wantOn,
+  )
+}
+
 // Docs indexed label: "Indexed" always (truthful ON-state), with the
 // relative-time suffix ONLY when a persisted timestamp exists (legacy
 // indexed teams have no timestamp — honest omission, no fabricated time).

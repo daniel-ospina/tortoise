@@ -48,6 +48,31 @@ def _run_doctor(argv: list[str]) -> int:
     return main(["doctor", *argv])
 
 
+def _pi_seam_name() -> str:
+    """Pi's installed artifact basename, DERIVED from the contract registry so
+    a rename cannot leave a test writing a file nothing reads."""
+    from tortoise.hook_install import ARTIFACT_CONTRACTS
+    return ARTIFACT_CONTRACTS["pi"].install_name
+
+
+def _session_verify_accepts_pi_harness() -> bool:
+    """The pi-aware read-only query is one that ACCEPTS `--harness pi`.
+
+    Doctor's collision hint names a replacement command, and in that state the
+    installer-shaped commands are exactly the ones a user must not be sent to:
+    `tortoise install pi` refuses on the collision, and so does
+    `hooks upgrade --harness pi` (it calls the same installer).  This asserts
+    the command actually named accepts the harness.  Its exit code may still
+    be non-zero for a missing config, which is not a refusal of the REQUEST.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "tortoise", "session", "verify",
+         "--harness", "pi"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    return "unknown harness" not in (proc.stdout + proc.stderr)
+
+
 def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
     """Boot an embedded DB at db_path and write one point.
 
@@ -89,8 +114,15 @@ class TestDoctorPath:
         assert "✅" in line and "1 Points" in line
 
     def test_doctor_db_uri_routes_through_from_uri(self, clear_db_env, capsys):
-        """--db docker:// URI is parsed by from_uri (dead port proves it)."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59999/tortoise"])
+        """--db docker:// URI is parsed by from_uri (dead port proves it).
+
+        The graph path is TEST-PREFIXED: doctor Step 3 goes through
+        ``from_uri``, which journals its resolved graph name in a test
+        session, and the session-end sweep drops every journaled graph
+        except the env-URI default — a shared path (``/tortoise``) would
+        let this test delete the dev/compose graph (#7795).
+        """
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59999/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -128,7 +160,7 @@ class TestDoctorPath:
         """#720 conf 78: the Step 2 Docker probe must probe the RESOLVED
         --db target's host/port — never a hardcoded localhost:16379. Both
         the probe line and the health line must report the same target."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59998/tortoise"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59998/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -141,7 +173,7 @@ class TestDoctorPath:
         """#720 P2 conf 75: a non-numeric port in --db/TORTOISE_DB_URI must
         surface as a clean ❌ check + rc 1 — never an uncaught ValueError
         traceback (parsed.port now lives inside the guarded try)."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:notaport/tortoise"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -152,30 +184,42 @@ class TestDoctorPath:
 
     def test_doctor_db_uri_password_never_in_error_output(self, clear_db_env, capsys):
         """#720 P2 conf 78: a malformed URI carrying a password must not
-        print the credential — the 'bad port' error redacts the userinfo
-        (docker://:***@) while keeping host/port for debuggability."""
-        rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/tortoise"])
+        print the credential. #2987 review: the masked URI itself is no longer
+        echoed when its tail is credential-shaped (`127.0.0.1:notaport` — a
+        non-numeric port is indistinguishable from `host:pw`), so the line now
+        fails closed; the port value is still named by the exception text, so
+        the diagnostic survives.
+
+        Class B: (1) `docker://:sekritpass@127.0.0.1:notaport` — before the
+        #2987 fix the tail after the last '@' was emitted verbatim, which is
+        the same region the no-'@' branch already refuses to print; (2)
+        reachable: `doctor --db <malformed URI>` prints `_mask_uri_userinfo`
+        of the target, and --db is operator-supplied.
+        """
+        rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
         assert "sekritpass" not in out  # credential never reaches stdout
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "bad port" in probe
-        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed
+        assert "notaport" in probe  # the bad port is still named by the reason
 
     def test_doctor_db_uri_password_with_at_sign_never_leaks(self, clear_db_env, capsys):
         """#720 conf 65: a password containing a raw @ must not leak —
         urlparse splits userinfo at the LAST @, so the mask must consume
         everything up to the host separator (docker://:p@ss@host must not
         print the ':ss@' tail)."""
-        rc = _run_doctor(["--db", "docker://:p@ss@127.0.0.1:notaport/tortoise"])
+        rc = _run_doctor(["--db", "docker://:p@ss@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
         assert "p@ss" not in out  # full credential (incl. @) never reaches stdout
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "bad port" in probe
-        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed (#2987)
+        assert "notaport" in probe  # the bad port is still named by the reason
 
     def test_doctor_malformed_ipv6_uri_clean_error(self, clear_db_env, capsys):
         """#720 P2 conf 95: a malformed authority (dangling '[' → urlparse
@@ -192,7 +236,7 @@ class TestDoctorPath:
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "❌" in probe
         assert "bad URI" in probe  # actionable message, not a raw ValueError
-        assert "docker://:***@[abc" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed (#2987)
 
     def test_doctor_unsupported_scheme_uri_masks_credentials(self, clear_db_env, capsys):
         """#720 P2 conf 95: an unsupported-scheme URI (bolt://, mongodb://,
@@ -231,7 +275,7 @@ class TestDoctorPath:
         from tortoise.__main__ import _mask_uri_userinfo
 
         assert _mask_uri_userinfo("docker://user:p/ss@host:notaport/g") == \
-            "docker://:***@host:notaport/g"
+            "<uri-redacted-unrecognised-shape>"
         # slash + multiple @ combined: everything up to the host is hidden
         assert _mask_uri_userinfo("docker://user:p/ss@h1@host:7687/g") == \
             "docker://:***@host:7687/g"
@@ -273,8 +317,45 @@ class TestDoctorPath:
         assert _mask_uri_userinfo("~/.tortoise/tortoise.db") == "~/.tortoise/tortoise.db"
         assert _mask_uri_userinfo("C:\\foo\\tortoise.db") == "C:\\foo\\tortoise.db"
         # urlsplit raises on unmatched '[' — the mask still hides the
-        # credential instead of leaking it (and never raises in a handler)
-        assert _mask_uri_userinfo("docker://user:pw@[abc") == "docker://:***@[abc"
+        # credential instead of leaking it (and never raises in a handler).
+        # #2987 review: `[abc` is not a recognised-safe target, so the whole
+        # value fails closed rather than echoing the tail.
+        assert _mask_uri_userinfo("docker://user:pw@[abc") == \
+            "<uri-redacted-unrecognised-shape>"
+
+    def test_mask_uri_userinfo_post_at_remainder_fails_closed(self):
+        """#2987 review: the text after the LAST '@' must not be echoed when it
+        is credential-shaped, and a later `scheme://` must not ride through.
+
+        Class B: (1) `rediss://u:pw@host:S3nPw` and
+        `rediss://u:pw@h:1 rediss://:S3nPw` print the password before the fix
+        — the post-'@' remainder was appended verbatim (`i = len(line)`) and
+        never judged, while the SAME region with no '@' fails closed one branch
+        up; (2) reachable: `_mask_uri_userinfo` is the masker every CLI error
+        path uses, and the value is an operator-supplied `TORTOISE_DB_URI`.
+
+        ANTI-VACUOUS: a well-formed masked URI must keep its target — otherwise
+        this rule would fail closed on every normal target.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # credential-shaped post-'@' tail: same treatment as the no-'@' form
+        assert _mask_uri_userinfo("rediss://u:pw@host:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        assert _mask_uri_userinfo("rediss://:pw@:S3nPw:6379") == \
+            "<uri-redacted-unrecognised-shape>"
+        # a SECOND URI after a masked one, on the same line
+        assert _mask_uri_userinfo("rediss://u:pw@h:1 rediss://:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        assert _mask_uri_userinfo("rediss://u:pw@h:1 rediss://user:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # ANTI-VACUOUS: a recognised-safe target still prints, masked, intact
+        assert _mask_uri_userinfo("bolt://user:pw@host:7687/g") == \
+            "bolt://:***@host:7687/g"
+        assert _mask_uri_userinfo("rediss://u:pw@[::1]:6379/db") == \
+            "rediss://:***@[::1]:6379/db"
+        assert _mask_uri_userinfo("docker://:pw@host:7687/g") == \
+            "docker://:***@host:7687/g"
 
     def test_mask_uri_userinfo_delimiter_inside_password_fails_closed(self):
         """#2983: a literal '?'/'#' inside a password (RFC-invalid — it
@@ -341,6 +422,70 @@ class TestDoctorPath:
             "rediss://host1:1/db and rediss://u:p@host2:2/db") == \
             "rediss://:***@host2:2/db"
 
+    def test_mask_uri_userinfo_scheme_with_password_and_no_at_fails_closed(self):
+        """#2987: a value that lost its '@host' tail still carries a password.
+
+        Class B: (1) `rediss://:T4ilPw` and `rediss://user:T4ilPw` make this
+        fail — with no '@' the last-'@' boundary finds nothing and the value
+        passed through verbatim, so the password was printed; (2) reachable:
+        the CLI prints `_mask_uri_userinfo(target)` / `_mask_uri_userinfo(str(e))`
+        for a bad target (doctor, init), and an operator-supplied target may be
+        any bytes.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # the empty-user form: `rediss://:pw@host` with the '@host' dropped
+        assert _mask_uri_userinfo("rediss://:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # a non-empty user whose 'password' is not a port (ports are numeric)
+        assert _mask_uri_userinfo("rediss://user:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # the SAME class hidden inside an error message: only the URI is
+        # replaced, so the prose stays diagnosable
+        assert _mask_uri_userinfo("Relative DB path 'rediss://:T4ilPw' rejected") == \
+            "Relative DB path 'rediss://<uri-redacted-unrecognised-shape>' rejected"
+        # ANTI-VACUOUS: a password-less host:port (numeric after the last ':')
+        # is not credential-shaped and must keep printing unchanged — otherwise
+        # this rule would fail closed on every normal target.
+        assert _mask_uri_userinfo("rediss://r-example.host.cloud:50317") == \
+            "rediss://r-example.host.cloud:50317"
+        assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
+            "docker://127.0.0.1:7687/tortoise"
+
+    def test_mask_uri_userinfo_malformed_scheme_and_schemeless_fail_closed(self):
+        """#2987 cycle-2: an invalid/empty scheme is "no scheme", and a
+        scheme-less continuation line fails closed on any '@'.
+
+        Class B: (1) `1://user:T4ilPw` and `rediss://user:\npw@host` make this
+        fail — the first was walked past as an invalid scheme and echoed, the
+        second's `pw@host` continuation was echoed because only a colon-LED
+        scheme-less line was checked; (2) both are reachable through
+        `TORTOISE_DB_URI` / the CLI error paths, which print through this helper.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        for value in (
+            "1://user:T4ilPw",
+            "://user:T4ilPw",
+            "://:T4ilPw",
+            "+://user:T4ilPw",
+            "rediss://user:\nS3ntinelpw@host",
+            "rediss://u:pw@h:1\nuser:T4ilPw@host",
+            "  rediss://:T4ilPw",
+            "rediss://[::1]:6379:S3n",
+            "rediss://[::1]:6abc",
+            # an '@' BEFORE the scheme / a non-ASCII scheme or port
+            "T4ilPw@rediss://host:6379",
+            "user:T4ilPw@rediss://:S3ntinel",
+            "user:T4ilPw@rediss://user2:T4ilPw@host:6379",
+            "user:T4ilPw@1://host:6379",
+            "r\u00e9diss://user:T4ilPw",
+            "rediss://[::1]:\u0660",
+        ):
+            out = _mask_uri_userinfo(value)
+            assert "T4ilPw" not in out and "S3n" not in out, \
+                f"leaked {value!r} -> {out!r}"
+
     def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
         """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.
 
@@ -397,16 +542,54 @@ class TestDoctorPath:
                 return _FakeGraph()
 
         monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59997/tenant-alpha"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59997/test_doctor_tenant"])
         out = capsys.readouterr().out
 
         assert rc == 1  # health check still fails against the dead port
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
-        assert "tenant-alpha" in probe  # probe reports the URI path's graph
+        assert "test_doctor_tenant" in probe  # probe reports the URI path's graph
         # Every select_graph — probe AND Step 3's from_uri projection — used
         # the URI path's graph; none created a stray "tortoise" graph.
-        assert set(selected) == {"tenant-alpha"}
+        assert set(selected) == {"test_doctor_tenant"}
         assert "tortoise" not in selected
+
+    def test_doctor_db_uri_probe_uses_decoded_credentials(
+            self, clear_db_env, monkeypatch, capsys):
+        """#3039: the Step 2 probe must percent-DECODE URI userinfo — urlparse
+        does not, so a raw read forwards a literal %XX and the probe reports a
+        false auth failure. Pin the (username, password) it hands FalkorDB."""
+        import falkordb as _falkordb
+
+        calls: list[dict] = []
+
+        class _FakeGraph:
+            def query(self, q):
+                return None
+
+        class _FakeFalkorDB:
+            def __init__(self, *a, **k):
+                calls.append(
+                    {key: k.get(key) for key in ("username", "password")}
+                )
+
+            def select_graph(self, name):
+                return _FakeGraph()
+
+        monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
+        # ad%6Din -> admin ; p%40ss -> p@ss
+        rc = _run_doctor([
+            "--db", "docker://ad%6Din:p%40ss@127.0.0.1:59997/test_doctor_tenant"])
+        capsys.readouterr()
+
+        assert rc == 1  # dead port — both probe and Step 3 still construct
+        # Step 2 (the probe under test) is followed by Step 3's from_uri
+        # construction, so a single mutable dict would be overwritten by the
+        # later, already-decoded call. Assert on EVERY construction:
+        # reverting the probe to raw `parsed.username` must red this test.
+        assert calls, "doctor constructed no FalkorDB client"
+        assert all(
+            c == {"username": "admin", "password": "p@ss"} for c in calls
+        ), calls
 
     def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
         """#720 conf 78: embedded target → probe reports embedded mode
@@ -446,7 +629,7 @@ class TestDoctorDefaultResolution:
 
     def test_no_flags_uses_env_uri(self, monkeypatch, clear_db_env, capsys):
         """TORTOISE_DB_URI env wins over embedded defaults."""
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:59999/tortoise")
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:59999/test_doctor")
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
@@ -520,13 +703,135 @@ class TestDoctorPreInit:
         # probe skipped → the missing dir tree was NOT created
         assert not os.path.exists(os.path.dirname(db_path))
 
+    def test_a_legacy_collision_does_not_recommend_a_refusing_command(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The hint's own invariant: never name a command that REFUSES.
+
+        `install_capture` refuses when the legacy extension is already disabled
+        at `.tortoise-capture.disabled` (it will not overwrite the previous
+        backup).  The detector cannot report that collision — its legacy blind
+        spot is #3713 — so in that state the only finding is `stale-artifact`,
+        no manual-fix kind is present, and the hint used to print
+        `tortoise install pi`: a command that then refuses.
+
+        Mutation: drop the `_legacy_collision` arm in `_cmd_doctor` — this REDs
+        on the assertion that the refusing command is absent.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        res = _ci.install_capture("pi", home=tmp_path)
+        assert res.ok, res.error
+        root = _ci.pi_home(tmp_path)
+        installed = root / _pi_seam_name()
+        installed.write_text("// tortoise-hook-version: 0\n// body\n",
+                             encoding="utf-8")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()      # the legacy directory
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()    # its backup name, taken
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "tortoise install pi" not in out, (
+            "the hint recommends a command that refuses in this state")
+        # Neither of the installer-shaped repairs may be named: in this state
+        # `tortoise install pi` AND `hooks upgrade --harness pi` both call the
+        # same installer and both refuse.
+        assert "hooks upgrade" not in out, (
+            "the hint recommends an upgrade that refuses in this state")
+        assert _ci.PI_DISABLED_DIRNAME in out, out
+        # The replacement the hint names must itself accept `--harness pi`.
+        # It does NOT pin WHICH read-only surface is named: `hooks status
+        # --harness pi` also accepts the harness since #5351, so the only
+        # invariant left here is that the hint is not a refusal.
+        assert _session_verify_accepts_pi_harness()
+
+    def test_a_symlinked_legacy_entry_is_not_treated_as_a_collision(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The guard must mirror the installer's own refusal condition.
+
+        `_install_pi` unlinking a SYMLINKED legacy entry never reaches its
+        refusal — only a real legacy DIRECTORY whose backup name is taken does.
+        A guard keyed on `.exists()` fires on the symlink case too, so doctor
+        withholds the command that actually works.
+
+        Mutation: change `.is_dir() and not .is_symlink()` back to `.exists()` —
+        this REDs, because the working `tortoise install pi` disappears.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        assert _ci.install_capture("pi", home=tmp_path).ok
+        root = _ci.pi_home(tmp_path)
+        (root / _pi_seam_name()).write_text("// tortoise-hook-version: 0\n",
+                                            encoding="utf-8")
+        target = tmp_path / "checkout"
+        target.mkdir()
+        (root / _ci.LEGACY_PI_DIRNAME).symlink_to(
+            target, target_is_directory=True)
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "move one aside" not in out, (
+            "a symlinked legacy entry is repaired by the installer, so the "
+            "working command must still be offered")
+
+    def test_a_memory_error_is_not_reported_as_an_unavailable_check(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Resource exhaustion must not be laundered into "check unavailable".
+
+        `MemoryError` is an `Exception`, so the per-harness
+        `except MemoryError: raise` is re-caught by the handler around the
+        whole block — a simulated exhaustion used to print
+        `check unavailable: simulated exhaustion`, abort the harness loop, and
+        leave rc at 0, contradicting the comment that says exhaustion is not a
+        refusal.
+
+        Mutation: remove the outer `except MemoryError: raise` — this REDs,
+        because doctor then prints the laundered warning instead of raising.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        from tortoise import hook_install as _hi
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _ci.install_capture("pi", home=tmp_path).ok
+
+        def _boom(*_a, **_k):
+            raise MemoryError("simulated exhaustion")
+
+        monkeypatch.setattr(_hi, "detect_artifact_install", _boom)
+        with pytest.raises(MemoryError):
+            _run_doctor([])
+
     def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """The canonical first-run scenario: no flags, no env, no ~/.tortoise
         → doctor reports 'not set up yet — run tortoise init' (rc 0) instead
-        of the raw embedded-redis FATAL CONFIG error."""
+        of the raw embedded-redis FATAL CONFIG error.
+
+        HOME is isolated because "fresh machine" includes the HOME-scoped
+        capture seams: since #4680 doctor grades the installed Pi extension's
+        GENERATION, so an ambient stale seam under the developer's real HOME
+        would legitimately FAIL this rc-0 assertion.
+        """
         from tortoise import config as _config
         canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
         monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         rc = _run_doctor([])
         out = capsys.readouterr().out
@@ -615,12 +920,13 @@ class TestDoctorImportHygiene:
 
 
 class TestDoctorSessionExtraction:
-    """#1197: doctor surfaces the /v1/sessions LLM-provider gate (#822).
+    """#1197: doctor surfaces the /v1/sessions LLM-provider state (#822).
 
-    Capture fails closed (503) when no provider key is configured — the beta
-    testers' most-critical feature. Doctor must report the provider/model
-    when configured, and FAIL in hosted mode (FLY_APP_NAME) when the key is
-    missing or the test seam is left on, so ops catch it before testers do.
+    Captures are STORED but the LLM extraction is skipped when no provider key
+    is configured (#3892) — extraction is the beta testers' most-critical
+    feature. Doctor must report the provider/model when configured, and FAIL
+    in hosted mode (FLY_APP_NAME) when the key is missing or the test seam is
+    left on, so ops catch it before testers do.
     """
 
     _LLM_ENV = (
@@ -640,15 +946,16 @@ class TestDoctorSessionExtraction:
         return next(line for line in out.splitlines() if "Session extraction" in line)
 
     def test_no_provider_local_warns(self, clean_llm_env, capsys):
-        """No key + not hosted → ⚠️ warning (capture fails closed; rc not
-        driven by this check). Embedded DB so the only possible ❌ is mine."""
+        """No key + not hosted → ⚠️ warning (captures are stored, extraction
+        skipped; rc not driven by this check). Embedded DB so the only
+        possible ❌ is mine."""
         monkeypatch, db_path = clean_llm_env  # noqa: RUF059
         rc = _run_doctor(["--path", db_path])
         out = capsys.readouterr().out
 
         line = self._extraction_line(out)
         assert "⚠️" in line
-        assert "503" in line and "no LLM provider key" in line
+        assert "STORED" in line and "no LLM provider key" in line
         assert rc in (0, 1)
 
     def test_provider_key_reports_provider(self, clean_llm_env, capsys):
@@ -679,7 +986,8 @@ class TestDoctorSessionExtraction:
 
     def test_hosted_no_provider_fails(self, clean_llm_env, capsys):
         """Hosted mode (FLY_APP_NAME) + no provider key → ❌ + rc 1 — the
-        flagship beta feature cannot work; ops must not ship this."""
+        flagship extraction feature cannot work; ops must not ship this. The
+        copy is truthful: captures are STORED, extraction is skipped."""
         monkeypatch, db_path = clean_llm_env
         monkeypatch.setenv("FLY_APP_NAME", "tortoise-api")
         rc = _run_doctor(["--path", db_path])
@@ -687,7 +995,7 @@ class TestDoctorSessionExtraction:
 
         line = self._extraction_line(out)
         assert "❌" in line
-        assert "503" in line
+        assert "STORED" in line and "skipped" in line
         assert rc == 1
 
     def test_hosted_mock_seam_fails(self, clean_llm_env, capsys):
@@ -819,3 +1127,329 @@ class TestOnboardDoctorCall:
         assert rc == 0
         assert "Step 5/5: Health check" in out
         assert "'Namespace' object has no attribute" not in out
+
+
+class TestDoctorPiSeamFreshness:
+    """#4680: `doctor` must grade the Pi seam's GENERATION, not its presence.
+
+    Pi is the one wizard-offered harness with no `HarnessLayout`, so step 6's
+    "Pi (extension found)" used to be the only Pi row — a stale or
+    markerless seam exited 0 with no freshness row at all (the review-P1
+    finding). Step 7 now drives both seam classes through
+    `contract_version_for` / `detect_artifact_install`.
+
+    `--path relative.db` pins an invalid DB target so the graph checks fail
+    fast and no embedded server is started; steps 6/7 still run.
+    """
+
+    @staticmethod
+    def _seam(home, text: str):
+        root = home / ".pi" / "agent" / "extensions"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / _pi_seam_name()
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _pi_row(out: str) -> str:
+        return next(line for line in out.splitlines() if "Capture hooks (pi)" in line)
+
+    def test_doctor_fails_a_stale_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A markerless (pre-contract) Pi seam is a FAIL row naming the repair.
+
+        Mutation: drop "pi" from step 7's loop — the green "Pi (extension
+        found)" row stands alone and this REDs (no ❌ row, rc 0 for this seam).
+        """
+        home = tmp_path / "home"
+        from tortoise import hook_install
+        shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source.read_text(
+            encoding="utf-8")
+        # The body is the SHIPPED seam with its marker stripped, so it is ours
+        # by signature but declares no generation — the pre-contract shape.
+        self._seam(home, "\n".join(
+            line for line in shipped.splitlines()
+            if not line.startswith("// tortoise-hook-version:")) + "\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "unversioned-artifact" in row, row
+        assert "tortoise install pi" in row, row
+
+    def test_doctor_passes_a_current_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The shipped bytes installed verbatim are "current" — doctor must not
+        nag a healthy Pi install (the failure mode that would train users to
+        ignore the row)."""
+        from tortoise import hook_install
+        home = tmp_path / "home"
+        self._seam(home, hook_install.ARTIFACT_CONTRACTS["pi"].source
+                   .read_text(encoding="utf-8"))
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "✅" in row, row
+        assert "install current" in row, row
+
+    def test_doctor_recommends_the_installer_for_a_repairable_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A stale-but-repairable Pi seam names `tortoise install pi`, the
+        command that actually fixes it (the counterpart to the foreign case
+        below — without this the hint could be silent for everything)."""
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// body\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "run `tortoise install pi` to repair" in row, row
+        assert "needs a manual fix" not in row, row
+
+    def test_doctor_never_recommends_a_pi_repair_that_would_refuse(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """#4680 review: `tortoise install pi` REFUSES a foreign artifact (it
+        will not clobber a file it cannot claim), so doctor must print the
+        finding's manual instruction instead of the hint that says to run it
+        unconditionally.  The detail is allowed to name the command as the
+        step AFTER moving the file aside — that is the installer's own
+        prescribed path.
+
+        Mutation: drop the `is_manual_fix` gate (always append "run `tortoise
+        install <harness>` to repair") — this REDs on a foreign artifact.
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// some other product extension\nexport default 1;\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi` to repair" not in row, (
+            "recommending a command that refuses is worse than no hint")
+
+    def test_doctor_never_recommends_the_installer_for_a_symlinked_root(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A symlinked install ROOT makes `tortoise install pi` refuse (it will
+        not write through a symlink), so doctor must not recommend it.
+
+        Mutation: compute the manual set over BLOCKING findings only — the root
+        note is non-blocking, so the hint flips to "run `tortoise install pi`"
+        and this REDs.
+        """
+        home = tmp_path / "home"
+        real = home / "checkout-extensions"
+        real.mkdir(parents=True)
+        (home / ".pi" / "agent").mkdir(parents=True)
+        root = home / ".pi" / "agent" / "extensions"
+        root.symlink_to(real)
+        (real / "tortoise-capture.ts").write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "symlinked-install" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, (
+            "the installer refuses a symlinked install root, so recommending "
+            "it is wrong")
+        # The withholding covers the finding's OWN detail too, whose phrasing
+        # is "reinstall with `tortoise install pi`" — a needle on the HINT's
+        # "run `...`" wording passes straight over it, which is how this
+        # refusal survived the first pass (#5351 round 3).
+        assert "reinstall with" not in row, (
+            "the detail embeds the same refusing command as the hint")
+
+    def test_doctor_never_recommends_the_installer_for_an_out_of_home_symlink(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A leaf symlink whose target escapes $HOME is refused by the
+        installer; the refusal is expressed in the NON-blocking symlink note,
+        so the hint must consult all findings.  (Peer of the root case above.)
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        outside = tmp_path / "outside.ts"
+        outside.write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        installed = (home / ".pi" / "agent" / "extensions"
+                     / _pi_seam_name())
+        installed.unlink()
+        installed.symlink_to(outside)
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, row
+        assert "reinstall with" not in row, (
+            "a manual kind with no legacy collision must withhold the detail's "
+            "unconditional `reinstall with `tortoise install pi`` too")
+
+    def test_doctor_names_the_collision_beside_a_manual_kind(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A MANUAL step does not clear the legacy collision, so naming only the
+        manual obstacle promises a repair that still refuses.
+
+        `foreign-artifact` is BOTH the first blocking finding and a manual kind
+        (it is in `MANUAL_FIX_KINDS`), so the manual arm selects the hint and
+        the `elif` dropped the collision from the row entirely.  The row must
+        therefore name BOTH obstacles; and because the manual kind's detail is
+        a CONDITIONAL two-step whose first step is the instruction the user
+        needs, the detail stays — the collision sentence ahead of it is the
+        counter-signal for its second step.  (Withholding it was tried and
+        reverted: it deletes "move it aside", and `session verify` refuses
+        before printing any finding when no API key resolves.)
+
+        Mutation: restore the `elif` (drop the collision append) — the
+        collision name disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        self._seam(home, "// some other product's extension\n")
+        kinds = {f.kind for f in detect_artifact_install(
+            home / ".pi" / "agent" / "extensions", "pi")}
+        assert kinds == {"foreign-artifact"}, (
+            "the fixture must read as FOREIGN (a manual kind) and nothing "
+            f"else, or this test is about a different state: {kinds}")
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert _ci.PI_DISABLED_DIRNAME in row, (
+            "the collision outlives any manual step, so it must be named: "
+            + row)
+        assert "move it aside, then re-run `tortoise install pi`" in row, (
+            "a MANUAL kind's detail is the instruction, not a bare command, "
+            "so the row keeps it: " + row)
+
+    def test_doctor_keeps_an_instruction_the_installer_is_not_part_of(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The withholding must key on the DETAIL naming the installer, not on
+        the existence of a collision.
+
+        `not-readable` is a manual kind whose detail is `chmod it so the seam
+        can load` — the collision has nothing to do with it, and the installer
+        is not the remedy.  A collision-arm rule (tried in review round 5)
+        withheld it and left the row with a pointer that does not always
+        recover the text.
+
+        Mutation: withhold on the collision alone (`_withhold = layout is None
+        and bool(_legacy_obstacle) …`) — `chmod it` disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        home = tmp_path / "home"
+        seam = self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        seam.chmod(0o000)
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "chmod it so the seam can load" in row, (
+            "the collision does not make `chmod` refuse, so the instruction "
+            "must survive: " + row)
+
+    def test_doctor_keeps_a_non_manual_detail_that_names_no_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A BLOCKING, non-manual kind whose detail carries no command must
+        keep its detail: it names no repair the installer could refuse.
+
+        `modified-artifact` is exactly that ("marker matches … but its bytes
+        differ from the shipped seam"), and the manual-kind exemption does not
+        cover it, so only the content half of the predicate saves it.  The
+        collision is present, so the seam IS unrepairable — the case a
+        kind-and-state rule withholds.
+
+        Mutation: drop the content guard from `_artifact_detail_would_refuse`
+        (keep the `unrepairable`/`blocking`/non-manual tests) — `bytes differ`
+        disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, (
+            "the fixture must report exactly `modified-artifact` (blocking, "
+            f"non-manual, command-free), or this is another state: {kinds}")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "bytes differ" in row, (
+            "no installer command is embedded, so nothing refuses — the "
+            "detail must survive: " + row)
+
+    def test_doctor_keeps_a_command_free_detail_when_the_path_looks_like_a_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The predicate matches a CLAUSE, not the bare command token.
+
+        Every artifact detail interpolates the install PATH, and backticks are
+        legal filename characters — so a $HOME containing the literal
+        `` `tortoise install pi` `` makes the token appear in a detail that
+        names no command at all.  A caller testing for the token alone withholds
+        `bytes differ from the shipped seam` there and leaves the pointer in its
+        place; the clause the detector actually writes does not occur in a path
+        (`hook_install.ARTIFACT_INSTALLER_CLAUSES`).
+
+        Mutation: match the bare token (`f"`tortoise install {harness}`" in
+        detail`) — this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "`tortoise install pi`" / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, kinds
+        assert "`tortoise install pi`" in str(seam), (
+            "the fixture's PATH must carry the bare token, or the mutation "
+            "this test pins is not exercised")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "bytes differ" in row, (
+            "the path merely LOOKS like a command; the detail names none, so "
+            "it must survive: " + row)

@@ -6,7 +6,7 @@ GET/DELETE/PATCH) were untested. Revenue gates (402/409) and the member-role
 invite path (#743) could ship broken with green CI.
 
 Covers, on the registry (selfhost) path:
-- 402 free/solo-tier gate (invites require the Pro or Team tier, #1875)
+- 402 free/solo-tier gate (invites require the Builder or Team tier, #1875)
 - 402 pro capacity gate (active members + pending invitations < 2, #1875)
 - 409 duplicate pending invitation
 - 422 validation (email, role)
@@ -151,12 +151,12 @@ def _seed_team_with_owner(reg, org_id: str, tier: str = "team",
 
 class TestInviteCreate:
     def test_free_tier_402(self, client, reg):
-        """Revenue gate: invites require the Pro or Team tier (#1875)."""
+        """Revenue gate: invites require the Builder or Team tier (#1875)."""
         _seed_team_with_owner(reg, "team-free", tier="free")
         r = client.post("/v1/invites",
                         json={"org_id": "team-free", "email": "bob@example.com"})
         assert r.status_code == 402
-        assert "Pro or Team tier" in r.json()["detail"]
+        assert "Builder or Team tier" in r.json()["detail"]
 
     def test_solo_tier_402(self, client, reg):
         """#1875: Solo (1 user) is also upgrade-gated."""
@@ -164,7 +164,7 @@ class TestInviteCreate:
         r = client.post("/v1/invites",
                         json={"org_id": "team-solo", "email": "bob@example.com"})
         assert r.status_code == 402
-        assert "Pro or Team tier" in r.json()["detail"]
+        assert "Builder or Team tier" in r.json()["detail"]
 
     def test_pro_tier_one_invite_allowed_then_capacity(self, client, reg):
         """#1875: Pro (max 2 users) — the owner + 1 invite fit; a second

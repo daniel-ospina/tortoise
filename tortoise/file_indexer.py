@@ -22,16 +22,32 @@ pipeline consumes (plan §5.1 component boundary; the #280/#330 ``_FM_RE`` /
     percent-encoding, corpus_name single-encode, realpath dedup and escape
     rejection (§4.1/§4.2). SHARED with #909 (the shared identity contract,
     §4.6 point 1).
+  - ``derive_session_source_url`` — the CANONICAL session-Source identity for
+    the hosted commit path (#4005): ``session:<session_id>``, the same url the
+    capture path materializes, the projection stub mints and
+    ``delete_session``/the orphan sweep delete — so capture, commit and delete
+    converge on ONE ``:Source``. Deliberately NOT under the ``corpus://``
+    authority, which stays reserved for ``derive_source_url`` (a session id
+    can never alias a corpus name).
+  - ``provenance_basename`` — the ONE basename primitive shared by Layer-1
+    (``commit_schema``) and the writers (``hosted_api``): splits on BOTH path
+    separators (``os.path.basename`` is POSIX-only) and returns ``""`` for a
+    basename-less path so Layer-1 can 422 it before any write (#4005).
+  - ``derive_source_content_hash`` — the raw-integrity anchor (#4005): sha256
+    (``hash_text``) of the raw's CRLF-normalized text, ``""`` when the raw is
+    absent. NEVER a hash of the identity url.
   - ``derive_session_id`` / ``derive_meeting_event_id`` / ``derive_document_id``
     — event/document identity rules (§4.2), incl. the derived-id collision
     rule for meetings.
   - ``classify_file`` + ``CLASSIFIER_TO_SOURCE_KIND`` + ``source_kind_for_classifier``
     — deterministic classification precedence and the classify→sourceKind
     mapping (§6.2).
-  - Import-time sourceKind registration (§4.4): ``agentSession`` (ONTOLOGY
-    v3.6 #6 value — snake ``agent_session`` RETIRED as a registry value) and
-    ``meeting_summary``, both NEUTRAL. ``document`` is already registered in
-    ``SOURCE_KIND_DEFAULTS`` and is NOT re-registered here (T2-merge note).
+  - sourceKind registry (§4.4): ``agentSession`` (ONTOLOGY v3.6 #6 value —
+    snake ``agent_session`` RETIRED as a registry value), ``meeting_summary``,
+    ``meeting_transcript`` and ``meeting_minutes`` are registered NEUTRAL in
+    the canonical ``source_credibility.SOURCE_KIND_DEFAULTS`` (NOT here — the
+    registry owns them so every consumer sees the same set regardless of
+    import order). ``document`` is likewise registry-owned.
 
 PURITY: this module imports no graph/SDK code — stdlib + the pure
 ``source_credibility`` registry only. Consumers (sdk.py, session_indexer,
@@ -54,15 +70,19 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: UP035
 from urllib.parse import quote
 
-from .source_credibility import SOURCE_KIND_DEFAULTS, register_source_kind_default
+from .source_credibility import SOURCE_KIND_DEFAULTS
 
-# ── sourceKind registry registration (§4.4) — import-time, idempotent ───────
+# ── sourceKind registry (§4.4) ─────────────────────────────────────────────
 # Sessions/meetings/docs are first-hand internal operational captures —
-# outside the research-evidence tier hierarchy — so NEUTRAL (None) stands
-# (precedent: every comparable operational kind in SOURCE_KIND_DEFAULTS is
-# registered NEUTRAL). ``document`` is already registered and NOT re-registered.
-register_source_kind_default("agentSession", None)     # ONTOLOGY v3.6 #6 value
-register_source_kind_default("meeting_summary", None)  # §4.4
+# outside the research-evidence tier hierarchy — so they register NEUTRAL
+# (None). The registrations live in the CANONICAL registry
+# (``source_credibility.SOURCE_KIND_DEFAULTS``: agentSession, meeting_summary,
+# meeting_transcript, meeting_minutes, document) rather than in an import-time
+# block here: file_indexer-import-time registration made `sourceKind` validity
+# depend on whether this module had been imported yet, so pack validation
+# disagreed with itself across processes (#2726 round-2 review). Consumers
+# (sdk.py, session_indexer, ingest.py, mining.py) import FROM here; this module
+# only READS the registry (source_kind_for_classifier's fail-loud check).
 
 # ── Canonical frontmatter boundary ─────────────────────────────────────────
 # A file starting ``---sessionId: foo\n---`` (no newline after the opening
@@ -217,9 +237,103 @@ def derive_source_url(
     rel = _resolve_rel_path(file_path, corpus_root)
     if corpus_name is None:
         corpus_name = Path(os.path.realpath(str(corpus_root))).name
+    return _corpus_permalink(corpus_name, rel)
+
+
+def _corpus_permalink(corpus_name: str, rel: Path) -> str:
+    """The single encoding primitive shared by every ``corpus://`` url.
+
+    Per-segment ``quote(seg, safe="")``, segments joined with ``/``;
+    ``corpus_name`` encoded EXACTLY ONCE (single-encode pin, see
+    ``derive_source_url``). Pinned here so a second permalink flavour can
+    never drift into a second format (the #300/#330 drift class).
+    """
     name_enc = quote(str(corpus_name), safe="")
     seg_enc = "/".join(quote(seg, safe="") for seg in rel.parts)
     return f"corpus://{name_enc}/{seg_enc}"
+
+
+def provenance_basename(path: str | None) -> str:
+    """The ONE basename primitive shared by Layer-1 and the write paths (W-7).
+
+    ``os.path.basename`` splits on ``/`` only, so a Windows-style
+    ``provenance_refs[].path`` would leak the whole local path into the graph
+    identity; this splits on BOTH separators and strips trailing ones. Returns
+    ``""`` when the path carries no basename component (``""``/``"/"``/
+    ``"."``/``".."``/``"a/."``) — Layer-1 rejects that with a 422 (#4005)
+    rather than letting the writer mint a basename-less ``Source.url``.
+
+    Layer-1 (``commit_schema``) and the hosted writer (``hosted_api``) MUST
+    both derive the basename through THIS function — the two used to disagree
+    on ``"."``/``"a/."`` (``Path(...).name`` vs ``os.path.basename``), so a
+    Layer-1-accepted payload fell through the writer's map and minted a
+    bare-basename Source (#4005 review P2).
+    """
+    raw = str(path or "").replace("\\", "/")
+    while raw.endswith("/"):
+        raw = raw[:-1]
+    base = raw.rsplit("/", 1)[-1]
+    if base in ("", ".", ".."):
+        return ""
+    return base
+
+
+def derive_session_source_url(session_id: str) -> str:
+    """Canonical session-Source identity: ``session:<session_id>`` (#4005).
+
+    ONTOLOGY §4.6 registers ``session:<id>`` as THE session-Source url (with
+    ``sourceKind: agentSession``). It is the SAME identity the capture path
+    materializes (``sdk._materialize_session_source``), the replay/projection
+    stub mints (``projection.edges._mint_source_stub``) and ``delete_session``
+    / the capture orphan sweep delete — so capture, commit and delete converge
+    on ONE ``:Source``. The pre-fix ``os.path.basename(ref.path)`` identity
+    collided two machines' ``session.md`` onto one node and was orphaned on
+    delete.
+
+    Deliberately NOT under the ``corpus://`` authority that
+    ``derive_source_url`` owns: ``corpus://<name>/<rel-path>`` is keyed on a
+    corpus name, which a session id could otherwise alias
+    (``derive_source_url(root/notes/session.md, root/notes)`` ==
+    ``corpus://notes/session.md``), collapsing a session Source onto a
+    corpus-indexed one. ``session:`` can never be produced by
+    ``derive_source_url``, so the two derivations can never be equal.
+
+    The raw's W-7 basename is NOT part of the identity — it rides as a
+    property (``Source.sourcePath`` / ``Document.sourcePath``). Two different
+    session ids therefore derive DISTINCT urls even when their raw basenames
+    are identical. (Two machines that resolve the SAME session id — e.g. both
+    fall back to ``derive_session_id`` -> ``file_<stem>`` — still address one
+    Source; the session id is the client's stable handle, not the basename.)
+
+    Raises ``ValueError`` on a blank session id — a Source url is an identity
+    and may never be empty. Layer-1 rejects a blank ``session_id`` with a 422
+    BEFORE any write (#4005), so this is the fail-closed backstop.
+    """
+    sid = str(session_id or "")
+    if not sid.strip():
+        raise ValueError(
+            "derive_session_source_url: session_id is required (the session "
+            "Source identity is `session:<session_id>`)"
+        )
+    return f"session:{sid}"
+
+
+def derive_source_content_hash(raw_text: str | None) -> str:
+    """Integrity anchor of the RAW (not of the identity url) (#4005).
+
+    ``hash_text`` of the raw's CRLF-normalized text — the SAME anchor a
+    corpus-indexed Source carries (``compute_file_hash`` reads in universal-
+    newlines text mode, so it hashes the normalized buffer; this normalizes
+    the client's buffer the same way before hashing, or the two anchors would
+    diverge on a CRLF raw — the #330 non-convergence class). Returns ``""``
+    when the raw is absent or empty: an absent anchor is honest, where
+    ``content_hash(url)`` (the pre-fix value) could not detect that the raw
+    changed, exists, or is gone.
+    """
+    if not raw_text:
+        return ""
+    normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    return hash_text(normalized)
 
 
 # ── Event / Document identity (§4.2) ──────────────────────────────────────

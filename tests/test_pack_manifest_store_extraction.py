@@ -55,13 +55,13 @@ TEST_TEAM = {
     "legacy_full_access": True,
     "tier": "free",
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
-    "max_api_keys": 2, "max_sessions": 1000,
+    "max_api_keys": 2, "max_sessions": None,
 }
 TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
                # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
                "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
-               "max_points": 10000, "max_api_keys": 2, "max_sessions": 1000}
+               "max_points": 10000, "max_api_keys": 2, "max_sessions": None}
 
 # The #1935 fixture shape: a declared object kind WITHOUT a kindDef (the
 # tenant-kind parity surface — FIX M declared-kind acceptance).
@@ -202,7 +202,8 @@ class TestTenantMaster:
     def test_default_master_pack_kinds_byte_identity(self):
         """The default master's pack_kinds keyset + order match the shared
         catalog exactly (the PackRegistry over default_packs_dir() is the
-        independent oracle) — the PACK_NS parameterization cannot drift."""
+        independent oracle) — the pack_kinds derivation cannot drift (#5165:
+        it is the brief's own non-core key set, in brief order)."""
         from tortoise.extractor_v2 import build_master_list
         from tortoise.pack_registry import PackRegistry, default_packs_dir
         from tortoise.value_extractor import compile_value_brief

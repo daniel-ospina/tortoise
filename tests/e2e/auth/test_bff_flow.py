@@ -1,8 +1,16 @@
 """
 Clickthrough verification for the #3501 BFF session flow.
 
-Runs the REAL Cloudflare Pages runtime (`wrangler pages dev website`) against a
-mock Supabase that performs REAL ES256 signing and REAL PKCE S256 verification.
+Runs the REAL Cloudflare Pages runtime (`wrangler pages dev
+website/apps/dashboard`) against a mock Supabase that performs REAL ES256
+signing and REAL PKCE S256 verification.
+
+The BFF moved with #4054: the auth + `/api/*` Functions now live in the
+`tortoise-dashboard` Pages project rooted at `website/apps/dashboard`, so the
+dev server runs from there. The blog Functions stayed in `website/` (the
+`premise-labs` project); their admin-gate cases need a `website/`-rooted server
+and — because one `wrangler pages dev` cannot serve both `functions/` trees —
+they moved to `test_blog_purge_admin_gate.py`.
 
 Nothing here is stubbed in a way that would hide a defect:
   - JWKS/token signing is genuine (Node crypto, raw r||s conversion)
@@ -30,10 +38,13 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from bff_test_helpers import require_toolchain
+from bff_test_helpers import d1_sqlite_files, require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEBSITE_DIR = REPO_ROOT / "website"
+# The BFF moved to the DASHBOARD Pages project (issue #4054). A Pages project's
+# `functions/` directory must sit beside the site directory, so `wrangler pages
+# dev .` runs from `website/apps/dashboard` — not `website/`.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = Path(__file__).resolve().parent / "mock_supabase.mjs"
 
 # Ports deliberately outside the 8790-8801 range: a pre-existing
@@ -123,11 +134,11 @@ def stack():
 
     # MUST run from inside the site directory. `wrangler pages dev <dir>` from
     # the repo root does NOT discover `<dir>/functions` — it logs
-    # "No Functions. Shimming..." and every route 404s. That cost a full
-    # debugging cycle; it is why the cwd here is WEBSITE_DIR and the argv is ".".
+    # "No Functions. Shimming..." and every route 404s. With #4054 the Functions
+    # live under DASHBOARD_DIR, so that is the site directory and the argv is ".".
     app = Proc(
         [
-            wrangler, "pages", "dev", ".",
+            wrangler, "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -138,15 +149,12 @@ def stack():
         # that redirect off-box (403). Binding it locally also exercises the
         # config-not-literal change from SCOPE.md 6.
         "-b", f"APP_ORIGIN={APP}",
-        # Needed by the blog endpoints' config guard — otherwise requireAdmin is
-        # never reached and the legacy-bearer contract cannot be tested.
-        "-b", "SUPABASE_SERVICE_ROLE_KEY=mock-service-role",
         # Needed by /api/v1. Without it the proxy answers 503 proxy_not_configured
         # before the token path runs, so a data-path assertion would be testing the
         # config guard instead of the property.
         "-b", f"API_ORIGIN={MOCK_URL}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
     )
     try:
         _wait(APP_PORT)
@@ -220,6 +228,24 @@ class Jar:
             if c.name == name:
                 return c.value
         return None
+
+
+def _jar_call(j: Jar, req) -> tuple[int, str, str]:
+    """Send `req` through `j`'s cookie jar WITHOUT following the redirect.
+
+    Asserting a 302 needs the response itself; `j.opener` follows and would
+    report the landing page's 200. Returns (status, Location, Set-Cookie).
+    """
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(j.jar), _NoRedirect)
+    try:
+        with op.open(req, timeout=30) as r:
+            return r.status, _headers(r).get("Location", ""), _headers(r).get("Set-Cookie", "")
+    except urllib.error.HTTPError as e:
+        return e.code, _headers(e).get("Location", ""), _headers(e).get("Set-Cookie", "")
 
 
 def _headers(r) -> dict:
@@ -356,13 +382,153 @@ def test_callback_with_forged_flow_cookie_is_rejected(stack):
     assert "interstitial=1" in headers.get("Location", ""), headers.get("Location")
 
 
-def test_confirm_without_flow_is_interstitial(stack):
+def test_email_confirmation_completes_through_the_interstitial(stack):
+    """#3528: an emailed confirmation link must COMPLETE.
+
+    `type=email` (signup confirmation AND magic link) used to be answered
+    `302 /auth?interstitial=1` whenever the browser carried no `__Host-authflow`
+    cookie matching a live `auth_flows` row — and NO email flow establishes one:
+    `FLOW_COOKIE` is minted only by `/auth/start` (OAuth) and `/auth/link`
+    (identity linking), while `/auth/reset` and `/auth/resend` set
+    `redirect_to=/auth/confirm` without one. A link opened from an inbox was
+    therefore answered with a redirect nothing consumes, and the single-use
+    `token_hash` was dropped — email confirmation did not work at all.
+
+    It now has the same contract as recovery: the GET verifies the token,
+    renders the consent interstitial, and mints NOTHING; the CSRF-guarded POST
+    mints exactly one session. A confirmation is NOT a password reset, so it
+    lands on `/welcome`, never on the reset panel.
+    """
     j = Jar()
-    status, _, headers = j.get(
+    status, body, _ = j.get(
         f"{APP}/auth/confirm?token_hash=abc&type=email", follow=False
     )
-    assert status == 302
-    assert "interstitial=1" in headers.get("Location", ""), headers
+    assert status == 200, (
+        f"an email confirmation link must render the interstitial, got {status} {body[:200]}"
+    )
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert "password" not in body.lower(), (
+        "a confirmation link must not be presented as a password reset"
+    )
+    assert j.cookie("__Host-session") is None, (
+        "the confirm GET minted a session from the link alone — the fixation vector"
+    )
+    assert j.cookie("__Host-authflow"), (
+        "the interstitial must bind the pending confirmation to this browser"
+    )
+
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
+    req.add_header("Content-Type", "application/json")
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "/welcome" in location, f"confirmation must land on /welcome, got {location!r}"
+    assert "reset=1" not in location, f"a confirmation is not a reset: {location!r}"
+    assert j.cookie("__Host-session"), "the confirmed POST minted no session"
+
+
+def test_recovery_confirm_completes_through_the_interstitial(stack):
+    """#4104 review (cycle 2): recovery completes CROSS-DEVICE, WITHOUT minting
+    a session from the link alone.
+
+    The earlier shape exempted `type=recovery` from the class-8 `__Host-authflow`
+    binding and minted a session straight from the `token_hash`. That re-opened
+    the session-fixation vector: an attacker requests a reset for THEIR OWN
+    address, gets a genuine link, and a victim who clicks it has the ATTACKER's
+    session minted into their browser. The `token_hash` alone cannot stop that —
+    the attacker can always obtain one for their own account.
+
+    So the GET verifies the token, mints NOTHING, and renders an interstitial
+    naming the account; the POST (CSRF-guarded, bound to the pending record by
+    the `__Host-authflow` cookie the GET just set in THIS browser) is what mints
+    the session. Both hops happen in one browser, so cross-device still works:
+    the cookie is created by the GET, not required to pre-exist.
+    """
+    j = Jar()
+    status, body, _ = j.get(
+        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery", follow=False
+    )
+    assert status == 200, (
+        f"the recovery GET must render the consent interstitial, got {status} {body[:200]}"
+    )
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert j.cookie("__Host-session") is None, (
+        "the recovery GET minted a session from the link alone — the fixation vector"
+    )
+    assert j.cookie("__Host-authflow"), (
+        "the interstitial must bind the pending recovery to this browser"
+    )
+
+    # The interstitial's own Continue action: a JSON POST carrying the cookie.
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
+    req.add_header("Content-Type", "application/json")
+    # No-redirect opener that still carries the jar: the response to ASSERT is
+    # the 302 itself (a redirect-following opener swallows it and returns 200).
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "/welcome?reset=1" in location, (
+        f"a completed recovery must land on the reset panel, got {location!r}"
+    )
+    assert j.cookie("__Host-session"), (
+        "recovery did not mint a session — the reset panel is then unreachable"
+    )
+
+
+def test_recovery_confirm_replaces_a_stale_flow_cookie(stack):
+    """A leftover flow cookie from an aborted sign-in must not block recovery.
+
+    A stale `__Host-authflow` in the recovering browser is common; it must be
+    REPLACED by the pending recovery the GET creates, and the POST must then
+    complete — not be refused as an unbound flow.
+    """
+    j = Jar()
+    # Pre-seed the stale cookie in the jar, so the GET sees it and the POST
+    # would carry it if the GET had not replaced it.
+    j.jar.set_cookie(http.cookiejar.Cookie(
+        version=0, name="__Host-authflow", value="deadbeefdeadbeef",
+        port=None, port_specified=False, domain="127.0.0.1",
+        domain_specified=True, domain_initial_dot=False, path="/",
+        path_specified=True, secure=True, expires=None, discard=False,
+        comment=None, comment_url=None, rest={}, rfc2109=False,
+    ))
+
+    status, body, _ = j.get(
+        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery", follow=False
+    )
+    assert status == 200, f"a stale flow cookie must not block recovery, got {status}"
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert j.cookie("__Host-authflow") not in (None, "deadbeefdeadbeef"), (
+        "the stale __Host-authflow was not replaced by the pending recovery"
+    )
+
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
+    req.add_header("Content-Type", "application/json")
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "interstitial" not in location, (
+        f"recovery was treated as an unbound flow: {location!r}"
+    )
+    assert "/welcome?reset=1" in location, f"expected the reset panel, got {location!r}"
+    assert j.cookie("__Host-session"), (
+        "recovery with a stale flow cookie minted no session"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -420,88 +586,6 @@ def test_profile_lookup_failure_does_not_sign_the_user_out(stack):
     assert user.get("email") is None, "profile fields should be absent when the lookup failed"
 
 
-def test_legacy_bearer_provider_outage_is_503_not_401(stack):
-    """The legacy bearer path must not turn a provider outage into a sign-out.
-
-    This is the #3485 class on the LAST path still carrying it: `verifySession`
-    returned null for both "invalid token" and "provider down", and requireAdmin
-    answered 401 for both.
-    """
-    _fault(authUser=True)
-    try:
-        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-        req.add_header("Authorization", "Bearer legacy-token")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                status, body = r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            status, body = e.code, e.read().decode()
-    finally:
-        _fault(authUser=False)
-
-    assert status == 503, (
-        f"a provider outage on the bearer path must be 503, never 401 — got {status} {body}"
-    )
-
-
-def _blog_admin(user_id: str | None = None, clear: bool = False) -> dict:
-    """Grant or clear blog_admins membership on the mock."""
-    payload: dict = {}
-    if user_id:
-        payload["userId"] = user_id
-    if clear:
-        payload["clear"] = True
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(f"{MOCK_URL}/__mock/blog-admin", method="POST", data=data)
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode())
-
-
-def _purge_with_bearer() -> tuple[int, str]:
-    req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-    req.add_header("Authorization", "Bearer legacy-token")
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-
-
-def test_legacy_bearer_non_admin_is_401(stack):
-    """A genuinely non-admin bearer IS a refusal — the other side of the line.
-
-    Depends on the mock actually answering /rest/v1/blog_admins with an empty set.
-    Before that route existed this passed on a 404 for the wrong reason.
-    """
-    _blog_admin(clear=True)
-    status, body = _purge_with_bearer()
-    assert status == 401, f"a non-admin must be 401, got {status} {body}"
-
-
-def test_legacy_bearer_admin_is_accepted(stack):
-    """The ADMIN branch must be reachable — a 404 mock had made it untestable.
-
-    With membership granted, the request must get PAST the admin gate. It may then
-    fail for its own reasons (bad body), but it must not be refused as
-    unauthorized — which is the only thing that distinguishes the branch.
-    """
-    _blog_admin(user_id="user-123")
-    try:
-        status, body = _purge_with_bearer()
-    finally:
-        _blog_admin(clear=True)
-    # Assert the POST-gate status, not merely `!= 401`. `!= 401` also passes for
-    # 400/500/503, so a regression that answered 503 would keep this green.
-    assert status == 400, (
-        f"an ADMIN bearer must pass the admin gate and then fail on its own bad "
-        f"input (expected 400 invalid_slug), got {status} {body}"
-    )
-    assert json.loads(body).get("error") == "invalid_slug", body
-
-
 def test_signout_revokes_the_row_not_just_the_cookie(stack):
     """Sign-out must REVOKE server-side, not merely clear the cookie client-side.
 
@@ -515,7 +599,10 @@ def test_signout_revokes_the_row_not_just_the_cookie(stack):
     handle = j.cookie("__Host-session")
     assert handle, f"sign-in produced no session; hops={j.hops}"
 
-    req = urllib.request.Request(f"{APP}/api/session", method="POST")
+    req = urllib.request.Request(f"{APP}/api/session", method="POST", data=b"{}")
+    # The CSRF guard's first layer requires a JSON media type (415 otherwise) —
+    # the browser client sends it, so the replay must too.
+    req.add_header("Content-Type", "application/json")
     with j.opener.open(req, timeout=30) as r:
         assert r.status == 200
 
@@ -626,8 +713,13 @@ def test_malformed_cookie_does_not_500(stack):
     A bare `%` raises URIError inside decodeURIComponent, which escaped and turned
     every endpoint's careful 401/503 contract into a 500.
     """
-    for path in ("/api/session", "/api/v1/teams", "/welcome", "/blog/api/purge"):
-        req = urllib.request.Request(f"{APP}{path}", method="POST" if "purge" in path else "GET")
+    # `/blog/api/purge` is NOT served by this server — the blog Functions stayed
+    # in the `premise-labs` project (website/), so its malformed-cookie case
+    # lives in test_blog_purge_admin_gate.py against a website/-rooted server.
+    # Dropping it here would silently lose that route's coverage (a 404 is also
+    # `!= 500`), which is why it was moved rather than left to pass vacuously.
+    for path in ("/api/session", "/api/v1/teams", "/welcome"):
+        req = urllib.request.Request(f"{APP}{path}", method="GET")
         req.add_header("Cookie", "__Host-session=%")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -650,7 +742,7 @@ def test_unconfigured_provider_is_503_not_401(stack):
     provider configured: a not-configured result must be RETRYABLE, which is what
     routes it to 503 rather than 401.
     """
-    src = (REPO_ROOT / "website/functions/_shared/auth/supabase.ts").read_text(encoding="utf-8")
+    src = (DASHBOARD_DIR / "functions/_shared/auth/supabase.ts").read_text(encoding="utf-8")
     marker = 'error: "supabase not configured"'
     idx = src.index(marker)
     line = src[:idx].count("\n")
@@ -680,10 +772,9 @@ def test_dead_refresh_token_401s_consistently(stack):
         s1, _b1, _ = j.get(f"{APP}/api/session")
         # Clear the cached access token so the next call must refresh into the
         # dead-token path rather than serving from the D1 cache.
-        import glob
         import sqlite3
 
-        for db in glob.glob(str(WEBSITE_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+        for db in d1_sqlite_files(DASHBOARD_DIR):
             try:
                 con = sqlite3.connect(db)
                 con.execute(
@@ -703,42 +794,6 @@ def test_dead_refresh_token_401s_consistently(stack):
     )
 
 
-def test_dead_bff_cookie_does_not_fall_back_to_a_legacy_bearer(stack):
-    """A REVOKED BFF cookie must not resurrect a legacy bearer.
-
-    Cycle 2 narrowed the legacy fallback so it only applies when no BFF cookie was
-    sent at all. Without that guard, F15's "a password change revokes every
-    session" is false for any browser still holding a legacy token, because D1
-    revocation cannot reach a Supabase access token.
-
-    This test sends BOTH (dead cookie + bearer) and asserts the request is still
-    refused. Deleting the `presentedBffCookie` guard makes this fail: the bearer
-    would be accepted and the admin gate reached.
-    """
-
-    # Grant the mock user admin rights, so an ACCEPTED bearer gets past the gate
-    # and the two outcomes are distinguishable.
-    _blog_admin(user_id="user-123")
-    try:
-        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-        # A BFF cookie that is present but resolves to nothing (never issued).
-        req.add_header("Cookie", "__Host-session=deadbeefdeadbeef")
-        req.add_header("Authorization", "Bearer legacy-token")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                status, body = r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            status, body = e.code, e.read().decode()
-    finally:
-        _blog_admin(clear=True)
-
-    assert status == 401, (
-        f"a dead BFF cookie must NOT fall back to the legacy bearer, got {status} {body} "
-        "— if this passed the admin gate, F15 is false for legacy-token holders"
-    )
-
-
 def test_expired_session_is_401_on_both_endpoints(stack):
     """An EXPIRED session must be dead on the DATA path too, not just on /api/session.
 
@@ -752,7 +807,6 @@ def test_expired_session_is_401_on_both_endpoints(stack):
     Every other consumer enforces `expires_at`; this pins that the data path does
     too.
     """
-    import glob
     import sqlite3
 
     j = Jar()
@@ -762,7 +816,7 @@ def test_expired_session_is_401_on_both_endpoints(stack):
 
     # Force the row's TTL into the past.
     patched = 0
-    for db in glob.glob(str(WEBSITE_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+    for db in d1_sqlite_files(DASHBOARD_DIR):
         try:
             con = sqlite3.connect(db)
             cur = con.execute(

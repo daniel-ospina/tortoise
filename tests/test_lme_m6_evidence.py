@@ -1104,7 +1104,7 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
 
     team = {"org_id": "m6-test-team", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000}
+            "max_api_keys": 2, "max_sessions": None}
     # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
     # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
     # __init__ → deterministic anchor close → clear overrides at exit.

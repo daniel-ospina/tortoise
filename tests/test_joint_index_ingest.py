@@ -21,6 +21,7 @@ DIFFERENT sourceKind ('report') does NOT overwrite the index-created
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -38,6 +39,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _query(sdk, cypher: str, params: dict | None = None):

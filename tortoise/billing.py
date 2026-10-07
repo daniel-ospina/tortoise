@@ -37,12 +37,12 @@ __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
+    "subscription_period_bounds",
     "mirror_subscription", "reconcile_org",
 ]
 
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
-_MAX_SESSIONS = 1000  # flat across tiers (matches today's effective default)
 
 
 class BillingError(Exception):
@@ -455,12 +455,16 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
 
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
-    ``max_sessions`` is 1000 flat across tiers.
+    ``max_sessions`` is written as **NULL (unlimited)** for every tier: the
+    flat 1000 was an inherited code fallback, never a ratified cap (#4010 —
+    see the module comment in ``tortoise/quota.py``). Writing the NULL here
+    also CLEARS any stored cap on the next tier change — the data half of the
+    same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
 
     #771 review P1: Supabase mode PATCHes the orgs row (tier + the quota
     columns 0006 carries: max_users/max_graphs/ops_allowance/graph_size_cap;
-    max_api_keys/max_sessions fall back to pricing defaults in quota.py) —
-    the registry twin only for selfhost.
+    max_api_keys falls back to pricing and max_sessions is unlimited in
+    quota.py) — the registry twin only for selfhost.
     """
     from tortoise.pricing import tier_limits
 
@@ -491,9 +495,79 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
             "max_graphs": lim["max_graphs_per_team"],
             "max_api_keys": lim["max_api_keys"],
             "max_points": lim["max_graph_nodes"],
-            "max_sessions": _MAX_SESSIONS,
+            # #4010: unlimited for every tier — NULL, never a number.
+            "max_sessions": None,
         },
     )
+
+
+def _supabase_mode() -> bool:
+    """True when billing must use the Supabase control plane (#669).
+
+    The lazy import mirrors ``apply_limits``: a selfhost/minimal install
+    without ``supabase_control`` stays registry-only and never pays the import.
+    Explicit ``TORTOISE_CONTROL_PLANE=supabase`` with missing creds returns
+    True (fail-closed) — the seam's ``get_control_plane()`` then raises, so a
+    Supabase-only deployment can never silently fall back to the registry.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+    except ImportError:
+        return False
+    return is_supabase_enabled()
+
+
+def _subscription_items(sub: dict) -> list:
+    """A Stripe subscription's item rows, for either payload shape.
+
+    Stripe returns ``items`` as a ``{'data': [...]}`` envelope; fixtures and
+    older payloads use a flat list. Anything else (a scalar, a missing key,
+    ``None``) yields ``[]`` — NEVER an ``AttributeError``: this helper runs on
+    webhook payloads, so a malformed shape must not raise. (#4216 review: the
+    first version called ``.get`` on any truthy non-dict and 500'd the
+    checkout route, before the metadata-tier fallback could run.)
+    """
+    # Guard the SUBJECT as well as the value: a non-dict ``sub`` must yield
+    # ``[]`` too (``hosted_api._price_id_from`` passes the raw payload in).
+    items = sub.get("items") if isinstance(sub, dict) else None
+    if isinstance(items, list):
+        rows = items
+    elif isinstance(items, dict):
+        rows = items.get("data") or []
+    else:
+        rows = []
+    return rows if isinstance(rows, list) else []
+
+
+def subscription_period_bounds(sub: dict) -> tuple:
+    """The subscription's billing period bounds — ``(start, end)`` — or
+    ``(None, None)`` when the payload carries neither.
+
+    #4216: Stripe API ``2025-03-31.basil`` moved ``current_period_start`` /
+    ``current_period_end`` OFF the top-level Subscription resource and onto its
+    subscription ITEMS. Read the top level first (pre-Basil, and the shape the
+    registry twin has always stored), then fall back to ``items[0]``. WITHOUT
+    the fallback a Basil-or-later account silently writes NO window and the
+    paying org stays unmeterable — the defect this fixes.
+
+    Values are returned AS-IS (whatever the API version emitted: a Unix epoch
+    int pre-Basil, an ISO-8601 string on newer versions, or ``None``); each
+    caller's own truthiness/None guard decides whether to write. A non-dict
+    ``sub`` yields ``(None, None)``.
+    """
+    if not isinstance(sub, dict):
+        return None, None
+    start = sub.get("current_period_start")
+    end = sub.get("current_period_end")
+    if start is None or end is None:
+        item = next(iter(_subscription_items(sub)), {})
+        if not isinstance(item, dict):
+            item = {}
+        if start is None:
+            start = item.get("current_period_start")
+        if end is None:
+            end = item.get("current_period_end")
+    return start, end
 
 
 def subscription_plan(sub: dict) -> tuple[str, str]:
@@ -519,8 +593,16 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     """Authoritative push of a Stripe Subscription onto the Org mirror.
 
     Order: resolve price→tier (raises on unknown price BEFORE any write) →
-    ``apply_limits`` → idempotent status/period SET. Used by boot reconcile and
-    the ``customer.subscription.updated`` webhook handler.
+    ``apply_limits`` → idempotent status/period write. The ONLY caller is
+    ``reconcile_org`` (boot reconcile was removed in #4262; the live
+    ``customer.subscription.updated`` handler inlines its own ``_set``).
+
+    The status/period write is seam-aware exactly like the webhook's ``_set``
+    and ``apply_limits`` (#4726): Supabase mode PATCHes the authoritative
+    ``organizations`` row — #669 deletes the registry graph there, so the old
+    unconditional ``MATCH (t:Team) SET`` matched 0 rows and reported success
+    (a silent billing loss) and, worse, RESURRECTED the deleted graph by
+    executing on it (#878). Registry/selfhost mode keeps the ``:Team`` twin.
 
     Returns {"tier", "interval", "status"} for audit/analytics.
     """
@@ -534,25 +616,52 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     else:
         tier, interval = subscription_plan(sub)
     apply_limits(sdk, org_id, tier)
-    params: dict = {
-        "id": org_id,
-        "status": status,
-        "period_end": sub.get("current_period_end"),
+    # #4216: read the bounds through the top-level-then-item helper, so a
+    # Basil-or-later Stripe account (period fields on the subscription ITEMS)
+    # still writes a window. Each bound is written ONLY when the payload
+    # carries it, so a partial subscription object can never NULL OUT a bound
+    # already stored.
+    #
+    # A payload that carries ONE bound and not the other leaves a half-known
+    # anchor. That is REPORTED, not silent — ``metering._current_period``
+    # refuses a half-known window and ``cohort_cost`` raises the #3981 alert —
+    # and is COMPLETED by the next authoritative push carrying the missing
+    # bound. ``20260919000001`` additionally repairs the Supabase
+    # ``organizations`` row, which this writer now updates in Supabase mode
+    # (#4726).
+    period_start, period_end = subscription_period_bounds(sub)
+    # One field set, derived once for both stores. ``cancel_at_period_end`` is
+    # a REGISTRY-TWIN property only: ``organizations`` has no such column
+    # (0012 adds subscription_status / customer_email / grace_until /
+    # current_period_end; 20260918000001 adds current_period_start) and no
+    # reader consumes it. It is therefore absent from the control-plane dict
+    # rather than passed and silently dropped by ``update_org_billing``'s
+    # allow-list — the exact silent-drop class this change removes.
+    twin: dict = {
+        "subscription_status": status,
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
     }
-    set_fields = (
-        "SET t.subscription_status=$status, t.current_period_end=$period_end, "
-        "t.cancel_at_period_end=$cancel_at_period_end"
-    )
     if sub.get("id"):
-        set_fields += ", t.subscription_id=$subscription_id"
-        params["subscription_id"] = sub["id"]
+        twin["subscription_id"] = sub["id"]
+    if period_start:
+        twin["current_period_start"] = period_start
+    if period_end:
+        twin["current_period_end"] = period_end
     if customer_email:
-        set_fields += ", t.customer_email=$customer_email"
-        params["customer_email"] = customer_email
-    sdk._get_registry().query(
-        f"MATCH (t:Team {{id:$id}}) {set_fields}", params=params
-    )
+        twin["customer_email"] = customer_email
+
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane, update_org_billing
+        update_org_billing(
+            get_control_plane(), org_id,
+            {k: v for k, v in twin.items() if k != "cancel_at_period_end"},
+        )
+    else:
+        set_fields = "SET " + ", ".join(f"t.{k}=${k}" for k in twin)
+        sdk._get_registry().query(
+            f"MATCH (t:Team {{id:$id}}) {set_fields}",
+            params={"id": org_id, **twin},
+        )
     return {"tier": tier, "interval": interval, "status": status}
 
 
@@ -564,21 +673,37 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       → LIST subscriptions → first active/trialing/past_due → mirror.
     - else no-op.
 
+    #4726: the identifiers are read from the SAME store ``mirror_subscription``
+    writes — the authoritative ``organizations`` row via the control-plane
+    seam in Supabase mode (#669 deletes the registry graph there, so the old
+    registry read found nothing and any write resurrected it, #878); the
+    ``:Team`` node in registry/selfhost mode. ``sdk`` may be ``None`` in
+    Supabase mode: this path must never construct a registry-namespaced SDK.
+
     Best-effort by contract: raises ``BillingError`` (unknown price — caller
-    logs + keeps stored tier/status) and ``StripeAPIError`` / ``BillingConfigError``
-    (outage / unconfigured — caller catches and logs; never breaks boot).
+    logs + keeps stored tier/status, and org-not-found) and ``StripeAPIError``
+    / ``BillingConfigError`` (outage / unconfigured — caller catches and logs;
+    never breaks boot).
 
     ``force`` is accepted for signature compatibility; reconcile always repairs
     from Stripe truth.
     """
-    reg = sdk._get_registry()
-    rows = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_id",
-        params={"id": org_id},
-    ).result_set
-    if not rows:
-        raise BillingError(f"reconcile_org: org {org_id!r} not found in registry")
-    sub_id, customer_id = rows[0]
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane, org_billing_state
+        row = org_billing_state(get_control_plane(), org_id)
+        if not row:
+            raise BillingError(f"reconcile_org: org {org_id!r} not found")
+        sub_id = row.get("subscription_id")
+        customer_id = row.get("stripe_customer_id")
+    else:
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_id",
+            params={"id": org_id},
+        ).result_set
+        if not rows:
+            raise BillingError(f"reconcile_org: org {org_id!r} not found in registry")
+        sub_id, customer_id = rows[0]
     if not sub_id and not customer_id:
         return {"org_id": org_id, "action": "noop"}
     client = StripeClient()

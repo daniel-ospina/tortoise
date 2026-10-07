@@ -1,7 +1,17 @@
-"""Product reader LLM — the two-phase retrieve-then-read answer surface (#1987).
+"""Product reader LLM — the two-phase retrieve-then-read reader (#1987).
 
-The product answer surface: an LLM reader that answers questions about
-captured memory, built from the LongMemEval benchmarked two-phase reader
+⛔ The ask lane that consumes this reader is EVAL-ONLY (#3849): the reader
+still ships, but there is NO ``/v1/ask`` REST route, NO SDK ``ask()`` method
+and NO MCP ask tool. Nothing product-side imports it — its direct importers
+are the eval-only lane (``tortoise/ask_lane.py``), the LongMemEval harness
+(``tools/longmem_eval/``, which measures this reader directly) and the
+transcript generator (``tools/gen_ask_transcripts.py``); the eval spot-check
+(``tools/ask_spotcheck.py``) reaches it through the lane. Do NOT build
+product features on it.
+
+The shipped reader for that eval-only lane: an LLM reader that answers
+questions about captured memory, built from the LongMemEval benchmarked
+two-phase reader
 (presence-commit → abstain). This module OWNS all reader prompt text and
 the reader class — the eval harness (`tools/longmem_eval/reader.py`) is a
 thin re-export so prompt drift is impossible by construction (the #1983
@@ -21,14 +31,14 @@ Key contracts:
   * ``detect_question_type`` (deterministic, ordered precedence
     temporal-reasoning → knowledge-update → multi-session →
     single-session-preference → None) supplies the type fragments on the
-    product path; callers may override with an explicit ``question_type``.
+    lane's path; callers may override with an explicit ``question_type``.
   * ``_looks_abstained`` is the best-effort heuristic abstained label
     (measurement/UX sugar, NEVER a gate — the two-phase prompt is
     authoritative). ``LLMReader.answer`` returns the raw stripped
     completion and labels abstained via ``_looks_abstained`` only —
     blank/whitespace output is NOT substituted inside the reader; the
-    canonical ``NO_EVIDENCE_TEXT`` substitution is the SDK/ask-lane
-    surface's responsibility (pinned in tests/test_ask_api.py).
+    canonical ``NO_EVIDENCE_TEXT`` substitution is the ask-lane
+    surface's responsibility (tested on the lane, not inside the reader).
   * ``PROBE_SYSTEM`` is the preflight ping prompt (moved from the eval's
     ``tools/longmem_eval/preflight.py``).
 """
@@ -280,7 +290,7 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 #: pinned to the A1 abstention phrasing). NOT substituted by the reader —
 #: ``LLMReader.answer`` returns the raw stripped completion and labels
 #: abstained via ``_looks_abstained``; the substitution is the
-#: SDK/ask-lane surface's responsibility (pinned in tests/test_ask_api.py).
+#: ask-lane surface's responsibility (tested on the lane).
 #: The ``abstained`` label is best-effort heuristic sugar — the two-phase
 #: prompt is authoritative.
 NO_EVIDENCE_TEXT = (
@@ -291,9 +301,10 @@ NO_EVIDENCE_TEXT = (
 
 def build_reader_user_message(evidence: str, question: str) -> str:
     """The reader's user-message template (#1987 Task 5) — single-sourced
-    so the SDK local lane and ``LLMReader.answer`` share ONE copy (no
-    parallel template drift: the eval measures ``LLMReader.answer``, the
-    product ships ``sdk.ask``)."""
+    so the eval-only ask lane (``ask_lane.run_ask_lane``) and
+    ``LLMReader.answer`` share ONE copy (no
+    parallel template drift: the eval measures ``LLMReader.answer``, this
+    lane ships it)."""
     return f"Memory context:\n{evidence}\n\nQuestion: {question}\n\nAnswer:"
 
 #: Official gen.py default generation length for non-CoT runs (the reader's
@@ -357,26 +368,98 @@ def system_prompt_for(question_type: str | None) -> str:
 
 
 # ── Deterministic question-type detection (Task 2) ─────────────────────────
+#
+# ⛔ Every pattern below is matched against a LOWERCASED question (see
+# ``detect_question_type``). They are written lowercase on purpose: a
+# sentence-cased question ("How many weeks ago …") must match the same rule
+# as the lowercased form ("how many weeks ago …"). #2009 measured the
+# consequence of the missing fold — a rule anchored on a question's first
+# word could not fire when that word was capitalised, which for a question
+# whose ONLY cue is that first word meant the type was never detected. The
+# one pattern that had depended on case (an optional month name before a
+# 4-digit year, matched via a leading capital) now names the months
+# explicitly, so it is case-independent without accepting an arbitrary word —
+# see the `_KU_PATTERNS` date rule.
+#
+# Cue selection for #2009 was measured, not guessed: each candidate pattern
+# was cross-tabulated against the dataset's own ``question_type``, and a
+# pattern was KEPT when it concentrated on ONE class. A handful do not
+# concentrate and are kept anyway on PRODUCT grounds — each is marked below
+# with its measured concentration and the measurement that justifies it, so
+# "kept despite low concentration" cannot be mistaken for an oversight.
+# Notably absent from what #2009 ADDED: bare ``favorite``/``prefer`` (the
+# cross-tab put those on ``single-session-user`` — "what is my preferred
+# ratio?" is a fact about the user, not an advice request) and a bare
+# ``first`` (added only inside ordering constructions). The pre-existing
+# ``_SSP_PATTERNS`` preference words are unchanged — see that group's note.
 
-#: TR rules (ordered): elapsed-time ("how many X ago"), "how many/long X",
-#: and a between-range ("between … and …"). "how many X ago" is high-
-#: precision; "was … at/before <date>" WITHOUT elapsed-time → KU.
+#: TR rules (ordered): elapsed-time ("N days ago", including WORD numbers —
+#: "two weeks ago"), "how many/long X", a between-range, elapsed-time between
+#: events, explicit ordering, and a relative day/week reference ("last
+#: Saturday", "most recently"). "was … at/before <date>" WITHOUT elapsed-time
+#: → KU.
 _TR_PATTERNS = (
-    re.compile(r"\b\d+\s+(days?|weeks?|months?|years?)\s+ago\b"),
+    re.compile(r"\b(a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+               r"twelve|\d+)\s+(days?|weeks?|months?|years?)\s+ago\b"),
     re.compile(r"\bhow (many|long)\s+(days?|weeks?|months?|years?)\b"),
     re.compile(r"\bbetween\b.{1,60}\band\b"),
+    re.compile(r"\bdays?\s+(had\s+)?passed\b"),
+    re.compile(r"\bpassed\s+(between|since)\b"),
+    re.compile(r"\bwhich event\b"),
+    re.compile(r"\bthe order of\b"),
+    re.compile(r"\bthe day (i|you|we)\b"),
+    re.compile(r"\band the day\b"),
+    re.compile(r"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|"
+               r"sunday|week|weekend|night|month)\b"),
+    re.compile(r"\bmost recently\b"),
+    # Ordinal CHOICE between two named events: "Which book did I finish first,
+    # 'A' or 'B'?" — the `which` + `or` pair is what separates this from a
+    # database fact question ("what is my first name?"), which uses `what` and
+    # names no alternative. FIRST only: a `second|third` branch would claim a
+    # preference question ("which do you prefer, the second option or the
+    # third?") because TR precedes SSP, and non-first ordinals are already
+    # covered by the verb rule below.
+    re.compile(r"\bwhich\b.{0,80}\bfirst\b.{0,80}\bor\b"),
+    # Bare wh-ordering: "which city did I visit first?", "who arrived first?".
+    # The negative lookahead is what keeps this from matching an ATTRIBUTIVE
+    # "first" ("who was my first manager?" — a fact question), while still
+    # admitting a sentence-final ordinal ("… first?"). `what` is excluded on
+    # purpose: "what is my first name?" is a database fact.
+    re.compile(r"\b(which|who)\b.{0,60}\bfirst\b(?!\s+[a-z])"),
+    re.compile(r"\b(graduated|finished|started|happened|occurred|became|"
+               r"completed?|began|took place)\b.{0,40}\b(first|second|third)\b"),
+    re.compile(r"\bwhich\b.{0,60}\b(happened|occurred|came|finished|started|"
+               r"graduated|began)\b.{0,15}\bfirst\b"),
+    # Elapsed state at a past event ("How long had I been a member when I
+    # attended the meetup?"). PAST tense only: the KU current-value form
+    # "how long HAVE I …" is matched in _KU_PATTERNS, and because TR precedes
+    # KU a `have` branch here would claim it first.
+    re.compile(r"\bhow long had i\b"),
 )
 
-#: KU rules: a current-value marker OR a past-tense + at/on/before/back
-#: in/during + optional ONE intervening month word + a 4-digit year.
-#: The relaxed form ("before March 2025") admits one month word; the bare
-#: year form ("before 2025") still matches. Month-only dates ("before
-#: March", no 4-digit year) deliberately fall through to None.
+#: KU rules: a current-value marker; a past-tense frame + at/on/before/back
+#: in/during + an optional MONTH NAME + a 4-digit year; and the "how often" /
+#: "how long have I" / "my current|previous|new" forms the cross-tab
+#: concentrated on KU.
+#:
+#: The date form admits exactly one month name between the preposition and the
+#: year ("before March 2025", and case-folded "before march 2025"), plus the
+#: bare year form ("before 2025"). The months are named explicitly rather
+#: than matched as `[a-z]+`, which would also accept a non-month word
+#: ("before the 2025 review"). A month with NO 4-digit year ("before March")
+#: deliberately falls through to None.
 _KU_PATTERNS = (
     re.compile(r"\b(currently|these days|at present|right now)\b"),
     re.compile(
         r"\b(was|were|did)\b.{0,80}\b(at|on|before|back in|during)\b"
-        r"(?:\s+[A-Z][a-z]+)?\s*\d{4}"),
+        r"(?:\s+(?:january|february|march|april|may|june|july|august|"
+        r"september|october|november|december))?\s*\d{4}"),
+    re.compile(r"\bhow often\b"),
+    re.compile(r"\bmy (current|previous|new|most recent)\b"),
+    re.compile(r"\bhow long have i\b"),
+    re.compile(r"\bhave i (been|tried)\b"),
+    re.compile(r"\bdo i (have|currently)\b"),
+    re.compile(r"\b(so far|up to now)\b"),
 )
 
 #: MS rules: cross-session / aggregation markers.
@@ -384,9 +467,67 @@ _MS_PATTERNS = (
     re.compile(
         r"\b(across sessions|over time|how many times|did you ever|"
         r"have you ever|throughout)\b"),
+    re.compile(r"\btotal\b"),
+    re.compile(r"\bhow much\b"),
+    re.compile(r"\bspen[dt]\b"),
+    re.compile(r"\bthe past\b"),
+    re.compile(r"\bin the last\b"),
+    re.compile(r"\ball (the|my)\b"),
+    # Bare counting. ⚠️ This cue does NOT concentrate: measured 168/500
+    # questions, majority class multi-session at 67/168 = 0.40. It is kept on
+    # PRODUCT grounds, not benchmark ones — a counting question is exactly
+    # what the multi-session fragment is for, so returning None for "How many
+    # bikes do I own?" would be worse than the label disagreement. Measured
+    # cost of dropping it: -0.034 mapped agreement (25 correct multi-session
+    # detections lost against 8 gained). The elapsed-time forms ("how many
+    # <unit>") are claimed by TR earlier, which is why this remainder skews
+    # multi-session at all.
+    #
+    # ⛔ NOT separately listed: `the total`, `total number of`, `in total` and
+    # `how many different`. Their removal is a no-op — measured 0.0000 — but
+    # the criterion is SYNTACTIC, not that measurement: every string matching
+    # them also matches a listed pattern of the same cue (`the total` /
+    # `total number of` / `in total` ⊂ `\btotal\b`; `how many different` ⊂
+    # `\bhow many\b`). Every member of this tuple returns the same type and
+    # the tuple is scored with `any()`, so such a pattern can never be the
+    # deciding match.
+    #
+    # ⛔ Do NOT extend that to a cue that is merely non-decisive on a sample.
+    # `spen[dt]` and `in the last` are each matched by 100% of their own
+    # sample hits through OTHER patterns in this tuple, and are still LIVE
+    # cues: "what did i spend at the store?" and "who did i see in the last
+    # episode?" reach multi-session through them alone. Non-decisive-on-a-
+    # sample is not subsumed.
+    re.compile(r"\bhow many\b"),
 )
 
 #: SSP rules: preference language.
+#:
+#: ⛔ #2009's calibration measured advice-seeking forms and did NOT add them.
+#: The measurement, split s: the two cues named here ("any tips", "can you
+#: recommend") are perfectly concentrated on this class but are rare (n=5 and
+#: n=4) and worth only +0.018 mapped agreement as a pair (preference 10/30).
+#: The wider advice-form candidate set — "(can|could) you (recommend|suggest)",
+#: "any (tips|suggestions|advice)", "(do|would) you (think|have)", "what
+#: should <verb>", "which (option|one)" — is worth +0.050 (preference 26/30).
+#: Neither is added:
+#:
+#:  * routing an advice-shaped question to the preference fragment does not
+#:    change the answer — ``docs/runbook/4107-preference-abstention.md`` §5.1:
+#:    "Routing to `_PREFERENCE_FRAGMENT` does not change the outcome"; §6:
+#:    "No prompt change is landed, deliberately". So the gain would be
+#:    agreement with a taxonomy the fragment does not act on.
+#:  * that runbook's characterization — ``detect_question_type`` returns None
+#:    for ``d6233ab6``, so the generic prompt is emitted — is pinned as a
+#:    DRIFT ALARM by tests/test_reader_4107_advice_shape.py. Flipping it is
+#:    not forbidden, but the test's own docstring requires re-characterizing
+#:    the runbook, and there is no measured benefit to buy with that cost.
+#:
+#: The bare preference words below are the pre-#2009 rule, unchanged. The
+#: cross-tab would also have preferred dropping them (the dataset files "what
+#: is my preferred ratio?" under ``single-session-user``), but the existing
+#: ``_SSP_PATTERNS`` and the tests that pin it route preference words to this
+#: class, and the dataset is asking a different question of the same text.
 _SSP_PATTERNS = (
     re.compile(
         r"\b(prefer|preference|preferred|favorite|which (option|one)|"
@@ -401,10 +542,18 @@ def detect_question_type(question: str | None) -> str | None:
     single-session-preference → None. Returns one of the 4 fragment types
     or None (the generic baseline). ``question`` may be None/empty →
     None.
+
+    ⛔ The question is LOWERCASED before matching (#2009). The rule patterns
+    are written lowercase, and a real user question is sentence-cased, so
+    without the fold every rule anchored on the question's first word missed:
+    "How many weeks ago did I …" returned None while the identical lowercased
+    text returned ``temporal-reasoning``. The fold is therefore load-bearing,
+    not cosmetic — and it is why the KU date rule names its months explicitly
+    instead of relying on a leading capital.
     """
     if not question or not str(question).strip():
         return None
-    q = str(question)
+    q = str(question).lower()
     if any(p.search(q) for p in _TR_PATTERNS):
         return "temporal-reasoning"
     if any(p.search(q) for p in _KU_PATTERNS):
@@ -468,7 +617,8 @@ def _looks_abstained(answer: str | None) -> bool:
     if not clauses:
         # separator-only output (".", "...", "!?", "—"): no clause to
         # match — NOT abstained (preserves pre-cycle-2 behavior; a crash
-        # here would escape sdk.ask()'s documented Raises contract).
+        # here would escape ``ask_lane.run_ask_lane``'s documented Raises
+        # contract).
         return False
     if any(p in clauses[0] for p in _ABSTAINED_PHRASES):
         return True
@@ -597,15 +747,16 @@ class LLMReader:
         passed through exactly as ``answer(context_hits=[])`` would: the
         user message becomes ``Memory context:\n\n\nQuestion: …``. The
         reader does NOT substitute ``NO_EVIDENCE_TEXT`` — per the constant's
-        contract that substitution is the SDK/ask-lane surface's
-        responsibility, and doing it here would break byte-identity.
+        contract that substitution is the ask lane's
+        (``ask_lane.run_ask_lane``) responsibility, and doing it here would break byte-identity.
         """
         user = build_reader_user_message(evidence, question)
         raw = self._model.complete(
             system=system_prompt_for(question_type), user=user)
         # None-guard: a provider response with empty content (refusal / empty
         # generation) must surface as the empty string, not crash the caller
-        # (the product ask() guards with ``(raw or "").strip()`` — mirror it
+        # (``ask_lane.run_ask_lane`` guards with ``(raw or "").strip()`` —
+        # mirror it
         # here so the eval's direct LLMReader path never AttributeErrors on
         # ``None.strip()``; observed live 2026-09-02 on qwen via OpenRouter).
         return (raw or "").strip()

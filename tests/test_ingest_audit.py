@@ -27,6 +27,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -43,6 +44,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _query(sdk, cypher: str, params: dict | None = None):
@@ -233,7 +235,7 @@ def test_audit_post_rebuild_completeness(tmp_path):
         bid = res["batch_id"]
         before = {p["id"] for p in sdk.list_batch(bid)["points"]}
         assert len(before) == 2
-        sdk._get_proj().rebuild_all(str(events_dir))
+        sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
         after = {p["id"] for p in sdk.list_batch(bid)["points"]}
         assert after == before, \
             f"list_batch must survive rebuild_all: {before} vs {after}"

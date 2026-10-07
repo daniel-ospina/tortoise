@@ -28,6 +28,36 @@
       "statement": "Routine aside about the meeting room during the account call."
     }
   ],
+  "planted_operators": [
+    {
+      "expected_kind": "NEGATE",
+      "from": {
+        "planted_turn": 7,
+        "verbatim_anchor": "The config partition was the root cause"
+      },
+      "id": "wp05_retro_writeup_op_01",
+      "reason": "the config-partition root cause (t7) contradicts the search-index blame the initial investigation ran with (t5) \u2014 ONTOLOGY \u00a73.1 NAND 'A contradicts B'; the assistant states the relation ('So the config diff was the real cause.'). The two attributions cannot both be the root cause. Extraction NANDs default unidirectional (#909): from = the counter-claim, to = the claim it refutes.",
+      "relation_turn": 7,
+      "to": {
+        "planted_turn": 5,
+        "verbatim_anchor": "The initial investigation blamed the search index"
+      }
+    },
+    {
+      "expected_kind": "SUPPORTS",
+      "from": {
+        "planted_turn": 9,
+        "verbatim_anchor": "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes"
+      },
+      "id": "wp05_retro_writeup_op_02",
+      "reason": "the rollback-and-recovery observation (t9: traffic normalized within thirteen minutes of reverting the partition) supports the config-partition root-cause claim (t7) \u2014 ONTOLOGY \u00a73.1 IMPL + \u00a78 supports|IMPL; the assistant turn states the relation ('Config partition confirmed.'). from = observation/evidence, to = claim.",
+      "relation_turn": 9,
+      "to": {
+        "planted_turn": 7,
+        "verbatim_anchor": "The config partition was the root cause"
+      }
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

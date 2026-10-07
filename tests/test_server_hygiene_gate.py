@@ -1,0 +1,511 @@
+"""#3634 Task 5 — the session-scoped E2E-7 gate on OWNED survivors.
+
+Three properties are pinned here, and none is observable from the
+whole-server graph count the gate it replaces used:
+
+1. The ownership predicate (``_owned_survivors``). A preserved-but-journalled
+   shared registry (``registry_*``) or the URI-path default graph must NOT
+   count as a survivor — the ownership record is the only thing that makes a
+   journalled name a leak, mirroring ``_sweep_drop``'s skips.
+2. The capture-before-sweep ordering inside ``_server_graph_hygiene`` — the
+   journal is DELETED by the sweep, so a name set read afterwards is empty
+   and the gate would be vacuously green. The pin targets the GATE'S OWN
+   capture (``journal_names = set(_read_journal())``), not merely some
+   ``_read_journal`` call: the whole-server bound's ``journal_size =
+   len(_read_journal())`` is a second read that must not satisfy the pin
+   (#3634 Task 5 review P1-B).
+3. The gate's own behaviour, driven hermetically through the real fixture
+   generator with every server call faked: it RAISES on an owned survivor,
+   stays silent when the own-sweep did not complete cleanly
+   (``failed``/``error``/``skipped``), fires regardless of the leftover
+   sweep's ``full_sweep`` flag (#3634 Task 5 review P1-A), and treats a
+   probe failure as an infra skip rather than a leak (#3634 Task 5 review
+   P1-C).
+
+Reach (recorded, not a defect): the gate lives under the
+``not others_foreign`` guard in ``tests/conftest.py`` — deferred only for a
+genuinely concurrent suite, NOT for a sibling worker of this xdist run
+(#6136). This file does NOT and cannot claim in-process observability of an
+actual leaking session; the subprocess leg is skipped (see
+``test_owned_survivors_*`` docstring in the plan and the OVERRIDES comments
+on #3634).
+"""
+from __future__ import annotations
+
+import ast
+import contextlib
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+
+from tests import _live_utils  # noqa: E402
+from tests._embedded import _owned_survivors  # noqa: E402
+
+# ── The ownership predicate ────────────────────────────────────────────────
+
+def test_owned_survivors_applies_the_ownership_predicate():
+    """A preserved-but-journalled shared registry must NOT be a survivor."""
+    journal = {"test_a", "registry_test_b_control_plane",
+               "registry_control_plane", "registry_tortoise", "tortoise_test_matrix"}
+    live = {"test_a", "registry_control_plane", "registry_tortoise", "tortoise_test_matrix"}
+    assert _owned_survivors(journal, live, "tortoise_test_matrix") == {"test_a"}
+
+
+def test_owned_survivors_ignores_foreign_graphs():
+    assert _owned_survivors({"test_a"}, {"org_x", "t"}, None) == set()
+
+
+# ── AST pin — the GATE'S capture must precede the sweep that deletes it ────
+#
+# AC4 is AST-pinned, NOT session-observed: the subprocess leg cannot seed a
+# journal (tests/test_tripwire.py::_run_session pops
+# TORTOISE_TEST_JOURNAL_FILE from the child env — `_CHILD_LANE_VARS`), so a
+# live leaking-session test is unwritable, not merely unwritten. The reach of
+# the gate itself (under `if not others` in the fixture, and NOT under the
+# bound check's `full_sweep` condition) is recorded on #3634; these pins
+# cover the ordering and placement the gate depends on.
+
+
+def _fixture_body(name: str) -> ast.FunctionDef:
+    tree = ast.parse((REPO / "tests" / "conftest.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in tests/conftest.py")
+
+
+def _own_statement_calls(fn: ast.FunctionDef) -> list[ast.Call]:
+    """Calls in the fixture's OWN statements — nested closures excluded.
+
+    `_atexit_cleanup` (the abnormal-exit path) also calls
+    `_session_end_own_sweep`, and it is DEFINED before the teardown capture.
+    Including it would make this pin assert a false ordering for a path that
+    never runs after a completed teardown; the pin is about the teardown path,
+    which is the fixture's own statement sequence.
+    """
+    calls: list[ast.Call] = []
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls.extend(n for n in ast.walk(stmt) if isinstance(n, ast.Call))
+    return calls
+
+
+def _callee(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _journal_names_capture(fn: ast.FunctionDef) -> ast.Assign | None:
+    """The `journal_names = ...` assignment in the fixture's own statements.
+
+    This is the GATE'S capture — the name set `_owned_survivors` compares
+    against the live server. It is deliberately distinguished from the
+    whole-server bound's `journal_size = len(_read_journal())` (a COUNT, and a
+    read that may legitimately stay where it is): the pin must not be
+    satisfiable by that other read (P1-B, Task 5 review).
+    """
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if isinstance(stmt, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "journal_names"
+                for t in stmt.targets):
+            return stmt
+    return None
+
+
+def test_journal_capture_precedes_the_sweep_that_deletes_it():
+    """A real ast.walk of the `_server_graph_hygiene` body.
+
+    Discriminating property: the assignment whose TARGET is `journal_names`
+    must contain the `_read_journal()` call AND lexically precede the
+    `_session_end_own_sweep` call. The session-end sweep REMOVES the journal,
+    so a name set read after it is empty and the gate is vacuously green.
+
+    Falsified in a scratch copy (#3634 Task 5 review P1-B): (a) moving only
+    `journal_names` after the sweep FAILS this pin, and (b) moving both reads
+    after the sweep also FAILS; the old pin accepted BOTH because it matched
+    any `_read_journal` call, including the bound's `journal_size` read.
+    """
+    fn = _fixture_body("_server_graph_hygiene")
+    capture = _journal_names_capture(fn)
+    assert capture is not None, (
+        "no `journal_names = ...` assignment in _server_graph_hygiene — the "
+        "E2E-7 gate would have no pre-sweep capture of the journal names")
+    reads = [n for n in ast.walk(capture) if isinstance(n, ast.Call)
+             and _callee(n) == "_read_journal"]
+    assert reads, (
+        "the `journal_names` assignment does not call _read_journal() — the "
+        "name set is not the gate's pre-sweep capture")
+    sweeps = [(c.lineno, c.col_offset) for c in _own_statement_calls(fn)
+              if _callee(c) == "_session_end_own_sweep"]
+    assert sweeps, "no _session_end_own_sweep call in _server_graph_hygiene"
+    capture_pos = min((c.lineno, c.col_offset) for c in reads)
+    assert capture_pos < min(sweeps), (
+        "the `journal_names` name set is captured AFTER the session-end sweep "
+        "that deletes the journal — the survivor gate would be vacuously green")
+
+
+def _gate_raise(fn: ast.FunctionDef) -> ast.Raise:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Raise) \
+                and "owned journalled graph(s) survived" in ast.unparse(node):
+            return node
+    raise AssertionError("the E2E-7 gate Raise is not in the fixture")
+
+
+def test_gate_raise_has_no_try_or_full_sweep_ancestor():
+    """P1-A (Task 5 review): the gate is a SIBLING of the bound-check `if`, a
+    direct child of `if not others_foreign` (sibling-worker-aware since
+    #6136 — a foreign suite defers, a sibling worker does not), and outside
+    every `try`.
+
+    Nested inside the bound-check's `if`, the gate inherited that `if`'s
+    `full and full.get("full_sweep", False)` condition — disabled exactly when
+    the leftover sweep failed or reported `full_sweep=False`, i.e. precisely
+    when cleanup was incomplete and survivors are most likely. Inside any
+    `try`, an `AssertionError` is swallowed and the gate is vacuous.
+    """
+    fn = _fixture_body("_server_graph_hygiene")
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    chain: list[ast.AST] = []
+    node: ast.AST | None = _gate_raise(fn)
+    while node is not None:
+        chain.append(node)
+        node = parents.get(node)
+
+    assert not any(isinstance(n, ast.Try) for n in chain), (
+        "the gate's Raise has a Try ancestor — AssertionError would be "
+        "swallowed and the gate is vacuous")
+    bad_full = [n for n in chain if isinstance(n, ast.If)
+                and "full" in ast.unparse(n.test)]
+    assert not bad_full, (
+        "the gate's Raise is gated on the bound check's `full_sweep` "
+        "condition — the gate is disabled exactly when cleanup was incomplete")
+    others_if = [n for n in chain if isinstance(n, ast.If)
+                 and "others" in ast.unparse(n.test)]
+    flags_if = [n for n in chain if isinstance(n, ast.If)
+                and "skipped" in ast.unparse(n.test)
+                and "failed" in ast.unparse(n.test)
+                and "error" in ast.unparse(n.test)]
+    survivors_if = [n for n in chain if isinstance(n, ast.If)
+                    and "survivors" in ast.unparse(n.test)]
+    assert others_if, "the gate is no longer guarded by `if not others`"
+    assert flags_if, "the gate's three-own-flag guard is gone"
+    assert survivors_if, "the gate no longer tests `if survivors`"
+    assert fn in chain and isinstance(chain[-1], ast.FunctionDef)
+
+
+def test_gate_probe_is_wrapped_in_a_try():
+    """P1-C (Task 5 review): `_live_graph_names` is the only server call on the
+    teardown path that was not already guarded. It must sit inside a `try` so a
+    connection/auth/maxmemory/stall failure prints-and-continues instead of
+    reding the suite indistinguishably from a real leak."""
+    fn = _fixture_body("_server_graph_hygiene")
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.body:
+            for call in ast.walk(stmt):
+                if isinstance(call, ast.Call) \
+                        and _callee(call) == "_live_graph_names":
+                    return
+    raise AssertionError(
+        "`_live_graph_names` is not wrapped in a try/except — a probe failure "
+        "would propagate out of teardown and red the suite as if it leaked")
+
+
+# ── The gate's behaviour, driven through the real fixture generator ────────
+#
+# Every server call the fixture makes is faked, so these tests are hermetic
+# (no docker, no FalkorDB) and exercise the ACTUAL gate code — not a copy of
+# its predicate. `_server_graph_hygiene` is a pytest fixture; its raw
+# generator is `.__wrapped__` in pytest 9.
+
+@contextlib.contextmanager
+def _noop_proj(*_args, **_kwargs):
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            return []
+
+    class _Proj:
+        db = _DB()
+
+    yield _Proj()
+
+
+def _loaded_conftest():
+    """The pytest-LOADED ``tests/conftest.py`` module, handed over by conftest.
+
+    Never ``import tests.conftest``: pytest loads tests/conftest.py as the
+    top-level module ``conftest``, so the dotted import builds a SECOND instance
+    whose top-level re-execution overwrites ``TORTOISE_TEST_SESSION`` with a
+    fresh nonce mid-session, stranding the live session's derived graph names +
+    journal (the double-import hazard is documented in ``tests/_embedded.py``).
+
+    Never ``sys.modules["conftest"]`` either: that bare key is shared by every
+    ``__init__``-less conftest, and a nested one TAKES IT OVER — leaving the
+    loaded module in no ``sys.modules`` entry at all, so no lookup or scan can
+    find it. conftest publishes itself (``LOADED_CONFTEST``) instead; this is
+    the accessor for that handover, pinned by
+    ``test_start_teardown_survives_a_nested_conftest_taking_the_bare_key``.
+    """
+    from tests import _embedded as emb
+
+    conftest = emb.LOADED_CONFTEST
+    if conftest is None:
+        raise RuntimeError(
+            "tests/conftest.py did not publish its loaded module: "
+            "tests/_embedded.py::LOADED_CONFTEST is None, so the gate's "
+            "globals cannot be reached. See the handover block in "
+            "tests/conftest.py (the bare sys.modules['conftest'] key is NOT "
+            "that module once a nested conftest has been collected).")
+    return conftest
+
+
+def test_start_teardown_survives_a_nested_conftest_taking_the_bare_key(monkeypatch, tmp_path):
+    """Pin the #6269 P1 on BEHAVIOUR, not on the spelling of the lookup.
+
+    The defect was reaching the loaded conftest through ``sys.modules["conftest"]``
+    — a key EVERY ``__init__``-less conftest shares, and which a nested one
+    (``tests/e2e/auth/conftest.py``) TAKES OVER, leaving the loaded module in no
+    ``sys.modules`` entry at all. Reproducing that order in-process is not
+    possible, so this test MANUFACTURES the state instead: shadow the bare key
+    exactly as a nested conftest does, then drive the real consumer
+    (``_start_teardown``). It fails for EVERY spelling that depends on that key —
+    ``["conftest"]``, ``.get("conftest")``, an aliased ``sys``/``modules`` —
+    which a source-scanning pin cannot promise (an earlier version of this pin
+    caught only the first spelling).
+    """
+    loaded = _loaded_conftest()
+    assert Path(loaded.__file__).resolve() == REPO / "tests" / "conftest.py"
+    assert hasattr(loaded, "_ACTIVE_SUITES_DIR")
+
+    shadow = types.ModuleType("conftest")
+    shadow.__file__ = str(REPO / "tests" / "e2e" / "auth" / "conftest.py")
+    assert not hasattr(shadow, "_ACTIVE_SUITES_DIR"), "fixture: shadow must be useless"
+    monkeypatch.setitem(sys.modules, "conftest", shadow)
+
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": [], "failed": []},
+                          live={"test_leak"}, journal={"test_leak"})
+    gen.close()
+
+
+def _start_teardown(monkeypatch, tmp_path, *, own, live, journal,
+                    full=None, probe_raises=False, others=()):
+    # The pytest-LOADED conftest module — the one whose `_server_graph_hygiene`
+    # globals the monkeypatches below must reach. Reached by conftest's own
+    # handover; see _loaded_conftest above for why neither
+    # `import tests.conftest` nor `sys.modules["conftest"]` is admissible.
+    conftest = _loaded_conftest()
+    import tortoise.embedded_reaper as reaper
+    from tests import _embedded as emb
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI",
+        _live_utils.docker_uri("tortoise_test_matrix"))
+    monkeypatch.setenv("TORTOISE_TEST_SESSION", "0123456789ab")
+    monkeypatch.setattr(conftest, "_ACTIVE_SUITES_DIR", str(tmp_path))
+    monkeypatch.setattr(emb, "_JOURNAL_FILE", str(tmp_path / "journal.jsonl"))
+    monkeypatch.setattr(emb, "_stale_sweep", lambda *a, **k: {"stale": []})
+    monkeypatch.setattr(emb, "_session_end_own_sweep", lambda *a, **k: own)
+    monkeypatch.setattr(
+        emb, "_leftover_sweep",
+        lambda *a, **k: full if full is not None else {"full_sweep": True})
+    monkeypatch.setattr(emb, "_read_journal", lambda: list(journal))
+
+    def _probe(_uri):
+        if probe_raises:
+            raise RuntimeError("server unreachable (simulated infra failure)")
+        return set(live)
+
+    monkeypatch.setattr(emb, "_live_graph_names", _probe)
+    monkeypatch.setattr(emb, "_uri_default_graph_name",
+                        lambda: "tortoise_test_matrix")
+    monkeypatch.setattr(emb, "_sweep_proj", _noop_proj)
+    monkeypatch.setattr(reaper, "_process_start_time", lambda _pid: None)
+    monkeypatch.setattr(reaper, "active_suite_markers", lambda *a, **k: list(others))
+
+    gen = conftest._server_graph_hygiene.__wrapped__(None)
+    next(gen)  # session-start half; returns a generator paused at `yield`
+    return gen
+
+
+def test_gate_raises_when_an_owned_journalled_name_survives(monkeypatch, tmp_path):
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": [], "failed": []},
+                          live={"test_leak"}, journal={"test_leak"})
+    with pytest.raises(AssertionError, match=r"E2E-7: 1 owned journalled"):
+        next(gen)
+
+
+def test_gate_fires_even_when_the_leftover_sweep_did_not_run(monkeypatch, tmp_path):
+    """P1-A regression: the gate must NOT inherit the bound check's
+    `full_sweep` condition. Here `full` is an ERROR dict — the old nesting
+    would have skipped the gate entirely."""
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": []},
+                          live={"test_leak"}, journal={"test_leak"},
+                          full={"error": "leftover sweep down"})
+    with pytest.raises(AssertionError, match=r"E2E-7: 1 owned journalled"):
+        next(gen)
+
+
+def test_gate_fires_when_full_sweep_is_false(monkeypatch, tmp_path):
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": []},
+                          live={"test_leak"}, journal={"test_leak"},
+                          full={"full_sweep": False})
+    with pytest.raises(AssertionError, match=r"E2E-7: 1 owned journalled"):
+        next(gen)
+
+
+@pytest.mark.parametrize("flag", ["failed", "error", "skipped"])
+def test_gate_is_silent_when_the_own_sweep_did_not_complete(
+        monkeypatch, tmp_path, flag):
+    """A transient delete error / raised sweep / skip must keep the journal and
+    NOT red the suite (epic cycle-8 P2-3/P2-4 log-and-continue)."""
+    own = {flag: ["test_leak"] if flag == "failed" else "simulated"}
+    gen = _start_teardown(monkeypatch, tmp_path, own=own,
+                          live={"test_leak"}, journal={"test_leak"})
+    with pytest.raises(StopIteration):
+        next(gen)  # teardown completes with no raise
+
+
+def test_gate_is_silent_on_preserved_and_default_names(monkeypatch, tmp_path):
+    gen = _start_teardown(
+        monkeypatch, tmp_path, own={"dropped": []},
+        live={"registry_test_b", "tortoise_test_matrix", "foreign_x"},
+        journal={"registry_test_b", "tortoise_test_matrix", "foreign_x"})
+    with pytest.raises(StopIteration):
+        next(gen)
+
+
+def test_probe_failure_does_not_raise(monkeypatch, tmp_path, capsys):
+    """P1-C (Task 5 review): an infra failure in the probe is an infra skip,
+    NOT a leak signal."""
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": []},
+                          live={"test_leak"}, journal={"test_leak"},
+                          probe_raises=True)
+    with pytest.raises(StopIteration):
+        next(gen)
+    out = capsys.readouterr().out
+    assert "E2E-7 survivor probe failed" in out
+    assert "NOT a leak signal" in out
+    # the leak COUNT is reported as unmeasured, never as a zero it did not
+    # observe — a failed probe has no residue to measure (P1-C).
+    assert "E2E-7 leak count: UNMEASURED" in out
+    assert "E2E-7: 1 owned journalled" not in out
+
+
+# ── #6136 / D3: the gate is SIBLING-WORKER-AWARE ───────────────────────────
+#
+# pytest-xdist runs one suite as N worker processes. Each worker is a
+# different pid but the SAME run (PYTEST_XDIST_TESTRUNUID) and owns its own
+# journal (per-process session nonce), so a sibling worker's graphs are never
+# in ours. The pre-#6136 `others` predicate (pid-different) counts a sibling
+# as a concurrent suite, so every worker but the last deferred and the
+# per-session leak assertion collapsed to once-per-job. These two tests pin
+# the split, and the first is the one that FAILS if the run-identity test is
+# removed from tests/conftest.py.
+
+
+def test_gate_survives_a_sibling_xdist_worker(monkeypatch, tmp_path):
+    """A sibling worker of THIS run must NOT defer this worker's gate.
+
+    Load-bearing: restore the pre-#6136 predicate (every pid-different marker
+    defers) and the generator completes with no AssertionError — the leaked
+    graph is silently left to whichever worker tears down last.
+    """
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-abc")
+    gen = _start_teardown(
+        monkeypatch, tmp_path, own={"dropped": []},
+        live={"test_leak"}, journal={"test_leak"},
+        others=[{"token": "4242-run-abc", "pid": 4242, "start": 1.0,
+                 "run": "run-abc"}])
+    with pytest.raises(AssertionError, match=r"E2E-7: 1 owned journalled"):
+        next(gen)
+
+
+def test_gate_still_defers_to_a_genuinely_concurrent_suite(monkeypatch, tmp_path):
+    """The sibling split must not relax the pre-#6136 deferral: a marker from
+    a DIFFERENT run is a foreign suite whose graphs are not ours, and a
+    marker with NO run id (a non-xdist process) must read as foreign too."""
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-abc")
+    for marker in ({"token": "4242-run-xyz", "pid": 4242, "start": 1.0,
+                    "run": "run-xyz"},
+                   {"token": "4242-legacy", "pid": 4242, "start": 1.0,
+                    "run": None}):
+        gen = _start_teardown(
+            monkeypatch, tmp_path, own={"dropped": []},
+            live={"test_leak"}, journal={"test_leak"}, others=[marker])
+        with pytest.raises(StopIteration):
+            next(gen)
+
+
+def test_reimporting_conftest_cannot_change_the_session_identity():
+    """#6323: the re-import this module performs must not strand the session.
+
+    pytest loads this conftest as the TOP-LEVEL ``conftest``, so
+    ``import tests.conftest`` is a SECOND module whose body re-executes
+    mid-session. Before #6323 that body re-rolled ``TORTOISE_TEST_SESSION``,
+    which re-pointed the journal and made the session read its OWN pre-import
+    journal as a live PEER — so ``wipe_server(scope=None)`` spared graphs the
+    session itself had minted.
+
+    The guard sits here, beside the call site, so it runs wherever the trigger
+    runs.
+
+    The re-execution is made GENUINE on purpose. In this file `import
+    tests.conftest` is normally a CACHED NO-OP — ``_start_teardown`` (below)
+    already imported it, so the body does not run again and the assertion below
+    would hold trivially, passing even against the pre-#6323 unconditional
+    re-roll. Popping the module first forces the body to re-execute, and the
+    identity check on the module object makes that condition LOUD rather than
+    silent: if a future change makes the import cached again, this fails
+    instead of quietly becoming a tautology.
+
+    Scope of the guarantee: this pins "re-executing the body does not move the
+    nonce". It does NOT pin the companion direction — that a fix must not
+    become the REJECTED ``setdefault`` design (a pre-set value would freeze the
+    nonce, so concurrent sessions would share one journal filename). That
+    decision is documented at ``tests/conftest.py:118-126`` and asserted by no
+    test: ``test_redirect_seam.py`` compares the env against the import-time
+    value, which a ``setdefault`` reversion would also satisfy. Guarding it
+    would mean re-executing the body with the marker removed, which mints a new
+    nonce and perturbs the live session — a worse trade than an unguarded, and
+    so far unobserved, reversion.
+    """
+    import os
+    import sys
+
+    before = os.environ.get("TORTOISE_TEST_SESSION")
+    assert before, "conftest must export TORTOISE_TEST_SESSION before tests run"
+
+    prior_module = sys.modules.get("tests.conftest")
+    sys.modules.pop("tests.conftest", None)
+    import tests.conftest  # noqa: F401 — a GENUINE second execution of the body
+
+    assert sys.modules["tests.conftest"] is not prior_module, (
+        "importing tests.conftest did not re-execute its body (the module was "
+        "still cached), so this guard proved nothing — see the docstring"
+    )
+
+    after = os.environ.get("TORTOISE_TEST_SESSION")
+    assert after == before, (
+        "re-executing conftest's body changed TORTOISE_TEST_SESSION "
+        f"({before!r} -> {after!r}) — the session's own journal is now "
+        "stranded as a live peer (#6323)"
+    )

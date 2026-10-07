@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -28,6 +29,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Graph query helpers (raw Cypher assertions) ─────────────────────
@@ -903,6 +905,7 @@ def sdk_logged():
     sdk._log_path = log
     yield sdk
     sdk.close()
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def _batch_records(sdk):
@@ -1336,7 +1339,7 @@ class TestA3OperatorDedupRicherReturn:
         events_dir.mkdir()
         log_path = str(events_dir / "events.jsonl")
         sdk._event_log_path = log_path
-        sdk._get_proj().rebuild_all(str(events_dir))
+        sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
         # post-rebuild: the operator survives at the full input set
         assert _count(sdk, "MATCH (n:Point {id:$p}) RETURN count(n)",
                       {"p": partial["id"]}) == 1

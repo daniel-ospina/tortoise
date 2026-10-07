@@ -1032,3 +1032,475 @@ class TestConcurrency:
         assert codes.count(200) == 10
         assert codes.count(401) == 10
         assert stub.count <= 2  # one TTL-refresh + one miss-refetch, then cooldown
+
+
+# ── Cold start: the fetch budget must BOUND the request (#3284) ────────────
+
+
+class SlowFetchStub(FetchStub):
+    """Fetch stub that outlives any budget the caller configured."""
+
+    def __init__(self, delay: float, body: bytes | None = None,
+                 error: Exception | None = None):
+        super().__init__(body=body, error=error)
+        self.delay = delay
+
+    async def __call__(self) -> bytes:
+        self.count += 1
+        await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        if self.body is None:
+            raise AssertionError("SlowFetchStub: no body configured")
+        return self.body
+
+
+class TestColdStartBound:
+    """#3284: the first request on a cold process must be BOUNDED.
+
+    ``httpx``'s ``timeout=`` is PER-PHASE (connect/read/write/pool), so it does
+    not bound a fetch: pre-fix, one fetch could burn connect(5) + read(5) ≈ 10s
+    and the request path pays up to TWO (TTL refresh + kid-miss refetch, R16) —
+    the 15–35s first request in #3144/#3284. The hard deadline is therefore
+    applied OUTSIDE the ``_fetch_jwks`` seam (``_fetch_jwks_bounded``), which is
+    what these tests pin: the fake below IGNORES any transport timeout, so only
+    a bound outside the seam can stop it.
+    """
+
+    BUDGET = 0.25  # small enough to keep the suite fast, large enough to be real
+
+    def test_slow_cold_fetch_is_hard_bounded_and_retryable(self, monkeypatch):
+        # raising=False: pre-fix the knob does not exist, so this test must
+        # fail on the BEHAVIOUR (the fetch runs to completion), not on a
+        # missing attribute (#3284 regression evidence).
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        stub = SlowFetchStub(1.0, error=OSError("jwks down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        t0 = time.monotonic()
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(tok)
+        elapsed = time.monotonic() - t0
+
+        assert ei.value.status_code == 503
+        # The bound, not the fake's duration (pre-fix: elapsed ≈ 1.0s).
+        assert elapsed < self.BUDGET + 0.25, (
+            f"cold request took {elapsed:.3f}s — the fetch was not bounded")
+        # A bounded 503 must still be ACTIONABLE (#3284): Retry-After tells the
+        # client when a retry can succeed instead of letting it hammer a
+        # cooldown that is already answering 503.
+        assert ei.value.headers, "503 carries no headers"
+        assert int(ei.value.headers["Retry-After"]) >= 1
+        assert ei.value.detail  # JSON body, never a zero-byte response
+
+    def test_slow_double_fetch_chain_stays_within_the_documented_bound(
+            self, monkeypatch):
+        """The documented 2 × per-fetch worst case must actually be ENFORCED.
+
+        The bound key resolution may rely on is
+        ``_JWKS_RESOLVE_WORST_CASE_S == 2 × fetch`` (a TTL refresh + a kid-miss
+        refetch, R16 — the R16 double fetch itself is pinned by
+        ``TestConcurrency::test_ttl_refresh_plus_miss_double_fetch``). This
+        test makes the stub outlive the bound by 4×, so a removed/widened bound
+        makes the elapsed time blow past ``2 × fetch`` and fails here. The
+        previous version slept ``BUDGET / 2``, so it passed with the bound
+        removed and pinned nothing.
+
+        Two independent COLD attempts are used rather than one request: a
+        request whose first fetch times out arms the cooldown and (correctly)
+        never reaches a second fetch, so it cannot exhibit the chain. Each cold
+        attempt must still make exactly one bounded fetch, and the pair must
+        stay inside the documented worst case.
+        """
+        # raising=False: pre-fix the knob does not exist, so this test must
+        # fail on the BEHAVIOUR, not on a missing attribute (#3284 evidence).
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        # Scale the documented bound with the shortened budget (the identity
+        # itself is pinned by test_documented_chain_bound_tracks_the_fetch_bound).
+        monkeypatch.setattr(sa, "_JWKS_RESOLVE_WORST_CASE_S", 2 * self.BUDGET)
+        stub = SlowFetchStub(4 * self.BUDGET, error=OSError("jwks down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        t0 = time.monotonic()
+        for _ in range(2):
+            sa._jwks = sa._JWKSCache()
+            sa._jwks._lock = asyncio.Lock()
+            with pytest.raises(HTTPException) as ei:
+                verify_ok(tok)
+            assert ei.value.status_code == 503
+        elapsed = time.monotonic() - t0
+
+        assert stub.count == 2, "each cold attempt must make one bounded fetch"
+        assert elapsed <= sa._JWKS_RESOLVE_WORST_CASE_S + 0.25, (
+            f"two bounded fetches took {elapsed:.3f}s — the documented "
+            f"{sa._JWKS_RESOLVE_WORST_CASE_S:.2f}s worst case is not enforced")
+
+    def test_slow_refresh_keeps_the_bound_and_still_serves_stale(self, monkeypatch):
+        """TTL expiry + a SLOW upstream + a valid token: bounded, and still 200.
+
+        This is the production shape of the symptom: the key set is past its
+        TTL, the upstream is slow, and a real user is waiting. The request must
+        stay inside the budget (pre-fix it waited the fetch out — ~1.0s here,
+        with no bound at all) and must serve from the last-good key set instead
+        of failing. A bound that costs availability is not a fix.
+        """
+        priv, pub = u.make_ec_keypair()
+        warm = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # TTL expired
+        slow = SlowFetchStub(
+            1.0, body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", slow)
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        assert warm.count == 1  # the warm fetch
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        t0 = time.monotonic()
+        assert verify_ok(tok)["user_id"] == "user-123"
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < self.BUDGET + 0.25, (
+            f"slow refresh took {elapsed:.3f}s — not bounded")
+        assert slow.count == 1, "the bounded attempt was retried on the request path"
+        assert "kid-1" in sa._jwks._keys  # last-good keys survived the timeout
+
+    def test_documented_chain_bound_tracks_the_fetch_bound(self):
+        """The documented worst case must be the arithmetic it claims.
+
+        A drift here silently re-opens #3284: the bound the request path is
+        allowed to rely on is ``2 × fetch`` (two fetches, R16), and the phases
+        must sum BELOW the hard total so a phase timeout normally fires first
+        (a hard deadline that wins that race strands the httpx worker —
+        CPython #87185 cannot cancel it).
+        """
+        assert sa._JWKS_RESOLVE_WORST_CASE_S == 2 * sa._JWKS_FETCH_TOTAL_S
+        assert sa._JWKS_FETCH_PHASE_TOTAL_S < sa._JWKS_FETCH_TOTAL_S
+        assert sa._JWKS_FETCH_TOTAL_S >= (
+            sa._JWKS_FETCH_PHASE_TOTAL_S + sa._JWKS_FETCH_MARGIN_S)
+
+    def test_prefetch_pays_the_first_fetch_not_the_first_request(self, monkeypatch):
+        """#3284 Move A: after the warm-up, the first request pays ZERO fetches."""
+        priv, pub = u.make_ec_keypair()
+        stub = seed_keys(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is True and report["keys"] == 1, report
+        assert report["error"] is None
+        assert stub.count == 1  # the warm-up paid it
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        assert verify_ok(tok)["user_id"] == "user-123"
+        assert stub.count == 1, "the request path paid a fetch after a warm cache"
+
+    def test_prefetch_failure_is_reported_and_does_not_arm_the_cooldown(
+            self, monkeypatch):
+        """#3284 regression (review P1): a boot warm-up must not deny the
+        first request.
+
+        The warm-up runs milliseconds after boot, exactly when DNS/egress are
+        least ready. If its single failed attempt armed the REQUEST-path
+        cooldown, every request for the next ``_COOLDOWN_S`` is refused in ~0ms
+        with fetch attempts frozen at 1 — even after the upstream recovers.
+        The first request must instead make its own (still bounded) attempt and
+        recover; the #3284 bound is what makes that safe.
+        """
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        priv, pub = u.make_ec_keypair()
+        good = json.dumps(u.build_ec_jwks(pub, "kid-1")).encode()
+        calls = {"n": 0}
+
+        async def _flaky() -> bytes:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("boot-time DNS blip")  # the warm-up's only attempt
+            return good
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _flaky)
+
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False and calls["n"] == 1
+        assert sa._jwks._last_failure_at is None, (
+            "the boot warm-up armed the request-path cooldown")
+
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        assert verify_ok(tok)["user_id"] == "user-123"  # recovered immediately
+        assert calls["n"] == 2, "the first request was refused instead of trying"
+
+    def test_prefetch_failure_reports_why_and_the_first_request_is_bounded(
+            self, monkeypatch):
+        """A failed warm-up must convert a HANG into a bounded retryable 503.
+
+        Corrected from the pre-review version: the warm-up deliberately does
+        NOT arm the request-path cooldown, so the first request PAYS its own
+        bounded fetch attempt (one ``BUDGET`` here) and then answers 503 with
+        ``Retry-After``. The old assertion that the request is refused in
+        < BUDGET encoded the boot-armed-cooldown regression and was wrong.
+        """
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        monkeypatch.setattr(sa, "_fetch_jwks",
+                            SlowFetchStub(1.0, error=OSError("jwks down")))
+        report = _run(sa.prefetch_jwks())  # bounded, never raises
+        assert report["ok"] is False
+        assert report["error"], "a failed warm-up must report why"
+        assert report["elapsed_ms"] < (self.BUDGET + 0.25) * 1000
+        assert sa._jwks._last_failure_at is None, (
+            "the warm-up must not arm the request-path cooldown")
+
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        t0 = time.monotonic()
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(tok)
+        elapsed = time.monotonic() - t0
+        assert ei.value.status_code == 503
+        # The request makes its OWN bounded attempt — not a 0ms cooldown
+        # refusal (the pre-fix behaviour) and not an unbounded wait.
+        assert self.BUDGET - 0.02 <= elapsed < self.BUDGET + 0.25, (
+            f"the first request took {elapsed:.3f}s — expected one bounded attempt")
+        assert sa._jwks._last_failure_at is not None, (
+            "the REQUEST (not the warm-up) arms the cooldown on its own failure")
+        assert int(ei.value.headers["Retry-After"]) >= 1
+
+    def test_empty_jwks_is_reported_as_empty_not_as_a_transport_failure(
+            self, monkeypatch):
+        """A 200 with zero usable keys is a DIFFERENT failure from an outage.
+
+        The boot log must say so (#2922: every failure states its reason), and
+        the request path must answer 401 "Unknown signing key", never 503: a
+        zero-key body is cached as ``{}``.
+        """
+        stub = FetchStub(body=b'{"keys": []}')
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False
+        assert report["keys"] == 0
+        assert report["outcome"] == "empty", report
+        assert report["error"], "every failure must state its reason (#2922)"
+        assert stub.count == 1
+        assert sa._jwks._last_failure_at is None, (
+            "an empty body must not arm the request-path cooldown from boot")
+
+    def test_empty_key_set_is_not_served_from_the_ttl_fast_path(
+            self, monkeypatch):
+        """An empty parse must not read as a FRESH cache entry.
+
+        ``_parse_jwks`` leaves ``_fetched_at == 0.0`` with ``_keys == {}``; on
+        a host whose monotonic clock is below the TTL, a bare
+        ``now - _fetched_at < TTL`` check treats that as fresh and serves
+        ``{}`` — a 401 window of up to a full TTL with the upstream healthy.
+        The fast path is forced here by stamping ``_fetched_at`` with a recent
+        monotonic value; the NEXT request must still attempt a fetch.
+        """
+        stub = FetchStub(body=b'{"keys": []}')
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        _run(sa.prefetch_jwks())
+        assert stub.count == 1
+        assert sa._jwks._keys == {}
+        sa._jwks._fetched_at = time.monotonic()  # host uptime < TTL case
+
+        # Assert on ``get()`` DIRECTLY — no ``verify_session_jwt``. R16 makes
+        # that caller force-refetch on a kid miss, so its fetch count is 2 with
+        # OR without the fix (an empty serve is followed by the forced
+        # refetch) and it cannot discriminate. ``get()`` can: with the
+        # usable-key-set guard the empty set is re-attempted (count 2); with
+        # ``self._keys is not None`` it is TTL-served (count 1).
+        keys = _run(sa._jwks.get())
+        assert keys == {}
+        assert stub.count == 2, (
+            "the empty key set was TTL-served instead of re-attempted")
+
+        # And the request path must still answer 401 "Unknown signing key"
+        # from the empty set (never 503), at no additional fetch cost.
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(tok)
+        assert ei.value.status_code == 401  # unknown signing key, not 503
+        assert stub.count == 2
+
+    def test_prewarm_that_serves_stale_keys_is_not_reported_ready(
+            self, monkeypatch):
+        """A failed warm-up that served last-good keys is NOT ``ready`` (#2922).
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set — so the pre-fix ``if not keys``
+        check is false and the report said ``ok=True/outcome="ready"`` for a
+        genuinely down upstream. The report must say the warm-up did not
+        refresh, and carry the reason.
+        """
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
+        good = FetchStub(body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", good)
+        _run(sa._jwks.get(force=True))
+        assert sa._jwks._keys, "precondition: last-good keys must be cached"
+
+        monkeypatch.setattr(sa, "_fetch_jwks",
+                            FetchStub(error=OSError("jwks down")))
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False, report
+        assert report["outcome"] == "stale", report
+        assert report["keys"] == 1, report
+        assert report["error"] and "jwks down" in report["error"], report
+
+    def test_prewarm_serving_stale_after_an_empty_rotation_is_not_ready(
+            self, monkeypatch):
+        """A zero-usable-key 200 against a WARM cache is also a stale serve.
+
+        The upstream answered (200) but with no usable keys: the warm-up did
+        NOT refresh, it serves the last-good set, and the boot report must not
+        say ``ready`` (nor ``empty`` — the served cache is not empty).
+        """
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
+        good = FetchStub(body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", good)
+        _run(sa._jwks.get(force=True))
+        assert sa._jwks._keys, "precondition: last-good keys must be cached"
+
+        monkeypatch.setattr(sa, "_fetch_jwks", FetchStub(body=b'{"keys": []}'))
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False, report
+        assert report["outcome"] == "stale", report
+        assert report["keys"] == 1, report
+        assert "0 usable keys" in report["error"], report
+
+    def test_prefetch_raising_fetch_with_an_empty_cache_reports_transport_error(
+            self, monkeypatch):
+        """A RAISING fetch with an empty cache is an OUTAGE, not an empty 200.
+
+        ``_keys == {}`` is NOT ``None``, so the raise path has no last-good set
+        to serve and returns ``({}, "JWKS fetch failed: …")``. Keyed off
+        ``if not keys`` first, the empty-check swallowed that real reason and
+        reported "upstream JWKS answered 200 with 0 usable keys (empty body /
+        bad rotation)" — which the boot log renders as "NOT a transport
+        outage" during an actual transport outage. ``_jwks`` is a MODULE global
+        that is NOT reset per lifespan (#3284), so a prior empty 200 — or a
+        prior lifespan — leaves exactly this state when the next boot's fetch
+        raises.
+        """
+        stub = FetchStub(error=OSError("network down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        # An EMPTY (not cold) cache: what a previous empty 200 leaves behind.
+        sa._jwks._keys = {}
+        sa._jwks._fetched_at = time.monotonic()
+
+        report = _run(sa.prefetch_jwks())
+
+        assert report["ok"] is False, report
+        assert report["keys"] == 0, report
+        assert report["outcome"] == "transport_error", report
+        assert "network down" in report["error"], (
+            "the REAL reason must survive, not the empty-rotation story: "
+            + repr(report))
+        assert "0 usable keys" not in report["error"], report
+        assert stub.count == 1
+        assert sa._jwks._last_failure_at is None, (
+            "the boot warm-up must not arm the request-path cooldown")
+
+    def test_prefetch_with_a_fresh_cache_and_armed_cooldown_reports_ready(
+            self, monkeypatch):
+        """A TTL-FRESH set is ``ready`` even when a cooldown blocks the fetch.
+
+        The coverage gap a re-review named: the warm-up passes ``force=True``,
+        so it skips the TTL fast path BY DESIGN; a cooldown armed by an earlier
+        failure then made ``_resolve`` return the "refetch not attempted"
+        reason for a cache that is milliseconds old. The report said ``stale``
+        and the boot log warned "did NOT refresh — serving N last-good key(s)"
+        about a set the first request serves at zero fetch cost. Outcome keys
+        off FRESHNESS, not off "did this call fetch?" — while the separate
+        stale-serve case (an EXPIRED set behind a cooldown) must stay ``stale``
+        (pinned by test_prewarm_that_serves_stale_keys_is_not_reported_ready
+        and its empty-rotation sibling).
+        """
+        priv, pub = u.make_ec_keypair()
+        warm = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        assert warm.count == 1
+        assert sa._jwks._keys, "precondition: a fresh key set is cached"
+        # Arm the request-path cooldown; the cache stays TTL-fresh.
+        sa._jwks._last_failure_at = time.monotonic()
+        stub = FetchStub(error=OSError("must not be fetched"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+
+        report = _run(sa.prefetch_jwks())
+
+        assert report["ok"] is True, report
+        assert report["outcome"] == "ready", report
+        assert report["keys"] == 1, report
+        assert report["error"] is None, report
+        assert stub.count == 0, "a fresh cache needs no fetch"
+
+        # The first request is served from that set at zero fetch cost.
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        assert verify_ok(tok)["user_id"] == "user-123"
+        assert stub.count == 0
+
+    def test_prefetch_cannot_raise_even_if_the_cache_explodes(self, monkeypatch):
+        class _Exploding:
+            async def get(self, *args, **kwargs):
+                raise RuntimeError("cache exploded")
+
+            async def get_with_origin(self, *args, **kwargs):
+                raise RuntimeError("cache exploded")
+
+        monkeypatch.setattr(sa, "_jwks", _Exploding())
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False and "RuntimeError" in report["error"]
+
+    def test_slow_cold_burst_is_bounded_and_coalesced(self, monkeypatch):
+        """The dashboard's PARALLEL boot calls on a cold process (#3284).
+
+        One bounded fetch attempt; every concurrent request answers within the
+        budget because the lock + cooldown coalesce them onto that attempt.
+        Pre-fix all 20 waited the fetch out together (one 5–10s stall for
+        every parallel call).
+        """
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", self.BUDGET, raising=False)
+        stub = SlowFetchStub(1.0, error=OSError("jwks down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        async def _burst():
+            return await asyncio.gather(
+                *[sa.verify_session_jwt(make_request(tok)) for _ in range(20)],
+                return_exceptions=True,
+            )
+
+        t0 = time.monotonic()
+        outcomes = _run(_burst())
+        elapsed = time.monotonic() - t0
+
+        assert all(isinstance(o, HTTPException) and o.status_code == 503
+                   for o in outcomes), [type(o).__name__ for o in outcomes]
+        assert stub.count == 1, "the cold burst was not coalesced"
+        assert elapsed < self.BUDGET + 0.5, (
+            f"20 cold requests took {elapsed:.3f}s — not bounded")
+        assert all(o.headers and int(o.headers["Retry-After"]) >= 1
+                   for o in outcomes)
+
+    def test_fetch_total_resolver_is_clamped_and_total_semantic(self, monkeypatch):
+        """``TORTOISE_JWKS_TIMEOUT`` is a TOTAL, never below the phase sum."""
+        floor = sa._JWKS_FETCH_PHASE_TOTAL_S + sa._JWKS_FETCH_MARGIN_S
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "9")
+        assert sa._resolve_fetch_total() == 9.0
+        # Below the phase sum the hard deadline would win the race against the
+        # phases and strand the httpx worker (CPython #87185) — clamp up.
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "0.1")
+        assert sa._resolve_fetch_total() == floor
+        # Garbage / non-positive values fall back to the floor, never raise at
+        # import (a malformed knob must not make the module unimportable).
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "not-a-number")
+        assert sa._resolve_fetch_total() == floor
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "0")
+        assert sa._resolve_fetch_total() == floor
+        # NON-FINITE values are rejected, not clamped (review P2-1). The old
+        # ``not v > 0`` guard is NaN-safe but NOT inf-safe: ``inf`` (and
+        # ``1e309``, which ``float()`` evaluates to ``inf``) passed it, was not
+        # ``< floor``, and landed in ``asyncio.timeout(inf)`` — which NEVER
+        # fires, silently disabling the #3284 hard deadline.
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "inf")
+        assert sa._resolve_fetch_total() == floor
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "1e309")
+        assert sa._resolve_fetch_total() == floor
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "nan")
+        assert sa._resolve_fetch_total() == floor

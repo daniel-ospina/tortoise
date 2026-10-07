@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- tortoise.premiselabs.co — product + docs + legal + auth sitemap.
+<!-- tortoise.premiselabs.co — product + docs + legal sitemap.
      Same-host URLs only (Google requirement); discovered via robots.txt
      cross-submission. welcome.html and invite-accept.html are auth-gated
-     (noindex) and intentionally omitted. -->
+     (noindex) and intentionally omitted. /auth moved to the app origin
+     (app.premiselabs.co) with the BFF in #4054, so it is no longer a
+     same-host URL and is omitted here too. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://tortoise.premiselabs.co/</loc>
@@ -18,11 +20,6 @@
     <loc>https://tortoise.premiselabs.co/faq</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
-  </url>
-  <url>
-    <loc>https://tortoise.premiselabs.co/auth</loc>
-    <changefreq>monthly</changefreq>
-    <priority>0.6</priority>
   </url>
   <url>
     <loc>https://tortoise.premiselabs.co/self-hosted</loc>

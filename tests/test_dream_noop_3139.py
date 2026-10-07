@@ -33,6 +33,7 @@ matching the verified behaviour of a real GRAPH.COPY'd FalkorDB graph.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -48,6 +49,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _claim(sdk: TortoiseSDK, content: str) -> str:

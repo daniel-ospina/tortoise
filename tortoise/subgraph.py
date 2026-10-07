@@ -64,6 +64,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from tortoise.fanout import PER_ENTITY_FANOUT_CAP
+
 __all__ = [
     "EDGE_PRIORITY_WEIGHT",
     "HOP_DECAY",
@@ -298,6 +300,9 @@ _CYPHER_POINT_META = f"MATCH (p:Point) WHERE p.id IN $ids RETURN {_prop_projecti
 # bare operator walk — the other endpoint is always the claim).
 _CYPHER_OPS = (
     "MATCH (n:Point) WHERE n.id = $id "
+    # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the id
+    # predicate at the re-binding MATCH below (foreign rows).
+    "WITH n "
     "MATCH (n)-[r:IMPL|NAND]-(op:Point {is_operator:true}) "
     "MATCH (op)-[r2:IMPL|NAND]-(other:Point) "
     "WHERE other.id <> n.id AND other.is_operator = false "
@@ -309,16 +314,29 @@ _CYPHER_OPS = (
 # 1-hop aboutObject entity link (the hub itself is never a candidate).
 _CYPHER_ABOUT = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "
     "MATCH (n)-[:aboutObject]->(o:Object) "
     "RETURN o.id AS hub_id, o.name AS hub_name"
 )
 
 # The ONLY permitted 2nd hop: seed → aboutObject hub → sibling claim.
+#
+# #5010 — the fan-out cap (STORAGE-ARCHITECTURE.md §11.5) is applied HERE,
+# per hub: this is the one expansion in the read path that a high-degree
+# entity makes unbounded (a 1,200-claim hub pulls ~1,200 sibling rows PER
+# ANCHOR into memory). `ORDER BY sib.id` makes the surviving set
+# deterministic (the old query had no order, so the retained rows depended on
+# engine order), and `collect(sib)[0..$cap]` bounds each hub independently so
+# a mega-hub cannot starve a co-hub of its rows.
 _CYPHER_SIBLINGS = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "
     "MATCH (n)-[:aboutObject]->(o:Object) "
     "MATCH (o)<-[:aboutObject]-(sib:Point) "
     "WHERE sib.id <> n.id AND sib.is_operator = false "
+    "WITH o, sib ORDER BY sib.id "
+    "WITH o, collect(sib)[0..$cap] AS sibs "
+    "UNWIND sibs AS sib "
     "RETURN o.id AS hub_id, o.name AS hub_name, "
     f"{_prop_projection('sib', 'sib_')}"
 )
@@ -326,6 +344,7 @@ _CYPHER_SIBLINGS = (
 # Whole-graph incident-edge count of a hub entity (not subgraph degree).
 _CYPHER_HUB_DEGREE = (
     "MATCH (o:Object) WHERE o.id IN $ids "
+    "WITH o "
     "MATCH (o)-[r]-() "
     "RETURN o.id AS hub_id, count(r) AS hub_degree"
 )
@@ -334,12 +353,14 @@ _CYPHER_HUB_DEGREE = (
 # superseded_by property, so BOTH directions are walked.
 _CYPHER_CORRECTS_OUT = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "
     "MATCH (n)-[:CORRECTS]->(other:Point) "
     "WHERE other.is_operator = false "
     f"RETURN {_prop_projection('other', 'other_')}"
 )
 _CYPHER_CORRECTS_IN = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "
     "MATCH (other:Point)-[:CORRECTS]->(n) "
     "WHERE other.is_operator = false "
     f"RETURN {_prop_projection('other', 'other_')}"
@@ -416,7 +437,8 @@ def _collect_raw(graph: Any, anchor_id: str) -> dict[str, list]:
     return {
         "ops": _q(graph, _CYPHER_OPS, {"id": anchor_id}),
         "about": _q(graph, _CYPHER_ABOUT, {"id": anchor_id}),
-        "siblings": _q(graph, _CYPHER_SIBLINGS, {"id": anchor_id}),
+        "siblings": _q(graph, _CYPHER_SIBLINGS,
+                       {"id": anchor_id, "cap": PER_ENTITY_FANOUT_CAP}),
         "corrects_out": _q(graph, _CYPHER_CORRECTS_OUT, {"id": anchor_id}),
         "corrects_in": _q(graph, _CYPHER_CORRECTS_IN, {"id": anchor_id}),
     }

@@ -1,9 +1,20 @@
-"""Static regression tests for the signup/signin form-safety hardening (#527).
+"""Static regression tests for the signup form-safety hardening (#527).
 
 Pins the contracts that keep the signup/login funnel from regressing into the
 original "static shell" bug (#527): native form GET-echo of credentials, the
 supabase-js duplicate-identifier script kill, raw Supabase error leakage, and
 missing CDN-failure guards.
+
+#4054: the LIVE auth surface is the single `/auth` page
+(`website/apps/dashboard/public/signup.html`, which carries BOTH signup and login
+modes). The legacy marketing-origin `website/signin.html` was DELETED — every
+`/signin*` URL 301s to `/auth` (`website/_redirects`, plus the company-host
+consolidation in `website/functions/_middleware.ts`), so the asset was
+unreachable and only kept the last legacy-bridge page alive. Its #527/#863
+static pins are retired below; each invariant they covered is now asserted
+against the live `/auth` page, is enforced repo-wide by
+tests/test_no_legacy_token_path.py, or no longer applies because the live
+recovery surface is a JS link rather than a form.
 
 Unconditional (no network, no browser): runs in the main suite. The node
 --check gate is skipped when node is unavailable (e.g. minimal runners).
@@ -23,10 +34,32 @@ from pathlib import Path
 import pytest
 
 WEBSITE = Path(__file__).resolve().parent.parent / "website"
+# #4054: the BFF surfaces moved to the APP Pages project
+# (`website/apps/dashboard/public/`). The legacy marketing-origin signin.html
+# was DELETED with the bridge; SIGNUP is now the single /auth surface.
+DASHBOARD_PUBLIC = WEBSITE / "apps" / "dashboard" / "public"
 
-SIGNUP = (WEBSITE / "signup.html").read_text()
-SIGNIN = (WEBSITE / "signin.html").read_text()
-WELCOME = (WEBSITE / "welcome.html").read_text()
+SIGNUP = (DASHBOARD_PUBLIC / "signup.html").read_text()
+WELCOME = (DASHBOARD_PUBLIC / "welcome.html").read_text()
+
+
+def test_retired_signin_page_stays_deleted() -> None:
+    """#4054: `website/signin.html` was the last page on the legacy
+    cross-subdomain session bridge and is DELETED. Every `/signin*` URL 301s to
+    `/auth` (`website/_redirects`), so the asset was unreachable; a
+    reintroduction would re-arm the JS-readable bridge.
+
+    REPLACES the retired signin.html static pins: the #527 form contract, the
+    #863 recovery lockout and the three-mechanism CDN guard are now asserted
+    against the LIVE /auth page (SIGNUP), are covered repo-wide by
+    tests/test_no_legacy_token_path.py, or are no longer invariants (the live
+    recovery request is a JS link, not a form). The pin here is the ABSENCE of
+    the retired page, so it cannot silently come back.
+    """
+    assert not (WEBSITE / "signin.html").exists(), (
+        "website/signin.html is back — it 301s to /auth on every host and its "
+        "only purpose was to keep the legacy session bridge alive (#4054)"
+    )
 
 
 def _strip_html_comments(text: str) -> str:
@@ -61,13 +94,13 @@ def test_email_form_is_post_with_explicit_action() -> None:
     behavior. method=post + action means a JS-failure submission can never
     put credentials in the URL (Cloudflare Pages discards POST bodies)."""
     signup_form = re.search(r'<form[^>]*id="email-form"[^>]*>', SIGNUP).group(0)
-    signin_form = re.search(r'<form[^>]*id="email-form"[^>]*>', SIGNIN).group(0)
     assert re.search(r'method="post"', signup_form), "signup form must be method=post"
     # #1494: the ONE email form now lives in the email modal (signup AND
     # login per the toggle); its action is the same-path canonical /auth.
     assert re.search(r'action="/auth"', signup_form), "signup form must action=/auth"
-    assert re.search(r'method="post"', signin_form), "signin form must be method=post"
-    assert re.search(r'action="/signin"', signin_form), "signin form must action=/signin"
+    # #4054: the deleted signin.html's duplicate `action="/signin"` email form is
+    # retired with the page — the /auth page is the single email form, and this
+    # assertion is what keeps the #527 GET-echo contract on the live surface.
     # The API-key modal form keeps the same #527 contract (no GET echo).
     apikey_form = re.search(r'<form[^>]*id="apikey-form"[^>]*>', SIGNUP).group(0)
     assert re.search(r'method="post"', apikey_form), "apikey form must be method=post"
@@ -79,8 +112,46 @@ def test_email_and_password_have_autocomplete() -> None:
     new-password / current-password) — the plan explicitly retains them."""
     assert 'autocomplete="email"' in SIGNUP
     assert 'autocomplete="new-password"' in SIGNUP
-    assert 'autocomplete="email"' in SIGNIN
-    assert 'autocomplete="current-password"' in SIGNIN
+    # #4054: the deleted signin.html's static `autocomplete="current-password"`
+    # pin is replaced by the LIVE /auth page's runtime assignment — the email
+    # modal toggles between signup and login, so the attribute is set in JS.
+    assert '"current-password"' in SIGNUP, (
+        "the /auth login modal must still request current-password autofill"
+    )
+
+
+# ── #3781: the private-beta gate must never come back ──────────────────────
+
+
+def test_no_client_side_beta_gate() -> None:
+    """#3781: the signup funnel must stay OPEN for a real new user.
+
+    The retired gate was a full-viewport overlay that covered all four
+    sign-in options until the visitor typed a hardcoded client-side
+    constant (`BETA_ACCESS_CODE = "betatester"`) or carried a
+    `localStorage['tortoise_beta_access']` flag — it blocked every real
+    signup and restricted nobody who read the page source (the endpoint it
+    appeared to protect, POST /v1/signup/email, is in SKIP_AUTH).
+
+    Checked against comment-stripped source so documenting the removal in a
+    comment can never miss a re-introduction of the overlay itself.
+    """
+    stripped = _strip_html_comments(SIGNUP)
+    # Quote- and attribute-agnostic on purpose (review P2): pinning `id="beta-gate"`
+    # missed `id='beta-gate'`, a `class="beta-gate"` overlay, and the `.beta-gate`
+    # CSS rule — a re-introduction in any of those spellings passed the guard while
+    # restoring the exact defect. The bare identifier covers every spelling; the
+    # constant/flag tokens are already spelling-independent.
+    for token, why in (
+        ("beta-gate", "the full-viewport overlay (or its CSS) is back"),
+        ("BETA_ACCESS_CODE", "the hardcoded client-side access code is back"),
+        ("BETA_ACCESS_KEY", "the client-side access-key constant is back"),
+        ("confirmBetaAccess", "the client-side unlock handler is back"),
+        ("tortoise_beta_access", "the localStorage unlock flag is back"),
+    ):
+        assert token not in stripped, f"#3781 regression: {why} ({token})"
+    # The front door itself must remain reachable (the gate's inverse).
+    assert 'id="btn-email"' in stripped, "the email signup CTA is missing"
 
 
 # ── The historical script-kill: no `let supabase` shadowing ────────────────
@@ -92,7 +163,9 @@ def test_no_supabase_identifier_shadowing() -> None:
     redeclaration → SyntaxError → the whole inline script died at parse time,
     leaving a static shell. Both pages must keep using a different identifier
     (supabaseClient) forever."""
-    for name, html in (("signup", SIGNUP), ("signin", SIGNIN), ("welcome", WELCOME)):
+    # #4054: signin.html is deleted (see the module docstring); the shadowing
+    # contract is asserted on the live surfaces that remain.
+    for name, html in (("signup", SIGNUP), ("welcome", WELCOME)):
         assert not re.search(r'\blet\s+supabase\b', html), \
             f"{name}.html must not declare `let supabase` (kills the inline script)"
 
@@ -113,7 +186,7 @@ def test_humanize_auth_error_present_with_rate_limit_mapping() -> None:
     email-bucket copy and the per-IP network copy must be present, and the
     mechanism codes must be pinned separately (over_email_send_rate_limit
     vs over_request_rate_limit_ip)."""
-    for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
+    for name, html in (("signup", SIGNUP),):
         assert "humanizeAuthError" in html, f"{name}.html missing humanizeAuthError()"
         # Literal error codes (stable — the function keys on error_code first)
         for code in ("over_email_send_rate_limit", "over_request_rate_limit_ip",
@@ -135,7 +208,7 @@ def test_email_bucket_copy_mechanism_split() -> None:
     assert EMAIL_BUCKET_COPY != NETWORK_COPY
     assert "from this network" not in EMAIL_BUCKET_COPY, \
         "email-bucket copy still blames the network (#863 misattribution)"
-    for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
+    for name, html in (("signup", SIGNUP),):
         # The email-bucket entry must be a separate array entry from the
         # per-IP entry: pin the pseudo-code + code separation.
         assert '"email_rate_limit"' in html, \
@@ -149,8 +222,9 @@ def test_no_raw_error_message_leakage() -> None:
     both handlers (replaced by humanizeAuthError)."""
     assert "showError(error.message)" not in SIGNUP, \
         "signup.html still surfaces raw error.message"
-    assert "showError(error.message)" not in SIGNIN, \
-        "signin.html still surfaces raw error.message"
+    # #4054: the deleted signin.html's copy of this check is retired; the
+    # repo-wide absence of a raw-message leak is enforced by
+    # tests/test_no_legacy_token_path.py and the BFF status-branch test below.
 
 
 def test_rate_limit_lockout_guards_present() -> None:
@@ -166,20 +240,19 @@ def test_rate_limit_lockout_guards_present() -> None:
     # the guard runs before any request: top-of-handler early return
     assert "rateLimitRemainingMs() > 0" in SIGNUP
     # #863: the LOGIN surface (email modal + forgot-password) carries its own
-    # page-scoped bucket on the auth page (tortoise_signin_* — migrated from
-    # the retired signin.html) so a login throttle never disables the signup
-    # form; signin.html keeps the same machinery as a legacy static pin.
+    # page-scoped bucket on the auth page (tortoise_signin_*) so a login throttle
+    # never disables the signup form.
     assert "tortoise_signin_rate_limited_until" in SIGNUP
     assert "tortoise_signin_rate_limit_tier" in SIGNUP
     assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP
-    assert "resetPasswordForEmail" in SIGNUP
-    assert "tortoise_signin_rate_limited_until" in SIGNIN
-    assert "tortoise_signin_rate_limit_tier" in SIGNIN
-    assert "RATE_LIMIT_LOCKOUT_MS" in SIGNIN
-    assert "SHORT_RATE_LIMIT_LOCKOUT_MS" in SIGNIN
-    assert "applyRateLimitLockout" in SIGNIN
-    assert "rateLimitRemainingMs() > 0" in SIGNIN
-    assert "resetPasswordForEmail" in SIGNIN
+    # #3501: the reset call is now the BFF route (the client no longer calls
+    # GoTrue directly).
+    assert 'bffPost("/auth/reset"' in SIGNUP
+    # #4054: the duplicate signin.html pins of the SAME login-bucket machinery
+    # (tortoise_signin_*, RATE_LIMIT_LOCKOUT_MS, SHORT_RATE_LIMIT_LOCKOUT_MS,
+    # applyRateLimitLockout, rateLimitRemainingMs, resetPasswordForEmail) are
+    # retired with the page. Every invariant they named is asserted on SIGNUP
+    # above, which is now the single login surface.
 
 
 def test_recovery_flow_present() -> None:
@@ -193,17 +266,16 @@ def test_recovery_flow_present() -> None:
     # entry + login-scoped bucket (#863 separation, #1493).
     assert 'id="modal-forgot-link"' in SIGNUP
     assert "modalForgotPassword" in SIGNUP
-    assert "resetPasswordForEmail" in SIGNUP
+    # #3501: the reset request is the BFF route, not a client GoTrue call.
+    assert 'bffPost("/auth/reset"' in SIGNUP
     assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP  # login bucket ≠ signup bucket
-    # Legacy signin.html pins (file retained for static contract).
-    assert 'id="forgot-link"' in SIGNIN
-    assert 'id="recovery-form"' in SIGNIN
-    assert 'id="btn-recovery"' in SIGNIN
-    assert "recoveryInFlight" in SIGNIN  # double-submit guard (bucket burn)
-    # #527 contract: recovery form must be method=post with explicit action
-    recovery_form = re.search(r'<form[^>]*id="recovery-form"[^>]*>', SIGNIN).group(0)
-    assert re.search(r'method="post"', recovery_form), "recovery form must be method=post"
-    assert re.search(r'action="/signin"', recovery_form), "recovery form must action=/signin"
+    # #4054: the legacy signin.html recovery pins (id="forgot-link",
+    # id="recovery-form", id="btn-recovery", recoveryInFlight, and the #527
+    # method=post/action="/signin" contract) are retired with the page. The LIVE
+    # recovery REQUEST is the /auth login modal's `modal-forgot-link` link
+    # (asserted above), which is a JS link, not a form — so the recovery-form
+    # #527 contract no longer applies. The #527 contract for the reset LANDING
+    # form is still asserted on welcome.html below.
     # welcome.html: recovery-landing reset panel.
     #
     # #3501 replaced the client-side reset (a supabase-js `updateUser` call on a
@@ -234,9 +306,9 @@ def test_recovery_flow_present() -> None:
     assert "r.status === 401" in WELCOME_CODE
     assert "This reset link has expired or is invalid" in WELCOME_CODE
     assert "sign in with your new password" in WELCOME_CODE
-    # The legacy client bridge is GONE. It could not read an HttpOnly session
-    # cookie, so its no-session branch fired on EVERY successful login and
-    # bounced the user back to /auth.
+    # The legacy client bridge is GONE. It resolved the legacy parent-domain
+    # cookie, so a browser holding no legacy session had no session it could see
+    # and was bounced back to /auth.
     for legacy in (
         "runSessionBridge",
         "createTortoiseSupabaseClient",
@@ -251,48 +323,67 @@ def test_recovery_flow_present() -> None:
     assert "This reset link has expired or is invalid. Request a new one." in WELCOME
 
 
-def test_server_429_tier_parsing_pins() -> None:
-    """#863: the server-first signup 429 path (signup.html) must resolve the
-    mechanism from the API's detail payload — the one layer that is neither
-    e2e-testable nor unit-tested (no JS test harness): error_code read,
-    string-detail hint scan, and the fail-safe email-bucket default."""
-    assert "lastServer429Code" in SIGNUP
-    assert "lastServer429Message" in SIGNUP
-    assert "detail.error_code" in SIGNUP
-    assert "resolveServer429Code" in SIGNUP
-    assert 'return "over_email_send_rate_limit"' in SIGNUP  # fail-safe default
+def test_bff_status_branches_pin() -> None:
+    """#3501: the page branches on the BFF HTTP STATUS and maps the JSON payload
+    onto the {code, message} shape the lockout helpers read.
+
+    Replaces the retired #863 `resolveServer429Code` pin: signup/password no
+    longer receive the provider's mechanism code directly (the BFF folds a
+    provider 429 into 503 for those routes), so the load-bearing property is now
+    the STATUS discipline — a 503 must be handled as a retryable fault and never
+    fall through to a "signed out"/"refused" branch (#3485).
+    """
+    assert "function bffPost(" in SIGNUP
+    assert "function bffError(" in SIGNUP
+    # The provider code rides `providerError` on the signup rejection; every
+    # other route uses `error`.
+    assert "data.providerError || data.error" in SIGNUP
+    # Explicit 503 branches, with honest retryable copy.
+    assert "Signup is temporarily unavailable" in SIGNUP
+    assert "Sign-in is temporarily unavailable" in SIGNUP
+    assert "We couldn't send the reset email right now" in SIGNUP
+    # The API-key route's 429 keeps its hour-scale copy.
+    assert "Too many sign-in attempts from this network" in SIGNUP
+    assert "Retry-After" in SIGNUP
 
 
 # ── CDN / script-failure guards ────────────────────────────────────────────
 
 
-def test_cdn_failure_guards_present() -> None:
-    """Three-mechanism guard against the historical trigger (CDN blocked →
-    inline script dies → dead form): (1) typeof check + try/catch around
-    createClient, (2) CDN <script> onerror belt, (3) watchdog block that
-    surfaces "temporarily unavailable" if the client never arrives."""
-    for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
-        # #1225: the CDN guard moved to the null-safe shared factory
-        # (assets/supabase-session.js) — same fail-closed intent, new surface.
-        assert 'typeof window.createTortoiseSupabaseClient === "function"' in html, \
-            f"{name}.html missing the null-safe client factory guard"
-        assert 'onerror="(function(){var e=document.getElementById(\'error\')' in html, \
-            f"{name}.html missing the CDN script onerror belt"
-        assert "temporarily unavailable" in html, \
-            f"{name}.html missing the temporarily-unavailable copy"
-        # The watchdog reads window.supabaseClient — the client must be exposed
-        # on window (a top-level `let` does not create a window property), or
-        # the watchdog false-fires on healthy loads (review P1).
-        assert "window.supabaseClient = supabaseClient" in html, \
-            f"{name}.html missing window.supabaseClient exposure"
-        assert "setTimeout(showWatchdogError, 6000)" in html, \
-            f"{name}.html missing the watchdog script block"
+def test_migrated_auth_page_has_no_client_cdn_machinery() -> None:
+    """The /auth page is on the BFF: there is NO CDN script and NO client, so
+    the CDN-death guard is deliberately ABSENT — a reintroduction of
+    `createTortoiseSupabaseClient` IS the bug. That absence is enforced by this
+    test, the static BFF suite, and tests/test_no_legacy_token_path.py.
+
+    RENAMED from `test_cdn_failure_guards_present`: the POSITIVE half of that
+    test pinned the three-mechanism CDN-death guard on the legacy signin.html,
+    which is DELETED (#4054). The guard's subject is gone, so only the absence
+    half remains — and it is the load-bearing half for the migrated surface.
+    """
+    # Migrated signup surface: none of the client machinery may be present.
+    # Comment-stripped: the page documents the removal in comments that name it.
+    signup_code = _strip_html_comments(SIGNUP)
+    for legacy in (
+        "createTortoiseSupabaseClient",
+        "window.supabaseClient",
+        "supabase-session.js",
+        "@supabase/supabase-js",
+        "SUPABASE_ANON_KEY",
+    ):
+        assert legacy not in signup_code, (
+            f"signup.html is on the BFF and must not carry the client CDN guard "
+            f"({legacy!r}) — the client-side session is retired (#3501)"
+        )
 
 
 def test_noscript_notice_present() -> None:
-    """A <noscript> notice must explain the no-JS case (no dead form)."""
+    """A <noscript> notice must explain the no-JS case (no dead form).
+
+    #4054: the deleted signin.html's copy of this pin is retired; the live /auth
+    page (SIGNUP) is the only form surface left, and this asserts it directly.
+    """
     assert "<noscript>" in SIGNUP and "enable JavaScript" in SIGNUP
-    assert "<noscript>" in SIGNIN and "enable JavaScript" in SIGNIN
 
 
 def test_confirmation_state_hides_provider_buttons() -> None:
@@ -327,9 +418,17 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("fname", ["signup.html", "signin.html", "welcome.html"])
-def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
-    html = (WEBSITE / fname).read_text()
+@pytest.mark.parametrize(
+    "page",
+    [
+        DASHBOARD_PUBLIC / "signup.html",
+        DASHBOARD_PUBLIC / "welcome.html",
+    ],
+    ids=["signup.html", "welcome.html"],
+)
+def test_inline_scripts_pass_node_syntax_check(page: Path) -> None:
+    html = page.read_text()
+    fname = page.name
     # #863 review: match attribute-bearing <script> tags too (a <script defer> or
     # <script type="module"> block would otherwise be silently skipped — the
     # exact regression class this gate exists for). External <script src=...>
@@ -359,11 +458,11 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
     """#3501: welcome.html must NOT wait for, or read, a client-side session.
 
     This replaces the pre-#3501 assertion that the page ran a bounded
-    `waitForSession`/`SIGNED_IN` wait. Under the BFF there is no
-    JavaScript-readable session, so that wait could only ever time out — and
-    its no-session branch bounced every successfully-authenticated visitor back
-    to /auth. That was the #3485 login loop, reproduced by construction for
-    every user.
+    `waitForSession`/`SIGNED_IN` wait. That wait resolved the legacy parent-domain
+    `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF session
+    is the HttpOnly `__Host-session`), so a browser holding no legacy session could
+    only ever time out — and its no-session branch bounced that visitor back to
+    /auth. That was the #3485 login loop, reproduced by construction for that visitor.
 
     The decision now happens SERVER-side in `functions/welcome.ts`, which reads
     the HttpOnly cookie and redirects before any HTML is served (pinned by

@@ -1,7 +1,11 @@
 """Tests for monitoring — health checks, Prometheus metrics, cost tracking."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +32,32 @@ class FakeSDK:
             raise RuntimeError("connection refused")
         proj = MagicMock()
         proj.g.query.return_value = MagicMock(result_set=[[1]])
+        return proj
+
+    def taxonomy(self):
+        return {"Point": self._graph_size, "Event": 0}
+
+
+class SlowColdStartSDK:
+    """A REACHABLE graph whose projection cold-start is slow — the shape of
+    the #3143 9,019-entity org: `_get_proj()` pays connect + the version probe
+    + `_ensure_indexes()` (~28 round trips, plus an O(graph) index build when
+    an index is missing), and the cost scales with graph size, while the
+    `RETURN 1` reachability query itself is sub-millisecond."""
+    def __init__(self, delay=0.2, graph_size=10):
+        self._delay = delay
+        self._graph_size = graph_size
+        self.query_calls = 0  # proof the reachability query was reached
+
+    def _get_proj(self):
+        time.sleep(self._delay)  # cold-start cost, NOT a reachability signal
+        proj = MagicMock()
+
+        def _q(*args, **kwargs):
+            self.query_calls += 1
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
         return proj
 
     def taxonomy(self):
@@ -68,6 +98,19 @@ def _fresh_probe_worker():
     monitoring._reset_probe_worker()
     yield
     monitoring._reset_probe_worker()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_graph_size_worker():
+    """#3253 review P2: the DEDICATED graph-size worker is process-lifetime
+    too. A test that wedges it (the stalled-taxonomy tests below) would leave
+    the ONE slot held, so every later ``graph_size`` count in the file pays
+    the full budget and ``graph_size`` stops being measurable — leaking a
+    wedged worker into the next test. Drop it per test, the same recovery
+    seam ops uses to fix a wedged count without a process restart."""
+    monitoring._reset_graph_size_worker()
+    yield
+    monitoring._reset_graph_size_worker()
 
 
 class TestProbeDb:
@@ -141,26 +184,28 @@ class TestProbeDb:
         assert calls["n"] == 2  # retried once, then still degraded
         assert "NXDOMAIN" in result["error"]
 
-    def test_retry_total_is_bounded_by_probe_db_total_timeout(self, monkeypatch):
-        """#2988: ``probe_db``'s real ceiling is TWO attempt bounds plus the
-        retry delay — ``PROBE_DB_TOTAL_TIMEOUT`` — not the bare per-attempt
-        ``PROBE_TIMEOUT``.
+    def test_retry_rides_the_single_combined_deadline(self, monkeypatch):
+        """#2988/#3143: the COMBINED (platform) shape's real ceiling is ONE
+        ``PROBE_TIMEOUT`` deadline — the #1565 retry rides the REMAINDER of it,
+        it does not take a second attempt bound. ``PROBE_DB_TOTAL_TIMEOUT``
+        (2 x ``PROBE_TIMEOUT`` + the retry delay) is retained only as the LOOSE
+        outer-alignment figure coordinators are sized above.
 
-        That total is the number a coordinator's outer bound is aligned above.
-        The previous version of this test slept ``0.98 * PROBE_TIMEOUT`` per
-        attempt and compared the wall clock against the 3.1s total with only
-        ~40-60ms of headroom; it genuinely failed once (3.1827s > 3.1s under a
-        cold daemon-thread start). A flaky guard in a registered CI surface is
-        worse than no guard.
+        This test used to assert the wall clock against that loose figure
+        (~0.95s at the patched sizes) — a bound the call cannot reach (~0.25s),
+        so it no longer guarded what it claimed. It now guards the REAL
+        structure: (a) a spy pins the retry's ``timeout`` at the REMAINDER —
+        strictly below the single bound — which is exactly what a "fresh
+        second bound" regression would break, and (b) the wall-clock backstop
+        is the single combined deadline. The SHIPPED ``PROBE_DB_TOTAL_TIMEOUT``
+        formula is pinned separately, as the alignment figure.
 
-        FIX — determinism over the knife-edge: the per-attempt bound and the
-        retry delay are MONKEYPATCHED DOWN so the measured total is small and
-        the margin is SECONDS, not milliseconds, and the SDK fails well INSIDE
-        the (small) attempt bound so nothing races the worker's own timeout.
-        The LOWER bound is safe because ``time.sleep`` can overshoot but never
-        undershoot; the UPPER bound carries a generous NAMED tolerance. The
-        SHIPPED ``PROBE_DB_TOTAL_TIMEOUT`` is pinned separately, because the
-        monkeypatched behavioural run cannot pin it.
+        Determinism over the knife-edge: the per-attempt bound and the retry
+        delay are MONKEYPATCHED DOWN so the measured total is small, and the
+        SDK fails well INSIDE the (small) attempt bound so nothing races the
+        worker's own timeout. ``time.sleep`` can overshoot but never undershoot,
+        so the LOWER bound is safe; the UPPER backstop carries a generous NAMED
+        tolerance.
         """
         import time
 
@@ -184,9 +229,22 @@ class TestProbeDb:
         per_attempt_work = 0.05
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", attempt_bound)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", retry_delay)
-        expected_total = 2 * attempt_bound + retry_delay
+        # The COMBINED shape's real ceiling: the retry rides the remainder of
+        # this ONE deadline — NOT `2 x attempt_bound + retry_delay`.
+        combined_deadline = attempt_bound
 
         calls = {"n": 0}
+        # Spy on the seam the retry budget crosses WITHOUT replacing the real
+        # implementation (the run stays behavioural).
+        seen: list[tuple] = []
+        real_probe_once = monitoring._probe_once
+
+        def spy_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            return real_probe_once(sdk, timeout=timeout,
+                                   setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "_probe_once", spy_probe_once)
 
         class SlowTransientSDK:
             def _get_proj(self):
@@ -203,6 +261,16 @@ class TestProbeDb:
 
         assert calls["n"] == 2, "the transient retry did not happen"
         assert result["ok"] is False
+        # STRUCTURAL guard: attempt 1 is the combined shape (no explicit
+        # allowance), and the retry is handed the REMAINDER — strictly less
+        # than the one deadline, because the first attempt and the delay were
+        # spent out of it. A regression that gave the retry a FRESH bound
+        # (``attempt_bound``) or the whole total would pin ``seen[1][0]`` at
+        # ``attempt_bound`` and fail here; the wall clock cannot see it, because
+        # each attempt fails in ~50ms.
+        assert seen[0] == (None, None), seen[0]
+        assert seen[1][1] is None, seen[1]  # the retry stays in COMBINED shape
+        assert 0 < seen[1][0] < combined_deadline, seen[1][0]
         # SAFE lower bound: both attempts' work plus the inter-attempt delay
         # really elapsed, so this run exercises the retry path.
         assert elapsed >= 2 * per_attempt_work + retry_delay, (
@@ -210,19 +278,19 @@ class TestProbeDb:
             f"({per_attempt_work}s each) plus the {retry_delay}s delay, so this "
             "measurement is not exercising the retry path"
         )
-        # UPPER bound with a GENEROUS NAMED TOLERANCE (seconds of headroom, not
-        # the ~40ms the old assertion had).
-        assert elapsed <= expected_total + RETRY_TOTAL_TIMING_TOLERANCE_S, (
-            f"probe_db took {elapsed:.3f}s — above two attempts plus one delay "
-            f"({expected_total}s) plus the {RETRY_TOTAL_TIMING_TOLERANCE_S}s "
-            "tolerance; probe_db's structure is no longer two bounded attempts "
-            "plus PROBE_RETRY_DELAY"
+        # UPPER backstop (generous NAMED tolerance): the call must stay inside
+        # its ONE combined deadline. The retry-budget structure is pinned by the
+        # structural assertions above, not by this clock.
+        assert elapsed <= combined_deadline + RETRY_TOTAL_TIMING_TOLERANCE_S, (
+            f"probe_db took {elapsed:.3f}s — above the single combined deadline "
+            f"({combined_deadline}s) plus the "
+            f"{RETRY_TOTAL_TIMING_TOLERANCE_S}s tolerance"
         )
-        # Drift guard, NOT a bound: the SHIPPED total must stay exactly two
-        # attempt bounds plus one retry delay.
+        # Drift guard, NOT a bound: the SHIPPED alignment figure must stay
+        # exactly two attempt bounds plus one retry delay.
         assert shipped_total == 2 * shipped_timeout + shipped_delay, (
-            "PROBE_DB_TOTAL_TIMEOUT drifted from the structure it describes "
-            "(2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
+            "PROBE_DB_TOTAL_TIMEOUT drifted from the alignment structure it "
+            "describes (2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
         )
 
     def test_never_raises_on_hung_connection(self, monkeypatch):
@@ -247,6 +315,851 @@ class TestProbeDb:
         assert "timeout" in result["error"]
         assert result["latency_ms"] < 2000
 
+    def test_malformed_sdk_never_raises(self):
+        """#3143 review: keep the never-raise contract for a malformed SDK.
+        The `_get_proj`/`proj.g` lookups run in the WORKER, so an
+        AttributeError is a classified degraded result — never an exception on
+        the caller thread (which would crash /health's handler)."""
+        class NoProjAttr:
+            pass
+
+        result = monitoring.probe_db(NoProjAttr())
+        assert result["ok"] is False
+        assert "_get_proj" in result["error"]
+
+        class NoneProj:
+            def _get_proj(self):
+                return None
+
+        result = monitoring.probe_db(NoneProj())
+        assert result["ok"] is False
+        assert "attribute" in result["error"]
+
+        class ProjWithoutGraph:
+            def _get_proj(self):
+                return object()
+
+        result = monitoring.probe_db(ProjWithoutGraph())
+        assert result["ok"] is False
+        assert "attribute" in result["error"]
+
+    def test_setup_raising_a_bare_timeout_never_reports_an_empty_error(
+            self, monkeypatch):
+        """#3143 review P2: on py3.12 ``concurrent.futures.TimeoutError`` IS
+        ``builtins.TimeoutError``, so a callable that RAISES one (a bare
+        ``TimeoutError()`` / ``socket.timeout`` from inside ``_get_proj``) is
+        re-raised out of ``Future.result`` and caught by the same handler as a
+        genuine phase overrun. ``setup.done()`` is True for BOTH causes, and
+        ``str(bare_timeout)`` is EMPTY — so pre-fix the probe returned
+        ``error=''`` (rendered as a bare 'unreachable' by /health) instead of
+        the synthesized setup message.
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.5)
+
+        class BareTimeoutSDK:
+            def _get_proj(self):
+                raise TimeoutError()  # str() == ""
+
+        calls = {"n": 0}
+
+        class MessagedTimeoutSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise TimeoutError("timed out")
+
+        # A bare timeout falls back to the synthesized setup message — never
+        # an empty string.
+        bare = monitoring.probe_db(BareTimeoutSDK())
+        assert bare["ok"] is False
+        assert bare["error"] == "probe setup timeout after 0.5s", bare
+        # #3683: the CALLABLE raised, so the probe has an observation — the
+        # synthesized spelling must NOT also decide the status (a message-less
+        # raised timeout and a messaged one are the same phase fact).
+        assert bare["observed"] is True, bare
+        # A timeout WITH its own message keeps it (more informative).
+        messaged = monitoring.probe_db(MessagedTimeoutSDK())
+        assert messaged["ok"] is False
+        assert "timed out" in messaged["error"], messaged
+        assert messaged["observed"] is True, messaged
+        # A TimeoutError is never retried (a hung DB stays hung).
+        assert calls["n"] == 1, calls
+
+    def test_default_budget_is_shared_across_the_two_phases(self, monkeypatch):
+        """#3143 review: with NO explicit setup allowance (the /health shape)
+        the cold-start and the query SHARE PROBE_TIMEOUT — the caller's total
+        wait stays inside the pre-#3143 single bound (#1384), never 2x it.
+
+        Asserts the QUERY's own dwell (the remaining budget), not a raw wall
+        clock: shared → ~0.8s inside the query; a per-phase budget (the
+        regression) → the full timeout. Wider margin than a total-elapsed
+        assertion, which the repo has been burned by under parallel load
+        (#1565 flake history).
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 3.0)
+        calls = {"query": 0}
+        entered = {}
+
+        class SlowSetupSlowQuery:
+            def _get_proj(self):
+                time.sleep(2.2)  # succeeds, but eats most of the budget
+                proj = MagicMock()
+
+                def _q(*args, **kwargs):
+                    calls["query"] += 1
+                    entered["t"] = time.monotonic()
+                    time.sleep(5.0)  # would blow the remaining budget
+                    return MagicMock(result_set=[[1]])
+
+                proj.g.query.side_effect = _q
+                return proj
+
+        result = monitoring.probe_db(SlowSetupSlowQuery())
+        returned = time.monotonic()
+        assert calls["query"] == 1  # setup succeeded → phase 2 was reached
+        assert result["ok"] is False
+        assert "timeout" in result["error"]
+        # Shared budget → the query may spend only the ~0.8s left; a per-phase
+        # budget would let it run the full 3.0s.
+        dwell = returned - entered["t"]
+        assert dwell < 2.0, f"query was given a fresh budget, not the remainder: {dwell:.2f}s"
+
+    def test_transient_retry_is_bounded_by_the_same_deadline(self, monkeypatch):
+        """#3143 review: the #1565 retry must NOT re-arm a fresh cold-start
+        allowance. The documented bound is ONE deadline of
+        ``setup_timeout + PROBE_TIMEOUT`` for the whole call (retry included).
+
+        Deterministic: an INJECTED clock makes attempt 1 consume exactly 2.5s
+        of the 3.0s deadline, so the retry budget must be exactly 0.5s. Without
+        that consumption a regression handing the retry a fresh
+        ``attempt_timeout`` (1.0s) or the whole ``total_budget`` (3.0s) would
+        satisfy any loose range — the exact defect this test exists to catch.
+        (No real sleeps: a wall-clock version left only ~0.5s of scheduling
+        slack and could flake on a loaded runner.)
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            if len(seen) == 1:
+                clock.t += 2.5  # the attempt consumed its deadline
+            return False, "transient", True, True
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object(), setup_timeout=2.0)
+        assert result["ok"] is False
+        assert len(seen) == 2  # retried once
+        assert seen[0] == (None, 2.0)  # explicit allowance on attempt 1
+        # Retry rides the remaining deadline in COMBINED shape — never a second
+        # 2s cold-start allowance (which would double the documented bound).
+        assert seen[1][1] is None
+        # 3.0s deadline − 2.5s consumed → 0.5s. A fresh 1.0s or 3.0s allowance
+        # would fail this.
+        assert seen[1][0] == pytest.approx(0.5), seen[1][0]
+
+    @pytest.mark.parametrize("overrun", [1.0, 1.2])
+    def test_exhausted_deadline_never_retries(self, monkeypatch, overrun):
+        """#3143 review: when attempt 1 already spent the whole deadline the
+        retry must NOT fire. A negative OR ZERO remainder would otherwise be
+        passed as the worker timeout, replacing the REAL transient error with
+        a bogus synthesized 'probe setup timeout after <non-positive>s'. The
+        ``overrun=1.0`` case pins the exact-deadline boundary (``>`` must not
+        be ``>=``)."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            clock.t += overrun  # 1.0 = exactly the deadline, 1.2 = overrun
+            return False, "connection refused", True, True
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object(), setup_timeout=0.0)
+        assert len(seen) == 1, seen  # no retry past the deadline
+        assert result["ok"] is False
+        assert result["error"] == "connection refused"  # the real error, not a fake timeout
+
+    def test_retry_short_budget_never_masks_the_real_error(self, monkeypatch):
+        """#3143 review: the ``remaining > 0`` guard does NOT cover the
+        window ``0 < remaining < cold-start``. There the retry still fires,
+        cannot redo the cold-start, and its synthesized setup timeout used to
+        OVERWRITE the real transient error — so ``/health`` reported a clock
+        artifact ("probe setup timeout after 0.01s") instead of the outage
+        cause, and abandoned a second worker thread for nothing."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.5)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.1)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            if len(seen) == 1:
+                clock.t += 1.39  # transient failure LATE in the shared budget
+                return False, "NXDOMAIN / connection refused", True, True
+            # The remainder (~0.01s) is far below the cold-start it must redo.
+            return False, f"probe setup timeout after {timeout}s", False, False
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object())
+        assert len(seen) == 2, seen  # the retry did fire...
+        assert seen[1][0] == pytest.approx(0.01), seen[1]  # ...on the remainder
+        assert result["ok"] is False
+        # ...but its inconclusive setup timeout must not mask the real cause.
+        assert result["error"] == "NXDOMAIN / connection refused", result["error"]
+
+
+class TestProbeDbBoundedAcquisition:
+    """#3446 — the SDK-acquisition phase is BOUNDED by ``probe_db(acquire=…)``.
+
+    The defect this closes: the acquisition ran on the coordinator's own
+    thread with nothing bounding it, so the outer coordinator bound — which is
+    DERIVED by summing an inner budget that includes
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — mixed one enforced term with one
+    unenforced one. An inequality can only be PROVEN above a sum of deadlines
+    the code actually imposes, so the constant was nominal and the derivation
+    was "best-effort alignment".
+
+    These tests are the enforcement, not the arithmetic: a deadline that
+    nothing observes is exactly the property that re-stales.
+    """
+
+    def test_acquisition_phase_is_abandoned_at_its_own_budget(self, monkeypatch):
+        """An acquisition that overruns is REPORTED at its budget.
+
+        LOAD-BEARING (mutation: call ``_acquire_on_probe_worker`` with
+        ``budget=None``, or drop the ``timeout=`` from ``future.result``): the
+        wait becomes the acquisition's own duration, so ``probe_db`` returns
+        the stub probe's verdict after ~1.0s instead of the acquisition-phase
+        timeout at ~0.05s — both assertions below red.
+
+        The acquire callable sleeps well inside the (patched) budget's
+        overshoot tolerance rather than racing it: ``time.sleep`` can
+        overshoot but never undershoot, so the UPPER backstop is what proves
+        the wait was abandoned early, and the message pins WHICH phase
+        reported.
+        """
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", budget)
+        acquired = {"n": 0}
+
+        def slow_acquire():
+            acquired["n"] += 1
+            time.sleep(1.0)  # 20x the budget: unmistakably past the deadline
+            return FakeSDK(db_ok=True)
+
+        start = time.monotonic()
+        result = monitoring.probe_db(acquire=slow_acquire)
+        elapsed = time.monotonic() - start
+
+        assert acquired["n"] == 1, "the acquisition phase did not run"
+        assert result["ok"] is False, result
+        assert result["error"] == (f"probe sdk acquisition timeout after {budget}s"), (
+            f"the acquisition phase must report ITS OWN spelling — got "
+            f"{result['error']!r}. A phase that reports another phase's error "
+            "makes the fault unattributable (#3446)"
+        )
+        assert elapsed < 0.5, (
+            f"probe_db waited {elapsed:.3f}s for an acquisition bounded at "
+            f"{budget}s — the phase deadline is NOMINAL, not enforced, and the "
+            "outer bound's derivation is unsound again"
+        )
+
+    def test_observed_distinguishes_a_raised_acquisition_from_an_answer_less_one(
+            self, monkeypatch):
+        """#3683: a callable that RAISED is observed; an answer-less phase is not.
+
+        The acquisition callable raising a ``TimeoutError`` is the case a
+        merge nearly lost: on py3.12 ``concurrent.futures.TimeoutError`` IS
+        ``builtins.TimeoutError``, so ``_acquire_on_probe_worker``'s ``except``
+        arm catches the callable's OWN raise. It must classify that as a
+        callable that RAISED (``observed=True``, #3683) and NOT conflate it
+        with a saturated-backlog refusal (``observed=False``). A budget overrun
+        and a queue wait are answer-less and unobserved.
+
+        LOAD-BEARING (mutation: return a fixed ``False`` for the acquire_error
+        arm, or drop the ``not isinstance(exc, _WorkerBacklogFull)`` test in
+        the helper): the raised arm below reports ``observed=False`` and reds.
+        """
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", budget)
+
+        def raising_timeout():
+            raise TimeoutError("socket connect timed out")
+
+        raised = monitoring.probe_db(acquire=raising_timeout)
+        assert raised["ok"] is False, raised
+        assert raised["observed"] is True, (
+            "an acquisition callable that RAISED produced an answer and must be "
+            f"observed=True (#3683) — got {raised!r}"
+        )
+        assert raised["error"] == "socket connect timed out", raised
+
+        def too_slow():
+            time.sleep(1.0)
+            return FakeSDK(db_ok=True)
+
+        timed_out = monitoring.probe_db(acquire=too_slow)
+        assert timed_out["ok"] is False, timed_out
+        assert timed_out["observed"] is False, (
+            "an acquisition that exhausted its budget produced NO answer and "
+            f"must be observed=False — got {timed_out!r}"
+        )
+
+    def test_acquisition_runs_on_the_shared_probe_worker(self):
+        """The phase runs on the probe worker, NOT the caller's thread.
+
+        That is what bounds it: the worker is the same process-lifetime daemon
+        ``_probe_once`` submits its two phases to, so a hung acquisition is
+        abandoned rather than leaked as a thread per probe (#2850).
+
+        LOAD-BEARING (mutation: acquire inline — call the callable on the
+        caller's thread instead of submitting it): the recorded thread name
+        becomes the caller's and this reds.
+        """
+        seen: dict = {}
+
+        def acquiring():
+            seen["thread"] = threading.current_thread().name
+            return FakeSDK(db_ok=True)
+
+        result = monitoring.probe_db(acquire=acquiring)
+        assert result["ok"] is True, result
+        assert seen["thread"].startswith("tortoise-probe-worker"), (
+            f"the acquisition ran on {seen['thread']!r} — an acquisition that "
+            "does not run on the bounded probe worker has no enforced deadline "
+            "(#3446)"
+        )
+
+    def test_acquisition_is_one_phase_even_when_the_probe_retries(self):
+        """The #1565 retry must NOT re-acquire the SDK.
+
+        ``probe_db`` retries the PROBE on a transient connect failure; the SDK
+        handle is a phase of its own and must be acquired exactly once, or a
+        flapping DB pays the acquisition cost twice inside a deadline sized for
+        one of each phase.
+
+        LOAD-BEARING (mutation: re-run the acquisition before the retry —
+        ``sdk = _acquire_on_probe_worker(acquire, …)[0]`` added just above the
+        ``_probe_once(sdk, timeout=remaining, …)`` call): ``calls['acquire']``
+        becomes 2 and this reds.
+        """
+        calls = {"acquire": 0, "probe": 0}
+
+        def acquiring():
+            calls["acquire"] += 1
+            return TransientOnceSDK(calls)
+
+        result = monitoring.probe_db(acquire=acquiring)
+        assert result["ok"] is True, result
+        assert calls["acquire"] == 1, (
+            f"the SDK was acquired {calls['acquire']} times — the retry must ride "
+            "the SAME handle, not re-pay the acquisition phase (#3446)"
+        )
+        assert calls["probe"] == 2, "the transient retry did not happen"
+
+    def test_raising_acquisition_never_escapes(self):
+        """A raising acquisition callable is classified, not propagated.
+
+        ``probe_db``'s contract for the DB path is NEVER raise — /health must
+        degrade rather than 500 (#1384).
+
+        LOAD-BEARING (mutation: drop the ``except Exception`` around
+        ``_acquire_on_probe_worker``): the RuntimeError escapes and this reds.
+        """
+        def broken():
+            raise RuntimeError("no handle for you")
+
+        result = monitoring.probe_db(acquire=broken)
+        assert result["ok"] is False
+        assert result["error"] == "no handle for you", result
+
+    def test_refused_submission_reports_the_workers_own_message(self, monkeypatch):
+        """A saturated backlog is NOT a phase timeout.
+
+        ``_WorkerBacklogFull`` IS a ``concurrent.futures.TimeoutError`` on
+        py3.12, so the deadline handler catches it; ``future.done()`` is what
+        tells the two apart. The worker's own message must survive, or the
+        remedy for a wedged worker reads as "the acquisition was slow".
+
+        LOAD-BEARING (mutation: drop the ``if future.done()`` branch): the
+        message becomes the synthesized acquisition timeout and this reds.
+        The ``observed`` assertion below is the OTHER half of the
+        ``not isinstance(exc, _WorkerBacklogFull)`` discrimination: a refusal
+        is answer-less, so a mutation that returns a constant True there
+        mislabels it an observed failure and reds (mutation-verified — the
+        whole file otherwise stays green under that simplification).
+        """
+        def refusing(_fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            future.set_exception(monitoring._WorkerBacklogFull(
+                "tortoise-probe-worker backlog full (32) — worker wedged"))
+            return future
+
+        monkeypatch.setattr(monitoring, "_probe_worker",
+                            lambda: SimpleNamespace(submit=refusing))
+        result = monitoring.probe_db(acquire=lambda: FakeSDK())
+        assert result["ok"] is False
+        assert "backlog full" in result["error"], result
+        assert "acquisition timeout" not in result["error"], result
+        assert result["observed"] is False, (
+            f"a refused (never-started) acquisition produced NO answer and must "
+            f"be observed=False (#3683) — got {result!r}"
+        )
+
+    def test_ambiguous_phase_ownership_is_rejected(self):
+        """Passing BOTH an sdk and an acquire callable is a CALL error.
+
+        The phase needs exactly one owner; silently preferring one would leave
+        the other's cost unbounded while looking handled.
+
+        LOAD-BEARING (mutation: replace the ``if sdk is not None: raise`` guard
+        with ``pass``): the ambiguity is silently resolved and this reds.
+        """
+        with pytest.raises(ValueError):
+            monitoring.probe_db(FakeSDK(), acquire=lambda: FakeSDK())
+        with pytest.raises(ValueError):
+            monitoring.probe_db()
+
+    def test_slow_but_in_budget_acquisition_does_not_eat_the_retry_window(
+            self, monkeypatch):
+        """The acquisition's OWN deadline must not be charged to the probe's.
+
+        #3446 review (reproduced): ``start`` was taken BEFORE the acquisition,
+        so ``remaining = total_budget - elapsed - PROBE_RETRY_DELAY`` subtracted
+        the acquisition's duration from a budget that does not include it. For
+        the platform shape ``total_budget`` is ``PROBE_TIMEOUT`` (1.5s) while
+        the acquisition's budget is 2.0s, so an acquisition slower than
+        ``PROBE_TIMEOUT - PROBE_RETRY_DELAY`` (1.4s) SUPPRESSED the #1565
+        transient retry and reported a reachable graph degraded — a
+        false-degrade, and the exact cold-embedded-acquisition scenario the
+        retry exists for.
+
+        The acquisition budget is PATCHED UP to 4.0 so the 1.45s sleep keeps
+        >=2s of overshoot headroom. The test needs only ``slow >
+        PROBE_TIMEOUT - PROBE_RETRY_DELAY`` (proven by the assertion below,
+        not assumed), and racing a 2.0s deadline with a 1.45s sleep on a box
+        running a dozen agent lanes is how a guard becomes a flake.
+
+        LOAD-BEARING (mutation: measure ``remaining`` from ``start`` again
+        instead of ``probe_start``): the retry never happens, ``ok`` is False
+        and this reds.
+        """
+        calls = {"acquire": 0, "probe": 0}
+        slow = 1.45
+        # Derived from the constants, not hand-typed: this is the window the
+        # bug conflated.
+        conflated = monitoring.PROBE_TIMEOUT - monitoring.PROBE_RETRY_DELAY
+        assert slow > conflated, (
+            f"this test only means something if the slow acquisition ({slow}s) "
+            f"exceeds the probe's own remaining window ({conflated}s)"
+        )
+        monkeypatch.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", 4.0)
+        assert slow < monitoring.PROBE_SDK_ACQUISITION_BUDGET - 2.0, (
+            "keep >=2s of overshoot headroom against the acquisition deadline, "
+            "or sleep jitter on a loaded box reds this test spuriously"
+        )
+        # A leftover abandoned acquisition from an earlier test in this class
+        # must not share the single slot with ours.
+        monitoring._reset_probe_worker()
+
+        def slow_acquire():
+            calls["acquire"] += 1
+            time.sleep(slow)
+            return TransientOnceSDK(calls)
+
+        result = monitoring.probe_db(acquire=slow_acquire)
+
+        assert calls["acquire"] == 1
+        assert calls["probe"] == 2, (
+            "the transient retry did NOT happen — a slow-but-in-budget "
+            "acquisition consumed the probe's retry window, so a reachable "
+            "graph is reported degraded (#3446 review)"
+        )
+        assert result["ok"] is True, result
+
+    def test_acquisition_failure_reports_the_historical_zero_latency(self):
+        """An acquisition failure reports ``latency_ms: 0.0``, as before #3446.
+
+        Both coordinators returned a FIXED ``{"ok": False, "latency_ms": 0.0,
+        "error": …}`` for an acquisition failure before the phase moved inside
+        ``probe_db``. The field means "probe latency", and the probe never
+        reached the DB — reporting the acquisition's own elapsed time is a
+        silent contract change for every downstream reader of the shape.
+
+        LOAD-BEARING (mutation: return ``round((time.monotonic() - start) *
+        1000, 1)`` on the two acquisition-failure returns): the raising case
+        reds on the ``== 0.0`` assertion below.
+        """
+
+        def broken():
+            time.sleep(0.02)  # ensure any elapsed-time reading is non-zero
+            raise RuntimeError("no handle for you")
+
+        raised = monitoring.probe_db(acquire=broken)
+        assert raised["ok"] is False
+        assert raised["latency_ms"] == 0.0, (
+            f"an acquisition failure reported latency_ms={raised['latency_ms']} "
+            "— the pre-#3446 contract (and the field's meaning) is 0.0 because "
+            "the probe never reached the DB"
+        )
+
+        def too_slow():
+            time.sleep(1.0)
+            return FakeSDK(db_ok=True)
+
+        debug = monitoring.PROBE_SDK_ACQUISITION_BUDGET
+        try:
+            monitoring.PROBE_SDK_ACQUISITION_BUDGET = 0.05
+            timed_out = monitoring.probe_db(acquire=too_slow)
+        finally:
+            monitoring.PROBE_SDK_ACQUISITION_BUDGET = debug
+        assert timed_out["ok"] is False
+        assert timed_out["latency_ms"] == 0.0, timed_out
+
+    def test_latency_ms_excludes_the_acquisition_phase(self):
+        """``latency_ms`` keeps its pre-#3446 meaning: the PROBE, not the call.
+
+        Before #3446 BOTH coordinators acquired the SDK themselves and then
+        called ``probe_db(sdk)``, so the reported latency started AFTER the
+        acquisition. Now that ``acquire=`` runs the phase INSIDE ``probe_db``,
+        subtracting its elapsed time is what keeps an ``acquire=`` caller and
+        an equivalent ``sdk=`` caller reporting the same number — otherwise a
+        cold embedded acquisition (up to ``PROBE_SDK_ACQUISITION_BUDGET``,
+        and the deadline binds on essentially every cold acquisition there)
+        would add ~2s to every chart of ``db.latency_ms``.
+
+        Measured shape (review, PR #5609): a 300ms acquisition reported
+        ``latency_ms=309.1`` before this exclusion, against ``1.6`` for the
+        equivalent ``sdk=`` shape.
+
+        LOAD-BEARING (mutation: drop ``- acquisition_elapsed`` from the return):
+        the acquisition's ~0.5s is charged to the probe and the ``< 250``
+        assertion below reds.
+        """
+        # A leftover abandoned acquisition from an earlier test in this class
+        # must not share the single probe slot and be charged to this probe.
+        monitoring._reset_probe_worker()
+
+        acquisition = {"elapsed": 0.0}
+
+        def slow_acquire():
+            began = time.monotonic()
+            time.sleep(0.5)  # unmistakably inside the 2.0s budget
+            acquisition["elapsed"] = time.monotonic() - began
+            return FakeSDK(db_ok=True)
+
+        acquired = monitoring.probe_db(acquire=slow_acquire)
+        assert acquired["ok"] is True, acquired
+        # The acquisition really did take the time: the exclusion below is
+        # observable, not a rounding artifact.
+        assert acquisition["elapsed"] >= 0.5, acquisition
+        assert acquired["latency_ms"] < 250, (
+            f"the acquire= shape reported latency_ms={acquired['latency_ms']} "
+            f"while its acquisition alone took {acquisition['elapsed']:.3f}s — "
+            "the reported field must keep meaning PROBE latency (pre-#3446 "
+            "semantics), not silently absorb the acquisition phase (#3446 "
+            "review)"
+        )
+
+        # The equivalent sdk= shape reports the same order: the acquisition's
+        # cost belongs to NEITHER.
+        supplied = monitoring.probe_db(FakeSDK(db_ok=True))
+        assert supplied["ok"] is True, supplied
+        assert supplied["latency_ms"] < 250, supplied
+
+    def test_queued_acquisition_names_the_wait_not_an_overrun(self):
+        """An acquisition that never STARTED must not read as one that ran.
+
+        The worker-side ``started`` event is the same never-ran/overran
+        discrimination ``_probe_once`` applies to its query phase — the review
+        P1 PR #3217 mandated for exactly this class (a submission queued behind
+        another probe's cold start was reported as that phase's own overrun).
+        Without it the error text names a callable that never executed, which
+        is the misattribution the third spelling exists to prevent.
+
+        LOAD-BEARING (mutation: drop the ``if not started.is_set()`` branch):
+        the message becomes the acquisition-timeout spelling and this reds.
+        """
+        worker = monitoring._probe_worker()
+        try:
+            # Occupy the SINGLE slot for longer than the acquisition budget, so
+            # the acquisition below is submitted but never picked up. THIS
+            # submit is the occupier — its future is deliberately unread.
+            worker.submit(lambda: time.sleep(0.6))
+            ran = {"n": 0}
+
+            def never_picked_up():
+                ran["n"] += 1
+                return FakeSDK(db_ok=True)
+
+            budget = 0.05
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", budget)
+                result = monitoring.probe_db(acquire=never_picked_up)
+
+            assert ran["n"] == 0, "the acquisition ran — the slot was not busy"
+            assert result["ok"] is False
+            assert result["error"] == (
+                f"{monitoring._PROBE_ACQUISITION_QUEUED_MSG}{budget}s"), (
+                f"a QUEUED acquisition reported {result['error']!r} — the "
+                "spelling must name the WAIT, not an overrun of a callable "
+                "that never ran (#3446 review / PR #3217)"
+            )
+        finally:
+            # Drop the occupied worker so a later test is not queued behind the
+            # occupier's sleep (the documented escape hatch; the old thread is
+            # a daemon and is abandoned, never joined).
+            monitoring._reset_probe_worker()
+
+    def test_malformed_acquire_is_a_call_error_not_a_db_failure(self):
+        """A non-callable or null-returning ``acquire`` is a CALL error.
+
+        Reporting these through the degraded dict labels a downstream
+        ``AttributeError`` (``'NoneType' object has no attribute '_get_proj'``)
+        as an unreachable graph — the same misattribution class the phase
+        spellings exist to remove.
+
+        LOAD-BEARING (mutations: drop the ``if not callable(acquire)`` guard →
+        the first ``pytest.raises`` reds; drop the post-acquisition ``if sdk is
+        None`` guard → the second reds).
+        """
+        with pytest.raises(ValueError, match="zero-arg callable"):
+            monitoring.probe_db(acquire=42)
+        with pytest.raises(ValueError, match="returned no SDK handle"):
+            monitoring.probe_db(acquire=lambda: None)
+
+    def test_probe_db_enters_exactly_the_declared_enforced_phases(
+            self, monkeypatch):
+        """The derivation is a sum over a phase SET — pin the set in code.
+
+        A bound that is a sum over three constants is only a bound if
+        ``probe_db`` can enter no other phase. The tests that pin the
+        derivation recompute CONSTANTS (the derivation lock is
+        ``tests/test_health_ready_nonblocking.py``), so they cannot see a phase
+        added to ``probe_db``. One other test in this file also counts
+        submissions, but it asserts a literal ``1`` on the SETUP early-return
+        path, where the query is never submitted — it does not pin the path
+        this test takes. What this test pins is the case in which the
+        submission count equals the size of the phase SET: a non-retrying
+        successful call entering each declared phase exactly once. That was the
+        one premise of the proof that prose alone held up.
+
+        The load-bearing half is the SUBMISSION COUNT, not the recorded tuple:
+        ``_PROBE_LAST_PHASES`` is self-reported by ``probe_db`` from a
+        hand-maintained list, so on its own it proves only that the declaration
+        and the recording agree — a phase whose author forgot to record it
+        would stay invisible. Counting the bounded waits that actually reach
+        ``_probe_worker`` cannot be fooled that way.
+
+        SCOPE of that count, stated because it is narrower than "any fourth
+        phase": the ``len(declared)`` equality holds on a NON-RETRYING
+        successful call, which enters each declared phase exactly once. A fourth
+        phase that bounds its wait on the shared probe worker on THIS path
+        raises the count to 4, whether or not anyone named it. The transient
+        retry is the one other branch that submits bounded waits, and its
+        composition is pinned separately below. A phase added on any OTHER
+        branch — one gated on ``setup_timeout``, say — would submit more waits
+        without being counted here, so it must still be added to the derivation
+        by hand. That is also why the derivation sums the SET and not a global
+        submission total: a total would charge the retry's re-entry as if it
+        were new phases.
+
+        LOAD-BEARING (mutation: insert a new bounded phase in ``probe_db`` —
+        e.g. ``_acquire_on_probe_worker(lambda: None, 0.5)`` right before
+        ``_probe_once`` — WITHOUT appending its name): ``submits`` becomes 4
+        and this reds. The record assertions alone would NOT have caught that
+        — which is why the count is here. The retry delta at the end reds on a
+        bounded wait added on the RETRY branch, which the ``len(declared)``
+        equality cannot see.
+        """
+        declared = monitoring._PROBE_ENFORCED_PHASES
+        assert declared == ("sdk_acquisition", "projection_setup",
+                            "reachability_query"), declared
+
+        real_worker = monitoring._probe_worker
+        submits = {"n": 0}
+
+        class _CountingWorker:
+            def submit(self, fn):
+                submits["n"] += 1
+                return real_worker().submit(fn)
+
+        monkeypatch.setattr(monitoring, "_probe_worker", _CountingWorker)
+
+        acquired = monitoring.probe_db(acquire=lambda: FakeSDK(db_ok=True))
+        assert acquired["ok"] is True, acquired
+        assert declared == monitoring._PROBE_LAST_PHASES, (
+            f"probe_db entered {monitoring._PROBE_LAST_PHASES!r} but the "
+            f"derivation declares {declared!r}"
+        )
+        assert submits["n"] == len(declared), (
+            f"probe_db submitted {submits['n']} bounded waits to the shared "
+            f"probe worker but the derivation sums {len(declared)} phases "
+            f"({declared!r}) — a phase the outer bound does not account for "
+            "makes it an under-estimate (#3446)"
+        )
+
+        before = submits["n"]
+        supplied = monitoring.probe_db(FakeSDK(db_ok=True))
+        assert supplied["ok"] is True, supplied
+        assert declared[1:] == monitoring._PROBE_LAST_PHASES, (
+            f"the ``sdk=`` shape entered {monitoring._PROBE_LAST_PHASES!r} — "
+            "it must not run the acquisition phase, because that cost belongs "
+            "to whichever caller acquired the handle"
+        )
+        assert submits["n"] - before == len(declared) - 1, (
+            "the ``sdk=`` shape must submit one bounded wait FEWER (there is "
+            "no acquisition phase — the caller acquired the handle)"
+        )
+
+        # The #1565 retry is the ONE other branch that submits bounded waits.
+        # Pin its composition too, or a phase added there would inflate the
+        # real inner total while every assertion above stayed green.
+        before_retry = submits["n"]
+        retried = monitoring.probe_db(
+            acquire=lambda: TransientOnceSDK({"probe": 0}))
+        assert retried["ok"] is True, retried
+        assert declared == monitoring._PROBE_LAST_PHASES, (
+            f"the transient retry entered {monitoring._PROBE_LAST_PHASES!r} — "
+            "it must ride the SAME phases rather than add one (#3446)"
+        )
+        # 1 acquisition + the first attempt's setup (its transient connect
+        # failure returned before the query) + the retry's two probe phases.
+        assert submits["n"] - before_retry == len(declared) + 1, (
+            "the transient retry must submit the acquisition once, the first "
+            "attempt's setup, and the retry's two phases — an extra bounded "
+            "wait on the retry branch would make the outer bound an "
+            "under-estimate (#3446)"
+        )
+
+
+class TransientOnceSDK:
+    """First ``_get_proj`` fails transiently, the second succeeds — the #1565
+    retry shape, with a counter so the test can prove how many PROBES ran."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def _get_proj(self):
+        import redis.exceptions as redis_exc
+
+        self._calls["probe"] += 1
+        if self._calls["probe"] == 1:
+            raise redis_exc.ConnectionError("transient connect refused")
+        proj = MagicMock()
+        proj.g.query.return_value = MagicMock(result_set=[[1]])
+        return proj
+
+
+class TestProbeSetupTimeoutResolution:
+    """#3143 review: the operator knob is read at CALL time and is tolerant.
+
+    An import-time read would be frozen before ``mcp_server._load_dotenv()``
+    runs (so a repo-root `.env` value would be silently ignored), and an
+    unguarded ``float()`` would brick ``import tortoise.sdk`` on a blank or
+    malformed value (the shipped `.env.example` line is blank-valued).
+    """
+
+    def test_unset_env_uses_default(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_PROBE_SETUP_TIMEOUT", raising=False)
+        assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+
+    def test_env_override_resolved_at_call_time(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42.5")
+        assert monitoring.probe_setup_timeout() == 42.5
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("1.5", 1.5),     # inclusive lower bound — same budget as /health
+        ("300", 300.0),   # inclusive upper bound
+    ])
+    def test_env_bounds_are_inclusive(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        assert monitoring.probe_setup_timeout() == expected
+
+    @pytest.mark.parametrize("raw", [
+        "",       # the documented blank form
+        "   ",
+        "abc",    # non-numeric
+        "20s",
+        "0",      # would be an instant permanent timeout
+        "-5",
+        "nan",
+        "inf",
+        "0.1",    # below PROBE_TIMEOUT: can only false-degrade a reachable graph
+        "1e-9",   # …and this reads as "valid" without the lower BOUND
+        "300.001",  # just above the accepted maximum
+        "1e12",
+    ])
+    def test_bad_env_falls_back_to_default_never_raises(self, monkeypatch, raw):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+
+    @pytest.mark.parametrize("raw", ["abc", "0.1", "300.001", "nan"])
+    def test_invalid_env_warns_before_falling_back(
+            self, monkeypatch, caplog, raw):
+        """The operator-visible contract: an invalid value is not silent — the
+        warning names the variable AND the fallback it substituted, so a
+        typo'd 0.1 is not discovered only via a resumed false-degrade."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            monitoring.probe_setup_timeout()
+        assert "TORTOISE_PROBE_SETUP_TIMEOUT" in caplog.text, caplog.text
+        assert f"using {monitoring.PROBE_SETUP_TIMEOUT}s" in caplog.text, caplog.text
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_blank_env_is_silent(self, monkeypatch, caplog, raw):
+        """The shipped ``.env.example`` line is blank-valued, so warning on
+        blank would warn on every default deployment."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+        assert [r for r in caplog.records
+                if r.name.startswith("tortoise.monitoring")] == []
+
+    def test_valid_env_is_silent(self, monkeypatch, caplog):
+        """A valid in-range value is honoured silently — the warning path
+        must not fire for it (e.g. a log hoisted above the early return)."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42.5")
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            assert monitoring.probe_setup_timeout() == 42.5
+        assert [r for r in caplog.records
+                if r.name.startswith("tortoise.monitoring")] == []
+
+    def test_mcp_tortoise_health_honors_env_override(self, monkeypatch):
+        """The `.env` knob must actually reach the tool (call-time read),
+        which the old import-time constant did not."""
+        from tortoise import mcp_server
+        from tortoise.mcp_auth import _transport_mode
+
+        captured = {}
+        real_metrics = monitoring.metrics
+
+        def spy_metrics(*args, **kwargs):
+            captured.update(kwargs)
+            return real_metrics(*args, **kwargs)
+
+        monkeypatch.setattr(monitoring, "metrics", spy_metrics)
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "7")
+        monkeypatch.setattr(mcp_server, "_get_org_sdk",
+                            lambda: FakeSDK(db_ok=True, graph_size=3))
+        token = _transport_mode.set("http")
+        try:
+            result = mcp_server.tortoise_health()
+        finally:
+            _transport_mode.reset(token)
+        assert result["status"] == "ok", result
+        assert captured["setup_timeout"] == 7.0
+
 
 class TestMetricsFunction:
     """metrics() function tests."""
@@ -262,7 +1175,7 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "unknown"
         assert result["falkordb"] == "no_sdk_registered"
-        assert result["db"] == {"ok": None, "latency_ms": 0.0,
+        assert result["db"] == {"ok": None, "observed": False, "latency_ms": 0.0,
                                 "error": "no_sdk_registered"}
         assert result["graph_size"] == 0
 
@@ -285,6 +1198,7 @@ class TestMetricsFunction:
         assert result["status"] == "degraded"
         assert "connection refused" in result["falkordb"]
         assert result["db"]["ok"] is False
+        assert result["db"]["observed"] is True
         assert "connection refused" in result["db"]["error"]
 
     def test_includes_uptime(self):
@@ -351,6 +1265,802 @@ class TestMetricsExplicitSdkArg:
         assert result["status"] == "degraded"
         assert calls["taxonomy"] == 0
         assert result["graph_size"] == 0
+        # #3253: a skipped count is NOT a measured 0 — say so per call.
+        assert result["graph_size_error"] is not None
+
+
+class TestGraphSizeMeasurementIsBoundedAndReported:
+    """#3253: the ``graph_size`` taxonomy round-trip in ``metrics()``.
+
+    Two defects, one shape. (1) The count ran on the CALLER thread with no
+    budget of its own, so a server that answered ``RETURN 1`` promptly but
+    stalled on the five label ``COUNT``s pinned the health call for as long as
+    the server stalled — the MCP ``tortoise_health`` tool and ``serve_health``
+    both. (2) A count that RAISED was swallowed (``record_error()``) and the
+    report stayed ``status="ok"`` / ``graph_size: 0``, identical to a genuinely
+    empty graph on the same call; only the process-lifetime ``errors`` counter
+    moved, so telling them apart took a second call.
+
+    The fix bounds the count (``GRAPH_SIZE_TIMEOUT``, on a DEDICATED daemon
+    worker so it can never occupy the probe slot) and reports per-call
+    whether the value was MEASURED via ``graph_size_error`` (``None`` ==
+    measured, so a 0 is a real empty graph; a string == not measured).
+    """
+
+    class EmptySDK(FakeSDK):
+        """A reachable graph with no nodes — a REAL measured zero."""
+
+        def taxonomy(self):
+            return {"Point": 0, "Event": 0}
+
+    class BoomSDK(FakeSDK):
+        def taxonomy(self):
+            raise RuntimeError("count failed")
+
+    def test_success_reports_a_measured_value(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=42))
+        assert result["graph_size"] == 42
+        # None is the "measured" signal, so 42 needs no caveat.
+        assert result["graph_size_error"] is None
+
+    def test_empty_graph_is_a_measured_zero(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is None, (
+            "a genuinely empty graph must read as measured, not unavailable")
+
+    def test_count_failure_is_distinguishable_from_empty_without_diffing_errors(
+            self):
+        """THE #3253 DISCRIMINATOR. Assert the DISTINCTION, not just a
+        number: on the SAME per-call report, an empty graph and a failed count
+        share ``status`` + ``graph_size`` (so the old reader could not tell
+        them apart) but differ on ``graph_size_error`` — no second call, no
+        cumulative-counter diff."""
+        monitoring._sdk = None
+        empty = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        failed = monitoring.metrics(sdk=self.BoomSDK(db_ok=True))
+
+        # The pre-#3253 observable really is identical — this is the defect.
+        assert (empty["status"], empty["graph_size"]) == (
+            failed["status"], failed["graph_size"])
+
+        # The per-call marker is what separates them.
+        assert empty["graph_size_error"] is None
+        assert failed["graph_size_error"] is not None
+        assert "count failed" in failed["graph_size_error"]
+        # The failure is still recorded (never raised) for the Prometheus
+        # counter consumer — the marker is additive, not a replacement.
+        assert failed["errors"] > empty["errors"]
+
+    def test_stalled_count_is_bounded_and_reported(self, monkeypatch):
+        """A reachable server that stalls on the label counts must not pin
+        the health call: ``metrics()`` returns inside the count budget with an
+        explicit unavailability marker instead of hanging."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the DEDICATED graph-size worker, not the caller.
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            started = time.monotonic()
+            result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        assert result["status"] == "ok"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None, result
+        assert "budget" in result["graph_size_error"]
+        assert elapsed < 1.0, f"metrics() did not honour the count budget: {elapsed:.2f}s"
+
+    def test_stalled_count_never_occupies_the_probe_slot(self, monkeypatch):
+        """Isolation: the count runs on its OWN worker, so a stalled count
+        cannot hold the single probe slot and turn a graph_size problem into a
+        false ``degraded`` on the next probe (#3143's symptom class)."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            stalled = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert stalled["graph_size_error"] is not None
+            # The count thread is STILL parked on the graph-size worker here;
+            # the probe lane must be unaffected.
+            started = time.monotonic()
+            probe = monitoring.probe_db(FakeSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+        assert probe["ok"] is True, probe
+        assert elapsed < 1.0, f"the probe lane queued behind the count: {elapsed:.2f}s"
+
+    def test_wedged_count_is_bounded_and_reset_restores_measurement(
+            self, monkeypatch):
+        """#3253 review P2 — the post-stall behaviour no test covered.
+
+        ONE permanently stalled ``taxonomy()`` count wedges the single
+        graph-size slot for the life of the process, because the worker is a
+        singleton and the stalled ``taxonomy()`` is abandoned, not cancelled.
+        Two properties
+        must hold and neither was pinned: (a) every LATER ``metrics()`` call
+        is still bounded — it queues behind the wedged slot and pays the
+        budget (failing fast only once the backlog of 32 is FULL), never
+        unbounded; and (b) ``_reset_graph_size_worker()`` drops the wedged
+        worker so ``graph_size`` is measurable again with no restart. Pre-fix
+        there was no reset seam at all, so (b) could not pass.
+        """
+        import threading
+
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", budget)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the graph-size worker until the test ends — never
+                # returns during the loop, so the slot stays wedged.
+                release.wait(30.0)
+                return {"Point": 1}
+
+        try:
+            # The first call is abandoned at the budget; the worker is left
+            # wedged on the stalled count.
+            first = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert first["graph_size_error"] is not None, first
+
+            # (a) Later calls queue behind the wedged slot and each pay the
+            # budget — but none may be UNBOUNDED. A generous absolute bound
+            # (matching this file's 1.0s tolerance for a 0.05s budget):
+            # pre-fix an unbounded call would ride the stalled count instead.
+            for i in range(3):
+                started = time.monotonic()
+                result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+                elapsed = time.monotonic() - started
+                assert result["graph_size_error"] is not None, (i, result)
+                assert result["graph_size"] == 0, (i, result)
+                assert elapsed < 1.0, (
+                    f"post-stall metrics() call {i} was not bounded: "
+                    f"{elapsed:.4f}s (budget {budget}s)")
+
+            # (b) The recovery seam: drop the wedged worker and the very next
+            # count is measurable again. Without it, graph_size stayed
+            # unmeasured for the process lifetime.
+            monitoring._reset_graph_size_worker()
+            recovered = monitoring.metrics(
+                sdk=FakeSDK(db_ok=True, graph_size=7))
+            assert recovered["graph_size"] == 7, recovered
+            assert recovered["graph_size_error"] is None, recovered
+        finally:
+            release.set()
+            monitoring._reset_graph_size_worker()
+
+    def test_probe_failure_marks_graph_size_unavailable(self):
+        """A degraded report must not leave ``graph_size_error`` as None —
+        that would present its ``graph_size: 0`` as a measured empty graph."""
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["graph_size_error"] is not None
+
+    def test_missing_probe_target_marks_graph_size_unavailable(self):
+        monitoring._sdk = None
+        result = monitoring.metrics()
+        assert result["status"] == "unknown"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
+
+
+class TestProbeNeverAskedStatus:
+    """#3683: a probe that never reached the reachability query is reported
+    ``unknown`` ("could not tell"), never ``degraded`` — ``degraded`` means an
+    OBSERVED failure, and the ``metrics()`` docstring already reserved the
+    state. The defect was that ``db["ok"] is False`` mapped EVERY probe
+    failure to degraded, so interleavings A and B (the shared probe slot held
+    for the whole allowance) were only distinguishable in error prose.
+
+    The held-slot reproductions of BOTH interleavings live in
+    ``TestProbeQueueIsolation`` and ``TestProbeSetupBudget`` at the
+    ``_probe_once`` layer; these pin
+    the mapping the issue asks for at the ``metrics()`` layer, plus the
+    observed-failure control that must NOT move.
+    """
+
+    def test_never_asked_probe_reports_unknown_not_degraded(self, monkeypatch):
+        """Interleaving A's shape through ``metrics()``: the explicit
+        allowance is consumed by the cold-start, so the reachability question
+        was never asked. The report must be the documented non-verdict."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        sdk = SlowColdStartSDK(delay=0.2)
+        result = monitoring.metrics(sdk=sdk, setup_timeout=0.05)
+        assert result["status"] == "unknown", result
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
+        assert result["db"]["error"].startswith(
+            monitoring._PROBE_SETUP_TIMEOUT_MSG), result["db"]["error"]
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
+        # ran_query == 0 is the PROOF the DB was never contacted.
+        assert sdk.query_calls == 0
+
+    def test_observed_failure_still_degrades(self):
+        """CONTROL for the routing: a real raised failure (the DB was
+        contacted and refused) keeps ``degraded`` — the fix must not blunt
+        the signal for a genuinely broken DB."""
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["db"]["observed"] is True
+        assert "connection refused" in result["db"]["error"]
+
+    def test_saturated_backlog_refusal_is_not_an_observation(self, monkeypatch):
+        """#3683 review: a submission REFUSED by a saturated worker backlog
+        never ran ``_setup``, so the DB was never contacted — that is an
+        UNOBSERVED probe, not a degraded one (mirrors the query-phase
+        refusal branch). Pinned because the setup-phase refusal shares the
+        ``concurrent.futures.TimeoutError`` base with a callable that raised."""
+        import threading
+        import time
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        release = threading.Event()
+        worker = monitoring._SingleSlotWorker(
+            "test-saturated-backlog", workers=1, max_backlog=1)
+        monkeypatch.setattr(monitoring, "_PROBE_WORKER", worker)
+        try:
+            worker.submit(lambda: release.wait(10))  # occupy the single slot
+            time.sleep(0.05)
+            worker.submit(lambda: None)  # fill the 1-deep backlog
+
+            class Stub:
+                def _get_proj(self):
+                    return None
+
+            ok, error, transient, observed = monitoring._probe_once(
+                Stub(), timeout=0.05)
+            assert ok is False
+            assert observed is False, (ok, error, observed)
+            assert transient is False, transient
+            assert "backlog full" in error, error
+        finally:
+            release.set()
+
+
+class TestProbeSetupBudget:
+    """#3143: the probe's cost is the projection cold-start, not `RETURN 1`.
+
+    `_probe_once` used to bound ``sdk._get_proj()`` AND ``RETURN 1`` with the
+    same 1.5s liveness budget. The cold-start is not a reachability signal —
+    it is connect + `_ensure_indexes()` and, on a large graph, an index build
+    over the whole graph — so a fully-reachable big graph timed out during
+    setup and was reported ``db.ok=false`` / ``status=degraded`` /
+    ``graph_size=0``: the onboarding gate lie. A REQUEST-PATH liveness gate
+    keeps the tight bound (a fast-degrade gate, #1384); the on-demand MCP
+    health tool gets an explicit setup allowance, and so does a BACKGROUND
+    liveness refresher whose request path reads an in-memory snapshot (#2988/
+    #3243 — see ``monitoring.PROBE_SETUP_TIMEOUT``).
+    """
+
+    def test_platform_liveness_budget_still_times_out_on_a_slow_cold_start(
+            self, monkeypatch):
+        """Unchanged platform behavior: a cold-start that overruns
+        PROBE_TIMEOUT still reports a bounded timeout, never a hang. The
+        message names the SETUP phase (the cold-start is what overran) and the
+        reachability query is never reached — there is no second budget."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        sdk = SlowColdStartSDK(delay=0.2)
+        result = monitoring.probe_db(sdk)
+        assert result["ok"] is False
+        assert result["observed"] is False  # #3683: never reached the query
+        assert "setup timeout" in result["error"], result["error"]
+        assert sdk.query_calls == 0
+
+    def test_metrics_default_shape_forwards_no_allowance(self, monkeypatch):
+        """#3143 review: the request-path liveness surface that reaches the probe
+        through ``metrics()`` (the standalone ``serve_health`` server) passes NO
+        allowance, so the #1384 fast-degrade contract holds. A REQUEST-PATH
+        liveness probe cannot absorb the allowance as gate latency; the callers
+        that DO pass it (the MCP tool, and the selfhost liveness refresher — a
+        background refresher whose request path reads an in-memory snapshot,
+        #2988/#3243) are pinned in their own files: ``tests/test_selfhost.py``
+        and ``tests/test_selfhost_health_probe_executor.py`` here, hosted
+        ``_probe_db``/``_READY_PROBE`` in ``tests/test_hosted_api.py``. A
+        refactor that had ``metrics()`` resolve the allowance itself (the
+        natural 'make all callers benefit' change) would give this surface a
+        multi-second cold-start; this pins the explicit ``setup_timeout=None``
+        it forwards AND the resulting status. #3683 CORRECTION: that status is
+        now ``unknown``, not ``degraded`` — the cold-start overran so the
+        reachability query never ran, which is NOT an observed failure (the
+        bound and the HTTP surface are unchanged; only the label moved to the
+        documented "could not tell" state)."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        forwarded = {}
+        real_probe_db = monitoring.probe_db
+
+        def spy_probe_db(target, setup_timeout=None):
+            forwarded["setup_timeout"] = setup_timeout
+            return real_probe_db(target, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
+        result = monitoring.metrics(sdk=SlowColdStartSDK(delay=0.2))
+        assert forwarded["setup_timeout"] is None, forwarded
+        assert result["status"] == "unknown"
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
+        assert "setup timeout" in result["db"]["error"]
+        assert result["graph_size"] == 0  # no taxonomy round-trip on a failed probe
+
+    def test_query_phase_keeps_its_own_budget_with_an_allowance(
+            self, monkeypatch):
+        """#3143 review: an explicit allowance must NOT be inherited by the
+        reachability query — the query keeps its own fresh ``PROBE_TIMEOUT``,
+        so the total stays ``setup_timeout + PROBE_TIMEOUT``. A regression
+        setting ``query_budget = setup_timeout`` (or the whole total) could pin
+        a black-hole query for the full allowance and would pass every other
+        test in this file."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        calls = []
+
+        class SlowQuerySDK:
+            def _get_proj(self):
+                proj = MagicMock()
+
+                def _q(*args, **kwargs):
+                    calls.append(time.monotonic())
+                    time.sleep(0.5)  # ≫ PROBE_TIMEOUT, ≪ the 20s allowance
+                    return MagicMock(result_set=[[1]])
+
+                proj.g.query.side_effect = _q
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 1}
+
+        started = time.monotonic()
+        result = monitoring.probe_db(SlowQuerySDK(), setup_timeout=20.0)
+        elapsed = time.monotonic() - started
+        assert calls, "the query phase was never reached"
+        assert result["ok"] is False
+        assert "probe timeout" in result["error"]
+        assert "setup timeout" not in result["error"]  # the QUERY phase overran
+        assert elapsed < 1.0, f"query inherited the allowance: {elapsed:.2f}s"
+
+    def test_combined_budget_exhausted_in_setup_never_submits_the_query(
+            self, monkeypatch):
+        """#3143 review: in the COMBINED (platform) shape, a cold-start that
+        consumes the whole budget must early-return WITHOUT submitting the
+        query — the guard that keeps ``future.result`` from being handed a
+        zero/negative timeout. Pinned by the observable: the query is never
+        called."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        # Deterministic discriminator: the guard's ONLY effect is that the query
+        # is never SUBMITTED. Counting submits (setup=1, query=2) is exact,
+        # whereas watching proj.g.query races with the abandoned worker thread.
+        # #3062 port: the probe now submits BOTH phases to the shared
+        # process-lifetime single-slot worker (``_probe_worker``), not a
+        # per-call ``ThreadPoolExecutor`` — so count through that seam.
+        submits = {"n": 0}
+        real_worker = monitoring._probe_worker()
+
+        class CountingWorker:
+            def submit(self, fn):
+                submits["n"] += 1
+                return real_worker.submit(fn)
+
+        monkeypatch.setattr(monitoring, "_probe_worker",
+                            lambda: CountingWorker())
+
+        class SetupHogSDK:
+            def _get_proj(self):
+                clock.t += 1.5  # overruns the whole shared budget
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+        result = monitoring.probe_db(SetupHogSDK())
+        assert result["ok"] is False
+        # The cold-start consumed the shared budget, so the QUERY never ran:
+        # it carries the SETUP spelling (one spelling per phase, #3143 review
+        # P2). "probe timeout" here would falsely claim the query was reached.
+        assert result["error"] == "probe setup timeout after 1.0s"
+        assert submits["n"] == 1, "the query was submitted past the deadline"
+
+    def test_serve_health_handler_forwards_no_allowance(self, monkeypatch):
+        """#3143 review: the standalone ``serve_health`` server is the third
+        platform liveness caller. Its handler calls ``metrics()`` with NO
+        arguments — pin that end-to-end, because a handler-level
+        ``setup_timeout=probe_setup_timeout()`` would otherwise give the
+        standalone liveness server a multi-second cold-start with the whole
+        suite green."""
+        import threading
+        import urllib.request
+        from http.server import HTTPServer
+
+        from tortoise import auth
+
+        monkeypatch.setattr(auth, "is_dev_mode", lambda: True)
+        monitoring.register(FakeSDK(db_ok=True, graph_size=3))
+        seen = {}
+        real_probe_db = monitoring.probe_db
+
+        def spy_probe_db(target, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(target, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
+        server = HTTPServer(("127.0.0.1", 0), monitoring._Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/health"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                assert resp.status == 200
+                body = json.loads(resp.read().decode())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        assert seen["setup_timeout"] is None, seen
+        assert body["db"]["ok"] is True
+        assert body["graph_size"] == 3
+
+    def test_taxonomy_failure_is_recorded_not_raised(self):
+        """#3143 review: post-fix, ``graph_size`` is newly reachable on large
+        graphs. A reachable DB whose label COUNT raises must not surface as a
+        crash — the report stays ok/0 and the failure is recorded in
+        ``errors``, never raised.
+
+        #3253: the per-call ``graph_size_error`` marker is the signal that now
+        distinguishes this from a genuinely empty graph (the ``errors``
+        counter is process-lifetime and needs a second call to diff)."""
+        class TaxonomyBoomSDK(FakeSDK):
+            def __init__(self):
+                super().__init__(db_ok=True)
+
+            def taxonomy(self):
+                raise RuntimeError("count failed")
+
+        monitoring._sdk = None
+        baseline = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=1))
+        result = monitoring.metrics(sdk=TaxonomyBoomSDK())
+        assert result["status"] == "ok"
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 0
+        assert result["errors"] == baseline["errors"] + 1
+        assert baseline["graph_size_error"] is None
+        assert result["graph_size_error"] is not None
+
+    def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
+            self, monkeypatch):
+        """#3143 regression: with the MCP tool's setup allowance, a graph
+        whose projection cold-start exceeds PROBE_TIMEOUT is reported
+        reachable with its REAL graph_size — not degraded/0."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        result = monitoring.metrics(
+            sdk=SlowColdStartSDK(delay=0.2, graph_size=9019),
+            setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
+        )
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 9019
+
+    def test_mcp_tortoise_health_uses_the_deep_setup_budget(self, monkeypatch):
+        """The fix is only real if the tool onboarding actually calls opts
+        into the setup allowance — assert it at the MCP tool boundary.
+
+        Hermetic: pin the knob (the tool resolves it at CALL time, so an
+        ambient `.env`/shell value below the 0.2s cold-start would fail this
+        on correct code).
+        """
+        from tortoise import mcp_server
+        from tortoise.mcp_auth import _transport_mode
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "20")
+        monkeypatch.setattr(
+            mcp_server, "_get_org_sdk",
+            lambda: SlowColdStartSDK(delay=0.2, graph_size=9019))
+        token = _transport_mode.set("http")
+        try:
+            result = mcp_server.tortoise_health()
+        finally:
+            _transport_mode.reset(token)
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 9019
+
+
+class TestProbeQueueIsolation:
+    """#3143 review P1: the shared #3062 probe slot must not charge its QUEUE
+    WAIT to the reachability budget.
+
+    The slot is deliberately ONE process-lifetime worker, so a probe can queue
+    behind another probe's cold-start. ``Future.result(timeout=…)`` starts its
+    clock at SUBMISSION, so before the fix a query queued behind a slow (or
+    already-abandoned) cold-start spent the 1.5s reachability budget queued,
+    timed out, and reported a REACHABLE graph ``degraded``/0 — the exact #3143
+    symptom this PR exists to remove, surviving under concurrency. The
+    unrebased head could not hit it (it used a per-call executor); the
+    hand-port onto the shared slot introduced it.
+    """
+
+    def test_query_queued_behind_a_slow_setup_is_not_reported_degraded(
+            self, monkeypatch):
+        import threading
+
+        # Tight reachability budget: a query whose queue wait is charged to it
+        # fails long before the competing cold-start finishes.
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        setup_running = threading.Event()
+        release_setup = threading.Event()
+
+        proj = MagicMock()
+        proj.g.query.return_value = MagicMock(result_set=[[1]])
+
+        class CoordinatedSDK:
+            """A reachable graph whose cold-start the test can hold open."""
+
+            def _get_proj(self):
+                setup_running.set()
+                assert release_setup.wait(5.0), "test never released setup"
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 9019}
+
+        holder: dict = {}
+
+        def _call():
+            holder["result"] = monitoring.metrics(
+                sdk=CoordinatedSDK(), setup_timeout=20.0)
+
+        caller = threading.Thread(target=_call, daemon=True)
+        caller.start()
+        try:
+            assert setup_running.wait(5.0), "the cold-start never started"
+
+            # While OUR cold-start holds the single slot, ANOTHER probe
+            # submits. Its cold-start is FIFO-queued AHEAD of our query, so
+            # when our setup returns the query has an occupied slot in front
+            # of it (the #3143 P1 interleave). The 0.5s dwell leaves a wide
+            # window for the caller thread to submit the query; the pre-fix
+            # failure below is evidence the interleave actually happened.
+            worker = monitoring._probe_worker()
+
+            def _competing_cold_start():
+                time.sleep(0.5)
+
+            worker.submit(_competing_cold_start)
+            release_setup.set()
+            caller.join(15.0)
+        finally:
+            release_setup.set()
+        assert not caller.is_alive(), "metrics() did not return"
+        result = holder["result"]
+        # The graph is reachable and `RETURN 1` is instant, so the ONLY way
+        # this reports degraded/0 is the queue wait being charged to the
+        # reachability budget.
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True, result
+        assert result["graph_size"] == 9019
+
+    def test_zero_leftover_with_a_free_slot_reports_the_reachable_graph(
+            self, monkeypatch):
+        """#3143 P1 (BOUNDARY, opposite pin): at EXACTLY zero leftover with a
+        FREE slot, a REACHABLE graph must still be reported ``ok``.
+
+        ``slot_wait_budget = max(0.0, setup_timeout - elapsed)`` is a FLOAT that
+        clamps to exactly ``0.0`` when the cold-start finishes at/just past its
+        allowance. Firing the guard on ``slot_wait_budget is not None`` rather
+        than on truthiness turns that clamp into a false-FAIL: ``wait(0.0)``
+        cannot let the worker run (the caller has not yielded the GIL, and a
+        zero-timeout lock acquire does not yield), so a query submitted
+        microseconds earlier is GUARANTEED to look un-started and the probe
+        returns the setup spelling for a perfectly healthy, reachable graph —
+        the #3143 symptom this branch exists to remove.
+
+        Determinism: the probe clock is frozen and the cold-start advances it by
+        EXACTLY the allowance, so the leftover is exactly ``0.0`` (not merely
+        small). NOTHING is interposed ahead of the query, so the #3062 slot is
+        FREE: as soon as the caller blocks in ``Future.result`` — which DOES
+        release the GIL, unlike ``wait(0.0)`` — the worker runs the query and
+        the REAL graph size is reported.
+
+        The slot being free is what makes the zero leftover benign: with no
+        queue there is no queue WAIT for the reachability budget to absorb, so
+        the guard is not needed at all. (The occupied-slot counterpart, where
+        the guard IS needed, is
+        ``test_query_queued_behind_a_slow_setup_is_not_reported_degraded``.)
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.4)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+
+        ALLOWANCE = 3.0
+        ran: list[float] = []
+        proj = MagicMock()
+
+        def _q(*args, **kwargs):
+            ran.append(1.0)
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
+
+        class BoundarySDK:
+            """A REACHABLE graph whose cold-start eats the WHOLE allowance."""
+
+            def _get_proj(self):
+                clock.t += ALLOWANCE  # leftover becomes exactly 0.0
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 9019}
+
+        result = monitoring.metrics(sdk=BoundarySDK(), setup_timeout=ALLOWANCE)
+
+        # THE DISCRIMINATOR: the slot is free, so the query RAN and the graph
+        # is reachable with its real size. A guard that fires at a zero
+        # leftover fails this same healthy probe with
+        # "probe setup timeout after 3.0s" / degraded / graph_size 0.
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True, result
+        assert result["db"]["error"] is None, result
+        assert result["graph_size"] == 9019, result
+        assert ran == [1.0], (
+            "the reachability query never ran — a zero leftover must not fail "
+            "a FREE-slot probe"
+        )
+
+    def test_queued_never_started_query_is_attributed_to_setup(
+            self, monkeypatch):
+        """#3143 review P2: a query that is QUEUED and never RAN is attributed
+        to the SETUP phase — the query phase was never reached.
+
+        The read of ``query_started`` in the ``TimeoutError`` handler resolves
+        a genuine race: the single #3062 slot is occupied for the whole
+        reachability budget, so the submitted ``_run_query`` never starts and
+        ``Future.result`` times out with the event still CLEAR. The phase at
+        fault is the wait for the slot, so the error must carry the SETUP
+        spelling; "probe timeout after …" would falsely claim the query itself
+        was reached and overran.
+
+        Determinism — no wall-clock race:
+        * the probe clock is frozen and ``_get_proj`` advances it by EXACTLY
+          the cold-start allowance, so the slot-wait leftover is exactly
+          ``0.0`` and the truthiness guard above the ``try`` cannot fire (a
+          zero leftover must stay benign — the FREE-slot counterpart is
+          ``test_zero_leftover_with_a_free_slot_reports_the_reachable_graph``);
+        * the slot is occupied by a blocker QUEUED FROM INSIDE ``_get_proj``,
+          i.e. put on the single slot's FIFO queue BEFORE the caller submits
+          the query. FIFO order — not thread scheduling — guarantees the
+          blocker runs first, so the query stays pending for the whole budget.
+        """
+        import threading
+
+        query_budget = 0.05
+        ALLOWANCE = 3.0
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+
+        release_slot = threading.Event()
+        ran = {"query": 0}
+        proj = MagicMock()
+
+        def _q(*args, **kwargs):
+            ran["query"] += 1
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
+
+        worker = monitoring._probe_worker()
+
+        class OccupiedSlotSDK:
+            """A reachable graph whose cold-start QUEUES a blocker ahead of
+            the query, occupying the single probe slot for the budget."""
+
+            def _get_proj(self):
+                clock.t += ALLOWANCE  # leftover becomes exactly 0.0
+                # Queued from INSIDE the slot, so it precedes the caller's
+                # query submission in the single slot's FIFO order.
+                worker.submit(lambda: release_slot.wait(5.0))
+                return proj
+
+        try:
+            ok, error, transient, observed = monitoring._probe_once(
+                OccupiedSlotSDK(), timeout=query_budget,
+                setup_timeout=ALLOWANCE)
+
+            assert ok is False, (ok, error)
+            # THE DISCRIMINATOR: the query never started, so the SETUP phase
+            # owns the error. The pre-fix fall-through spelled it
+            # "probe timeout after 0.05s" (a query that overran).
+            assert error == (
+                f"{monitoring._PROBE_SETUP_TIMEOUT_MSG}{ALLOWANCE}s"), error
+            assert error == "probe setup timeout after 3.0s", error
+            assert "probe timeout after" not in error, error
+            assert transient is False, transient
+            # #3683: and the probe never OBSERVED anything, so the report is
+            # the documented `unknown`, never a false `degraded`.
+            assert observed is False, observed
+            assert ran["query"] == 0, (
+                "the queued query RAN — the blocker did not hold the slot")
+        finally:
+            # Release the blocker, then flush the abandoned query submission so
+            # the process-lifetime worker is idle for the next test.
+            release_slot.set()
+        worker.submit(lambda: None).result(timeout=5.0)
+
+
+class TestProbeSetupBudgetIntegration:
+    """#3143 at the REAL-projection layer — the issue's integration surface.
+
+    The pure-unit class above uses a stub; this one forces the #3143 shape on a
+    real FalkorProjection: real connect + `_ensure_indexes()` cold-start, real
+    `RETURN 1`, real `taxonomy()` label counts. Only the cold-start TIMING is
+    approximated (a sleep) — the measured real cost is graph-size dependent
+    (~28 sequential round trips; 229ms on a 3,000-node server graph vs 0.7ms
+    for `RETURN 1`), which a unit test cannot reproduce without a large graph.
+
+    This class also PINS the deliberate divergence the fix creates on a
+    reachable-but-slow graph: `/health` (tight shared budget) says degraded for
+    the #1384 fast-degrade contract, while the on-demand `tortoise_health`
+    tool says ok. That is the intended new contract, not an accident. NOTE it
+    does NOT satisfy #3143's Indicator 2 ("`tortoise_health` and `/health`
+    agree on the same instance within one probe cycle") — the two surfaces
+    deliberately DIVERGE here, and that indicator is descoped to #3243. What
+    this pins is narrower: the tool's verdict about the graph (reachable, with
+    its real graph_size) is no longer a false degraded/0.
+    """
+
+    def test_real_projection_slow_cold_start_ok_with_real_graph_size(
+            self, sdk_factory, monkeypatch):
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        proj.g.query("MERGE (p:Point {id:'3143-p1'}) SET p.pointKind='fact'")
+        real_size = sum(sdk.taxonomy().values())
+        assert real_size > 0
+
+        # The cold-start overruns the liveness budget; the graph answers fine.
+        def slow_cold_start():
+            time.sleep(0.2)
+            return proj
+
+        monkeypatch.setattr(sdk, "_get_proj", slow_cold_start, raising=False)
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+
+        tight = monitoring.probe_db(sdk)  # platform liveness shape — unchanged
+        assert tight["ok"] is False
+        assert "setup timeout" in tight["error"]
+
+        result = monitoring.metrics(
+            sdk=sdk, setup_timeout=monitoring.PROBE_SETUP_TIMEOUT)
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        # The REAL taxonomy count, not a stub attribute — and this is the
+        # unbudgeted round-trip documented on monitoring.metrics().
+        assert real_size > 0
+        assert result["graph_size"] == real_size
+        # Issue #3143's third leg: the agent's diagnostic fallback
+        # (tortoise_status → sdk.status()) must agree with the health report.
+        assert sdk.status()["total_entities"] == result["graph_size"]
 
 
 class TestRecordFunctions:
@@ -368,16 +2078,32 @@ class TestRecordFunctions:
         monitoring.record_error()
         assert _counter_value(monitoring.ERROR_COUNT) == before + 2
 
-    def test_record_cost_by_team(self):
-        before_e = _counter_value(monitoring.TEAM_COST, {"team": "eldato"})
-        before_a = _counter_value(monitoring.TEAM_COST, {"team": "app-team"})
+    def test_record_cost_sets_the_allocation_idempotently(self):
+        """#4493: ``TEAM_COST`` is a Gauge and ``record_cost`` SETS.
 
-        monitoring.record_cost("eldato", 150)
-        monitoring.record_cost("eldato", 50)
-        monitoring.record_cost("app-team", 75)
+        The old contract was ``.inc`` on a Counter — cumulative, and with no
+        production caller the series could never move off 0. The per-team cost
+        figure is a recurring ALLOCATION recomputed on every refresh, so it can
+        go down at a period rollover: Prometheus' rule is "if the value can go
+        down, it is a gauge", and a set is the only shape that is idempotent
+        across refreshes (an increment would double-count on every tick).
 
-        assert _counter_value(monitoring.TEAM_COST, {"team": "eldato"}) == before_e + 200
-        assert _counter_value(monitoring.TEAM_COST, {"team": "app-team"}) == before_a + 75
+        Note ``team_cost_cents()`` reads the Gauge's BARE sample name — the
+        ``_counter_value`` helper filters ``_total`` and would read every Gauge
+        as 0, the exact dead-hook signature this metric was rescued from.
+        """
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("org-a", 150)
+            monitoring.record_cost("org-a", 50)   # replaces — never accumulates
+            monitoring.record_cost("org-b", 75)
+            monitoring.record_cost("org-c", -5)   # clamped — never a credit
+
+            assert monitoring.team_cost_cents() == {
+                "org-a": 50, "org-b": 75, "org-c": 0,
+            }
+        finally:
+            monitoring.clear_team_cost()
 
 
 class TestMetricsEndpoint:
@@ -389,7 +2115,27 @@ class TestMetricsEndpoint:
         body = generate_latest()
         assert b"tortoise_requests_total" in body
         assert b"tortoise_errors_total" in body
-        assert b"tortoise_team_cost_cents" in body
+
+    def test_generate_latest_exposes_the_team_cost_gauge_as_a_bare_sample(self):
+        """#4493: the per-team cost family is a GAUGE, so its sample name
+        carries no ``_total`` suffix.
+
+        The previous assertion — ``b"..._cents{" in body or b"..._cents " in
+        body`` — could NEVER fail: the ``# TYPE tortoise_team_cost_cents
+        gauge`` comment line satisfies the second disjunct, and the OLD
+        Counter's ``..._cents_total`` sample satisfied it too. Record a value
+        and assert the real bare-sample line, and that no counter-shaped
+        sample exists.
+        """
+        from prometheus_client import generate_latest
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("t", 7)
+            body = generate_latest()
+        finally:
+            monitoring.clear_team_cost()
+        assert b'tortoise_team_cost_cents{team="t"} 7' in body, body
+        assert b"tortoise_team_cost_cents_total" not in body
 
 
 class TestProbeWorkerNoLeak:
@@ -421,9 +2167,50 @@ class TestProbeWorkerNoLeak:
         after = sum(1 for t in threading.enumerate() if t.is_alive())
         # Old shape: +8 (one ThreadPoolExecutor worker per call). New shape:
         # at most the single shared daemon probe worker.
+        # #3683: this is a COUNT of threads, which is only a PROXY for the real
+        # property (one pool, created once, eagerly, with a FIXED width and a
+        # bounded backlog, so hung calls queue instead of spawning). At
+        # ``workers > 1`` the constant below would have to be the width, or a
+        # correct change would fail here with a "threads leaked" message. The
+        # real property is pinned separately by
+        # ``test_same_worker_recovers_after_a_released_hang``.
         assert after - before <= 1, (
             f"{after - before} threads leaked for 8 hung probes — "
             "per-call ThreadPoolExecutor regressed")
+
+    def test_same_worker_recovers_after_a_released_hang(self, monkeypatch):
+        """#3683: the property behind the count above — ONE pool, created
+        once, serves the next call after a hang is released, with NO
+        ``_reset_probe_worker()``. This is what must hold at any width; a
+        count assertion alone cannot tell a fixed-width pool from a leak."""
+        import threading
+        import time
+
+        release = threading.Event()
+
+        class ReleaseSDK:
+            def _get_proj(self):
+                release.wait(5.0)
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 3}
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monitoring._reset_probe_worker()
+        assert monitoring.probe_db(ReleaseSDK())["ok"] is False  # times out
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if monitoring.probe_db(ReleaseSDK())["ok"] is True:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(
+                "the shared probe worker never recovered — a reset was needed, "
+                "so the pool is not the process-lifetime worker it claims")
 
 
 class TestHealthProbe:

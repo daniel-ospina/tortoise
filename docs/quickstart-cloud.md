@@ -34,24 +34,61 @@ tortoise signup
 
 2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact support@premiselabs.co.
 
-## 2. Connect your agent (MCP, streamable-http)
+## 2. Connect your agent (MCP over HTTP)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`. The transport is **Streamable HTTP**, and in
+client JSON config its value is `"http"`.
 
-Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients read this file):
+> ⚠️ Never set an entry's `type` to `"streamable-http"`. That is a Claude Code alias for this
+> transport, not a second one: Cursor's CLI can silently drop a whole config file that uses it,
+> leaving you with no error and no connection. If your client requires a `type`, use `"http"`;
+> Cursor and Pi omit `type` entirely and infer the transport from `url`.
+
+Auth is a Bearer header that reads your key from the environment — never paste the literal key into a
+config file, because config files get committed.
+
+**Claude Code** — add to `.mcp.json` in your project. Claude Code requires `"type": "http"` (a `url`
+entry with no `type` is read as stdio and the server is skipped):
 
 ```json
 {
   "mcpServers": {
     "tortoise": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "https://api.premiselabs.co/mcp/",
       "headers": {
-        "Authorization": "Bearer tt_YOUR_KEY"
+        "Authorization": "Bearer ${TORTOISE_API_KEY}"
       }
     }
   }
 }
+```
+
+A project-scope `.mcp.json` stays **⏸ Pending approval** in Claude Code until you
+approve it once — start `claude` in the project and allow the prompt, or run
+`/mcp` (`claude mcp reset-project-choices` resets the choice).
+
+**Cursor** — add to `.cursor/mcp.json`. Cursor expands `${env:…}` and infers the transport from `url`,
+so the entry carries **no** `type`:
+
+```json
+{
+  "mcpServers": {
+    "tortoise": {
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:TORTOISE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Export the key you were shown in step 1 so the header resolves — the config file holds the *reference*,
+not the secret:
+
+```bash
+export TORTOISE_API_KEY="tt_..."   # the key from step 1; add to your shell profile to persist
 ```
 
 **Codex** instead:
@@ -89,6 +126,44 @@ tortoise session capture --file transcript.txt     # file your agent sessions
 tortoise session list                               # what's been captured
 tortoise context                                    # memory digest for session-start hooks
 ```
+
+### Session capture requires explicit consent
+
+Filing a transcript to Tortoise Cloud is **off by default**, and what gates it
+is **per-surface**, not uniform (#3615):
+
+- **The in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
+  (`tortoise/capture_consent.py`), which is credential-independent — exporting
+  `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
+  enable capture there; it only authenticates the connection.
+- **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
+  `agent-infra` and starts hosted capture on **credential presence**, never
+  reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
+  a **data-sharing opt-in**, not a credential-only change. Open dependency:
+  **agent-infra#1117**.
+
+To let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
+`tortoise sessions import`) file sessions:
+
+```bash
+export TORTOISE_CAPTURE=1     # truthy: 1 / true / yes / on
+```
+
+Without it the hook no-ops and prints a notice; sessions stay on the machine.
+The visible line repeats on each session close while a legacy credential is
+present — only the durable copy is one-time. This is a deliberate behavior
+change: capture used to follow the
+credential. The requirement is **host-agnostic** — it applies to a self-hosted
+endpoint too (a self-hosted daemon is still data leaving the machine), so the
+same opt-in is needed for `docs/quickstart-selfhosted.md`'s replay steps.
+Existing installs must also re-copy the hook — `.claude/hooks/*.sh` are
+per-project copies and do not update themselves:
+`cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh`.
+
+A one-time notice is also written durably to
+`~/.tortoise/capture-consent-notice` (a stale copied hook discards the CLI's
+stderr, so the file is the channel that survives it), and `tortoise doctor`
+reports the current consent state.
 
 **Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
 friction events + draft Points) is a local CLI/SDK path — see the
@@ -165,9 +240,13 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 If you are on a version without the export tool, replay your knowledge through the hosted ingest path — the path verified by the original E2E-12-D replay journey (content parity; Point IDs and edge topology are NOT carried over by replay):
 
 ```bash
+export TORTOISE_CAPTURE=1                        # explicit consent (session capture)
 tortoise session capture --file transcript.txt    # sessions captured while self-hosted
 tortoise create-point "The decision was approved" --kind statement   # individual claims
 ```
+
+(`tortoise session capture` requires the explicit consent opt-in — see
+*Session capture requires explicit consent* in section 3.)
 
 For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
 

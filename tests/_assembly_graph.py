@@ -16,6 +16,19 @@ v2 eval lane faithfully (docs/plans/2026-09-08-2165-connected-assembly.md):
 
 This module is a TEST HELPER (underscore prefix) — excluded from
 ci-surfaces.yml selection and from any production import path.
+
+⛔ NOT a capture-shaped session graph (#3914). Every Point here carries the
+snake ``session_id`` prop that ``create_point(session_id=…`` writes, but
+NO ``(:Session {id})`` node and NO
+``(:Session)-[:CONTAINS]->(:Point)`` edge. #3804 taught the shipping point
+fetch to read that snake prop, so the assembly goldens in
+``tests/test_assembly_sdk.py`` now name these Points (``[session
+sess-2026-08-10]``) — they no longer pin ``[session ?]``. The fixture is
+still not capture-shaped: it proves nothing about the ``CONTAINS`` read (the
+ask fixtures in #3910/#3914 carry that weight); it only carries the SDK write
+path's own identity prop. Read as: "session identity here comes from
+``create_point(session_id=…)``, NOT from a capture edge", NOT as "capture
+writes a ``session_id`` prop".
 """
 from __future__ import annotations
 

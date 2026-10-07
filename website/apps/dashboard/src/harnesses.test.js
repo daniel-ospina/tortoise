@@ -2,6 +2,7 @@
 // no jsdom/React needed) (#1998 W2 — universal command, surface 5).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   HARNESS_ORDER, HARNESS_NAMES, HARNESS_SELF_INSTALL, HARNESS_TEACH_HUMAN,
   UNIVERSAL_COMMAND, UNIVERSAL_COMMAND_HARNESSES,
@@ -9,13 +10,38 @@ import {
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
-  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
-  HARNESS_OAUTH, CANONICAL_MCP_URL,
+  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
+  PI_CAPTURE_INSTALL, CLAUDE_CAPTURE_NOTE, CODEX_CAPTURE_INSTALL,
+  HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL, SKILLS_CLAIM,
+  SKILLS_LIST,
+  CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE, CLAUDE_WEB_FILING, HARNESS_CAPTURE_REQUIRES_OPT_IN,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
-  harnessDisplayName,
+  harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
+
+// #4365: the served installer ships THREE capabilities — onboarding is delivered
+// as INSTRUCTIONS (a document the agent reads), never installed into a harness's
+// skills namespace.
+//
+// EXACT assertions only. This file previously also guarded the same prose SHAPE
+// the wizardPrompts gate guarded (an approved-host allowlist, a "no hand-named
+// skill" sweep, install-verb/negation clause heuristics, a set-statement tail
+// rule). EIGHT independent adversarial reviews found ~41 defects in that net and
+// NONE in the product; one cycle introduced a bypass in the net while fixing the
+// net. The shape net is therefore removed from both gates — a net whose gaps are
+// silent reads as coverage, which is worse than no net. The completeness classes
+// it was reaching for live in #4885. What remains is what can be demonstrated:
+// the set itself, and that the claim is DERIVED from it rather than restated.
+test('#4365: the shipped set is exactly three capabilities, and the claim is derived from it', () => {
+  assert.deepEqual(SKILLS_LIST.split(', '),
+    ['how-to-use-tortoise', 'tortoise-decide', 'tortoise-file-finding'])
+  assert.equal(SKILLS_CLAIM, `Install the Tortoise skills (${SKILLS_LIST})`,
+    'SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal')
+  assert.ok(!/onboarding/i.test(SKILLS_LIST),
+    'the shipped set must never include onboarding — it is not a skill')
+})
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {
   assert.equal(HARNESS_ORDER.length, 7)
@@ -90,6 +116,15 @@ test('#2912: family resolution + preferred surface + display names', () => {
   assert.equal(preferredSurface(cursor, 'pi'), 'cursor')
   assert.equal(harnessDisplayName('codexDesktop'), 'Codex Desktop')
   assert.equal(harnessDisplayName('claude-desktop'), 'Claude Desktop')
+  // #3428 (lane B3, review cycle 1 P2-1): `knownHarnessName` is the user-facing
+  // lookup — a KNOWN leaf (including the HARNESS_EXTRA_NAMES-only Codex
+  // Desktop) resolves, and an unknown id returns null so the CALLER owns the
+  // neutral fallback (unlike harnessDisplayName, which falls back to the raw
+  // id and would leak "codexDesktop" into the sentence).
+  assert.equal(knownHarnessName('codexDesktop'), 'Codex Desktop')
+  assert.equal(knownHarnessName('claude-desktop'), 'Claude Desktop')
+  assert.equal(knownHarnessName('pi'), 'Pi')
+  assert.equal(knownHarnessName('not-a-harness'), null)
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {
@@ -164,13 +199,23 @@ test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (C
   assert.match(desktop, /Leave Request headers empty/, 'desktop: the field is named only to say it stays empty')
   assert.ok(!/beta/i.test(desktop), 'desktop: no beta caveat')
   assert.ok(!desktop.includes(KEY), 'desktop: never embeds the key')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): the dashboard Continue click no
+  // longer writes the checkpoint (the human writer is deleted), so the copy must
+  // name the real writer instead of promising the click does it.
+  assert.match(desktop, /first successful write/, 'desktop: the real checkpoint writer is named')
+  assert.ok(!desktop.includes('harness-connected checkpoint'),
+    'desktop: the deleted human writer (#3428) must not be promised')
   const web = UNIVERSAL_COMMAND['claude-web'](KEY)
   assert.match(web, /Connectors/, 'web: connector steps')
   assert.match(web, /Server URL/, 'web: server URL step')
   assert.match(web, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'web: canonical connector URL (no slash)')
   assert.match(web, /Authorize/, 'web: OAuth Authorize step')
   assert.match(web, /tortoise_health/, 'web: agent verifies')
-  assert.match(web, /harness-connected/, 'web: checkpoint handoff (dashboard Continue)')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
+  // human writer — the copy now names the agent's first successful write.
+  assert.match(web, /first successful write/, 'web: the real checkpoint writer is named')
+  assert.ok(!web.includes('harness-connected checkpoint'),
+    'web: the deleted human writer (#3428) must not be promised')
   assert.ok(!web.includes('Authorization'), 'web: no Bearer recipe')
   assert.ok(!web.includes(KEY), 'web: never embeds the key')
   // #2865: the Continue label tells the truth on a manual connector surface.
@@ -194,8 +239,8 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   assert.equal(prompt, HARNESS_INSTALL['claude-web'](), 'claude-web and chatgpt share the identical workflows body')
   assert.match(prompt, /Follow these workflows/, 'prompt: workflows marker')
   // the self-contained UNIVERSAL_COMMAND block embeds the connector steps +
-  // prompt + a USER-FACING in-chat verify (no server signal — chatgpt has no
-  // tortoise_health call)
+  // prompt + a user-facing in-chat verify; the `chatgpt` copy must not name
+  // `tortoise_health`.
   const cmd = UNIVERSAL_COMMAND.chatgpt()
   assert.match(cmd, /Developer mode/, 'command: Developer mode')
   assert.match(cmd, /chatgpt\.com\/plugins/, 'command: plugins surface')
@@ -203,7 +248,11 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   assert.match(cmd, /OAuth/, 'command: OAuth')
   assert.match(cmd, /Follow these workflows/, 'command: workflows prompt embedded')
   assert.match(cmd, /are we connected\?/, 'command: in-chat verify question')
-  assert.match(cmd, /harness-connected/, 'command: checkpoint handoff (dashboard Continue)')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
+  // human writer — the copy now names the agent's first successful write.
+  assert.match(cmd, /first successful write/, 'chatgpt: the real checkpoint writer is named')
+  assert.ok(!cmd.includes('harness-connected checkpoint'),
+    'chatgpt: the deleted human writer (#3428) must not be promised')
   assert.ok(!cmd.includes('tt_'), 'chatgpt copy must never carry a key prefix')
   assert.ok(!cmd.includes(KEY), 'chatgpt copy must never embed the test key')
   assert.ok(!cmd.includes('tortoise_health'), 'chatgpt copy verifies IN CHAT — never tortoise_health')
@@ -265,4 +314,263 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
+})
+
+// #3575: the capture-INSTALL seam — `HARNESS_CAPTURE_SUPPORT[h] === true` is a
+// capability claim, and it is only honest when the product actually INSTALLS a
+// capture step. These pin the three legs (declared seam ⟺ in-repo artifact ⟺
+// install step) so the Pi false PASS — `pi: true` with no capture install —
+// cannot regress.
+test('#3575: capture support is derived from the seam, and every supported harness installs it', () => {
+  const seamHarnesses = Object.keys(HARNESS_CAPTURE_SEAM)
+  for (const h of HARNESS_ORDER) {
+    assert.equal(
+      HARNESS_CAPTURE_SUPPORT[h],
+      seamHarnesses.includes(h),
+      `${h}: HARNESS_CAPTURE_SUPPORT must equal seam presence (derived, not asserted)`,
+    )
+    if (!HARNESS_CAPTURE_SUPPORT[h]) continue
+    const artifact = HARNESS_CAPTURE_SEAM[h]
+    assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
+    // The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+    // in the capture-install surface (Cursor's copy is a JSON file, so its
+    // capture step is a connect-wizard step + the Memory-sources row).  Either
+    // surface must name the declared artifact — capability is not a claim.
+    const surface = `${HARNESS_INSTALL[h](KEY)}\n${HARNESS_CAPTURE_INSTALL[h] || ''}`
+    assert.ok(
+      surface.includes(artifact),
+      `HARNESS_INSTALL/${h} capture-install surface must install its declared seam ${artifact}`,
+    )
+  }
+})
+
+test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+  assert.match(pi, /\.pi\/agent\/extensions/)
+  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+})
+
+// #3818 (P2-4): the copy-paste Codex capture install must honour the SAME
+// `$CODEX_HOME` override the installer does. A hardcoded `~/.codex` command
+// writes the hook into a file Codex never reads on a non-default setup — the
+// silent no-capture the seam exists to prevent, on the surface most likely to
+// be read.
+test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
+  const codex = HARNESS_CAPTURE_INSTALL.codex
+  assert.ok(codex, 'HARNESS_CAPTURE_INSTALL.codex present')
+  assert.match(codex, /\$\{CODEX_HOME:-\$HOME\/\.codex\}/,
+    'the copy must use the ${CODEX_HOME:-$HOME/.codex} default the installer honours')
+  // Pin the COMMANDS, not just the prose: a comment naming $CODEX_HOME left
+  // the actual mkdir/cp/chmod lines hardcoded to ~/.codex.
+  const commandLines = codex.split('\n').filter((l) => /^(mkdir|cp|chmod)\b/.test(l))
+  assert.ok(commandLines.length >= 3, commandLines)
+  for (const line of commandLines) {
+    assert.ok(line.includes('CODEX_HOME'),
+      `command ignores $CODEX_HOME: ${line}`)
+    assert.ok(!line.includes('~/.codex'),
+      `command hardcodes ~/.codex: ${line}`)
+  }
+})
+
+// #3819: the Cursor capture install. Cursor's MCP copy is a JSON file (so the
+// capture step lives in HARNESS_CAPTURE_INSTALL + HARNESS_STEPS.cursor), the
+// registration is HOME-scoped at `~/.cursor` (Cursor has no config-dir env
+// var), and the IDE-ONLY limitation is disclosed — Cursor's own docs say
+// cloud agents have no editor-lifetime session boundary, and the disclosure
+// must sit where the user chooses Cursor, not in a footnote.
+test('#3819: the Cursor capture install is home-scoped, flat, and discloses the IDE-only limit', () => {
+  const cursor = HARNESS_CAPTURE_INSTALL.cursor
+  assert.ok(cursor, 'HARNESS_CAPTURE_INSTALL.cursor present')
+  assert.match(cursor, /tortoise\/cursor-hooks\/session-end\.sh/,
+    'the capture step must name the declared seam artifact')
+  assert.match(cursor, /~\/\.cursor\/hooks\.json/,
+    'the copy must name ~/.cursor/hooks.json, the one path Cursor reads')
+  assert.doesNotMatch(cursor, /CURSOR_HOME:-/,
+    'Cursor has NO config-dir env var — do not teach a ${CURSOR_HOME:-…} default')
+  assert.match(cursor, /sessionEnd/, 'the copy must name the sessionEnd event')
+  // the flat entry shape is load-bearing — a nested matcher group invalidates
+  // Cursor's WHOLE hooks.json (its validator rejects a non-string command)
+  assert.match(cursor, /FLAT/,
+    'the copy must warn that the entry is flat (a nested entry disables all Cursor hooks)')
+  // Cursor's validator also requires a document `version`
+  assert.match(cursor, /version/,
+    'the copy must warn that hooks.json needs a numeric version')
+  // the IDE-only limitation is disclosed on the install surface
+  assert.match(cursor, /IDE-ONLY/)
+  assert.match(cursor, /[Cc]loud [Aa]gent/,
+    'the disclosure must name cloud agents explicitly')
+  assert.match(cursor, /no editor-lifetime session boundary/,
+    'the disclosure quotes the constraint that makes the gap real')
+})
+
+// #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
+// a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
+// pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
+// alongside the seam. The install step must disable the legacy entry, and it
+// must do so non-destructively. Structure-only: this pins the guard text, not
+// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// unit). Removing any leg REDs this test.
+test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  // the colliding legacy path is named...
+  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
+    'the guard must name the legacy entry Pi loads as a second extension')
+  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'the symlink leg must be guarded by -L (unlink the link, never the target)')
+  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  assert.match(pi, /\.tortoise-capture\.disabled/,
+    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.doesNotMatch(pi, /rm\s+-/,
+    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
+})
+
+// #3615 made every in-repo hook fail closed on an explicit per-machine opt-in,
+// but the six hand-authored instalments of capture copy kept telling users that
+// capture simply happened: the built bundle shipped the old claim and
+// `TORTOISE_CAPTURE` zero times (#3661). The fix states the truth once
+// (`captureInstallNote`) and this test makes the drift unrepeatable.
+//
+// Mutation-checked: restoring the old sentence in the source (sed) REDs the
+// negative leg; the built bundle went from 0 → 1 `TORTOISE_CAPTURE` with the old
+// claim going to 0. Note the claude-web surface is deliberately NOT in the
+// opt-in list: capture there is the agent's own tortoise_session_capture call,
+// refused by the team off-switch — demanding the env var there would be the
+// mirror of the bug this test exists for (an overstatement of the gate).
+test('#3661: every capture surface names the opt-in, and none claims capture happens by default', () => {
+  // The surface set is DERIVED from the module, not hand-listed: a new capture
+  // seam that forgot the variable must RED, and a hand-maintained list would
+  // silently stop covering it. `HARNESS_CAPTURE_INSTALL` is the capture-snippet
+  // registry, and `HARNESS_CAPTURE_REQUIRES_OPT_IN` declares per seam whether
+  // the opt-in gates it (Pi's extension is the one that does not).
+  // The name is pinned as a LITERAL, not compared only against the module's own
+  // constant: `text.includes(CAPTURE_OPT_IN_ENV)` alone stays green if someone
+  // renames the constant on both sides, telling users to export a variable the
+  // hook never reads. The literal is pinned cross-language on the Python side
+  // (tests/test_session_capture_e2e.py passes it straight into
+  // `capture_consent_enabled`), so both ends agree on the spelling.
+  const OPT_IN_NAME = 'TORTOISE_CAPTURE'
+  assert.equal(CAPTURE_OPT_IN_ENV, OPT_IN_NAME,
+    'the disclosed variable must be the one tortoise/capture_consent.py reads')
+  assert.equal(CAPTURE_OPT_IN_LINE, `${OPT_IN_NAME}=1`)
+  assert.deepEqual(Object.keys(HARNESS_CAPTURE_REQUIRES_OPT_IN).sort(),
+    Object.keys(HARNESS_CAPTURE_INSTALL).sort(),
+    'every capture seam must declare whether the per-machine opt-in gates it')
+  // The VALUES are the fact, not the map's private business: this map decides the
+  // shipped success-screen sentence, so a wrong value is a false promise. Pin the
+  // whole map — otherwise `pi: true` or `claude: false` are unfalsifiable
+  // (the hook seams file nothing until TORTOISE_CAPTURE=1; installing the Pi
+  // extension IS its opt-in — tests/test_pi_capture_hooks.py pins that decision).
+  assert.deepEqual(HARNESS_CAPTURE_REQUIRES_OPT_IN,
+    { claude: true, codex: true, cursor: true, pi: false },
+    'the per-seam opt-in map decides the capture PROMISE — its values are load-bearing')
+  for (const [h, gated] of Object.entries(HARNESS_CAPTURE_REQUIRES_OPT_IN)) {
+    const snippet = HARNESS_CAPTURE_INSTALL[h]
+    assert.ok(snippet.includes(OPT_IN_NAME),
+      `HARNESS_CAPTURE_INSTALL.${h} must name ${OPT_IN_NAME} — after #3615 the hooks file no session without it (#3661)`)
+    if (gated) {
+      // naming the variable is not enough: the user has to be told the syntax.
+      assert.ok(snippet.includes(CAPTURE_OPT_IN_LINE),
+        `HARNESS_CAPTURE_INSTALL.${h} must show the line to run (${CAPTURE_OPT_IN_LINE})`)
+    }
+    // A wizard snippet that carries ANY capture copy inherits the duty — the
+    // trigger is the copy itself, not an exact match with the row's snippet:
+    // HARNESS_INSTALL.claude's install block differs by a comment line from
+    // HARNESS_CAPTURE_INSTALL.claude, so an `includes(snippet)` test silently
+    // skipped the PRIMARY seam (caught in review). Cursor's wizard body is MCP
+    // config only, so it is correctly skipped.
+    const install = HARNESS_INSTALL[h]
+    if (typeof install === 'function') {
+      const body = install(KEY)
+      if (/capture/i.test(body)) {
+        assert.ok(body.includes(OPT_IN_NAME),
+          `HARNESS_INSTALL.${h} carries capture copy, so it must name ${OPT_IN_NAME}`)
+      }
+    }
+  }
+  // The wizard snippets that embed a capture step must carry the SAME note the
+  // Memory-sources row shows — the de-duplication is the claim, so these are
+  // pinned against the constant ITSELF, not a substring match. (A substring test
+  // silently skipped claude: its install block differs from the row's snippet by
+  // one comment line, so dropping the note from HARNESS_INSTALL.claude left the
+  // suite green — caught in review.) Cursor is deliberately absent: its wizard
+  // body is MCP config only, and its capture step is a wizard STEP, asserted
+  // through HARNESS_STEPS.cursor above.
+  assert.ok(HARNESS_INSTALL.claude(KEY).includes(CLAUDE_CAPTURE_NOTE),
+    'HARNESS_INSTALL.claude must embed the shared Claude capture note')
+  assert.ok(HARNESS_INSTALL.codex(KEY).includes(CODEX_CAPTURE_INSTALL),
+    'HARNESS_INSTALL.codex must embed the shared Codex capture step')
+  assert.ok(HARNESS_INSTALL.pi(KEY).includes(PI_CAPTURE_INSTALL),
+    'HARNESS_INSTALL.pi must embed the shared Pi capture step')
+  // The connect-wizard steps (the archived LEGACY_WIZARD_ARCHIVED render, a
+  // retained rollback path) carry the Cursor scope disclosure in prose.
+  assert.ok(HARNESS_STEPS('cursor', KEY)
+    .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n').includes(OPT_IN_NAME),
+  'HARNESS_STEPS.cursor carries the Cursor capture disclosure, so it must name the opt-in')
+  // The local-spool claim is PER SEAM: only the Claude Code seam spools without
+  // consent (session-turn.sh runs `tortoise session spool` ungated). Codex and
+  // Cursor route through `sessions import`, which refuses BEFORE it can write —
+  // telling those users their transcript is in a Tortoise spool would be this
+  // issue's own defect class, so pin the asymmetry.
+  assert.match(HARNESS_CAPTURE_INSTALL.claude, /capture-spool/,
+    'the Claude seam DOES spool locally without consent — its copy must disclose that')
+  for (const h of ['codex', 'cursor']) {
+    assert.doesNotMatch(HARNESS_CAPTURE_INSTALL[h], /capture-spool/,
+      `HARNESS_CAPTURE_INSTALL.${h} must not claim a local spool — its seam refuses before anything is written`)
+    // The same claim could reach users through the archived wizard's prose
+    // steps, so the asymmetry is pinned THERE too — as a FORWARD guard.
+    // Only Cursor has a step list today (`HARNESS_STEPS` is a lookup, not a
+    // registry: it returns undefined for claude/codex/pi, i.e. there is no step
+    // to pin). Asserting on the empty string would be false assurance — it can
+    // never fail — so the absent case is skipped explicitly, and a future
+    // Codex step that claims a Tortoise spool REDs here instead.
+    const steps = HARNESS_STEPS(h, KEY)
+    if (!Array.isArray(steps)) continue
+    assert.doesNotMatch(steps
+      .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n'), /capture-spool/,
+    `HARNESS_STEPS.${h} must not claim a local spool either — same seam, same refusal`)
+  }
+  // The negative half is a SOURCE scan, not a list of rendered values: the
+  // claude-web filing paragraph is gated off (HARNESS_CAPTURE_SUPPORT['claude-web']
+  // is false — disabled-with-reason), so no rendered-value assertion and no
+  // snapshot can reach it, and a hand-maintained surface list silently stops
+  // covering a newly added one. Scanning the module covers every branch, live or
+  // gated. LIMIT, stated: it recognises the two phrasings the stale copy actually
+  // used, so a fresh PARAPHRASE evades it — this repo deliberately rejects
+  // semantic copy-nets (wizardPrompts.test.js header: eight reviews found ~41
+  // defects in the net and none in the product), so the exact-match snapshot is
+  // the guard for rendered copy and this scan is the backstop for gated branches.
+  // The server-policy sentence is unaffected — it says `default-ON`, which is
+  // TRUE of the organization toggle and is not the old claim.
+  const src = readFileSync(new URL('./harnesses.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /recording is\s+ON by default|files every session/i,
+    'harnesses.js still claims capture happens by default somewhere — #3615 made ' +
+    'every in-repo hook fail closed on the explicit opt-in; state it via captureInstallNote')
+  // The gated-off claude-web paragraph is reachable by no render, so it is pinned
+  // as the exported constant itself (the source scan above is the only other net).
+  assert.match(CLAUDE_WEB_FILING, /nothing is filed unless you call it/,
+    'the claude-web filing paragraph must state that filing is the agent\'s own call')
+  // The refusal fact and the variable's ABSENCE are load-bearing: this path is
+  // gated by the agent's own call plus the team toggle, NOT by TORTOISE_CAPTURE,
+  // so the paragraph must keep the 409 and must never name the hook's variable
+  // (a phrase-shape regex alone left "can refuse the file" green after the 409
+  // was deleted — caught in review).
+  assert.match(CLAUDE_WEB_FILING, /409/,
+    'the claude-web filing paragraph must keep the server-side refusal (409) — the toggle can only refuse')
+  assert.doesNotMatch(CLAUDE_WEB_FILING, /TORTOISE_CAPTURE/,
+    'the claude-web path is not gated by TORTOISE_CAPTURE — its paragraph must not name the variable')
+  assert.doesNotMatch(CLAUDE_WEB_FILING, /on by default/i,
+    'the claude-web filing paragraph must not claim capture happens by default')
+  // The one deliberate exception, pinned so a future edit cannot quietly
+  // generalize the hook wording onto Pi: its extension reads no
+  // TORTOISE_CAPTURE (installing it IS the opt-in), so its copy must state the
+  // install IS the opt-in rather than telling the user to export the variable.
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /Installing this extension IS the opt-in/,
+    'the Pi seam has no consent gate — its copy must say installing it IS the opt-in')
+  assert.doesNotMatch(HARNESS_CAPTURE_INSTALL.pi, /Filing is OFF until this machine opts in/,
+    'the Pi seam must not carry the hook wording: it reads no TORTOISE_CAPTURE')
 })

@@ -11,6 +11,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_domain_validators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -461,6 +462,8 @@ def graph_sdk():
     sdk = _make_sdk()
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
 
 
 class TestGraphValidators:
@@ -652,8 +655,18 @@ class TestValidateCLI:
 # ── 7. MCP tool ────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _transport_context():
-    """MCP tools require an initialized transport mode (#236 auth gate)."""
+def _transport_context(monkeypatch):
+    """MCP tools require an initialized transport mode (#236 auth gate).
+
+    Stdio is chosen deliberately, and it means the dev-mode auth gate in
+    ``_safe`` must hold: a caller shell that exports ``TORTOISE_API_KEY``
+    would make every tool return the "Authentication required. The MCP stdio
+    transport cannot carry auth tokens" envelope instead of the graph result
+    (#2734). The precondition is pinned here rather than inherited from the
+    invoking environment, so these tests exercise the handler, not whatever
+    key the shell happens to carry.
+    """
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     from tortoise.mcp_auth import (  # noqa: I001
         _current_org_id, _current_org_limits, _transport_mode,
     )
@@ -674,31 +687,29 @@ class TestMCPValidateTool:
         assert entry.annotations.readOnlyHint is True
         assert entry.sdk_method == "validate_domain"
 
-    def test_handler_returns_violations(self, graph_sdk):
+    def test_handler_returns_violations(self, graph_sdk, monkeypatch):
         import tortoise.mcp_server as mcp_mod
         from tortoise.mcp_server import tortoise_validate_domain
         ids = _seed_chain_violations(graph_sdk)
-        orig_sdk = mcp_mod.sdk
-        mcp_mod.sdk = graph_sdk
-        try:
-            res = tortoise_validate_domain("product-strategy")
-        finally:
-            mcp_mod.sdk = orig_sdk
+        # The handler resolves its SDK through mcp_server._get_org_sdk (the
+        # #236 auth refactor), so that is the seam to swap — the same
+        # convention as tests/test_mcp_server.py.
+        monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: graph_sdk)
+        res = tortoise_validate_domain("product-strategy")
         assert res["ok"] is False
         assert any(v["rule"] == "orphan_use_case"
                    and v["ref"] == ids["orphan_uc"]["id"]
                    for v in res["violations"])
 
-    def test_handler_unknown_domain_error(self, graph_sdk):
+    def test_handler_unknown_domain_error(self, graph_sdk, monkeypatch):
         import tortoise.mcp_server as mcp_mod
         from tortoise.mcp_server import tortoise_validate_domain
-        orig_sdk = mcp_mod.sdk
-        mcp_mod.sdk = graph_sdk
-        try:
-            res = tortoise_validate_domain("nope-405")
-        finally:
-            mcp_mod.sdk = orig_sdk
-        assert "error" in res
+        monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: graph_sdk)
+        res = tortoise_validate_domain("nope-405")
+        # Name the domain: a bare "error" key also matches the stdio auth
+        # envelope, which made this assertion vacuously true (#2734).
+        assert "nope-405" in res["error"]
+        assert "unknown domain" in res["error"]
 
 
 # ── 8. Commit endpoint: warnings[] on the 200 (additive) ───────────────────
@@ -715,7 +726,7 @@ def commit_client():
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000}
+            "max_api_keys": 2, "max_sessions": None}
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
         # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
         # clear at enter; pop-pin → restore __init__ → deterministic anchor

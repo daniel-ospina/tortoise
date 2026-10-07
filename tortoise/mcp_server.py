@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -15,45 +16,41 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
+from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS)
-from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
-    CODE_IN_FLIGHT_LIMIT,
-    CODE_QUOTA_EXCEEDED,
-    CODE_READER_UNAVAILABLE,
-    CODE_RETRIEVAL_UNAVAILABLE,
-    CODE_TIMEOUT,
-)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
+                          _supersede_window_end, _now_iso)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
                                _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
-                               ERR_EXCLUDED, SELFHOST_ORG_ID)
-from tortoise.transport import ask_exposure_enabled
+                               ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
+# #3834: the transport wait-bound vocabulary is read as a MODULE attribute
+# (``tortoise.mcp_auth`` is its single home), so the fast path pays no
+# ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
+# FastAPI app — and a patch of the canonical constant reaches this surface.
+from tortoise import mcp_auth as _mcp_auth
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 
 _log = logging.getLogger(__name__)
-
-# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE (the MCP tortoise_ask
-# tool) is off by default. The READER ships (the eval's reader — the 500-Q
-# benchmark runs through it); only the customer-facing ask EXPOSURE is
-# gated until the reader-model decision is made. ``tortoise_ask`` lives in
-# its OWN curation group ("ask", see tool_registry.py GROUP_BY_NAME) so the
-# default (ungrouped) hosted /mcp surface can exclude it; an explicit
-# tool_group="ask" server (dev/eval) still serves it.
-_ASK_TOOL_GROUP = "ask"
 
 
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
-    Only sets environment keys that are empty/unset, so an explicit
-    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
-    entrypoint philosophy: the DB target must be explicit, never accidental.
+    Only sets environment keys that are ABSENT from ``os.environ`` — a key
+    that is explicitly set, even to the empty string, is never overridden.
+    That presence test is load-bearing: ``tools/ask_shape_rate.py`` narrows
+    the non-pinned provider keys to ``""`` (present-but-unkeyed) so a later
+    ``_load_dotenv()`` cannot re-arm them and defeat the reader pin (#4582).
+    An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
+    hosted entrypoint philosophy: the DB target must be explicit, never
+    accidental.
     """
     if path is None:
         path = os.path.join(
@@ -189,13 +186,39 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
                                   latency_ms: int, error_kind: str | None) -> None:
     """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
 
+    ``status`` is one of this full set — the vocabulary is stated HERE because
+    this is the single emission point for ``mcp_tool_call``:
+
+    - ``ok`` — the call completed.
+    - ``validation_error`` / ``auth_error`` / ``exec_error`` — mapped by
+      ``_classify_mcp_call_error`` (``error_kind`` = the offending field, the
+      exception class, or the unwrapped cause's class name, respectively);
+      the #236 stdio auth gate is the OTHER ``auth_error`` producer, with
+      ``error_kind = "stdio_auth_gate"`` — it is not an exception class, so it
+      is not produced by that classifier.
+    - ``timeout`` — the transport wait bound fired at this seam
+      (``error_kind = "wait_bound"``).
+    - ``cancelled`` — the caller cancelled the dispatch
+      (``error_kind = "caller_cancelled"``).
+    - ``refused`` — the TRANSPORT had already refused and answered this request
+      before this seam could wait on it; the refusal is recorded once here
+      instead of being duplicated as a false ``timeout``
+      (``error_kind = "transport_wait_bound"``).
+
+    The first four are the #889 set; ``timeout``, ``cancelled`` and ``refused``
+    were added by #3834. The #888 research brief
+    (``docs/epics/2026-08-11-888-surface-design/01-research-brief.md``) still
+    lists only the original four — it is #888's artifact, not this lane's, so it
+    is deliberately not edited here and this docstring is the live vocabulary.
+
     The Supabase write (sync httpx POST, up to 5s timeout in
     _track_analytics_event) runs OFF the tool-call hot path: on the default
     executor when an event loop is running (all server transports), else on a
     daemon thread. Any failure is logged and swallowed — telemetry must never
     break a tool call.
     """
-    props = {"tool_name": tool_name, "status": status,
+    props = {"tool_name": _mcp_auth._sanitize_for_log(tool_name),
+             "status": status,
              "latency_ms": latency_ms, "error_kind": error_kind}
 
     def _write() -> None:
@@ -231,10 +254,348 @@ async def _flush_mcp_telemetry() -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+# ── #3834: the MCP-level wait bound ────────────────────────────────
+# The HTTP transport's WaitBoundMiddleware bounds the REST routes, but it is
+# INERT for MCP tool calls: FastMCP 3.4.6 runs Streamable-HTTP in SSE mode and
+# starts the EventSourceResponse BEFORE dispatching the tool
+# (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+# headers immediately)"), so ``http.response.start`` is on the wire within
+# milliseconds and there is no refusal left to substitute. The measured
+# population — the 7,795 ``mcp_tool_call`` events, p99 22.5 s, max 157 s — is
+# exactly this dispatch, so the bound is enforced HERE, at ``mcp.call_tool``:
+# the single seam every transport funnels through. It is applied across the
+# registry rather than per tool (no tool name is referenced), so the 98→25
+# surface rebuild (#4282) cannot throw it away.
+
+#: Tool dispatches abandoned past the bound, held only so their late
+#: result/exception is retrieved (never "exception was never retrieved"), so the
+#: #2850 workload gauge stays non-idle while they run, and so a test can await
+#: them. Entries remove themselves on completion.
+_pending_mcp_wait_bound: set = set()
+
+#: Breach-telemetry SCHEDULING futures (the telemetry pool's submit future),
+#: tracked only so a late exception on it is retrieved. The write's own future
+#: is tracked by the shared writer in ``hosted_api``.
+_pending_mcp_wait_bound_telemetry: set = set()
+
+#: The breach marker on a refused result's ``_meta``. A client can branch on it
+#: without parsing prose; ``_wrapped_call_tool`` reads it to keep the
+#: accompanying ``mcp_tool_call`` telemetry out of ``ok`` — ``timeout`` when this
+#: seam's own deadline fires, or ``refused``/``transport_wait_bound`` when the
+#: transport already refused the request and this seam suppresses its duplicate.
+_WAIT_BOUND_META_KEY = "tortoise_wait_bound"
+
+
+def _hold_mcp_dispatch_after_request(task) -> None:
+    """Keep an abandoned MCP dispatch tracked, and hold the #2850 gauge for it.
+
+    The round-1 fix moved ``InFlightMiddleware`` inside ``WaitBoundMiddleware``
+    so an abandoned REST handler keeps counting until it finishes — else the
+    watchdog's idle predicate reads idle while abandoned work still runs. That
+    ordering does NOT cover this seam: the abandoned MCP dispatch is a task
+    created inside the MCP app, and the HTTP POST (which the gauge wraps) ends
+    as soon as the SSE refusal is written. So this seam holds the gauge itself
+    for the life of the abandoned dispatch.
+
+    Called on the TIMEOUT path only. The cancellation path is the opposite case
+    (the cancellation is propagated into the dispatch); see the ``except
+    asyncio.CancelledError`` branch in ``_await_under_mcp_wait_bound``. The gauge
+    exits in a ``finally`` so a raising abandoned dispatch cannot leak a slot.
+    """
+    monitoring.workload_enter()
+    _pending_mcp_wait_bound.add(task)
+
+    def _done(t) -> None:
+        _pending_mcp_wait_bound.discard(t)
+        try:
+            if not t.cancelled():
+                t.exception()  # retrieve, so it is never un-retrieved
+        finally:
+            monitoring.workload_exit()
+
+    task.add_done_callback(_done)
+
+
+def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
+                                         name: str) -> None:
+    """Schedule the shared breach writer OFF the event loop (#3834 G1).
+
+    The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
+    site the REST arm uses — but ``hosted_api`` imports ``mcp_server`` at module
+    scope, so this module cannot import it back at module scope. Importing it
+    lazily HERE, on the loop and on the BREACH path, built the whole hosted
+    FastAPI app before the refusal could be written: measured in a fresh process
+    against a 0.05 s bound, the refusal came back after ~2–4 s (load-dependent)
+    with the event loop frozen for the same span — the refusal is the product on
+    this path, so a late one defeats the unit. The lazy import therefore lives
+    INSIDE the callable submitted to the telemetry pool
+    (``monitoring.control_plane_worker("telemetry")``, daemon workers, bounded
+    backlog; #3498): the worker thread pays the import, the loop writes the
+    refusal. The single emit site is unchanged — only where its module is
+    imported moved.
+    """
+    # #3834 F-3: sanitize the client-supplied tool name at the analytics sink.
+    # The helper is shared with the REST arm (``mcp_auth``), not a third copy —
+    # ``mcp_server`` already imports that module, so this pays no ``hosted_api``
+    # import. Sanitized on the loop (pure and cheap), so the off-loop closure
+    # carries only the safe value.
+    safe_name = _mcp_auth._sanitize_for_log(name)
+
+    def _emit() -> None:
+        try:
+            from tortoise import hosted_api as _ha
+            _ha._emit_wait_bound_breach(
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+        except Exception:  # telemetry must never turn a refusal into an error
+            _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
+
+    try:
+        fut = monitoring.control_plane_worker("telemetry").submit(_emit)
+    except Exception:  # telemetry must never turn a refusal into an error
+        _log.debug("mcp wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_mcp_wait_bound_telemetry.add(fut)
+
+    def _done(f) -> None:
+        _pending_mcp_wait_bound_telemetry.discard(f)
+        # ``submit`` returns a PRE-FAILED future when the telemetry worker's
+        # bounded backlog is full (``_WorkerBacklogFull``) — the saturation
+        # that also causes breaches. Mirror ``hosted_api._telemetry_done`` so
+        # the outer hop's drop is traceable rather than silent (#3834 H3).
+        if not f.cancelled() and f.exception() is not None:
+            _log.debug(
+                "mcp wait-bound telemetry schedule dropped: %r", f.exception())
+
+    fut.add_done_callback(_done)
+
+
 # Captured before wrapping — the middleware chain re-dispatches
 # call_tool(run_middleware=False) internally; the wrapper passes those
 # through untouched so exactly ONE event is emitted per client tool call.
 _original_call_tool = mcp.call_tool
+
+#: The key ``hosted_api.WaitBoundMiddleware`` writes the transport arrival time
+#: under, on the shared ASGI ``scope["state"]`` dict (the same dict the auth
+#: dependency writes ``org_id`` into).
+_WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
+
+#: The key the middleware sets when IT has already emitted the breach event and
+#: answered the caller (#3834 F-2). The seam reads it so one request records
+#: exactly one ``transport_wait_bound_exceeded``.
+_WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
+
+
+def _wait_bound_state() -> dict | None:
+    """The shared ASGI ``scope["state"]`` dict, or None off-HTTP.
+
+    Both the transport arrival stamp (#3834 F1) and the already-refused flag
+    (#3834 F-2) ride this one dict, which ``hosted_api.WaitBoundMiddleware``
+    writes and Starlette's ``Mount`` forwards to this sub-app as the SAME
+    mapping.
+
+    HTTP-only by construction: on stdio there is no request, so this returns
+    None. It deliberately never raises — a missing dict means "no transport
+    stamp / no refusal", never "fail the tool call". ``get_http_request`` is
+    tried first because it is the public API, but its MCP-SDK ``request_ctx``
+    branch can return a protocol object rather than the Starlette request, so
+    FastMCP's HTTP ContextVar is the reliable fallback.
+    """
+    candidates: list = []
+    try:
+        from fastmcp.server.dependencies import get_http_request
+        candidates.append(get_http_request())
+    except Exception:
+        pass
+    try:
+        from fastmcp.server.http import _current_http_request
+        candidates.append(_current_http_request.get())
+    except Exception:
+        pass
+    for request in candidates:
+        scope = getattr(request, "scope", None)
+        if not isinstance(scope, dict):
+            continue
+        state = scope.get("state")
+        if isinstance(state, dict):
+            return state
+    return None
+
+
+def _wait_bound_arrival() -> float | None:
+    """When the HTTP request arrived at the transport, or None off-HTTP.
+
+    The stamp is written by ``hosted_api.WaitBoundMiddleware`` and is what makes
+    the bound ONE deadline instead of two (#3834 F1). The middleware cannot
+    bound an MCP *tool call* — Streamable-HTTP starts the SSE response BEFORE
+    dispatching the tool — so it hands this seam the SAME arrival time and the
+    seam waits only the REMAINING part of the bound. Without it the
+    caller-visible wait is pre-SSE cost + bound (measured: 0.522 s for an
+    advertised 0.3 s bound) and a slow org resolution can push the total past
+    the 15 s client budget with no legible refusal.
+
+    HTTP-only by construction, so on stdio it returns None and the full bound
+    applies.
+    """
+    state = _wait_bound_state()
+    if state is not None:
+        stamp = state.get(_WAIT_BOUND_ARRIVAL_KEY)
+        if isinstance(stamp, (int, float)):
+            return float(stamp)
+    return None
+
+
+def _wait_bound_refused() -> bool:
+    """True when the transport already refused this request (#3834 F-2).
+
+    ``hosted_api.WaitBoundMiddleware`` sets this on the shared
+    ``scope["state"]`` when IT emits the breach event and answers the caller —
+    the pre-SSE-stall path, where pre-SSE cost >= bound and this seam's own
+    deadline has already collapsed to 0. The seam must then NOT emit a second
+    ``transport_wait_bound_exceeded`` and must NOT record the redundant refusal
+    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal, so the
+    abandoned dispatch still terminates cleanly.
+    """
+    state = _wait_bound_state()
+    return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
+
+
+async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
+                                     task_meta):
+    """Await the real tool dispatch under the transport wait bound (#3834).
+
+    On breach the caller gets a legible refusal that REUSES the shipped
+    vocabulary: the message and the advertised delay come from the SINGLE module
+    both surfaces read (``mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`` /
+    ``mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S``), and ``retry_after`` rides the
+    result.
+
+    ⚠️ Why the refusal is a ``CallToolResult(isError=True)`` and NOT a JSON-RPC
+    ``error`` object: the MCP SDK's ``tools/call`` handler wraps every handler
+    exception except ``UrlElicitationRequiredError`` into exactly that shape
+    (``mcp/server/lowlevel/server.py::_make_error_result``), so a raised
+    ``McpError`` loses its code and ``data`` on this surface. The result channel
+    is the only one the SDK exposes once the SSE stream has started; carrying
+    the same message plus ``error.data.retry_after`` inside the result keeps the
+    retry signal shipped WITH the bound instead of dropping it.
+
+    On the TIMEOUT path the dispatch is ABANDONED, never cancelled: cancelling
+    an ``asyncio`` await runs every ``finally`` the handler owns, and would also
+    release this seam's #2850 gauge hold (``_hold_mcp_dispatch_after_request``)
+    while the dispatched work is still in flight — the exact
+    busy-misread-as-idle the hold exists to prevent. (The SDK-closing
+    ``finally`` that makes an early cancel destructive is a fact about the
+    hosted handlers in ``hosted_api`` — #2988 / #3718 — not about this module.)
+    On the CANCELLATION path the opposite holds — the cancellation is propagated
+    INTO the dispatch, as the direct await this wrapper replaced did, so the
+    tool's own cancellation cleanup runs.
+    """
+    t0 = _time.perf_counter()
+    # #3834 F1: spend the TRANSPORT's REMAINING deadline, not a fresh one. The
+    # caller-visible wait is pre-SSE cost + bound; a fresh bound here makes it a
+    # SUM, and a slow org resolution can push the total past the client budget
+    # with no legible refusal. ``_time.monotonic()`` matches the middleware's
+    # clock (``time.monotonic``), NOT this function's ``perf_counter`` t0.
+    arrival = _wait_bound_arrival()
+    if arrival is None:
+        remaining = float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)  # stdio / no HTTP request
+    else:
+        remaining = max(
+            0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival))
+    task = asyncio.ensure_future(
+        _original_call_tool(name, arguments, version=version,
+                            run_middleware=True, task_meta=task_meta))
+    try:
+        # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
+        # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
+        # seam's cost is NOT the waiter: measured, the two are cost-neutral (same
+        # trivial coroutine — ``wait_for(shield)`` 198 µs p50 vs ``asyncio.wait``
+        # 199 µs p50, identical 53.8 µs floor; an inline ``asyncio.timeout`` is
+        # 7.7 µs). It is the per-call ``ensure_future`` task indirection —
+        # ABANDON-don't-cancel requires owning the task — measured as a dispatch
+        # delta of p50 ≈ +0.48 ms, p95 ≈ +1.7 ms vs the unwrapped
+        # ``_original_call_tool``. The ``shield`` is what preserves
+        # ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited future on
+        # timeout, and cancelling here would run the SDK-closing ``finally``
+        # under work still using it (#2988 / #3718).
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+    except asyncio.CancelledError:
+        # Outer cancellation (client disconnect, server shutdown, transport
+        # teardown). Propagate it INTO the dispatch and await it, so the tool's
+        # own cancellation path runs — abandoning here would silently keep a
+        # cancelled dispatch alive. Suppress only the child's CANCELLATION; a
+        # genuine error from its cleanup must surface.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
+    except TimeoutError:
+        if task.done():
+            # The dispatch finished as the deadline expired: surface its own
+            # result/exception. A handler's ``TimeoutError`` is NOT a wait
+            # breach (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+            return task.result()
+        # ``shield`` kept the inner dispatch RUNNING; the breach path below
+        # abandons it on purpose.
+        pass
+
+    _hold_mcp_dispatch_after_request(task)
+    # #3834 F-2: the transport already refused AND answered this request (a
+    # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
+    # deadline was 0). The middleware's event is then the truthful record;
+    # emitting here would be a second, mutually-inconsistent
+    # ``transport_wait_bound_exceeded`` for the same request.
+    transport_refused = _wait_bound_refused()
+    # #3834 F-1: report the interval the bound actually governs — the
+    # CALLER-VISIBLE wait, the SAME interval the REST arm's breach event reports
+    # (``hosted_api`` uses ``time.monotonic() - transport arrival``). ``t0`` here
+    # is THIS seam's entry, which is AFTER pre-SSE (org resolution, rate limit,
+    # routing); because the seam spends only the transport's REMAINING deadline,
+    # a ``t0``-based interval under-reports by the whole pre-SSE cost. On stdio
+    # there is no transport arrival, so the seam-local ``t0`` stands in.
+    if arrival is None:
+        latency_ms = int((_time.perf_counter() - t0) * 1000)
+    else:
+        latency_ms = int((_time.monotonic() - arrival) * 1000)
+    # #3834 F-3: the tool name is the client-supplied JSON-RPC ``params.name``.
+    # On the SCOPED path ``_enforce_mcp_tool_scope`` has already resolved it
+    # against the registry (and denies an unregistered name), but on the
+    # UNscoped (org-wide / selfhost) path it reaches this seam without any
+    # registry-membership guarantee — and the ``mcp_tool_call`` sink is always on,
+    # so it is untrusted in the same class of sink the REST arm already sanitizes
+    # its route path for. Escape it for the log line (the analytics sink
+    # sanitizes its own copy).
+    safe_name = _mcp_auth._sanitize_for_log(name)
+    if transport_refused:
+        # The transport's warning already covers this request; a second
+        # "refusing legibly" warning would describe a refusal this seam never
+        # delivers (the middleware dropped the SSE response).
+        _log.debug(
+            "MCP tools/call %s already refused at the transport; this seam's "
+            "refusal is redundant", safe_name)
+    else:
+        # The SAME breach writer the REST arm uses — one emit site, one prop
+        # vocabulary — scheduled OFF the loop (see
+        # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay
+        # a ``hosted_api`` import, and neither must the breach path, where that
+        # import froze the loop and delivered the refusal seconds late.
+        _emit_mcp_wait_bound_breach_off_loop(
+            _current_org_id.get() or "", latency_ms, name)
+        _log.warning(
+            "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
+            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    return ToolResult(
+        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        # The REST JSON-RPC error payload, carried on the channel this surface
+        # has: same code, same message, same `data.retry_after`.
+        structured_content={"error": {
+            "code": ERR_TIMEOUT,
+            "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "data": {"retry_after": retry_after},
+        }},
+        meta={_WAIT_BOUND_META_KEY: True},
+        is_error=True,
+    )
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -243,9 +604,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
 
     - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
       session resolutions (scopes None) pass — existing flows unchanged.
-    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
-      graphs:write; everything else (read tools) needs graphs:read (write
-      implies read — graphs:write satisfies reads).
+    - a SCOPED key is enforced: the tool's registry entry carries the declared
+      `writes` flag — a `writes=True` tool needs graphs:write, everything else
+      needs graphs:read (write implies read — graphs:write satisfies reads).
+      `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
+    - an UNRESOLVABLE name is DENIED (`AuthorizationError`), never served as a
+      read. The old else-branch treated any name missing from the parallel
+      write list as a read, so a writer absent from that list was reachable by
+      a graphs:read-only key (#4170).
     - deleg=0 children without a data scope never reach here (the
       middleware rejects them at resolution); deleg=0 children WITH a data
       scope are routed to their own graph by _get_org_sdk and enforced
@@ -259,7 +625,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
     if scopes is None or _current_legacy_full_access.get():
         return
     have = set(scopes)
-    if name in WRITE_TOOL_NAMES:
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        # #4170: an unresolvable name is DENIED, never served as a read. The
+        # default used to be "read", so a write missing from the parallel list
+        # was reachable from a graphs:read-only key.
+        raise AuthorizationError(
+            f"Unknown tool {name} — denied (not present in the registry).")
+    if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
                 f"Key lacks graphs:write scope for tool {name}.")
@@ -282,12 +655,72 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
             f"Graph-scoped keys cannot access {surface}.")
 
 
+#: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
+#: the ``_SENSITIVE_OP_LIMITS`` entry the op is governed by. Enforced at the
+#: dispatch point below, NEVER inside a handler: a handler that charges its own
+#: limit is the second implementation of one budget that this seam exists to
+#: prevent, and it is the entry point the REST twin cannot see.
+_MCP_BUDGETED_OPS: dict[str, str] = {
+    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
+    # directly (no HTTP), so #2038's per-IP budget on the REST twin
+    # POST /v1/packs/manifests never applied to it.
+    "tortoise_pack_install": "pack_manifest",
+}
+
+
+async def _check_mcp_op_budget(name: str, org_id: str) -> None:
+    """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
+
+    `tortoise_pack_install` is the cheapest path to the same expensive
+    operation the REST surface bounds: it calls `upsert_tenant_manifest`
+    in-process, consuming no `pack_manifest` budget at all and bounded only by
+    the generic 100/min per-key middleware — a ~1200x looser bound than the
+    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
+    call passes through on every transport, so the budget is applied HERE.
+
+    Team scope, not IP: the caller is an authenticated agent server, and a
+    per-IP frame would be both wrong (shared egress addresses) and unavailable
+    (no Request at this seam). The team-scoped bucket is charged through
+    `hosted_api._check_sensitive_op_budget` — the SAME shared
+    `_SENSITIVE_BUCKETS` store, the SAME `_SENSITIVE_OP_LIMITS` table and the
+    SAME refusal contract the REST arm uses.
+
+    Ordering mirrors the REST twin (`upload_pack_manifest` charges before its
+    scope check), so a scope-denied call still consumes budget there and here.
+    Refusal is RAISED, not returned as a `{"installed": False}` dict: a dict
+    would read to the caller as a completed call, not a refusal. Auth (401) is
+    excluded by construction — transport middleware rejects it before this
+    seam, exactly as the REST dependency does.
+
+    No scope (stdio / operator) or the selfhost placeholder org → skip: there
+    is no tenant registry to bill, mirroring `_enforce_quota`.
+    """
+    op = _MCP_BUDGETED_OPS.get(name)
+    if op is None:
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        return
+    from fastapi import HTTPException
+
+    from tortoise.hosted_api import _check_sensitive_op_budget
+    try:
+        await _check_sensitive_op_budget(op, org_id)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        raise ToolError(
+            f"{exc.detail} (Retry-After: {exc.headers.get('Retry-After', '3600')}s)",
+        ) from None
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
     """Telemetry-instrumented single dispatch point (installed as mcp.call_tool).
 
-    Emits one mcp_tool_call analytics event per client tool call, with
+    Emits one mcp_tool_call analytics event per client tool call — the ``status``
+    vocabulary is documented at ``_emit_mcp_tool_call_telemetry`` — with
     latency measured around the tool execution only (transport auth runs
     before this point and is excluded). Background-task dispatches
     (task_meta) are measured at scheduling granularity — our tools never use
@@ -297,13 +730,39 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
+    # #2050: budget BEFORE the scope gate — the REST twin charges before its
+    # scope check too, so the two surfaces agree on what consumes budget.
+    await _check_mcp_op_budget(name, org_id)
     _enforce_mcp_tool_scope(name)
-    maybe_record_mcp_read(name, org_id, _current_org_limits.get())
+    maybe_record_mcp_read(
+        name, org_id, _current_org_limits.get(),
+        # REVIEW-FIX P2 (#4057): `arguments` is the raw PRE-validation dict, and
+        # this metering runs BEFORE the dispatch. So a tool that does not
+        # declare `dry_run` — whose schema will REJECT that key — would be
+        # recorded as a READ the caller never performed. Gate on the declared
+        # preview set, not on key presence in untrusted input.
+        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+    )
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
-        result = await _original_call_tool(name, arguments, version=version,
-                                           run_middleware=True, task_meta=task_meta)
+        result = await _await_under_mcp_wait_bound(
+            name, arguments, version=version, task_meta=task_meta)
+        if getattr(result, "meta", None) and result.meta.get(_WAIT_BOUND_META_KEY):
+            # #3834: the transport wait bound refused this dispatch. Its own
+            # status (not exec_error) so "how often are we breaching 10 s" is
+            # answerable from the SAME mcp_tool_call series the bound was
+            # justified by.
+            if _wait_bound_refused():
+                # #3834 F-2: the TRANSPORT already refused and answered this
+                # request before this seam could wait on it (pre-SSE cost >=
+                # bound, so the remaining deadline was 0). Recording ``timeout``
+                # would be a second, FALSE row in the very series the bound is
+                # measured from. ``refused`` is its own status: the dispatch was
+                # abandoned by an OUTER refusal, not by this seam's deadline.
+                status, error_kind = "refused", "transport_wait_bound"
+            else:
+                status, error_kind = "timeout", "wait_bound"
         # The stdio auth gate (#236) returns an error dict instead of raising
         # (TORTOISE_API_KEY set → every call is rejected). Classify it so
         # unauthenticated stdio calls don't masquerade as ok.
@@ -313,10 +772,26 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                 and payload["error"].startswith("Authentication required")):
             status, error_kind = "auth_error", "stdio_auth_gate"
         return result
+    except asyncio.CancelledError:
+        # A cancelled dispatch is neither an "ok" nor an exec error — classifying
+        # it as timeout or success would hide the cancellation rate in the same
+        # mcp_tool_call series the bound is measured from. (Pre-existing: the
+        # generic `except Exception` never saw CancelledError, so a cancelled
+        # call emitted status="ok".)
+        status, error_kind = "cancelled", "caller_cancelled"
+        raise
     except Exception as exc:
         status, error_kind = _classify_mcp_call_error(exc)
         raise
     finally:
+        # NOTE (#3834 F-1): this is deliberately the SEAM-LOCAL interval (tool
+        # dispatch, transport cost excluded), NOT the caller-visible interval
+        # the breach event above reports. ``mcp_tool_call`` is an established
+        # dispatch series (#888/#889; the p99 22.5 s population the bound was
+        # justified by), and its contract — documented at ``_wrapped_call_tool``
+        # — excludes transport auth. Redefining it would silently break
+        # comparability with that population. The bound's own telemetry is the
+        # breach event, which measures the caller-visible wait on both arms.
         latency_ms = int((_time.perf_counter() - t0) * 1000)
         try:
             _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
@@ -431,44 +906,56 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 })
 
 
-# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
-# classification — tools/call for a tool NOT in this set counts as a read.
-# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
-# _quota_gated-wrapped but absent from that frozenset, and the demo-create
-# tool writes Points via _enforce_quota without the wrapper. Membership is
-# asserted by an introspective test (plan Task 11) so a new write tool cannot
-# silently be counted as a read.
-WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
-    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
-    "tortoise_mine_conversations", "tortoise_approve_merge",
-    "tortoise_promote_point",
-    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
-    # graphs:read-only key must NEVER invoke — a read-only key deleting
-    # points/entities or mutating operators/sources is a write-scope
-    # bypass. Membership asserted by test_every_node_creating_tool_* +
-    # test_no_write_tool_counted_as_read (extended in C5).
-    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
-    "tortoise_set_point_baseline", "tortoise_set_source_tier",
-    "tortoise_annotate_operator",
-    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
-    # tenant graph (write) — re-review P2: it was missing (classified read).
-    "tortoise_pack_install",
-    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
-    # capture writes episodic Points (REST twin requires graphs:write); the
-    # onboarding index/demo/toggle tools write DEFAULT-graph/org state;
-    # get_source_reliability write-through refreshes the Source cache.
-    "tortoise_session_capture",
-    "tortoise_graph_set_recording",  # #2302: per-graph recording override write (team:manage-gated in-function; a graphs:read-only key must never reach it) — REST PATCH /v1/graphs twin
-    "tortoise_onboarding_github_index",
-    "tortoise_onboarding_session_recording",
-    "tortoise_get_source_reliability",
-    "tortoise_onboarding_github_connect",  # stores credentials + org state
-    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
-    # the two anchor Subjects into the DEFAULT graph (derived write-set test
-    # caught it at the rebased head).
-    "tortoise_onboarding_seed",
-})
+# #4170: the write permission lives on each ToolDefinition entry (`writes`),
+# so WRITE_TOOL_NAMES is DERIVED — a rename or a merge edits the entry and the
+# permission travels with it. It is no longer a hand-maintained parallel list
+# that a new writer could silently be missing from.
+#
+# #308 (R3, scoping delta 11): this is also the read-velocity classification
+# set — tools/call for a tool NOT in it counts as a read. It is NOT the
+# complement of _QUOTA_GATED: tortoise_ingest is _quota_gated-wrapped but
+# absent from that frozenset, and the demo-create tool writes Points via
+# _enforce_quota without the wrapper.
+#
+# The E402 noqa is deliberate: the bottom `tool_registry` import exists
+# for the adapter, and importing the derived helpers here keeps this module's
+# import order unchanged (tool_registry does not import mcp_server — no cycle).
+from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
+
+WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
+
+# #4057: a tool is dry-run-capable iff its SERVED HANDLER declares a `dry_run`
+# parameter — the fact this metering needs. It is deliberately NOT "the raw
+# argument dict carries a `dry_run` key": that dict is the PRE-validation
+# client input, read BEFORE the dispatch, so a caller could move the read
+# counter for a tool whose schema REJECTS the key (a READ recorded for a call
+# that is then refused). Computed from the declarations and cached (lazy — the
+# handlers are defined below this point — because it sits on the per-call
+# path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
+# the six preview tools must be in it, a write tool without `dry_run` must not,
+# and the metering behaviour is verified through the real dispatch seam.
+_DRY_RUN_TOOLS: frozenset[str] | None = None
+
+
+def _dry_run_tool_names() -> frozenset[str]:
+    """Registry names whose served handler declares `dry_run` (computed once)."""
+    global _DRY_RUN_TOOLS
+    if _DRY_RUN_TOOLS is None:
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        names = set()
+        for entry in TOOL_REGISTRY:
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "dry_run" in params:
+                names.add(entry.name)
+        _DRY_RUN_TOOLS = frozenset(names)
+    return _DRY_RUN_TOOLS
 
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
@@ -523,6 +1010,33 @@ def _enforce_quota(resource: str = "points") -> None:
     enforce_org_limit(limits, resource, sdk=_get_org_sdk())
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The import is itself guarded: ``tortoise.metering`` may be the thing that
+    failed, and an unguarded import inside an ``except`` would turn a
+    bookkeeping fault into the user-facing failure the owner's ruling forbids.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        # The fallback still ALERTS — a log line on an ephemeral Fly rootfs is
+        # the #3677 loss class this lane exists to remove, and this is the one
+        # case where the ledger AND the reporter are both down. The kind
+        # constant lives in ``operator_alert``, importable when ``metering`` is not.
+        with contextlib.suppress(Exception):
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment(lane, org_id, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
@@ -531,8 +1045,12 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
 
     #681: after a successful write (fn returns without raising), records a
-    write op for overage metering. Best-effort — metering failures are
-    swallowed and never block the tool.
+    write op for overage metering. Best-effort — the increment never blocks the
+    tool, and the drop is never silent (#3981): when the increment cannot be
+    recorded the operator is alerted (lane=mcp_write_op) and the error is
+    absorbed. The raise from an unresolvable metering window is a SIGNAL, not a
+    refusal; the user-facing refusal here is ``_enforce_quota`` above, which
+    runs BEFORE the write.
 
     #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
     point_create event after a successful Point-creating write — int for a
@@ -542,25 +1060,54 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
-        result = fn(*args, **kwargs)
-        # Metering (#681): best-effort, after successful write
         try:
-            from tortoise.mcp_auth import _current_org_id, _current_org_limits
+            from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
-            if org_id:
+        except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
+            org_id = None
+        # #4488: own a FRESH embedding-encode tally for this tool call, so the
+        # encodes it performs are attributed even though no HTTP middleware wraps
+        # this lane. Fresh (never inherited) → it cannot double-count the hosted
+        # capture lane's tally, and an exception still flushes what was encoded.
+        # Resolved before the write so the tally knows its org from the start.
+        #
+        # ⛔ ARMED ONLY WHEN THERE IS AN ORG. On the stdio transport
+        # ``_current_org_id`` is legitimately None (_enforce_quota says so:
+        # "stdio/operator — no org context"), and every sibling writer exempts
+        # ``not org_id`` — ``record_embedding_usage`` included. Arming a tally
+        # with no org would make the write's encodes non-empty and
+        # unattributable, so ``flush_tally`` would fire an UNMETERED_INCREMENT
+        # incident on EVERY stdio write that encodes — a permanent false alarm
+        # about attribution on a lane that has no tenant BY DESIGN. Guarding
+        # here matches the write-op metering below (`if org_id:`) and the
+        # writer's own exemption contract.
+        if org_id:
+            with _embed_metering.meted(org_id):
+                result = fn(*args, **kwargs)
+        else:
+            result = fn(*args, **kwargs)
+        # Metering (#681): best-effort, after successful write
+        if org_id:
+            try:
+                from tortoise.mcp_auth import _current_org_limits
                 limits = _current_org_limits.get() or {}
                 from tortoise.metering import record_write_ops
                 record_write_ops(org_id, tier=limits.get("tier"))
-                # #308 (R1): weighted point_create recording + evaluation.
-                # The engine piggybacks R2 evaluation on the same call.
+            except Exception as e:  # noqa: BLE001, RUF100 — never block the tool
+                _alert_unmetered("mcp_write_op", org_id, e)
+            # #308 (R1): weighted point_create recording + evaluation. The
+            # engine piggybacks R2 evaluation on the same call. Its OWN
+            # best-effort block — an abuse-recording failure is not a dropped
+            # increment and must never be reported as one (#3981).
+            try:
                 if abuse_weight is not None and not _abuse_off():
                     n = (int(abuse_weight(result, args, kwargs) or 0)
                          if callable(abuse_weight) else int(abuse_weight))
                     if n > 0:
                         from tortoise import abuse as _abuse
                         _abuse.get_engine().record_point_create(org_id, n)
-        except Exception:
-            pass  # best-effort — never block the tool
+            except Exception:
+                pass  # best-effort — never block the tool
         return result
     return _gated
 
@@ -573,16 +1120,20 @@ def _abuse_off() -> bool:
         return True
 
 
-def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None) -> None:
+def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None,
+                          *, dry_run: bool = False) -> None:
     """#308 (R3, scoping delta 11): read-velocity counting for non-write
     tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
-    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
-    it; registry resolutions may not → per-org counting only there).
-    Best-effort: telemetry never breaks the tool call."""
+    as reads. A ``dry_run=True`` preview of a write tool performs only READS,
+    so it is metered as a read (the alternative is an un-metered enumeration
+    channel that no read-velocity alert can see). key_id rides the limits
+    ContextVar (Supabase resolutions carry it; registry resolutions may not →
+    per-org counting only there). Best-effort: telemetry never breaks the
+    tool call."""
     try:
         if not org_id or org_id == SELFHOST_ORG_ID or _abuse_off():
             return
-        if name in WRITE_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES and not dry_run:
             return
         from tortoise import abuse as _abuse
         _abuse.record_read((limits or {}).get("key_id"), org_id)
@@ -598,8 +1149,26 @@ def _scrub_error(msg: str) -> str:
     return msg
 
 
+class _SafeError(dict):
+    """Failure result from :func:`_safe` (transport, auth, quota, exception).
+
+    A ``dict`` *subclass*, deliberately not a plain dict. A successful SDK
+    write returns the created node's own property dict, which may contain a
+    user-supplied key literally named ``"error"`` — so key presence cannot
+    distinguish "the call failed" from "the call succeeded and the user has a
+    prop called error". Gating on ``"error" not in result`` therefore silently
+    dropped the onboarding observation for such writes (#3926). Gate on
+    ``isinstance(result, _SafeError)`` instead.
+
+    As a dict subclass the value still indexes, compares, and serializes
+    exactly as the plain error dict did — the wire shape is unchanged.
+    """
+
+    __slots__ = ()
+
+
 def _safe(fn, *args, **kwargs):
-    """Call fn; return error dict on exception instead of raising.
+    """Call fn; return an _SafeError on exception instead of raising.
 
     #329: QuotaExceededError → {"error", "code": ERR_QUOTA}; QuotaCheckError
     → {"error", "code": ERR_QUOTA_SERVER} (fail-closed counting).
@@ -612,16 +1181,16 @@ def _safe(fn, *args, **kwargs):
     """
     mode = _transport_mode.get()
     if mode is None:
-        return {
+        return _SafeError({
             "error": (
                 "Authentication required. MCP transport mode not initialized."
             )
-        }
+        })
     if mode == "http":
         pass  # auth enforced at transport (OrgResolutionMiddleware)
     elif mode == "stdio":
         if not _is_dev_mode():
-            return {
+            return _SafeError({
                 "error": (
                     "Authentication required. The MCP stdio transport cannot "
                     "carry auth tokens, so TORTOISE_API_KEY disables stdio. "
@@ -632,10 +1201,10 @@ def _safe(fn, *args, **kwargs):
                     "Bearer <tt_key>'; (3) local stdio dev mode — unset "
                     "TORTOISE_API_KEY."
                 )
-            }
+            })
     else:
         # Unknown transport mode — fail-closed (code-review fix)
-        return {"error": f"Unknown MCP transport mode: {mode!r}"}
+        return _SafeError({"error": f"Unknown MCP transport mode: {mode!r}"})
     try:
         result = fn(*args, **kwargs)
         return result
@@ -653,27 +1222,28 @@ def _safe(fn, *args, **kwargs):
             # survives intact.
             scrubbed = [{**v, "message": _scrub_error(v["message"])}
                         for v in e.violations]
-            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
-                    "violations": scrubbed}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               "code": ERR_BUNDLE_INVALID,
+                               "violations": scrubbed})
         if isinstance(e, QuotaExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         # Epic 903-C11 (#1249): BudgetExceededError (full-mode dream budget
         # unsatisfiable — C6) is quota-class → ERR_QUOTA.
         from tortoise.exceptions import BudgetExceededError
         if isinstance(e, BudgetExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         if isinstance(e, QuotaCheckError):
-            return {"error": str(e), "code": ERR_QUOTA_SERVER}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA_SERVER})
         from tortoise.exceptions import Phase2Error
         if isinstance(e, Phase2Error):
             # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
             # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
             # audit the partial commit before re-sending (cycle-23/24 pin).
             # REVIEW-FIX P2: message scrubbed (#43).
-            return {"error": _scrub_error(str(e)),
-                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               **({"batch_id": e.batch_id} if e.batch_id else {})})
         msg = _scrub_error(str(e))
-        return {"error": msg}
+        return _SafeError({"error": msg})
 
 
 def _scrub_analyze_answer(answer: str) -> str:
@@ -712,8 +1282,21 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
+    # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    # `embedding` ITSELF is deliberately NOT here — `create_point` has a
+    # recorded decision (PR #3018 review P2) that a caller-supplied vector is
+    # stored verbatim; the writer marks it `embedding_verbatim` instead.
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embedding_verbatim", "embedding_preserved",
+    # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
+    # are server-derived (read from the :Source on the live path and carried in
+    # the Point's journaled snapshot). A tenant setting either would forge
+    # provenance and break live/replay parity. Rejected on ALL spellings, at
+    # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -752,17 +1335,13 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 
 
 
-def _http_excluded_error(message: str | None = None) -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
-
-    ``message`` overrides the default guidance (used by the #2013 ask gate,
-    where the hosted REST /v1/ask is ALSO gated off — the default text's
-    "hosted REST API" hint would be wrong for that caller)."""
+def _http_excluded_error() -> dict:
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
     return {
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
-            "message": message or (
+            "message": (
                 "This tool is not available over HTTP. "
                 "Use the hosted REST API or stdio MCP."),
         },
@@ -791,9 +1370,11 @@ def tortoise_create_point(kind: str, content: str,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
-    On first successful write from an incomplete org, auto-completes
-    onboarding (files remaining step edges + flips status to complete) —
-    no separate ceremony needed.
+    On a successful write from an incomplete org, records the onboarding
+    steps this write is evidence for (`harness-connected`,
+    `first-points-filed`, plus `decide-completed` for a decision-shaped
+    write) and hands completion to the canonical fork-aware gate — no
+    separate ceremony needed, and no step the write did not observe (#3784).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
@@ -832,8 +1413,20 @@ def tortoise_create_point(kind: str, content: str,
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
-    if "error" not in result:
-        _maybe_onboarding_auto_complete()
+    # #3926: gate on the typed failure result, never on key presence — a user
+    # prop named "error" must not suppress the onboarding observation.
+    if not isinstance(result, _SafeError):
+        # #3784: only a decision-shaped write observes the decision step —
+        # `decision` is the pointKind the documented EP decide protocol
+        # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
+        # creates. Read the PERSISTED pointKind when the write returned one
+        # (the server must observe what was recorded, not what was asked
+        # for); any other kind observes no decision.
+        _recorded_kind = (result.get("pointKind") if isinstance(result, dict)
+                          else kind)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or kind).strip().lower()
+                               == "decision"))
     return result
 
 
@@ -1105,7 +1698,10 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     """
     try:
         results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
-        if isinstance(results, list) and results and "error" not in results[0]:
+        # #3926: a _safe failure is an _SafeError (never a list), so the
+        # list check alone is the failure gate — a row whose props carry a
+        # user key named "error" must still resolve.
+        if isinstance(results, list) and results:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
                      "confidence": round(
@@ -1175,93 +1771,6 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  relationship_filter=relationship_filter,
                  traversal_path=traversal_path)
 
-
-async def tortoise_ask(question: str, question_type: str | None = None,
-                       question_date: str | None = None) -> dict:
-    """Answer a question about captured memory (#1987 Task 8) — ONE bounded
-    RAG pass (retrieval → annotation → context assembly → ONE LLM reader
-    call) returning an ANSWER (not ranked hits), with the full ask response
-    shape: {answer, abstained, question_type, question_date, evidence,
-    context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded}.
-
-    COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
-    (LLM-free), tortoise_ask consumes LLM tokens against the org's
-    per-minute ask budget (60/min) — budget-exhausted calls return the
-    structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
-    and are NEVER an unbounded call. Read-classified (never counted as a
-    write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
-    bounds are the SAME shared structures as the REST surface
-    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-org
-    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
-    On the hosted path the MCP handler meters through the SAME single call
-    site as HTTP (``sdk.ask(org_id=_current_org_id.get())``); stdio
-    (org_id=None) and the selfhost transport (the ``_selfhost_transport``
-    flag) record nothing.
-
-    Invalid inputs (empty/oversize/bad type/bad date) surface as a
-    STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
-    """
-    # #2013 PRODUCT-GATING: call-time gate mirroring the listing filter —
-    # FastMCP dispatches tools/call by name without consulting the list
-    # Transform, so a listing-only gate would leak the ask exposure. Served
-    # only on (a) the default surface with TORTOISE_ENABLE_ASK=1 or (b) an
-    # explicit tool_group="ask" server (dev/eval opt-in).
-    if (_transport_mode.get() == "http"
-            and _tool_group.get() != _ASK_TOOL_GROUP
-            and not ask_exposure_enabled()):
-        return _http_excluded_error(
-            message="The ask tool is not served on this server: the hosted ask "
-                    "exposure is gated off (#2013). Use stdio MCP or an "
-                    "explicit tool_group=\"ask\" server.")
-    from tortoise.exceptions import (
-        AskQuotaExceeded,
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        AskInFlightLimitError,
-        ask_budget_retry_after,
-        ask_in_flight_capacity,
-        ask_llm_budget_available,
-        run_ask_bounded,
-    )
-    org_id = _current_org_id.get()
-    sdk = _get_org_sdk()
-    # Local-lane validation FIRST (structured error, ZERO complete() calls)
-    # — BEFORE the budget gate, so invalid inputs never consume a budget slot
-    # (matching the HTTP path's validate-first semantics).
-    try:
-        sdk._ask_validate(question, question_type, question_date)
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt) —
-    # skip the charge when the in-flight cap is already full (a request that
-    # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
-    if ask_in_flight_capacity(org_id) and not ask_llm_budget_available(org_id):
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": ask_budget_retry_after(org_id)}}
-    try:
-        return await run_ask_bounded(
-            sdk.ask, org_id, question,
-            question_type=question_type, question_date=question_date,
-            _sdk_org_id=org_id,
-        )
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    except AskQuotaExceeded as e:
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": e.retry_after}}
-    except AskInFlightLimitError:
-        return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
-    except AskBoundedTimeoutError:
-        return {"error": {"code": CODE_TIMEOUT}}
-    except AskReaderUnavailable:
-        return {"error": {"code": CODE_READER_UNAVAILABLE}}
-    except AskRetrievalUnavailable:
-        return {"error": {"code": CODE_RETRIEVAL_UNAVAILABLE}}
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
@@ -1387,9 +1896,9 @@ def tortoise_recall(query: str | None = None,
             centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
         )
 
-    # _safe returns an error dict on SDK exceptions — surface it at the TOP
-    # level so consumers never mis-parse results.
-    if isinstance(results, dict) and "error" in results:
+    # _safe returns an _SafeError on SDK exceptions — surface it at the TOP
+    # level so consumers never mis-parse results (#3926: never key presence).
+    if isinstance(results, _SafeError):
         return {"mode": mode, **results}
     if mode == "subgraph":
         # recall_subgraph returns {nodes, edges, stats} — spread flat.
@@ -1576,6 +2085,12 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_org_sdk().get_point, id)
+    # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
+    # the non-operator guard below would match a failed call and fabricate a
+    # domain fact ('is not an operator'), discarding the real cause. Surface
+    # the typed failure FIRST (#4576; same pattern as #3926).
+    if isinstance(point, _SafeError):
+        return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
@@ -1633,8 +2148,10 @@ def tortoise_file_decision(options: Any, evidence: Any,
                 "code": ERR_QUOTA}
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
-    if "error" not in result:
-        _maybe_onboarding_auto_complete()
+    # #3926: gate on the typed failure result, never on key presence.
+    if not isinstance(result, _SafeError):
+        # #3784: this call IS the observation — a decision was filed.
+        _maybe_onboarding_auto_complete(decision_observed=True)
     return result
 
 
@@ -1662,21 +2179,34 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
                  approver_id, artifact_id, point_ids, decision_content)
 
 
-def tortoise_delete_point(id: str) -> dict:
-    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
+def tortoise_delete_point(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.
+
+    dry_run=True previews the blast radius — the point and every edge that
+    would be removed — and changes nothing; dry_run=False (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete_point, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_point_wrapped, id)
 
 
-def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
+def tortoise_invalidate(id: str, corrected_by_id: str,
+                        dry_run: bool = False) -> dict:
     """Mark a Point outdated with a CORRECTS edge from the correcting Point.
 
     The `corrected_by_id` point CORRECTS the invalidated point.
     Returns {invalidated, id, corrected_by}.
+
+    dry_run=True previews the transition (one point outdated, one CORRECTS
+    edge added) and changes nothing; dry_run=False (default) applies it.
     """
+    if dry_run:
+        return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+                       dry_run: bool = False) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
     transfer_edges=True (default): full supersede — all edges move from old to
@@ -1684,12 +2214,18 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) ->
     CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
     Returns {invalidated, id, corrected_by} (+ edges_transferred when
     transfer_edges=True).
+
+    dry_run=True previews exactly which edges would transfer and changes
+    nothing; dry_run=False (default) applies the supersede.
     """
+    if dry_run:
+        return _safe(_preview_supersede, _get_org_sdk(),
+                     old_id, new_id, transfer_edges)
     return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
-def tortoise_retract_point(id: str) -> dict:
+def tortoise_retract_point(id: str, dry_run: bool = False) -> dict:
     """Tombstone-retract a Point — status='retracted' (point stays in graph).
 
     Terminal state transition; default query/list surfaces exclude retracted
@@ -1697,7 +2233,13 @@ def tortoise_retract_point(id: str) -> dict:
     missing, is an operator, or is already terminal (the shared terminal
     vocabulary: status in live.TERMINAL_EXCLUDED_STATUSES OR the legacy
     outdated=true flag).
+
+    dry_run=True previews the one-node status transition (and runs the same
+    guard, so a rejected input is rejected here too) and changes nothing;
+    dry_run=False (default) retracts.
     """
+    if dry_run:
+        return _safe(_preview_retract_point, _get_org_sdk(), id)
     return _safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)
 
 
@@ -1896,19 +2438,59 @@ def tortoise_health() -> dict:
     Alias → overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
-    the request-scoped org SDK over HTTP (selfhost daemon: the org_selfhost
-    graph, the SAME namespace /health probes; hosted: the calling org's
-    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so tool and /health can never disagree about DB reachability.
+    the request-scoped org SDK over HTTP and the base SDK over stdio — so the
+    report reflects the caller's own graph, never monitoring's module-global
+    handle.
+    #3143 correction: this tool and hosted /health do NOT probe the same
+    graph, so they can disagree about reachability. This tool probes the
+    CALLER'S ORG graph (``_get_org_sdk()``); hosted /health probes the
+    DEFAULT graph (``_make_sdk(namespace=None)`` through
+    ``hosted_api._probe_db()``). They share a FalkorDB SERVER, not a graph,
+    and the probe is not a bare reachability check: ``_probe_once`` runs
+    ``sdk._get_proj()`` (connect + version probe + ``_ensure_indexes()``),
+    whose cost scales with the PROBED graph. So an org graph can time out
+    while the default graph answers ok — #3143 is that case. Their budgets
+    differ by design too: this tool gives the reachability query a fresh
+    ``PROBE_TIMEOUT``, /health spends one shared budget across both phases
+    (its cached-verdict staleness window is #3062).
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered
     while /health (fresh SDK probe) said ok — the first call every onboarding
     script makes lied. graph_size likewise counts the SERVED graph, never an
-    empty unregistered handle."""
+    empty unregistered handle.
+
+    #3143 (health-truthful): the probe's 1.5s budget was written to bound the
+    sub-millisecond ``RETURN 1`` reachability query, but it also bounded the
+    projection cold-start (``_get_proj()``: connect + ``_ensure_indexes()`` —
+    ~28 round trips, and an index build over the whole graph when one is
+    missing). That cost scales with graph size, so a large, fully-reachable
+    org (9,019 entities) timed out during setup and reported
+    ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
+    now passes the cold-start allowance it always pays for — it builds a
+    request-scoped SDK per call — while the platform liveness gate keeps the
+    tight fast-degrade bound. The allowance is resolved at CALL time
+    (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
+    set in the repo-root ``.env`` — loaded after this module imports
+    ``tortoise.monitoring`` — is honoured instead of frozen at import.
+
+    #3253 (health-truthful): the ``graph_size`` taxonomy count is bounded by
+    ``monitoring.GRAPH_SIZE_TIMEOUT`` on its own worker, so this tool's total
+    is ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT`` at
+    worst — never as long as a half-broken server stalls. When the count
+    cannot be measured, the report carries the per-call ``graph_size_error``
+    marker (``None`` when ``graph_size`` was really measured, so a 0 is a
+    genuinely empty graph; a string otherwise), instead of the previous
+    indistinguishable ok/0."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(lambda: monitoring.metrics(sdk=_get_org_sdk()))
+    # #3143: pass the cold-start allowance (call-time resolved) so a reachable
+    # graph whose cold-start exceeds /health's shared budget is reported ok
+    # with its real graph_size instead of degraded/0.
+    return _safe(lambda: monitoring.metrics(
+        sdk=_get_org_sdk(),
+        setup_timeout=monitoring.probe_setup_timeout(),
+    ))
 
 
 def tortoise_session_context() -> dict:
@@ -2184,10 +2766,17 @@ def tortoise_update(id: str, props: Any = None) -> dict:
                  id, **(props or {}))
 
 
-def tortoise_delete(id: str) -> dict:
-    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
+def tortoise_delete(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation.
+
+    dry_run=True previews the blast radius — which node resolves, and every
+    edge that would go with it — and changes nothing; dry_run=False
+    (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete, _get_org_sdk(), id)
     result = _safe(_get_org_sdk().delete, id)
-    if isinstance(result, dict) and "error" in result:
+    if isinstance(result, _SafeError):
         return result
     return {"deleted": bool(result), "id": id}
 
@@ -2381,9 +2970,19 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """
     return _safe(_get_org_sdk().set_source_tier, url, tier)
 
-def tortoise_get_entity(id: str) -> dict:
+def tortoise_get_entity(id: str | None = None, type: str | None = None,
+                        limit: int = 20) -> Any:
     """Get any entity by ID, eventId, or url.
-    Alias → get(id, type='entity') (epic #888 W3)."""
+
+    This is the BROAD fetch tool (owner decision, `docs/product/canonical-mcp-tools.md`,
+    approval_pr 4120): `type` selects the node kind exactly as `tortoise_get` did, so the
+    retirement pointers that name `tortoise_get_entity(id, type=...)` resolve. With no
+    `type`, it keeps its narrow meaning — the entity addressed by an id|eventId|url —
+    and the SDK method `TortoiseSDK.get_entity` is untouched (the decision separates the
+    tool's broad meaning from the SDK's narrow one).
+    """
+    if type is not None or id is None:
+        return tortoise_get(id, type=type, limit=limit)
     return _safe(_get_org_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
@@ -2394,8 +2993,15 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
-def tortoise_delete_entity(id: str) -> bool:
-    """Delete any entity by ID."""
+def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
+    """Delete any entity by ID.
+
+    dry_run=True returns a preview dict naming the node(s) and every edge
+    that would be removed, and changes nothing; dry_run=False (default)
+    deletes and returns whether a node was found.
+    """
+    if dry_run:
+        return _safe(_preview_delete_entity, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_entity, id)
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
@@ -2489,6 +3095,128 @@ _OVERVIEW_SECTIONS = (
 )
 
 
+#: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
+#: sections as bounded counts, never as their full row array. A section is
+#: data-proportional when it yields one row per graph row rather than one row
+#: per graph-shape token (a fixed vocabulary) AND IS UNCAPPED — four qualify:
+#: `sources` (one row per registered URL), `tags` (one row per :Tag node),
+#: `pointkinds` (one row per pointKind PRESENT) and `structure_check` (one row
+#: per violating Point). `stale` is also one row per graph row, but it is
+#: CAPPED by the caller's `limit` (default 50 rows; still only ~3,000 rows at
+#: limit=5000), so it is not folded here. Returning any of the four wholesale
+#: made the orientation call more expensive than the list_* calls it was built
+#: to replace — measured on an embedded graph: `sources` 35,190 of 36,498 bytes
+#: (96.4%) at 300 sources, `tags` 14,000 of 15,187 bytes (92.2%) at 400 tags,
+#: `structure_check` 73,490 of 93,829 bytes (78.3%) at 400 orphaned drafts,
+#: `pointkinds` 19,200 bytes at 400 distinct kinds. Each wrapped section keeps
+#: its full array reachable via its own section=.
+_OVERVIEW_SUMMARY_TOP = 20
+
+
+#: #3510 review (P2) — the folded remainder is a SIBLING field of the summary,
+#: never a key inside the group map. `group_field` is free-form graph text (a
+#: tag name, a `sourceKind` string), so there is no in-map sentinel string a
+#: real group cannot produce: a genuine group named "other" used to be merged
+#: with the remainder (3 real `sourceKind="other"` rows reported 14). Kept out
+#: of the map, the collision is impossible by construction.
+_OVERVIEW_SUMMARY_OTHER = "other"
+
+
+def _overview_summary(rows: Any, group_field: str, out_field: str,
+                      count_field: str | None = None, *,
+                      unit: str = "rows") -> Any:
+    """Bounded summary of a data-proportional orient section (#3510).
+
+    Returns {total, <out_field>[, with_points][, other]} — never the rows.
+    `<out_field>` groups the rows by `group_field`, keeps the
+    _OVERVIEW_SUMMARY_TOP largest groups and reports the folded remainder as the
+    sibling `other`. The bound is _OVERVIEW_SUMMARY_TOP, NOT the group
+    vocabulary: `group_field` is graph text a caller can invent on every row, so
+    the vocabulary is unbounded and the top-N cut is what bounds the map (see
+    tests/test_orient_direct_consolidation.py::
+    test_fold_is_bounded_when_the_group_vocabulary_is_unbounded).
+
+    THE UNIT IS THE POINT — `unit` fixes what every number means (each
+    `<out_field>` value, `total` and `other`), or the summary misinforms:
+
+    * ``unit="magnitude"`` — the group's summed `count_field`. Used by `tags`
+      and `pointkinds`, where a group is exactly ONE row, so a row count would
+      report a literal 1 for every group while throwing away the count the row
+      carries (`tortoise_list_tags` reports {"hot": 50}; the summary must say
+      50, not 1).
+    * ``unit="rows"`` — the group's row count. Used by `sources`, where a group
+      aggregates many registered Sources, so the row count (how many sources of
+      this kind) is a real magnitude and keeps the registry's mostly-`points:0`
+      emptiness visible; and by `structure_check`, whose rows carry no separate
+      magnitude, so a violation row's count IS its count of violations.
+
+    The fold is a partition in that unit:
+    ``sum(<out_field>.values()) + other == total``, always.
+
+    `with_points` is emitted only when the unit is rows and a `count_field` was
+    given: it counts rows whose magnitude is positive — the SAME row unit as
+    `total` (e.g. "how many registered sources actually extracted points"). It
+    is omitted for a magnitude section, where a row count stranded beside a
+    magnitude `total` would be the very unit confusion this parameter exists to
+    stop.
+
+    A non-list input is an error envelope from _safe (or a mocked shape) and is
+    passed through unchanged.
+    """
+    if not isinstance(rows, list):
+        return rows
+    if unit not in ("rows", "magnitude"):
+        raise ValueError(f"_overview_summary: unknown unit {unit!r}")
+    if unit == "magnitude" and count_field is None:
+        raise ValueError("_overview_summary: unit='magnitude' needs a count_field")
+    with_points = 0
+    groups: dict[str, list[int]] = {}
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        magnitude = 0
+        if count_field is not None:
+            value = row.get(count_field)
+            if isinstance(value, (int, float)) and value > 0:
+                with_points += 1
+                magnitude = int(value)
+        raw = row.get(group_field)
+        # "" is the group key for a row whose group value is absent or blank —
+        # a real blank value and a missing one describe the same thing, so they
+        # are the same group. (The previous "unknown" fallback was a synthetic
+        # key a real group literally named "unknown" merged into: the same
+        # collision class as the `other` remainder this function now keeps out
+        # of the map.)
+        key = raw if isinstance(raw, str) and raw else ""
+        bucket = groups.setdefault(key, [0, 0])
+        bucket[0] += 1
+        bucket[1] += magnitude
+
+    def _unit_value(bucket: list[int]) -> int:
+        return bucket[1] if unit == "magnitude" else bucket[0]
+
+    # The section's own unit ranks first: for `sources` the row count decides
+    # (how many sources of this kind), for `tags`/`pointkinds` the row counts all
+    # tie at 1 so the summed magnitude is the only thing that can order them
+    # (most-used tags first).
+    if unit == "magnitude":
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][0], kv[0]))
+    else:
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][1], kv[0]))
+    bounded = {k: _unit_value(b) for k, b in top[:_OVERVIEW_SUMMARY_TOP]}
+    other = sum(_unit_value(b) for _, b in top[_OVERVIEW_SUMMARY_TOP:])
+    total = sum(_unit_value(b) for _, b in top)
+    summary: dict[str, Any] = {"total": total}
+    if unit == "rows" and count_field is not None:
+        summary["with_points"] = with_points
+    summary[out_field] = bounded
+    # SIBLING field, never a key in `<out_field>` — see _OVERVIEW_SUMMARY_OTHER.
+    if other:
+        summary[_OVERVIEW_SUMMARY_OTHER] = other
+    return summary
+
+
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int) -> Any:
     """Dispatch one overview section to its original tool body."""
@@ -2535,7 +3263,19 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id).
+    section except topics (which requires entity_id). The UNCAPPED sections
+    whose size grows with the graph's ROWS rather than its shape (a fixed
+    vocabulary) are reported as bounded counts, never as rows, so the summary
+    stays compact as the graph grows (#3510). Each number in a section's
+    summary is in that section's OWN unit:
+      `sources`         → {total, with_points, by_kind} in SOURCES (a group is
+                          many source rows, so `by_kind` counts sources)
+      `tags`            → {total, by_name} in TAGGED-POINT counts
+      `pointkinds`      → {total, by_kind} in POINT counts
+      `structure_check` → {total, by_rule} in VIOLATIONS
+    Each `by_*` map keeps its top 20 groups and reports the folded remainder as
+    the sibling `other`, in the same unit. Pass the matching section= for the
+    full array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -2545,7 +3285,24 @@ def tortoise_overview(section: str | None = None,
         for sec in _OVERVIEW_SECTIONS:
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
-            combined[sec] = _overview_section(sec, entity_id, days, limit)
+            result = _overview_section(sec, entity_id, days, limit)
+            # #3510: every data-proportional section is folded to bounded
+            # counts here — the rows themselves stay behind the explicit
+            # section= calls. `tags`/`pointkinds` fold in their section's own
+            # magnitude (each group is one row, so a row count would be a
+            # literal 1); `sources`/`structure_check` fold in rows.
+            if sec == "sources":
+                result = _overview_summary(result, "sourceKind", "by_kind",
+                                           "points")
+            elif sec == "tags":
+                result = _overview_summary(result, "name", "by_name", "count",
+                                           unit="magnitude")
+            elif sec == "pointkinds":
+                result = _overview_summary(result, "kind", "by_kind", "count",
+                                           unit="magnitude")
+            elif sec == "structure_check":
+                result = _overview_summary(result, "type", "by_rule")
+            combined[sec] = result
         return combined
     if not isinstance(section, str):
         return {"error": f"overview: section must be a string, got {type(section).__name__}"}
@@ -2765,15 +3522,69 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
 _onboarding_state_cache: dict[str, tuple[float, bool]] = {}
 _ONBOARDING_STATE_TTL = 60.0
 
+#: In-flight gate resolutions, keyed by org (#2924 review). The gate now AWAITS
+#: between the cache lookup and the fill, so without this N concurrent
+#: ``tools/list`` requests for ONE org all miss and each submits its own
+#: graph-pool offload — a redundant stampede on the pool that also carries
+#: graph WRITES, arriving exactly when the read is slow. Concurrent callers
+#: share one task; the entry is dropped when it settles.
+_onboarding_gate_inflight: dict[str, asyncio.Task[bool]] = {}
 
-def _org_onboarding_complete() -> bool:
+
+def _drop_gate_inflight(org_id: str, task: object) -> None:
+    """Drop ``task`` from the in-flight map — ONLY if it is still the entry.
+
+    #2924 review: a bare ``pop(org_id)`` is a real bug, not a simplification.
+    The failed-read path deliberately leaves no cache entry, so the NEXT caller
+    (same loop batch, same org) can install a replacement while the settled
+    task's done-callbacks are still queued; a bare pop then evicts the LIVE
+    replacement, and a third caller starts a duplicate read — two resolutions in
+    flight for one org, on exactly the control-plane blip the single-flight
+    exists to stop amplifying.
+    """
+    if _onboarding_gate_inflight.get(org_id) is task:
+        _onboarding_gate_inflight.pop(org_id, None)
+
+
+async def _resolve_onboarding_gate(org_id: str) -> bool:
+    """Resolve the gate ONCE, for every concurrent caller (#2924).
+
+    Fills the TTL cache on success; a FAILED read fills nothing, so the next
+    ``list_tools`` retries rather than caching the failure. Never raises — the
+    caller's fail-open contract is preserved by the caller.
+    """
+    from tortoise.hosted_api import _get_onboarding_projection_off_loop
+    try:
+        # #2001 (W5): the gate reads the merged projection — node-aware wire
+        # completion; fail-open coercion (non-bool / 'unavailable' → False).
+        projection = await _get_onboarding_projection_off_loop(org_id)
+        complete = projection.get("onboarding_complete")
+        complete = bool(complete) if isinstance(complete, bool) else False
+    except Exception:
+        return False  # never cache a failed read — retry next list
+    _onboarding_state_cache[org_id] = (_time.time(), complete)
+    return complete
+
+
+async def _org_onboarding_complete() -> bool:
     """True when the current HTTP org's onboarding is complete.
 
     Fail-open: stdio/selfhost (no tenant Org row) and transient control-plane
     read failures return False — a read hiccup must never hide the tools a
     org still needs to finish onboarding. Reads the canonical onboarding
-    state via hosted_api._get_onboarding_state (Supabase orgs row or registry
-    Org node), cached 60s per org.
+    state via hosted_api._get_onboarding_projection (jsonb ``teams`` row + the
+    graph OnboardingState node), cached 60s per org.
+
+    #2924: ``async`` because the read is OFF the event loop —
+    ``_get_onboarding_projection`` is synchronous end to end (blocking PostgREST
+    over ``httpx.Client`` AND a fresh FalkorDB client construction including
+    ``ssl.create_default_context``), and calling it inline from this gate
+    blocked the single loop on the MCP ``tools/list`` hot path. A ``py-spy``
+    MainThread dump taken during a 1.08 s ``/health`` stall caught exactly this
+    call chain; the app's own heartbeat recorded ``loop_lag_max_ms`` of 2033 ms.
+    Only the cache MISS is offloaded, so the steady state stays a memory read;
+    concurrent misses for one org share a single resolution
+    (``_onboarding_gate_inflight``) so the await cannot become a stampede.
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
@@ -2783,16 +3594,18 @@ def _org_onboarding_complete() -> bool:
     cached = _onboarding_state_cache.get(org_id)
     if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
         return cached[1]
+    task = _onboarding_gate_inflight.get(org_id)
+    if task is None or task.done():
+        task = asyncio.ensure_future(_resolve_onboarding_gate(org_id))
+        _onboarding_gate_inflight[org_id] = task
+        task.add_done_callback(
+            lambda _t, _org=org_id: _drop_gate_inflight(_org, _t))
     try:
-        from tortoise.hosted_api import _get_onboarding_projection
-        # #2001 (W5): the gate reads the merged projection — node-aware wire
-        # completion; fail-open coercion (non-bool / 'unavailable' → False).
-        complete = _get_onboarding_projection(org_id).get("onboarding_complete")
-        complete = bool(complete) if isinstance(complete, bool) else False
+        # shield: one caller hanging up must not cancel the shared resolution
+        # out from under the others.
+        return await asyncio.shield(task)
     except Exception:
         return False  # never cache a failed read — retry next list
-    _onboarding_state_cache[org_id] = (now, complete)
-    return complete
 
 
 def _onboarding_state() -> dict:
@@ -2967,16 +3780,57 @@ def tortoise_onboarding_github_status() -> dict:
 
 # ── Auto-complete onboarding on first real write ────────────────
 # When an agent makes its first successful graph write (create_point or
-# file_decision), the server auto-files the remaining onboarding steps and
-# flips status to complete — no agent-side state machine ceremony needed.
+# file_decision), the server records the onboarding steps THAT WRITE IS
+# EVIDENCE FOR, then hands the completion decision to the canonical
+# fork-aware gate — no agent-side state machine ceremony needed.
+#
+# #3784: a step edge is a record of something the server OBSERVED. Filing a
+# step the write does not evidence records a fact the user never produced,
+# and the Setup guide then reports complete for work that did not happen.
 
-def _maybe_onboarding_auto_complete() -> None:
-    """After a successful agent write, auto-complete onboarding if not
-    already done. Idempotent: steps are FWW edges, replay is a no-op.
+def _maybe_onboarding_auto_complete(*,
+                                    decision_observed: bool = False) -> None:
+    """After a successful agent write, record the onboarding facts that
+    write is itself evidence for, then let the canonical gate decide
+    completion. Idempotent: steps are FWW edges, replay is a no-op.
 
-    Files harness-connected, first-points-filed, and decide-completed step
-    edges and flips status to complete. Invalidates the 60s TTL cache so
-    the MCP tools/list filter picks up the change immediately.
+    Observed steps (#3784) — the step's own label is the claim, so the
+    server may file it only on the event the label describes:
+    - ``harness-connected`` + ``first-points-filed``: a successful agent
+      tool call IS the observation for both — the harness reached the
+      server, and the two triggering tools file points (label: "Seed your
+      first memory").
+    - ``decide-completed`` (label: "Make your first decision"): filed ONLY
+      when the caller observed a decision — ``tortoise_file_decision``
+      succeeded, or ``tortoise_create_point(kind="decision")`` (the
+      documented EP decide protocol, ``tortoise/onboarding/SKILL.md`` §5).
+      A plain point write observes no decision and must not claim one.
+      (``skills/tortoise-decide/SKILL.md``'s option/criterion/evidence flow
+      is a DELIBERATE false negative — claiming a decision at the refinement
+      step would be the same unobserved fact, inverted. See #3916.)
+    - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
+      from a write. Its presentation is observed by the agent catalog
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``), or asserted by an
+      external caller through ``PATCH /v1/onboarding/state``
+      (``catalog_presented``). The dashboard used to render-mark it on a
+      build-fork pick, but that writer is deleted; the id stays an accepted,
+      OPTIONAL record either way. #3913 (owner ruling 2026-09-20): it is NO
+      LONGER a build-gate requirement — the build fork completes on the two
+      observed acts above — so it is never a completion input.
+
+    Status is SERVER-OWNED and fork-aware: completion is delegated to
+    ``hosted_api._maybe_apply_completion`` (the canonical
+    ``state.completion_gate_satisfied`` eval, honouring fork=None→self,
+    compact-first and fork_unsure_at), so this function can never flip an
+    org to complete while a required step is missing.
+
+    ``decision_observed`` is keyword-only and defaults to False: a caller
+    that forgets to declare its observation fails CLOSED (claims no
+    decision), never open.
+
+    Caches the ``tools/list`` verdict ``True`` only when ``_maybe_apply_completion``
+    reports a real transition to complete; that helper pops the entry itself,
+    so a completion is visible immediately.
 
     Only fires in HTTP (hosted) mode with a real org_id — stdio and
     self-host calls are no-ops."""
@@ -2991,18 +3845,15 @@ def _maybe_onboarding_auto_complete() -> None:
         return  # already known complete
     try:
         from tortoise.hosted_api import (
+            _emit_onboarding_step_events,
             _get_onboarding_projection,
             _get_onboarding_state,
+            _maybe_apply_completion,
+            _onboarding_distinct_id,
             _org_proj,
         )
         from tortoise.onboarding.state import (
-            STATUS_COMPLETE as _OS_COMPLETE,
-        )
-        from tortoise.onboarding.state import (
             write_completed_step as _os_write_step,
-        )
-        from tortoise.onboarding.state import (
-            write_status as _os_write_status,
         )
         proj = _org_proj(org_id)
         projection = _get_onboarding_projection(org_id)
@@ -3010,24 +3861,34 @@ def _maybe_onboarding_auto_complete() -> None:
         if isinstance(prog, bool) and prog:
             _onboarding_state_cache[org_id] = (now, True)
             return  # already complete
-        # File all remaining step edges (idempotent FWW) — safe if some
-        # already exist, skips nothing.
-        # Fork-aware: self fork needs decide-completed, build fork needs
-        # catalog-presented (unknown fork defaults to self behavior).
-        fork = projection.get("fork") or "self"
-        steps = ("harness-connected", "first-points-filed",
-                 "catalog-presented" if fork == "build" else "decide-completed")
+        # File ONLY the steps this write observed (#3784). Idempotent FWW
+        # edges — a replay is a no-op.
+        observed = ["harness-connected", "first-points-filed"]
+        if decision_observed:
+            observed.append("decide-completed")
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
-        for step in steps:
-            _os_write_step(proj, org_id, step,
-                           status_from_mirror=legacy_mirror)
-        # Flip status (monotonic — no-op if already complete).
-        _os_write_status(proj, org_id, _OS_COMPLETE,
-                         status_from_mirror=legacy_mirror)
-        # Invalidate cache so tools/list retires onboarding tools
-        # immediately.
-        _onboarding_state_cache[org_id] = (now, True)
+        # #2006 (W11): emit IMMEDIATELY after each creating write, so a later
+        # step's failure cannot discard an edge creation this call already
+        # observed. Fail-safe (capture never raises, and the helper guards each
+        # emit), so this can never block the agent's write.
+        for step in observed:
+            res = _os_write_step(proj, org_id, step,
+                                 status_from_mirror=legacy_mirror)
+            if res.get("created"):
+                _emit_onboarding_step_events(
+                    [step],
+                    distinct_id=_onboarding_distinct_id(org_id),
+                    org_id=org_id, source="mcp_auto")
+        # Server-owned status → the canonical fork-aware gate decides, never
+        # this function (monotonic; a no-op if already complete).
+        if _maybe_apply_completion(org_id):
+            # The helper returned a real TRANSITION to complete — cache the
+            # tools/list verdict. An already-complete org never reaches here
+            # (the projection short-circuit above cached it), and caching
+            # True for an incomplete org would retire the onboarding tools
+            # from tools/list — a second false "you're all set".
+            _onboarding_state_cache[org_id] = (now, True)
     except Exception:
         # Fail-open: a transient graph/control-plane error must NOT block
         # the agent's write. Next write re-triggers this check.
@@ -3039,7 +3900,9 @@ def _maybe_onboarding_auto_complete() -> None:
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → provider 503 → quota 402. Stdio/self-host returns an honest "requires
+# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# is STORED and only the LLM extraction is skipped, reported as
+# `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
@@ -3100,8 +3963,10 @@ def tortoise_session_capture(conversation: list[dict],
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _stored_session_harness,
         _submit_off_loop,
     )
     limits = _current_org_limits.get() or {}
@@ -3124,6 +3989,15 @@ def tortoise_session_capture(conversation: list[dict],
         org["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
         org["max_points"] = int(limits["max_points"])
+    # #4010: carry the resolved sessions limit through the SAME bridge, but
+    # ONLY when it is actually present. `_check_org_limit(org, "sessions")`
+    # treats an EXPLICIT None as unlimited and a MISSING key as fail-closed
+    # (#310 GAP-B) — so a presence guard is required, not `.get()`: the bridge
+    # must not synthesize a key the resolver never produced (that would be the
+    # same silent leniency the `enforce_org_limit` fallback removal exists to
+    # kill, and it would make MCP capture succeed where REST 500s).
+    if "max_sessions" in limits:
+        org["max_sessions"] = limits["max_sessions"]
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,
@@ -3181,9 +4055,35 @@ def tortoise_session_capture(conversation: list[dict],
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+            # #4898: attribute the failure to the SESSION's stored harness, NOT
+            # the caller's raw ``harness`` argument — the SAME resolution the
+            # REST capture applies to both per-harness keys
+            # (``_observed_capture_harness``: stored or claimed,
+            # first-writer-wins; #3681 / #3700). Without it, a failed
+            # re-capture of an existing ``session_id`` whose stored harness
+            # differs writes the error under the CALLER's declaration and the
+            # dashboard paints the failure on another harness's row — the
+            # relabel class #3681 closed for the receipt key, one key down.
+            # ``_stored_session_harness`` fails open to None, which restores
+            # the fresh-session rule (the claim only ever introduces a harness
+            # the server has not stamped).
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
-        return {"error": str(detail), "status": status}
+                _record_capture_last_error(
+                    org_id,
+                    _observed_capture_harness(
+                        org, harness,
+                        asyncio.run(_stored_session_harness(org, session_id))),
+                    str(detail))
+        # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
+        # — the points-estimate gate, the cohort cost cap, or the
+        # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
+        # ERR_QUOTA code rather than making the caller interpret a bare status.
+        # One mapping site covers every 402 this impl can raise, so REST and
+        # MCP cannot drift on the class of a refusal.
+        out = {"error": str(detail), "status": status}
+        if status == 402:
+            out["code"] = ERR_QUOTA
+        return out
 
 
 def tortoise_graph_set_recording(recording: bool | None,
@@ -3311,6 +4211,268 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
+# ── #3656: say WHY a `tools/call` is rejected ────────────────────
+# The ONLY producer of the observed signature -- HTTP 200 carrying
+# ``-32602 "Invalid request parameters"`` with ``data: ""`` -- is the MCP SDK's
+# session receive loop (``mcp/shared/session.py``), whose blanket
+# ``except Exception`` around request admission converts EVERY failure there
+# into that one message. Two consequences follow, and both are tortoise's to
+# fix:
+#
+#   1. The reason is DISCARDED. The SDK logs it (``Failed to validate
+#      request: ...``) and puts nothing actionable on the wire, which is
+#      exactly the harm #3656 reports -- "the client learns nothing
+#      actionable".
+#   2. The signature is unclassifiable after the fact. #3656 could only be
+#      reported as an observation because no artifact said which member the
+#      server objected to.
+#
+# Because a ``tools/call`` rejected here is one the SDK had already admitted at
+# the transport layer, the only way this signature appears is the request
+# reaching the session and being rejected there.
+#
+# WHAT THIS CANNOT REACH (measured, not assumed): the same ``except Exception``
+# has a SECOND arm -- any exception escaping ``ServerSession._handle_incoming``
+# (demonstrated: ``anyio.BrokenResourceError`` when the session's
+# incoming-message stream is already broken) is ALSO answered with this exact
+# ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
+# validator involved. That arm is reproduced at the SDK-session level (see
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), where the
+# session's write stream is alive and the error IS written back; it is NOT
+# reproduced through the HTTP surface, and nothing here shows the transport can
+# reach that state -- so whether it is client-visible on ``/mcp`` is
+# unestablished. It is therefore reported rather than papered over -- there is
+# no "member" to name in that arm, and inventing one would be a lie. The
+# underlying defect there is the SDK's, not tortoise's: an internal failure is
+# reported as INVALID_PARAMS.
+#
+# The fix runs the SDK's OWN model for the ENVELOPE VERDICT, so an envelope is
+# never refused that the session would serve. That guarantee is exact for the
+# envelope and is pinned against a live ``ServerSession`` in
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary. It is NOT a claim about
+# the transport gates, which are a transcription with a documented drift edge --
+# see `_transport_would_dispatch_jsonrpc_post`.
+def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
+    """The SDK's own validation errors for a ``tools/call`` envelope, or None.
+
+    Gate 3 is the producer of the arm this guard names (the receive loop is the
+    one exception SITE, and it has a second arm this guard cannot reach -- see
+    the module comment above). These are the SDK's own expressions, in the
+    order the SDK runs them:
+
+    1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
+       check. On failure the transport owns the answer (its 400 carrying
+       ``-32602 Validation error: ...``; ``-32700`` is the earlier
+       ``json.loads`` failure), so this returns None and the request passes
+       through untouched.
+    2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
+       ONLY a request; a notification / response / error body is answered
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). This gate is
+       load-bearing for a body carrying ``method``/``id`` **and an ``error``
+       member**, which the union resolves to ``JSONRPCError`` (measured: a
+       ``result`` member instead resolves to a REQUEST, which always has a real
+       rejection reason and is handled by gate 3). Without this gate the guard
+       would replace that body's 202 with a ``-32602`` -- the over-strict
+       direction, which breaks a working caller.
+    3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
+       -- what ``BaseSession._receive_loop`` runs, and the producer of the
+       opaque ``-32602 "Invalid request parameters"`` this guard exists to
+       replace.
+
+    Those three gates gate the arm this guard is for: an envelope the SDK
+    rejects. The same SDK ``except`` also answers a well-formed request when
+    ``_handle_incoming`` raises, and there is no member to name in that arm --
+    the caller passes through and the SDK keeps the last word, which is why this
+    guard is a message fix and not a fix for #3656's transient (see the module
+    comment above).
+
+    The REASON comes from ``CallToolRequest``, the one variant that
+    ``method == "tools/call"`` discriminates to. A union failure reports every
+    variant's errors (a 30-entry dump naming ``PingRequest``, ``GetTaskRequest``
+    and the rest), which is noise on the wire; the concrete variant reports only
+    the members of THIS call -- ``params.name``, ``params.arguments``, ... If the
+    concrete variant unexpectedly validates anyway, the union's own errors are
+    used rather than a fabricated reason.
+
+    Returns None when the envelope is one the SDK admits -- and ALSO whenever
+    the reproduction cannot be made (models unavailable, an unexpected
+    exception). A guard that cannot reproduce the SDK's verdict must never
+    invent one: pass-through is the fail-safe direction, and it is why a stale
+    copy of these expressions can rename an error but can never refuse a
+    request the SDK would have served.
+    """
+    try:
+        from mcp.types import (CallToolRequest, ClientRequest,  # noqa: I001
+                               JSONRPCRequest, JSONRPCMessage)
+        from pydantic import ValidationError as _PydanticValidationError
+    except Exception:  # pragma: no cover - import guard, never a request failure
+        return None
+
+    def _errors(exc) -> list[dict[str, Any]]:
+        return [
+            {
+                "loc": [str(part) for part in err.get("loc", ())],
+                "msg": str(err.get("msg", "invalid")),
+                "type": str(err.get("type", "value_error")),
+            }
+            for err in exc.errors()
+        ]
+
+    try:
+        message = JSONRPCMessage.model_validate(raw)
+        # Gate 2: the transport dispatches only a REQUEST. A notification /
+        # response / error body is answered 202, not "invalid params".
+        if not isinstance(message.root, JSONRPCRequest):
+            return None
+        dumped = message.root.model_dump(by_alias=True, mode="json",
+                                        exclude_none=True)
+    except Exception:
+        return None  # the transport owns this failure; do not pre-empt it
+    try:
+        ClientRequest.model_validate(dumped)
+    except _PydanticValidationError as union_exc:
+        try:
+            CallToolRequest.model_validate(dumped)
+        except _PydanticValidationError as concrete_exc:
+            return _errors(concrete_exc)
+        except Exception:  # pragma: no cover - fall back to the union dump
+            return _errors(union_exc)
+        return _errors(union_exc)  # pragma: no cover - unreachable in practice
+    except Exception:  # pragma: no cover - never invent a reason
+        return None
+    return None
+
+
+def _routed_path(request: Any) -> str:
+    """The request path AS THE ROUTER SEES IT.
+
+    A middleware inside a MOUNTED app receives the full path with the mount
+    prefix still on it, plus ``root_path``: a POST to ``/mcp`` arrives as
+    ``path='/mcp/'`` with ``root_path='/mcp'`` (measured — Starlette's ``Mount``
+    leaves the prefix in place and the router strips it while matching). So a
+    check against the transport's own endpoint has to strip it too, or the guard
+    would never fire in production (mounted at ``/mcp``) while firing in a test
+    that mounts at the root.
+    """
+    root = request.scope.get("root_path") or ""
+    path = request.url.path
+    if root and path.startswith(root):
+        return path[len(root):] or "/"
+    return path
+
+
+def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
+                                          headers: Any) -> bool:
+    """True when the SDK's transport would DISPATCH this POST to the session.
+
+    Every gate listed below is reproduced from the transport, so the guard
+    speaks only where the SDK speaks. The middleware wraps the ROUTER, so
+    without this predicate it can answer ``200 -32602`` for a request no part of
+    the SDK ever saw. Each clause closes a MEASURED divergence of that kind:
+
+    * ``endpoint`` -- the route. A POST to a path this app does not route is a
+      404; the caller passes the same string it gives ``mcp.http_app(path=...)``
+      and the request's path as the router sees it (``_routed_path``), so the
+      guard's idea of "the endpoint" cannot drift from the route table.
+    * ``TransportSecurityMiddleware._validate_content_type`` -- the raw header
+      must START WITH ``application/json`` (its 400). This is a different and
+      STRICTER gate than the transport's own part match below: ``text/plain,
+      application/json`` is a 400, not a 415.
+    * ``StreamableHTTPServerTransport._check_content_type`` -- an EXACT
+      ``application/json`` part in the ``;``/``,``-split (its 415), so
+      ``application/jsonx`` keeps the 415 that the prefix gate above let
+      through.
+    * ``_check_accept_headers`` -- both media types, because this app is built
+      with ``json_response=False`` (SSE responses); otherwise the transport
+      answers 406.
+    * ``_validate_protocol_version`` -- absent means the negotiated default, an
+      unsupported value is the transport's 400 ``-32600``.
+    * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``; without the bound this middleware would
+      buffer an unbounded body and then replace that limit's 413. In THIS app
+      ``mcp_auth.RequestBodySizeMiddleware`` (1 MB) binds first, so this clause
+      is the belt to that braces: it keeps the guard's own memory bounded if
+      that cap is ever reordered or removed. A chunked POST declares no length,
+      so it is passed straight through to the limiter that counts bytes.
+
+    NOT reproduced, deliberately, because each is answered before this
+    middleware or is a no-op here -- named rather than silently assumed:
+
+    * ``TransportSecurityMiddleware``'s **Host** (421) and **Origin** (403)
+      checks: ``HostOriginGuardMiddleware`` sits OUTSIDE this middleware with
+      the same allowlists and answers both
+      (``test_origin_and_host_refusals_still_precede_the_guard``).
+    * ``_validate_session``: a no-op under ``stateless_http=True``
+      (``mcp_session_id`` is None), and the initialize-only session-id 404
+      cannot apply to ``tools/call``.
+
+    The order of the header clauses here is this function's, not the SDK's
+    (the transport checks accept before content-type); each is independently
+    decisive, so the order cannot admit a request the SDK refuses.
+
+    Being STRICTER than the transport is always safe here: the request simply
+    passes through and the SDK answers, so relaxing a gate, changing the
+    response mode or raising a limit makes the guard stop intercepting rather
+    than mislabel -- and an import failure returns False for the same reason
+    (never pre-empt on a broken assumption). The converse does NOT hold, and is
+    this design's known edge: a gate the SDK ADDS, or one narrowed here by
+    mistake, makes the guard LOOSER and it would answer for a request the
+    transport refuses. The tests pin the gates enumerated below; a new upstream
+    gate is not detectable from here.
+    """
+    try:
+        from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+        from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        from mcp.types import DEFAULT_NEGOTIATED_VERSION
+    except Exception:  # pragma: no cover - never pre-empt on an import failure
+        return False
+    if path != endpoint:  # ── the route: anything else is the router's 404
+        return False
+    # ── the transport's own gates, in its own order ──
+    content_type = headers.get("content-type", "")
+    if not content_type.lower().startswith(CONTENT_TYPE_JSON):
+        return False  # TransportSecurityMiddleware: 400
+    parts = [p.strip() for p in content_type.split(";")[0].split(",")]
+    if not any(p == CONTENT_TYPE_JSON for p in parts):
+        return False  # _check_content_type: 415
+    accepted = [m.strip() for m in headers.get("accept", "").split(",")]
+    has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
+    has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
+    if not (has_json and has_sse):
+        return False  # _validate_accept_header: 406
+    # The SDK substitutes the default only when the header is ABSENT (`is
+    # None`), so a present-but-empty value is its 400 -- `.get(k, default)`, not
+    # `or`, or an empty header would be silently upgraded to the default.
+    version = headers.get("mcp-protocol-version", DEFAULT_NEGOTIATED_VERSION)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False  # _validate_protocol_version: 400 -32600
+    declared = headers.get("content-length")
+    if declared is None:
+        return False  # chunked: RequestBodyLimitMiddleware counts the bytes
+    try:
+        if int(declared) > DEFAULT_MAX_REQUEST_BODY_SIZE:
+            return False  # RequestBodyLimitMiddleware: 413
+    except ValueError:  # pragma: no cover - a malformed length is not ours
+        return False
+    return True
+
+
+def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
+    """Render the field locations the SDK rejected, in the client's language.
+
+    ``loc`` from a pydantic union error is the offending MEMBER PATH (e.g.
+    ``params.name``), which is precisely what the discarded reason held and
+    what a client needs to repair the call.
+    """
+    parts = []
+    for err in errors:
+        member = ".".join(err.get("loc") or []) or "<request>"
+        parts.append(f"{member}: {err.get('msg', 'invalid')}")
+    return "Invalid params: " + "; ".join(parts)
+
+
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     allowed_hosts: list[str] | None = None,
                     rate_limit: int = 100,
@@ -3348,11 +4510,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     (route unused) and coexists with the POST/DELETE streamable-http route.
     """
     from starlette.middleware import Middleware  # noqa: I001
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # The transport's endpoint INSIDE this sub-app. One value, used both to
+    # build the route and to gate the #3656 admission guard -- so the guard can
+    # never intercept a path the route table does not serve (its 404).
+    mcp_path = "/"
 
     # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
@@ -3383,7 +4551,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
-        group scoping (#523) + the #2013 gated ask group.
+        group scoping (#523).
 
         The excluded tools (org_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
@@ -3391,32 +4559,33 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
 
-        #2013 PRODUCT-GATING: the ask tool (group="ask") is absent from the
-        DEFAULT (ungrouped) hosted surface unless TORTOISE_ENABLE_ASK=1 — the
-        reader ships (the eval's reader), the hosted ask EXPOSURE is gated
-        off. An EXPLICIT tool_group="ask" server (dev/eval) serves it
-        regardless — deliberate opt-in.
+        #3877: the group is read from the SAME single source `tools_by_group()`
+        reads — the group the registry APPLIED to the entry
+        (`ToolDefinition.group`, assigned once by `_apply_groups`). Re-deriving it
+        here from `GROUP_BY_NAME` with no default dropped every name the map does
+        not list, so those tools were unreachable on EVERY group-scoped server
+        while the registry had already assigned them "memory". One lookup, so the
+        declared group and the served group cannot disagree.
         """
         async def list_tools(self, tools):
             group = _tool_group.get()
+            _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
             # filter below already excludes the onboarding tools.
             onboarding_done = False
             if not (group and group != "onboarding"):
-                onboarding_done = _org_onboarding_complete()
+                # #2924: awaited — the gate read is off the event loop (the
+                # read is synchronous end to end; see _org_onboarding_complete).
+                onboarding_done = await _org_onboarding_complete()
 
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
-                tgroup = GROUP_BY_NAME.get(t.name)
-                if group:
-                    # explicit curation-group request — serve that group's tools
-                    if tgroup != group:
-                        return False
-                elif tgroup == _ASK_TOOL_GROUP and not ask_exposure_enabled():
-                    # default (ungrouped) hosted surface: the gated ask group
-                    # is excluded unless the exposure flag is on (#2013)
+                _entry = _by_name.get(t.name)
+                tgroup = getattr(_entry, "group", None)
+                # explicit curation-group request — serve that group's tools
+                if group and tgroup != group:
                     return False
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this org's onboarding is complete (fail-open
@@ -3426,6 +4595,76 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 return True
 
             return [t for t in tools if _visible(t)]
+
+    class ToolCallAdmissionMiddleware(BaseHTTPMiddleware):
+        """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
+
+        See ``_tools_call_rejection`` above for why this surface has one producer
+        SITE of the OPAQUE ``-32602`` signature -- this middleware, when it
+        answers, is a second producer of ``-32602`` with a real reason -- and one
+        validator for the envelope verdict (the SDK's own model, which the guard
+        runs rather than replaces). Scope is deliberately narrow, and each
+        narrowing is a case where the SDK does NOT emit the opaque signature:
+
+        * ``POST`` only, and only to the transport's own endpoint
+          (``mcp_path``), and only when the SDK's own gates would let the body
+          through -- see ``_transport_would_dispatch_jsonrpc_post`` and
+          ``_routed_path``. Everything the transport would answer itself (404
+          for another path, 400/403/406/413/415 for its own refusals) stays the
+          transport's answer.
+        * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
+          ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
+          and a body missing ``jsonrpc`` passes through (the transport rejects
+          it first, with a different message).
+        * ``method == "tools/call"`` only -- every other method is untouched.
+        * A JSON object only -- a batch array is left to the transport.
+        * A body ``JSONRPCMessage`` resolves to a REQUEST -- a notification /
+          response / error root is answered 202 by the transport, and this
+          middleware must not turn that into a ``-32602``.
+
+        As the transport does, this marks the response uncacheable and
+        unbuffered (``Cache-Control: no-cache, no-transform`` and
+        ``X-Accel-Buffering: no``): a proxy must not store or coalesce a
+        JSON-RPC error, and the frame is one event long. The body framing is the
+        transport's SSE event; the headers are pinned by
+        ``test_the_named_error_is_uncacheable_and_unbuffered``.
+        """
+
+        async def dispatch(self, request, call_next):
+            if request.method != "POST":
+                return await call_next(request)
+            if not _transport_would_dispatch_jsonrpc_post(
+                    _routed_path(request), mcp_path, request.headers):
+                return await call_next(request)
+            try:
+                raw = json.loads(await request.body())
+            except Exception:
+                # The transport owns parse errors (it answers -32700), and it
+                # must still see the body -- BaseHTTPMiddleware replays it.
+                return await call_next(request)
+            if not isinstance(raw, dict):
+                return await call_next(request)
+            if (raw.get("jsonrpc") != "2.0" or "id" not in raw
+                    or raw.get("method") != "tools/call"):
+                return await call_next(request)
+            errors = _tools_call_rejection(raw)
+            if errors is None:
+                return await call_next(request)
+            from starlette.responses import Response
+            # The auth plane's one envelope builder (#5281 house primitive),
+            # framed here as the transport's SSE event instead of a JSON
+            # HTTP error. Same code, same shape, one definition.
+            body = json.dumps(_mcp_auth._jsonrpc_error_body(
+                # The SDK's own code for this failure class -- unchanged.
+                -32602,
+                _tools_call_rejection_message(errors),
+                {"method": "tools/call", "errors": errors},
+                request_id=raw["id"],
+            ))
+            return Response(f"event: message\ndata: {body}\n\n",
+                            status_code=200, media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache, no-transform",
+                                     "X-Accel-Buffering": "no"})
 
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
@@ -3473,13 +4712,19 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # Sets the curation-group ContextVar for the tools/list transform.
         middleware.append(group_mw)
 
+    # #3656: INNERMOST — it runs after security headers / body-size / auth /
+    # rate-limit have each had their say, immediately before the MCP transport,
+    # so the reason it reports is the LAST word on the request rather than a
+    # substitute for an auth or quota refusal. See the class docstring.
+    middleware.append(Middleware(ToolCallAdmissionMiddleware))
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         allowed_hosts=allowed_hosts or [],
-        path="/",
+        path=mcp_path,
         middleware=middleware,
     )
 
@@ -3494,12 +4739,558 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 # __main__.py, deployment.py) are unaffected: they import the module first
 # (which executes register_all), then call main().
 
+
+# ── Dry-run previews (#4057) ─────────────────────────────────────
+# `dry_run=True` answers "what would this destroy?" and changes NOTHING.
+#
+# A preview is READ-ONLY: it runs the same existence/lifecycle validations
+# the write path runs (so a bad input fails here exactly as the write would,
+# with the same message), then enumerates the nodes and edges the write
+# would touch. It never emits an event, never marks the projection dirty,
+# and never enters `_quota_gated` — that wrapper meters a WRITE, and a
+# preview performs none. It IS wrapped in `_safe`, so the same
+# auth/transport gate that protects the write protects the preview: a dry
+# run is a read, not an auth bypass.
+#
+# The flag is opt-in PREVIEW, not opt-in destruction: `dry_run` defaults to
+# `False`, which is today's behaviour byte-for-byte, so no existing caller
+# changes meaning. Flipping the default to True would make every existing
+# `tortoise_delete(id)` call a silent no-op — a breaking change to the
+# surface, not an additive off-by-default field (the #3986 carve-out).
+#
+# Every preview reports the concrete blast radius. Where the writer's
+# transfer rule is non-trivial (supersede), the preview mirrors the rule and
+# a differential test pins the preview count against the writer's OWN
+# `edges_transferred`, so a drift fails the suite instead of shipping a
+# preview that lies.
+
+_PREVIEW_NOTE = "No changes were made — re-call with dry_run=false to apply."
+
+
+def _preview_result(tool: str, would: str, **fields) -> dict:
+    return {"dry_run": True, "tool": tool, "would": would, **fields,
+            "note": _PREVIEW_NOTE}
+
+
+def _preview_delete_edges(sdk, internal_ids: list) -> list[dict]:
+    """All edges incident to ANY of the nodes, as {type, from, to}.
+
+    Set-based and deduped by INTERNAL edge id. A per-node loop would
+    double-count an edge whose BOTH endpoints are being deleted (once per
+    endpoint), and a logical-id match would return both nodes' edges for each
+    node; `ID(r)` dedup is exact in both cases. Endpoints are reported by
+    LOGICAL identity (id, else eventId/name/url), never the internal id.
+    DETACH DELETE removes each node and every incident edge, so this set IS
+    the delete's edge blast radius.
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (a)-[r]-(b) WHERE ID(a) IN $nids OR ID(b) IN $nids "
+        "RETURN ID(r), type(r), "
+        "coalesce(startNode(r).id, startNode(r).eventId, startNode(r).name, startNode(r).url), "
+        "coalesce(endNode(r).id, endNode(r).eventId, endNode(r).name, endNode(r).url)",
+        params={"nids": internal_ids},
+    ).result_set
+    seen: set = set()
+    out: list[dict] = []
+    for rid, rtype, src, tgt in rows:
+        if rid in seen:
+            continue
+        seen.add(rid)
+        out.append({"type": rtype, "from": src, "to": tgt})
+    return out
+
+
+def _preview_orphan_tags(sdk, internal_ids: list) -> list[str]:
+    """Tags the writer's orphan-GC would delete alongside the Points.
+
+    `delete_point` runs, when the deleted point had any TAGGED edge, a
+    graph-wide `MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`. A tag is
+    removed iff it has no TAGGED edge from a SURVIVING point — which also
+    catches pre-existing orphans. (Only `delete_point` does this;
+    `_delete_entity` does not.)
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q) "
+        "WITH t, [x IN collect(ID(q)) WHERE NOT x IN $nids] AS survivors "
+        "WHERE size(survivors) = 0 RETURN coalesce(t.name, t.id, t.tag)",
+        params={"nids": internal_ids},
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _preview_delete_point(sdk, id: str) -> dict:
+    # The writer's `MATCH (n:Point {id:$id}) DETACH DELETE n` deletes EVERY
+    # matching Point, so count internal ids — not a hardcoded 1.
+    proj = sdk._get_proj()
+    internals = [row[0] for row in proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN ID(n)",
+        params={"id": id},
+    ).result_set]
+    edges = _preview_delete_edges(sdk, internals)
+    # Tag GC is gated on the deleted point having a TAGGED edge.
+    has_tags = bool(proj.g.query(
+        "MATCH (n:Point {id:$id})-[:TAGGED]->() RETURN count(*) > 0",
+        params={"id": id},
+    ).result_set[0][0]) if internals else False
+    tags = _preview_orphan_tags(sdk, internals) if has_tags else []
+    return _preview_result(
+        "tortoise_delete_point", "delete",
+        found=bool(internals),
+        target={"id": id, "label": "Point"},
+        nodes_removed=len(internals),
+        edges_removed=len(edges),
+        tags_removed=len(tags),
+        nodes=[id] * len(internals),
+        edges=edges,
+        tags=tags,
+    )
+
+
+def _preview_delete_entity(sdk, id: str) -> dict:
+    # REVIEW-FIX P2 (#4057): the label→id-property table is IMPORTED, never
+    # re-hardcoded. `_delete_entity` (sdk.py) and the replay fold
+    # (`projection._delete_entity_by_id`) both read
+    # `projection._CANONICAL_ENTITY_ID_PROPS`, so a local copy here could drift
+    # — and drift makes this preview UNDER-report the blast radius (a label
+    # whose id property moved would match nothing and silently drop out of the
+    # count), which is the dangerous direction.
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        secondary_entity_id_props,
+    )
+    proj = sdk._get_proj()
+    seen: set = set()
+    nodes: list[str] = []
+    for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+        # Dedup by INTERNAL node id: a node carrying two matched labels
+        # (`:Point:Object`) is deleted ONCE — the writer's first DETACH DELETE
+        # removes it and the next label matches 0. Two DISTINCT nodes sharing
+        # an id value are both deleted, and their internal ids differ, so
+        # this neither over- nor under-counts. (Matches the writer, which
+        # never dedups by logical id.)
+        # #4649: the SAME OR-SET the writer and the replay fold use — primary
+        # key first, the label's secondary key if the primary matched nothing.
+        # A url-keyed :Source has no `id`, so without this the preview
+        # UNDER-reports the blast radius (the dangerous direction).
+        for match_prop in (prop, *secondary_entity_id_props(label)):
+            # The fall-through condition must be the WRITER's, not "did this
+            # key match anything": `_delete_entity` breaks on the DETACH
+            # DELETE's count, so a primary key whose only match was ALREADY
+            # deleted by an earlier label returns 0 and falls through to the
+            # secondary key. Gating on a raw `hit` (any matched row, `seen` or
+            # not) stops one label early and UNDER-reports the blast radius —
+            # the dangerous direction on an irreversible op. Graph:
+            # `(:Object:Source {id:X})` + `(:Source {url:X})` — the writer
+            # deletes BOTH, a `hit`-gated preview claimed one.
+            added = False
+            for (internal,) in proj.g.query(
+                f"MATCH (n:{label} {{{match_prop}:$id}}) RETURN ID(n)",
+                params={"id": id},
+            ).result_set:
+                if internal in seen:
+                    continue
+                seen.add(internal)
+                nodes.append(id)
+                added = True
+            if added:
+                break
+    # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
+    edges = _preview_delete_edges(sdk, sorted(seen))
+    return _preview_result(
+        "tortoise_delete_entity", "delete",
+        found=bool(nodes),
+        target={"id": id},
+        nodes_removed=len(nodes),
+        edges_removed=len(edges),
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def _preview_delete(sdk, id: str) -> dict:
+    """Preview `tortoise_delete` — resolve the label first, exactly as
+    `TortoiseSDK.delete` does, then preview the branch it would take.
+
+    #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
+    included. Without it a url-keyed `:Source` (no `id`, minted by
+    `_link_source`) previewed as `found=False, nodes_removed=0` while
+    `tortoise_delete(url)` DELETED the node and all its edges, so the
+    destructive tool's only blast-radius surface under-reported (the leaf
+    preview `_preview_delete_entity` was already OR-set-aware; this dispatcher
+    is what routes to it).
+    """
+    resolved = sdk._get_proj()._resolve_entity(
+        id, by_id=True, by_eventId=True, by_url=True)
+    if not resolved:
+        return _preview_result(
+            "tortoise_delete", "delete",
+            found=False,
+            target={"id": id, "label": None},
+            nodes_removed=0,
+            edges_removed=0,
+            nodes=[],
+            edges=[],
+        )
+    label = resolved[0]["label"]
+    out = (_preview_delete_point(sdk, id) if label == "Point"
+           else _preview_delete_entity(sdk, id))
+    out["tool"] = "tortoise_delete"
+    out["target"] = {"id": id, "label": label}
+    return out
+
+
+def _preview_retract_point(sdk, id: str) -> dict:
+    """Preview `tortoise_retract_point` — a ONE-node status flip.
+
+    The shared lifecycle guard runs first, so a missing / operator / already
+    terminal point raises exactly as the write would (no rosy preview over an
+    input the write would reject).
+    """
+    guard = sdk._assert_lifecycle_guard(id, method="retraction")
+    # The writer's CAS carries `WHERE <non-terminal>` and a duplicated id can
+    # mix a live and a terminal node — count only the rows it would stamp.
+    from tortoise.live import _terminal_excluded
+    n_affected = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE " + _terminal_excluded("n.status") +
+        " RETURN count(n)",
+        params={"id": id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_retract_point", "retract",
+        found=True,
+        target={"id": id},
+        nodes_affected=n_affected,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=0,
+        status={"id": id, "from": guard.get("status") or "live",
+                "to": "retracted", "outdated": guard.get("outdated")},
+    )
+
+
+def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
+    """Preview `tortoise_invalidate` — outdate ONE point, add ONE CORRECTS
+    edge. Both lifecycle guards AND the writer's #5358 inverted-window
+    precondition run first, mirroring the write's validation order and
+    messages.
+
+    The #5358 check reads its own clock, which precedes the writer's. The
+    guarantee is therefore ONE-WAY, in the safe direction: the preview refuses
+    whenever the write would refuse (a start inside the preview→write interval
+    may be refused here and accepted there — conservative, never a false
+    "the write will succeed"). Do NOT "fix" that asymmetry by dropping the
+    shared call: a green preview must mean the write accepts."""
+    if id == corrected_by_id:
+        raise ValueError(
+            f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
+        )
+    old = sdk._assert_lifecycle_guard(
+        id, method="invalidation", role="source", missing_ok=True)
+    if old is None:
+        return _preview_result(
+            "tortoise_invalidate", "invalidate",
+            found=False, invalidated=False,
+            target={"id": id, "corrected_by": corrected_by_id},
+            nodes_affected=0, edges_removed=0, edges_added=0,
+        )
+    sdk._assert_lifecycle_guard(
+        corrected_by_id, method="invalidation", role="corrector")
+    # #5358: mirror the writer's inverted-window precondition — the SAME
+    # shared check `invalidate_point` runs — so the preview cannot report
+    # "would invalidate" for an input the write refuses (#4057's contract:
+    # a preview over an input the write would reject must reject it too).
+    # `_preview_supersede(transfer_edges=False)` reuses this function, so it
+    # inherits the check.
+    from datetime import datetime, timezone
+    sdk._assert_window_start_not_inverted(
+        id, datetime.now(timezone.utc).isoformat())  # noqa: UP017
+    # The writer is `MATCH (a:Point {id:$new}), (b:Point {id:$old}) MERGE
+    # (a)-[:CORRECTS]->(b)` — it binds EVERY matching pair, stamps EVERY
+    # matching old node, and the MERGE adds only pairs that lack the edge.
+    proj = sdk._get_proj()
+    n_old = proj.g.query("MATCH (b:Point {id:$o}) RETURN count(b)",
+                        params={"o": id}).result_set[0][0]
+    pairs_added = proj.g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) "
+        "WHERE NOT (a)-[:CORRECTS]->(b) RETURN count(*)",
+        params={"n": corrected_by_id, "o": id},
+    ).result_set[0][0]
+    edges = [{"type": "CORRECTS", "from": corrected_by_id, "to": id}
+             for _ in range(pairs_added)]
+    return _preview_result(
+        "tortoise_invalidate", "invalidate",
+        found=True, invalidated=True,
+        target={"id": id, "corrected_by": corrected_by_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=len(edges),
+        status={"id": id, "from": old.get("status") or "live",
+                "to": "outdated", "outdated": True},
+        edges=edges,
+    )
+
+
+def _preview_supersede(sdk, old_id: str, new_id: str,
+                       transfer_edges: bool = True) -> dict:
+    """Preview `tortoise_supersede`.
+
+    transfer_edges=False is the invalidate behaviour and reuses that preview.
+    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+      * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
+        The writer uses CREATE here, so every row becomes its own edge;
+      * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
+        targets. The writer MERGEs, so rows to the same target collapse;
+      * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
+        the writer — sdk.py's own named constant), also MERGEs.
+    An edge whose far endpoint IS the successor is delete-only (no phantom
+    self-edge) — reported under `edges_dropped`.
+
+    `edges_transferred_from_old` is the writer's own old-side count — on any
+    graph with no direct IMPL/NAND self-loop at `old` it equals the number the
+    writer reports as `edges_transferred`, and a differential test pins the two
+    together there. It is NOT equal when BOTH of two conditions hold: `old`
+    carries a direct IMPL/NAND self-loop of type `T`, AND no edge
+    `(new)-[r:T]->(old)` of that SAME type already exists. Then the writer is the
+    one that over-counts: its out-pass repoints `(old)-[r:T]->(old)` to
+    `(new)->(old)` and MERGEs that edge into existence — and the MERGE is typed
+    by `rtype`, the self-loop's OWN type (`sdk.py`, `MERGE (new)-[nr:{rtype}]->(t)`) —
+    and its in-pass then matches the freshly created edge and delete-onlys it,
+    booking one removed edge twice — while this preview dedups the two matches
+    and counts the edge ONCE. The TYPE matters: only a same-type edge suppresses
+    the divergence, because only a same-type edge collapses that MERGE. Measured
+    across all six states (self-loop type x pre-existing edge):
+
+        no pre-existing edge   preview 2  writer 3  DIFFER
+        same type              preview 3  writer 3  agree — the MERGE collapses onto
+                                                     it and the in-pass delete-onlys
+                                                     that pre-existing edge, which this
+                                                     preview also counts, under
+                                                     `edges_dropped`
+        opposite type          preview 3  writer 4  DIFFER — nothing to collapse onto,
+                                                     so the out-pass still creates
+
+    Each condition has its own test. This
+    value is the accurate one; the self-loop is reported under `edges_dropped`
+    with the reason "self-loop on the old node". It counts every row the write
+    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
+    self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing.
+    It is therefore NOT "the edges that arrive at the successor": those are
+    `edges_created_at_new` + `edges_already_present_at_new`.
+    `edges_remaining_at_old` is the complementary count — the edges incident to
+    old that the write neither repoints nor removes (e.g. `related`, `TAGGED`,
+    `aboutSource`, an inbound `CORRECTS`, an `alreadyDecided` operator edge via
+    `edges_kept_attached`). Without it a caller cannot read the residual blast
+    radius from any field. The `CORRECTS` edge the write ADDS is not included
+    (it does not exist yet) — see `corrects_edge`.
+    `edges_created_at_new` is the NET-NEW edge count the write creates at the
+    successor (MERGE destinations already present are excluded), and
+    `edges_already_present_at_new` names those no-ops; both are multiplied by
+    `successor_nodes` when a duplicate successor id fans the writer out.
+    """
+    if not transfer_edges:
+        out = _preview_invalidate(sdk, old_id, new_id)
+        out["tool"] = "tortoise_supersede"
+        out["would"] = "invalidate (transfer_edges=false)"
+        out["transfer_edges"] = False
+        return out
+    if old_id == new_id:
+        raise ValueError("supersede_point: old_id and new_id must differ")
+    sdk._assert_lifecycle_guard(old_id, method="supersession", role="source")
+    sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
+    proj = sdk._get_proj()
+    from tortoise.security import validate_rel_type
+    created: list[dict] = []   # 2a operator edges — CREATE, never collapse
+    merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
+    dropped: list[dict] = []
+    kept: list[dict] = []
+    # INTERNAL ids of every edge the write removes from old (repointed OR
+    # delete-only). Set-keyed so an edge matched by two passes is handled once;
+    # `edges_remaining_at_old` is the incident count minus this set.
+    handled_old_edge_ids: set = set()
+
+    # 2a — operator edges. The writer validates every relationship type BEFORE
+    # any mutation (a raw/imported undeclared type is an injection primitive),
+    # so the preview validates too.
+    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
+        "RETURN op.id, type(r), r.idx, op.label, ID(r)",
+        params={"old": old_id},
+    ).result_set:
+        validate_rel_type(rtype)
+        if op_label == "alreadyDecided":
+            kept.append({"type": rtype, "from": op_id, "to": old_id,
+                         "reason": "alreadyDecided stays on the superseded prior"})
+        else:
+            created.append({"type": rtype, "from": op_id, "to": new_id})
+            handled_old_edge_ids.add(op_rid)
+
+    # #4021 parity — a window whose resolved END precedes the predecessor's own
+    # validFrom is refused by the writer before it mutates anything, so the
+    # preview must refuse it too (a `dry_run` that reports success on a write
+    # that will raise is the fail-open direction of the same defect).
+    # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
+    # every relationship type before its window guard, so an undeclared rel
+    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
+    # its `[0]` indexing is relied on by every pass below.
+    win_rows = proj.g.query(
+        "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
+        "RETURN o.validFrom, n.validFrom, n.createdAt",
+        params={"old": old_id, "new": new_id},
+    ).result_set
+    if win_rows:
+        _supersede_window_end(
+            old_id=old_id, new_id=new_id,
+            # EVERY node carrying the id — the writer stamps them all, so a
+            # first-row-only read would preview success on a write the
+            # writer refuses (the fail-open direction of this same defect).
+            old_vfs=[r[0] for r in win_rows],
+            valid_from=None,  # the MCP surface exposes no valid_from kwarg
+            stored_vf=win_rows[0][1],
+            successor_created_at=win_rows[0][2],
+            now=_now_iso(),   # the writer's clock, not a new one
+        )
+    succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
+                            params={"id": new_id}).result_set
+    # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
+    # scalar (the writer reads only the first successor row), so with a
+    # duplicate successor id the writer still transfers an old edge that ends
+    # at a LATER successor. `succ_count` models the writer's MATCH fan-out.
+    succ_first = succ_rows[0][0] if succ_rows else None
+    succ_count = max(len(succ_rows), 1)
+    # Pre-existing edges at the successor: the MERGE-backed legs collapse into
+    # an edge that is already there, so it is NOT net-new ("edges that would
+    # transfer" must not claim a delta the write will not make). SDK-reachable
+    # input: `new` already carrying an edge to the same destination.
+    pre_out = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r]->(t) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+    pre_in = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (t)-[r]->(new:Point {id:$n}) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+
+    # 2a-DIRECT — operator-less IMPL/NAND, both directions. The writer's
+    # exclusion set is built from the far LOGICAL ids (a far node sharing an
+    # operator's id is excluded even if it is not itself an operator), and its
+    # repoint MERGE requires `(t:Point {id:$tid})` — a non-Point far endpoint
+    # is deleted at old and creates nothing.
+    seen_direct: set = set()
+    for direction in ("out", "in"):
+        if direction == "out":
+            dq = ("MATCH (o:Point {id:$old})-[r:IMPL|NAND]->(t) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        else:
+            dq = ("MATCH (t)-[r:IMPL|NAND]->(o:Point {id:$old}) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        direct_rows = proj.g.query(dq, params={"old": old_id}).result_set
+        far_ids = [row[1] for row in direct_rows]
+        op_ids = {r[0] for r in proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "AND coalesce(p.is_operator,false) = true RETURN p.id",
+            params={"ids": far_ids}).result_set} if far_ids else set()
+        for rtype, tid, t_internal, t_labels, rid in direct_rows:
+            if rid in seen_direct:
+                continue  # a self-loop is matched by BOTH passes
+            seen_direct.add(rid)
+            if tid in op_ids:
+                continue  # operator target — owned by 2a, never repointed
+            handled_old_edge_ids.add(rid)
+            if tid == old_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "self-loop on the old node — its repoint is "
+                                          "undone by the writer's in-pass delete-only"})
+            elif tid == new_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            elif "Point" not in (t_labels or []):
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint is not a Point — the repoint "
+                                          "MERGE matches nothing (old edge removed)"})
+            else:
+                merged.append((
+                    (rtype, direction, t_internal),
+                    {"type": rtype,
+                     "from": new_id if direction == "out" else tid,
+                     "to": tid if direction == "out" else new_id},
+                ))
+
+    # 2b — structural rels (the writer's own constant — never a local copy).
+    for rel in SUPERSEDE_STRUCTURAL_RELS:
+        for rtype, tid, t_internal, rid in proj.g.query(
+            f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "
+            "RETURN type(r), coalesce(t.id,t.eventId,t.name,t.url), ID(t), ID(r)",
+            params={"old": old_id},
+        ).result_set:
+            handled_old_edge_ids.add(rid)
+            if succ_first is not None and t_internal == succ_first:
+                dropped.append({"type": rtype, "other": tid or new_id,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            else:
+                merged.append(((rtype, "out", t_internal),
+                               {"type": rtype, "from": new_id, "to": tid}))
+
+    # Collapse ONLY the MERGE-backed legs, keyed on the far node's INTERNAL id
+    # (the writer MERGEs by node identity, not by logical id).
+    seen: set = set()
+    merged_final: list[tuple] = []
+    for key, edge in merged:
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_final.append((key, edge))
+    # A MERGE destination that already exists at the successor is a no-op.
+    created_edges: list[dict] = list(created)  # 2a operator CREATEs always create
+    already_present: list[dict] = []
+    for (rtype, direction, t_internal), edge in merged_final:
+        present = ((rtype, t_internal) in pre_out if direction == "out"
+                   else (rtype, t_internal) in pre_in)
+        (already_present if present else created_edges).append(edge)
+    removed_raw = len(created) + len(merged) + len(dropped)
+    # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
+    # binds EVERY matching node (no cardinality guard), which is exactly what
+    # `_preview_invalidate` already counts as `n_old`. Mirror it instead of
+    # hardcoding 1.
+    n_old = proj.g.query("MATCH (n:Point {id:$old}) RETURN count(n)",
+                         params={"old": old_id}).result_set[0][0]
+    # Every edge still incident to old after the write removes the handled set.
+    # The writer ADDS only `(new)-[:CORRECTS]->(old)` (reported separately), and
+    # that edge does not exist yet, so it is correctly absent here.
+    incident_at_old = proj.g.query(
+        "MATCH (o:Point {id:$old})-[r]-() RETURN count(r)",
+        params={"old": old_id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_supersede", "supersede",
+        found=True,
+        transfer_edges=True,
+        target={"old_id": old_id, "new_id": new_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_transferred_from_old=removed_raw,
+        edges_remaining_at_old=incident_at_old - len(handled_old_edge_ids),
+        edges_created_at_new=len(created_edges) * succ_count,
+        edges_already_present_at_new=len(already_present) * succ_count,
+        successor_nodes=succ_count,
+        edges_transferred=removed_raw,
+        edges=created_edges + already_present,
+        edges_dropped=dropped,
+        edges_kept_attached=kept,
+        corrects_edge={"type": "CORRECTS", "from": new_id, "to": old_id},
+        status={"id": old_id, "to": "superseded", "outdated": True},
+    )
+
+
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the
 # handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
+from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: E402
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
@@ -3507,6 +5298,151 @@ _adapter.register_all(TOOL_REGISTRY, {
     for t in TOOL_REGISTRY
     if t.name in globals()
 })
+
+
+# ── Retired names (#3883): a removed name RESOLVES and WARNS ────────────────
+# #3836 (b): when a name is retired, a caller still gets an answer and is TOLD the
+# name is retired, naming the replacement. A silent "tool not found" is not
+# acceptable — which is why this exists BEFORE any name is retired (#3883 is a
+# hard prerequisite for executing the #3863 removals).
+#
+# A retired name is deliberately NOT a registered component, so it is absent from
+# `tools/list` and the advertised surface really does shrink. `_RetiredToolTransform`
+# resolves it on `get_tool`, so `tools/call` still works. The shim reuses the
+# ORIGINAL handler, so the answer is exactly what the live tool returned (same
+# structured content, same inferred output schema); the warning is ADDED, never
+# substituted. The warning rides BOTH the result content (so an agent sees it) and
+# the result `_meta` (so a client can read it).
+
+
+def _retired_warning(spec: Any) -> dict[str, Any]:
+    """The machine-readable warning carried on the result and on the tool itself."""
+    # The declared `sdk_method` is published only when it actually resolves. Five
+    # registry entries declare a binding that does not exist (the #3838 drift), and
+    # the generated doc marks them `~~method~~ (no such method)`; the runtime warning
+    # is a machine-readable payload, so it must not assert as fact what the doc
+    # calls out as a false declaration.
+    from tortoise.sdk import TortoiseSDK
+
+    declared = spec.sdk_method or None
+    resolved = declared if declared and hasattr(TortoiseSDK, declared) else None
+    return {
+        "name": spec.name,
+        "retired": True,
+        "use_instead": spec.retired_use_instead,
+        "sdk_method": resolved,
+        "sdk_method_exists": resolved is not None,
+        "message": (
+            f"RETIRED TOOL: `{spec.name}` has been retired from the Tortoise MCP "
+            f"surface. It still answers, but it is no longer advertised. Call "
+            f"`{spec.retired_use_instead}` instead (#3883)."
+        ),
+    }
+
+
+def _warn_retired_result(base: Any, spec: Any) -> Any:
+    """The result the live tool produced, plus a warning that the name is retired."""
+    from fastmcp.tools.base import ToolResult
+    from mcp.types import TextContent
+
+    if not isinstance(base, ToolResult):
+        return base
+
+    warning = _retired_warning(spec)
+    meta = dict(base.meta or {})
+    tortoise_meta = meta.get("tortoise")
+    meta["tortoise"] = {
+        **(tortoise_meta if isinstance(tortoise_meta, dict) else {}),
+        "retired": warning,
+    }
+    # The warning goes LAST, not first: the payload stays `content[0]` and
+    # `structured_content` is untouched, so a caller that reads the payload — the
+    # normal path — is byte-identical to the live tool. Only a caller of the
+    # RETIRED name sees the extra block, and seeing it is the point (#3883).
+    return ToolResult(
+        content=[*base.content, TextContent(type="text", text=warning["message"])],
+        structured_content=base.structured_content,
+        meta=meta,
+        is_error=base.is_error,
+    )
+
+
+def build_retired_tools(retired_registry: list[Any], handlers: dict[str, Any]) -> dict[str, Any]:
+    """Build the retired-name shims: same schema, same answer, plus a warning."""
+    import functools
+
+    from fastmcp.tools import FunctionTool
+
+    def _make_shim(original: Any, base: Any, spec: Any) -> Any:
+        # A factory, not a loop-local closure: a bare `def` inside the loop would
+        # capture the LOOP variable and every shim would call the last handler.
+        @functools.wraps(original)
+        def retired_fn(*args, **kwargs):
+            return _warn_retired_result(
+                base.convert_result(original(*args, **kwargs)), spec
+            )
+
+        return retired_fn
+
+    shims: dict[str, Any] = {}
+    for spec in retired_registry:
+        original = handlers.get(spec.name)
+        if original is None:
+            continue
+        # `base` is the tool this name WOULD have been, so `convert_result` yields
+        # byte-identical structured output (incl. the `x-fastmcp-wrap-result`
+        # envelope for list-returning handlers).
+        base = FunctionTool.from_function(
+            original, name=spec.name,
+            description=spec.description, annotations=spec.annotations,
+        )
+        retired_fn = _make_shim(original, base, spec)
+        retired_fn.__doc__ = (
+            f"RETIRED — use {spec.retired_use_instead}. {spec.description}"
+        )
+        shims[spec.name] = FunctionTool.from_function(
+            retired_fn, name=spec.name, description=retired_fn.__doc__,
+            annotations=spec.annotations,
+            meta={"tortoise": {"retired": _retired_warning(spec)}},
+        )
+    return shims
+
+
+from fastmcp.server.transforms import Transform  # noqa: E402
+
+
+class _RetiredToolTransform(Transform):
+    """Serve retired names on `get_tool` (with a warning) without advertising them.
+
+    `list_tools` strips them so the advertised surface shrinks; `get_tool` falls
+    back to the shim when no live tool owns the name. Registered unconditionally,
+    even with zero retired names, so the gate reads the transform set from the
+    source and a name can never be retired without the gate noticing.
+    """
+
+    def __init__(self, shims: dict[str, Any]) -> None:
+        self._shims = dict(shims)
+
+    async def list_tools(self, tools: Any) -> Any:
+        return [t for t in tools if getattr(t, "name", None) not in self._shims]
+
+    async def get_tool(self, name: str, call_next: Any, *, version: Any = None) -> Any:
+        tool = await call_next(name, version=version)
+        if tool is not None:
+            return tool
+        return self._shims.get(name)
+
+
+from tortoise.tool_registry import RETIRED_TOOL_REGISTRY  # noqa: E402
+
+_RETIRED_SHIMS = build_retired_tools(RETIRED_TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in RETIRED_TOOL_REGISTRY
+    if t.name in globals()
+})
+if not getattr(mcp, "_retired_tool_transform_registered", False):
+    mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
+    mcp._retired_tool_transform_registered = True
 
 if __name__ == "__main__":
     main()

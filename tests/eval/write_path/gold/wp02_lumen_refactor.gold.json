@@ -28,6 +28,22 @@
       "statement": "Routine calendar reminder mentioned mid-session."
     }
   ],
+  "planted_operators": [
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 7,
+        "verbatim_anchor": "Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding"
+      },
+      "id": "wp02_lumen_refactor_op_01",
+      "reason": "the twenty-four-hour key lifetime with boundary rotation (t7) reduces the never-expiring-token risk claim (t6) \u2014 ONTOLOGY \u00a73.9 mitigated_by + \u00a75; MITIGATES is the write path's graded dampener on the operator edge (w_eff = w * (1 - strength)), never a refutation of the risk. from = the measure's claim, to = the risk claim. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 7,
+      "to": {
+        "planted_turn": 6,
+        "verbatim_anchor": "The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks"
+      }
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

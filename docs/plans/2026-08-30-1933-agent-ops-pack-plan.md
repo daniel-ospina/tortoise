@@ -172,7 +172,7 @@ agent-ops (the existing helper self-adapts — check it still passes).
 
 ### T9 — `config/ci-surfaces.yml`
 Register `test_agent_ops_pack.py` + `test_agent_ops_supersede.py` under
-`core:` (alphabetical). Run `python3 tools/ci_selection.py --integrity`.
+`core:` (alphabetical). Run `uv run python tools/ci_selection.py --integrity`.
 
 ## Verification
 1. Docker lane: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`
@@ -180,6 +180,6 @@ Register `test_agent_ops_pack.py` + `test_agent_ops_supersede.py` under
    test_pack_state.py, test_commit_schema.py, test_commit_endpoint.py,
    test_extractor_v2.py, test_value_extractor.py, test_pack_shipping*.py
    (regression around the P0/T3 changes).
-2. `python3 tools/ci_selection.py --integrity` clean (new files registered).
+2. `uv run python tools/ci_selection.py --integrity` clean (new files registered).
 3. commit-workflow skill (mandatory) → PR with pre-existing-CI-failures note
    if main's known failures surface.

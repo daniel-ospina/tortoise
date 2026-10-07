@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 _URI = os.environ.get(
@@ -93,9 +94,17 @@ def _no_embedder(monkeypatch):
 @pytest.fixture(autouse=True)
 def _env_clean(monkeypatch):
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
-    for k in ("TORTOISE_ASK_RETRIEVAL_LIMIT", "TORTOISE_ASK_CONTEXT_ITEM_CAP",
-              "TORTOISE_ASK_CONTEXT_TOKEN_CAP"):
-        monkeypatch.delenv(k, raising=False)
+    # #4105: pin the HISTORICAL ask-lane caps. This module's "DEFAULT" arm is
+    # the pool-40 shape (its whole R9 contract is a statement about that
+    # shape); the product defaults were raised to 200/400/200/16000/128000 bytes and
+    # would otherwise admit both deep golds and make the discriminator
+    # vacuous. The byte ceiling is pinned too — otherwise it would DERIVE
+    # from whatever token cap a widened arm sets.
+    monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")
+    monkeypatch.setenv("TORTOISE_ASK_POOL_SIZE", "120")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "8000")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "32768")
     yield
 
 
@@ -125,7 +134,7 @@ def _n_rows(evidence: str) -> int:
 
 
 def _legacy(sdk, monkeypatch, question, *, widen=False):
-    """A-arm: flag-OFF legacy ask() (DEFAULT or WIDENED caps) with the stub
+    """A-arm: flag-OFF legacy run_ask_lane() (DEFAULT or WIDENED caps) with the stub
     FakeReader — evidence text is reader-independent (metric a)."""
     from tests.test_ask_sdk import _install_fake
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
@@ -134,7 +143,10 @@ def _legacy(sdk, monkeypatch, question, *, widen=False):
         monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "120")
         monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "120")
         monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "32000")
-    return sdk.ask(question, question_date=Q_DATE)
+        # the widened byte ceiling must follow the widened token cap, or the
+        # pinned 32 KiB default would silently neutralise the raise
+        monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "256000")
+    return run_ask_lane(sdk, question, question_date=Q_DATE)
 
 
 def _b_arm(sdk, question, *, caps=None, widen=False):
@@ -147,7 +159,7 @@ def _b_arm(sdk, question, *, caps=None, widen=False):
             "assembled arm must never run under the OFF gate")
     _caps = {"limit": 120, "context_item_cap": 120,
              "context_token_cap": 32000} if widen else (caps or {})
-    return sdk.ask_assembled(question, question_date=Q_DATE, caps=_caps)
+    return run_ask_assembled(sdk, question, question_date=Q_DATE, caps=_caps)
 
 
 # ── master-flag guard ──────────────────────────────────────────────────────
@@ -221,8 +233,12 @@ def test_r9_admission_table_default_widened_assembled(sdk, monkeypatch):
         f"A-default admits both deep golds ({n_gold_def}/2) — the pool-40 "
         "no longer binds above them, so the A-widened arm is vacuous")
     # non-vacuity: a starved/empty default window must fail, not silently
-    # pass both `not in` assertions above (a known in-pool crowd row)
-    assert "deep-subject milestone" in a_def["evidence"], \
+    # pass the `n_gold_def < 2` guard above (a known in-pool crowd row).
+    # #3291: the token must be CROWD-UNIQUE. "deep-subject milestone" also
+    # appears in the two GOLD rows (tests/_assembly_graph.py:317), so a gold
+    # row ALONE satisfied this control and it did not pin crowd-row admission
+    # at all. "milestone was discussed" occurs only in the crowd rows (:301).
+    assert "milestone was discussed" in a_def["evidence"], \
         "A-default: the pool-40 must still admit in-pool crowd rows"
     assert _n_rows(a_def["evidence"]) >= 20, \
         "A-default: the pool-40 must still admit in-pool crowd rows"
@@ -285,13 +301,13 @@ def test_matched_control_order_shuffle_no_delta(sdk, monkeypatch):
         [h.get("id") for h in a2.post_cap_lines]
     # the stub reader (when supplied) sees the SAME context both times
     from tests.test_ask_sdk import FakeReader
-    r1 = sdk.ask_assembled(q, question_date=Q_DATE,
+    r1 = run_ask_assembled(sdk, q, question_date=Q_DATE,
                            _reader_factory=lambda: FakeReader(
                                reply="C", tokens_out=3))
-    cache = __import__("tortoise.sdk", fromlist=["_ask_reader_cache"])
+    cache = __import__("tortoise.ask_lane", fromlist=["_ask_reader_cache"])
     cache._ask_reader_cache().pop(
         f"ask:{getattr(sdk, '_namespace', 'default')}", None)
-    r2 = sdk.ask_assembled(q, question_date=Q_DATE,
+    r2 = run_ask_assembled(sdk, q, question_date=Q_DATE,
                            _reader_factory=lambda: FakeReader(
                                reply="C", tokens_out=3))
     assert r1.evidence == r2.evidence and r1.answer == r2.answer

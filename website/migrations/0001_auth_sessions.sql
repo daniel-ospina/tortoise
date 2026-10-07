@@ -4,9 +4,12 @@
 -- material server-side. See SCOPE.md §8.1.
 --
 -- Apply:  wrangler d1 execute SESSIONS --file website/migrations/0001_auth_sessions.sql
--- (or --local for local development; `ensureSchema()` in
---  website/functions/_shared/auth/session.ts keeps the same shape idempotently
---  so a fresh local database is self-establishing.)
+-- (or --local for local development; the runtime bootstrap in
+--  website/apps/dashboard/functions/_shared/auth/ keeps the same shape idempotently —
+--  `ensureSchema()` for this table, `ensureSchemaTokenColumns()` (token.ts) for the three
+--  token-cache columns, and the per-route flow-table bootstraps in `auth/start.ts` /
+--  `auth/confirm.ts` for `auth_flows` / `email_flow_pending` — so a fresh local database is
+--  self-establishing.)
 
 CREATE TABLE IF NOT EXISTS sessions (
   handle        TEXT PRIMARY KEY,

@@ -52,7 +52,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 RULE_TEXT = "destructive actions require a verbal token acknowledgement"
@@ -226,8 +226,9 @@ class TestMemoryGranularity:
         assert g and "rule text" in g
 
     def test_agent_ops_kinds_in_v2_master_list(self):
-        """PACK_NS: the agent-ops kinds ride the v2 master list's pack_kinds
-        (the S2/S4 prompt vocabulary)."""
+        """#5165: the agent-ops kinds ride the v2 master list's pack_kinds
+        (the S2/S4 prompt vocabulary) because the brief derives them — no
+        hardcoded namespace tuple is consulted."""
         master = v2.build_master_list()
         assert "agent-ops:rule" in master["pack_kinds"]
 
@@ -289,10 +290,14 @@ class TestRulesWithWhyExtraction:
             "RETURN e.eventKind, e.content", {}).result_set
         assert rows, "ruleRevised Event missing"
         # session linkage: extractedFrom → session Source + Session CONTAINS
+        # (#4005: the session Source identity is the canonical
+        # `session:<session_id>` ONTOLOGY §4.6 url — the SAME one the capture
+        # path materializes and delete_session deletes — not a bare basename)
         n = g.query(
             "MATCH (p:Point {content:$c})-[:extractedFrom]->"
-            "(s:Source {url:'session.md'}) RETURN count(s)",
-            params={"c": RATIONALE_TEXT}).result_set[0][0]
+            "(s:Source {url:$u}) RETURN count(s)",
+            params={"c": RATIONALE_TEXT, "u": f"session:{sid}"},
+        ).result_set[0][0]
         assert n >= 1
         n = g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point {content:$c}) "

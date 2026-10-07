@@ -1,0 +1,80 @@
+# skip-bypass-expiry (#4759) — the MACHINE CHECK on the `SKIP_*` deploy-bypass
+# window. #4605's incident window was closed by PROSE ("flip it back once the
+# data plane is healthy") and nothing enforced it, so a correct-during-incident
+# bypass stayed set afterwards and silently disarmed a deploy gate. This workflow
+# is the thing that no longer lets that be quiet.
+#
+# WHAT IT DOES. Every `SKIP_*` variable is read through the ordinary `vars`
+# context (no API call, no extra token scope — and it works for a variable the
+# API cannot even be asked about with a workflow token) and aged against its
+# dated companion `SKIP_<VAR>_SET_AT`:
+#
+#   - inside the window     → ::warning:: naming the variable and its age
+#   - past the window       → ::error:: + exit 1 (this run goes RED)
+#   - set with NO usable date → ::error:: + exit 1 — a bypass that cannot be
+#                             aged is the prose failure mode returning, so it is
+#                             a violation, never a pass
+#
+# The window is `WINDOW_DAYS_DEFAULT=7` in .github/scripts/deploy-bypass.sh. Seven days
+# because these lanes serve HOURS-TO-DAYS incident windows (the #4605 DB-health
+# window was a day-scale data-plane restore): a week never nags during a real
+# incident, while a bypass that outlives one working week is stale by any
+# reading.
+#
+# ⛔ THIS IS A REMINDER, NEVER A DEPLOY BLOCK. It is a separate scheduled
+#    workflow with no path to `deploy-hosted.yml`; a red run here cannot strand
+#    the very incident-fix deploy the bypass exists for. The same window state
+#    is repeated in the run SUMMARY of every deploy by
+#    `deploy-bypass.sh report` (an OVERDUE / NOT RECORDED callout), so the signal
+#    also appears where the deploy is being read, not only here.
+#
+# WHY NOT `gh variable list --json updatedAt` (the obvious source): the
+# repository-variables endpoint requires the fine-grained "Variables" permission,
+# which the workflow `GITHUB_TOKEN` does not carry — and the `vars` context
+# exposes a variable's VALUE but not its `updatedAt`. The dated companion
+# variable is therefore the mechanism that a machine can actually read, and
+# forgetting it fails LOUD (violation above) instead of falling back to silence.
+# Recorded in docs/infra-runbook.md §8.2.
+#
+# Harness: .github/scripts/deploy-bypass.test.sh (fixtures, no network).
+name: skip-bypass-expiry
+
+on:
+  schedule:
+    # Daily, off the hour (GitHub jitter is absorbed by the day-wide window).
+    - cron: '41 7 * * *'
+  workflow_dispatch:
+
+# Never overlap; a concurrent run would only duplicate the same lines.
+concurrency:
+  group: skip-bypass-expiry
+  cancel-in-progress: false
+
+# Nothing is written anywhere: the verdict is the run colour plus the step
+# summary. `contents: read` is only for the checkout that fetches the script.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # The four lanes and their dated companions, exactly the variables §8.2
+      # documents. An unset variable renders as an empty string (treated as
+      # "gate armed"); an unset `_SET_AT` on a SET lane is a violation.
+      SKIP_DB_HEALTH_GATE: ${{ vars.SKIP_DB_HEALTH_GATE }}
+      SKIP_DB_HEALTH_GATE_SET_AT: ${{ vars.SKIP_DB_HEALTH_GATE_SET_AT }}
+      SKIP_PACK_SMOKE: ${{ vars.SKIP_PACK_SMOKE }}
+      SKIP_PACK_SMOKE_SET_AT: ${{ vars.SKIP_PACK_SMOKE_SET_AT }}
+      SKIP_FLY_MACHINES_GUARD: ${{ vars.SKIP_FLY_MACHINES_GUARD }}
+      SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
+      SKIP_FLY_SECRET_PROVENANCE: ${{ vars.SKIP_FLY_SECRET_PROVENANCE }}
+      SKIP_FLY_SECRET_PROVENANCE_SET_AT: ${{ vars.SKIP_FLY_SECRET_PROVENANCE_SET_AT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Age every SKIP_* deploy bypass (#4759)
+        # Exit 1 = at least one lane is past the window or has no usable start
+        # date. That red IS the reminder (GitHub notifies the schedule's author);
+        # the step summary names each variable, its age and the clear command.
+        run: bash .github/scripts/deploy-bypass.sh expiry

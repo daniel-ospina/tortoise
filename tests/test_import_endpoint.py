@@ -37,11 +37,12 @@ import pytest
 # #1389 / #3505: these deep import-path tests (restore → temp graph → verify →
 # swap) are the #1389 skips. Their recorded reason — the app's keepalive anchor
 # and the handler booting two embedded daemons on the same single-writer path —
-# no longer holds for this module: `_EMBEDDED_CONSTRUCTION_LOCK` (below)
-# serializes every IN-PROCESS `FalkorProjection.__init__`, so the second daemon
-# of that pair is never started and every later opener reuses the first
-# starter's server. What remains outside the lock (the residual exposure listed
-# in the lock's own note below) is (a) a construction that raises inside
+# no longer holds: the session-wide construction serialization
+# (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by conftest's
+# `_serialize_embedded_construction`) closes the double-start race, so the
+# second daemon of that pair is never started and every later opener reuses the
+# first starter's server. What remains outside the lock (the residual exposure
+# listed in the lock's own note) is (a) a construction that raises inside
 # `_start_redis()` after its daemon spawned but before `_save_setting_registry()`,
 # and (b) redislite's `_cleanup()` last-client branch removing `<db>.settings`
 # from `__del__`/atexit. Neither is the keepalive-anchor-vs-handler collision
@@ -49,19 +50,23 @@ import pytest
 # `SeedVisibilityError` guard at `_seed_live_graph` is what makes them loud
 # instead of silent.
 #
-# The skip is therefore retained as a COVERAGE decision, not a collision
-# workaround: this path's authoritative coverage is the server-mode harness —
-# the subprocess server in #1390's parity E2E
-# (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import),
-# which is the harness these cases would otherwise have to stand up here.
-# Unskipped in the in-process harness, four of the five pass; the fifth
-# (`test_import_tampered_blob_422`) fails on its own stale detail expectation
-# ("blob integrity" vs the endpoint's actual "decryption failed") — a
-# test-vs-code drift, not an embedded single-writer collision. Un-skipping or
-# repairing them is a scoped test change, not a comment change.
+# #3545 / #3547 corrected the skip's coverage claim. #1390's subprocess parity
+# E2E (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import)
+# covers the HAPPY PATH ONLY — it never exercises the fail-closed chain — so
+# "redundant in-process copies, covered by the parity E2E" was true of
+# `test_import_happy_path` alone. #3545 un-skipped `test_import_tampered_blob_422`
+# (its stale "blob integrity" expectation is fixed and its sibling
+# `test_import_rehashed_blob_header_decrypt_failure_422` now pins the other
+# branch of that taxonomy). The remaining fail-closed deep cases
+# (`test_import_empty_backup_over_live_422`,
+# `test_import_dangling_edge_quarantined_422`,
+# `test_import_swap_failure_503_quarantined_live_untouched`) are DEFERRED with a
+# tracked reason in #3547 — this marker keeps them out of the default lane,
+# it does not hide them.
 _import_deep = pytest.mark.skip(
-    reason="#3505: redundant in-process copies of the deep import path — "
-           "covered by #1390's subprocess-server parity E2E"
+    reason="#3505/#3547: in-process deep-path (restore→swap) copies — the parity "
+           "E2E (#1390) covers the happy path only; the deferred fail-closed "
+           "cases are tracked in #3547"
 )
 
 from fastapi.testclient import TestClient  # noqa: E402, I001
@@ -85,48 +90,6 @@ from tests.test_supabase_control import (  # noqa: E402
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-# #3505: one embedded server per db_path — serialize construction.
-#
-# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
-# absent (or its pid is dead) — `redislite.client.RedisMixin.__init__` (the
-# `_is_redis_running()` / `_start_redis()` fork). Two constructions that
-# interleave BEFORE either has written `.settings` therefore BOTH take the
-# fresh-start branch, each spawning its own daemon in its own tempdir, and
-# the later `_save_setting_registry()` silently owns the registry. The
-# loser's writes are then invisible to every later opener.
-#
-# That is exactly this module's flake (#3505): on a failing run the seeder
-# held one daemon while the `tortoise-health-probe` thread (`hosted_api.py`
-# `_probe_db` -> `_make_sdk`) started its own on the same `import.db`;
-# `_counts` then re-opened through `.settings` and resolved to the probe's
-# EMPTY daemon — `assert [] == ['old-0']`, which reads like the import wiped
-# the graph. Serializing the construction makes the first starter the single
-# owner of the registry, so every later opener (health probe, boot sweep,
-# `_counts`, the import handler) reuses that one server.
-#
-# Scope of the guarantee (this is NOT a global single-writer guarantee): the
-# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls. Two paths
-# stay outside it and can still add or remove a registry entry — (1) a
-# construction that raises inside `_start_redis()` (RedisLiteException /
-# RedisLiteServerStartError) after its daemon spawned but before
-# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
-# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
-# and shuts the daemon down from `__del__`/atexit on any thread. That residual
-# is why `_seed_live_graph` ALSO verifies visibility at seed time: if the
-# seeder's server is ever not the one a fresh opener resolves to, that check
-# raises the NAMED SeedVisibilityError instead of letting the condition
-# resurface as `assert [] == ['old-0']`.
-#
-# Blast radius of the critical section: it spans the WHOLE `__init__`,
-# including redislite's blocking `subprocess.call` server start and the
-# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
-# embedded start therefore stalls every other constructor in the module,
-# where it previously stalled only its own thread. That wait is bounded by
-# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
-# `redis-server` binary — accepted deliberately: the serialization is the
-# fix, and a hung start is a louder failure than a silent second daemon.
-_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
-
 
 @pytest.fixture(scope="module", autouse=True)
 def _embedded_local_file_lane():
@@ -143,22 +106,14 @@ def _embedded_local_file_lane():
     plan's Task 10 "13 migrate out" list: this is an embedded-file-contract
     file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST.
 
-    #3505: also serializes embedded FalkorProjection construction for the
-    module (see _EMBEDDED_CONSTRUCTION_LOCK) — the app's probe/boot-sweep
-    threads construct on the same db_path as the test's seeder."""
+    #3505/#3546: the construction serialization this file needs (the app's
+    probe/boot-sweep threads construct on the same db_path as the test's
+    seeder) is now installed ONCE for the whole session by
+    `tests/conftest._serialize_embedded_construction` — not per module, which
+    was the #3546 defect (see `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`).
+    """
     mp = pytest.MonkeyPatch()
     mp.delenv("TORTOISE_DB_URI", raising=False)
-
-    _orig_proj_init = FalkorProjection.__init__
-
-    def _serialized_proj_init(self, *args, **kwargs):
-        # `return` forwarded deliberately: `__init__` must return None, so it is
-        # inert today, but it keeps this wrapper correct if it is ever reused for
-        # a factory or `__new__` (where dropping the result would be a real bug).
-        with _EMBEDDED_CONSTRUCTION_LOCK:
-            return _orig_proj_init(self, *args, **kwargs)
-
-    mp.setattr(FalkorProjection, "__init__", _serialized_proj_init)
     yield
     mp.undo()
 
@@ -406,7 +361,7 @@ def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
 
 
 def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
-    """#3505 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
+    """#3505/#3546 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
 
     Why this test exists: the four live `_seed_live_graph` tests do not pin
     the lock. Running them against a copy with the serialization deleted is
@@ -416,7 +371,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     about. This test pins it DETERMINISTICALLY, with no dependence on
     redislite timing.
 
-    Mechanism: hold `_EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
+    Mechanism: hold `EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
     standing in for a construction that is inside the critical section — and
     assert a second construction from another thread cannot reach its BODY
     until the lock is released. The body's entry is observed by monkeypatching
@@ -434,11 +389,18 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     The join window is deliberately much larger than the probe latency (a
     microsecond-scale path) so the red arm is deterministic rather than a
     second timing lottery. Removing either half of the mechanism reds this
-    test: dropping the `with _EMBEDDED_CONSTRUCTION_LOCK` wrapper in
-    `_embedded_local_file_lane` lets the worker through; deleting the lock
-    object itself raises NameError on the holder thread.
+    test: dropping the `with EMBEDDED_CONSTRUCTION_LOCK` wrapper installed by
+    conftest's `_serialize_embedded_construction` lets the worker through;
+    deleting the lock object itself raises NameError on the holder thread.
+
+    #3546: this pins the CENTRAL lock — held against the wrapper that
+    conftest's `_serialize_embedded_construction` installs for the session, so
+    deleting that fixture reds here. A module-local lock copy (the defect the
+    issue names) could not gate a construction whose wrapper guards a
+    different lock object.
     """
     import tortoise
+    from tests._embedded import EMBEDDED_CONSTRUCTION_LOCK
 
     db_path = str(tmp_path / "serialized-construction.db")
     body_entered = threading.Event()
@@ -455,7 +417,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     monkeypatch.setattr(tortoise, "FalkorDB", _probe_falkordb)
 
     def _hold_lock() -> None:
-        with _EMBEDDED_CONSTRUCTION_LOCK:
+        with EMBEDDED_CONSTRUCTION_LOCK:
             holder_ready.set()
             release_holder.wait(30.0)
 
@@ -465,12 +427,12 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
 
     # The try/finally starts BEFORE the holder_ready assertion: if that wait
     # fails (or anything between here and the worker's own try raises), the
-    # holder would otherwise keep `_EMBEDDED_CONSTRUCTION_LOCK` for its full
-    # 30s event wait, and the module-scoped autouse fixture serializes EVERY
+    # holder would otherwise keep `EMBEDDED_CONSTRUCTION_LOCK` for its full
+    # 30s event wait, and the session-scoped autouse fixture serializes EVERY
     # in-process `FalkorProjection.__init__` on that same lock — one false RED
-    # would then stall every subsequent construction in this file.
+    # would then stall every subsequent construction in the session.
     try:
-        assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
+        assert holder_ready.wait(5.0), "could not take EMBEDDED_CONSTRUCTION_LOCK"
 
         def _construct() -> None:
             try:
@@ -483,13 +445,13 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
         try:
             worker.join(1.0)
             assert not body_entered.is_set(), (
-                "#3505: FalkorProjection.__init__ reached its body while "
-                "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
+                "#3505/#3546: FalkorProjection.__init__ reached its body while "
+                "EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
                 "the construction serialization is missing or bypassed."
             )
             assert worker.is_alive(), (
-                "#3505: the constructor finished (or raised) while the lock was "
-                "held — the serialization did not gate it."
+                "#3505/#3546: the constructor finished (or raised) while the lock "
+                "was held — the serialization did not gate it."
             )
         finally:
             release_holder.set()
@@ -541,15 +503,22 @@ def _build_artifact(payload: dict, key: bytes, *,
                     tamper_blob: bool = False,
                     payload_sha_override: str | None = None,
                     header: dict | None = None) -> bytes:
-    """One-line clear header + raw encrypted blob (the wire contract)."""
+    """One-line clear header + raw encrypted blob (the wire contract).
+
+    #3545: ``tamper_blob`` flips the last byte of the ENCRYPTED blob while the
+    clear header keeps the hash of the ORIGINAL blob — a corrupted blob whose
+    header was NOT rewritten, so the endpoint's sha256 integrity gate is the
+    layer that rejects it ("blob integrity check failed", asserted by
+    ``test_import_tampered_blob_422``). A header REHASHED over the tampered
+    bytes is the other branch (the AES-GCM tag rejects it, "decryption
+    failed"); build it with ``_rehash_header_over_blob`` below.
+    """
     inner = {
         "format": "tortoise-export-v1",
         "payload_sha256": payload_sha_override or hashlib.sha256(_canonical(payload)).hexdigest(),
         "payload": payload,
     }
     blob = encrypt_backup(json.dumps(inner).encode("utf-8"), key=key)
-    if tamper_blob:
-        blob = blob[:-1] + bytes([blob[-1] ^ 0xFF])
     header = header or {
         "format": "tortoise-export-v1",
         "artifact_version": 1,
@@ -559,8 +528,26 @@ def _build_artifact(payload: dict, key: bytes, *,
         "exporter_version": "1.0.0",
         "exported_at": "2026-08-17T00:00:00Z",
         "source_surface": "selfhost",
+        # Hashed BEFORE the tamper below (see the docstring) — the stale-header
+        # case that makes the sha256 gate the rejector.
         "blob_sha256": hashlib.sha256(blob).hexdigest(),
     }
+    if tamper_blob:
+        blob = blob[:-1] + bytes([blob[-1] ^ 0xFF])
+    return json.dumps(header).encode("utf-8") + b"\n" + blob
+
+
+def _rehash_header_over_blob(artifact: bytes) -> bytes:
+    """Rewrite the clear header's ``blob_sha256`` to match its blob (#3545).
+
+    Models an adversary who controls the clear header: the sha256 integrity
+    gate PASSES, so the AES-GCM authentication tag is the layer that rejects
+    the artifact — the endpoint's "decryption failed" branch. Pairs with
+    ``_build_artifact(tamper_blob=True)``, whose header deliberately stays stale.
+    """
+    header_line, blob = artifact.split(b"\n", 1)
+    header = json.loads(header_line)
+    header["blob_sha256"] = hashlib.sha256(blob).hexdigest()
     return json.dumps(header).encode("utf-8") + b"\n" + blob
 
 
@@ -713,8 +700,17 @@ class TestImportCaps:
 
 
 class TestImportValidationFailClosed:
-    @_import_deep
     def test_import_tampered_blob_422(self, sb_client, as_user, capture_audit):
+        """A corrupted blob whose clear header was NOT rewritten is rejected by
+        the sha256 integrity gate — pre-decrypt, pre-restore (#3545).
+
+        NOT behind ``@_import_deep``: the rejection is pre-restore, so the case
+        is cheap, and this is the only test pinning THIS branch's rejection
+        message together with the live-graph-untouched assertion — #1390's
+        parity E2E exercises the happy path only, and the un-skipped sibling
+        ``test_import_quarantine_stamps_ledger`` reaches the same sha256 path
+        for ledger stamping only.
+        """
         tc, fake, db_path = sb_client
         _seed_team(fake)
         _seed_live_graph(db_path, n_points=1)
@@ -727,6 +723,26 @@ class TestImportValidationFailClosed:
         # quarantine recorded
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         # live graph untouched (old content survives)
+        assert _counts(db_path)["ids"] == ["old-0"]
+
+    def test_import_rehashed_blob_header_decrypt_failure_422(
+            self, sb_client, as_user, capture_audit):
+        """The other half of #3545's taxonomy: a tampered blob whose clear
+        header WAS rehashed passes the sha256 gate, so AES-GCM authentication
+        is what rejects it ("decryption failed"). Both paths are 422 +
+        quarantine, pre-restore; only the rejecting layer differs.
+        """
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        _seed_live_graph(db_path, n_points=1)
+        as_user()
+        key = os.urandom(32)
+        artifact = _rehash_header_over_blob(
+            _build_artifact(_build_payload(), key, tamper_blob=True))
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "decryption failed" in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == ["old-0"]
 
     def test_import_wrong_key_422(self, sb_client, as_user, capture_audit):

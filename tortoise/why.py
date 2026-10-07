@@ -53,6 +53,7 @@ import logging
 import os
 import re
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
@@ -66,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ── W4 flag ────────────────────────────────────────────────────────────────
 # Default OFF (production exposure gated by the epic's user-exposure gate —
 # both conditions must hold before the flip). Tests / dev / the A11 pilot set
-# it explicitly, mirroring the TORTOISE_ENABLE_ASK gating precedent (#2013).
+# it explicitly, mirroring the flag-gated rollout precedent.
 W4_FLAG_ENV = "TORTOISE_W4_ENRICHMENT"
 
 # ── Budgets (plan §3.1.1 — pinned by the S6 contract test) ────────────────
@@ -94,12 +95,9 @@ def w4_enrichment_enabled() -> bool:
     """Resolve the W4 enrichment flag (honored on ALL enriched surfaces).
 
     Default OFF — production exposure is gated by the epic's user-exposure
-    gate. Truthy values: 1/true/yes/on.
+    gate. Truthy values: the declared contract (1/true/yes/on) — #4097.
     """
-    v = os.environ.get(W4_FLAG_ENV)
-    if v is None:
-        return False
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(W4_FLAG_ENV))
 
 
 # ── The shared assembly ────────────────────────────────────────────────────
@@ -403,6 +401,9 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
 # Direct: a bare statement→statement IMPL edge (the reification rule).
 _SUPPORT_OP_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the id
+    # predicate at the re-binding MATCH below (foreign rows).
+    "WITH n "
     "MATCH (sup:Point)-[r:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
     f"WHERE r.idx = 0 AND sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
@@ -412,6 +413,7 @@ _SUPPORT_OP_CYPHER = (
 )
 _SUPPORT_DIRECT_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "
     "MATCH (sup:Point)-[r:IMPL]->(n) "
     f"WHERE sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
@@ -428,6 +430,7 @@ _SUPPORT_DIRECT_CYPHER = (
 # counterargument's own content over the operator label).
 _CONFLICTS_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "
     "MATCH (c:Point)-[r:NAND]->(n) "
     "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
     "WITH n, c, r, src, ri "
@@ -469,6 +472,7 @@ _EP_CYPHER = (
 # never an alternative); mitigations ride the connecting operator.
 _TRADEOFFS_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "
     "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt:Point) "
     f"WHERE ri.idx = 0 AND r2.idx > 0 "
     f"AND (alt.is_operator = false OR alt.is_operator IS NULL) AND {_exclude_status_clause('alt')} "
@@ -730,7 +734,7 @@ def project_item(item: dict, block: dict) -> dict:
 def item_to_why_entry(item: dict) -> dict | None:
     """Project an enriched item back to the canonical §3.1.4 why entry.
 
-    Used by the ask surface (its pool hits flow through the search-path
+    Used by the ask lane (its pool hits flow through the search-path
     enrichment) — zero extra graph reads. Returns None when the item was
     not enriched (no W4 data).
     """
