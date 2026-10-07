@@ -49,6 +49,7 @@ import pytest
 
 from tortoise.api import EventAPI
 from tortoise.log import EventLog
+from tortoise.projection.nonfolded import NonFoldedEventsError
 from tortoise.sdk import TortoiseSDK
 
 # The one journaled write-contract record type (#3299).
@@ -650,8 +651,14 @@ class TestPassTwoMintOrderingResidual:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+            # #3585 supersedes #3299's warn-only contract: a journaled mutation the
+            # fold cannot replay is now FAIL-CLOSED, so the residual is loud as an
+            # exception rather than (only) as a warning. The requirement this test
+            # encodes is unchanged — the gap must not be silent — so the assertion
+            # moves to the error channel and checks the error NAMES the event.
+            with pytest.raises(NonFoldedEventsError) as exc:
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
-        assert _fold_warnings(caplog), (
+        assert "could not be resolved" in str(exc.value), (
             "the pass-2 ordering gap silently dropped a journaled mutation — "
-            "the #3299 non-folded-set contract requires a fold-miss warning")
+            "the non-folded-set contract requires the misfold to be NAMED")
