@@ -222,10 +222,21 @@ Exit codes
     1  COLLISION    >= 1 STRONG hit on a >= 1 BLOCKING surface (do NOT dispatch).
                     A weak hit never decides this, and a hit on an ADVISORY
                     surface never decides it, however it is shaped
-    2  INCOMPLETE   >= 1 BLOCKING surface could not be queried (NOT clean).
-                    A surface that can never produce a blocking hit is EXEMPT and
-                    its failure is only REPORTED: it has no ability to prevent a
-                    duplicate, so its failure cannot conceal one (#5251)
+    2  INCOMPLETE   NOT clean, and NOT a collision. TWO DISTINCT CAUSES, and a
+                    caller must distinguish them because the remedies differ:
+                    (a) >= 1 BLOCKING surface could not be queried. A surface that
+                        can never produce a blocking hit is EXEMPT and its failure
+                        is only REPORTED: it has no ability to prevent a
+                        duplicate, so its failure cannot conceal one (#5251).
+                        Rendered as a report ending in `VERDICT: INCOMPLETE`.
+                    (b) the queried NUMBER is not a work item: it is an OPEN PULL
+                        REQUEST (#7009). Raised by `NotAWorkItem` BEFORE any
+                        verdict is computed, so this cause prints NO report and
+                        NO `VERDICT` line — only the refusal, on stderr. The
+                        remedy is NOT "fix gh auth/network"; it is "re-run with
+                        the issue number". A caller keying its remedy on
+                        `VERDICT: INCOMPLETE` will MISS this one; keying on the
+                        exit code alone cannot tell (a) from (b).
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)
@@ -2792,8 +2803,21 @@ def scan_pr_surface(
 ) -> None:
     """PR surface matching.
 
-    ⛔ ORDER IS LOAD-BEARING. The caller's OWN PR, and a PR that simply *is* the
-    issue, are decided FIRST — before any match test. #4567 found this order
+    ⛔ ORDER IS LOAD-BEARING, but the number==issue case is NO LONGER a
+    first-decided *weak hit*: an OPEN PR whose number is the issue RAISES
+    `NotAWorkItem` (#7009). That check runs at block 0, BEFORE the ownership
+    check — it is an INPUT-VALIDITY test, not a match test, so `main()`
+    auto-declaring the caller's own branch (the documented `--repo .` form)
+    cannot suppress it. The caller's OWN PR is still decided before any match
+    test; a TERMINAL PR whose number is the issue still takes the weak arm and
+    leaves the verdict CLEAN.
+
+    RAISES `NotAWorkItem` for an open PR number, in ADDITION to `SurfaceError`.
+    On the CLI path both reach `main()` (exit 2); a PROGRAMMATIC caller of this
+    function or of `run_preflight` must catch `NotAWorkItem` itself, because it
+    is deliberately not absorbed by the per-surface handlers.
+
+    #4567 found this order
     inverted: the keyword test ran first and `continue`d unconditionally, so the
     self-PR suppression below it was **dead code** and `exit 0` was unreachable
     for any issue whose number is also a PR. Deleting the keyword arm removes
