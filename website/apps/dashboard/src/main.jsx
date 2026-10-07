@@ -2624,6 +2624,13 @@ function claimIntentInFlight() {
       refreshOnboarding().catch(() => {})
     } catch (e) {
       setGithubDisconnect((s) => ({ ...s, busy: false, error: (e && e.message) || 'Could not disconnect GitHub — try again.' }))
+      // #4946: the endpoint clears the local credential and writes
+      // `github_connected: false` UNCONDITIONALLY before it responds, so a
+      // response lost in flight (a dropped connection, a proxy 504) must not
+      // leave the card saying Connected. Re-read the server projection — this
+      // claims nothing, it only asks — exactly as the success arm does. If the
+      // request never reached the server, the read simply shows Connected.
+      refreshOnboarding().catch(() => {})
     }
   }
 

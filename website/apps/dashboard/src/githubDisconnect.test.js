@@ -531,7 +531,10 @@ test('#4946 wiring: a failed disconnect keeps the dialog open with the reason (E
   assert.equal(last.error, 'HTTP 500', 'the server reason must reach the dialog')
   assert.equal(last.open, true, 'a failed attempt keeps the dialog open for a retry')
   assert.equal(last.result, null, 'a failure must not produce an outcome panel')
-  assert.equal(refreshes.length, 0, 'a failed disconnect must not claim the connection changed')
+  // The endpoint clears locally before it answers, so a lost response must not
+  // leave the card stale: the failure arm re-reads the server projection.
+  assert.equal(refreshes.length, 1,
+    'a failed disconnect must still re-read the onboarding projection (the endpoint clears unconditionally)')
 })
 
 /** Run the open/close handlers against a capturing setter and focus spies. */
