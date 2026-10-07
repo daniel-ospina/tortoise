@@ -16,6 +16,7 @@ import os
 import secrets
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -877,3 +878,375 @@ def test_transient_503_conventions_agree_on_status():
     assert oauth.OAuthTemporarilyUnavailable().body() == {
         "error": "temporarily_unavailable",
         "error_description": "Temporary control-plane failure — retry."}
+
+
+# ── Control-plane round-trip envelope (#2848) ───────────────────────────────
+#
+# #3669 made the token grants loop-SAFE (the whole grant is offloaded as a unit).
+# It did not make them FAST: both grants are still a SERIES of PostgREST round
+# trips, so a control plane that is slow-but-alive MULTIPLIES into request
+# latency and can cross the OAuth budget without anything being "down".
+#
+# PINNED HERE (all MEASURED; each test asserts its exact sequence):
+#
+#   authorization_code, registry client ........ 6 round-trips  (10 s budget)
+#   authorization_code, mint ABORT ............. 10 round-trips (10 s budget)
+#   authorization_code, LOST-DELIVERY SETTLE ... 11 round-trips (10 s budget)
+#   refresh_token .............................. 9 round-trips  (30 s budget)
+#   refresh_token, mint ABORT .................. 12 round-trips (30 s budget)
+#
+# These are NOT claimed to be every series the endpoint can produce. The FAILURE
+# rows are all longer than the success rows, and longer than the naive "abort"
+# intuition: unwinding a half-minted pair costs extra round-trips, and the
+# lost-delivery path additionally pays a settle PATCH that never succeeds — so the
+# worst case on the code grant is reached exactly when the control plane is
+# already slow. Two different outcomes ride on those lengths (the mint-abort
+# answers a RETRYABLE 503; the lost-settle a terminal "re-run authorization"),
+# which is why the count and the outcome are pinned separately.
+#
+# METHOD NOTE — a shape MEASURED and deliberately NOT pinned, recorded so the
+# next lane does not re-derive it:
+#
+#   * A CIMD client's ("Claude connector") token exchange is ALSO 6. A CIMD row
+#     cannot reach /oauth/token for the first time: both doors that mint a code
+#     (GET /oauth/authorize, POST /oauth/consent) call `resolve_client`, which is
+#     what provisions the row. Measured in the production order —
+#     `validate_authorize_params` (3 round-trips) then `exchange_auth_code` (6).
+#     The 8 you get by calling `exchange_auth_code` with a hand-seeded code is an
+#     ARTIFACT of skipping that prerequisite, not a shape the token budget sees;
+#     the provisioning cost is real but is paid on the authorize/consent doors,
+#     which are not on the token budget.
+#
+# These tests pin the serial COUNT and the additivity, and deliberately assert no
+# wall-clock SLI, which would be a load-dependent flake rather than a contract.
+
+
+class _RoundTripCounter:
+    """Proxy over the fake control plane: records ``(op, table, method)`` for
+    every round-trip the seam exposes through ``query``, ``rpc`` or
+    ``rpc_value``, and can delay each one.
+
+    Answers "how many SERIAL round-trips did that request make?" — the question
+    any total-latency bound depends on. Writes the test makes straight to
+    ``cp.tables`` are deliberately not counted, so the count is the request's,
+    not the test's.
+
+    LIMIT, stated because it bounds what the assertions below can promise: only
+    those THREE entry points are intercepted. A round-trip a helper made through
+    any other attribute would be invisible to both the count and the delay. The
+    measured series is exact for the paths pinned here; a new control-plane
+    helper added to one of them must be routed through ``_trip`` (or this class
+    extended) or the guard silently stops covering it.
+    """
+
+    def __init__(self, inner, per_call_s: float = 0.0):
+        self._inner = inner
+        self.per_call_s = per_call_s
+        self.calls: list[str] = []
+
+    def _trip(self, op, fn, *a, **k):
+        table = a[0] if a and isinstance(a[0], str) else (k.get("fn") or "?")
+        method = k.get("method") or ""
+        self.calls.append(f"{op}:{table}{':' + method if method else ''}")
+        if self.per_call_s:
+            time.sleep(self.per_call_s)
+        return fn(*a, **k)
+
+    def query(self, *a, **k):
+        return self._trip("query", self._inner.query, *a, **k)
+
+    def rpc(self, *a, **k):
+        return self._trip("rpc", self._inner.rpc, *a, **k)
+
+    def rpc_value(self, *a, **k):
+        return self._trip("rpc_value", self._inner.rpc_value, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _exchange_auth_code(counter, cp, code, client_id=_CLIENT_ID):
+    """One authorization-code exchange over `counter`; asserts it succeeded."""
+    body = {"grant_type": "authorization_code", "code": code,
+            "code_verifier": _seed_code(cp, code, client_id=client_id),
+            "client_id": client_id, "redirect_uri": _REDIRECT,
+            "resource": None}
+    out = oauth.exchange_auth_code(counter, body, "https://tortoise.example")
+    assert out.get("access_token"), out
+
+
+def _assert_serial_additivity(counter, t0, elapsed):
+    """The calls are SERIAL, so the cost is additive in the per-call delay.
+
+    A LOWER bound, so it is deterministic on a loaded host: each injected call
+    sleeps at least D. If the calls were concurrent the total would be ~D, not
+    N*D, so this is also the falsifier for "they are parallel".
+    """
+    n = len(counter.calls)
+    assert elapsed >= n * 0.05, (
+        f"{n} serial round-trips at 50 ms each must cost >= {n * 0.05:.2f}s; "
+        f"took {elapsed:.3f}s — the calls are NOT serial (or not all counted)")
+    return n
+
+
+def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
+    """The authorization-code exchange makes SIX serial PostgREST round-trips
+    (MEASURED), which is what makes Anthropic's 10 s token budget a function of
+    the control plane's per-call latency rather than of our own code.
+
+    #3669 offloaded the grant as a unit, which protects the event LOOP. It does
+    not reduce latency: these calls are in SERIES, so a control plane that is
+    slow-but-alive (this issue's observation #2: 12-25 s on adjacent endpoints)
+    multiplies into the request. At ~1.7 s per round-trip, six in series is
+    already past the 10 s budget with nothing actually "down".
+
+    Measured by calling ``exchange_auth_code`` DIRECTLY rather than through the
+    endpoint, deliberately: the app shares ONE control-plane client with
+    background maintenance (the retention sweep reaches ``account_deletions``),
+    so a wall-clock delay in an endpoint-level test lets that work interleave
+    and the counter then reports calls that are not this request's (observed:
+    11 vs 6). A direct call has no event loop, so the series is exactly the
+    exchange's own.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    counter = _RoundTripCounter(cp)
+    _exchange_auth_code(counter, cp, "series-code")
+
+    # THE SERIES — each entry is one serial round-trip on the request's path.
+    assert counter.calls == [
+        "query:oauth_clients",         # _verify_client_auth
+        "query:oauth_codes:PATCH",     # the atomic claim (consume)
+        "query:organizations",         # _assert_org_usable
+        "query:oauth_refresh_tokens:POST",   # _issue_tokens (1 of 2)
+        "query:oauth_access_tokens:POST",    # _issue_tokens (2 of 2)
+        "query:oauth_codes:PATCH",     # the settle
+    ], counter.calls
+
+    counter.per_call_s = 0.05
+    counter.calls.clear()
+    t0 = time.perf_counter()
+    _exchange_auth_code(counter, cp, "series-code-2")
+    elapsed = time.perf_counter() - t0
+    assert counter.calls == [
+        "query:oauth_clients", "query:oauth_codes:PATCH", "query:organizations",
+        "query:oauth_refresh_tokens:POST", "query:oauth_access_tokens:POST",
+        "query:oauth_codes:PATCH",
+    ], counter.calls
+    _assert_serial_additivity(counter, t0, elapsed)
+
+
+def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
+    """The REFRESH grant is the LONGER series on the same endpoint — MEASURED
+    here as NINE serial round-trips — and it is the one no test pinned at all.
+
+    It is on Anthropic's 30 s budget rather than the 10 s the code grant gets,
+    which is the only reason a series this long is tolerable; at the issue's
+    observed per-call latency it is still the closer of the two to its edge.
+    Pinned so that a round-trip ADDED here (a quota or membership read, say) is
+    visible, which is the same silent-regression failure the code-grant leg
+    exists for.
+
+    The sibling access row MATTERS and is seeded deliberately: ``_issue_tokens``
+    always mints refresh+access as a pair, so any refresh token this AS issued
+    has a live sibling with ``refresh_token_id == refresh_id``. That is what makes
+    ``refresh_grant``'s ``prev_access`` lookup non-empty, which is what adds the
+    final ``oauth_access_tokens:PATCH``. Seeding the refresh row alone yields 8
+    and leaves that round-trip unpinned (verified by mutation: deleting the
+    prev-access revoke still passed at 8).
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    rid, token = _seed_refresh_token(cp, "series-rt")
+    _seed_access_token(cp, refresh_id=rid)
+    counter = _RoundTripCounter(cp)
+
+    out = oauth.refresh_grant(
+        counter, {"grant_type": "refresh_token", "refresh_token": token,
+                  "client_id": _CLIENT_ID}, "https://tortoise.example")
+    assert out.get("access_token"), out
+
+    n = len(counter.calls)
+    assert counter.calls == [
+        "query:oauth_clients",              # _verify_client_auth
+        "query:oauth_refresh_tokens",       # the presented token's row
+        "query:organizations",              # org still usable
+        "query:org_memberships",            # membership not lapsed
+        "query:oauth_access_tokens",        # the family it belongs to
+        "query:oauth_refresh_tokens:POST",  # mint the rotated refresh token
+        "query:oauth_access_tokens:POST",   # mint the new access token
+        "query:oauth_refresh_tokens:PATCH",  # revoke the presented token
+        "query:oauth_access_tokens:PATCH",  # revoke the sibling access token
+    ], counter.calls
+
+    counter.per_call_s = 0.05
+    counter.calls.clear()
+    rid2, legacy = _seed_refresh_token(cp, "series-rt-2")
+    _seed_access_token(cp, refresh_id=rid2)
+    t0 = time.perf_counter()
+    out2 = oauth.refresh_grant(
+        counter, {"grant_type": "refresh_token", "refresh_token": legacy,
+                  "client_id": _CLIENT_ID}, "https://tortoise.example")
+    elapsed = time.perf_counter() - t0
+    assert out2.get("access_token"), out2
+    assert _assert_serial_additivity(counter, t0, elapsed) == n, (
+        f"the refresh series changed between runs: {n} then {len(counter.calls)}")
+
+
+def _fail_access_token_mint(cp):
+    """Make the access-token INSERT raise: the mint-abort path.
+
+    Patches the instance rather than using ``fail_query`` deliberately — this
+    test wants the fault, not the ``_FAULT_CPS`` accounting the other tests in
+    this file are built around.
+    """
+    original = cp.query
+
+    def _q(table, **kw):
+        if table == "oauth_access_tokens" and kw.get("method") == "POST":
+            raise RuntimeError("control plane 500")
+        return original(table, **kw)
+
+    cp.query = _q
+
+
+def test_abort_path_is_longer_than_the_success_series_on_both_grants():
+    """The series that fires under a DEGRADED control plane is LONGER than the
+    success series — MEASURED as 10 for the code grant (against 6 on success) and
+    12 for refresh (against 9) — and both answer a RETRYABLE 503.
+
+    This is the opposite of the intuition the success legs invite: the abort path
+    does strictly MORE work (``_rollback_minted`` / ``_mint_observably_clean`` to
+    unwind the half-minted pair, plus ``_restore_code`` on the code grant) at
+    exactly the moment the control plane is already slow — and then tells the
+    client to retry the whole exchange. A bound sized from 6 or 9 would be a bound
+    for the healthy path only.
+
+    NOT the maximum on this grant: the LOST-DELIVERY settle path measured 11 (see
+    the file header).
+    """
+    # ── authorization_code ──
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    counter = _RoundTripCounter(cp)
+    _fail_access_token_mint(cp)
+    verifier = _seed_code(cp, "abort-code")
+
+    with pytest.raises(oauth.OAuthTemporarilyUnavailable):
+        oauth.exchange_auth_code(
+            counter, {"grant_type": "authorization_code", "code": "abort-code",
+                      "code_verifier": verifier, "client_id": _CLIENT_ID,
+                      "redirect_uri": _REDIRECT, "resource": None},
+            "https://tortoise.example")
+
+    assert counter.calls == [
+        "query:oauth_clients",               # _verify_client_auth
+        "query:oauth_codes:PATCH",           # the atomic claim
+        "query:organizations",               # _assert_org_usable
+        "query:oauth_refresh_tokens:POST",   # mint 1 of 2 ...
+        "query:oauth_access_tokens:POST",    # ... mint 2 of 2 FAILS
+        "query:oauth_refresh_tokens:PATCH",  # rollback: revoke the minted refresh
+        "query:oauth_access_tokens:PATCH",   # rollback: revoke any access row
+        "query:oauth_refresh_tokens",        # rollback: re-read to confirm
+        "query:oauth_access_tokens",         # rollback: re-read to confirm
+        "query:oauth_codes:PATCH",           # _restore_code (a retry can work)
+    ], counter.calls
+
+    # ── refresh_token ──
+    cp2 = FakeControlPlane()
+    _seed_base_tables(cp2)
+    rid, token = _seed_refresh_token(cp2, "abort-rt")
+    _seed_access_token(cp2, refresh_id=rid)
+    counter2 = _RoundTripCounter(cp2)
+    _fail_access_token_mint(cp2)
+
+    with pytest.raises(oauth.OAuthTemporarilyUnavailable):
+        oauth.refresh_grant(
+            counter2, {"grant_type": "refresh_token", "refresh_token": token,
+                       "client_id": _CLIENT_ID}, "https://tortoise.example")
+
+    assert counter2.calls == [
+        "query:oauth_clients",
+        "query:oauth_refresh_tokens",
+        "query:organizations",
+        "query:org_memberships",
+        "query:oauth_access_tokens",
+        "query:oauth_refresh_tokens:POST",
+        "query:oauth_access_tokens:POST",    # FAILS
+        "query:oauth_refresh_tokens:PATCH",
+        "query:oauth_access_tokens:PATCH",
+        "query:oauth_refresh_tokens",
+        "query:oauth_access_tokens",
+        "query:oauth_refresh_tokens",
+    ], counter2.calls
+
+    assert len(counter.calls) == 10 and len(counter2.calls) == 12, (
+        f"the abort series changed shape: {len(counter.calls)} / {len(counter2.calls)}")
+
+
+def test_lost_settle_makes_the_longest_code_grant_series(monkeypatch):
+    """The code grant's LONGEST series — MEASURED as 11 — is the LOST-DELIVERY
+    SETTLE, and it is longer than the pinned mint-abort series because it pays the
+    settle PATCH that the abort path never reaches.
+
+    When ``_issue_tokens`` SUCCEEDS but ``_settle_redemption`` loses its CAS
+    (#3027's reconciler race — a concurrent attempt taking the claim), the request
+    has already minted the pair, so it must roll the pair back AND still record the
+    outcome: 6 round-trips INCLUDING the lost settle, then 4 to compensate the
+    pair, then 1 ``_restore_code`` to leave a retry possible. This is the shape the
+    degraded control plane produces, not a contrived race: the claim grace is 60 s,
+    and at the per-call latency #2848 observed (12-25 s) six serial calls already
+    exceed it, so losing the settle is the EXPECTED outcome.
+
+    The OUTCOME is pinned, not just the count, and the assertion is written to
+    distinguish the two: ``OAuthTemporarilyUnavailable`` SUBCLASSES ``OAuthError``
+    (``oauth.py``), so ``pytest.raises(OAuthError)`` alone would also accept the
+    retryable 503. This path is TERMINAL — the client is told to re-run
+    authorization rather than retry — which is the difference between a connector
+    re-authorizing and a connector stampeding a degraded control plane.
+
+    The loss is forced by running the REAL settle (so its PATCH is counted, which
+    is the whole point) and then reporting the CAS as lost.
+    """
+    cp = FakeControlPlane()
+    _seed_base_tables(cp)
+    real_settle = oauth._settle_redemption
+    counter = _RoundTripCounter(cp)
+
+    def _losing_settle(inner, *a, **k):
+        real_settle(inner, *a, **k)
+        return False
+
+    monkeypatch.setattr(oauth, "_settle_redemption", _losing_settle)
+
+    with pytest.raises(oauth.OAuthError) as ei:
+        oauth.exchange_auth_code(
+            counter, {"grant_type": "authorization_code", "code": "lost-code",
+                      "code_verifier": _seed_code(cp, "lost-code"),
+                      "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT,
+                      "resource": None},
+            "https://tortoise.example")
+
+    # The count is not the whole contract: OAuthTemporarilyUnavailable SUBCLASSES
+    # OAuthError, so ``raises(OAuthError)`` would also pass on the retryable 503.
+    # Assert the TERMINAL outcome explicitly, or a regression that made this path
+    # retryable — inviting a stampede on an already-degraded control plane — would
+    # keep the suite green.
+    assert not isinstance(ei.value, oauth.OAuthTemporarilyUnavailable), (
+        f"the lost-settle path must be terminal, not retryable; got {type(ei.value).__name__}")
+
+    assert counter.calls == [
+        "query:oauth_clients",               # _verify_client_auth
+        "query:oauth_codes:PATCH",           # the atomic claim
+        "query:organizations",               # _assert_org_usable
+        "query:oauth_refresh_tokens:POST",   # mint 1 of 2
+        "query:oauth_access_tokens:POST",    # mint 2 of 2
+        "query:oauth_codes:PATCH",           # the settle — LOST, and paid anyway
+        "query:oauth_refresh_tokens:PATCH",  # compensate the pair
+        "query:oauth_access_tokens:PATCH",
+        "query:oauth_refresh_tokens",        # observe the compensation
+        "query:oauth_access_tokens",
+        "query:oauth_codes:PATCH",           # _restore_code
+    ], counter.calls
+    assert len(counter.calls) == 11, (
+        f"the lost-settle series changed shape: {len(counter.calls)}")
