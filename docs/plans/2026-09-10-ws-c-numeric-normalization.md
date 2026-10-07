@@ -226,8 +226,9 @@ requirement. It departs from §4's blanket exclusion, so taking it later require
 and a marked `OVERRIDES:` line naming the misparse mode it reintroduces. *(The **other** route to
 detection — a separate deterministic numeric-fidelity check — was scoped and refused on **measurement**,
 not preference: it would have been a third copy of value-identity logic against the recorded decision at
-`docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28`, and it was blind in its own target case
-(`_resolve_source_turn` fails exactly when the number was rewritten). Detection's home is the span
+`docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28`, and it was blind in its own target case —
+the quote-match rate that locates the source drops 80% → 50% on rewritten numbers (the
+`_resolve_source_turn` anti-correlation recorded on #2684). Detection's home is the span
 carried by #2684 — not this design.)*
 
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
@@ -269,7 +270,7 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 
 | ID | Question | Recommendation | Consequence if different |
 | --- | --- | --- | --- |
-| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and **not** on the HTTP `Point` model (`tortoise/commit_schema.py:500`) — ⚠️ **v3 (2026-10-07):** that half is foreclosed by the owner's Option (a) decision, because `Point` is `extra="forbid"`, so declaring the field there is exactly what makes a client-supplied amount *accepted* (the half OD5 closes). See §7.1 S3 and §7.2 step 2. | A parallel declaration drifts from the write path — the field still replays via the open-set passthrough, but the drift warning fires on every rebuild. Declaring it on `Point` **widens** the contract instead: the closed model would begin accepting a client-supplied amount, which is the half OD5 closes. |
+| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and **not** on the HTTP `Point` model (`tortoise/commit_schema.py:500`) — ⚠️ **v3 (2026-10-07):** that half is foreclosed by the owner's Option (a) decision, because `Point` is `extra="forbid"`, so declaring the field there would be the one place a client could newly submit it. (OD5 closes the *cross-check*, not client acceptance — §3/OD5.) See §7.1 S3 and §7.2 step 2. | A parallel declaration drifts from the write path — the field still replays via the open-set passthrough, but the drift warning fires on every rebuild. Declaring it on `Point` **widens** the contract instead: the closed model would begin accepting a client-supplied amount — the one place a client could newly submit it. (OD5 closes the *cross-check*, not client acceptance — §3/OD5.) |
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
@@ -281,6 +282,9 @@ value is the same comparison §2.3's circular argument needed, and Option (a) re
 separator rule it depends on. There is no client-supplied amount to adjudicate, so **no cross-check is
 performed**. `create_entity` therefore carries a **derived,
 server-written** field, and the derivation — not any client-supplied prop — is the value's source.
+Because the MCP and SDK boundaries filter by **deny-list** and let unknown keys through (§7.1 S1/S2),
+this is a **declaration**: the value field's key is declared **server-managed**, which is what makes a
+client-supplied spelling rejected rather than written. Declaring a key server-managed widens no contract.
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -445,9 +449,9 @@ compares nothing against the source turn. Detection is #2684's property and is n
 
 ## 9. Sources
 
-**Internal (repo files; line references checked against the base tree at `d531debae` — origin/main, the
-diff base. This doc-only commit changes no code, so they hold at `64aee5537` too. The two
-`~/.swarm/research/…` entries below are machine-local, outside this repo and not at that head):**
+**Internal (repo files; `file:line` references were checked against the tree as it stood when this
+revision was written — a docs-only change moves no code, so they hold until a code change touches those
+files. The two `~/.swarm/research/…` entries below are machine-local, outside this repo):**
 
 - `docs/ONTOLOGY.md` §11 (v3.2, #398) — derived-value cache doctrine (`Derived values may be CACHED, never
   authoritative … the derivation is the truth, the cache is a performance artifact`, `:1515`); §4.1
