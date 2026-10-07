@@ -212,34 +212,44 @@ LINTER_CONFIG_NAMES = frozenset({
     "lychee.toml",
 })
 
-# A markdownlint config must be SELF-CONTAINED for its content digest to mean
-# anything: the digest pins the config FILE's bytes, so a config that loads its
-# rules from somewhere else is a route the map cannot see. Two measured forms:
+# A linter config must be SELF-CONTAINED for its content digest to mean anything:
+# the digest pins the config FILE's bytes, so a config that DELEGATES its policy
+# leaves a route the map cannot see. Measured with
+# `"config": {"extends": "./lintcfg/relaxed.json"}` — editing only
+# `relaxed.json` to `{"MD001": false}` left `_config_digest` byte-identical while
+# cli2 reported `0 issues`: a rule was off and the guard was silent.
 #
-#   * `"config": {"extends": "./lintcfg/relaxed.json"}` — the map moves when the
-#     reference is ADDED, but a LATER change that edits only `relaxed.json` to
-#     `{"MD001": false}` leaves the map byte-identical, and cli2 then reports
-#     `0 issues`: a rule is off and the guard is silent.
-#   * a PROGRAMMATIC config (`.cjs`/`.mjs`) — the file EXECUTES, so it can load a
-#     module the map does not track; its bytes do not describe its policy.
+# The keys that load policy from OUTSIDE the file are enumerated, not guessed.
+# `extends`/`customRules` come from markdownlint's own config schema;
+# `markdownItPlugins`/`modulePaths`/`outputFormatters` are the module-loading
+# keys of cli2's options object, read from `markdownlint-cli2@0.23.3`'s
+# `constants.mjs` (`cli2SchemaKeys`: config, customRules, fix, frontMatter,
+# gitignore, globs, ignores, markdownItPlugins, modulePaths, noBanner,
+# noInlineConfig, noProgress, outputFormatters, overrides, showFound). A future
+# cli2 key that loads a module would need adding here; the programmatic-config
+# refusal below is the backstop that does not depend on this list staying fresh.
 #
-# The indirection is REFUSED rather than followed: an `extends` may name a
-# PACKAGE (`markdownlint/style/prettier`), not only a repo path, so following it
-# would mean resolving npm's module graph inside the differ. The check is
-# fail-closed, and its one false positive is deliberate and fails loud — a
-# declarative config that merely MENTIONS the key inside a block comment is
-# refused, and the remedy is to reword the comment.
-_POLICY_INDIRECTION = re.compile(
-    r'"(?P<quoted>extends|customRules)"\s*:'  # JSON/JSONC: the quoted key
-    r"|^\s*(?P<bare>extends|customRules)\s*:",  # YAML: the bare key at line start
-    re.M,
-)
+# The keys are read from the PARSED config, never from a text pattern: a pattern
+# is evaded by a spelling the parser still honours — measured, a JSONC
+# `\u0065xtends` escape and a YAML flow mapping (`config: {extends: …}`) each
+# turned MD001 off while a `"extends"` search found nothing. An unparseable config
+# fails closed.
+_POLICY_LOADING_KEYS = frozenset({
+    "extends",
+    "customRules",
+    "markdownItPlugins",
+    "modulePaths",
+    "outputFormatters",
+})
 _PROGRAMMATIC_CONFIG_NAMES = frozenset({
     ".markdownlint-cli2.cjs",
     ".markdownlint-cli2.mjs",
     ".markdownlint.cjs",
     ".markdownlint.mjs",
 })
+# Neither is a config OBJECT — they are newline lists of paths — so nothing in
+# them can delegate policy.
+_PLAIN_LIST_CONFIG_NAMES = frozenset({".markdownlintignore", ".lycheeignore"})
 
 # lychee 0.24.2 does NOT take its policy from `lychee.toml` alone: it also
 # auto-loads a section out of `Cargo.toml` (`[package.metadata.lychee]`),
@@ -497,34 +507,164 @@ def _lychee_section_digest(path: Path, rel: str) -> str:
     ).hexdigest()
 
 
+def _strip_jsonc(text: str) -> str:
+    r"""JSONC -> JSON: drop `//` and `/* */` comments and trailing commas.
+
+    cli2 reads a `.jsonc` options file with comments (`parsers/jsonc-parse.mjs`),
+    so `json.loads` over the raw bytes would refuse the repo's own
+    `.markdownlint-cli2.jsonc`. The scan is string-aware, because a `//` inside a
+    quoted value is data, not a comment; an escape is copied verbatim so a
+    `\uXXXX` key survives to be decoded by `json.loads`.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    in_string = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "/":
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "*":
+            index += 2
+            while index + 1 < length and not (
+                text[index] == "*" and text[index + 1] == "/"
+            ):
+                index += 1
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return _drop_trailing_commas("".join(out))
+
+
+def _drop_trailing_commas(text: str) -> str:
+    """JSONC allows a comma before a closing brace or bracket; JSON does not.
+
+    Done in its own string-aware pass rather than with a regex over the whole
+    document: a VALUE may legitimately contain `,}` or `,]` (a rule option string,
+    say), and a blanket substitution would rewrite inside it.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    in_string = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == ",":
+            look = index + 1
+            while look < length and text[look] in " \t\r\n":
+                look += 1
+            if look < length and text[look] in "}]":
+                index += 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _load_config_object(path: Path, rel: str) -> object:
+    """Parse a linter config so its KEYS can be inspected instead of its text.
+
+    The parser follows the extension, matching what the linter itself reads: cli2
+    discovers `.jsonc`/`.yaml`/`.cjs`/`.mjs` options files and
+    `.jsonc`/`.json`/`.yaml`/`.yml`/`.cjs`/`.mjs` config files. A config that
+    cannot be parsed fails closed — a policy that cannot be read cannot be
+    attested.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FailClosed(f"cannot read {rel} to attest the linter policy: {exc}") from exc
+    try:
+        if path.suffix in (".yaml", ".yml"):
+            import yaml
+
+            return yaml.safe_load(text)
+        if path.suffix == ".toml":
+            return tomllib.loads(text)
+        return json.loads(_strip_jsonc(text))
+    except Exception as exc:
+        raise FailClosed(
+            f"cannot parse {rel} to attest the linter policy "
+            f"({type(exc).__name__}: {exc}) — failing closed"
+        ) from exc
+
+
+def _delegated_policy_key(node: object) -> str | None:
+    """The first key in a parsed config that loads policy from OUTSIDE the file."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and key in _POLICY_LOADING_KEYS:
+                return key
+            found = _delegated_policy_key(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _delegated_policy_key(item)
+            if found is not None:
+                return found
+    return None
+
+
 def _require_self_contained_config(path: Path, rel: str) -> None:
-    """Refuse a markdownlint config whose policy the digest cannot attest.
+    """Refuse a linter config whose policy the digest cannot attest.
 
     A content digest only pins what it READS: a config that pulls its rules from
-    another file (`extends`, `customRules`) or executes code (a `.cjs`/`.mjs`
-    config that can load an untracked module) leaves a route where editing THAT
-    file turns a rule off without moving the snapshot — so `check` reports `0 new`
-    on a genuinely suppressed finding. See `_POLICY_INDIRECTION` for the
-    measurement. Fail closed rather than follow the reference: it may name an npm
-    package, not a repo path.
+    another file or an npm package leaves a route where editing THAT file turns a
+    rule off without moving the snapshot — so `check` reports `0 new` on a
+    genuinely suppressed finding. See `_POLICY_LOADING_KEYS` for the measurement
+    and the enumeration. Fail closed rather than follow the reference: an
+    `extends` may name a package, not a repo path, so resolving it would mean
+    reimplementing cli2's module graph inside the differ.
     """
     if path.name in _PROGRAMMATIC_CONFIG_NAMES:
         raise FailClosed(
-            f"{rel} is a PROGRAMMATIC markdownlint config — it executes and can load "
-            "rules from a module this snapshot does not track, so the linter policy "
-            "cannot be attested. Inline the policy in a declarative config."
+            f"{rel} is a PROGRAMMATIC linter config — it executes and can load rules "
+            "from a module this snapshot does not track, so the linter policy cannot "
+            "be attested. Inline the policy in a declarative config."
         )
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise FailClosed(f"cannot read {rel} to attest the linter policy: {exc}") from exc
-    match = _POLICY_INDIRECTION.search(text)
-    if match is not None:
-        key = match.group("quoted") or match.group("bare")
+    if path.name in _PLAIN_LIST_CONFIG_NAMES:
+        return
+    key = _delegated_policy_key(_load_config_object(path, rel))
+    if key is not None:
         raise FailClosed(
-            f"{rel} declares `{key}`, so it loads linter policy from a file this "
-            "snapshot does not track — editing THAT file would turn a rule off with "
-            "the snapshot unmoved. Inline the policy in this file."
+            f"{rel} declares `{key}`, so it loads lint policy from outside this file (a "
+            "path or an npm package) — the snapshot digests the config's bytes, so a "
+            "rule switched off in what it loads would move the snapshot not at all. "
+            "Inline the policy in this file."
         )
 
 

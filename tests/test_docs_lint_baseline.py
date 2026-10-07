@@ -954,10 +954,16 @@ def test_policy_digest_refuses_a_config_that_loads_policy_elsewhere(tmp_path: Pa
     `"config": {"extends": "./lintcfg/relaxed.json"}`, editing ONLY
     `relaxed.json` to `{"MD001": false}` left `_config_digest` byte-identical
     while cli2 reported `0 issues` — a rule turned off with the guard silent, in
-    a LATER change than the one that added the reference. A programmatic
-    `.cjs`/`.mjs` config is the same hole one level down (it executes, so it can
-    load an untracked module), so both are refused rather than followed: an
-    `extends` may name a package, not only a repo path.
+    a LATER change than the one that added the reference.
+
+    The keys are read from the PARSED config, because a text pattern is evaded by
+    a spelling the parser still honours: a JSONC backslash-u escape and a YAML
+    flow mapping each turn the rule off while an `extends` search finds nothing.
+    A programmatic `.cjs`/`.mjs` config is the same hole one level down — it
+    executes, so it can load an untracked module — and the keys that load a
+    module are cli2's own (`markdownItPlugins`/`modulePaths`/`outputFormatters`)
+    as well as markdownlint's (`extends`/`customRules`). All of them are refused
+    rather than followed: an `extends` may name a package, not only a repo path.
     """
     repo = tmp_path / "repo"
     (repo / "lintcfg").mkdir(parents=True)
@@ -968,35 +974,58 @@ def test_policy_digest_refuses_a_config_that_loads_policy_elsewhere(tmp_path: Pa
     git("init", "-q")
     git("config", "user.email", "t@example.invalid")
     git("config", "user.name", "t")
-    # A self-contained declarative config is accepted.
+    # A self-contained JSONC config — comments and all — is accepted whole.
     config = repo / ".markdownlint-cli2.jsonc"
-    config.write_text('{"config": {"MD013": false}}\n', encoding="utf-8")
+    config.write_text(
+        '{\n  // MD013 is off for prose documents\n  "config": {"MD013": false}\n}\n',
+        encoding="utf-8",
+    )
     git("add", "-A")
     git("commit", "-qm", "base")
     assert set(dlb._config_digest(repo)) == {".markdownlint-cli2.jsonc"}
 
-    # ...but one that DELEGATES its rules does not.
-    config.write_text(
-        '{"config": {"extends": "./lintcfg/relaxed.json"}}\n', encoding="utf-8"
+    # Every form that DELEGATES its policy is refused, including the two spelled
+    # so that a regex over the config's text would find nothing.
+    backslash = chr(92)
+    delegating = (
+        '{"config": {"extends": "./lintcfg/relaxed.json"}}\n',
+        '{"customRules": ["./rules/extra.mjs"]}\n',
+        '{"markdownItPlugins": [["./plugins/x.mjs", {}]]}\n',
+        '{"modulePaths": ["./rules/"]}\n',
+        '{"outputFormatters": [["./fmt.mjs", {}]]}\n',
+        '{"config": {"' + backslash + 'u0065xtends": "./lintcfg/relaxed.json"}}\n',
     )
-    git("commit", "-qam", "extends")
-    with pytest.raises(dlb.FailClosed, match="extends"):
-        dlb._config_digest(repo)
+    for body in delegating:
+        config.write_text(body, encoding="utf-8")
+        git("commit", "-qam", "delegates")
+        with pytest.raises(dlb.FailClosed):
+            dlb._config_digest(repo)
 
-    # `customRules` is the same indirection, in the same single-line shape.
-    config.write_text('{"customRules": ["./rules/extra.mjs"]}\n', encoding="utf-8")
-    git("commit", "-qam", "customRules")
-    with pytest.raises(dlb.FailClosed, match="customRules"):
+    # ...and so is the same delegation spelled as YAML.
+    config.unlink()
+    yaml_config = repo / ".markdownlint-cli2.yaml"
+    yaml_config.write_text("config: {extends: ./lintcfg/relaxed.json}\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "yaml flow")
+    with pytest.raises(dlb.FailClosed):
         dlb._config_digest(repo)
 
     # A programmatic config EXECUTES, so its bytes do not describe its policy.
-    config.unlink()
+    yaml_config.unlink()
     (repo / ".markdownlint-cli2.cjs").write_text(
         "module.exports = require('./lintcfg/relaxed.json');\n", encoding="utf-8"
     )
     git("add", "-A")
     git("commit", "-qm", "programmatic")
-    with pytest.raises(dlb.FailClosed, match="PROGRAMMATIC"):
+    with pytest.raises(dlb.FailClosed):
+        dlb._config_digest(repo)
+
+    # A config that cannot be parsed cannot be attested either — fail closed.
+    (repo / ".markdownlint-cli2.cjs").unlink()
+    (repo / ".markdownlint-cli2.jsonc").write_text('{"config": ', encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "unparseable")
+    with pytest.raises(dlb.FailClosed):
         dlb._config_digest(repo)
 
 

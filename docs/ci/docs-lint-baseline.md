@@ -139,8 +139,12 @@ without moving this snapshot, and the map's digest is pinned by
 `tests/test_docs_lint_baseline.py`, so the edit is always visible in the diff and
 must be made out loud, with the reason. A config that does not **hold** its own
 policy is refused rather than followed: `extends` and `customRules` name a second
-file, and a `.cjs`/`.mjs` config executes, so a rule switched off in what they
-load would move this snapshot not at all. Separately, both `docs` paths reject a
+file, cli2's `markdownItPlugins`/`modulePaths`/`outputFormatters` load a module,
+and a `.cjs`/`.mjs` config executes — so a rule switched off in what they load
+would move this snapshot not at all. The keys are read from the **parsed** config,
+not scanned as text: a text pattern is evaded by a spelling the parser still
+honours (a JSONC `\u` escape, a YAML flow mapping), and a config that cannot be
+parsed fails closed. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
 debt and is unaffected; that guard greps the added-markdown diff read from a
@@ -150,14 +154,14 @@ skipping the guard on a large diff. It matches **case-insensitively**, because
 cli2's own directive parser does (an uppercase `MARKDOWNLINT-DISABLE` comment
 suppresses a finding just as the lowercase form does), and it runs with rename
 detection on, so a pure `git mv` of a file that already carries a directive is
-not mistaken for an added one. It is a **heuristic over added lines**, and it has
-exactly one false positive, which is deliberate and fails loud: a directive
-written inside a code FENCE is not honoured by cli2 — the finding it names still
-reports — but the added line still matches the pattern (measured: a directive
-inside a fence left the named finding in place, while the same directive in a
-backtick span removed it). The remedy is to reword the example; the check is a
-required gate, so failing a demonstration that hides nothing is the safe
-direction.
+not mistaken for an added one. It is a **heuristic over added lines**, and it
+fails loud rather than quiet. It matches the added line even when the directive
+sits inside a code FENCE, and that is NOT a false positive: cli2 honours a fenced
+directive too (measured: a `markdownlint-disable MD001` comment inside a fenced
+`markdown` block suppressed MD001 exactly as the bare form did), so a fenced
+example hides a finding just as a bare one does. The remedy for a documentation
+example is to reword it, and the check is a required gate: rejecting a
+demonstration that suppresses a finding is the direction that cannot hide one.
 
 ## Regenerating it
 
