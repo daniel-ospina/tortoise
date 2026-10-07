@@ -30428,10 +30428,18 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
         else:
             # No path (unusual) — bind the existing db handle to the graph.
             from tortoise.projection import _GuardedGraph
-            dump_proj = type("_DumpProj", (), {
-                "g": _GuardedGraph(proj.db.select_graph(graph_name), proj),
-                "graph_name": graph_name,
-            })()
+            # #7626: the wrapper's back-reference must describe the graph THIS handle
+            # is bound to (`graph_name`), not the SDK's default projection. The
+            # wrapper now re-resolves its handle from that back-reference when the
+            # engine reports the graph was replaced, so passing the SDK's `proj`
+            # would silently repoint a backup dump at the wrong graph. `db` is the
+            # same client, so the re-resolution lands on `graph_name`.
+            _dump = type("_DumpProj", (), {})()
+            _dump.db = proj.db
+            _dump.graph_name = graph_name
+            _dump._graph_name = graph_name
+            _dump.g = _GuardedGraph(proj.db.select_graph(graph_name), _dump)
+            dump_proj = _dump
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
             create_backup, dump_proj, cp_source, storage,

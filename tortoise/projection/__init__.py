@@ -2013,6 +2013,52 @@ class _GuardedGraph:
         self._g = g
         self._proj = projection
 
+    def rebind(self) -> None:
+        """Re-resolve the inner graph handle **in place** (#7626).
+
+        Every caller reaches the wire through THIS object — ``proj.g.query(...)``
+        reads ``proj.g`` at each use, and this wrapper is shared by reference — so
+        swapping ``_g`` here repairs all of them at once, with no caller needing to
+        know a rebuild happened.
+
+        The alternative was to clear the SDK's cached projection
+        (``self._proj = None``), which is what #7405's write-retry did. That
+        DESTROYS object identity: every caller holding the old projection, or the
+        old wrapper, keeps a dead handle, and the only repair is a re-bind at each
+        such call site — a class four successive static-scan methods kept finding
+        new instances of (10 live, ~45 latent; see #7626). Repointing in place has
+        no such class, because there is nothing to re-bind.
+        """
+        self._g = self._proj.db.select_graph(self._proj._graph_name)
+
+    def _heal_invalidated_handle(self, exc: BaseException) -> None:
+        """Re-resolve the handle in place if the engine invalidated it (#7626).
+
+        Called from the except arm of every query verb, immediately before the
+        original exception is re-raised. **Never raises**: a failure to re-resolve
+        must not MASK the caller's real error — callers bucket on `type`
+        (`_classify_db_failure`), so letting an AttributeError from a bare/mock
+        projection escape would convert a classified DB error into an unclassified
+        one on the hot path every `proj.g.query` goes through. A failed heal is
+        reported and the original error still propagates.
+        """
+        from tortoise.retry import graph_replaced
+
+        if not graph_replaced(exc):
+            return
+        try:
+            self.rebind()
+        except Exception:
+            # Deliberately swallowed: the caller's exception is the one that must
+            # reach them, and the next query will simply try to heal again.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "could not re-resolve the graph handle after it was invalidated; "
+                "the handle stays dead for this projection",
+                exc_info=True,
+            )
+
     def query(self, cypher: str, params=None, timeout=None):
         # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
         # answers `=~` with an EMPTY result set, so this is the one decision
@@ -2034,7 +2080,19 @@ class _GuardedGraph:
         # dead socket is still an op the capture generated). No-op (one
         # ContextVar read) when no capture is active.
         record_graph_op(cypher)
-        return self._g.query(cypher, params=params, timeout=timeout)
+        try:
+            return self._g.query(cypher, params=params, timeout=timeout)
+        except Exception as exc:
+            # #7626: if the engine invalidated this handle, re-resolve it IN PLACE
+            # before the exception leaves this frame, so every subsequent use — by
+            # this caller, by any other holder of this projection, and by any holder
+            # of this wrapper — reaches the new graph. Then RE-RAISE instead of
+            # retrying: this funnel cannot know whether the statement is idempotent,
+            # and a bare CREATE re-issued on an unknown outcome mints a duplicate
+            # point (the #7405 round-1 P1). Whether to retry is the caller's call,
+            # because that is where the idempotency knowledge lives.
+            self._heal_invalidated_handle(exc)
+            raise
 
     def ro_query(self, cypher: str, params=None, timeout=None):
         # Same refusal for the read-only verb: the raw handle this wrapper
@@ -2042,28 +2100,47 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.ro_query(cypher, params=params, timeout=timeout)
+        try:
+            return self._g.ro_query(cypher, params=params, timeout=timeout)
+        except Exception as exc:
+            # #7626: the handle is dead for READS too — heal it here so the
+            # asymmetry the issue reports (reads work, writes are refused) cannot
+            # leave a dead read handle behind either.
+            self._heal_invalidated_handle(exc)
+            raise
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g._query(
-            cypher, params=params, timeout=timeout, read_only=read_only
-        )
+        try:
+            return self._g._query(
+                cypher, params=params, timeout=timeout, read_only=read_only
+            )
+        except Exception as exc:
+            self._heal_invalidated_handle(exc)
+            raise
 
     def profile(self, cypher: str, params=None):
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.profile(cypher, params=params)
+        try:
+            return self._g.profile(cypher, params=params)
+        except Exception as exc:
+            self._heal_invalidated_handle(exc)
+            raise
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
-        return self._g.explain(cypher, params=params)
+        try:
+            return self._g.explain(cypher, params=params)
+        except Exception as exc:
+            self._heal_invalidated_handle(exc)
+            raise
 
     def execute_command(self, *args, **kwargs):
         # #3595 (review round 2, P2): the raw Redis command channel carries
@@ -2071,7 +2148,11 @@ class _GuardedGraph:
         # beneath `self._g` already intercept it — but keep the wrapper's own
         # refusal complete rather than depending on the inner handle's class.
         _guard_execute_command(args)
-        return self._g.execute_command(*args, **kwargs)
+        try:
+            return self._g.execute_command(*args, **kwargs)
+        except Exception as exc:
+            self._heal_invalidated_handle(exc)
+            raise
 
     def __getattr__(self, name):
         return getattr(self._g, name)
@@ -3714,6 +3795,16 @@ class FalkorProjection(
     explicit per-call `confirm_destructive=True` (#2944) and is refused on a
     non-disposable server graph.
     """
+
+    def rebind_graph(self) -> None:
+        """Re-resolve this projection's graph handle **in place** (#7626).
+
+        Preserves the wrapper object, so a caller that captured the projection OR
+        its ``g`` keeps a valid handle across a graph rebuild. Callers replacing a
+        rebuild-invalidated handle should use this rather than dropping and
+        re-creating the projection, which would strand every other holder.
+        """
+        self.g.rebind()
 
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,

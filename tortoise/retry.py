@@ -43,6 +43,29 @@ _NETWORK_ERRNOS = frozenset({
 #: pressure IS the retry; unrelated ResponseErrors (WRONGTYPE, ...) are not.
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 
+# #7626: FalkorDB answers a query issued through a handle whose graph was deleted
+# or replaced with this ResponseError. The handle is then dead for EVERY use — not
+# just the query that tripped it — so the response means "this handle is
+# invalidated", not merely "this query failed". Kept beside `_MISCONF_RE` so the
+# two vendor error shapes live in one place rather than being re-spelled per call
+# site.
+_GRAPH_REPLACED_RE = re.compile(r"graph was deleted or replaced", re.IGNORECASE)
+
+
+def graph_replaced(exc: BaseException) -> bool:
+    """True when the engine reports the graph handle was invalidated (#7626).
+
+    Deliberately distinct from :func:`retryable_transient`, which answers "may I
+    re-issue this?" — a question only the caller can answer, because it depends on
+    whether the statement is idempotent. This predicate answers the narrower and
+    universally safe question "is the handle I just used now dead?", which is
+    always true here, and is the condition under which a handle must be re-resolved
+    before any further use.
+    """
+    from redis.exceptions import ResponseError
+
+    return isinstance(exc, ResponseError) and bool(_GRAPH_REPLACED_RE.search(str(exc)))
+
 
 class WriteStageRetriesExhausted(Exception):
     """Write-stage retry sentinel (R1, #1786/#1806).
