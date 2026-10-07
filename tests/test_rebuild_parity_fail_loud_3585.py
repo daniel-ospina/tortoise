@@ -39,6 +39,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise.backup import restore
 from tortoise.consistency import check_consistency, recover_from_log
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
@@ -817,3 +818,270 @@ class TestReReviewRoundThree:
         # and does not apply a write that precedes its Point — a pre-existing,
         # separate limit); what must NOT happen is a fail-LOUD verdict on it.
         assert r["divergence"] != "non-folded", r["divergence"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle-3 — the FINAL-STATE resolution of a held ObjectSuperseded
+# (#5285 re-review). Rounds 1-2 fixed the supersede fold event-by-event and
+# each fix opened a new asymmetry; the root cause was that `pending` (a
+# forward-referenced supersede) was resolved against the entity index ONLY at
+# creation events, never against the journal's final state. These tests pin
+# the two headlines the earlier rounds left UNPINNED — reverting FIX 1 (the
+# carrier predicate) or FIX 2 (final-state resolution) now reddens the suite.
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCycleThreeFinalStateResolution:
+    def test_second_name_only_supersede_of_a_terminal_name_folds(
+            self, env, tmp_path):
+        """P1 — FIX 1. FAILS IF: the carrier lookup gates EXISTENCE on
+        `status != "superseded"`.
+
+        The graph fold matches a name-only supersede on NAME and re-folds
+        UNCONDITIONALLY (`_fold_object_superseded`, `cas=False`), so a SECOND
+        supersede of a once-superseded name folds one row there. Filtering the
+        terminal carrier out made the reference fold see ZERO carriers, hold
+        the event `pending`, and flush it as `object-superseded-miss` — a
+        false refusal (`divergence="non-folded"`) of a journal all three
+        replay engines accept and fold to `superseded`.
+        REACHABLE: a stray/replayed second supersede of a name the SDK has
+        already superseded (the writers emit one, an append/merge can carry
+        two)."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-a", name="TERM",
+             status="live", event_id="e-a0")
+        _raw(events, type="ObjectSuperseded", name="TERM",
+             supersedes_by="s1", event_id="e-a1")
+        _raw(events, type="ObjectSuperseded", name="TERM",
+             supersedes_by="s2", event_id="e-a2")
+        expected = [("obj-5285-a", "TERM", "superseded")]
+        for engine in ENGINES:
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            try:
+                assert _objects(proj) == expected, f"{engine}: {_objects(proj)}"
+            finally:
+                proj.close()
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3a"))
+        try:
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+
+    def test_rename_materialized_forward_reference_resolves(
+            self, env, tmp_path):
+        """P1 — FIX 2. FAILS IF: a held supersede is resolved only at a
+        CREATION event.
+
+        A forward-referenced supersede-by-name whose target name is
+        materialized by an `op=rename` (not a creation) stays `pending`
+        forever, is flushed as `object-superseded-miss`, and reports the exact
+        cycle-2 bogus status divergence (`{field:'status', expected:'live',
+        found:'superseded'}`) against the graph `rebuild_all` folds correctly.
+        REACHABLE: a merged/partial journal where the supersede by the NEW
+        name precedes the Object, and a rename supplies that name."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-w", name="WITNESS",
+             status="live", event_id="e-c0")
+        _raw(events, type="ObjectSuperseded", name="NEWNAME",
+             supersedes_by="WITNESS", event_id="e-c1")
+        _raw(events, type="ObjectRegistered", id="obj-5285-x", name="OLDNAME",
+             status="live", event_id="e-c2")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-x",
+             op="rename", state={"name": "NEWNAME"}, event_id="e-c3")
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3c"))
+        try:
+            assert ("obj-5285-x", "NEWNAME", "superseded") in _objects(proj), \
+                _objects(proj)
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+
+    def test_plain_forward_referenced_supersede_by_id_is_not_refused(
+            self, env, tmp_path):
+        """P2 — FIX 5(iii), id shape: the forward-reference GUARD.
+
+        FAILS IF a fix for FIX 2 over-corrects and treats EVERY
+        forward-referenced supersede as a miss: `rebuild_all`'s trailing
+        sweep folds it, so refusing it here reds a journal the graph folds.
+        REACHABLE: `[Sup(id=x), Reg(x,XOBJ)]` — the supersede precedes its own
+        Object's registration."""
+        _sdk, events = env
+        _raw(events, type="ObjectSuperseded", id="obj-5285-fid",
+             supersedes_by="y", event_id="e-fid")
+        _raw(events, type="ObjectRegistered", id="obj-5285-fid",
+             name="FID", status="live", event_id="e-fid-reg")
+        for engine in ENGINES:
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            try:
+                assert any(o[0] == "obj-5285-fid" for o in _objects(proj)), \
+                    f"{engine}: {_objects(proj)}"
+            finally:
+                proj.close()
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3fid"))
+        try:
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+
+    def test_plain_forward_referenced_supersede_by_name_is_not_refused(
+            self, env, tmp_path):
+        """P2 — FIX 5(iii), name shape. FAILS IF a held
+        supersede-by-name that is materialized by its own registration is
+        flushed as a miss instead of folded.
+        REACHABLE: `[Sup(name=N), Reg(x,N)]`."""
+        _sdk, events = env
+        _raw(events, type="ObjectSuperseded", name="FNAME",
+             supersedes_by="y", event_id="e-fnm")
+        _raw(events, type="ObjectRegistered", id="obj-5285-fnm",
+             name="FNAME", status="live", event_id="e-fnm-reg")
+        for engine in ENGINES:
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            try:
+                assert any(o[0] == "obj-5285-fnm" for o in _objects(proj)), \
+                    f"{engine}: {_objects(proj)}"
+            finally:
+                proj.close()
+        # The apply-based engines leave a forward-referenced supersede `live`
+        # (the stated FIX-4 parity bound); `rebuild_all`'s trailing sweep is
+        # the engine that folds it, and the reference fold must match THAT.
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3fnm"))
+        try:
+            assert _objects(proj) == [("obj-5285-fnm", "FNAME",
+                                       "superseded")], _objects(proj)
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+
+    def test_a_forward_reference_folds_the_last_incarnation(
+            self, env, tmp_path):
+        """REGRESSION — the `[Sup(id=x), Reg(x,X), Del(x), Reg(x,X)]` case.
+
+        FAILS IF a held supersede is consumed at the FIRST creation that
+        matches it. The deferred sweep runs after every delete, so it folds
+        the supersede onto the LAST incarnation; a creation-time resolution
+        left the re-created node `live` and invented a `content` divergence.
+        REACHABLE: an id re-created after a delete (incarnation reuse), with a
+        forward-referenced supersede for that id."""
+        _sdk, events = env
+        _raw(events, type="ObjectSuperseded", id="obj-5285-g",
+             supersedes_by="y", event_id="e-g0")
+        _raw(events, type="ObjectRegistered", id="obj-5285-g", name="G1",
+             status="live", event_id="e-g1")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-g",
+             op="delete", event_id="e-g2")
+        _raw(events, type="ObjectRegistered", id="obj-5285-g", name="G2",
+             status="live", event_id="e-g3")
+        expected = [("obj-5285-g", "G2", "superseded")]
+        for engine in ENGINES:
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            try:
+                # APPLY/REFUSE parity is what this case pins: all engines
+                # accept. (The apply-based engines leave the forward reference
+                # live — the stated FIX-4 parity bound — so the STATUS is
+                # asserted against `rebuild_all`'s sweep, not theirs.)
+                assert any(o[0] == "obj-5285-g" for o in _objects(proj)), \
+                    f"{engine}: {_objects(proj)}"
+            finally:
+                proj.close()
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3g"))
+        try:
+            assert _objects(proj) == expected, _objects(proj)
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+
+    def test_early_ambiguity_does_not_exempt_a_later_zero_carrier_miss(
+            self, env, tmp_path):
+        """FIX C guard — the ambiguity carve-out is LOCAL to its event.
+
+        FAILS IF the >1-carrier carve-out is recorded in the never-cleared
+        `ambiguous` set and consulted by later events: a second name-only
+        supersede of a once-ambiguous name whose carriers are ALL gone is a
+        genuine 0-row miss `rebuild_all` refuses, so exempting it would pass a
+        journal the graph refuses.
+        REACHABLE: two carriers of one name (ambiguous first supersede), both
+        deleted, then a second name-only supersede of that name."""
+        sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-amb-a", name="AMB3",
+             status="live", event_id="e-amb3-0")
+        _raw(events, type="ObjectRegistered", id="obj-5285-amb-b", name="AMB3",
+             status="live", event_id="e-amb3-1")
+        _raw(events, type="ObjectSuperseded", name="AMB3",
+             supersedes_by="s", event_id="e-amb3-2")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-amb-a",
+             op="delete", event_id="e-amb3-3")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-amb-b",
+             op="delete", event_id="e-amb3-4")
+        _raw(events, type="ObjectSuperseded", name="AMB3",
+             supersedes_by="s", event_id="e-amb3-5")
+        with pytest.raises(NonFoldedEventsError):
+            sdk._get_proj().rebuild_all(str(events),
+                                        confirm_destructive=True)
+        proj = _fresh(tmp_path, "c3amb")
+        try:
+            # `rebuild_all` refuses, so the reference fold must refuse too.
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is False, r
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert any("object-superseded-miss" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle-3 — the FOURTH replay engine: backup.restore (#5285 FIX 3)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBackupRestoreFailsLoud:
+    def _backup_with(self, root: Path, records) -> Path:
+        src = root / "backup_src"
+        src.mkdir(parents=True)
+        (src / "events.jsonl").write_text(
+            "\n".join(json.dumps(rec) for rec in records) + "\n")
+        (src / "manifest.json").write_text(
+            '{"backed_up_at":"2026-01-01","db":"tortoise.db",'
+            '"events":"events.jsonl"}')
+        # No tortoise.db: force the JSONL replay fallback.
+        return src
+
+    def test_restore_refuses_an_id_only_absent_target_supersede(
+            self, tmp_path):
+        """P2 — FIX 3. FAILS IF the restore replay passes `apply(ev)` with no
+        journal context: `apply()`'s ObjectSuperseded refusal gate is keyed on
+        `journal_object_surviving is not None`, so without it an id-only
+        absent-target supersede restored silently and `restore` returned
+        `{"status": "ok"}` while `rebuild_all` refuses the identical journal.
+        REACHABLE: a backup journal whose only record is an id-only supersede
+        for an id no registration created."""
+        src = self._backup_with(tmp_path, [{
+            "type": "ObjectSuperseded", "id": "obj-never-registered",
+            "supersedes_by": "y", "event_id": "e-restore-d",
+            "ts": "2026-01-01T00:00:00+00:00"}])
+        with pytest.raises(NonFoldedEventsError):
+            restore(str(src), db_path=str(tmp_path / "r.db"),
+                    events_path=str(tmp_path / "r.jsonl"), into_falkor=True)
+
+    def test_restore_still_succeeds_on_a_healthy_journal(self, tmp_path):
+        """FAILS IF the new run boundary refuses a journal the graph folds:
+        a false refusal here breaks every legitimate restore.
+        REACHABLE: one plain ObjectRegistered."""
+        src = self._backup_with(tmp_path, [{
+            "type": "ObjectRegistered", "id": "obj-5285-ok",
+            "name": "OKOBJ", "status": "live", "event_id": "e-restore-ok",
+            "ts": "2026-01-01T00:00:00+00:00"}])
+        result = restore(str(src), db_path=str(tmp_path / "ok.db"),
+                         events_path=str(tmp_path / "ok.jsonl"),
+                         into_falkor=True)
+        assert result["status"] == "ok", result

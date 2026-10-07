@@ -4952,12 +4952,29 @@ class FalkorProjection(
             # legs' `journal_point_creation_ids`: `rebuild_all` folds this
             # supersede in a sweep AFTER every creation AND every delete, so an
             # Object that exists at the journal's END (a forward reference
-            # included) IS folded there — refusing it here would red a journal
-            # the graph reproduces. An Object that survives nowhere matched
-            # nothing there either, and `object-superseded-miss` fails the run.
-            # The named `supersede-target-deleted` exemption is carried too.
-            # With no journal context (the LIVE one-record path) nothing is
-            # recorded.
+            # included) IS folded there — refusing it here would RED a journal
+            # `rebuild_all` ACCEPTS. Accept/refuse parity is the whole of what
+            # this gate protects; it says nothing about the resulting node's
+            # fields. An Object that survives nowhere matched nothing there
+            # either, and `object-superseded-miss` fails the run. The named
+            # `supersede-target-deleted` exemption is carried too. With no
+            # journal context (the LIVE one-record path) nothing is recorded.
+            #
+            # STATED PARITY BOUND (#5285 cycle-3, FIX 4) — the earlier comment
+            # here claimed the apply engines "reproduce" the deferred sweep's
+            # graph. They do NOT, and the gate must not rest on a claim the
+            # engine fails. MEASURED on `[ObjectSuperseded(id=x),
+            # ObjectRegistered(x,XOBJ)]`: `rebuild_all`'s trailing sweep folds
+            # the supersede (status='superseded'), while THIS chronological
+            # pass matched nothing inline and leaves status='live'; a
+            # `check_consistency` run against an apply-replayed graph therefore
+            # reports `divergence="content"` for that journal. This is the
+            # same recognised, pre-existing deferred-fold gap as
+            # `DirectEdgeRepoint` (the warn-only branch below) — the ACCEPT
+            # verdict is shared, the graph is not. The gate below governs the
+            # REFUSAL only, and for the refusal the JOURNAL-END key is the
+            # right predicate: `rebuild_all` does fold it, so refusing here
+            # would be a false refusal.
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0 and journal_object_surviving is not None:
                 _cids, _cnames = journal_object_surviving

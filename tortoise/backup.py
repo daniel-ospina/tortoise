@@ -5,6 +5,7 @@ Restore: replays backup JSONL into a fresh projection.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import shutil
@@ -209,7 +210,13 @@ def restore(backup_dir: str, db_path: str,
         from tortoise.projection import (  # noqa: I001
             FalkorProjection,
             journal_hard_delete_seqs,
+            journal_object_hard_deleted_ids,
+            journal_object_surviving_keys,
             plan_point_restamp_folds,
+        )
+        from tortoise.projection.nonfolded import (
+            assert_no_non_folded,
+            collect_non_folded,
         )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
@@ -258,38 +265,66 @@ def restore(backup_dir: str, db_path: str,
             # inline MERGE no-ops for a forward reference, while
             # ``rebuild_all``'s after-creations sweep resolves it).
             deferred_corrects: list[tuple[int, str, str]] = []
-            for seq, ev in enumerate(records):
-                if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
-                    deferred_links.append((seq, ev))
-                    continue
-                # Keyed on the PLAN, not the raw envelope type — the plan
-                # selects by the NORMALIZED type (``_norm`` splices a nested
-                # payload), so a raw-type guard would let a ``type``-in-``point``
-                # terminalizer fall through to ``apply()``'s inline branch and
-                # its unshared selection (#325/#3722's raw-vs-normalized class).
-                if seq in restamp_plan:
-                    edge = proj.apply_journal_point_restamp(
-                        ev, seq, restamp_plan)
-                    if edge is not None:
-                        deferred_corrects.append(edge)
-                    continue
-                proj.apply(ev)
-            if deferred_corrects:
-                try:
-                    proj.fold_deferred_corrects_edges(
-                        deferred_corrects, hard_delete_seqs)
-                except Exception:
-                    logger.exception(
-                        "restore: deferred CORRECTS fold failed; %d "
-                        "edge(s) not replayed", len(deferred_corrects))
-            if deferred_links:
-                try:
-                    proj.fold_deferred_entity_links(
-                        deferred_links, hard_delete_seqs)
-                except Exception:
-                    logger.exception(
-                        "restore: deferred EntityLinked fold failed; %d "
-                        "link(s) not replayed", len(deferred_links))
+            # #5285 cycle-3 (FIX 3): this is the FOURTH whole-journal replay
+            # engine, and it replayed one record at a time with NO journal
+            # context — so `apply()`'s ObjectSuperseded refusal gate (keyed on
+            # `journal_object_surviving is not None`) was SKIPPED and an
+            # id-only absent-target supersede restored silently, while
+            # `rebuild_all` refuses the identical journal. Supply the same
+            # whole-journal keys `rebuild`/`recover_from_log` supply, and
+            # feature-detect the kwargs (an `apply(ev)`-only injected backend
+            # must not be handed a kwarg it does not accept).
+            journal_object_surviving = journal_object_surviving_keys(records)
+            journal_object_deleted = journal_object_hard_deleted_ids(records)
+            apply_kwargs: dict = {}
+            try:
+                _apply_params = inspect.signature(proj.apply).parameters
+            except (TypeError, ValueError):
+                _apply_params = {}
+            if "journal_object_surviving" in _apply_params:
+                apply_kwargs = {
+                    "journal_object_surviving": journal_object_surviving,
+                    "journal_object_deleted": journal_object_deleted,
+                }
+            # The refusal is a RUN BOUNDARY, exactly as on the other three
+            # engines: without the collector `record_non_folded` is a no-op
+            # and the context would change nothing. `assert_no_non_folded`
+            # raises `NonFoldedEventsError` AFTER the close, so a miss fails
+            # the restore loudly instead of returning `{"status": "ok"}`.
+            with collect_non_folded() as _nf_entries:
+                for seq, ev in enumerate(records):
+                    if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                        deferred_links.append((seq, ev))
+                        continue
+                    # Keyed on the PLAN, not the raw envelope type — the plan
+                    # selects by the NORMALIZED type (``_norm`` splices a nested
+                    # payload), so a raw-type guard would let a ``type``-in-``point``
+                    # terminalizer fall through to ``apply()``'s inline branch and
+                    # its unshared selection (#325/#3722's raw-vs-normalized class).
+                    if seq in restamp_plan:
+                        edge = proj.apply_journal_point_restamp(
+                            ev, seq, restamp_plan)
+                        if edge is not None:
+                            deferred_corrects.append(edge)
+                        continue
+                    proj.apply(ev, **apply_kwargs)
+                if deferred_corrects:
+                    try:
+                        proj.fold_deferred_corrects_edges(
+                            deferred_corrects, hard_delete_seqs)
+                    except Exception:
+                        logger.exception(
+                            "restore: deferred CORRECTS fold failed; %d "
+                            "edge(s) not replayed", len(deferred_corrects))
+                if deferred_links:
+                    try:
+                        proj.fold_deferred_entity_links(
+                            deferred_links, hard_delete_seqs)
+                    except Exception:
+                        logger.exception(
+                            "restore: deferred EntityLinked fold failed; %d "
+                            "link(s) not replayed", len(deferred_links))
+            assert_no_non_folded(_nf_entries, engine="restore")
         finally:
             proj.close()
 
