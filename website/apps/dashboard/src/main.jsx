@@ -101,6 +101,10 @@ import {
 // #1765: identity surface — pure predicates + presentational components
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
+import { DeleteAccountSection } from './accountDeletion.js'
+// #4946 item 3: the real GitHub disconnect control + its consequence copy. A
+// createElement module so the dashboard suite can execute-render it.
+import { GithubDisconnectControl } from './githubDisconnect.js'
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
@@ -452,6 +456,7 @@ function SettingsTab(props) {
   const {
     state, loading, onResumeSetup,
     github, githubConnected, reposCount, onConnectGithub, githubError,
+    githubDisconnect, onOpenGithubDisconnect, onCloseGithubDisconnect, onConfirmGithubDisconnect,
     sessions, sessionsOn, sessionsLoading,
     memorySourcesProps,
     // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
@@ -493,7 +498,7 @@ function SettingsTab(props) {
           below; this home owns the OAuth connection state. Connect errors
           surface on the issues row (one mechanism — no drift). ── */}
       <section className="settings-home" aria-labelledby="settings-github-heading">
-        <h3 id="settings-github-heading">GitHub connect</h3>
+        <h3 id="settings-github-heading" tabIndex={-1}>GitHub connect</h3>
         {loading ? (
           <p className="dim">Loading GitHub status…</p>
         ) : githubConnected ? (
@@ -519,6 +524,24 @@ function SettingsTab(props) {
             {githubError && <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{githubError}</p>}
           </>
         )}
+        {/* #4946 item 3: the disconnect control. Its OPENER renders only while
+            connected, but the dialog lives OUTSIDE the connected arm — a
+            successful disconnect flips `github_connected` false, and an outcome
+            panel nested in the connected arm would unmount before the user
+            could read it (the honest "revocation was not confirmed" warning in
+            particular). This home owns the OAuth connection state. */}
+        <div style={{ marginTop: '0.5rem' }}>
+          <GithubDisconnectControl
+            connected={githubConnected}
+            open={githubDisconnect.open}
+            busy={githubDisconnect.busy}
+            error={githubDisconnect.error}
+            result={githubDisconnect.result}
+            onOpen={onOpenGithubDisconnect}
+            onClose={onCloseGithubDisconnect}
+            onConfirm={onConfirmGithubDisconnect}
+          />
+        </div>
       </section>
 
       {/* ── Home 3: Memory sources — the ONLY live home of the four source
@@ -1042,6 +1065,57 @@ function App() {
   const [identityError, setIdentityError] = React.useState('')
   const [profileBusy, setProfileBusy] = React.useState('') // '' | 'oauth' | 'email' | 'unlink' | 'resend'
   const [profileError, setProfileError] = React.useState('')
+  // #4029: personal-account deletion — the confirm popup is closed by default
+  // and Cancel is a pure local close (no request, no state change).
+  const [deleteAccountOpen, setDeleteAccountOpen] = React.useState(false)
+  const [deleteAccountBusy, setDeleteAccountBusy] = React.useState(false)
+  const [deleteAccountError, setDeleteAccountError] = React.useState('')
+  // #4029 item 5: the DELETE response body (teams_deleted / hard_delete_after /
+  // note) drives a confirmation shown BEFORE the session ends, so the user is
+  // told what was removed instead of landing on the sign-in page.
+  const [deleteAccountResult, setDeleteAccountResult] = React.useState(null)
+  // #4946 item 3: the GitHub disconnect control's state — open/busy/error plus
+  // the endpoint's response body, which the dialog reports honestly (a
+  // revocation GitHub did not confirm is never shown as a clean disconnect).
+  const [githubDisconnect, setGithubDisconnect] = React.useState({
+    open: false, busy: false, error: '', result: null,
+  })
+  // #2392 (a11y): focus-restore holder for the disconnect dialog — the opener
+  // is captured at the gesture and every close hands focus back instead of
+  // dropping it on <body>.
+  const githubDisconnectRestoreRef = React.useRef(null)
+  // #4029 (a11y) applied to #4946: while the disconnect request is in flight
+  // BOTH dialog buttons are disabled, which drops focus to <body>. Reclaim it
+  // for the dialog container (tabIndex -1), guarded on activeElement === body so
+  // focus the user moved is never stolen.
+  React.useEffect(() => {
+    if (!githubDisconnect.open || !githubDisconnect.busy) return
+    const raf = requestAnimationFrame(() => {
+      if (typeof document === 'undefined') return
+      if (document.activeElement !== document.body) return
+      const dlg = document.getElementById('github-disconnect-dialog')
+      if (dlg) dlg.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [githubDisconnect.open, githubDisconnect.busy])
+  // #2392 (a11y): focus-restore holder — the opener is captured at the gesture
+  // and every non-logout close hands focus back instead of dropping it on
+  // <body>.
+  const deleteAccountRestoreRef = React.useRef(null)
+  // #4029 (a11y): while the DELETE is in flight BOTH dialog buttons are
+  // disabled, which drops focus to <body>. Reclaim it for the dialog container
+  // (tabIndex -1) — guarded on activeElement === body, mirroring the account
+  // menu's outside-click reclaim, so focus the user moved is never stolen.
+  React.useEffect(() => {
+    if (!deleteAccountOpen || !deleteAccountBusy) return
+    const raf = requestAnimationFrame(() => {
+      if (typeof document === 'undefined') return
+      if (document.activeElement !== document.body) return
+      const dlg = document.getElementById('delete-account-dialog')
+      if (dlg) dlg.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [deleteAccountOpen, deleteAccountBusy])
   const [reauthOpen, setReauthOpen] = React.useState(false)
   const [reauthBusy, setReauthBusy] = React.useState(false)
   const [reauthError, setReauthError] = React.useState('')
@@ -2458,6 +2532,37 @@ function claimIntentInFlight() {
     }
   }
 
+  // #4029: confirm-CTA action for the account-delete popup. DELETE
+  // /v1/user/account schedules the deletion server-side (solely-owned teams
+  // are cascaded there). The response body is KEPT so the popup can confirm
+  // what was removed (#4029 item 5) to a user who is still signed in; the
+  // session ends on the acknowledgement (finishAccountDeletion below), never
+  // before — a confirmation after logout is unreachable. Cancel is NOT this —
+  // it only closes the popup (no request).
+  async function deleteAccount() {
+    setDeleteAccountBusy(true)
+    setDeleteAccountError('')
+    try {
+      const body = await api('/v1/user/account', { method: 'DELETE', useSession: true })
+      setDeleteAccountResult(body || {})
+    } catch (e) {
+      // A failed DELETE keeps the popup OPEN (armed retry) and surfaces the
+      // reason in it.
+      setDeleteAccountError(e.message || 'Could not delete your account — try again.')
+    } finally {
+      setDeleteAccountBusy(false)
+    }
+  }
+
+  // #4029 item 5: the acknowledgement action on the deletion confirmation —
+  // the deletion is already scheduled server-side, so this only ends the
+  // session (and clears the per-session confirmation state).
+  async function finishAccountDeletion() {
+    setDeleteAccountOpen(false)
+    setDeleteAccountResult(null)
+    await logout()
+  }
+
   async function handleReauthPassword(password) {
     setReauthBusy(true); setReauthError('')
     try {
@@ -2504,6 +2609,56 @@ function claimIntentInFlight() {
     } finally {
       setReauthBusy(false)
     }
+  }
+
+  // #4946 item 3: the real GitHub disconnect. POSTs the endpoint that shipped
+  // in #5598 (revoke at GitHub → clear locally → `github_connected: false`),
+  // then refreshes the onboarding projection so the connect card reads the new
+  // state. The response body is kept for the dialog: the endpoint's `revoked`
+  // flag is the only thing that makes a disconnect read as clean.
+  async function disconnectGithub() {
+    setGithubDisconnect((s) => ({ ...s, busy: true, error: '' }))
+    try {
+      const res = await api(`/v1/onboarding/github/disconnect${onboardingTeamQ()}`, { method: 'POST', useSession: true })
+      setGithubDisconnect((s) => ({ ...s, busy: false, result: res || {} }))
+      refreshOnboarding().catch(() => {})
+    } catch (e) {
+      setGithubDisconnect((s) => ({ ...s, busy: false, error: (e && e.message) || 'Could not disconnect GitHub — try again.' }))
+      // #4946: the endpoint clears the local credential and writes
+      // `github_connected: false` UNCONDITIONALLY before it responds, so a
+      // response lost in flight (a dropped connection, a proxy 504) must not
+      // leave the card saying Connected. Re-read the server projection — this
+      // claims nothing, it only asks — exactly as the success arm does. If the
+      // request never reached the server, the read simply shows Connected.
+      refreshOnboarding().catch(() => {})
+    }
+  }
+
+  function openGithubDisconnect() {
+    rememberFocusedTrigger(githubDisconnectRestoreRef)
+    setGithubDisconnect((s) => ({ ...s, open: true, error: '', result: null }))
+  }
+
+  // Every close path (Cancel, backdrop, Escape, the outcome panel's Close): a
+  // pure local close — no request, and any stale response state is dropped —
+  // that also hands focus back to the opener (#2392).
+  function closeGithubDisconnect() {
+    // #2392: a COMPLETED disconnect clears the local credential server-side and
+    // writes `github_connected: false` UNCONDITIONALLY (the endpoint always
+    // clears, even when GitHub did not confirm) — so the opener is going away,
+    // either already unmounted or about to be when `refreshOnboarding()` lands.
+    // Never trust a successful restore in that case: the opener is still mounted
+    // for the length of one refresh GET, and focusing it would drop focus onto
+    // <body> the moment it unmounts. Fall back to the GitHub-connect heading
+    // (tabIndex -1) instead — the same programmatic-focus-target pattern as the
+    // Memory-sources heading (#3890).
+    const completed = !!(githubDisconnect && githubDisconnect.result)
+    const restored = restoreFocus(githubDisconnectRestoreRef)
+    if ((!restored || completed) && typeof document !== 'undefined') {
+      const heading = document.getElementById('settings-github-heading')
+      if (heading && typeof heading.focus === 'function') heading.focus()
+    }
+    setGithubDisconnect({ open: false, busy: false, error: '', result: null })
   }
 
   async function handleReauthProvider(provider) {
@@ -9132,6 +9287,10 @@ function claimIntentInFlight() {
             reposCount={reposLoaded ? reposList.length : null}
             onConnectGithub={wizardConnectGithub}
             githubError={memoryErrors.issues}
+            githubDisconnect={githubDisconnect}
+            onOpenGithubDisconnect={openGithubDisconnect}
+            onCloseGithubDisconnect={closeGithubDisconnect}
+            onConfirmGithubDisconnect={disconnectGithub}
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
@@ -9189,6 +9348,32 @@ function claimIntentInFlight() {
             addError={profileError}
             onResend={handleResend}
             resendBusy={profileBusy === 'resend'}
+          />
+        )}
+        {/* #4029: personal-account deletion lives on the Profile tab and only
+            for a real SESSION account — a key-login has no auth account to
+            delete (the server answers `unsupported` in registry mode). */}
+        {tab === 'profile' && authMode === 'session' && identityInv && !identityInv.unsupported && (
+          <DeleteAccountSection
+            open={deleteAccountOpen}
+            busy={deleteAccountBusy}
+            error={deleteAccountError}
+            result={deleteAccountResult}
+            onOpen={() => {
+              rememberFocusedTrigger(deleteAccountRestoreRef)
+              setDeleteAccountError('')
+              setDeleteAccountResult(null)
+              setDeleteAccountOpen(true)
+            }}
+            onCancel={() => {
+              // Every non-logout close path (Cancel, backdrop, Escape): close,
+              // drop the response state, and hand focus back to the opener.
+              setDeleteAccountOpen(false)
+              setDeleteAccountResult(null)
+              restoreFocus(deleteAccountRestoreRef)
+            }}
+            onConfirm={deleteAccount}
+            onDone={finishAccountDeletion}
           />
         )}
         {tab === 'keys' && (

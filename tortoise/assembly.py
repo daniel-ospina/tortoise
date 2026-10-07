@@ -53,6 +53,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.entity_identity import (  # #3633 route-then-refuse
+    display_holder_ids, record_non_folded)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
@@ -286,6 +288,11 @@ def extract_subject_terms(question: str,
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
 from typing import Protocol  # noqa: E402
+# #3302: the canonical OBJECT terminal vocabulary. Safe as a module-level
+# import: commit_ops' import closure does not reach assembly (verified), so
+# this edge cannot cycle — unlike projection/entities.py, which imports the
+# same set at FUNCTION level for its own reasons.
+from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES  # noqa: E402
 
 # #3317: the Object statuses the RESOLVER will not resolve — the resolver's
 # view of the Object-SEARCH exclusion boundary (deliberately NARROWER than
@@ -623,13 +630,65 @@ def docker_resolver_port(sdk) -> ResolverPort:
     status_filter = f"AND ({status_predicate}) " if status_predicate else ""
 
     def exact_objects(names: list[str]) -> list[dict]:
-        rows = proj.g.query(
+        # #3633 §B.1 route-then-refuse, per ref: the single
+        # `o.name IN $names OR o.id IN $names` union mixed the id space and the
+        # name space in ONE name-keyed coordinate and silently returned both.
+        # The arms are resolved APART — an exact id match is unambiguous and
+        # wins; a NAME-form ref resolves only when exactly ONE Object holds it.
+        # Two or more same-name carriers is a refusal (the non-folded entry is
+        # recorded, the ref is dropped), never a union.
+        #
+        # STATUS NOTE: the predicate here is the port-local
+        # `_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES` (`{retracted}`), NOT
+        # `entity_identity`'s `_terminal_excluded` — deliberately, because this
+        # leg is assembly's resolve-time Object-search surface (#3317/#2977),
+        # so a `superseded` Object can still resolve by name here. "Exactly one"
+        # is about HOLDER COUNT, not about widening the status set.
+        id_rows = proj.g.query(
             "MATCH (o:Object) "
-            "WHERE (o.name IN $names OR o.id IN $names) "
+            "WHERE o.id IN $names "
             f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
-        return [{"id": r[0], "name": r[1]} for r in rows]
+        name_rows = proj.g.query(
+            "MATCH (o:Object) "
+            "WHERE o.name IN $names "
+            f"{status_filter}"
+            "RETURN o.id, o.name",
+            params={"names": names}).result_set
+        by_id: dict[str, list] = {}
+        for r in id_rows:
+            if r[0]:
+                by_id.setdefault(r[0], []).append((r[0], r[1]))
+        by_name: dict[str, list] = {}
+        for r in name_rows:
+            by_name.setdefault(r[1], []).append((r[0], r[1]))
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for ref in names:
+            id_hits = by_id.get(ref, [])
+            if len(id_hits) > 1:
+                # two nodes claiming one id — corruption, never a candidate.
+                record_non_folded("Object", ref,
+                                  display_holder_ids([h[0] for h in id_hits]),
+                                  shape="duplicate-id")
+                continue
+            if id_hits:
+                row = id_hits[0]
+            else:
+                hits = by_name.get(ref, [])
+                if len(hits) > 1:
+                    record_non_folded("Object", ref,
+                                      display_holder_ids([h[0] for h in hits]))
+                    continue
+                if not hits:
+                    continue
+                row = hits[0]
+            if row in seen:
+                continue
+            seen.add(row)
+            out.append({"id": row[0], "name": row[1]})
+        return out
 
     def excluded_exact_objects(names: list[str]) -> list[dict]:
         # #4061 R1: the DISTINGUISHING probe. ``exact_objects`` returns LIVE
@@ -1284,10 +1343,33 @@ def synthesize_hits(
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
 # excluded successor as invisible -> the renderer's NAME-ONLY annotation).
-# Mirrors the canonical search_engine.TERMINAL_EXCLUDED_STATUSES tuple (P2-3:
-# an 'outdated'-status successor object is recall-excluded too).
+#
+# The OBJECT terminal vocabulary is ``commit_ops.OBJECT_TERMINAL_STATUSES``.
+# It is NOT ``search_engine``/``live``'s ``TERMINAL_EXCLUDED_STATUSES``, which
+# is the POINT vocabulary — #3302: the comment that used to sit here cited
+# that Point source for an Object set, sending a reader to the module that
+# does not own this vocabulary. Derived from the canonical set rather than
+# copied by value, because the by-value copy was the actual root: an Object
+# set that was a frozen snapshot of a source it did not reference drifts the
+# moment the canonical set moves.
+#
+# The one divergence is ``outdated``, and it is LOAD-BEARING — not dead. The
+# generic write path CAN put it on an :Object: ``create_entity("object", ...)``
+# spreads caller props over its literal defaults, and ``_update_entity`` issues
+# an unvalidated ``SET n += $props``; ``status`` is not a server-managed prop,
+# so both are reachable from the MCP surface (``tortoise_create_entity`` /
+# ``tortoise_update_entity``). Dropping the member would flip such a successor
+# from recall-excluded (NAME-ONLY annotation) to a verified link. The guard
+# that would reject the status (#2977 / PR #3326, ``OBJECT_STATUS_VALUES``) is
+# NOT on main.
+#
+# The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
+# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
+# widening of the member cannot pass unnoticed. (The canonical set itself is
+# pinned by tests/test_object_search_visibility_3301.py; the #3317 pin beside
+# it guards the RESOLVER set and is not the oracle for this one.)
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
-    {"superseded", "deprecated", "archived", "retracted", "outdated"})
+    OBJECT_TERMINAL_STATUSES | {"outdated"})
 
 
 @dataclass(frozen=True)

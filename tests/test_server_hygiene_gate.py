@@ -22,16 +22,20 @@ whole-server graph count the gate it replaces used:
    probe failure as an infra skip rather than a leak (#3634 Task 5 review
    P1-C).
 
-Reach (recorded, not a defect): the gate lives under ``if not others`` in
-``tests/conftest.py`` — last-suite-standing only. This file does NOT and
-cannot claim in-process observability of an actual leaking session; the
-subprocess leg is skipped (see ``test_owned_survivors_*`` docstring in the
-plan and the OVERRIDES comments on #3634).
+Reach (recorded, not a defect): the gate lives under the
+``not others_foreign`` guard in ``tests/conftest.py`` — deferred only for a
+genuinely concurrent suite, NOT for a sibling worker of this xdist run
+(#6136). This file does NOT and cannot claim in-process observability of an
+actual leaking session; the subprocess leg is skipped (see
+``test_owned_survivors_*`` docstring in the plan and the OVERRIDES comments
+on #3634).
 """
 from __future__ import annotations
 
 import ast
 import contextlib
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -162,7 +166,9 @@ def _gate_raise(fn: ast.FunctionDef) -> ast.Raise:
 
 def test_gate_raise_has_no_try_or_full_sweep_ancestor():
     """P1-A (Task 5 review): the gate is a SIBLING of the bound-check `if`, a
-    direct child of `if not others`, and outside every `try`.
+    direct child of `if not others_foreign` (sibling-worker-aware since
+    #6136 — a foreign suite defers, a sibling worker does not), and outside
+    every `try`.
 
     Nested inside the bound-check's `if`, the gate inherited that `if`'s
     `full and full.get("full_sweep", False)` condition — disabled exactly when
@@ -243,9 +249,70 @@ def _noop_proj(*_args, **_kwargs):
     yield _Proj()
 
 
+def _loaded_conftest():
+    """The pytest-LOADED ``tests/conftest.py`` module, handed over by conftest.
+
+    Never ``import tests.conftest``: pytest loads tests/conftest.py as the
+    top-level module ``conftest``, so the dotted import builds a SECOND instance
+    whose top-level re-execution overwrites ``TORTOISE_TEST_SESSION`` with a
+    fresh nonce mid-session, stranding the live session's derived graph names +
+    journal (the double-import hazard is documented in ``tests/_embedded.py``).
+
+    Never ``sys.modules["conftest"]`` either: that bare key is shared by every
+    ``__init__``-less conftest, and a nested one TAKES IT OVER — leaving the
+    loaded module in no ``sys.modules`` entry at all, so no lookup or scan can
+    find it. conftest publishes itself (``LOADED_CONFTEST``) instead; this is
+    the accessor for that handover, pinned by
+    ``test_start_teardown_survives_a_nested_conftest_taking_the_bare_key``.
+    """
+    from tests import _embedded as emb
+
+    conftest = emb.LOADED_CONFTEST
+    if conftest is None:
+        raise RuntimeError(
+            "tests/conftest.py did not publish its loaded module: "
+            "tests/_embedded.py::LOADED_CONFTEST is None, so the gate's "
+            "globals cannot be reached. See the handover block in "
+            "tests/conftest.py (the bare sys.modules['conftest'] key is NOT "
+            "that module once a nested conftest has been collected).")
+    return conftest
+
+
+def test_start_teardown_survives_a_nested_conftest_taking_the_bare_key(monkeypatch, tmp_path):
+    """Pin the #6269 P1 on BEHAVIOUR, not on the spelling of the lookup.
+
+    The defect was reaching the loaded conftest through ``sys.modules["conftest"]``
+    — a key EVERY ``__init__``-less conftest shares, and which a nested one
+    (``tests/e2e/auth/conftest.py``) TAKES OVER, leaving the loaded module in no
+    ``sys.modules`` entry at all. Reproducing that order in-process is not
+    possible, so this test MANUFACTURES the state instead: shadow the bare key
+    exactly as a nested conftest does, then drive the real consumer
+    (``_start_teardown``). It fails for EVERY spelling that depends on that key —
+    ``["conftest"]``, ``.get("conftest")``, an aliased ``sys``/``modules`` —
+    which a source-scanning pin cannot promise (an earlier version of this pin
+    caught only the first spelling).
+    """
+    loaded = _loaded_conftest()
+    assert Path(loaded.__file__).resolve() == REPO / "tests" / "conftest.py"
+    assert hasattr(loaded, "_ACTIVE_SUITES_DIR")
+
+    shadow = types.ModuleType("conftest")
+    shadow.__file__ = str(REPO / "tests" / "e2e" / "auth" / "conftest.py")
+    assert not hasattr(shadow, "_ACTIVE_SUITES_DIR"), "fixture: shadow must be useless"
+    monkeypatch.setitem(sys.modules, "conftest", shadow)
+
+    gen = _start_teardown(monkeypatch, tmp_path, own={"dropped": [], "failed": []},
+                          live={"test_leak"}, journal={"test_leak"})
+    gen.close()
+
+
 def _start_teardown(monkeypatch, tmp_path, *, own, live, journal,
                     full=None, probe_raises=False, others=()):
-    import tests.conftest as conftest
+    # The pytest-LOADED conftest module — the one whose `_server_graph_hygiene`
+    # globals the monkeypatches below must reach. Reached by conftest's own
+    # handover; see _loaded_conftest above for why neither
+    # `import tests.conftest` nor `sys.modules["conftest"]` is admissible.
+    conftest = _loaded_conftest()
     import tortoise.embedded_reaper as reaper
     from tests import _embedded as emb
 
@@ -337,7 +404,55 @@ def test_probe_failure_does_not_raise(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "E2E-7 survivor probe failed" in out
     assert "NOT a leak signal" in out
+    # the leak COUNT is reported as unmeasured, never as a zero it did not
+    # observe — a failed probe has no residue to measure (P1-C).
+    assert "E2E-7 leak count: UNMEASURED" in out
     assert "E2E-7: 1 owned journalled" not in out
+
+
+# ── #6136 / D3: the gate is SIBLING-WORKER-AWARE ───────────────────────────
+#
+# pytest-xdist runs one suite as N worker processes. Each worker is a
+# different pid but the SAME run (PYTEST_XDIST_TESTRUNUID) and owns its own
+# journal (per-process session nonce), so a sibling worker's graphs are never
+# in ours. The pre-#6136 `others` predicate (pid-different) counts a sibling
+# as a concurrent suite, so every worker but the last deferred and the
+# per-session leak assertion collapsed to once-per-job. These two tests pin
+# the split, and the first is the one that FAILS if the run-identity test is
+# removed from tests/conftest.py.
+
+
+def test_gate_survives_a_sibling_xdist_worker(monkeypatch, tmp_path):
+    """A sibling worker of THIS run must NOT defer this worker's gate.
+
+    Load-bearing: restore the pre-#6136 predicate (every pid-different marker
+    defers) and the generator completes with no AssertionError — the leaked
+    graph is silently left to whichever worker tears down last.
+    """
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-abc")
+    gen = _start_teardown(
+        monkeypatch, tmp_path, own={"dropped": []},
+        live={"test_leak"}, journal={"test_leak"},
+        others=[{"token": "4242-run-abc", "pid": 4242, "start": 1.0,
+                 "run": "run-abc"}])
+    with pytest.raises(AssertionError, match=r"E2E-7: 1 owned journalled"):
+        next(gen)
+
+
+def test_gate_still_defers_to_a_genuinely_concurrent_suite(monkeypatch, tmp_path):
+    """The sibling split must not relax the pre-#6136 deferral: a marker from
+    a DIFFERENT run is a foreign suite whose graphs are not ours, and a
+    marker with NO run id (a non-xdist process) must read as foreign too."""
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-abc")
+    for marker in ({"token": "4242-run-xyz", "pid": 4242, "start": 1.0,
+                    "run": "run-xyz"},
+                   {"token": "4242-legacy", "pid": 4242, "start": 1.0,
+                    "run": None}):
+        gen = _start_teardown(
+            monkeypatch, tmp_path, own={"dropped": []},
+            live={"test_leak"}, journal={"test_leak"}, others=[marker])
+        with pytest.raises(StopIteration):
+            next(gen)
 
 
 def test_reimporting_conftest_cannot_change_the_session_identity():

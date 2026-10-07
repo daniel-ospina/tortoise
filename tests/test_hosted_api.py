@@ -293,6 +293,49 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _reset_health_probe_state(monkeypatch) -> None:
+    """The whole of ``_reset_health_probe``'s reset, as a PLAIN function.
+
+    Extracted so the reset is exercisable directly: pytest refuses to call a
+    fixture function (``Fixtures are not meant to be called directly``), which
+    would otherwise make the #3396 guard below untestable.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.monitoring as mon
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    # #3062's round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A leftover probe worker can rebuild ``_probe_sdk`` with the
+    # previous env key after this fixture has run, which is what made
+    # ``test_probe_connection_is_reused_not_rebuilt_per_call`` count 2 builds
+    # (green in the docker lane, red in the embedded lane).
+    #
+    # This and ``_reset_probe_worker()`` below are COMPLEMENTARY, not alternatives:
+    # nulling the worker slot does not stop an already-abandoned acquisition from
+    # re-populating ``_PROBE_SDK_CACHE`` under the old env key, and clearing the
+    # cache does not release an occupied worker slot.
+    ha_mod._probe_sdk_reset()
+    # #3396: the coordinators are not the only process-global singleton — the
+    # shared ``monitoring._PROBE_WORKER`` is submitted to by the REAL ``_probe_db``
+    # (``hosted_api.py`` -> ``monitoring.probe_db`` -> ``_probe_worker().submit``),
+    # and a probe whose SDK acquisition is abandoned at
+    # ``PROBE_SDK_ACQUISITION_BUDGET`` leaves its single slot occupied.
+    # ``_probe_worker()`` replaces the worker only when it is NOT ``alive``, so an
+    # occupied-but-alive worker is handed back; ``_reset_probe_worker()`` (which
+    # nulls the global) is the only way to get a USABLE slot while the abandoned
+    # call is still inside its socket operation. The slot itself frees when that
+    # call returns (monitoring.py: "holds the single shared ``_probe_worker`` slot
+    # while it does"; proved by
+    # tests/test_monitoring.py::test_same_worker_recovers_after_a_released_hang,
+    # which recovers on the SAME worker with no reset). The old thread is a daemon
+    # — abandoned, never joined.
+    mon._reset_probe_worker()
+
+
 @pytest.fixture(autouse=True)
 def _reset_health_probe(monkeypatch):
     """#2850: /health and /health/ready share a module-level single-flight probe
@@ -303,24 +346,78 @@ def _reset_health_probe(monkeypatch):
     the module: it would otherwise re-probe behind a test's back and overwrite
     a deliberately patched verdict. The refresher's own behavior is covered by
     ``test_health_probe_loop_refreshes_the_coordinator``.
-    """
-    import tortoise.hosted_api as ha_mod
 
-    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    # Round-2 review: reset the process-global SDK CACHE too, not just the
-    # coordinators. A probe worker left over from a previous test can rebuild
-    # ``_probe_sdk`` with the previous env key after this fixture has run, which
-    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
-    # count 2 builds (green in the docker lane, red in the embedded lane).
-    ha_mod._probe_sdk_reset()
+    #3396: resetting the COORDINATORS is not enough. The shared
+    ``monitoring._PROBE_WORKER`` is a SECOND process-global: the real
+    ``_probe_db`` submits to it, and a probe whose SDK acquisition is abandoned
+    at ``PROBE_SDK_ACQUISITION_BUDGET`` keeps its single slot while that call runs
+    (it is abandoned, never cancelled, so it returns on its own). A worker that is
+    occupied but still ``alive`` is handed back by the lazy accessor, so the reset
+    below is the only way to get a usable slot BEFORE that call returns; until
+    then a direct ``_probe_db()`` can time out (``first["ok"] is False``).
+    ``monitoring._reset_probe_worker()`` is the escape hatch available for ops
+    recovery, and is what ``tests/test_monitoring.py``'s ``_fresh_probe_worker``
+    calls on both sides of its yield. (That coordinator sentence above is about the
+    health COORDINATOR and is a different object from the shared worker named here.)
+    """
+    _reset_health_probe_state(monkeypatch)
     yield
-    ha_mod._HEALTH_PROBE.reset()
-    ha_mod._READY_PROBE.reset()
-    ha_mod._CONTROL_PLANE_PROBE.reset()
-    ha_mod._probe_sdk_reset()
+    _reset_health_probe_state(monkeypatch)
+
+
+def test_reset_health_probe_drops_a_wedged_probe_worker(monkeypatch):
+    """#3396: a WEDGED probe worker must not survive ``_reset_health_probe``.
+
+    The lazy accessor only replaces a worker that is NOT ``alive``
+    (``monitoring._probe_worker()``); an occupied-but-alive worker is therefore
+    handed back, so ``monitoring._reset_probe_worker()`` is the only way to get a
+    usable slot while the abandoned call is still running. (The slot frees by
+    itself once that call returns — it is abandoned, not cancelled.) So if this
+    module's autouse fixture omits that reset, an abandoned acquisition from an
+    earlier test in the file keeps the slot and a direct ``_probe_db()`` can
+    report ``ok: False``.
+
+    Deterministic by construction: it occupies the slot itself and then runs the
+    same reset the autouse fixture runs, so it does not depend on test ORDER (the
+    issue's documented ``-k "health or Health"`` repro is order- and timing-
+    dependent — that is why it passed most of the time and made the previous fix
+    attempt look unverifiable).
+
+    What this test proves and what it does NOT: it proves the reset drops an
+    occupied worker (the reset's contract). It does NOT prove the intermittent
+    ``-k "health or Health"`` failure is fixed — the underlying class is that a
+    ``_SingleSlotWorker`` thread cannot be joined or cancelled, so an abandoned
+    acquisition holds the slot until its own socket call returns.
+    """
+    import tortoise.monitoring as mon
+
+    started, release = threading.Event(), threading.Event()
+
+    def _block():
+        started.set()
+        release.wait(60)
+
+    wedged = mon._probe_worker()
+    wedged.submit(_block)
+    try:
+        # Generous bound: this box runs many concurrent sessions, and a red here
+        # must mean the reset failed, not that a freshly-started daemon thread was
+        # starved of the CPU. `release` is set in `finally` either way.
+        assert started.wait(30), "the shared probe worker never ran the blocker"
+        # Precondition: wedged but ALIVE, so the lazy accessor reuses it —
+        # which is what keeps this leak invisible to every liveness check.
+        assert mon._probe_worker() is wedged, (
+            "precondition: a wedged-but-alive worker must be reused")
+
+        _reset_health_probe_state(monkeypatch)
+        try:
+            assert mon._probe_worker() is not wedged, (
+                "#3396: the wedged probe worker survived the reset — "
+                "the next test inherits a wedged slot and its probe times out")
+        finally:
+            release.set()
+    finally:
+        release.set()
 
 
 def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
@@ -2983,6 +3080,71 @@ class TestSessionCapture:
             "issues/new?template=bug_report.yml"), b["report_url"]
 
 
+    def test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind(self, client):
+        """#3555: the LIST's `extracted` must count every non-turn point and
+        must agree with the DETAIL endpoint.
+
+        Measured defect: `list_sessions` filtered on `pointKind IN ['decision',
+        'statement']` while `get_session_detail` (both its count and its points
+        list, added under #822) used the non-turn filter, so the SAME session
+        reported a different `extracted` on the list than on the detail.
+
+        The reachable producers of that divergence are pinned separately here,
+        because they need DIFFERENT arms of the predicate: an UNTYPED point
+        (the M2 lane's shape -- extractor_v2 repairs a missing or
+        `unclassified` kind to 'statement' before the write, so NULL arrives
+        from M2) needs `IS NULL`, while a registered kind outside the old pair
+        (mintable through non-extractor write paths) needs `<> 'event'`.
+
+        The graph is built directly (not through POST /v1/sessions) because the
+        subject here is the READ predicate. Over the four points below the
+        candidate predicates separate: 3 = correct, 2 = the `IS NULL` arm
+        dropped, 1 = the old hardcoded pair, 4 = count every contained point
+        (which would report the TURN as an extraction).
+        """
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        sid = "sess-3555-nonturn"
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at='2026-10-05T00:00:00Z', s.turn_count=0 "
+            # 1. an UNTYPED point (no pointKind at all) -- the M2 lane's shape,
+            #    and the only reason the `IS NULL` arm exists:
+            "MERGE (p:Point {id:$sid + '-x1'}) "
+            "SET p.content='untyped (M2)', p.createdAt=1 "
+            "MERGE (s)-[:CONTAINS]->(p) "
+            # 2. a registered kind OUTSIDE the old pair, mintable through a
+            #    non-extractor write path:
+            "MERGE (r:Point {id:$sid + '-x2'}) "
+            "SET r.pointKind='requirement', r.content='counted too', r.createdAt=2 "
+            "MERGE (s)-[:CONTAINS]->(r) "
+            # 3. a kind the old pair already counted (regression):
+            "MERGE (d:Point {id:$sid + '-x3'}) "
+            "SET d.pointKind='decision', d.content='ship it', d.createdAt=3 "
+            "MERGE (s)-[:CONTAINS]->(d) "
+            # 4. a TURN, which must stay excluded:
+            "MERGE (t:Point {id:$sid + '-t9'}) "
+            "SET t.pointKind='event', t.content='[user] hi', t.createdAt=4 "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": sid})
+        try:
+            listed = client.get("/v1/sessions").json()["sessions"]
+            row = next((x for x in listed if x["id"] == sid), None)
+            assert row is not None, f"the session must be listed: {[x['id'] for x in listed][:5]!r}"
+            assert row["extracted"] == 3, (
+                "the list must count every NON-TURN point: the untyped (M2) "
+                "point needs the `IS NULL` arm, the 'requirement' point needs "
+                f"the `<> 'event'` arm, and the turn must stay excluded: {row!r}")
+            detail = client.get(f"/v1/sessions/{sid}").json()
+            assert detail["extracted"] == row["extracted"] == 3, (
+                "list and detail must agree on one session's extracted figure: "
+                f"list={row['extracted']!r} detail={detail['extracted']!r}")
+        finally:
+            proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s", params={"sid": sid})
+            proj.g.query("MATCH (p:Point) WHERE p.id STARTS WITH $sid DETACH DELETE p",
+                         params={"sid": sid})
+
+
 class TestSessionCaptureWriteVerb:
     """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
     verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
@@ -3421,28 +3583,26 @@ class TestSessionList:
             "actor_display", "turn_points", "extracted_points", "source"}
         assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
         for field in SESSION_READ_FIELDS:
-            # #3555: `extracted` is excluded from the LIST comparison — the
-            # one field on which the list endpoint is NOT the shared
-            # projection. `list_sessions` still counts with the legacy typed
-            # filter (pointKind IN ['decision','statement']) while the SDK
-            # and the detail endpoint count every non-turn Point
-            # (pointKind IS NULL OR <> 'event'). For an untyped M2 extraction
-            # — the documented normal shape — the list reports 0 and the
-            # other two report N (measured here: one injected untyped Point
-            # → sdk=2, detail=2, list=1). Asserting the list value would MASK
-            # that divergence rather than bind it; #3555 tracks it.
-            if field != "extracted":
-                assert read[field] == served[field], (
-                    f"{field} diverges between the SDK read ({read[field]!r}) "
-                    f"and GET /v1/sessions ({served[field]!r})")
+            # #3555: `extracted` is compared on ALL THREE surfaces now. It was
+            # excluded below this comment because the list endpoint computed
+            # that one field differently (legacy `pointKind IN
+            # ['decision','statement']` against the SDK/detail non-turn
+            # filter); the list now counts with the same predicate, so the
+            # exclusion is retired WITH the divergence instead of left to hide
+            # a re-divergence.
+            assert read[field] == served[field], (
+                f"{field} diverges between the SDK read ({read[field]!r}) "
+                f"and GET /v1/sessions ({served[field]!r})")
             assert read[field] == detail[field], (
                 f"{field} diverges between the SDK read ({read[field]!r}) "
                 f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
         # The hosted surfaces and the SDK read one node, so the shared field
         # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a TYPED point, which
-        # is why the list endpoint's legacy filter happens to agree here; a
-        # real untyped extraction diverges (#3555, excluded above).
+        # assertion vacuous — the mock extractor mints a TYPED point
+        # ('statement', a kind the legacy pair counted too), so this test
+        # binds SURFACE PARITY only; the predicate itself is discriminated by
+        # test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind
+        # (#3555).
         assert read["extracted"] >= 1
 
 
@@ -8937,7 +9097,9 @@ class TestSessionActorReadPath2600:
             real = str(proj.g.explain(
                 "MATCH (s:Session) WHERE s.actor_user_id = '" + _2600_UUID_A +
                 "' OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-                "WHERE p.pointKind IN ['decision', 'statement'] "
+                # #3555: the literal must track the real query, or this pin
+                # stops pinning the shape that ships.
+                "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
                 "RETURN s.id, s.created_at, s.turn_count, count(p), "
                 "s.actor_user_id, s.harness "
                 "ORDER BY s.created_at DESC LIMIT 50"))

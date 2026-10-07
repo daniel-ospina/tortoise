@@ -195,10 +195,10 @@ VALUE_CONFIRMED_REFUSAL = (
 #      (a null ``p`` does not count). ``sum()`` also returns floats.
 #
 # The stage-3 predicate is copied VERBATIM from the session-detail endpoint,
-# which is the corrected one. The ``list_sessions`` variant
-# (``pointKind IN ['decision','statement']``) is a known defect: extraction
-# writes NULL / other kinds, so it reports 0 for sessions that did produce
-# memory. Never use it here.
+# which is the corrected one. The ``list_sessions`` variant it replaced
+# (``pointKind IN ['decision','statement']``, unified away in #3555) was a
+# known defect: extraction writes NULL / other kinds, so it reported 0 for
+# sessions that did produce memory. Never use that filter here.
 # The stage-3 predicate has ONE home: it is interpolated into ``FUNNEL_QUERY``
 # below AND reported to consumers as ``detail.stage3_predicate``. A hand-copied
 # literal in the payload would let the response describe a query that is no

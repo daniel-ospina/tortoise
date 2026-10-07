@@ -52,6 +52,8 @@ from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contra
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .entity_identity import (  # #3633 route-then-refuse identity resolution
+    ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
@@ -192,9 +194,18 @@ _SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
 # provider/model choice is a product decision (deploy-time) — these are
 # cheap-tier defaults matching the analyzer's model choices (analyze.py
 # _LLM_PROVIDERS) and session_indexer's whitelist family.
+#
+# #4129: every id here must be one the provider actually SERVES, because a
+# provider answers 200 to a retired id and silently serves a different model.
+# api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
+# so naming the retired id did not fail — it silently ran a model nobody
+# configured. Verified against GET /models on 2026-10-05, which serves exactly
+# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
+# changing an id; models.OpenAICompatModel also warns at call time when the
+# served id diverges from the requested one.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
 }
@@ -1617,9 +1628,10 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
 #: `extracted_points`, `source` — so a column ADDED to the hosted detail
 #: handler reddens it too, the direction the inline columns would otherwise
 #: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
-#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
-#: because the list still uses the legacy typed filter and diverges for
-#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is pinned too
+#: — the list counts with the same non-turn predicate as the detail endpoint
+#: and the SDK read, so all three agree (#3555).
+#: Ordered as the hosted handlers append their
 #: columns: existing positions are stable and new columns go at the END, so
 #: a consumer reading positionally never shifts.
 #: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
@@ -8082,11 +8094,22 @@ class TortoiseSDK:
         # no neighbor would be dirtied (stored confidences stay stale at
         # pre-delete values). Shared helper keeps this capture in lockstep
         # with _mark_dirty's own traversal.
-        op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
-        neighbor_ids = (
-            [oid for oid in op_ids if oid != id]
-            + [cid for cid in neighbor_claims if cid != id]
-        )
+        _op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
+        # #2422/#5566: the OPERATOR ids are dropped here, exactly as
+        # `_mark_dirty` drops them. Most operators are unsweepable as roots —
+        # `_sweep_dirty_roots` subtracts only `affected`, and `_affected_claims`
+        # admits an operator's INPUTS, so an operator that is nobody's input
+        # keeps its `ep_dirty` forever, pinning `_auto_dream_mode` to 'local'
+        # (measured: after a converged pass such an operator was the only
+        # remaining root AND the only remaining graph flag). A NESTED operator —
+        # one that is another operator's input — is reachable through the
+        # per-hop expansion and does not have that problem, so this is a
+        # narrowing of which ids become roots, not a claim that operators can
+        # never be swept. Nothing is lost from #1916: the claims below are the
+        # operator's OTHER inputs, and the hop in `TortoiseEP` walks
+        # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
+        # `_affected_factors` still re-derives the operator's factor.
+        neighbor_ids = [cid for cid in neighbor_claims if cid != id]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
@@ -10125,6 +10148,20 @@ class TortoiseSDK:
                 self.set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+            # The OPERATOR is the dirty root here, not the mitigation: EP reads
+            # the changed strength off the operator's factor, and only a
+            # seeded operator pulls its inputs into the affected set. The
+            # CREATE path below marks exactly this pair ([mid, id]); the
+            # update path must match it. Marking `[mid]` alone is no longer a
+            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
+            # back-link direction too — but the pair is what this path is
+            # specified to mark, and it does not depend on that helper's
+            # shape. The in-process flow hides a missing mark behind the
+            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
+            # has no such mask and a re-mitigation would silently not move
+            # confidence. (#5566 review P2.)
+            self._mark_dirty([mid, id])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -12730,29 +12767,31 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         proj = self._get_proj()
 
-        # 1. Validate approver Subject exists (fail loudly, not silently)
-        r = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $id OR s.name = $id RETURN s.id",
-            params={"id": approver_id},
-        ).result_set
-        if not r:
+        # 1. Validate approver Subject exists (fail loudly, not silently).
+        # #3633 route-then-refuse: the old `s.id = $id OR s.name = $id` probe
+        # passed on an ARBITRARY row when two live Subjects shared a name, then
+        # wired the raw coordinate. Resolve id-or-name to EXACTLY ONE live id
+        # (>=2 -> AmbiguousEntityName) and rebind so every downstream write uses
+        # the id, never the name.
+        resolved_approver = resolve_entity_id(proj.g, "Subject", approver_id,
+                                             addressing=ADDRESSING_SOURCE)
+        if resolved_approver is None:
             raise ValueError(
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
             )
+        approver_id = resolved_approver
 
         # 2. Validate artifact exists (Object, or a document Source — a
         #    document is a :Source since D10, ONTOLOGY v3.15 §4.4).
-        r = proj.g.query(
-            "MATCH (n) WHERE (n:Object OR "
-            "  (n:Source AND n.documentKind IS NOT NULL)) "
-            "AND (n.id = $id OR n.name = $id OR n.url = $id) "
-            "RETURN labels(n), n.id",
-            params={"id": artifact_id},
-        ).result_set
-        if not r:
+        # #3633: same route-then-refuse resolution (id > url > one live name).
+        # The ORIGINAL string is kept for the human-facing display strings.
+        artifact_ref = artifact_id
+        resolved_artifact = resolve_document_target_id(proj.g, artifact_id)
+        if resolved_artifact is None:
             raise ValueError(
                 f"Cannot file human approval: artifact {artifact_id!r} does not exist"
             )
+        artifact_id = resolved_artifact
 
         # 3. Validate point_ids exist and are non-operator Points
         if not point_ids:
@@ -12772,7 +12811,7 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # 4. Decision Point (pointKind humanApproval) — epistemic weight carrier
-        content = decision_content or f"Approved: {artifact_id}"
+        content = decision_content or f"Approved: {artifact_ref}"
         decision = self.create_point(
             "humanApproval",
             content,
@@ -12783,7 +12822,7 @@ class TortoiseSDK:
 
         # 5. Event (eventKind humanApproval) — the occurrence record
         event = self.create_event(
-            name=f"human approval of {artifact_id}",
+            name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
             eventStatus="completed",
@@ -12929,9 +12968,21 @@ class TortoiseSDK:
         if not author:
             return chain
         proj = self._get_proj()
+        # #3633 route-then-refuse: `authoredBy` is written as a resolved
+        # Subject ID by `file_human_approval`, but older Points (and direct
+        # `create_point(authoredBy=<name>)` callers) carry a NAME, and the
+        # historical match was case-insensitive. The old
+        # `toLower(s.name) = toLower($n)` probe read by NAME ONLY — so it
+        # returned None for an id-valued author — AND took `rows[0]` with no
+        # live filter, a silent pick over same-name carriers. Resolve id-first
+        # then one live case-insensitive name (>=2 -> AmbiguousEntityName).
+        resolved = resolve_entity_id(proj.g, "Subject", author,
+                                    case_insensitive_name=True)
+        if resolved is None:
+            return {**chain, "subject": None}
         rows = proj.g.query(
-            "MATCH (s:Subject) WHERE toLower(s.name) = toLower($n) RETURN properties(s)",
-            params={"n": author},
+            "MATCH (s:Subject {id:$sid}) RETURN properties(s)",
+            params={"sid": resolved},
         ).result_set
         if not rows:
             return {**chain, "subject": None}
@@ -14090,19 +14141,41 @@ class TortoiseSDK:
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
-        """1-hop reverse-BFS from ``point_ids``: operators targeting them
-        (reverse of operator→point), then the claims those operators target
-        (1-hop forward). Shared by ``_mark_dirty`` (post-write marking) and
-        ``delete_point`` (pre-delete neighbor capture, #1916) so the
-        traversal can never drift between the two — a change to the BFS
-        shape updates both call sites in lockstep. Returns ``(op_ids,
-        claim_ids)``."""
+        """1-hop reverse-BFS from ``point_ids``: operators joined to them by an
+        ``IMPL|NAND`` edge in EITHER direction (``(op)-[:IMPL|NAND]->(p)`` and
+        ``(p)-[:IMPL|NAND]->(op)`` — a mitigation is the SOURCE of its operator
+        edge), then the claims those operators target (1-hop forward). Shared by
+        ``_mark_dirty`` (post-write marking) and ``delete_point`` (pre-delete
+        neighbor capture, #1916) so the traversal can never drift between the two
+        — a change to the BFS shape updates both call sites in lockstep. Returns
+        ``(op_ids, claim_ids)``."""
+        ids = list(point_ids)
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
             "WHERE p.id IN $ids RETURN DISTINCT op.id",
-            params={"ids": list(point_ids)},
+            params={"ids": ids},
         ).result_set
         op_ids = [r[0] for r in rows]
+        # ⛔ A mitigation is the SOURCE of its operator edge —
+        # `(mit)-[:IMPL]->(op)` — so the match above, which reads the id as the
+        # operator's TARGET, misses it. Left out, a mitigation whose strength
+        # changed through `update_point` / the MCP write path (which mark only
+        # `[id]`, unlike `mitigate_operator`) reaches NO operator, so the run is
+        # a silent no-op and the operator's factor keeps the old weight. Measured
+        # at #5566: `_affected_claims([mit]) == []`, where the pre-narrowing
+        # traversal returned the operator's other participants. The second match
+        # is a deliberate over-approximation: it also returns an operator the id
+        # CONSUMES (the id points at it with an `IMPL|NAND` edge), whose factor
+        # does not contain the id, so that case costs a recompute and not a wrong
+        # value.
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:IMPL|NAND]->(op:Point {is_operator:true}) "
+            "WHERE p.id IN $ids RETURN DISTINCT op.id",
+            params={"ids": ids},
+        ).result_set
+        for r in rows:
+            if r[0] not in op_ids:
+                op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
             rows = proj.g.query(
@@ -14650,11 +14723,14 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking; the closure guarantees 0 ≤ coverage ≤ 1 and a converged
-        full-window pass reports 1.0). The dirty-root logic is driven from
-        the window-level ``converged`` flag: a converged pass clears the
-        affected roots; a failed pass clears nothing (W4 retention —
-        non-converged regions reselect via the window union).
+        ranking). The
+        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
+        are not mirrors, so `affected` can exceed the closure and coverage can
+        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        The dirty-root logic is driven from the window-level ``converged``
+        flag: a converged pass clears the affected roots; a failed pass clears
+        nothing (W4 retention — non-converged regions reselect via the window
+        union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
@@ -14728,13 +14804,24 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Mirrors ``TortoiseEP._affected_claims``'s batched per-hop expansion
-        exactly (operators are transparent bridges — one claim-hop per BFS
-        level; operator-less direct edges via #888 W5 semantics; #780 draft
-        exclusion) so the denominator matches the pass's universe:
-        affected ⊆ closure, and a converged pass over its whole window
-        reports coverage = 1.0. The window members themselves are reachable
-        at 0 claim-hops (an operator-less isolated claim is its own window).
+        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
+        are transparent bridges — one claim-hop per BFS level; the operator
+        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
+        are bridged; operator-less direct edges via #888 W5 semantics; #780
+        draft exclusion). The window members themselves are reachable at 0
+        claim-hops (an operator-less isolated claim is its own window).
+
+        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
+        guaranteed — do not reinstate that claim. Two gaps remain, both
+        predating #5566 and both filed (as the duplicate pair **#6597** /
+        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
+        seeds by ONE claim-hop before its loop while this starts at 0, so
+        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
+        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
+        rather than ``_live_only``, so a terminal/outdated bridge is counted
+        here but can never be reached by EP. The third asymmetry — an operator
+        window member being dropped from the seed set — was #5566's own
+        regression and is handled below.
 
         Two batched queries per hop (operator-bridge + direct-edge), seeded
         with the whole window — cheap for the scheduler's large windows
@@ -14749,6 +14836,25 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+        # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
+        # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
+        # operator reaches that operator's INPUTS, so they are part of what a
+        # pass CAN reach and belong in the denominator. Without them the closure
+        # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
+        # denominator bug #6597/#6598 describe, reached through the SEED rather
+        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
+        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        op_input_rows = proj.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "AND (o.status IS NULL OR o.status <> 'draft') "
+            "AND (c.status IS NULL OR c.status <> 'draft') "
+            "RETURN DISTINCT c.id",
+            params={"ids": list(window)},
+        ).result_set
+        closure |= {r[0] for r in op_input_rows}
         frontier = list(closure)
         hops = 0
         while frontier and (max_hops is None or hops < max_hops):
@@ -14757,8 +14863,14 @@ class TortoiseSDK:
             if frontier:
                 # Operator-mediated bridges (op_type OR is_operator — legacy
                 # operator detection parity, #943). Never hops through drafts.
+                # #5566: typed AND directed, mirroring _affected_claims — only
+                # operator INPUTS are bridged (a structural predicate or the
+                # reverse-only mitigation `IMPL` forms no factor and would
+                # inflate the denominator, permanently under-reporting
+                # coverage).
                 nbr_rows = proj.g.query(
-                    "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                    "-[r2:IMPL|NAND]->(m:Point) "
                     "WHERE n.id IN $ids AND m.id <> n.id "
                     "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                     "AND (op.status IS NULL OR op.status <> 'draft') "
@@ -21994,8 +22106,8 @@ class TortoiseSDK:
 
         Both counts use the DETAIL endpoint's non-turn predicate
         (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
-        are untyped, so the legacy ``IN ['decision','statement']`` filter the
-        LIST endpoint still uses would report 0 for them (#3555).
+        are untyped, and the list endpoint's legacy ``IN ['decision',
+        'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
         """
@@ -24916,17 +25028,19 @@ class TortoiseSDK:
         Returns {mean, total_events, impl_count, nand_count, alpha, beta, outcomes}.
         """
         proj = self._get_proj()
-        # Try exact id match first, fall back to name if no id match (#152).
-        # Prevents merging outcomes from Subject A (id='alice') with Subject B
-        # (name='alice') when a subject_id collides with another Subject's name.
-        id_check = proj.g.query(
-            "MATCH (s:Subject {id: $sid}) RETURN count(s) > 0",
-            params={"sid": subject_id},
-        ).result_set
-        if id_check and id_check[0][0]:  # noqa: SIM108
-            match_clause = "s.id = $sid"
-        else:
-            match_clause = "s.name = $sid"
+        # #3633 route-then-refuse (replaces #152's id-then-name fallback).
+        # #152 kept Subject A (id='alice') from merging with Subject B
+        # (name='alice') by preferring the id; the `else` arm still keyed
+        # `s.name = $sid`, so TWO live same-name Subjects unioned BOTH carriers'
+        # outcomes into one score. The resolver now returns exactly one live id
+        # (id match still wins) and REFUSES on >=2 same-name carriers; a dead
+        # coordinate resolves to None and yields the vacuous posterior.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        if resolved_sid is None:
+            return {"mean": 0.5, "total_events": 0, "impl_count": 0,
+                    "nand_count": 0, "alpha": 1.0, "beta": 1.0,
+                    "outcomes": []}
+        match_clause = "s.id = $sid"
 
         # Direct: Event connects directly to claim Points via IMPL/NAND
         # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
@@ -24938,7 +25052,7 @@ class TortoiseSDK:
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         ).result_set
         nand_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
@@ -24948,7 +25062,7 @@ class TortoiseSDK:
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         ).result_set
 
         # Collect outcomes
@@ -25030,17 +25144,21 @@ class TortoiseSDK:
     def get_owned_entities(self, subject_id: str) -> list:
         """Return all entities owned by a Subject (governance query)."""
         proj = self._get_proj()
-        # Issue #327: start from the labeled, indexed Subject (both id and name
-        # are RANGE-indexed -> OR uses the index) and traverse ownedBy inward.
-        # Narrowing: ownedBy/memberOf targets are canonically Subject (#216);
-        # non-Subject targets are out of contract.
+        # Issue #327: start from the labeled, indexed Subject and traverse
+        # ownedBy inward. Narrowing: ownedBy/memberOf targets are canonically
+        # Subject (#216); non-Subject targets are out of contract.
+        # #3633 route-then-refuse: the `s.id = $sid OR s.name = $sid` start
+        # unioned BOTH same-name carriers' owned entities. Resolve to exactly
+        # one live id (>=2 -> AmbiguousEntityName), then traverse from that id.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
         r = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
             # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
-            # id/name predicate at the re-binding MATCH below (foreign rows).
+            # id predicate at the re-binding MATCH below (foreign rows).
+            # (#3633 removed the name arm that made this an id/name predicate.)
+            "MATCH (s:Subject) WHERE s.id = $sid "
             "WITH s "
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         return [dict(row[0]) for row in r.result_set]
 
@@ -25232,19 +25350,22 @@ class TortoiseSDK:
         gap.
         """
         proj = self._get_proj()
-        # Issue #327: labeled Subject start (id|name OR both indexed -> Index
-        # Scan) then traverse outward; roles filters the source Subject p.
+        # #3633 route-then-refuse: the `id = $sid OR name = $sid` starts unioned
+        # BOTH same-name carriers' members and roles. Resolve once to exactly
+        # one live id (>=2 -> AmbiguousEntityName); a dead coordinate resolves
+        # to None and both legs simply return nothing.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
         members = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (s:Subject) WHERE s.id = $sid "
             "WITH s "
             "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         roles = proj.g.query(
-            "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "MATCH (p:Subject) WHERE p.id = $sid "
             "WITH p "
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         out = {
             "members": [dict(row[0]) for row in members.result_set],

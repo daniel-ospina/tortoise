@@ -43,6 +43,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import subprocess
@@ -154,6 +155,197 @@ def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
             })
         result[job.get("name") or str(job.get("id", "?"))] = steps
     return result
+
+
+# --- paid vs selected + queue wait (#7532) ---------------------------------
+#
+# Until now this tool measured STEPS INSIDE jobs, which answers "what did the
+# gate spend" but never "was that spend proportional to what the diff
+# SELECTED" — and never separated EXECUTION from QUEUE RESIDENCY. Those are the
+# two numbers that decide where a slow gate gets fixed, and without them the
+# first wrong explanation (queue latency, or a heavy corpus file) cannot be
+# refuted. Measured 2026-10-06 on a real push run (37468261628): ratio 1.177
+# against the run-leg pool below, while queue wait was 0.2-1.5 min on EVERY job
+# — i.e. slowdown AFTER start, not queueing. The residual ~18% is job WALL time
+# (checkout/install/collect) that the per-file denominator does not represent,
+# so "calibrates at 1.0" was never a property of this arithmetic.
+# ⛔ Do NOT restate a PR-run band here. The earlier 2.96-4.35 figures were
+# computed with a numerator that counted every `test*` job — a different basis
+# from this tool's — and are NOT comparable to its output.
+
+TEST_JOB_PREFIX = "test"
+
+# The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
+# `test-slow (a)`, or a bare `test`/`test-slow`. Jobs that start with `test` but
+# do not match are reported in `excluded_jobs`, and a matched shard that never
+# completed is reported in `incomplete_shard_jobs`; neither contributes to
+# `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total gate
+# execution. WHY any particular leg is excluded differs per leg and is defined by
+# `.github/workflows/python-ci.yml` — read that file; do not assert a summary
+# mechanism here.
+SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
+
+
+def job_execution_s(job: dict) -> float | None:
+    """A job's EXECUTION seconds (started_at -> completed_at), or None.
+
+    None means the job never completed (queued/cancelled). It has no execution
+    cost to attribute, and treating it as 0 would silently deflate the ratio.
+    """
+    start, end = job.get("started_at"), job.get("completed_at")
+    if not start or not end:
+        return None
+    try:
+        t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def queue_wait_s(job: dict, run_created_at: str | None) -> float | None:
+    """Seconds a job sat resident before it STARTED (run created -> job start).
+
+    Deliberately measured from the RUN's created_at, not the job's: the Jobs
+    API exposes no job-created_at. This is the run's queue residency attributed
+    to the job — which is what the "is it queue latency?" question asks.
+    """
+    if not run_created_at or not job.get("started_at"):
+        return None
+    try:
+        t0 = datetime.fromisoformat(run_created_at.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return max((t1 - t0).total_seconds(), 0.0)
+
+
+def durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping (#3407 c4 shape)."""
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
+
+
+def selected_weight_s(selection: dict, durations: dict,
+                      default_weight: float = 0.0,
+                      full_pool: set[str] | None = None) -> float:
+    """The weight of what the gate will actually RUN, in measured seconds.
+
+    Sums every selected leg's `durations` weight. A file with no measured
+    duration contributes `default_weight` — the same "absent = not adopted"
+    collapse `ci_selection` uses — so a partially-populated map under-counts
+    instead of crashing.
+
+    ⛔ `ci_selection.select()` returns the STRING sentinel ``"ALL"`` for a full
+    selection (push/schedule, a shared-module change, or an unclaimed path —
+    produced by `_full_selection`), NOT a list. Iterating it yields the three
+    characters ``A``, ``L``, ``L``, whose keys are never in `durations`, so the
+    whole fast pool silently contributes `default_weight` — measured as a 4.5x
+    deflation of the denominator (a 4.5x INFLATION of `ratio`) on the real
+    manifest. The sentinel is handled explicitly below.
+    """
+    raw = selection.get("test_files")
+
+    def _finite(v) -> float | None:
+        # `bool` is an int subclass and a NaN weight would silently make `ratio`
+        # None via `selected > 0` — both are malformed, not weights.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if math.isfinite(f) else None
+
+    if raw == "ALL":
+        # ⛔ The map is NOT the pool the gate runs. `durations` also carries
+        # `on_demand` entries — eval/retrieval/test_integration.py alone is
+        # 1523.4 s of the 7398.2 s map — which python-ci never runs (they live
+        # in evals-on-demand.yml). Summing the whole map inflates the
+        # denominator, so a true 1.0 reads ~0.79 and the calibration inverts in
+        # the other direction. `full_pool` (the run legs) restricts it to what
+        # the numerator can cover; None keeps the whole map for callers that
+        # have no manifest.
+        if full_pool is None:
+            values = [v for _, v in durations.items()]
+        else:
+            # Iterate the POOL, not the map, so a pool file ABSENT from
+            # `durations` falls back to `default_weight` exactly as the list-leg
+            # branch below does. Filtering the map instead made the two branches
+            # disagree: the same absence was 0 here and `default_weight` there.
+            # A SET, not a list: two pool members that normalise to the same key
+            # ("tests/a" and "tests/a.py") must not be summed twice.
+            norm = {k if k.endswith(".py") else f"{k}.py" for k in full_pool}
+            values = [durations.get(k) for k in sorted(norm)]
+        total = 0.0
+        for value in values:
+            w = _finite(value)
+            total += w if w is not None else default_weight
+        return total
+    legs: list[str] = list(raw or [])
+    if selection.get("slow_run"):
+        legs += list(selection.get("slow_selected") or [])
+    total = 0.0
+    for name in legs:
+        key = name if name.endswith(".py") else f"{name}.py"
+        value = durations.get(key)
+        w = _finite(value)
+        total += w if w is not None else default_weight
+    return total
+
+
+def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
+                     run_created_at: str | None = None,
+                     full_pool: set[str] | None = None) -> dict:
+    """What the gate PAID against what the diff SELECTED (#7532).
+
+    `ratio` is the diagnostic: a push run selects the FULL pool (measured 1.177
+    on run 37468261628, the residual being job wall time the per-file
+    denominator cannot see), while a PR run that selects a small surface but
+    pays a large one is execution inflation, not selection weight. `queue_s` is
+    reported alongside so queue latency cannot be mistaken for execution cost.
+
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the counted
+    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed. A `test*` job
+    that does not match `SHARD_JOB_RE` is returned in `excluded_jobs`, and a
+    matched shard that never completed is returned in `incomplete_shard_jobs`
+    (which also sets `complete=False`); neither contributes to `paid_s`.
+    **`paid_s` is therefore the COUNTED SHARDS' execution time, not total gate
+    execution — say so whenever it is quoted.**
+    """
+    paid = 0.0
+    queue = 0.0
+    counted: list[str] = []
+    excluded: list[str] = []
+    incomplete: list[str] = []
+    for job in jobs:
+        name = job.get("name") or ""
+        if not name.startswith(TEST_JOB_PREFIX):
+            continue
+        if not SHARD_JOB_RE.match(name):
+            excluded.append(name)
+            continue
+        secs = job_execution_s(job)
+        if secs is None:
+            incomplete.append(name)
+            continue
+        paid += secs
+        counted.append(name)
+        q = queue_wait_s(job, run_created_at)
+        if q is not None:
+            queue += q
+    selected = selected_weight_s(selection, durations, full_pool=full_pool)
+    return {
+        "paid_s": round(paid, 1),
+        "selected_s": round(selected, 1),
+        "ratio": round(paid / selected, 3) if selected > 0 else None,
+        "queue_s": round(queue, 1),
+        # ⛔ A matched shard that never completed keeps its files' FULL weight in
+        # the denominator while contributing 0 to paid_s — which LOWERS ratio,
+        # i.e. a stalled shard reads as cheaper. The flag makes such a run
+        # non-comparable instead of silently flattering it.
+        "complete": not incomplete,
+        "incomplete_shard_jobs": sorted(incomplete),
+        "jobs_counted": sorted(counted),
+        "excluded_jobs": sorted(excluded),
+    }
 
 
 # --- pytest log parsing -----------------------------------------------------
@@ -705,6 +897,56 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     return "\n".join(lines)
 
 
+def paid_vs_selected_cli(args) -> int:
+    """#7532: the --paid-vs-selected entry point.
+
+    PyYAML and `ci_selection` are imported HERE, not at module scope, so the
+    module keeps its stdlib-at-import contract (see the module docstring).
+    """
+    if not args.run_id or not args.changed_files:
+        print("--paid-vs-selected needs both --run-id and --changed-files",
+              file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection  # lazy by design
+
+    # `_manifest_of` is this module's existing seam for exactly this — it wraps
+    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
+    # `load_manifest()` does for every other consumer. Feeding the raw YAML
+    # straight to `fast_pool` would iterate a scalar surface
+    # character-by-character and raise on a None one.
+    manifest = _manifest_of(Path(args.manifest).read_text())
+    changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
+    selection = ci_selection.select(changed, args.event, manifest)
+    # On a full selection the denominator is the set of files the gate actually
+    # runs, not the whole `durations` map: the map also carries `on_demand`
+    # entries python-ci never runs (eval/retrieval/test_integration.py alone is
+    # 1523.4 s of 7398.2 s), so summing the whole map would understate the ratio
+    # on the calibration path. The carve-out runs as its own job whose weight is
+    # not in the numerator either — see `.github/workflows/python-ci.yml` for
+    # which job runs what.
+    full_pool = None
+    if selection.get("test_files") == "ALL":
+        full_pool = set(ci_selection.fast_pool(manifest))
+        # `push_legs` spreads `push_extra` into the counted `test` shards, but
+        # `fast_pool` does NOT include it. Omitting it here would put files in
+        # the counted jobs with no weight on the other side. It is `[]` today,
+        # and that is exactly why the guard belongs here rather than a comment:
+        # the day it is populated is the day the ratio silently inflates.
+        full_pool |= set(manifest.get("push_extra") or [])
+        full_pool |= (set(manifest.get("slow_files") or [])
+                      - ci_selection.carve_out_files(manifest))
+    run = fetch_run(args.repo, args.run_id)
+    result = paid_vs_selected(
+        fetch_jobs(args.repo, args.run_id), selection,
+        durations_map(manifest), run.get("created_at"), full_pool=full_pool)
+    result["event"] = args.event
+    result["full"] = bool(selection.get("full"))
+    result["changed_files"] = len(changed)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the CI timing measurement artifact (#1477)")
     ap.add_argument("--repo", required=True, help="owner/repo (used for gh api calls)")
@@ -723,7 +965,18 @@ def main() -> int:
                     help="the selection manifest whose `durations:` map is refreshed")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --refresh-durations, render + validate but do not write")
+    ap.add_argument("--paid-vs-selected", action="store_true",
+                    help="#7532 — print what the gate PAID (test* job execution) against what "
+                         "the diff SELECTED (ci_selection weight), plus the queue-wait split; "
+                         "measurement only, writes no artifact")
+    ap.add_argument("--changed-files", default="",
+                    help="comma-separated changed paths, for --paid-vs-selected")
+    ap.add_argument("--event", default="pull_request",
+                    help="selection event for --paid-vs-selected: pull_request (default) or push")
     args = ap.parse_args()
+
+    if args.paid_vs_selected:
+        return paid_vs_selected_cli(args)
 
     if args.pick_run:
         picked = pick_run(args.repo)

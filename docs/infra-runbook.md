@@ -20,17 +20,20 @@ updated: 2026-09-23
 ## 1. Initial Provisioning
 
 ### Prerequisites
+
 - Fly.io account with `flyctl` authenticated
 - Cloudflare account with `wrangler` authenticated (or dashboard access)
 - GitHub repo access with Actions secrets permission
 - `premiselabs.co` domain on Cloudflare DNS
 
 ### FalkorDB Cloud (managed database)
+
 FalkorDB runs on FalkorDB Cloud (managed) — provides AOF durability, automated
 backups, and multi-tenancy. Create the instance in the FalkorDB Cloud console,
 then set the connection string:
 
 **tortoise-api (FastAPI) on Fly.io:**
+
 ```bash
 fly apps create tortoise-y4mjjq   # or use the existing app
 fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
@@ -42,6 +45,7 @@ fly certs create api.premiselabs.co
 ```
 
 ### Cloudflare Pages (Dashboard)
+
 ```bash
 # Create project in Cloudflare dashboard: "tortoise-dashboard"
 # Deploy the React/Vite SPA (source of truth):
@@ -50,12 +54,14 @@ fly certs create api.premiselabs.co
 ```
 
 ### R2 Bucket
+
 ```bash
 wrangler r2 bucket create tortoise-backups
 # Lifecycle: delete objects older than 28 days (set in dashboard)
 ```
 
 ### DNS (Cloudflare)
+
 | Type | Name | Target |
 |------|------|--------|
 | CNAME | api | tortoise-api.fly.dev |
@@ -126,7 +132,9 @@ client-contract defect tracked by **#3805** (one canonical base URL + bounded
 fail-fast).
 
 ### GitHub Actions
+
 Set these secrets in repo Settings → Secrets and variables → Actions:
+
 - `FLY_API_TOKEN` — from `flyctl auth token`
 - `CLOUDFLARE_API_TOKEN` — from Cloudflare dashboard (Pages + R2 permissions)
 
@@ -286,7 +294,7 @@ enabled.
 | Key | Provider | Default model | Notes |
 |-----|----------|---------------|-------|
 | `OPENROUTER_API_KEY` | OpenRouter (aggregator) | `deepseek/deepseek-chat` | First in priority; one key → many model families |
-| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
+| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-flash` | Cheapest-tier default, and the analyzer's model too (`analyze._LLM_PROVIDERS`). NOT `deepseek-chat`: that id is retired and the provider answers 200 while silently serving `deepseek-flash`, so naming it made the configured model differ from the model used (#4129) |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
@@ -301,7 +309,7 @@ provider/model and fails in hosted mode when the key is missing.
 
 ### Provider choice guidance
 
-- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-chat` —
+- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-flash` —
   cheapest viable tier, zero extra config.
 - **Aggregation / future model swaps:** `OPENROUTER_API_KEY` — one key covers
   many model families (`openrouter:deepseek/deepseek-chat`, …) with per-route
@@ -345,7 +353,7 @@ fail-closed upper bound.
 
 **Dollar cost:** depends on the provider's then-current pricing and the
 transcript length (5,000-char truncation per turn in `_session_llm_transcript`).
-All four default models are cheap-tier (`deepseek-chat`, `deepseek/deepseek-chat`,
+All four default models are cheap-tier (`deepseek-flash`, `deepseek/deepseek-chat`,
 `gpt-4o-mini`, `gemini-2.0-flash`). At free-tier volumes (10K write ops/month)
 per-capture cost is fractions of a cent — the quota gates above are the hard
 stop, not spend; monitor spend via the provider dashboard.
@@ -704,7 +712,7 @@ the §6.0 precondition was verified (2026-09-17: `00000000:2382` and `http=200`)
 **Status: unconfirmed — treat the clamp as a hypothesis, not a fact.** The
 `hosted_api.health` docstring (`tortoise/hosted_api.py`, `@app.get("/health")`)
 claims that "Fly caps the http_check grace period at 60s", attributed to the
-#338 fix.
+\#338 fix.
 Independent research could **not** confirm this: no such cap appears in Fly's
 config reference, in `flyctl`, or in `fly-go`, and `flyd` is closed-source, so an
 undocumented server-side clamp cannot be ruled out. The honest position is
@@ -914,7 +922,7 @@ That pairing is the signature: the loop was fine, one request was waiting.
 first request instead of by the process, and its budget was not what it claimed.
 `httpx.AsyncClient(timeout=5)` is **per phase** (connect/read/write/pool — a
 20 s sum), not a 5 s total, and one request can pay **two** fetches (TTL refresh
-+ `kid`-miss refetch). The same lesson is already recorded on the control-plane
+\+ `kid`-miss refetch). The same lesson is already recorded on the control-plane
 probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
 
 **What changed (2026-09-16).**
@@ -944,7 +952,7 @@ probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
 **What is still not app-fixable.** A **zero-byte** 503 with `server: Fly/…` and
 no body is generated by Fly's proxy *before the app sees the request*
 (`error.message="… [PR01] no known healthy instances found …"`) — that was
-#3144, and it is a **de-registration** symptom, not a fetch symptom. The app
+\#3144, and it is a **de-registration** symptom, not a fetch symptom. The app
 cannot attach a body or a `Retry-After` to it. The available lever is "the
 machine is never de-registered for an app-level reason": the in-memory `/health`
 (#3062) and the kernel-served TCP check (#3063). If you see the zero-byte shape,
@@ -1526,7 +1534,7 @@ tracked as **#5798**.
   incident is already open, the run leaves the incident open, advances **no**
   state, does **not** reach the escalation leg, and (since #5021) exits **RED**.
   Two separate reasons, stated separately because they are not the same:
-  * **Why the state is not advanced — the restart gate.**
+  - **Why the state is not advanced — the restart gate.**
     `decide_escalation`'s RUN leg reads `STATE_DOWN_RUNS`, the same counter
     `decide_restart`'s run leg reads, and `normalize_escalation_knobs` enforces
     `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So any flap that **advanced**
@@ -1537,7 +1545,7 @@ tracked as **#5798**.
     service that was answering UP moments ago is what the restart gate exists to
     bound, so the flap advances nothing. The wall-clock leg is not moved here
     either: it is anchored on the incident's server-side `created_at`.
-  * **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
+  - **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
     axis.** `last_down_ts` is the staleness input that decides whether
     `STATE_FIRST_FAILURE_TS` (the restart window's START) is reset to `now`: the
     reset fires only once the gap since the last recorded failing run exceeds
@@ -1546,7 +1554,7 @@ tracked as **#5798**.
     (or keeping armed) a restart in the wall-clock dimension, exactly what the
     shared-counter argument forbids in the run-count dimension. So a flap
     advances neither.
-  * **Why a page is not sent — scope, not impossibility.** Because
+  - **Why a page is not sent — scope, not impossibility.** Because
     `decide_escalation` is a pure function of **persisted** state, a page IS
     reachable from here without moving anything: when an incident has already
     accumulated `ESCALATE_MIN_RUNS` observed failing runs and is past its
@@ -1560,7 +1568,7 @@ tracked as **#5798**.
     flaps from creation and never records a genuine DOWN run keeps `down_runs`
     below `ESCALATE_MIN_RUNS`, so its run leg is never satisfied and it does not
     page at all.
-  * **What #5021 changed:** the run is no longer **GREEN**. The confirmation
+  - **What #5021 changed:** the run is no longer **GREEN**. The confirmation
     probe FAILED (a `DOWN` verdict exhausts all `PROBE_ATTEMPTS` attempts, while
     an `UNEXPECTED` verdict returns on its first attempt), and a run that
     observed a failure must not read as an all-clear — the same “green while
@@ -1877,9 +1885,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    `.github/scripts/fly-managed-secrets.txt` — its header contract states what
    each source token requires.
 3. Inspect the live state:
+
    ```bash
    fly secrets list -a tortoise-y4mjjq
    ```
+
 4. Resolve it by **declaring the real source**: add the propagation line to the
    workflow plus the matching probe line (§8.1), or — for a **non-secret config
    value** — record it in `fly.toml [env]`. That second route is a transition, and
@@ -1971,13 +1981,80 @@ observation can no longer decide on its own. **Do not "restore" phase 2's
 `exit 1`** — that is the #4771 defect (the #4545 invariant violated at the
 decision level, after #4545 had fixed it at the assertion level). The harness
 `.github/scripts/deploy-health-gate.test.sh` pins both halves: `db.ok` never true
-+ readiness 200 → pass, and `db.ok` never true + readiness never 200 → fail.
+\+ readiness 200 → pass, and `db.ok` never true + readiness never 200 → fail.
 
 **OVERRIDES:** the general expectation that a deploy gate should fail on **any**
 unhealthy subsystem — here the weaker `db.ok` observation *informs* and the
 strongest observed predicate (`/health/ready`, an AND of both planes) *decides*,
 because two independent probes on different budgets can disagree and only the
 stronger one is evidence that the release is actually unready.
+
+### 8.6 When a `deploy-hosted` job fails, an issue files itself — and pages Telegram (#2240)
+
+**What fires.** One step at the end of each of `deploy-hosted.yml`'s three jobs —
+`Alert on failure (out-of-band) — {packaging-smoke,deploy-api,post-deploy-verify} (#2240)`,
+each guarded by `if: failure()`. It runs `.github/scripts/deploy-api-alert.sh`, which
+
+1. reads the step list the workflow passes (`id=${{ steps.<id>.outcome }}`) and
+   takes the **first** step whose outcome is `failure` — the causal one;
+2. **files or updates ONE GitHub issue** titled
+   `deploy-hosted: deploy-api failed at '<step-id>'` (job-level
+   `deploy-hosted: deploy-api failed` when no step was reported), through the
+   shared substrate `.github/scripts/auto-file-issue.sh` — so a second failure
+   of the **same step** comments `Recurrence #N` on the same issue instead of
+   filing a duplicate, and a failure at a **different step** files its own;
+3. pages Telegram best-effort through `.github/scripts/telegram-send.sh`.
+
+**Why it exists.** `deploy-api` had no failure observability at all: no
+`if: failure()` step anywhere in the workflow, `post-deploy-verify` skipped
+exactly when the deploy fails, the availability watchdog reads a stale build as
+UP (a stale build still answers `401`), and `deploy-api` is not a required
+branch-protection context. A blocked deploy lane was therefore silent — 4.6 days
+in 2026-08-30→09-04 (22 consecutive failed runs, zero alerts) and ~2 more days
+in 2026-09-29→10-01. This is the missing channel.
+
+**Why all three sites, and not just `deploy-api`.** The three are **mutually
+exclusive at runtime** (`deploy-api` is gated on `packaging-smoke`'s result and
+`post-deploy-verify` on `deploy-api`'s, so a skipped job cannot also fail), so at
+most one alert fires per run. They are all needed: a failed **pack smoke** leaves
+the deploy *skipped*, which is as silent as the 4.6-day stall this exists to end.
+The issue body says **what a red in that job means**, because the three are not
+interchangeable:
+
+| failed job | what it means |
+|---|---|
+| `deploy-api` | the release was **not** verified end-to-end — nothing shipped if the failure was **before** `Deploy`; **at or after** it a release may be live but unverified (read the `failed step` row) |
+| `packaging-smoke` | the deploy was **skipped** — the app did not flip |
+| `post-deploy-verify` | the release is **live and unhealthy** (there is no rollback) — the deploy itself succeeded |
+
+**Within `deploy-api`, the notifier covers the JOB, not one gate.** ≥8 steps there
+are fail-closed (dependency parity, verify secrets, Fly secret provenance,
+migration drift, Fly machines, set secrets, deploy, plus
+`check-fly-secret-drift.py`'s exit-2 provisioning path); a per-gate alert would
+leave the same silence on the rest. The step id in the title is what keeps a
+per-gate reading possible.
+
+**When the failing step is the migration-drift gate**, the issue body additionally
+carries the gate's **own** report verbatim — the `BLOCKING` versions, the
+`OUT OF ORDER` subset, and the ordered remediation. That report is the gate's
+stdout, teed to a file in the same step (`$DRIFT_REPORT_FILE`), deliberately
+**not** a second run of the gate: a second reading of prod could name a different
+blocking set than the run being reported.
+
+**What to do when it fires.** Read the issue, then the linked run. For a drift
+block, the remediation is the one the report prints — resolve any `OUT OF ORDER`
+version first, then `gh workflow run supabase-deploy.yml --ref main`. **A lane
+must never take a production action here:** no DDL, and no
+`supabase migration repair --status applied` (the band-aid `#2240` ruled out; a
+blanket repair hides real drift, #1001). Close the issue when the streak ends —
+that is what ends it; while it stays open the counter keeps climbing.
+
+**OVERRIDES:** the usual "one monitor, one gate" shape — each notifier is
+attached to its **job**, not to the drift gate it was filed for, because ≥8 steps
+in `deploy-api` are fail-closed and a per-gate alert would leave the same silence
+on the rest; and it is one issue per **failing step** rather than one per run,
+because a key carrying `${{ github.run_id }}` files a new issue on every failing
+run (#2706).
 
 ## Secrets Matrix
 
@@ -2006,7 +2083,9 @@ stronger one is evidence that the release is actually unready.
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
 ## Reproducibility Test
+
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
+
 - [ ] FalkorDB Cloud instance provisioned, FALKORDB_CLOUD_URI secret set
 - [ ] `fly apps create tortoise-y4mjjq` → deploys, health check passes, connects to FalkorDB Cloud
 - [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok (db: connected)

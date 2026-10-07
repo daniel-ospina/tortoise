@@ -90,7 +90,7 @@ API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
 
 if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
   echo "check-migration-drift: Management API returned HTTP $HTTP_CODE — cannot determine migration state (exit 2)" >&2
-  printf '%s\n' "$API_BODY" | head -c 400 >&2
+  printf '%s\n' "${API_BODY:0:400}" >&2
   echo "" >&2
   exit 2
 fi
@@ -123,7 +123,7 @@ REMOTE_AHEAD="$(comm -13 <(printf '%s\n' "$LOCAL_VERSIONS") <(printf '%s\n' "$RE
 BLOCKING=""
 WARN_ONLY=""
 for v in $REPO_AHEAD; do
-  f="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | head -n1)"
+  f="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | head -n1 || true)"
   # A repo-ahead version with no resolvable file cannot be classified — block
   # it (fail-closed) rather than dropping it, so the BLOCKING count always
   # accounts for every repo-ahead version and the completeness note cannot lie.
@@ -136,9 +136,9 @@ for v in $REPO_AHEAD; do
   # patterns first
   if grep -iE "create unique index|primary key|add constraint .*unique|exclude using|create table|alter table|create or replace function|create trigger|do \$\$|create policy|create type|create view" "$f" \
       | sed -E 's/--.*$//; s!/\*.*\*/!!g' \
-      | grep -qiE "create unique index|primary key|add constraint .*unique|exclude using|create table|alter table|create or replace function|create trigger|do \$\$|create policy|create type|create view"; then
+      | grep -iE "create unique index|primary key|add constraint .*unique|exclude using|create table|alter table|create or replace function|create trigger|do \$\$|create policy|create type|create view" >/dev/null; then
     BLOCKING="$BLOCKING $v"
-  elif grep -iE "create index" "$f" | sed -E 's/--.*$//' | grep -qiE "create index"; then
+  elif grep -iE "create index" "$f" | sed -E 's/--.*$//' | grep -iE "create index" >/dev/null; then
     WARN_ONLY="$WARN_ONLY $v"
   else
     BLOCKING="$BLOCKING $v"

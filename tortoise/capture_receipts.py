@@ -24,9 +24,16 @@ state keys (never client state):
 
 The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
 and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
-(it reads no last-error key). The hosted API also spells the per-harness keys
-itself in places (see #4893), so a change to a key name must not assume this
-module is the only place it appears.
+(it reads no last-error key). The hosted API still spells every per-harness key
+name literally in its two onboarding default-state dicts
+(``DEFAULT_ONBOARDING_STATE`` and ``_ONBOARDING_DEFAULT_STATE``) — that
+enumeration is legitimate and must stay, because the dashboard needs a
+REGISTERED row per harness even before any capture arrives and THIS module owns
+only the key format, not the harness list. Those literals are pinned to these
+formatters by ``tests/test_5051_capture_receipt_key_registry.py``, so changing a
+key name here fails there instead of silently drifting the registry (an
+unregistered key is dropped by the ``_update_onboarding_state`` allowlist
+filter).
 """
 from __future__ import annotations
 

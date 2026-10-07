@@ -504,3 +504,125 @@ def test_clean_run_has_no_remediation_markers():
     assert "OK" in r.stdout
     for marker in ("OUT OF ORDER", "BLOCKING", "PENDING AFTER", "include-all"):
         assert marker not in r.stdout, f"{marker!r} leaked into a clean run: {r.stdout}"
+
+
+# ── #6136 regression: early-exit pipeline consumers under `set -euo pipefail` ──
+#
+# The gate runs under `set -euo pipefail` (line 32). Where a pipeline's LAST
+# member exits at its first match (`head -n1`, `grep -q`), the UPSTREAM writer
+# takes SIGPIPE, so the PIPELINE's status becomes 141 rather than 0/1. That has
+# two distinct consequences, and BOTH are invisible to a small fixture, because
+# the writer only takes SIGPIPE once its output exceeds the pipe buffer:
+#
+#   * statement level -> `set -e` ABORTS the script (141, often with no output)
+#   * condition level -> `if`/`elif` read a MATCH as a NON-match
+#
+# The tests below make both deterministic by exceeding the pipe buffer. The
+# block-class one is the important one: as a condition, a lost match silently
+# downgrades a pending `CREATE TABLE` to warn-only and the gate exits 0 with the
+# migration unapplied — FAIL-OPEN.
+#
+# A body comfortably over the pipe capacity is used rather than a
+# timing-dependent race, so these are deterministic on a loaded host and under
+# both BSD and GNU coreutils. The `ls | head -n1` site at `:126` is guarded with
+# `|| true` and is deliberately NOT pinned here: it needs thousands of matching
+# files to exceed the buffer, while the test that observed the CI red stages a
+# handful of tiny migrations — orders of magnitude below that, so it cannot
+# reach the site. (The boundary between 2 files and 2600 is measured; the exact
+# listing sizes are not load-bearing and are deliberately not quoted here.) So
+# the specific trigger of that red is UNIDENTIFIED; what these tests establish is
+# the defect CLASS, and that these three paths now fail loudly pre-fix and pass
+# post-fix.
+#
+# False-negative floor, stated because it bounds what these can promise: every
+# fixture must EXCEED the pipe capacity, so on a host whose default capacity were
+# raised above ~243 KiB these would silently stop failing pre-fix (they would
+# still pass post-fix). The sizes below give ~4x headroom over the 64 KiB default.
+
+_PIPE_BUSTING_LINES = 5000  # measured 243 KiB (block) / 268 KiB (index-only)
+
+
+def _run_staged(mig: Path, stub: Path) -> subprocess.CompletedProcess:
+    """Run the gate against fixtures the caller has already staged."""
+    return subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=_seam_env(mig, stub),
+        cwd=REPO_ROOT,
+    )
+
+
+def _stage_one(name: str, body: str) -> Path:
+    """Stage a single migration with explicit content and return its dir."""
+    mig = _write_fixture_migrations([name])
+    (mig / name).write_text(body)
+    return mig
+
+
+def test_large_block_class_body_with_one_index_line_still_blocks():
+    """A block-class migration padded past the pipe buffer must still BLOCK.
+
+    Regression for #6136. The block-class `if` condition is a pipeline ending in
+    `grep -qiE`; on a body larger than the pipe buffer that `grep` exits at its
+    first match, SIGPIPEs the upstream `sed`, and `pipefail` turns the pipeline's
+    status into 141 — so the condition reads a MATCH as NO MATCH. Control then
+    falls to the index `elif`, which matches the one `CREATE INDEX` line, and a
+    pending `CREATE TABLE` is reported warn-only: the gate exits 0 (FAIL-OPEN).
+    """
+    body = "\n".join(
+        f"CREATE TABLE IF NOT EXISTS public.t_{i} (a int);"
+        for i in range(_PIPE_BUSTING_LINES)
+    ) + "\nCREATE INDEX IF NOT EXISTS idx_z ON public.t_0 (a);\n"
+    assert len(body) > 65536, f"fixture must exceed the pipe buffer, got {len(body)}"
+
+    mig = _stage_one("20260813000009_big.sql", body)
+    r = _run_staged(mig, _stub_curl(["0001"]))
+
+    assert r.returncode == 1, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+    assert "BLOCKING" in r.stdout, r.stdout[-2000:]
+    assert "20260813000009" in r.stdout, r.stdout[-2000:]
+
+
+def test_large_index_only_body_warns_rather_than_blocks():
+    """The mirror case: an index-only migration must warn, not block.
+
+    Regression for #6136. The index `elif` has the same early-exit consumer, so
+    on a body past the pipe buffer it too read a match as no-match and the
+    fail-closed `else` reported an index-only migration as BLOCKING — a spurious
+    block, and the opposite error from the test above.
+    """
+    body = "\n".join(
+        f"CREATE INDEX IF NOT EXISTS idx_{i} ON public.t_0 (a);"
+        for i in range(_PIPE_BUSTING_LINES)
+    ) + "\n"
+    assert len(body) > 65536, f"fixture must exceed the pipe buffer, got {len(body)}"
+
+    mig = _stage_one("20260813000010_idx.sql", body)
+    r = _run_staged(mig, _stub_curl(["0001"]))
+
+    assert r.returncode == 0, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+    assert "warn-only" in r.stdout, r.stdout[-2000:]
+    assert "BLOCKING" not in r.stdout, r.stdout[-2000:]
+
+
+def test_large_api_error_body_still_reports_exit_2():
+    """An over-buffer API error body must report the documented exit 2.
+
+    Regression for #6136. The error path piped the Management API body through
+    `head -c 400`; a body larger than the pipe buffer SIGPIPE'd `printf`, so
+    `set -e` ended the script at 141 instead of the documented 2
+    (could-not-determine) that callers rely on to fail closed.
+    """
+    big = FIXTURES / "big-api-error-body.txt"
+    big.write_text("x" * 262144 + "\n")
+    stub = FIXTURES / "stub-curl-big-error.sh"
+    # body first, then the http_code line the script reads last
+    stub.write_text(f"#!/usr/bin/env bash\ncat '{big}'\necho 500\n")
+    stub.chmod(0o755)
+
+    mig = _write_fixture_migrations(["0001_base.sql"])
+    r = _run_staged(mig, stub)
+
+    assert r.returncode == 2, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+    assert "500" in r.stderr, r.stderr[-2000:]
