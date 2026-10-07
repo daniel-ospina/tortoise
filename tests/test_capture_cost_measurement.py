@@ -1741,7 +1741,9 @@ def test_accumulate_call_cost_rejects_a_non_finite_charge():
             f"an unusable charge is disclosed as without-cost ({label}): {cost!r}")
         # #5868: the SESSION-total disclosure and the per-route breakdown
         # disclosure are different facts — an absent/non-finite charge must not
-        # bump the breakdown counter.
+        # bump the breakdown counter. Tolerant access is deliberate: the raw
+        # accumulator creates this key LAZILY, so "absent" and "zero" are the
+        # same fact here (the emitted row always carries it).
         assert cost.get("route_cost_overflows", 0) == 0, cost
         assert cost["prompt_tokens"] == 100, cost   # tokens survive for repricing
         assert cost["completion_tokens"] == 10, cost
@@ -1791,6 +1793,7 @@ def test_accumulate_call_cost_bounds_the_accumulated_total():
         f"the overflowed charge is disclosed, not written: {cost!r}")
     # #5868: the session total could not hold the charge — that is
     # ``calls_without_cost``'s fact, not the per-route breakdown counter's.
+    # (Lazy key on the raw accumulator: see the note in the test above.)
     assert cost.get("route_cost_overflows", 0) == 0, cost
 
     lane = cost["by_route"]["openrouter"]["point-model"]
@@ -1835,7 +1838,10 @@ def test_rollup_does_not_reintroduce_a_non_finite_total():
         f"the unrepresentable aggregate is disclosed: {llm!r}")
     # #5868: no by_route breakdown exists here, so the breakdown counter must
     # stay silent — a session-total overflow is not a breakdown overflow.
-    assert llm.get("route_cost_overflows", 0) == 0, llm
+    # ``_rollup_llm`` sets this key UNCONDITIONALLY, so it is asserted by
+    # value: tolerant access could not tell "absent" from "zero" here, which
+    # is exactly what this test pins.
+    assert llm["route_cost_overflows"] == 0, llm
     # the row must survive the exact encoding the analytics sink performs
     assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
 
@@ -1866,7 +1872,8 @@ def _mixed_sign_two_route_capture() -> dict:
     return stage["cost"]
 
 
-def _rolled_row(stage_cost: dict, *, stage: str = "s1"):
+def _rolled_row(stage_cost: dict, *, stage: str = "s1",
+                session_id: str = "sess-5868"):
     """``_rollup_llm`` -> ``_capture_cost_props``: the emitted row."""
     from tortoise import hosted_api as ha
     from tortoise.extractor_v2 import _rollup_llm
@@ -1874,7 +1881,7 @@ def _rolled_row(stage_cost: dict, *, stage: str = "s1"):
     llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
                  "deadline_aborts": 0, "by_stage": {}}
     _rollup_llm(llm, {"cost": stage_cost, "attempts": 4}, stage=stage)
-    return ha._capture_cost_props("sess-5868", {"stats": {"llm": llm}})
+    return ha._capture_cost_props(session_id, {"stats": {"llm": llm}})
 
 
 def _sum_by_stage(props: dict) -> float:
@@ -2076,6 +2083,138 @@ def test_overflow_events_can_coexist_with_an_incomplete_session_total():
     assert llm["by_stage"]["s1"][_PROVIDER][_MODEL][
         "calls_without_cost"] == 1, llm["by_stage"]
     assert llm["route_cost_overflows"] == 1, llm
+
+
+def test_a_batch_overflow_rides_the_merge_seam_into_the_accumulator():
+    """#5868 — a batch's OWN per-call overflow must survive
+    ``_merge_cost_accumulator``.
+
+    The accumulator ROLLS IN its source's ``route_cost_overflows`` and then
+    adds any drops of its own. Without a test that feeds it a source which
+    already carries one, the roll-in line can be deleted with the whole suite
+    still green — and a real per-call overflow produced inside a
+    ``kind_classifier`` batch would then be lost at the merge while the
+    emitted row still read as reconciled, which is precisely the silent gap
+    this counter exists to close.
+
+    REDs on: dropping the ``src['route_cost_overflows']`` carriage in
+    ``_merge_cost_accumulator``.
+    """
+    from tortoise.extractor_v2 import _merge_cost_accumulator
+
+    batch = _mixed_sign_two_route_capture()
+    assert batch["route_cost_overflows"] == 1, batch   # fired PER CALL
+
+    usage: dict = {}
+    _merge_cost_accumulator(usage, {"cost": batch, "attempts": 4})
+    acc = usage["cost"]
+
+    # the batch's overflow arrived ... and no MERGE-seam event was invented:
+    # every route bucket above is finite, so it merges into the empty
+    # accumulator cleanly. An exact 1 pins BOTH halves (a dropped carriage
+    # reads 0; a double-counted merge reads 2).
+    assert acc["route_cost_overflows"] == 1, acc
+    assert math.isfinite(acc["cost_usd"]) and acc["cost_usd"] == 0.0, acc
+
+    # and it reaches the emitted row, so the carriage is end-to-end
+    props = _rolled_row(acc)
+    assert props["route_cost_overflows"] == 1, props
+
+
+def test_two_per_call_overflows_are_both_counted():
+    """#5868 — the PER-CALL counter is a running SUM, not a flag.
+
+    Two routes each drop a charge in the SAME accumulator (the session total
+    stays finite throughout), so an ``= 1`` assignment ships an undercount
+    while the session-overflow half of the guard still works. The only test
+    that reached >=2 events before this went through the ``_rollup_llm``
+    seam, so an assignment at this seam was invisible.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    stats: dict = {}
+    for provider, model, charge in (
+            ("deepseek", "deepseek-v4-flash", -0.9e308),
+            (_PROVIDER, _MODEL, 1.0e308),      # route A, +1
+            (_PROVIDER, _MODEL, 1.0e308),      # route A, +2 -> overflows
+            ("deepseek", "gpt-4o-2024-08-06", -1.0e308),
+            ("openrouter", "point-model-2", 1.0e308),    # route B, +1
+            ("openrouter", "other-model", -1.0e308),
+            ("openrouter", "point-model-2", 1.0e308)):   # route B, +2 -> overflow
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10,
+            cost_usd=charge, provider=provider, model=model)
+
+    cost = stats["cost"]
+    # the session total is finite and complete at every step ...
+    assert math.isfinite(cost["cost_usd"]), cost
+    assert cost["cost_usd"] == pytest.approx(1.1e308), cost
+    # (lazy key on a raw accumulator with no charge-less call: absent == 0)
+    assert cost.get("calls_without_cost", 0) == 0, cost
+    # ... and BOTH routes dropped a per-call charge
+    assert cost["route_cost_overflows"] == 2, cost
+
+
+def test_two_bucket_merge_overflows_are_both_counted():
+    """#5868 — the MERGE counter is a running SUM too.
+
+    Two different routes overflow at the merge seam inside one accumulator
+    while the session total merges cleanly, so an ``= 1`` at that seam
+    undercounts. Each batch is built through the real per-call accumulator
+    (none of them overflows internally) and its own total cancels, so the
+    only events come from the merge.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost, _merge_cost_accumulator
+
+    def _batch(*calls):
+        acc: dict = {}
+        for provider, model, charge in calls:
+            _accumulate_call_cost(
+                acc, prompt_tokens=100, completion_tokens=10, cost_usd=charge,
+                provider=provider, model=model)
+        assert acc["cost"].get("route_cost_overflows", 0) == 0, acc["cost"]
+        return acc
+
+    usage: dict = {}
+    _merge_cost_accumulator(usage, _batch((_PROVIDER, _MODEL, 1.5e308)))
+    route_b = ("openrouter", "point-model-2")
+    # each later batch's SESSION total cancels to 0.0, so only the route
+    # buckets it names grow past the representable sum
+    _merge_cost_accumulator(usage, _batch(
+        (route_b[0], route_b[1], 1.5e308),
+        ("deepseek", "deepseek-v4-flash", -1.5e308)))
+    _merge_cost_accumulator(usage, _batch(
+        (_PROVIDER, _MODEL, 1.5e308),        # route A collides -> overflow 1
+        ("deepseek", "gpt-4o-2024-08-06", -1.5e308)))
+    _merge_cost_accumulator(usage, _batch(
+        (route_b[0], route_b[1], 1.5e308),   # route B collides -> overflow 2
+        ("deepseek", "claude-x", -1.5e308)))
+
+    acc = usage["cost"]
+    assert math.isfinite(acc["cost_usd"]), acc
+    assert acc["calls_without_cost"] == 0, acc
+    assert acc["route_cost_overflows"] == 2, acc
+
+
+def test_route_cost_overflows_aggregate_across_rows():
+    """#5868 — the READ side sums the counter over the window.
+
+    ``cost_per_session_distribution`` is the surface the report and the
+    launch gate read; a per-row reset there would under-report on any
+    multi-row window (i.e. every real one) while every single-row test stayed
+    green.
+    """
+    rows = [_rolled_row(_mixed_sign_two_route_capture(), session_id=f"s{i}")
+            for i in range(2)]
+    assert [r["route_cost_overflows"] for r in rows] == [1, 1]
+
+    dist = costing.cost_per_session_distribution(rows)
+    assert dist["route_cost_overflows"] == 2, dist
+
+    # the control: a window without the counter reports nothing
+    clean = costing.cost_per_session_distribution(
+        [dict(rows[0], route_cost_overflows=0)])
+    assert clean["route_cost_overflows"] == 0, clean
 
 
 # ── #5854: the token fields are validated, never shaped ─────────────────────
@@ -2664,6 +2803,56 @@ def test_report_cli_discloses_an_unrepresentable_by_stage_subtotal(
     assert report.main(["--jsonl", str(fixture)]) == 0
     text = capsys.readouterr().out
     assert "by_stage sub-totals unrepresentable: 1" in text, text
+
+
+def test_report_cli_discloses_an_unrepresentable_subtotal_without_a_price(
+        tmp_path, capsys):
+    """#5868 — the UNPRICED branch is a SEPARATE render path.
+
+    The disclosure is printed from ``_overflow_disclosure_lines`` in both
+    branches, but the priced-path test cannot reach this one, so a dropped or
+    renamed line here ships green. A window with nothing priceable is exactly
+    where the reader has the least other signal — losing the only breakdown
+    caveat there is the worst place to lose it.
+
+    The clean-window control pins the OTHER half: an unconditional line would
+    read as an alarm on every healthy report.
+    """
+    from tools import capture_cost_report as report
+
+    unpriced = {"org_id": "org-1", "event_name": "capture_cost",
+                "created_at": "2026-09-16T12:00:00+00:00",
+                "properties": {
+                    "session_id": "mystery", "calls": 1,
+                    "cost_usd": 0.0, "calls_without_cost": 1,
+                    "calls_without_usage": 0, "deadline_aborts": 0,
+                    "route_cost_overflows": 3,
+                    "by_stage": {"s1": {"deepseek-direct": {
+                        "no-such-model-0731": {
+                            "calls": 1, "prompt_tokens": 100,
+                            "completion_tokens": 10, "cost_usd": 0.0,
+                            "usage_present": True,
+                            "calls_without_usage": 0}}}}}}
+    fixture = tmp_path / "unpriced-overflow.jsonl"
+    fixture.write_text(json.dumps(unpriced) + "\n", encoding="utf-8")
+    out_json = tmp_path / "unpriced-overflow.json"
+
+    assert report.main(["--jsonl", str(fixture), "--out", str(out_json)]) == 0
+    text = capsys.readouterr().out
+    # the branch really is the unpriced one ...
+    assert "NO PRICED capture_cost SESSIONS" in text, text
+    assert json.loads(out_json.read_text())["distribution"][
+        "priced_sessions"] == 0
+    # ... and it still discloses the dropped sub-total
+    assert "by_stage sub-totals unrepresentable: 3" in text, text
+
+    clean = dict(unpriced)
+    clean["properties"] = dict(unpriced["properties"],
+                               route_cost_overflows=0)
+    clean_fixture = tmp_path / "unpriced-clean.jsonl"
+    clean_fixture.write_text(json.dumps(clean) + "\n", encoding="utf-8")
+    assert report.main(["--jsonl", str(clean_fixture)]) == 0
+    assert "sub-totals unrepresentable" not in capsys.readouterr().out
 
 
 def test_report_cli_aggregates_retries_per_session_before_percentiling(

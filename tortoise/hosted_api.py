@@ -27776,8 +27776,9 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # sub-totals that could not represent their FINITE sum (one event may
         # stand for several calls at the merge seams). This asserts that the
         # ``by_stage`` breakdown is incomplete; it is NOT a statement about
-        # ``cost_usd``'s completeness, which ``calls_without_cost`` owns — in
-        # the combined case (the session sum overflowed too) both are non-zero.
+        # ``cost_usd``'s completeness, which ``calls_without_cost`` owns — the
+        # two can be non-zero together only at a merge seam, never at the
+        # per-call one.
         "route_cost_overflows": int(llm.get("route_cost_overflows", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried

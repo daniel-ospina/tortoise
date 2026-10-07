@@ -585,10 +585,12 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         "calls_without_tokens": without_tokens_total,
         # #5868: OVERFLOW EVENTS — a row whose ``by_stage`` breakdown dropped a
         # cost sub-total it could not represent (one event may stand for
-        # several calls). ``cost_usd`` is still the authoritative total UNLESS
-        # the row also carries ``calls_without_cost``; this counter only says
-        # ``sum(by_stage)`` is short of it, so a consumer reading the breakdown
-        # (rather than the row total) knows the gap is measured, not silent.
+        # several calls at the merge seams). ``cost_usd`` is still the
+        # authoritative total UNLESS the row also carries
+        # ``calls_without_cost``; this counter is a BREAKDOWN disclosure only —
+        # it says the ``by_stage`` partition is incomplete and may not
+        # reconcile with ``cost_usd`` in either direction (when the session sum
+        # overflowed too, the two can still agree).
         "route_cost_overflows": route_cost_overflows_total,
         "deadline_aborts": deadline_aborts,
         "excluded_no_calls": excluded_no_calls,

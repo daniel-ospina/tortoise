@@ -8003,9 +8003,15 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     bucket SUB-TOTAL, which may stand for several calls. Either way
     ``route_cost_overflows > 0`` asserts exactly one thing: the ``by_stage``
     breakdown is not a complete partition of the row. It says nothing about
-    ``cost_usd``'s own completeness — that is ``calls_without_cost``'s question,
-    and when the session sum overflowed too BOTH counters are non-zero and the
-    dropped charge is absent from ``cost_usd`` as well.
+    ``cost_usd``'s own completeness — that is ``calls_without_cost``'s question.
+
+    Both counters CAN be non-zero together, but only at the MERGE seams
+    (``_merge_cost_accumulator`` / ``_rollup_llm``), where a bucket merge and
+    the cross-stage sum overflow independently. At THIS per-call seam the two
+    are mutually exclusive: a session-total overflow sends the charge down the
+    charge-less path below, which bumps ``calls_without_cost`` alone, so the
+    per-route branch is unreachable in that state and the surviving breakdown
+    still reconciles with the (already bounded) total.
     """
     acc = stats.setdefault("cost", {})
     # #5854: normalise BOTH provider token fields before the first mutation
@@ -8128,10 +8134,16 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     ``_accumulate_call_cost``). Both counters roll to the session level here
     so a provider that reported no charge, or a call that carried no usage
     block at all, is disclosed on the emitted row instead of surviving only
-    inside ``by_stage``. Each call keeps the ``(provider, model)``
-    route that served it, so a mid-stage failover is never misattributed to
-    the configured primary. The ``by_stage`` buckets use the
-    pricing-envelope shape (``tools/longmem_eval/usage.py`` /
+    inside ``by_stage``. ``route_cost_overflows`` (#5868) rolls beside them
+    as the BREAKDOWN disclosure: it counts the events at which a
+    ``by_stage`` sub-total (a charge seen per call, or a bucket sum merged
+    into an existing stage here) could not represent its finite total, and
+    it says nothing about ``cost_usd``'s own completeness — that stays
+    ``calls_without_cost``'s question, which is why this seam can leave BOTH
+    non-zero while the per-call seam cannot. Each call keeps the
+    ``(provider, model)`` route that served it, so a mid-stage failover is
+    never misattributed to the configured primary. The ``by_stage`` buckets
+    use the pricing-envelope shape (``tools/longmem_eval/usage.py`` /
     ``costing.price_usage_envelope``) so the row is repricable at report
     time. ``stage`` defaults for the pre-existing 2-arg callers.
     """

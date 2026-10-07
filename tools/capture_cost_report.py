@@ -22,8 +22,11 @@ $0 one.
         calls_without_usage,  # calls that carried no usage block at all
         deadline_aborts,      # billed upstream, unpriceable here
         unattributed,         # #3824: calls made, no roll-up survived
-        route_cost_overflows, # #5868: charges a by_stage bucket could not
-                              # represent, so sum(by_stage) < cost_usd
+        route_cost_overflows, # #5868: OVERFLOW EVENTS — a charge or a
+                              # by_stage sub-total the breakdown could not
+                              # represent, so by_stage is not a complete
+                              # partition of the row and may not reconcile
+                              # with cost_usd in either direction
         by_stage: {stage: {provider: {model: {calls, prompt_tokens,
                     completion_tokens, cost_usd, usage_present,
                     calls_without_cost, calls_without_usage}}}},
@@ -221,6 +224,31 @@ def _window(rows: list[dict]) -> tuple[str, str]:
     return (min(stamps), max(stamps))
 
 
+def _overflow_disclosure_lines(count: int, indent: str = "  ") -> list[str]:
+    """#5868: the operator-facing disclosure for an unrepresentable
+    ``by_stage`` sub-total.
+
+    Emitted ONLY when the window actually carries one — an unconditional
+    "the breakdown is short of cost_usd" reads as a false alarm on every
+    healthy report. It also names no DIRECTION: a dropped bucket sub-total
+    makes the breakdown an incomplete partition of the row, but the gap is
+    not guaranteed to run either way (when the session sum overflowed too,
+    the two totals can still agree), so the line states only what is true of
+    every row that carries the counter.
+    """
+    if not count:
+        return []
+    return [
+        f"{indent}by_stage sub-totals unrepresentable: {count}"
+        " (overflow events, not charges)",
+        f"{indent}  — the by_stage breakdown is not a complete partition of",
+        f"{indent}    the row, so it may not reconcile with cost_usd in",
+        f"{indent}    either direction. This is NOT a statement about",
+        f"{indent}    cost_usd itself (see the calls-without-a-charge line",
+        f"{indent}    for the total's own completeness).",
+    ]
+
+
 def render(rows: list[dict], *, top: int, since_label: str) -> str:
     """The human/CI-readable report. Returns the text; caller prints it."""
     dist = costing.cost_per_session_distribution(rows)
@@ -260,10 +288,7 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
         add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
         add(f"  captures behind those calls       : {dist['unattributed_captures']}")
-        add(f"  by_stage sub-totals unrepresentable: "
-            f"{dist['route_cost_overflows']} (overflow events, not charges)")
-        add("  (the by_stage breakdown is short of cost_usd — this is NOT a")
-        add("   statement about cost_usd's own completeness)")
+        lines.extend(_overflow_disclosure_lines(dist["route_cost_overflows"]))
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -301,11 +326,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         f"(across {dist['unattributed_captures']} capture(s)) — counted in "
         "the attempts line below, not additional to it")
     add(f"  calls served without a charge  : {dist['calls_without_cost']}")
-    add(f"  by_stage sub-totals unrepresentable: {dist['route_cost_overflows']}"
-        " (overflow events, not charges)")
-    add("    — the by_stage breakdown is short of cost_usd; it is NOT a")
-    add("      statement about cost_usd itself (see the calls-without-a-charge")
-    add("      line above for the total's own completeness)")
+    lines.extend(_overflow_disclosure_lines(dist["route_cost_overflows"],
+                                            indent="    "))
     add(f"  attempts with no meterable reply: {dist['unmetered_attempts']}")
     add(f"  sessions tokens we could not price: {dist['unpriced_sessions']}")
     add("")
