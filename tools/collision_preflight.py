@@ -3140,17 +3140,33 @@ def scan_pr_surface(
         #    Measured both ways: `--self-branch <PR head>` and auto-detect each
         #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
         #    branch can suppress is not a refusal.
-        #    use_closing_field is TRUE ONLY on the BLOCKING open-PR surface, and the
-        #    guard below is scoped by it deliberately. Without that scope the refusal
-        #    also fires from the ADVISORY closed-PR sample — whose elements can carry a
-        #    non-terminal `state` — and an advisory surface would then be able to force
-        #    exit 2, which is the one thing such a surface must never do (the authority
-        #    split `test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported`
-        #    pins). It would also print "is an OPEN PULL REQUEST" about a PR drawn from
-        #    the CLOSED sample. Caught by review at round 6; the whole refusal had been
-        #    live on both surfaces since round 1 because no test put a number==issue PR
-        #    on the advisory surface.
-        if use_closing_field and terminal is None and str(pr.get("number")) == str(issue):
+        #    The guard is scoped to the BLOCKING surface through `surface.authority`,
+        #    which IS the invariant rather than a proxy for it. Without that scope the
+        #    refusal also fires from the ADVISORY closed-PR sample — whose elements can
+        #    carry a non-terminal `state` — and an advisory surface could then force
+        #    exit 2, the one thing such a surface must never do (the authority split
+        #    `test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported` pins).
+        #    It would also print "is an OPEN PULL REQUEST" about a PR drawn from the
+        #    CLOSED sample.
+        #
+        #    `use_closing_field` (True only on the blocking payload) correlates with
+        #    the authority today, but it is a payload-CAPABILITY flag: were the blocking
+        #    path ever to stop requesting `closingIssuesReferences`, keying on it would
+        #    silently DELETE this fail-closed refusal. `surface.authority` cannot drift
+        #    that way — it is assigned per surface at construction from
+        #    ADVISORY_SURFACES.
+        #
+        #    Coverage note, stated accurately: an advisory number==issue test already
+        #    existed (`test_closed_pr_own_number_is_weak_not_blocking`), but its fixture
+        #    omits `state`, which `gh_fixtures` normalizes to "closed" — TERMINAL — so
+        #    the `terminal is None` clause was never exercised for the number==issue arm
+        #    on that surface. The uncovered shape is a NON-TERMINAL state, which
+        #    `test_advisory_surface_cannot_refuse_a_number_that_is_the_issue` pins.
+        if (
+            surface.authority != AUTHORITY_ADVISORY
+            and terminal is None
+            and str(pr.get("number")) == str(issue)
+        ):
             linked = []
             unreadable = False
             # The message decoration must NOT be able to pre-empt the refusal.

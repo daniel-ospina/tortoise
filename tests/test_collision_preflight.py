@@ -756,6 +756,40 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
+    def test_advisory_surface_cannot_refuse_a_number_that_is_the_issue(self):
+        """An ADVISORY surface must never be able to force exit 2 (#7009).
+
+        The advisory closed-PR sample's elements are whatever the payload
+        returned, and `_pr_terminal_state` accepts a NON-TERMINAL `state` — so an
+        UNSCOPED number==issue refusal raised `NotAWorkItem` from the ADVISORY
+        scan too: a surface with no authority to block stopped a dispatch with
+        exit 2, stderr only and no report at all.
+
+        `test_closed_pr_own_number_is_weak_not_blocking` structurally could not
+        catch it. It does put a number==issue PR on the advisory surface, but its
+        fixture omits `state`, which `gh_fixtures` normalizes to "closed" — i.e.
+        TERMINAL — so the guard's `terminal is None` clause was False and the
+        number clause never decided. This test is that same shape with the state
+        made non-terminal: the one value that reaches the guard, and therefore the
+        only shape that pins the scoping. Measured: it fails on the parent tool
+        (exit 2, "is an OPEN PULL REQUEST") and passes here.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "body": "restored in #3061", "state": "OPEN",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        # The hit is still REPORTED — an advisory surface reports, it just cannot
+        # block — and the verdict stays CLEAN at exit 0.
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("PR number == issue (3061)", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The pre-fix symptom, pinned by its exact text: the refusal must not be
+        # reachable from the CLOSED sample.
+        self.assertNotIn("is an OPEN PULL REQUEST", out)
+
     def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
         """An OPEN PR's number is not a work item — the run must refuse (#7009).
 
