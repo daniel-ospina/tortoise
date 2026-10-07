@@ -925,7 +925,7 @@ jobs:
           # (AssertionError). That file is NOT touched by #6269 and PASSES 3/3 SERIAL on
           # the same commit — so the parallelism, not the code under test, is the trigger.
           # Mechanism: the module keeps a module-global mutable fixture dir
-          # (`FIXTURES = _tmp()`, tests/test_migration_drift_gate.py:33) and
+          # (`FIXTURES = _tmp()`, tests/test_migration_drift_gate.py:32) and
           # `_write_fixture_migrations` DELETES every `*.sql` in it (:39-40) while
           # `_stub_curl` rewrites `stub-curl.sh` in the same directory (:48) — shared
           # mutable state that a concurrent worker can trip. NOT PROVEN to be the exact
