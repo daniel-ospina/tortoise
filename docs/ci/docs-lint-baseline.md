@@ -41,7 +41,21 @@ does), which would fail unrelated PRs on inherited findings. The one exception i
 lychee's `error:` placeholder (it could not extract a URL at all): there the
 target has no distinguishing content, so the offending line's own text is used
 as the identity — otherwise two different broken links in one file would collapse
-to one key and a swap would pass. The two halves are compared differently: a
+to one key and a swap would pass. **Both of lychee's failure maps are read.**
+lychee reports a hard failure in `error_map` and a link it could not reach in
+time in `timeout_map`, and its own verdict (`ResponseStats::is_success`, lychee
+0.24.2) is `error_map.is_empty() && timeout_map.is_empty()` — the
+`--accept-timeouts` opt-out exists precisely because a timeout **is** a failure
+by default. Because the `docs` job runs the link check with the action's
+`fail: false` (so the differ decides), a map the differ does not read is a class
+it cannot fail on, and one `update` cannot record either: keying on `error_map`
+alone let a new dead link that **timed out** instead of erroring pass the
+required check. Both maps are now parsed, on both the `check` and the `update`
+side, and `timeout_map` is a required key of the report — so the differ sees
+exactly the findings that make lychee exit non-zero. The committed snapshot as
+generated records no timeout entries, so a timed-out link in a changed file
+fails the check until a re-baseline records it (the fail-closed direction).
+The two halves are compared differently: a
 markdownlint finding is counted as a **multiset**, because how many times a rule
 fires in a file is a property of that file, so several findings can share a key
 and adding a third still fails; a lychee finding is compared as a **set** of

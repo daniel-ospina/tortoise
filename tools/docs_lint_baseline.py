@@ -28,6 +28,20 @@ WHAT THIS PROGRAM DOES
     the committed snapshot, and exit non-zero ONLY on findings that are not in
     the snapshot. New findings still fail the build; this narrows the SCOPE the
     check is responsible for, it does not weaken it.
+
+    **BOTH of lychee's failure maps are read, and that equivalence is the point.**
+    lychee reports a hard failure in ``error_map`` and a link it could not reach
+    in time in ``timeout_map``, and its own verdict
+    (``ResponseStats::is_success``, lychee 0.24.2) is
+    ``error_map.is_empty() && timeout_map.is_empty()`` — the ``--accept-timeouts``
+    opt-out exists precisely because a timeout IS a failure by default. Because
+    this step runs the whole-repo lychee action with ``fail: false`` (so the
+    differ decides), a map the differ does not read is a class it cannot fail on:
+    keying on ``error_map`` alone left a new dead link that TIMED OUT instead of
+    erroring passing the required check, and unable ever to become "known" (the
+    snapshot's producer uses the same parse). Reading both maps makes the differ
+    see exactly the findings that make lychee exit non-zero, and it then decides
+    only whether they are already in the snapshot.
   * ``update`` — regenerate the snapshot by running the CI's OWN pinned linters
     (``markdownlint-cli2@0.23.3`` and ``lychee 0.24.2``) over the population the
     job can lint (``git ls-files '*.md'``). The snapshot is reproducible, never
@@ -235,6 +249,19 @@ MARKDOWNLINT_LINTING = re.compile(r"^Linting: (?P<files>\d+) files?$", re.M)
 # allowed into a key (see `lychee_key`).
 _CACHE_MARKER = re.compile(r"^\s*Error \(cached\)\s*$", re.I)
 
+# lychee's TWO failure maps, and BOTH must be read. lychee 0.24.2 declares a
+# failure twice — a hard error in `error_map` and a link it could not reach
+# inside the timeout in `timeout_map` — and its OWN verdict
+# (`ResponseStats::is_success`, lychee-bin/src/formatters/stats/response.rs) is
+# `error_map.is_empty() && timeout_map.is_empty()`; the `--accept-timeouts`
+# opt-out exists precisely because a timeout IS a failure by default. Reading
+# only `error_map` made the differ blind to a class the pre-#7435 step failed on
+# (the lychee action runs with its default `fail: true`, which propagates
+# lychee's non-zero exit code), so a new dead link that TIMED OUT instead of
+# erroring passed the required `docs` check — and could never be recorded as
+# known either, because `update` uses this same parse.
+_LYCHEE_ERROR_MAPS = ("error_map", "timeout_map")
+
 # Files rendered by a generator, mapped to the generator that must be edited.
 # Kept explicit (rather than sniffed) so the fix target is unambiguous; the
 # marker sniff below is the safety net for a generator this map does not know.
@@ -331,23 +358,30 @@ def normalize_link_target(url: str, repo_root: Path) -> str:
 
 
 def parse_lychee(document: dict, repo_root: Path) -> list[tuple[str, str, str]]:
-    """(path, link_target, kind) for every entry in lychee's JSON error_map."""
+    """(path, link_target, kind) for every entry in BOTH lychee failure maps.
+
+    `timeout_map` is read as well as `error_map` — see `_LYCHEE_ERROR_MAPS`.
+    A timeout is a failure lychee itself counts (its `is_success` requires the
+    map to be EMPTY), and the differ is now the only thing deciding the step, so
+    a map it does not read is a class it cannot fail on.
+    """
     findings: list[tuple[str, str, str]] = []
-    for path, entries in (document.get("error_map") or {}).items():
-        for entry in entries or []:
-            status = entry.get("status")
-            if not isinstance(status, dict):
-                # A producer that emits a non-object status must fail CLOSED (its
-                # key reds), not crash with an AttributeError and a traceback.
-                status = {}
-            kind = status.get("details") or status.get("text") or "error"
-            findings.append(
-                (
-                    normalize_path(path),
-                    normalize_link_target(str(entry.get("url", "")), repo_root),
-                    _collapse(str(kind)),
+    for map_name in _LYCHEE_ERROR_MAPS:
+        for path, entries in (document.get(map_name) or {}).items():
+            for entry in entries or []:
+                status = entry.get("status")
+                if not isinstance(status, dict):
+                    # A producer that emits a non-object status must fail CLOSED (its
+                    # key reds), not crash with an AttributeError and a traceback.
+                    status = {}
+                kind = status.get("details") or status.get("text") or "error"
+                findings.append(
+                    (
+                        normalize_path(path),
+                        normalize_link_target(str(entry.get("url", "")), repo_root),
+                        _collapse(str(kind)),
+                    )
                 )
-            )
     return findings
 
 
@@ -509,11 +543,19 @@ def _require_lychee_shape(document: object, where: str) -> dict:
     envelope, a wrapper) wrote a 0-entry lychee snapshot and exited 0. The
     ceiling accepts 0, so that snapshot then reds every future inherited link
     finding: the generator must be exactly as fail-closed as the consumer.
+
+    `timeout_map` is required for the same reason, one class further on: it is a
+    REQUIRED key of lychee's own JSON (0.24.2 emits it on every run — empty or
+    not), and a document without it is one whose timeouts the differ cannot see.
+    Requiring it means a producer that stops emitting the key fails CLOSED with
+    a message, instead of silently dropping the timeout class again.
     """
-    if not isinstance(document, dict) or "error_map" not in document or "total" not in document:
+    required = ("total", *_LYCHEE_ERROR_MAPS)
+    missing = [key for key in required if not isinstance(document, dict) or key not in document]
+    if missing:
         raise FailClosed(
-            f"lychee JSON from {where} has not the expected shape (total/error_map "
-            "missing) — failing closed"
+            f"lychee JSON from {where} has not the expected shape ("
+            f"{'/'.join(missing)} missing) — failing closed"
         )
     return document
 

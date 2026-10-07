@@ -61,12 +61,28 @@ docs/y.md:104 error MD032/blanks-around-lists Lists should be surrounded by blan
 NO_FINDINGS_REPORT = "Linting: 1 file\nSummary: 0 issues in 0 files\n"
 
 
-def _lychee_document(entries: dict[str, list[dict]]) -> dict:
-    return {"total": 10, "errors": sum(len(v) for v in entries.values()), "error_map": entries}
+def _lychee_document(entries: dict[str, list[dict]], timeouts: dict[str, list[dict]] | None = None) -> dict:
+    """A lychee JSON report. `timeouts` is its SECOND failure map.
+
+    lychee 0.24.2 emits BOTH `error_map` and `timeout_map` on every run, and
+    both are REQUIRED by `_require_lychee_shape` — a hard failure and a link it
+    could not reach in time are two different maps in lychee's own JSON.
+    """
+    return {
+        "total": 10,
+        "errors": sum(len(v) for v in entries.values()),
+        "error_map": entries,
+        "timeout_map": timeouts or {},
+    }
 
 
 def _file_entry(url: str, kind: str = "File not found. Check if file exists and path is correct"):
     return {"url": url, "status": {"text": kind, "details": kind}}
+
+
+def _timed_out_entry(url: str) -> dict:
+    """A lychee `timeout_map` entry — what a link it could not reach looks like."""
+    return {"url": url, "status": {"text": "Timeout", "details": "Request timed out"}}
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -273,6 +289,67 @@ def test_new_lychee_finding_fails(tmp_path: Path, capsys):
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "1 new, 2 known (baseline), 0 in generated files" in out
+
+
+# ── lychee's SECOND failure map: a timeout is a failure it counts ─────────────
+
+
+def test_both_lychee_failure_maps_are_parsed():
+    """`error_map` AND `timeout_map` — a timeout is not a flavour of no-finding.
+
+    lychee 0.24.2 splits its failures across two maps; its own JSON fixture
+    (`lychee-bin/src/formatters/stats/json.rs`) carries `"timeouts": 1` with the
+    timeout entry under `timeout_map` and `error_map` holding only the 404. So a
+    differ that reads one map cannot see the other map's findings at all.
+    """
+    document = _lychee_document(
+        {"docs/x.md": [_file_entry("https://example.invalid/err")]},
+        {"docs/y.md": [_timed_out_entry("https://example.invalid/slow")]},
+    )
+    assert sorted(_lychee_keys(document)) == [
+        "docs/x.md|https://example.invalid/err",
+        "docs/y.md|https://example.invalid/slow",
+    ]
+
+
+def test_a_new_timed_out_link_fails_the_check(tmp_path: Path, capsys):
+    """The fail-open this closes: a NEW dead link that TIMES OUT must still red.
+
+    lychee's verdict (`ResponseStats::is_success`, lychee-bin/src/formatters/
+    stats/response.rs) is `error_map.is_empty() && timeout_map.is_empty()`, and
+    `check.rs` maps a false verdict to `ExitCode::LinkCheckFailure` unless
+    `--accept-timeouts` is passed — which the `docs` job does not pass. So before
+    #7435 the lychee action, running with its default `fail: true`, FAILED the
+    required check on a timeout. #7435 sets `fail: false` and makes the differ the
+    sole verdict, so reading only `error_map` silently stopped failing on the
+    timeout class — and because `update` uses the same parse, the target could
+    never be recorded as known either. Measured on the revision before this test:
+    `0 new, 0 known (baseline)` and exit 0 for exactly this document.
+    """
+    document = _lychee_document(
+        {}, {"docs/x.md": [_timed_out_entry("https://example.invalid/slow")]}
+    )
+    rc = _check(tmp_path, NO_FINDINGS_REPORT, document, _baseline([], []))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "1 new, 0 known (baseline), 0 in generated files" in out
+    assert "https://example.invalid/slow" in out
+
+
+def test_a_timeout_on_a_recorded_target_is_known(tmp_path: Path, capsys):
+    """The two maps share ONE identity, so the fix adds no false red of its own.
+
+    A real target's key is `path|target` with no status, so a link the snapshot
+    recorded as an ERROR and that reports as a TIMEOUT in this run is the SAME
+    finding — the timeout class cannot re-red inherited debt for a link that is
+    already on the list (the #7475 property this snapshot exists to keep).
+    """
+    key = "docs/x.md|https://example.invalid/a"
+    document = _lychee_document({}, {"docs/x.md": [_timed_out_entry("https://example.invalid/a")]})
+    rc = _check(tmp_path, NO_FINDINGS_REPORT, document, _baseline([], [key]))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "0 new, 1 known (baseline)" in out
 
 
 # ── lychee occurrence counts are a RUN property, so lychee is a set ───────────
@@ -1067,10 +1144,14 @@ def test_update_rejects_a_lychee_document_the_check_would_reject():
         dlb._require_lychee_shape({}, "test")
     with pytest.raises(dlb.FailClosed):
         dlb._require_lychee_shape({"total": 0}, "test")
-    assert dlb._require_lychee_shape({"total": 0, "error_map": {}}, "test") == {
-        "total": 0,
-        "error_map": {},
-    }
+    # The SECOND failure map is required too: a producer that stops emitting
+    # `timeout_map` would otherwise silently drop the timeout class again — the
+    # exact fail-open this change closes. lychee 0.24.2 emits it on every run.
+    with pytest.raises(dlb.FailClosed):
+        dlb._require_lychee_shape({"total": 0, "error_map": {}}, "test")
+    assert dlb._require_lychee_shape(
+        {"total": 0, "error_map": {}, "timeout_map": {}}, "test"
+    ) == {"total": 0, "error_map": {}, "timeout_map": {}}
 
 
 def test_linters_capture_output_instead_of_deciding_the_verdict():
