@@ -18,9 +18,9 @@
     "population": "git ls-files '*.md' \u2014 838 files",
     "counts": {
       "markdownlint": 11238,
-      "lychee": 158
+      "lychee": 153
     },
-    "variance": "markdownlint findings are deterministic. The lychee half also checks REMOTE links, so its count varies between generations for reasons no author controls (rate limits, transient network, TLS) \u2014 which is why its key carries no status text, and why its pinned ceiling in tests/test_docs_lint_baseline.py has headroom while the markdownlint one is exact. Regenerate with `update`; never hand-edit."
+    "variance": "markdownlint findings are deterministic and occurrence-counted. The lychee half also checks REMOTE links, whose occurrence count varies between RUNS for reasons no author controls (rate limits, transient network, TLS, run population), so it is a SET of `(path, target)` keys, not a count \u2014 its pinned ceiling in tests/test_docs_lint_baseline.py has headroom while the markdownlint one is exact. Regenerate with `update`; never hand-edit."
   },
   "markdownlint": [
     ".scope-1894.md|MD007|1|Unordered list indentation [Expected: 0; Actual: 3]",
@@ -11277,7 +11277,6 @@
     "docs/epics/2026-09-10-2835-capability-registry/prior-art-scan.md|https://sourcegraph.com/blog/evolving-precise-code-intel-backend",
     "docs/license-notes.md|docs/docs/client-server-split.md",
     "docs/license-notes.md|https://www.couchbase.com/blog/couchbase-adopts-bsl-license/",
-    "docs/license-notes.md|https://www.couchbase.com/blog/couchbase-adopts-bsl-license/",
     "docs/license-notes.md|https://www.hashicorp.com/en/bsl",
     "docs/plans/2026-08-07-327-db-indexes.md|error:|Cannot parse 'docker://:16379' into a URL: empty host",
     "docs/plans/2026-08-11-942-selfhost-trust.md|http://localhost:8000/mcp",
@@ -11291,8 +11290,6 @@
     "docs/research/2026-08-26-classification-later.md|https://doi.org/10.3390/ijgi14070268",
     "docs/research/2026-08-26-classification-later.md|https://www.cambridge.org/core/journals/research-synthesis-methods/article/",
     "docs/research/2026-09-08-tortoise-agent-daemon.md|http://localhost/",
-    "docs/research/2026-09-09-competitor-memory-architecture.md|https://deepwiki.com/basicmachines-co/docs.basicmemory.com/2.1-system-architecture-and-components",
-    "docs/research/2026-09-09-competitor-memory-architecture.md|https://deepwiki.com/basicmachines-co/docs.basicmemory.com/2.1-system-architecture-and-components",
     "docs/research/2026-09-09-competitor-memory-architecture.md|https://deepwiki.com/basicmachines-co/docs.basicmemory.com/2.1-system-architecture-and-components",
     "docs/research/2026-09-09-competitor-memory-architecture.md|https://deepwiki.com/langchain-ai/langmem/9-api-reference",
     "docs/research/2026-09-09-competitor-memory-architecture.md|https://docs.mem0.ai/core-concepts/memory-operations/%7Badd,search,update,delete%7D",
@@ -11382,7 +11379,6 @@
     "website/apps/dashboard/node_modules/debug/README.md|website/apps/dashboard/node_modules/debug/examples/node/worker.js",
     "website/apps/dashboard/node_modules/electron-to-chromium/README.md|https://m.do.co/c/bb22ea58e765",
     "website/apps/dashboard/node_modules/electron-to-chromium/README.md|https://www.npmjs.com/package/electron-to-chromium",
-    "website/apps/dashboard/node_modules/electron-to-chromium/README.md|https://www.npmjs.com/package/electron-to-chromium",
     "website/apps/dashboard/node_modules/escalade/readme.md|http://deno.land/x/escalade",
     "website/apps/dashboard/node_modules/fdir/README.md|error:|Cannot resolve root-relative link '/BENCHMARKS.md': To resolve root-relative links in local files, provide a root dir",
     "website/apps/dashboard/node_modules/fdir/README.md|error:|Cannot resolve root-relative link '/documentation.md': To resolve root-relative links in local files, provide a root dir",
@@ -11410,7 +11406,6 @@
     "website/apps/dashboard/node_modules/rollup/README.md|https://packagephobia.com/badge?p=rollup",
     "website/apps/dashboard/node_modules/rollup/README.md|https://packagephobia.com/result?p=rollup",
     "website/apps/dashboard/node_modules/rollup/README.md|https://www.npmjs.com/package/rollup",
-    "website/apps/dashboard/node_modules/rollup/README.md|website/apps/dashboard/node_modules/rollup/CONTRIBUTING.md",
     "website/apps/dashboard/node_modules/rollup/README.md|website/apps/dashboard/node_modules/rollup/CONTRIBUTING.md",
     "website/apps/dashboard/node_modules/source-map-js/README.md|https://mrale.ph/blog/2018/02/03/maybe-you-dont-need-rust-to-speed-up-your-js.html",
     "website/apps/dashboard/node_modules/source-map-js/README.md|https://www.npmjs.com/package/source-map-js",

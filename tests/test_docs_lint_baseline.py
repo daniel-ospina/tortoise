@@ -14,8 +14,11 @@ rather than prevent:
     stop;
   * **new findings fail** — a differ that returns 0 for everything is worse than
     no differ, because it looks like a check;
-  * **occurrence counts, not sets** — two findings can share one key, so a set
-    would silently absorb a change that ADDED a third;
+  * **occurrence counts where the TREE determines them, a set where it does not**
+    — two markdownlint findings can share one key, so a set would silently absorb
+    a change that ADDED a third; a lychee occurrence count is a property of the
+    RUN (file population + run cache + remote status), so counting it re-fails
+    inherited debt on an unchanged tree (#7542);
   * **fail-closed** — a linter that did not run must never read as "clean", and
     the markdownlint exit code cannot carry that evidence: GNU `xargs` rewrites a
     child's 1-125 to 123, so cli2's 1 (findings) and 2 (fatal) are the same byte.
@@ -118,6 +121,10 @@ def _md_keys(report: str) -> list[str]:
     return [dlb.markdownlint_key(f) for f in dlb.parse_markdownlint(report)]
 
 
+def _lychee_keys(document: dict, repo_root: Path = ROOT) -> list[str]:
+    return [dlb.lychee_key(f) for f in dlb.parse_lychee(document, repo_root)]
+
+
 # ── keys survive an unrelated line shift ─────────────────────────────────────
 
 
@@ -184,16 +191,21 @@ def test_lychee_key_is_stable_across_the_run_population():
     lychee reports a URL it has already seen in a run as `Error (cached)`, so a
     status in the key makes the SAME untouched link key differently when the run
     covers the whole repo (what `update` does) and when it covers only a PR's
-    changed files (what CI does). Measured: `docs/license-notes.md` carries the
-    same URL twice in the snapshot, both as `Error (cached)`, so any PR touching
-    that file would have reported an inherited link as NEW and failed the
+    changed files (what CI does). Measured on the committed snapshot:
+    `docs/license-notes.md` carries the hashicorp URL TWICE, but the all-file
+    `update` recorded it ONCE (and the couchbase URL on that same file twice), so
+    a changed-file run's second occurrence was counted as NEW and failed the
     required check — the #7475 failure this snapshot exists to remove.
+
+    The KEY is only half of that fix. The other half is that the lychee compare is
+    a SET, not a count: the count is a property of the run (see
+    `test_lychee_occurrence_count_is_not_compared_across_populations`).
     """
     cached = ("docs/x.md", "https://example.invalid/a", "Error (cached)")
     fresh = ("docs/x.md", "https://example.invalid/a", "Rejected status code: 429 Too Many Requests")
     assert dlb.lychee_key(cached) == dlb.lychee_key(fresh) == "docs/x.md|https://example.invalid/a"
-    # A DIFFERENT target is still a different finding, and the count still tells
-    # two occurrences of one target from one.
+    # A DIFFERENT target is a different finding; identical targets are one
+    # finding, however many times the target appears (the set compare below).
     other = ("docs/x.md", "https://example.invalid/b", "Error (cached)")
     assert dlb.lychee_key(other) != dlb.lychee_key(cached)
 
@@ -261,6 +273,80 @@ def test_new_lychee_finding_fails(tmp_path: Path, capsys):
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "1 new, 2 known (baseline), 0 in generated files" in out
+
+
+# ── lychee occurrence counts are a RUN property, so lychee is a set ───────────
+
+
+def test_lychee_occurrence_count_is_not_compared_across_populations(tmp_path: Path, capsys):
+    """The #7542 P1: a run's repeat of a recorded target must NOT read as NEW.
+
+    `update` lints ALL tracked markdown while CI lints only the changed files, and
+    a remote link's entry count moves with the run (cache + transient status), so
+    the count a baseline records is NOT reproducible by the run that reads it.
+    Measured on the committed snapshot: `docs/license-notes.md` carries the
+    hashicorp URL twice, the all-file `update` recorded it once, and a
+    changed-file run reports it twice — `1 new, 4 known` and a red REQUIRED `docs`
+    on an unrelated PR. The lychee compare is a key SET, so the repeat is KNOWN.
+    """
+    key = "docs/x.md|https://example.invalid/a"
+    twice = _lychee_document(
+        {
+            "docs/x.md": [
+                _file_entry("https://example.invalid/a"),
+                _file_entry("https://example.invalid/a"),
+            ]
+        }
+    )
+    assert _lychee_keys(twice) == [key, key], "the fixture really repeats one key"
+    # Baseline records it ONCE (what the all-file update wrote); the run reports it
+    # TWICE (what a changed-file run writes) — still zero new.
+    rc = _check(tmp_path, NO_FINDINGS_REPORT, twice, _baseline([], [key]))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "0 new, 2 known (baseline)" in out
+
+
+def test_lychee_same_link_twice_with_a_doubled_baseline_is_clean(tmp_path: Path, capsys):
+    """The same population on both sides: a doubled baseline over a doubled run.
+
+    This is the direction that was already green on the couchbase URL, pinned so a
+    future re-baseline cannot silently make it the ONLY green shape.
+    """
+    key = "docs/x.md|https://example.invalid/a"
+    twice = _lychee_document(
+        {"docs/x.md": [_file_entry("https://example.invalid/a")] * 2}
+    )
+    rc = _check(tmp_path, NO_FINDINGS_REPORT, twice, _baseline([], [key, key]))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "0 new, 2 known (baseline)" in out
+
+
+def test_a_genuinely_new_lychee_target_is_still_reported_exactly_once(tmp_path: Path, capsys):
+    """Set membership is not a no-op: an unseen target still reds the check.
+
+    The set compare narrows the check to targets not on the list; it must not stop
+    reporting a target that IS new. The run repeats a KNOWN target and adds one
+    NEW one, so exactly one finding is new — the repeat is suppressed, the new
+    target is not.
+    """
+    known = "docs/x.md|https://example.invalid/known"
+    document = _lychee_document(
+        {
+            "docs/x.md": [
+                _file_entry("https://example.invalid/known"),
+                _file_entry("https://example.invalid/known"),
+                _file_entry("https://example.invalid/brand-new"),
+            ]
+        }
+    )
+    rc = _check(tmp_path, NO_FINDINGS_REPORT, document, _baseline([], [known]))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "1 new, 2 known (baseline)" in out
+    assert "brand-new" in out
+    assert "example.invalid/known" not in out.split("NEW findings")[1]
 
 
 # ── generated files name the generator ───────────────────────────────────────
@@ -567,7 +653,35 @@ def test_update_writes_a_valid_snapshot(tmp_path: Path, monkeypatch):
     assert rc == 0
 
 
-# ── workflow wiring ──────────────────────────────────────────────────────────
+def test_update_deduplicates_the_lychee_half(tmp_path: Path, monkeypatch):
+    """The producer writes a SET for lychee — a repeat is one entry, not two.
+
+    The check compares membership (see
+    `test_lychee_occurrence_count_is_not_compared_across_populations`), so the
+    producer must not advertise a count. Deduplicating here is what makes the
+    committed artifact and the live comparison one normalisation rather than two.
+    """
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(dlb, "_require_lychee_binary", lambda binary: None)
+    monkeypatch.setattr(dlb, "_run_markdownlint", lambda files, root: (0, NO_FINDINGS_REPORT))
+    monkeypatch.setattr(
+        dlb,
+        "_run_lychee",
+        lambda files, root, binary: _lychee_document(
+            {
+                "docs/x.md": [
+                    _file_entry("https://example.invalid/a"),
+                    _file_entry("https://example.invalid/a"),
+                ]
+            }
+        ),
+    )
+    files = _write(tmp_path, "files.txt", "docs/x.md\n")
+    out = tmp_path / "baseline.json"
+    assert dlb.main(["update", "--files-from", str(files), "--baseline", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["lychee"] == ["docs/x.md|https://example.invalid/a"]
+    assert written["snapshot"]["counts"]["lychee"] == 1
 
 
 def _docs_steps() -> list[dict]:
@@ -844,7 +958,7 @@ def _extract_suppression_guard(run: str) -> str:
     marker = re.search(r"\$RUNNER_TEMP/(\w+)", "".join(block))
     if marker:
         sibling = f"$RUNNER_TEMP/{marker.group(1)}"
-        nxt = next((l for l in lines[start + len(block) :] if l.strip()), "")
+        nxt = next((raw for raw in lines[start + len(block) :] if raw.strip()), "")
         if re.match(r"\s*if grep ", nxt) and sibling in nxt:
             for line in lines[start + len(block) :]:
                 block.append(line)
@@ -1016,11 +1130,12 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     counts = baseline["snapshot"]["counts"]
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
     # deliberate append, never noise. The lychee half also checks REMOTE links,
-    # whose count drifts between generations for reasons no author controls, so
-    # its ceiling is the MAXIMUM OBSERVED across generations (151-160, measured
-    # three times) — not a round number: slack above the observed range is an
-    # amnesty window, so it is bounded at 160 and any re-baseline above it must
-    # raise this row out loud. The asymmetry is deliberate.
+    # whose occurrence count drifts between RUNS for reasons no author controls,
+    # so it is a SET (deduplicated) and its ceiling is the MAXIMUM OBSERVED set
+    # size across generations (151-160, measured three times) — not a round
+    # number: slack above the observed range is an amnesty window, so it is
+    # bounded at 160 and any re-baseline above it must raise this row out loud.
+    # The asymmetry is deliberate.
     ceilings = {"markdownlint": 11238, "lychee": 160}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
@@ -1053,7 +1168,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
         "ba58e90af5357ad7f83eb6c4004b84b0860ce4408dbbb1b7977c704c766d5469"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
-        "caee699b2f935fe798006b2cf51fdcf0027d6efe792bba2a5cd1e0c8fde03996"
+        "568e42acb1a73bc4ff3b68a1cecf58b4233d9f8f3ebd68279f7c3e59cece8493"
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
 
 

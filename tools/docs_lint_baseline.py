@@ -71,12 +71,15 @@ covers the whole repo (what ``update`` does) and when it covers only a PR's
 changed files (what CI does). A status in the key therefore reds an unrelated PR
 on an inherited finding, which is the #7475 failure this exists to remove. The
 status IS still shown in the report; it is just not part of the identity. Two
-findings on one target stay distinguished by the occurrence count below.
+findings on one target are ONE finding — the target is broken either way — and
+the lychee comparison is therefore a key SET; see "THE SNAPSHOT…" below for why
+an occurrence count cannot be compared across the populations the two paths run
+over.
 
 PLACEHOLDER TARGETS ARE THE EXCEPTION, and they are the opposite failure. When
 lychee cannot extract a URL it records the target ``error:``, and ``path|error:``
 has no distinguishing content: two different broken links in one file collapse to
-one key, so editing one to the other keeps the count and absorbs a new dead link.
+one key, so editing one to the other keeps the key and absorbs a new dead link.
 For those findings only the offending line's own text is the identity — it is
 source content, not run state, and it is exactly what the paragraph above
 promises changes when the line is edited. A bare ``Error (cached)`` marker is
@@ -87,13 +90,36 @@ offending line's text), and ``column`` is horizontal, so both survive a shift of
 the file's lines. Editing the offending line itself DOES change the key — that is
 deliberate and fail-closed: a finding you touched is a finding you own.
 
-THE SNAPSHOT IS OCCURRENCE-COUNTED, NOT A SET
+THE SNAPSHOT IS OCCURRENCE-COUNTED WHERE THE TREE DETERMINES THE COUNT
 
-Several findings can share one key (the same rule, column and offending line
-text on two different lines). A set would silently absorb a change that ADDED a
-third — the key was already present — so the snapshot stores every occurrence and
-the check compares counts: a change fails whenever it produces MORE occurrences
-of a key than the snapshot recorded. Fixing one of them is never a new finding.
+The two linters need different comparisons, and the difference is forced by the
+data, not chosen for convenience.
+
+  * **markdownlint is a multiset.** Several findings can share one key (the same
+    rule, column and offending line text on two different lines). A set would
+    silently absorb a change that ADDED a third — the key was already present —
+    so the snapshot stores every occurrence and the check compares counts: a
+    change fails whenever it produces MORE occurrences of a key than the
+    snapshot recorded. This is safe because a file's markdownlint findings are a
+    property of the file ALONE: every file is linted independently, so the count
+    is identical whether the run covers one file or all 838. Fixing one of them
+    is never a new finding.
+
+  * **lychee is a SET of ``(path, target)`` keys.** A link's occurrence count is
+    a property of the RUN, not the tree: ``update`` lints all tracked markdown
+    while CI lints only the changed files, and remote-link outcomes (429/403/…)
+    plus lychee's run cache move the count for an unchanged link between runs.
+    Measured at the snapshot's own base_sha: ``docs/license-notes.md`` carries
+    the hashicorp URL TWICE, the all-file ``update`` recorded it ONCE (while
+    recording the couchbase URL on the same file TWICE), and a changed-file run
+    reports the hashicorp URL twice — so a count comparison classified an
+    INHERITED finding as new and redded an unrelated PR, the #7475 failure this
+    snapshot exists to remove. Membership still fails a genuinely new dead link;
+    it stops re-failing a *repeat* of a link already on the list, which the
+    owner's ruling ("reject a change only for problems not on that list") does
+    not ask for — the problem is already on the list. There is no reproducible
+    count to compare against, so the baseline stores and compares a key set, and
+    ``update`` deduplicates this half.
 
 END STATE — THIS IS A SNAPSHOT, NOT AN AMNESTY (#7534)
 
@@ -603,10 +629,11 @@ def _describe(kind: str, key: str, observed: tuple | None = None) -> str:
 def run_check(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve()
     baseline = load_baseline(Path(args.baseline))
-    # Occurrence counts, not sets: see the module docstring. Adding a second
-    # occurrence of an already-recorded key is still a new finding.
+    # Occurrence counts for markdownlint (a file's findings are a property of the
+    # file alone); a SET for lychee (its occurrence count is a property of the run
+    # — see the module docstring).
     known_markdownlint = Counter(baseline["markdownlint"])
-    known_lychee = Counter(baseline["lychee"])
+    known_lychee = set(baseline["lychee"])
 
     try:
         _require_unchanged_linter_policy(baseline, repo_root)
@@ -634,17 +661,28 @@ def run_check(args: argparse.Namespace) -> int:
             generated_cache[path] = generated_target(path, repo_root)
         return generated_cache[path]
 
-    for kind, observed in (("markdownlint", markdownlint), ("lychee", lychee)):
-        recorded = known_markdownlint if kind == "markdownlint" else known_lychee
-        seen: Counter[str] = Counter()
-        for key, finding in observed:
-            if _generated(finding[0]) is not None:
-                generated += 1
-            seen[key] += 1
-            if seen[key] <= recorded[key]:
-                known += 1
-            else:
-                new.append((kind, key, finding))
+    # markdownlint is a multiset: a THIRD identical finding is a genuinely new
+    # failure (the count is tree-determined). Use a separate loop so each half's
+    # comparison is explicit and a single typed expression.
+    seen_markdownlint: Counter[str] = Counter()
+    for key, finding in markdownlint:
+        if _generated(finding[0]) is not None:
+            generated += 1
+        seen_markdownlint[key] += 1
+        if seen_markdownlint[key] <= known_markdownlint[key]:
+            known += 1
+        else:
+            new.append(("markdownlint", key, finding))
+
+    # lychee is a membership test: its occurrence count is a run property (see the
+    # module docstring), so counting it would re-fail inherited debt.
+    for key, finding in lychee:
+        if _generated(finding[0]) is not None:
+            generated += 1
+        if key in known_lychee:
+            known += 1
+        else:
+            new.append(("lychee", key, finding))
 
     print(
         f"docs-lint baseline: {len(new)} new, {known} known (baseline), "
@@ -790,14 +828,17 @@ def run_update(args: argparse.Namespace) -> int:
             f"markdownlint judged {judged} of {len(files)} file(s) while generating the "
             "snapshot — refusing to write an incomplete baseline"
         )
-    # Sorted WITH duplicates: the snapshot is a multiset (see the module
+    # Sorted WITH duplicates: the markdownlint half is a multiset (see the module
     # docstring), so two occurrences of one key are two entries.
     markdownlint = sorted(
         markdownlint_key(f) for f in parse_markdownlint_checked(markdownlint_text)
     )
 
     lychee_document = _run_lychee(files, repo_root, args.lychee_bin)
-    lychee = sorted(lychee_key(f) for f in parse_lychee(lychee_document, repo_root))
+    # Deduplicated: the lychee half is a SET of `(path, target)` keys. Its
+    # occurrence count is a property of the run, not the tree, so writing
+    # duplicates would advertise a count the check deliberately does not compare.
+    lychee = sorted({lychee_key(f) for f in parse_lychee(lychee_document, repo_root)})
 
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True
@@ -835,10 +876,11 @@ def run_update(args: argparse.Namespace) -> int:
             "population": f"git ls-files '*.md' — {len(files)} files",
             "counts": {"markdownlint": len(markdownlint), "lychee": len(lychee)},
             "variance": (
-                "markdownlint findings are deterministic. The lychee half also checks "
-                "REMOTE links, so its count varies between generations for reasons no "
-                "author controls (rate limits, transient network, TLS) — which is why "
-                "its key carries no status text, and why its pinned ceiling in "
+                "markdownlint findings are deterministic and occurrence-counted. The "
+                "lychee half also checks REMOTE links, whose occurrence count varies "
+                "between RUNS for reasons no author controls (rate limits, transient "
+                "network, TLS, run population), so it is a SET of `(path, target)` "
+                "keys, not a count — its pinned ceiling in "
                 "tests/test_docs_lint_baseline.py has headroom while the markdownlint "
                 "one is exact. Regenerate with `update`; never hand-edit."
             ),
