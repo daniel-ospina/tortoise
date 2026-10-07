@@ -3491,12 +3491,20 @@ _POINT_RESTAMP_EVENT_TYPES = frozenset({
     "PointInvalidated",
 })
 
-# #3585: the point-lifecycle types `rebuild_all` folds only in its DEFERRED
-# sweep (order-sensitive re-stamp pass). `apply()` has no sweep, so it cannot
-# fold them; classifying them as unknown would refuse a lost-DB recovery.
-# See the `apply()` branch that consumes this set.
-_APPLY_DEFERRED_POINT_TYPES: frozenset[str] = frozenset({
-    "PointSuperseded", "PointInvalidated", "DirectEdgeRepoint",
+# #3585: the recognized journal types this one-record `apply()` engine does
+# NOT fold, and must NOT refuse either. `rebuild_all` folds `DirectEdgeRepoint`
+# in its DEFERRED pass-2b (the operator-edge re-point descriptor replay), which
+# `apply()` has no equivalent of — so classifying it as unknown would make
+# `rebuild(log)` / `recover_from_log` refuse any journal holding one, i.e. a
+# lost DB could no longer be recovered.
+#
+# The set is WARN-ONLY: the `apply()` branch that consumes it gives the
+# recognized-not-folded-here case a named message, but the treatment is
+# IDENTICAL to the `else` it displaces. `PointSuperseded` / `PointInvalidated`
+# are deliberately NOT listed — the `_POINT_RESTAMP_EVENT_TYPES` branch above
+# consumes and returns on both before this set is reached (#3305).
+_APPLY_WARN_ONLY_TYPES: frozenset[str] = frozenset({
+    "DirectEdgeRepoint",
 })
 
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
@@ -5537,28 +5545,38 @@ class FalkorProjection(
             # for a type OUTSIDE this vocabulary — #3299 arose from exactly
             # that (an unknown mutation vanishing under wipe+replay).
             pass
-        elif t in _APPLY_DEFERRED_POINT_TYPES:
-            # #3585 re-review (P0): these ARE recognized and rebuilt — but only
-            # by `rebuild_all`'s DEFERRED pass, which this one-record apply
-            # engine has no equivalent of (the sweeps are order-sensitive and
-            # run after pass-1b). Recording them here would make `rebuild(log)`
-            # and `recover_from_log` REFUSE any journal holding a supersede or
-            # invalidate — i.e. a lost DB could no longer be recovered — so the
-            # engine's known parity gap stays a WARNING, as it was before #3585.
-            # It is NOT an unknown type: the vocabulary knows it (see
-            # `_NO_PROJECTION_FOLD`), and R8's fail-closed rule is for an event
+        elif t in _APPLY_WARN_ONLY_TYPES:
+            # P1-fix (#3585 re-review): `DirectEdgeRepoint` IS recognized and
+            # IS rebuilt — but only by `rebuild_all`'s DEFERRED pass-2b, which
+            # this one-record apply engine has no equivalent of (the sweep runs
+            # after the operator pass). Recording it here as non-folded would
+            # make `rebuild(log)` and `recover_from_log` REFUSE any journal
+            # holding one — i.e. a lost DB could no longer be recovered — so
+            # the engine's known parity gap stays a WARNING. This branch is a
+            # WARN-ONLY naming of the recognized-not-folded-here case: the same
+            # treatment as the `else` below, but the message says WHY. It is
+            # NOT an unknown type, and R8's fail-closed rule is for an event
             # the fold cannot RESOLVE, not for a type this engine models later.
+            # (`PointSuperseded` / `PointInvalidated` are NOT members: the
+            # `_POINT_RESTAMP_EVENT_TYPES` branch above returns on both.)
             logger.warning(
                 "%r is folded by rebuild_all's deferred pass only — this "
                 "apply-based engine skipped it (rebuild-parity gap)", t)
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
-            # must not be dropped silently. A type that IS recognized but has
-            # no branch HERE — e.g. DirectEdgeRepoint, replayed only by
-            # rebuild_all's pass-2b — still warns: that is a genuine
-            # rebuild-parity gap, not noise. (PointSuperseded /
-            # PointInvalidated were the other two until #3305 gave them the
-            # branch above.)
+            # must not be dropped silently. #3585 (R8): non-folded and NOT
+            # exempt — the run fails. Only a STRING type is a real record: a
+            # malformed line with no type is dropped identically by every
+            # engine (the writer never emits it), so recording it would be a
+            # false positive. (The one recognized-not-folded-here type,
+            # `DirectEdgeRepoint`, is caught by the warn-only branch above, so
+            # this arm is reserved for a genuinely unknown record.)
+            if isinstance(t, str):
+                record_non_folded(
+                    SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
+                    event_type=t,
+                    detail="graph fold: unrecognized type",
+                )
             logger.warning("unrecognized event type %r — skipped", t)
 
     def _episodic_point_ids(self) -> set[str]:
