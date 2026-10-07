@@ -213,10 +213,11 @@ What this settles:
 
 **Why (on the record, not as a re-argument).** The grounded requirement behind the workstream (#2782) is a
 **sum and a ratio against a threshold** — *"75% of tranche 1 spent → tranche 2 unlocks"*. That needs
-values read **correctly**; nothing grounded asks the design to catch a wrong read. The research points the
-same way: neither comparable ships a locale parser and both keep the raw source, and the controlled
-ablation has the verbatim route ahead of the derived one by 15.9 / 22.0 pts (external — **arXiv
-2601.00821v3**; our own reproduction is pre-registered at **#3011** and has not been run).
+values read **correctly**; nothing grounded asks the design to catch a wrong read. What the research
+returned points the same way: both comparables keep the raw source, and the controlled ablation has the
+verbatim route ahead of the derived one by 15.9 / 22.0 pts (external — **arXiv 2601.00821v3**; our own
+reproduction is pre-registered at **#3011** and has not been run). *(The “neither ships a locale parser”
+half stays **unverified** — see this section's opening; it is not relied on here.)*
 
 **The rejected alternative — (b), recorded for when it would be right.** A minimal **anchored**
 separator/currency rule for values carrying a currency anchor. It is the **only** route to detecting T2's
@@ -268,7 +269,7 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 
 | ID | Question | Recommendation | Consequence if different |
 | --- | --- | --- | --- |
-| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and on the HTTP `Point` model (`tortoise/commit_schema.py:500`). | A parallel declaration drifts from the write path: the field still replays via the open-set passthrough, but the drift warning fires on every rebuild and the HTTP validator refuses it. |
+| **OD1** | Where is the value field declared and typed? | Declare it once, on the accepted point-property surface (the fixed Point property list, `_upsert_point_props`, `tortoise/projection/entities.py:801`) and **not** on the HTTP `Point` model (`tortoise/commit_schema.py:500`) — ⚠️ **v3 (2026-10-07):** that half is foreclosed by the owner's Option (a) decision, because `Point` is `extra="forbid"`, so declaring the field there is exactly what makes a client-supplied amount *accepted* (the half OD5 closes). See §7.1 S3 and §7.2 step 2. | A parallel declaration drifts from the write path — the field still replays via the open-set passthrough, but the drift warning fires on every rebuild. Declaring it on `Point` **widens** the contract instead: the closed model would begin accepting a client-supplied amount, which is the half OD5 closes. |
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
