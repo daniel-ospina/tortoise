@@ -121,8 +121,7 @@ is what makes the field cheap.
 On FalkorDB **the whole graph is RAM** — no spill-to-disk and no eviction on Cloud — at **$0.10/GB-hour ≈
 $73/GB/month** on provisioned memory (**MEASURED** — vendor pricing, $0.10/GB-hour × ~730 h; the storage
 magnitudes below are measured in `docs/architecture/STORAGE-ARCHITECTURE.md` §2.2 / line 173,
-§7 / line 439 and §12.1 / lines 858, 930 — tracked at HEAD `e18dda11b` (PR #7559 merged as
-`1c8bc4701`)). There is **no cold tier**: an
+§7 / line 439 and §12.1 / lines 858, 930 — tracked at `1c8bc4701` (PR #7559's merge commit)). There is **no cold tier**: an
 unread byte costs the same as a read one. The only documented removal of a graph is `GRAPH.DELETE`
 (permanent); per-graph eviction is documented only for Enterprise (self-managed), not Cloud —
 **documentation-based, unconfirmed** (its source qualifies it *"not exposed on Cloud as far as we can
@@ -187,8 +186,9 @@ the paragraph above states the reading this correction's wording assumes.)*
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
 **⚠️ Open decision for the owner — this correction does not settle it.** §4's blanket *"no separator
-pattern ladder"* and §6/T3's abstention rule jointly make T2's named regression (`R$ 1.234,56` read as
-`1.234`) **undetectable by construction**. Two coherent readings exist:
+pattern ladder"* makes T2's named regression (`R$ 1.234,56` read as `1.234`) **undetectable by
+construction** — §6/T3 does no work for this case, because T3 governs only forms with **no** anchor and
+`R$` **is** an anchor (§6/T2). Two coherent readings exist:
 
 - **(a) Keep §4 as written.** The design types only unambiguous values and explicitly **cannot detect the
   misread**; detection belongs to #2684. *(This correction's **wording** assumes (a) — it is the reading
@@ -456,8 +456,9 @@ block (which reads 143 MB / 46 MB) — **line 439 carries no node or `Point` cou
 ("1.5 KB each") and §12.1a / line 930 ("1,830 B ≈ 1.79 KB/vector") — the per-embedding size. §12.1b is
 the unindexed `Object`/`Event` accounting and carries none of these magnitudes. The 15,521-node /
 8,032-`Point` figures are this document's own **INFERRED** arithmetic (§2.2 table), not magnitudes from
-that source. Tracked at HEAD `e18dda11b` (PR #7559 merged as `1c8bc4701`); the magnitudes are cited from
-that source, not from #2782.
+that source. Tracked at `1c8bc4701` (PR #7559's merge commit — the commit that produced the magnitudes;
+the earlier `e18dda11b` pin was a branch commit of a different PR that never touched the file); the
+magnitudes are cited from that source, not from #2782.
 - Research: `~/.swarm/research/2026-09-09-typed-values-and-lifecycles.md`,
   `~/.swarm/research/2026-09-09-numeric-storage-audit.md`.
 - `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`; the verbatim-vs-derived ablation,
