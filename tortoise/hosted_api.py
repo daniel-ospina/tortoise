@@ -27772,10 +27772,12 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # token can sit beside a valid sibling and a valid charge, so the
         # call is not usage-less.)
         "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
-        # #5868: provider charges a per-route ``by_stage`` bucket could not
-        # REPRESENT (finite charges, unrepresentable sub-total). ``cost_usd``
-        # still contains them, so this — not ``calls_without_cost`` — is what
-        # explains a ``cost_usd != sum(by_stage)`` divergence.
+        # #5868: OVERFLOW EVENTS — per-route/bucket ``by_stage`` cost
+        # sub-totals that could not represent their FINITE sum (one event may
+        # stand for several calls at the merge seams). This asserts that the
+        # ``by_stage`` breakdown is incomplete; it is NOT a statement about
+        # ``cost_usd``'s completeness, which ``calls_without_cost`` owns — in
+        # the combined case (the session sum overflowed too) both are non-zero.
         "route_cost_overflows": int(llm.get("route_cost_overflows", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried

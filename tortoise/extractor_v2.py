@@ -7837,7 +7837,8 @@ def _merge_cost_bucket(tgt: dict, src: dict) -> bool:
     read by nobody at ROW level — the enclosing accumulator has to observe it
     too, exactly as ``_accumulate_call_cost`` observes the per-call lane
     overflow, or the emitted row reads as reconciled while its ``by_stage`` is
-    short.
+    short. ONE call here drops at most ONE sub-total (which may stand for
+    several calls), so the caller counts OVERFLOW EVENTS, not charges.
     """
     tgt["calls"] += int(src.get("calls", 0) or 0)
     tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
@@ -7995,6 +7996,16 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     records ``route_cost_overflows`` (its own counter, never a bump of
     ``calls_without_cost``, which would claim the total is short and send the
     report to reprice from the very breakdown that dropped the charge).
+
+    WHAT IT COUNTS — OVERFLOW EVENTS, not charges. At this per-call seam one
+    event is one dropped charge; at the merge seams (``_merge_cost_accumulator``
+    / ``_rollup_llm``, via ``_merge_cost_bucket``) one event is one dropped
+    bucket SUB-TOTAL, which may stand for several calls. Either way
+    ``route_cost_overflows > 0`` asserts exactly one thing: the ``by_stage``
+    breakdown is not a complete partition of the row. It says nothing about
+    ``cost_usd``'s own completeness — that is ``calls_without_cost``'s question,
+    and when the session sum overflowed too BOTH counters are non-zero and the
+    dropped charge is absent from ``cost_usd`` as well.
     """
     acc = stats.setdefault("cost", {})
     # #5854: normalise BOTH provider token fields before the first mutation
@@ -8151,7 +8162,9 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     # disclosure counter so the emitted row can explain a
     # ``cost_usd != sum(by_stage)`` divergence instead of leaving it silent.
     # (``calls_without_cost`` above cannot carry it: that counter answers "is
-    # ``cost_usd`` complete?", and it IS.)
+    # ``cost_usd`` complete?", a different question — and in the combined
+    # case, where the cross-stage sum above also overflowed, the answer is NO
+    # and both counters fire.)
     llm_stats["route_cost_overflows"] = (
         llm_stats.get("route_cost_overflows", 0)
         + int(cost.get("route_cost_overflows", 0) or 0))

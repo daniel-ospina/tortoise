@@ -909,6 +909,19 @@ def test_poisoned_values_degrade_instead_of_crashing():
         "calls"] == 0
 
 
+def test_a_poisoned_route_overflow_count_degrades_to_zero():
+    """#5868 — the new counter rides the same ``_as_int`` sanitiser as its
+    siblings: a tampered/foreign row must degrade the DIAGNOSTIC, never crash
+    report assembly or surface a shaped number."""
+    for poison in ("junk", float("nan"), float("inf"), True, 10 ** 400):
+        row = {"properties": {
+            "session_id": "poison", "calls": 1, "cost_usd": 0.001,
+            "calls_without_cost": 0, "route_cost_overflows": poison,
+            "by_stage": {}}}
+        dist = costing.cost_per_session_distribution([row])
+        assert dist["route_cost_overflows"] == 0, (poison, dist)
+
+
 def test_report_cli_survives_a_poisoned_row(tmp_path, capsys):
     """The CLI must exit 0 on a poisoned-but-valid-JSON row, not traceback."""
     from tools import capture_cost_report as report
@@ -1726,6 +1739,10 @@ def test_accumulate_call_cost_rejects_a_non_finite_charge():
         assert cost.get("cost_usd", 0.0) == 0.0, cost
         assert cost["calls_without_cost"] == 1, (
             f"an unusable charge is disclosed as without-cost ({label}): {cost!r}")
+        # #5868: the SESSION-total disclosure and the per-route breakdown
+        # disclosure are different facts — an absent/non-finite charge must not
+        # bump the breakdown counter.
+        assert cost.get("route_cost_overflows", 0) == 0, cost
         assert cost["prompt_tokens"] == 100, cost   # tokens survive for repricing
         assert cost["completion_tokens"] == 10, cost
 
@@ -1772,6 +1789,9 @@ def test_accumulate_call_cost_bounds_the_accumulated_total():
     assert cost["calls"] == 2, cost             # both calls still counted
     assert cost["calls_without_cost"] == 1, (
         f"the overflowed charge is disclosed, not written: {cost!r}")
+    # #5868: the session total could not hold the charge — that is
+    # ``calls_without_cost``'s fact, not the per-route breakdown counter's.
+    assert cost.get("route_cost_overflows", 0) == 0, cost
 
     lane = cost["by_route"]["openrouter"]["point-model"]
     assert math.isfinite(lane["cost_usd"]), lane
@@ -1813,6 +1833,9 @@ def test_rollup_does_not_reintroduce_a_non_finite_total():
     assert llm["cost_usd"] == 1e308, llm     # the first representable total
     assert llm["calls_without_cost"] == 1, (
         f"the unrepresentable aggregate is disclosed: {llm!r}")
+    # #5868: no by_route breakdown exists here, so the breakdown counter must
+    # stay silent — a session-total overflow is not a breakdown overflow.
+    assert llm.get("route_cost_overflows", 0) == 0, llm
     # the row must survive the exact encoding the analytics sink performs
     assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
 
@@ -1886,7 +1909,10 @@ def test_per_route_overflow_is_disclosed_at_the_row_level():
     # the SESSION total is finite and CORRECT — no measurement was lost
     assert math.isfinite(cost["cost_usd"]), cost
     assert cost["cost_usd"] == 0.0, cost
-    # ... and the "is cost_usd complete?" counter correctly says it is
+    # ... and the "is cost_usd complete?" counter correctly says it is. Tolerant
+    # access is CORRECT here (unlike the row-level asserts below): the
+    # accumulator creates this key LAZILY, only when a call lacks a charge, so
+    # "absent" and "zero" are the same fact at this layer.
     assert cost.get("calls_without_cost", 0) == 0, cost
     # the route bucket dropped a charge and disclosed it there
     lane = cost["by_route"][_PROVIDER][_MODEL]
@@ -1897,8 +1923,9 @@ def test_per_route_overflow_is_disclosed_at_the_row_level():
     props = _rolled_row(cost)
     assert props["route_cost_overflows"] == 1, props
     # the row genuinely does NOT reconcile — and now has the field that says
-    # why, instead of that gap being silent
-    assert _sum_by_stage(props) != props["cost_usd"], props
+    # why, instead of that gap being silent. Pin the MAGNITUDE, not merely
+    # "they differ": the shortfall IS the unrepresentable route-A charge.
+    assert props["cost_usd"] - _sum_by_stage(props) == 1.5e308, props
     # ... and the report reader surfaces it rather than dropping it
     assert costing.cost_per_session_distribution(
         [props])["route_cost_overflows"] == 1
@@ -1956,14 +1983,18 @@ def test_bucket_merge_overflow_is_disclosed_too():
         _accumulate_call_cost(
             batch, prompt_tokens=100, completion_tokens=10,
             cost_usd=charge, provider=provider, model=model)
-        # no SINGLE batch overflowed — every charge above is finite
-        assert "route_cost_overflows" not in batch["cost"], batch["cost"]
+        # no SINGLE batch overflowed — every charge above is finite (pin the
+        # VALUE, not the key's absence: ``_merge_cost_accumulator`` initialises
+        # the counter to 0 eagerly, and a refactor that made
+        # ``_accumulate_call_cost`` do the same would break a key-presence
+        # assertion with no behaviour change)
+        assert batch["cost"].get("route_cost_overflows", 0) == 0, batch["cost"]
         _merge_cost_accumulator(usage, batch)
 
     # the merged session total landed (the charges cancel)
     acc = usage["cost"]
     assert math.isfinite(acc["cost_usd"]) and acc["cost_usd"] == 0.0, acc
-    assert acc.get("calls_without_cost", 0) == 0, acc
+    assert acc["calls_without_cost"] == 0, acc
     # route A's merged bucket could NOT represent 1.5e308 + 1.5e308
     assert acc["by_route"][_PROVIDER][_MODEL]["calls_without_cost"] == 1, acc
     assert acc["route_cost_overflows"] == 1, acc
@@ -1973,6 +2004,78 @@ def test_bucket_merge_overflow_is_disclosed_too():
     assert props["route_cost_overflows"] == 1, props
     assert props["by_stage"]["s1"][_PROVIDER][_MODEL][
         "calls_without_cost"] == 1, props["by_stage"]
+
+
+def test_same_stage_rollup_merge_overflow_is_disclosed_too():
+    """#5868 — the THIRD seam: ``_rollup_llm`` merging into an EXISTING stage bucket.
+
+    ``"classify"`` is rolled into the same ``llm_stats`` twice (extractor_v2's
+    S2 classify pass and the union pass), and ``"s1"`` once per chunk, so
+    ``by_stage[stage]`` is already populated when the next roll merges into it —
+    and THAT merge can overflow while neither the per-call accumulator nor
+    ``_merge_cost_accumulator`` did. Counting only the other two seams leaves
+    this one silent, and nothing else in the suite reaches it.
+
+    It is also the counter's >1 boundary: two routes overflow, so the increment
+    must be a running SUM rather than an assignment.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost, _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0, "by_stage": {}}
+    for _ in range(2):
+        batch: dict = {}
+        for provider, model, charge in (
+                (_PROVIDER, _MODEL, 1.5e308),
+                (_PROVIDER, "gpt-4o-2024-08-06", -1.5e308)):
+            _accumulate_call_cost(
+                batch, prompt_tokens=100, completion_tokens=10,
+                cost_usd=charge, provider=provider, model=model)
+        # each batch lands on its own — no per-call lane overflowed in it
+        assert batch["cost"]["cost_usd"] == 0.0, batch["cost"]
+        assert batch["cost"].get("route_cost_overflows", 0) == 0, batch["cost"]
+        _rollup_llm(llm, {"cost": batch["cost"], "attempts": 2},
+                    stage="classify")
+
+    # the session total stayed finite and complete ...
+    assert math.isfinite(llm["cost_usd"]) and llm["cost_usd"] == 0.0, llm
+    assert llm["calls_without_cost"] == 0, llm
+    # ... and BOTH merged route sub-totals were unrepresentable
+    assert llm["route_cost_overflows"] == 2, llm
+    merged = llm["by_stage"]["classify"][_PROVIDER]
+    assert merged[_MODEL]["calls_without_cost"] == 1, merged
+    assert merged["gpt-4o-2024-08-06"]["calls_without_cost"] == 1, merged
+
+
+def test_overflow_events_can_coexist_with_an_incomplete_session_total():
+    """#5868 — the counter is a BREAKDOWN disclosure, not a TOTAL one.
+
+    When the cross-stage sum overflows as well, the dropped charge is absent
+    from ``cost_usd`` too, so BOTH counters fire. Pinned because the tempting
+    misreading — "``route_cost_overflows`` means ``cost_usd`` is
+    authoritative" — is false in exactly this state.
+
+    REDs on: any docstring/label claiming this counter says ``cost_usd`` is
+    complete (it says nothing about ``cost_usd``).
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost, _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0, "by_stage": {}}
+    for _ in range(2):
+        chunk: dict = {}
+        _accumulate_call_cost(
+            chunk, prompt_tokens=100, completion_tokens=10, cost_usd=1e308,
+            provider=_PROVIDER, model=_MODEL)
+        _rollup_llm(llm, {"cost": chunk["cost"], "attempts": 1}, stage="s1")
+
+    # the cross-stage sum could not represent 2e308 — cost_usd is short ...
+    assert math.isfinite(llm["cost_usd"]) and llm["cost_usd"] == 1e308, llm
+    assert llm["calls_without_cost"] == 1, llm
+    # ... AND the merged by_stage bucket could not either
+    assert llm["by_stage"]["s1"][_PROVIDER][_MODEL][
+        "calls_without_cost"] == 1, llm["by_stage"]
+    assert llm["route_cost_overflows"] == 1, llm
 
 
 # ── #5854: the token fields are validated, never shaped ─────────────────────
@@ -2539,6 +2642,28 @@ def test_report_cli_discloses_unattributed_calls(tmp_path, capsys):
     assert payload["distribution"]["unattributed_captures"] == 1
     assert payload["distribution"]["excluded_no_calls"] == 0
     assert payload["distribution"]["excluded_unmeasured"] == 1
+
+
+def test_report_cli_discloses_an_unrepresentable_by_stage_subtotal(
+        tmp_path, capsys):
+    """#5868 — the disclosure must reach the OPERATOR, not only the dict.
+
+    A dropped, renamed or mis-wired render line leaves the reader with the
+    same silent gap the counter exists to remove — and would ship green, since
+    the distribution-level assertions above never read the report text.
+    """
+    from tools import capture_cost_report as report
+
+    props = _rolled_row(_mixed_sign_two_route_capture())
+    assert props["route_cost_overflows"] == 1, props
+    fixture = tmp_path / "unrepresentable.jsonl"
+    fixture.write_text(json.dumps({
+        "event_name": "capture_cost", "properties": props}) + "\n",
+        encoding="utf-8")
+
+    assert report.main(["--jsonl", str(fixture)]) == 0
+    text = capsys.readouterr().out
+    assert "by_stage sub-totals unrepresentable: 1" in text, text
 
 
 def test_report_cli_aggregates_retries_per_session_before_percentiling(

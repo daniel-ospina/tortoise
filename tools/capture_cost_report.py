@@ -260,8 +260,10 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
         add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
         add(f"  captures behind those calls       : {dist['unattributed_captures']}")
-        add(f"  by_stage charges unrepresentable  : "
-            f"{dist['route_cost_overflows']}")
+        add(f"  by_stage sub-totals unrepresentable: "
+            f"{dist['route_cost_overflows']} (overflow events, not charges)")
+        add("  (the by_stage breakdown is short of cost_usd — this is NOT a")
+        add("   statement about cost_usd's own completeness)")
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -299,9 +301,11 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         f"(across {dist['unattributed_captures']} capture(s)) — counted in "
         "the attempts line below, not additional to it")
     add(f"  calls served without a charge  : {dist['calls_without_cost']}")
-    add(f"  by_stage charges unrepresentable: "
-        f"{dist['route_cost_overflows']} — cost_usd is authoritative; "
-        "sum(by_stage) is short by these")
+    add(f"  by_stage sub-totals unrepresentable: {dist['route_cost_overflows']}"
+        " (overflow events, not charges)")
+    add("    — the by_stage breakdown is short of cost_usd; it is NOT a")
+    add("      statement about cost_usd itself (see the calls-without-a-charge")
+    add("      line above for the total's own completeness)")
     add(f"  attempts with no meterable reply: {dist['unmetered_attempts']}")
     add(f"  sessions tokens we could not price: {dist['unpriced_sessions']}")
     add("")
