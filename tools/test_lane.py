@@ -32,9 +32,9 @@ CONTRACT — THE TARGET IS NOT A PARAMETER
 The container this tool acts on is ALWAYS ``fdb-lane-<sha1(worktree)[:10]>``,
 derived inside ``start()``/``stop()`` from the worktree the command runs in.
 There is no ``--name``, no ``--slug``, and no function argument that selects a
-container: two review rounds showed that each override, however spelled, is a
-way for one lane to delete or silently adopt another lane's isolated DB (a
-peer's slug is a computable ``sha1(path)[:10]``). ``repo_root()`` scrubs
+container: any override, however spelled, would be a way for one lane to delete
+or silently adopt another lane's isolated DB, because a peer's slug is a
+computable ``sha1(path)[:10]``. ``repo_root()`` scrubs
 ``GIT_DIR``/``GIT_WORK_TREE`` for the same reason — an inherited git env var
 would otherwise retarget the CLI at a peer worktree with no flag involved.
 
@@ -108,7 +108,7 @@ def repo_root() -> Path:
     ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED rather than inherited: with
     ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) `rev-parse`
     reports the OTHER tree, so the tool would compute a peer lane's container
-    name and act on it with no flag involved (review round 3, P2).
+    name and act on it with no flag involved.
     """
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_WORK_TREE")}
@@ -153,8 +153,7 @@ def is_managed(name: str) -> bool:
     ``lane_name()`` is always ``fdb-lane-<10 hex>``, so in production this can
     only return True. It is kept — one line, no cost — because EVERY removal
     intent still has to pass it, so re-introducing a way to name a container
-    (the round-2/3 peer-deletion defect) does not silently regain the ability
-    to delete a shared instance.
+    does not silently regain the ability to delete a shared instance.
     """
     return name.startswith(NAME_PREFIX) and name not in PROTECTED_NAMES
 
@@ -199,13 +198,14 @@ def port_is_free(port: int) -> bool:
 
 def _docker(*args: str,
             timeout: int = DOCKER_TIMEOUT) -> subprocess.CompletedProcess:
-    """Run docker — never raising, never hanging.
+    """Run docker — never raising for a failure it can convert, never hanging.
 
     A failure comes back as a non-zero result so every caller's "a failure is
-    not evidence of absence" rule applies uniformly, and a TIMEOUT is converted
-    into that same shape with a self-describing stderr rather than blocking
-    forever (round 4, P2): this tool exists for an overloaded host, so a wedged
-    daemon is an expected failure, not an exotic one.
+    not evidence of absence" rule applies uniformly, and a TIMEOUT, a missing
+    binary and an unrunnable binary are converted into that same shape with a
+    self-describing stderr rather than blocking forever: this tool exists for an
+    overloaded host, so a wedged daemon is an expected failure, not an exotic
+    one.
     """
     try:
         return subprocess.run(["docker", *args], capture_output=True,
@@ -216,13 +216,15 @@ def _docker(*args: str,
             f"docker {' '.join(args[:1])} timed out after {timeout}s")
     except FileNotFoundError:
         # Deliberately NOT `str(exc)`: that is "[Errno 2] No such file or
-        # directory: 'docker'", whose "no such" makes container_state classify
-        # "docker is not installed" as ABSENT — a failure reported as evidence
-        # of absence, the one inference this module refuses to make. Caught by
-        # round 5, P1.
+        # directory: 'docker'". This branch is caught before `OSError` so the
+        # message names the cause, and it carries no absence phrasing for
+        # `container_state` to mistake for a missing container.
         return subprocess.CompletedProcess(
             ["docker", *args], 127, "",
             "docker executable is not available on PATH")
+    except OSError as exc:          # e.g. docker present but not executable
+        return subprocess.CompletedProcess(
+            ["docker", *args], 126, "", f"could not run docker: {exc}")
 
 
 def _container_publishes(port: int) -> bool:
@@ -246,9 +248,9 @@ def _wait_ready(name: str) -> bool:
     """Wait for the container's server to answer PING — bounded in WALL TIME.
 
     Seconds, not iterations: an iteration count is not a bound when each
-    iteration awaits an unbounded docker call (round 4, P2). Every call's
-    timeout comes from the REMAINING budget, so the deadline is not overshot by
-    a full per-call timeout (round 5, P3).
+    iteration awaits a docker call of its own. Every call's timeout comes from
+    the REMAINING budget, so the deadline is not overshot by a full per-call
+    timeout.
     """
     deadline = time.monotonic() + READY_TIMEOUT
     while True:
@@ -275,12 +277,12 @@ def container_state(name: str) -> str:
     if r.returncode == 0:
         return (r.stdout or "").strip() or "unknown"
     err = f"{r.stderr or ''}{r.stdout or ''}".lower()
-    # ONLY Docker's own absence phrasings ("No such container"/"No such
-    # object"). Unrecognised failures — a broken context, a permission problem,
-    # anything whose text merely happens to contain "not found" — fail CLOSED to
-    # `unknown`, because reading a failure as absence is what licenses a blind
-    # `docker rm` (round 5).
-    return "absent" if "no such" in err else "unknown"
+    # Only Docker's own absence phrasings, with the NOUN matched rather than the
+    # prefix: a bare "no such" also matches "no such host" (a bad DOCKER_HOST)
+    # and "no such file or directory" (a missing TLS file), and reporting those
+    # as absence is how `down` ends up exiting 0 while a live container keeps
+    # its port. Anything unrecognised fails CLOSED to `unknown`.
+    return "absent" if re.search(r"no such (container|object)\b", err) else "unknown"
 
 
 def _graph_count(name: str) -> int | None:
@@ -295,18 +297,25 @@ def _graph_count(name: str) -> int | None:
     return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
 
 
-def _published_port(name: str) -> int | None:
-    """The loopback port a container publishes for 6379, or None."""
+def _published_port(name: str) -> tuple[bool, int | None]:
+    """`(asked, port)` for the container's 6379 mapping.
+
+    `asked` separates the two reasons a port can be missing, which are different
+    facts: docker could not be asked (a failed or timed-out `docker port`),
+    versus docker answered and there is no mapping. Collapsing them let a failed
+    QUERY destroy a container that had just answered PING — on exactly the
+    overloaded host this tool is built for.
+    """
     r = _docker("port", name, "6379/tcp")
     if r.returncode != 0:
-        return None
+        return False, None
     for token in (r.stdout or "").replace("\n", " ").split():
         if ":" in token:
             try:
-                return int(token.rsplit(":", 1)[1])
+                return True, int(token.rsplit(":", 1)[1])
             except ValueError:
                 pass
-    return None
+    return True, None
 
 
 def start(port: int | None = None) -> tuple[str, int]:
@@ -329,11 +338,17 @@ def start(port: int | None = None) -> tuple[str, int]:
     name = lane_name()
     state = container_state(name)
     if state == "running":
-        published = _published_port(name)
+        asked, published = _published_port(name)
+        if not asked:
+            # Never remove a container on the strength of a failed QUERY: this
+            # one may be perfectly healthy.
+            raise SystemExit(
+                f"test-lane: could not determine which port {name} publishes "
+                f"(the `docker port` query failed) — refusing to treat that as "
+                f"a broken container; retry, or check the daemon"
+            )
         if published is None:
             raise SystemExit(f"test-lane: {name} is running but publishes no port")
-        # A long-lived container can be wedged: the fresh path refuses to hand
-        # back a URI to a server that never answers, and so must this one.
         if not _wait_ready(name):
             raise SystemExit(
                 f"test-lane: {name} is running but never answered PING within "
@@ -348,9 +363,10 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"belong to another lane would be unforgivable)"
         )
     if state != "absent":
-        if not is_managed(name):
-            raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
-        _docker("rm", "-f", name)
+        # The result is READ rather than discarded: a failed `rm` leaves a name
+        # that makes the `docker run` below fail with "name already in use",
+        # which reads as a run problem rather than the removal problem it is.
+        _remove_and_describe(name)
 
     chosen = port if port is not None else pick_port()
     r = _docker(
@@ -369,11 +385,16 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
             f"Logs:\n{logs.stdout}{logs.stderr}"
         )
-    published = _published_port(name)
-    if published is None:
-        # Never leave behind a container nobody can address.
+    asked, published = _published_port(name)
+    if not asked or published is None:
+        # This container is OURS and seconds old: if it cannot be addressed
+        # there is nothing to hand back, so remove it rather than leave it
+        # holding a reserved port. The message names the actual cause — a failed
+        # query is not the same fact as "publishes no port".
+        why = ("docker could not report its published port" if not asked
+               else "it publishes no port")
         raise SystemExit(
-            f"test-lane: {name} answered PING but publishes no port; "
+            f"test-lane: {name} answered PING but {why}; "
             f"{_remove_and_describe(name)}"
         )
     return name, published
@@ -384,9 +405,8 @@ def _remove_and_describe(name: str) -> str:
     happened — a cleanup whose result is unread is how a running container with
     a reserved port survives to make every later `start()` refuse.
 
-    Guarded like every other removal intent, so the claim that no removal can
-    bypass the ownership check is true of the whole module and not just of
-    `stop()` (round 5, P3).
+    Guarded like every other removal intent, so "no removal bypasses the
+    ownership check" is true of the whole module and not just of `stop()`.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -398,9 +418,9 @@ def _remove_and_describe(name: str) -> str:
 def stop() -> str:
     """Remove THIS LANE's container. Takes no argument, by design.
 
-    Two review rounds established that any way to name another container —
-    `--name`, `--slug`, or a parameter — is a way for one lane to delete
-    another lane's isolated DB, so there is nothing to name. `is_managed()`
+    Any way to name another container — `--name`, `--slug`, or a parameter —
+    would be a way for one lane to delete another lane's isolated DB, so there
+    is nothing to name. `is_managed()`
     remains the prefix rule that a removal must satisfy.
     """
     name = lane_name()
@@ -455,12 +475,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     name = lane_name()
     state = container_state(name)
     print(f"{name}: {state}", file=sys.stderr)
+    if state == "unknown":
+        # A non-zero exit lets a script tell "could not ask" from an answer —
+        # the rest of the tool fails closed, and `status` must too.
+        return 1
     if state == "running":
         graphs = _graph_count(name)
         print(f"  graphs={'unknown' if graphs is None else graphs}",
               file=sys.stderr)
-        published = _published_port(name)
-        if published is not None:
+        asked, published = _published_port(name)
+        if not asked:
+            print("  port=unknown (the `docker port` query failed)",
+                  file=sys.stderr)
+        elif published is not None:
             print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
     return 0
 
@@ -488,8 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Flags live on the SUBcommands so the natural spelling works
     # (`uri --port 16390`), and ONLY on the commands that use them: `down` takes
     # no target and no mapping, and `status` reads a port rather than choosing
-    # one, so accepting a flag either ignores would read as "do that" (round 3
-    # P3 + round 4 P3).
+    # one, so accepting a flag either ignores would read as "do that".
     graph_only = argparse.ArgumentParser(add_help=False)
     graph_only.add_argument("--graph", default=DEFAULT_GRAPH,
                             help=f"graph/database name for the URI "
