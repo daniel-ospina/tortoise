@@ -160,8 +160,10 @@ establish the absence; the two profiles below are what the research returned):
   fact edges reference source episodes.
 - **Mem0** keeps text as text; structured fields ride alongside it as **filterable metadata**.
 
-Our own controlled ablation agrees on the keep-the-source half: raw **verbatim beats derived by 15.9 /
-22.0 pts** (`EXTRACTOR-V4-ARCHITECTURE.md` §2.4; pre-registered #3011).
+The controlled ablation (`EXTRACTOR-V4-ARCHITECTURE.md` §2.4 — **arXiv 2601.00821v3**, an external study) agrees
+on the keep-the-source half: raw **verbatim beats derived by 15.9 / 22.0 pts**. ⚠️ *(v3 follow-up: this
+previously read "**Our own** controlled ablation", which was wrong — the 15.9/22.0 figures are the external
+ablation's, not ours. Our own reproduction is pre-registered at **#3011** and has no data yet.)*
 
 ⇒ **Keep the raw text as the evidence, declare the field on the schema, and keep every typed value
 traceable to the words it came from.** ⚠️ *(v3: this conclusion previously read "…and validate the value
@@ -183,7 +185,8 @@ Abstention protects the *typed field*. It does **not** detect a wrong number tha
 **abstaining is not detecting** — so §8's misread is *not* made detectable by this shape. Detecting it
 requires carrying the verbatim source span, which is a different deliverable: **#2684**
 (`[evidence-assembly] Slice B: verbatim value-spans on value-bearing points`, the #2542 value-fidelity
-family). *(Detection moving inside this design was the rejected alternative (b); see §2.3.)*
+family). *(Detection moving inside this design was the rejected alternative (b), recorded below in this
+section.)*
 
 **The locale-aware numeric parser is dropped as the foundation.** #2817 is no longer a parser project.
 
@@ -210,8 +213,9 @@ What this settles:
 **Why (on the record, not as a re-argument).** The grounded requirement behind the workstream (#2782) is a
 **sum and a ratio against a threshold** — *"75% of tranche 1 spent → tranche 2 unlocks"*. That needs
 values read **correctly**; nothing grounded asks the design to catch a wrong read. The research points the
-same way: neither comparable ships a locale parser and both keep the raw source, and our own ablation has
-the verbatim route ahead of the derived one by 15.9 / 22.0 pts.
+same way: neither comparable ships a locale parser and both keep the raw source, and the controlled
+ablation has the verbatim route ahead of the derived one by 15.9 / 22.0 pts (external — **arXiv
+2601.00821v3**; our own reproduction is pre-registered at **#3011** and has not been run).
 
 **The rejected alternative — (b), recorded for when it would be right.** A minimal **anchored**
 separator/currency rule for values carrying a currency anchor. It is the **only** route to detecting T2's
@@ -220,8 +224,10 @@ requirement. It departs from §4's blanket exclusion, so taking it later require
 and a marked `OVERRIDES:` line naming the misparse mode it reintroduces.
 
 **Honest research limit.** This design pass did not find a comparable that validates an extracted value
-against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and our own
-ablation); **traceability of a typed value to its raw text** may be ours and is not borrowed authority.
+against its source words. The **keep-the-raw-text** half is borrowed practice (Graphiti, Mem0, and the
+external controlled ablation of `EXTRACTOR-V4-ARCHITECTURE.md` §2.4 — **arXiv 2601.00821v3**, *not* ours;
+our own reproduction is pre-registered at #3011 with no data); **traceability of a typed value to its raw
+text** may be ours and is not borrowed authority.
 ⚠️ **v3:** the previous sentence here claimed an *"arithmetic-mismatch check"* as a design requirement.
 No such check is proposed by this design (see the restated requirement above) — a
 lexical source-comparison check is exactly what the evidence on bare string-presence verification argues
@@ -259,7 +265,7 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
-| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text, and no client value is accepted.** *(v3.1, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare a client value against, so none is accepted. |
+| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text, and no client value is accepted.** *(v3 follow-up, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare a client value against, so none is accepted. |
 
 ⚠️ **v3 note on OD5 — the cross-check half is CLOSED by the 2026-10-07 decision.** The server-derives
 half stands. The cross-check half is **not implementable**: comparing a client value to a server-derived
@@ -478,9 +484,10 @@ the earlier `e18dda11b` pin was a branch commit of a different PR that never tou
 magnitudes are cited from that source, not from #2782.
 - Research: `~/.swarm/research/2026-09-09-typed-values-and-lifecycles.md`,
   `~/.swarm/research/2026-09-09-numeric-storage-audit.md`.
-- `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`; the verbatim-vs-derived ablation,
-  pre-registered #3011) — §2.4 reports **verbatim beats derived by 15.9 pts (LoCoMo) / 22.0 pts
-  (LongMemEval-S)** (`:148`).
+- `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §2.4 (`:127`) — the verbatim-vs-derived ablation, which
+  is **external** (`:148` names **arXiv 2601.00821v3**); **#3011** is our own *pre-registered*
+  reproduction of it and has no data. §2.4 reports **verbatim beats derived by 15.9 pts (LoCoMo) / 22.0 pts
+  (LongMemEval-S)** (`:148`) — the external figures, not ours.
 
 **External:**
 
