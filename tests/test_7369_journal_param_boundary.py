@@ -1,0 +1,1441 @@
+"""#7369 — the parameter boundary is TOTAL, so a corrupt record degrades.
+
+THE DEFECT THIS PINS
+--------------------
+A journal record is untrusted input: it is a JSONL file on disk that can be
+hand-edited, produced by another version, or torn. Values read from it ride
+into FalkorDB Cypher parameters, and FalkorDB rejects a non-primitive property
+value, a non-finite float, and a string carrying NUL or a lone surrogate.
+
+The folds used to gate this BY HAND, per field, through four different
+predicates at ~21 call sites. So each newly recorded field had to remember to
+gate itself, and the ones that did not — ``valid_to`` on the terminalizer
+folds, and every fixed SET clause on the primary creation path — raised from
+inside a replay:
+
+    redis.exceptions.ResponseError: Property values can only be of primitive types
+
+That is not a local failure. ``rebuild_all``'s pass-1a and pass-1b have **no
+per-event try/except**, so the raise lands AFTER ``_wipe_all_nodes``: the
+rebuild aborts having already destroyed the graph, leaving it wiped or
+half-built — in the measured case a RETRACTED claim still LIVE, i.e. the graph
+serving retracted content as current.
+
+THE SEAM, WHICH IS THE ACTUAL FIX
+---------------------------------
+Not four more per-field gates. ``_GuardedGraph`` (``self.g``) is the single
+handle every projection write goes through — the live ``apply()`` and all
+three replay engines — and it already carries three sibling cross-cutting
+decisions (the #3595 operator refusal, ``_is_bulk_wipe``, the #3359 op count).
+The writability policy is now enforced THERE, at the parameter boundary, so a
+recorded field is safe BY CONSTRUCTION and a field recorded LATER cannot
+reopen the hole. The predicate is ``_annotator_value_ok`` OR ``_engine_coerces``
+— the annotator dims' policy widened by the driver's own coercion rule, so the
+rule keeps ONE home rather than gaining a fifth copy.
+
+WHY THE GATE DEGRADES TO ``None`` RATHER THAN DROPPING THE KEY
+--------------------------------------------------------------
+A parameter the Cypher still references must stay BOUND, and for a
+``SET n += $map`` an OMITTED key leaves the pre-existing value in place —
+state the journal never justified, which is the very outcome this gate exists
+to prevent. ``None`` is also what the folds' own ``ev.get(key)`` fallbacks
+already produce for an absent field, so the degradation matches the existing
+contract instead of inventing one.
+
+WHAT IS DELIBERATELY *NOT* COVERED HERE
+---------------------------------------
+  * **Gated is not the same as FAITHFUL.** ``_journal_instant`` substitutes the
+    REPLAY CLOCK for a corrupt or absent instant, so ``expired_at``/``ts``
+    cannot raise but can still write a value the journal never stated — and
+    ``consistency.py``'s reference fold does not mirror that fallback, so the
+    two disagree. That is the #5048 "Total" clause, not this change.
+  * **``supersedes_by`` is only half closed.** ``str(ev.get(...) or "")`` at
+    ``entities.py`` coerces a map into a repr STRING (so it cannot raise on the
+    non-primitive class) but passes a NUL/lone-surrogate string through
+    unchanged. The boundary gate catches the latter now; the silent
+    ``repr``-of-a-map is a fidelity defect owned by #5048's family, not this
+    file.
+  * **``consistency.py``'s ``_fold_journal`` cannot raise at all** — it builds
+    an in-memory ``{id: props}`` dict and never sends a parameter, so it is a
+    false positive as a "replay surface" for THIS class. Its exposure is
+    comparison false-positives, not a ``ResponseError``.
+  * **``recover_from_log`` already could not abort** — it has a per-event
+    try/except (``consistency.py``) and silently skips the record. The gate
+    makes it correct rather than merely survivable; the abort-after-wipe shape
+    belongs to ``rebuild_all`` / ``rebuild`` / ``backup.restore``.
+
+Run (embedded carve-out):
+  TORTOISE_TEST_CARVE_OUT=1 python -m pytest \\
+      tests/test_7369_journal_param_boundary.py -q
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import pathlib
+from typing import ClassVar
+
+import pytest
+
+from tortoise.projection import (
+    _engine_coerces,
+    _flat_writable,
+    _GuardedGraph,
+    _journal_safe_params,
+    _log_identity_skip,
+    _map_key_ok,
+    _statement_writes,
+    _value_ok,
+    _writable_at_parse,
+    _writable_id,
+)
+from tortoise.sdk import TortoiseSDK
+
+# ── a strict stand-in for the driver's own rejection ─────────────────────
+#
+# FalkorDB rejects a map / bytes / set / non-finite float as a property value,
+# and rejects a string carrying NUL or a lone surrogate at encode. This mirror
+# is what makes the SEAM test below a real test: the fake raises exactly where
+# the engine raises, so if the gate stops being wired into the verb, the test
+# fails instead of quietly passing.
+
+def _reject_unless_writable(key, value, depth=0):
+    if isinstance(value, dict):
+        if depth > 0:
+            raise ValueError(
+                "Property values can only be of primitive types "
+                f"(param {key!r} carries a nested map)"
+            )
+        for k, v in value.items():
+            _reject_unless_writable(f"{key}.{k}", v, depth + 1)
+        return
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, (int,)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Property values can only be of primitive types "
+                f"(param {key!r} is non-finite)"
+            )
+        return
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise ValueError(f"param {key!r} carries a NUL byte")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(f"param {key!r} carries a lone surrogate") from None
+        return
+    if isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _reject_unless_writable(f"{key}[{i}]", item, depth + 1)
+        return
+    raise ValueError(
+        f"Property values can only be of primitive types (param {key!r} "
+        f"is {type(value).__name__})"
+    )
+
+
+class _StrictDriver:
+    """A graph handle that rejects exactly what FalkorDB rejects."""
+
+    def __init__(self):
+        self.seen: list = []
+        self.checked = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        for k, v in (params or {}).items():
+            _reject_unless_writable(k, v)
+            self.checked += 1
+        self.seen.append((cypher, params))
+        return "ok"
+
+    ro_query = query
+    profile = query
+    explain = query
+
+    def _query(self, cypher, params=None, timeout=None, read_only=False):
+        return self.query(cypher, params=params, timeout=timeout)
+
+
+class _ProjectionStub:
+    def _assert_test_graph(self, message):  # only reached for a bulk wipe
+        return None
+
+
+def _guarded(driver=None):
+    return _GuardedGraph(driver or _StrictDriver(), _ProjectionStub())
+
+
+# ── 1. the pure policy ───────────────────────────────────────────────────
+
+def test_every_unwritable_value_class_degrades_to_null():
+    """The classes that raise at parameter parse, one per row.
+
+    No statement is supplied, so none of these params is SPREAD (``+= $x``)
+    and a dict is therefore a dict IN a property — the engine rejects it.
+    """
+    out = _journal_safe_params({
+        "a": {"evil": 1},          # a map where a scalar belongs
+        "b": b"bytes",              # bytes
+        "c": {1, 2},                # a set
+        "d": float("nan"),          # non-finite float
+        "e": "a\x00b",              # NUL
+        "f": ["ok", {"x": 1}],      # an array containing a map
+    })
+    assert out == {
+        "a": None, "b": None, "c": None, "d": None, "e": None, "f": None,
+    }, out
+
+
+def test_the_same_map_degrades_or_is_spread_depending_on_the_statement():
+    """THE discriminating case, and the reason the container test is
+    Cypher-aware rather than depth-based.
+
+    The value does not decide it — the statement does. ``SET n += $props``
+    spreads a map into properties, so gating the map itself would null every
+    such write. ``SET n.validTo=$vt`` puts the map IN a property, where the
+    engine rejects it — and that is the exact shape of the #7369 failure, so a
+    depth-only rule silently leaves the reported defect open (measured: the
+    gate passed a dict-valued ``$vt`` straight through and ``rebuild_all``
+    still raised after the wipe).
+    """
+    assert _journal_safe_params(
+        {"vt": {"evil": 1}},
+        "MATCH (n:Point) SET n.validTo=$vt RETURN n",
+    ) == {"vt": None}
+
+    assert _journal_safe_params(
+        {"props": {"a": 1}}, "MATCH (n:Point) SET n += $props RETURN n",
+    ) == {"props": {"a": 1}}
+
+
+def test_a_corrupt_ENTRY_inside_a_spread_map_degrades_alone():
+    """The container is recursed into, not discarded: one unwritable entry
+    must not cost the good ones their write."""
+    assert _journal_safe_params(
+        {"props": {"ok": 1, "bad": {"x": 1}}},
+        "MATCH (n:Point) SET n += $props RETURN n",
+    ) == {"props": {"ok": 1, "bad": None}}
+
+
+def test_an_UNWIND_row_list_is_not_a_value_position():
+    """REGRESSION PIN for the container shapes this gate must NOT null.
+
+    ``UNWIND $turns AS turn`` holds a LIST OF ROW MAPS — rows, not property
+    values. A rows-blind gate nulls the whole list, and the failure is SILENT
+    rather than loud: the statement still runs, it just runs on nothing, so the
+    capture turn upsert and the document version bump are skipped and the
+    replay completes with the right SHAPE and the WRONG CONTENT (measured —
+    ``version did not advance with the hash: ['sha-v2', 1]``).
+    """
+    assert _journal_safe_params(
+        {"turns": [{"id": "a", "v": [0.5]}]},
+        "UNWIND $turns AS turn MERGE (t:Point {id: turn.id})",
+    ) == {"turns": [{"id": "a", "v": [0.5]}]}
+
+    # ...and a genuinely corrupt entry INSIDE a row still degrades on its own.
+    assert _journal_safe_params(
+        {"turns": [{"id": "a", "bad": {"x": 1}}]},
+        "UNWIND $turns AS turn SET t.p = turn.bad",
+    ) == {"turns": [{"id": "a", "bad": None}]}
+
+
+def test_a_map_that_REPLACES_props_is_a_container_too():
+    """``SET n = $p`` replaces the whole property set from a map — the third
+    container shape, and the one a spread-only rule misses."""
+    assert _journal_safe_params(
+        {"p": {"a": 1}}, "MATCH (n:Point) SET n = $p",
+    ) == {"p": {"a": 1}}
+
+    # A bare variable is not required: ``SET n.x = $p`` is a SCALAR position,
+    # so the same dict must degrade there. This is what keeps the two apart.
+    assert _journal_safe_params(
+        {"p": {"a": 1}}, "MATCH (n:Point) SET n.x = $p",
+    ) == {"p": None}
+
+
+def test_none_is_kept_because_dropping_it_breaks_live_replay_parity():
+    """``update_point(x=None)`` CLEARS a property; a replay that dropped the
+    key would leave the prior value in place and diverge from live."""
+    params = {"a": None}
+    assert _journal_safe_params(params) is params
+
+
+def test_a_clean_param_map_is_returned_unchanged_same_object():
+    """The healthy hot path must not allocate — this runs on every query."""
+    params = {"id": "p1", "content": "text", "v": [0.1, 0.2], "n": 3,
+              "b": True, "props": {"ok": 1}}
+    assert _journal_safe_params(params, "MATCH (n) SET n += $props") is params
+
+
+def test_legitimate_nested_arrays_survive():
+    """The gate must not reject what the engine genuinely accepts."""
+    params = {"m": [[1, 2], [3, 4]], "ids": ["a", "b"], "e": [0.5] * 8}
+    assert _journal_safe_params(params) is params
+
+
+# ── 2. the seam is WIRED INTO THE BOUNDARY (not merely available) ────────
+#
+# These are the mutation-sensitive tests: unwire the gate from any verb and
+# they fail, because the strict driver then sees the raw value and raises
+# exactly as FalkorDB does.
+
+@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile",
+                                  "explain"])
+def test_the_boundary_degrades_before_the_driver_sees_it(verb):
+    """MUTATION-SENSITIVE: unwire the gate from any verb and this fails.
+
+    The corrupt value is deliberately NOT a dict. The first version of this
+    test passed one at the TOP level, and the mirror below accepts a top-level
+    dict (it cannot know whether the statement spreads it), so the mirror waved
+    it through and the test passed with the gate UNWIRED — eight of sixteen
+    passing on an unwired gate, which made this module's claim that unwiring
+    fails every verb false. ``bytes`` is rejected at every position, so the
+    mirror can only accept it if the gate actually ran.
+    """
+    driver = _StrictDriver()
+    g = _guarded(driver)
+    call = getattr(g, verb)
+    out = call("MATCH (n:Point) SET n.v=$v RETURN n", params={"v": b"bytes"})
+    assert out == "ok", out
+
+
+def test_a_read_only_statement_is_untouched():
+    """A read whose parameters are already writable returns the SAME object.
+
+    NOTE: identity alone does NOT prove the walk was skipped — the full walk
+    also returns the same object when nothing is degraded, so this test passes
+    with or without the fast path. The fast path's own decision function is
+    asserted directly in `test_the_read_fast_path_admits_the_id_list_shape`;
+    this test is here for the read path's contract, not its cost.
+    """
+    params = {"ids": [f"p{i}" for i in range(5000)]}
+    assert _journal_safe_params(
+        params, "MATCH (p:Point) WHERE p.id IN $ids RETURN p",
+    ) is params
+
+
+def test_the_read_fast_path_admits_the_id_list_shape():
+    """The read fast path must cover the shape retrieval actually sends.
+
+    The first version of this pre-scan admitted only SCALARS, so a 5,000-id
+    read — `params={"ids": [...5000 strings...]}`, which is a LIST — fell
+    through to the full walk (~22 ms/call) while the commit message claimed the
+    hot path was preserved. The claim was false and this assertion is the check
+    that would have caught it.
+    """
+    assert _flat_writable([f"p{i}" for i in range(5000)]) is True
+    assert _flat_writable(("a", "b")) is True
+    assert _flat_writable("a") is True
+    assert _flat_writable(None) is True
+    # ...and anything nested must DECLINE the fast path, so the full walk —
+    # where correctness lives — still runs.
+    assert _flat_writable({"a": 1}) is False
+    assert _flat_writable([{"a": 1}]) is False
+    assert _flat_writable([["a"]]) is False
+    assert _flat_writable(b"x") is False
+    assert _flat_writable({"a", "b"}) is False
+    # A corrupt scalar in a flat list must NOT be admitted as writable.
+    assert _flat_writable(["ok", "bad\x00id"]) is False
+
+
+def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
+    """THE P1 FIX (round 3). A read cannot be skipped.
+
+    The clause does not decide whether a parameter is PARSED — FalkorDB parses
+    every parameter regardless of clause, so an unwritable value in a read
+    ``MATCH {prop:$p}`` aborts ``rebuild_all`` after the wipe exactly as a
+    write does. Skipping reads here RE-OPENED the hole; measured aborts in
+    ``resolve_source_key`` (`MATCH (s:Source {canonicalUrl:$cu})`),
+    ``_try_about_edge`` (`MATCH (e:Subject {name:$name})`), and a plain dict
+    reaching a read through ``about_entities``.
+
+    The hot path is preserved by a cheap SCALAR pre-scan instead: a read whose
+    parameters are all writable scalars still returns identity, so this is a
+    correctness fix that costs the retrieval path nothing.
+    """
+    # A corrupt scalar in a READ is degraded (this used to be returned as-is).
+    assert _journal_safe_params(
+        {"cu": "bad\x00url"}, "MATCH (s:Source {canonicalUrl:$cu}) RETURN s",
+    ) == {"cu": None}
+    # A map is a SHAPE-only reject: measured, the engine ACCEPTS a dict as a bare
+    # parameter on a statement that writes nothing, and rejects it only once it is
+    # STORED as a property. So on a READ it is forwarded, not nulled (#7174).
+    payload = {"deep": [{"n": 1}]}
+    assert _journal_safe_params(
+        {"name": "x", "payload": payload},
+        "MATCH (e:Subject {name:$name}) RETURN e",
+    )["payload"] == payload
+    # ...and the SAME map on a WRITE is degraded, because there it WOULD be stored
+    # as a property and the engine raises "Property values can only be of primitive
+    # types" — the abort-after-wipe this boundary exists to prevent.
+    assert _journal_safe_params(
+        {"name": "x", "payload": payload},
+        "MATCH (e:Subject {name:$name}) SET e.payload = $payload",
+    )["payload"] is None
+    # PARSE-time rejects still degrade on BOTH, because the engine parses every
+    # parameter regardless of clause (bytes measured on a read).
+    assert _journal_safe_params(
+        {"v": b"\x01\x02"}, "MATCH (n:X {v: $v}) RETURN n",
+    ) == {"v": None}
+    # A PARSE reject NESTED inside a container still degrades. The engine parses
+    # the WHOLE parameter, so testing only the top level let this through and
+    # the engine then refused it with "Failed to parse query parameter 'ids'
+    # value" — the abort-after-wipe, re-opened by the map exemption itself.
+    assert _journal_safe_params(
+        {"ids": ["ok", "bad\x00id"]}, "MATCH (n) WHERE n.id IN $ids RETURN n",
+    ) == {"ids": None}
+    assert _journal_safe_params(
+        {"m": {"a": "bad\x00x"}}, "MATCH (n) WHERE n.id = $m RETURN n",
+    ) == {"m": None}
+    # ...and a nested lone surrogate too (the driver rejects it at encode).
+    assert _journal_safe_params(
+        {"ids": ["ok", "bad\ud800id"]},
+        "MATCH (n) WHERE n.id IN $ids RETURN n",
+    ) == {"ids": None}
+    # A write keyword inside a STRING LITERAL does not make a read a write —
+    # matching the raw text would null this perfectly good map.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.s='SET' RETURN n",
+    )["m"] == {"a": 1}
+    # CALL is treated as a write: an index procedure STORES without naming a
+    # write clause, and a keyword search cannot see inside the procedure name.
+    assert _journal_safe_params(
+        {"m": {"a": 1}},
+        "CALL db.idx.vector.createNodeIndex('Point','embedding',1536,'HNSW')",
+    )["m"] is None
+    # ...and DROP is a write clause (it was missing from the keyword set).
+    # Pinned on a BARE DROP, not `CALL db.idx.fulltext.drop(...)` — the latter is
+    # already caught by the call-procedure rule, so it would pass even with DROP
+    # removed from the keyword set.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "DROP INDEX ON :Point(embedding)",
+    )["m"] is None
+    # A PROPERTY named after a keyword is not a clause: `n.set` in a read is a
+    # property reference, and nulling the map there is a false refusal.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.set = $m RETURN n",
+    )["m"] == {"a": 1}
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) WHERE n.drop = $m RETURN n",
+    )["m"] == {"a": 1}
+    # A read-only CALL/subquery is NOT a write either — these are the retrieval
+    # paths, and nulling a map there is the #7174 false refusal again.
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "CALL db.idx.vector.queryNodes('Point','embedding',5)",
+    )["m"] == {"a": 1}
+    assert _journal_safe_params(
+        {"m": {"a": 1}}, "MATCH (n) CALL { WITH n RETURN n } RETURN n",
+    )["m"] == {"a": 1}
+    # ...and the all-scalar read still takes the cheap identity route.
+    assert _journal_safe_params(
+        {"name": "fine"}, "MATCH (e:Subject {name:$name}) RETURN e",
+    ) == {"name": "fine"}
+
+
+def test_a_SELF_REFERENTIAL_or_deep_parameter_DEGRADES_and_never_raises():
+    """The recursion must be BOUNDED — its contract is "degrades, never raises".
+
+    An unbounded walk breaks that twice: a cycle recurses forever and a deep
+    container exhausts the stack. On the replay path (`_TOLERATE_ALTERED_NUMBERS`)
+    the sibling `_guard_numeric_params` is a no-op, so this walk is the ONLY
+    boundary there and a RecursionError would abort the rebuild AFTER the wipe.
+    """
+    cyclic: list = ["ok"]
+    cyclic.append(cyclic)
+    assert _journal_safe_params(
+        {"a": cyclic}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    cyclic_map: dict = {"ok": 1}
+    cyclic_map["self"] = cyclic_map
+    assert _journal_safe_params(
+        {"a": cyclic_map}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    deep: object = 1
+    for _ in range(2000):
+        deep = [deep]
+    assert _journal_safe_params(
+        {"a": deep}, "MATCH (n) WHERE n.id = $a RETURN n",
+    ) == {"a": None}
+
+    # A shallow, entirely writable container is STILL forwarded (the bound must
+    # not become a blanket refusal).
+    assert _journal_safe_params(
+        {"a": {"n": [1, "two"]}}, "MATCH (n) WHERE n.id = $a RETURN n",
+    )["a"] == {"n": [1, "two"]}
+
+
+def test_an_EMPTY_identity_is_refused_not_admitted():
+    """THE P2 FIX (round 3). ``_annotator_value_ok("")`` is True.
+
+    So replacing the folds' ``if not name:`` / ``if not eid:`` / ``if not url``
+    with ``if not _writable_id(name):`` ADMITTED the empty string, and a record
+    with NO ``name`` defaults to ``""`` — so a `SubjectAdded` carrying no name
+    created ``:Subject {name:""}`` where the old guard skipped it. An empty
+    identity is not an identity; refusing it in ``_writable_id`` keeps the rule
+    in one home instead of repeating ``... and val`` at every call site.
+    """
+    assert _writable_id("") is False
+    assert _writable_id("a") is True
+    # A record whose name is ABSENT (not merely corrupt) is skipped, not
+    # materialised as an empty-keyed node.
+    assert _journal_safe_params(
+        {"name": ""}, "MERGE (s:Subject {name:$name}) RETURN s",
+    ) == {"name": ""}  # the MERGE key is left to the FOLD, which now skips it
+
+
+def test_a_MERGE_key_is_never_nulled_because_the_engine_refuses_a_null_key():
+    """THE P1 FIX. FalkorDB REFUSES a null merge key (``Cannot merge node
+    using null property value``), so degrading an identity parameter does not
+    PREVENT an abort — it swaps in a different one.
+
+    That was measured end-to-end: a ``PointAdded`` whose ``point.id`` carries a
+    NUL passed the old ``isinstance(str)`` check, reached ``MERGE (n:Point
+    {id:$id})``, was nulled here, and raised. So the boundary now leaves a MERGE
+    key alone and the creation anchors SKIP the record instead, using
+    ``_writable_id`` (as ``_retract`` and ``_revise_point`` already did).
+    """
+    assert _journal_safe_params(
+        {"id": "bad\x00id"}, "MERGE (n:Point {id:$id}) RETURN n",
+    ) == {"id": "bad\x00id"}
+
+    # ...while a VALUE parameter in the SAME statement is still gated.
+    assert _journal_safe_params(
+        {"id": "ok", "c": {"evil": 1}},
+        "MERGE (n:Point {id:$id}) SET n.content=$c",
+    ) == {"id": "ok", "c": None}
+
+
+def test_a_ROW_FIELD_used_as_a_MERGE_key_is_not_nulled_either():
+    """The same manufactured-null-key hole by a different route.
+
+    A MERGE key can be a row FIELD rather than a parameter — ``MERGE (t:Point
+    {id: turn.id})`` over ``UNWIND $turns``. Nulling that field is refused by
+    the engine exactly like a null parameter key (measured on the real turn
+    statement: ``Cannot merge node using null property value``), so the field
+    names appearing as ``<row>.<field>`` inside a MERGE map are excluded from
+    the row walk. A NON-key field in the same row is still gated.
+
+    ⛔ WHAT THIS DOES **NOT** CLAIM (round-7 review, finding 3). Leaving the
+    field alone is NOT a fix for the corrupt value: it is still a parameter the
+    engine cannot PARSE, so this exemption only avoids converting one abort
+    into a SECOND one. The route is closed in the FOLD — the one writer of a
+    row-MERGE statement is ``sdk._write_capture_turns``, which skips a batch
+    whose session id (hence every row id) is unwritable and WARNs, pinned by
+    ``test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded``.
+    The assertion below pins the boundary's own contract and must not be read
+    as "a corrupt row merge key is safe here".
+    """
+    cy = ("UNWIND $turns AS turn MERGE (t:Point {id: turn.id}) "
+          "SET t.content = turn.c")
+    assert _journal_safe_params(
+        {"turns": [{"id": "bad\x00id", "c": "fine"}]}, cy,
+    ) == {"turns": [{"id": "bad\x00id", "c": "fine"}]}
+
+    assert _journal_safe_params(
+        {"turns": [{"id": "good", "c": {"x": 1}}]}, cy,
+    ) == {"turns": [{"id": "good", "c": None}]}
+
+
+def test_the_boundary_preserves_a_corrupt_sibling_and_only_nulls_the_bad_one():
+    driver = _StrictDriver()
+    g = _guarded(driver)
+    g.query("MATCH (n:Point) SET n += $props",
+            params={"props": {"good": 7, "bad": {"x": 1}}})
+    _cypher, params = driver.seen[-1]
+    assert params == {"props": {"good": 7, "bad": None}}, params
+
+
+# ── 3. the acceptance: a poisoned journal does not abort a rebuild ───────
+#
+# BEFORE THE FIX this is the measured end-to-end failure: `rebuild_all` raises
+# `ResponseError: Property values can only be of primitive types` from pass-1b,
+# AFTER `_wipe_all_nodes` has already destroyed the graph.
+
+def _poison(events: pathlib.Path, record_type: str, key: str, value) -> int:
+    """Rewrite the journal, replacing ``key`` on every record of ``type``.
+
+    ``key`` is a DOTTED path — ``PointAdded`` nests the point payload under
+    ``point`` (``point.content``), while the terminalizer fields the issue names
+    (``valid_to``) sit at the top level.
+    """
+    path_parts = key.split(".")
+    hits = 0
+    for path in sorted(events.glob("*.jsonl")):
+        lines = []
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("type") == record_type:
+                node = rec
+                for part in path_parts[:-1]:
+                    node = node.get(part) if isinstance(node, dict) else None
+                    if node is None:
+                        break
+                if isinstance(node, dict) and path_parts[-1] in node:
+                    node[path_parts[-1]] = value
+                    hits += 1
+            lines.append(json.dumps(rec, ensure_ascii=False))
+        path.write_text("\n".join(lines) + "\n")
+    return hits
+
+
+@pytest.fixture
+def superseded(tmp_path):
+    """(events_dir, sdk, old_id, new_id) with a supersession on the journal."""
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "j7369.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    old = sdk.create_point("statement", "the old claim")["id"]
+    new = sdk.create_point("statement", "the new claim")["id"]
+    sdk.supersede_point(old, new)
+    yield events, sdk, old, new
+    sdk.close()
+
+
+def test_a_corrupt_valid_to_no_longer_aborts_the_rebuild(superseded):
+    """THE proof obligation for #7369.
+
+    ``valid_to`` is the field the issue names, and it is the one the per-field
+    gating missed. A rebuild must COMPLETE and must not leave the superseded
+    claim looking live.
+    """
+    events, sdk, old, _new = superseded
+    assert _poison(events, "PointSuperseded", "valid_to", {"evil": 1}) == 1
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.status, n.outdated",
+        params={"i": old},
+    ).result_set
+    assert rows, "the rebuild lost the superseded point entirely"
+    status, outdated = rows[0]
+    assert status == "superseded" and outdated is True, (
+        f"the replay left the superseded claim in a state the journal never "
+        f"justified: status={status!r} outdated={outdated!r}"
+    )
+
+
+def test_a_corrupt_creation_field_no_longer_aborts_the_rebuild(superseded):
+    """The creation path is the WIDER half of the class — ~20 ungated values
+    on ``_upsert_point_props`` alone — and it is not on the issue's table."""
+    events, sdk, _old, _new = superseded
+    assert _poison(events, "PointAdded", "point.content", {"evil": 1}) >= 1
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, "the rebuild did not re-materialise any point"
+
+
+def test_a_corrupt_point_id_is_skipped_rather_than_aborting_the_rebuild(superseded):
+    """THE P1 ACCEPTANCE, end to end.
+
+    A NUL in ``point.id`` used to pass the ``isinstance(str)`` guard, reach
+    ``MERGE (n:Point {id:$id})``, be degraded to ``None`` and raise ``Cannot
+    merge node using null property value`` — an abort after the wipe, which is
+    what the boundary alone could NOT fix. The creation anchors now skip the
+    record with ``_writable_id``, so the rebuild COMPLETES and every OTHER
+    point still materialises.
+    """
+    events, sdk, _old, _new = superseded
+    assert _poison(events, "PointAdded", "point.id", "bad\x00id") >= 1
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, (
+        "the rebuild skipped the corrupt-id record AND lost the healthy ones"
+    )
+
+
+def test_a_corrupt_PROMOTE_id_is_skipped_rather_than_aborting_the_rebuild(superseded):
+    """The PROMOTE folds are the second identity route into the same abort.
+
+    ``PointPromoted`` / ``OperatorPromoted`` guarded their snapshot with bare
+    truthiness (``p.get("id")``), so a corrupt id reached ``MERGE (n:Point
+    {id:$id})`` — and because the boundary now (correctly) refuses to null a
+    merge key, the engine rejected the parameter and pass-1b died AFTER the
+    wipe. Measured on the pre-fix tree: ``Failed to parse query parameter 'id'
+    value``. All four promote sites now use ``_writable_id``.
+    """
+    events, sdk, _old, _new = superseded
+    # Append a promote record carrying a poisoned id — the journal for a
+    # supersede fixture has no promote, and the guard is what is under test.
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps({"type": "PointPromoted", "event_id": "e7369",
+                      "ts": "2026-01-01T00:00:00+00:00",
+                      "point": {"id": "bad\x00id", "content": "x",
+                                "pointKind": "statement"}}) + "\n"
+    )
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, "the rebuild lost the healthy points"
+
+
+# ── 4. the ENTITY families' MERGE keys (the second half of the class) ────
+#
+# Each of these folds MERGEs on a journal-derived key, and each guarded that
+# key with TRUTHINESS — so a NUL-carrying value passed the guard, reached the
+# MERGE, and (with the boundary correctly refusing to null a merge key) died in
+# pass-1b AFTER the wipe. The fix is the same `_writable_id` gate the Point
+# anchors use.
+
+_FAMILY_RECORDS = [
+    ("Subject", {"type": "SubjectAdded", "id": "sub-7369"},
+     "name", "bad\x00name"),
+    ("Object", {"type": "ObjectRegistered", "id": "obj-7369"},
+     "name", "bad\x00name"),
+    ("Source", {"type": "SourceCreated", "id": "src-7369"},
+     "url", "bad\x00url"),
+    ("Event", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.id", "bad\x00ev"),
+    # The NESTED keys `_event_plain_merge` merges on. The top-level-only
+    # helper could not reach these, which is exactly the test gap that let
+    # the first version of this fix ship a still-open class (#7369 review r3).
+    ("Event.subject", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.subject", "bad\x00subj"),
+    ("Event.object", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.object", "bad\x00obj"),
+    ("Event.uses",
+     {"type": "EventRecorded", "event": {"id": "ev-7369",
+                                        "uses": [{"name": "ok"}]}},
+     "event.uses[0].name", "bad\x00use"),
+    ("Document", {"type": "DocumentCreated"}, "id", "bad\x00doc"),
+    # `_upsert_document` forwards `source_url` verbatim to `link_source_to_entity`
+    # (edges.py), which merges on it — the fourth round-3 miss.
+    ("Document.source_url",
+     {"type": "DocumentCreated", "id": "doc-src-7369", "title": "t"},
+     "source_url", "bad\x00ref"),
+]
+
+
+def _poison_path(rec, key, val):
+    """Set a possibly-NESTED ``key`` (``a.b[0].c``) on a record copy."""
+    parts = key.split(".")
+
+    def _step(node, part, create):
+        """Descend one part, creating a {} or [] per a trailing ``[i]``."""
+        idx = None
+        if part.endswith("]"):
+            part, _, rest = part.partition("[")
+            idx = int(rest[:-1])
+        if idx is None:
+            return node.setdefault(part, {}) if create else node[part]
+        seq = node.setdefault(part, []) if create else node[part]
+        while len(seq) <= idx:
+            seq.append({})
+        return seq[idx]
+
+    node = rec
+    for part in parts[:-1]:
+        node = _step(node, part, create=True)
+    last = parts[-1]
+    if last.endswith("]"):
+        name, _, rest = last.partition("[")
+        idx = int(rest[:-1])
+        seq = node.setdefault(name, [])
+        while len(seq) <= idx:
+            seq.append({})
+        seq[idx] = val
+    else:
+        node[last] = val
+    return rec
+
+
+@pytest.mark.parametrize("label,rec,key,val", _FAMILY_RECORDS)
+def test_a_corrupt_entity_key_does_not_abort_the_rebuild(
+        superseded, label, rec, key, val):
+    """The identity route through the ENTITY folds, one case per key.
+
+    Without the `_writable_id` guard each of these aborts pass-1b after the
+    wipe; with it the record is skipped and the healthy points survive.
+    """
+    events, sdk, _old, _new = superseded
+    rec = _poison_path(rec, key, val)
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps(rec, ensure_ascii=False) + "\n"
+    )
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, (
+        f"{label}: the rebuild lost the healthy points (aborted after the wipe?)"
+    )
+
+
+def test_two_rebuilds_of_a_poisoned_journal_agree(superseded):
+    """Degrading must still be a FUNCTION of the journal."""
+    events, sdk, old, _new = superseded
+    _poison(events, "PointSuperseded", "valid_to", {"evil": 1})
+    snapshots = []
+    for _ in range(2):
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        snapshots.append(sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$i}) RETURN n.status, n.outdated",
+            params={"i": old},
+        ).result_set)
+    assert snapshots[0] == snapshots[1], snapshots
+
+
+# ── the pass-1 stub auto-creation must not mint a NULL/empty-id node ─────
+#
+# #7369 review r5 (P1). `_create_edges` auto-creates a stub for a short source
+# id that does not resolve. That `CREATE (s:Point {id:$sid})` passes `src` in a
+# plain VALUE position — it is NOT a MERGE key, so the parameter boundary is
+# free to degrade it. An unwritable id therefore reaches the driver as a bad
+# identity, in one of two ways:
+#
+#   "\x00"  -> `_annotator_value_ok` refuses it, so the boundary DEGRADES it to
+#              None, and the statement mints `CREATE (s:Point {id:null})` — a
+#              node with no identity that no later MERGE can ever match, left
+#              behind on every replay. This is the reported P1.
+#   ""       -> `_annotator_value_ok("")` is True so the boundary leaves it
+#              alone, and it mints `(:Point {id:""})` — an identity that is not
+#              one (which is exactly why `_writable_id` adds `bool(val)`).
+#
+# `_journal_safe_params`'s own docstring states the rule for the first case —
+# a null identity converts one abort into a DIFFERENT abort, so the FOLD must
+# skip via `_writable_id` — and this was the fold site that did not.
+
+
+class _MissingNodeDriver(_StrictDriver):
+    """``_StrictDriver`` whose existence probe answers "the node is missing"."""
+
+    class _Result:
+        result_set: ClassVar[list[list[object]]] = [[False]]
+
+    def query(self, cypher, params=None, timeout=None):
+        super().query(cypher, params=params, timeout=timeout)
+        return self._Result()
+
+
+def _create_edges_seen(operator, point_id="op-1"):
+    from tortoise.projection.edges import _EdgeHandlers
+
+    driver = _MissingNodeDriver()
+    handler = _EdgeHandlers()
+    handler.g = _guarded(driver)
+    handler._create_edges({"id": point_id, "operator": operator})
+    return driver.seen
+
+
+@pytest.mark.parametrize(
+    "label,bad",
+    [
+        ("NUL-bearing (degrades to None -> :Point {id:null})", "\x00"),
+        ("empty string (-> :Point {id:''})", ""),
+        ("lone surrogate (degrades to None)", "\ud800"),
+    ],
+)
+def test_a_stub_is_never_minted_from_an_unwritable_id(label, bad):
+    seen = _create_edges_seen({"op_type": "IMPL", "inputs": [bad]})
+    stub_creates = [(c, p) for c, p in seen if "CREATE (s:Point" in c]
+    assert stub_creates == [], (
+        f"{label}: a stub was minted for an unwritable source id, so the "
+        f"graph gains a node with no usable identity: {stub_creates!r}"
+    )
+    # ...and no edge is created to the source that was never materialised.
+    assert [c for c, _ in seen if "MERGE" in c] == [], seen
+
+
+def test_a_WRITABLE_short_stub_source_still_autocreates():
+    """The new guard must not disable the #6713 stub path it sits next to."""
+    seen = _create_edges_seen({"op_type": "IMPL", "inputs": ["7"]})
+    stub_creates = [(c, p) for c, p in seen if "CREATE (s:Point" in c]
+    assert len(stub_creates) == 1, seen
+    assert stub_creates[0][1] == {"sid": "7"}, stub_creates[0]
+
+
+# ── 5. every identity skip is OBSERVABLE (round-7 review, finding 2) ─────
+#
+# The boundary change turned a LOUD abort into a SKIP: before it, an unwritable
+# identity raised out of pass-1a/pass-1b (no per-event try/except, so AFTER the
+# wipe); after it, the fold drops the record. A drop nobody can see is
+# indistinguishable from data loss to the operator, which is the risk this
+# whole change exists to manage. `_log_identity_skip` is the ONE reporter, and
+# these tests are what make the reporting falsifiable.
+
+def test_an_unwritable_identity_skip_is_OBSERVABLE(caplog):
+    """The reporter's contract: truthy-but-unwritable WARNs; ABSENT is silent.
+
+    Both halves matter. A skip that does not log is invisible; an ABSENT
+    identity (the folds default `name`/`subject`/`object` to `""` and skip
+    those by design) is ordinary, so logging it would drown the corrupt case.
+    """
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Subject", "bad\x00name", "name (MERGE key)")
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Subject", "", "name (MERGE key)")
+    _log_identity_skip("Subject", None, "name (MERGE key)")
+    assert caplog.text == "", (
+        "an ABSENT identity was logged as a skip — that is the healthy case "
+        f"and it would drown the corrupt one: {caplog.text!r}"
+    )
+
+
+def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog):
+    """End-to-end: the record is dropped AND an operator can see it dropped.
+
+    `test_a_corrupt_entity_key_does_not_abort_the_rebuild` proves the rebuild
+    SURVIVES; this proves the survival is not silent.
+    """
+    events, sdk, _old, _new = superseded
+    label, rec, key, val = _FAMILY_RECORDS[0]  # Subject / name
+    assert label == "Subject", label
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps(_poison_path(rec, key, val), ensure_ascii=False) + "\n"
+    )
+
+    caplog.set_level(logging.WARNING)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text
+
+
+def test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded(caplog):
+    """Finding 3: the `UNWIND $turns` row MERGE key is closed by the FOLD.
+
+    The boundary must not null a row merge key (`{id: turn.id}`) — the engine
+    refuses a null key — so forwarding it would hand the engine the same
+    unparseable parameter, i.e. the original abort by a different route.
+    `_write_capture_turns` is the ONE writer of that statement, and it skips the
+    batch when the session id (from which every row id derives) is unwritable.
+    """
+    from tortoise import sdk as sdk_mod
+
+    driver = _StrictDriver()
+    proj = type("P", (), {"g": _guarded(driver)})()
+    caplog.set_level(logging.WARNING)
+    written = sdk_mod._write_capture_turns(
+        proj, type("S", (), {})(), "bad\x00session",
+        [{"role": "user", "content": "hi"}],
+        now="2026-01-01T00:00:00+00:00",
+        turn_embs=[None],
+        texts_and_counts=(["hi"], {"user": 0}),
+    )
+    assert written == 0, written
+    assert driver.seen == [], (
+        "the turn statement was issued anyway, so an unwritable ROW merge key "
+        f"reached the engine: {driver.seen!r}"
+    )
+    assert "capture turn batch" in caplog.text, caplog.text
+
+
+def test_a_RESOLVED_source_key_is_guarded_too(monkeypatch, caplog):
+    """Finding 1: `_upsert_source` must guard the graph-RESOLVED key.
+
+    `url` is this statement's MERGE key, so `_journal_safe_params` forwards it
+    by design; `resolve_source_key` returns the STORED `s.url` read back from
+    the graph, so an unwritable stored url would reach the engine and abort
+    after the wipe. The three sibling source writers (`_mint_source_stub`,
+    `link_source_to_entity`, `_materialize_connector_source`) already guard the
+    resolved key; this pins the fourth.
+    """
+    from tortoise.projection import entities as ent_mod
+
+    monkeypatch.setattr(
+        ent_mod, "resolve_source_key", lambda g, url: "bad\x00resolved")
+
+    driver = _StrictDriver()
+    stub = type("P", (), {"g": _guarded(driver)})()
+    caplog.set_level(logging.WARNING)
+    out = ent_mod._EntityHandlers._upsert_source(
+        stub, {"type": "SourceCreated", "id": "src-7369", "url": "https://ok"})
+
+    assert out is None, out
+    assert driver.seen == [], (
+        "the Source MERGE was issued with an unwritable RESOLVED key: "
+        f"{driver.seen!r}"
+    )
+    assert "url (resolved MERGE key)" in caplog.text, caplog.text
+
+
+def test_a_MISSING_id_is_not_reported_as_an_unwritable_name(caplog):
+    """Round 9: the reporter must name the identity that ACTUALLY failed.
+
+    `_upsert_subject`/`_upsert_object` guard `if not sid or not _writable_id(name)`.
+    Handing the reporter only `name` on that COMBINED condition made a record
+    with a missing `id` and a healthy `name` log `skipping Subject — name
+    (MERGE key) 'Alice' is not a writable identity` — false, since
+    `_writable_id('Alice')` is True. An absent identity is not an anomaly
+    (those records were skipped silently before this change); only the corrupt
+    MERGE key is, so the conditions are split.
+    """
+    from tortoise.projection import entities as ent_mod
+
+    handler = ent_mod._EntityHandlers()
+    caplog.set_level(logging.WARNING)
+    # Missing `id`, healthy `name`: skipped, and NOTHING is logged.
+    handler._upsert_subject({"name": "Alice"})
+    handler._upsert_object({"name": "Alice"})
+    assert caplog.text == "", (
+        f"a healthy name was reported as unwritable: {caplog.text!r}"
+    )
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    # A present id but a corrupt MERGE key: the corrupt case IS reported.
+    handler._upsert_subject({"id": "s-1", "name": "bad\x00name"})
+    assert "skipping Subject" in caplog.text, caplog.text
+    assert "name (MERGE key)" in caplog.text, caplog.text
+
+
+def test_the_clause_classifier_PINS_each_round7_and_8_fix():
+    """Every behaviour those fixes changed, ASSERTED — not merely probed by hand.
+
+    Round 9 found the file asserted none of them: reverting the whole commit
+    left every existing assertion green. Each block below fails on the pre-fix
+    code.
+    """
+    # A backtick-quoted WRITE procedure is still a write — the dangerous
+    # direction, where classifying it as a read forwards a map into a property
+    # position and the engine rejects it AFTER the wipe.
+    assert (
+        _statement_writes("CALL `db.idx.fulltext.createNodeIndex`('P','e','t')")
+        is True
+    )
+    # The index writers, the apoc writers that store, and bare DDL.
+    for stmt in (
+        "CALL db.idx.vector.createNodeIndex('P','e',3,'HNSW')",
+        "CALL db.idx.fulltext.drop('Point')",
+        "CALL apoc.trigger.add()",
+        "CALL apoc.config.set()",
+        "CALL apoc.cypher.doIt('CREATE (n) SET n.x=$m', {})",
+        "CALL apoc.cypher.runMany('CREATE (n) SET n.x=1', {})",
+        "CALL apoc.atomic.add(n,'p',1)",
+        "CALL dbms.setConfigValue()",
+        "DROP INDEX ON :Point(embedding)",
+    ):
+        assert _statement_writes(stmt) is True, stmt
+    # ...while the READ-ONLY procedures, subqueries and keyword-named
+    # properties are not writes — nulling a map there is the #7174 false
+    # refusal this whole exemption exists to remove.
+    for stmt in (
+        "CALL db.idx.vector.queryNodes('P','e',5)",
+        "CALL db.idx.fulltext.queryNodes('P','q')",
+        "CALL apoc.load.json()",
+        "MATCH (n) CALL { WITH n RETURN n } RETURN n",
+        "MATCH (n) WHERE n.set = $m RETURN n",
+        "MATCH (n) WHERE n.drop = $m RETURN n",
+        "MATCH (n) WHERE n.x = $SET RETURN n",
+        "MATCH (n {set: $m}) RETURN n",
+        "MATCH (n:SET) RETURN n",
+    ):
+        assert _statement_writes(stmt) is False, stmt
+        # ...and the map riding on it survives, end to end.
+        assert _journal_safe_params({"m": {"a": 1}}, stmt)["m"] == {"a": 1}, stmt
+    # A write keyword inside a LITERAL does not make a read a write.
+    assert _statement_writes("MATCH (n) WHERE n.s='SET' RETURN n") is False
+    # THE DEPTH BOUND IS A BOUND ON CONTAINERS, NOT ON SCALARS. A scalar leaf AT
+    # the bound is parsed exactly like one at the top — the sibling predicate
+    # `_is_persistable_prop_value` agrees — so it must still be forwarded.
+    #
+    # Asserted on the PREDICATE, NOT through `_journal_safe_params`: a nested list
+    # of SCALARS is short-circuited by `_annotator_value_ok` before the predicate
+    # is ever consulted, so routing it through the gate passes with the bound
+    # reverted and pins nothing. That is how the first version of this block was
+    # born inert (round 10).
+    deep: object = "leaf"
+    for _ in range(32):
+        deep = [deep]
+    assert _writable_at_parse(deep) is True  # 32 container levels, scalar leaf
+    # With the guard on ENTRY this was False — the off-by-one: the scalar call at
+    # depth 32 refused a leaf the engine parses like any other.
+    assert _writable_at_parse([deep]) is False  # ...one more and the bound bites
+
+
+def test_a_MERGED_or_UNWOUND_row_field_is_not_a_property_value():
+    """#7406: the batch setup's two STRUCTURAL row fields — a regression I caused.
+
+    The walker judged every nested container by `_annotator_value_ok`, so a row
+    field the statement MERGES (`n += r.props` — the map-of-properties form the
+    engine ACCEPTS) or UNWINDS (`UNWIND r.inputs AS inp`, a list of dicts never
+    stored at all) was nulled. Measured on the real engine: `props` -> None
+    turned every `n += r.props` into `n += null`, and `inputs` -> None killed
+    source promotion — reddening tests/test_battery_setup.py with "Property
+    values can only be of primitive types or arrays of primitive types", a test
+    that PASSES on main. A PLAIN row field is still a property value and must
+    still degrade, which is what keeps this from being a blanket exemption.
+    """
+    merged = (
+        "UNWIND $rows AS r MERGE (n:Point {id: r.id}) "
+        "ON CREATE SET n += {a: 1}, n += r.props "
+        "SET n.embedding = vecf32(r.embedding)"
+    )
+    out = _journal_safe_params(
+        {"rows": [{"id": "p", "props": {"a": 1}, "other": {"x": 1}}]}, merged,
+    )
+    assert out["rows"][0]["props"] == {"a": 1}  # merged: structural, preserved
+    assert out["rows"][0]["other"] is None  # plain: a property value, degraded
+
+    unwound = (
+        "UNWIND $rows AS r MERGE (o:Point {id: r.id}) "
+        "ON CREATE SET o.is_operator = true "
+        "WITH o, r UNWIND r.inputs AS inp RETURN count(inp)"
+    )
+    out2 = _journal_safe_params(
+        {
+            "rows": [
+                {"id": "o", "inputs": [{"id": "a", "idx": 0}], "junk": {"x": 1}}
+            ]
+        },
+        unwound,
+    )
+    assert out2["rows"][0]["inputs"] == [{"id": "a", "idx": 0}]
+    assert out2["rows"][0]["junk"] is None
+
+
+def test_a_DECIMAL_is_preserved_because_the_engine_COERCES_it():
+    """#7406: `_annotator_value_ok` is the wrong question for a coercible number.
+
+    A `decimal.Decimal` is not a persistable property primitive, so the walker
+    nulled it — but the driver encodes it and the engine stores the float.
+    Measured on the real engine: `test_non_json_native_value_is_journalled_as_
+    stored` passes on `main` with the raw `Decimal("0.25")` and journals
+    `0.25`; with the boundary the journal read `None`. Same false-refusal class
+    as the `n += r.props` regression above — degrading a value the engine
+    ACCEPTS is silent data loss. A value the engine really does reject (bytes)
+    still degrades in the same map, which keeps this from being a blanket
+    exemption for unknown types.
+    """
+    from decimal import Decimal
+
+    out = _journal_safe_params(
+        {"p": {"confidence": Decimal("0.25"), "blob": b"x"}},
+        "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)",
+    )
+    assert out["p"]["confidence"] == Decimal("0.25")  # coerced, preserved
+    assert out["p"]["blob"] is None  # rejected, degraded
+
+
+def test_the_boundary_models_the_DRIVER_transport_both_directions():
+    """#7406: the accept/reject set is the TRANSPORT's, and it is not a type list.
+
+    The driver inlines `str(value)` for a parameter it cannot encode natively
+    and the engine parses THAT, so the boundary must accept exactly what the
+    engine parses. Two attempts at a TYPE allowlist each missed a member a
+    review then measured: `Decimal`-only nulled `np.int64(7)` on a supported
+    surface (`_sanitize_props` admits numpy integers — see
+    `test_4647_store_representable.py`), and widening to `numbers.Number`
+    nulled `np.bool_` while FORWARDING `Fraction(5, 2)` into a guaranteed
+    `Invalid input '/'` parse reject. Modelling the transport closes the class
+    instead of enumerating it.
+
+    Each case is a value the real engine was measured to accept or reject;
+    asserted on a WRITE and a READ because the two paths reach this by
+    different branches.
+    """
+    from decimal import Decimal
+    from fractions import Fraction
+
+    np = pytest.importorskip("numpy")
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    read = "MATCH (n:Point {id:$id}) WHERE n.v = $v RETURN n"
+
+    accepted = [
+        Decimal("0.25"),
+        Fraction(5, 1),
+        np.int64(7),
+        np.int32(7),
+        np.bool_(True),
+        np.float64(1.5),
+    ]
+    rejected = [
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Fraction(5, 2),
+        complex(1, 2),
+        np.datetime64("1970-01-02"),
+    ]
+    for v in accepted:
+        assert _engine_coerces(v), f"engine accepts {v!r} (str={str(v)!r})"
+        assert _journal_safe_params({"p": {"v": v}}, write)["p"]["v"] is v
+        assert _journal_safe_params({"v": v}, read)["v"] is v
+    for v in rejected:
+        assert not _engine_coerces(v), f"engine rejects {v!r} (str={str(v)!r})"
+        assert _journal_safe_params({"p": {"v": v}}, write)["p"]["v"] is None
+        assert _journal_safe_params({"v": v}, read)["v"] is None
+
+
+def test_a_SET_is_a_PARSE_reject_and_a_CYCLE_degrades():
+    """#7406: two classifications corrected after review.
+
+    A `set` was grouped with `list`/`tuple` as a SHAPE-only reject, so a read
+    forwarded it. Measured: the engine refuses a set while PARSING the
+    parameter (`Failed to parse query parameter`), on a read exactly as on a
+    write — there is no statement to forward it on.
+
+    And `_walk`'s container recursion had no depth bound, so a self-referential
+    structure raised `RecursionError` — which aborts the rebuild AFTER the wipe
+    on the replay path this boundary exists for, where `_guard_numeric_params`
+    is a no-op under `_TOLERATE_ALTERED_NUMBERS`. Not JSON-reachable (a cycle
+    cannot come from `json.loads`), but the contract is "degrades, never
+    raises" and the sibling predicate is already bounded.
+    """
+    assert _writable_at_parse({1, 2}) is False
+    assert _writable_at_parse(frozenset({1})) is False
+    read = "MATCH (n:Point {id:$id}) RETURN n.p AS p"
+    assert _journal_safe_params({"p": {1, 2}}, read)["p"] is None
+    # ...but the read-path SHAPE exemption it exists for still works: a map or
+    # a list is accepted as a bare parameter, so it must be left alone.
+    assert _journal_safe_params({"p": {1: 2}}, read)["p"] == {1: 2}
+    assert _journal_safe_params({"p": [1, 2]}, read)["p"] == [1, 2]
+
+    cyclic = {"props": None}
+    cyclic["props"] = cyclic
+    out = _journal_safe_params(
+        {"rows": [cyclic]},
+        "UNWIND $rows AS r SET t += r.props RETURN count(t)",
+    )
+    assert "rows" in out  # degraded, NOT a RecursionError
+
+
+def test_a_PARSE_reject_inside_a_CONTAINER_is_nulled_on_a_READ_too():
+    """#7406 review: the read exemption handed containers to a SECOND type list.
+
+    `_writable_at_parse` enumerated the leaf classes it knew (float finiteness,
+    bytes, NUL strings, sets) and let every OTHER leaf fall through to `return
+    True`, so a container holding one — `{"k": Decimal("NaN")}`,
+    `[complex(1, 2)]` — was forwarded on a read and the engine aborted with
+    "Failed to parse query parameter": the class this predicate exists to
+    close, re-opened one level down. It now asks the SAME transport predicate
+    the boundary uses, so the two cannot disagree about a leaf. The container
+    exemption it was ADDED for (a map or array that is harmless as a bare
+    parameter) still holds — asserted here so the narrowing cannot silently
+    over-reach. Measured against the real engine.
+    """
+    from decimal import Decimal
+
+    read = "MATCH (n:Point {id:$id}) RETURN n.p AS p"
+    for bad in ({"k": Decimal("NaN")}, {"k": complex(1, 2)}, [Decimal("Infinity")]):
+        assert _writable_at_parse(bad) is False, bad
+        assert _journal_safe_params({"m": bad}, read)["m"] is None, bad
+    for good in ({"k": 1}, [1, 2], {"d": [{"n": 1}]}):
+        assert _writable_at_parse(good) is True, good
+        assert _journal_safe_params({"m": good}, read)["m"] is good, good
+
+
+def test_the_gate_patterns_read_STRIPPED_text_and_the_literal_regex_is_tight():
+    """#7406 review: two over-acceptances in the pattern layer.
+
+    The gate patterns matched the RAW statement, so a `MERGE {…}` inside a
+    STRING LITERAL false-exempted a parameter that was then never nulled —
+    measured: a NUL-bearing `bytes` value passed through untouched and the
+    engine raised "Failed to parse query parameter". They now run on the
+    literal-stripped text, exactly as `_statement_writes` does.
+
+    And `_LITERAL_NUMBER_RE` admitted a trailing dot (`"5."`), which the engine
+    rejects — so a custom `__str__` could still forward a parse reject.
+    """
+    literal_merge = "MATCH (n) WHERE n.x = 'MERGE {id: $v}' RETURN n"
+    assert _journal_safe_params({"v": b"\x00"}, literal_merge)["v"] is None
+
+    trailing_dot = type("T", (), {"__str__": lambda _s: "5."})()
+    assert _engine_coerces(trailing_dot) is False
+
+
+def test_a_map_key_the_DRIVER_raises_on_is_dropped_not_forwarded():
+    """#7406 review: the driver RAISES on some map KEYS — an abort, not a degrade.
+
+    `falkordb/helpers.py::stringify_param_value` raises `ValueError` for an
+    empty key and for a key containing a backtick, BEFORE the statement is
+    sent. Reachable from the live surface (`update_point(**props)` with a
+    tenant key carrying a backtick) and from a corrupt journal record via
+    `_persist_extra_props` — on the replay path that raise lands AFTER the
+    wipe. The engine has no spelling for such a key, so the entry is DROPPED
+    and the keys that are fine are kept; nulling the whole map instead would
+    lose them.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    assert _map_key_ok("good") is True
+    assert _map_key_ok("") is False
+    assert _map_key_ok("a`b") is False
+
+    out = _journal_safe_params({"p": {"a`b": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+    out = _journal_safe_params({"p": {"": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+    # ...and inside a rows list, which the driver encodes the same way.
+    rows = "UNWIND $rows AS r RETURN count(r)"
+    assert _journal_safe_params({"rows": [{"a`b": 1, "ok": 2}]}, rows)["rows"] == [{"ok": 2}]
+
+
+def test_a_container_of_DRIVER_COERCED_leaves_is_preserved_on_a_WRITE():
+    """#7406 review: the transport fix had stopped at the SCALAR leaf.
+
+    `_annotator_value_ok` recurses an array through `_is_persistable_prop_value`
+    — a TYPE allowlist — so `[np.int64(7)]`, `[Decimal("0.25")]` and
+    `[np.bool_(True)]` made the whole array False and a WRITE nulled it, while
+    the raw engine stores `[7]`, `[0.25]`, `[true]` (measured through
+    `_GuardedGraph` against the raw handle). Silent data loss on a surface
+    `_sanitize_props` admits, and the same class as the scalar fix one level
+    down. `_value_ok` now recurses with the transport leaf predicate, which
+    ALSO carries the finiteness and NUL rules down to every leaf — so `[nan]`
+    is nulled here where the old array branch accepted it.
+    """
+    from decimal import Decimal
+
+    np = pytest.importorskip("numpy")
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for kept in ([np.int64(7)], [Decimal("0.25")], [np.bool_(True)], [1, 2]):
+        assert _value_ok(kept) is True, kept
+        assert _journal_safe_params({"p": {"v": kept}}, write)["p"]["v"] is kept
+    for nulled in ([b"x"], [float("nan")], [[Decimal("NaN")]], [{"k": 1}]):
+        assert _value_ok(nulled) is False, nulled
+        assert _journal_safe_params({"p": {"v": nulled}}, write)["p"]["v"] is None
+
+
+def test_a_SHAPE_mismatch_degrades_instead_of_being_forwarded():
+    """#7406 review: `SET n += $p` needs a MAP; anything else aborts.
+
+    The `shape` branches handle the conforming cases only, so a non-dict in a
+    spread position used to reach the leaf accept and be forwarded — the engine
+    then answers "Property values can only be of primitive types" (measured).
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for bad in ([1, 2], "abc", 7):
+        assert _journal_safe_params({"p": bad}, write)["p"] is None, bad
+    assert _journal_safe_params({"p": {"a": 1}}, write)["p"] == {"a": 1}
+
+
+def test_an_UNWIND_list_of_SCALARS_is_kept_not_nulled():
+    """#7406 review: the regression the shape guard introduced.
+
+    `UNWIND` does NOT require maps — measured, the engine accepts `[1,2,3]`,
+    nested lists and a bare map. The rows branch passed shape `"map"` for EVERY
+    row, so a scalar row fell into the shape-mismatch degrade and became null.
+    That is the exact shape `TortoiseSDK._mark_dirty` uses
+    (`UNWIND $ids AS pid MATCH (n:Point {id: pid}) … SET n.ep_dirty = true`,
+    sdk.py with `ids` a list of id strings) and longmem's `ingest_v2` uses for
+    `UNWIND $names AS name`. Measured end-to-end through `_GuardedGraph`
+    against the raw handle: every `n.ep_dirty` was left null, an existing
+    `ep_dirty = true` was CLEARED, and the in-memory mirror was pruned — EP
+    recompute stopped silently. A row is a map only when it IS one.
+    """
+    unwind = "UNWIND $rows AS r RETURN r"
+    for kept in (["pt-1", "pt-2"], [1, 2, 3], [[1, 2], [3, 4]], [{"id": "a"}]):
+        assert _journal_safe_params({"rows": kept}, unwind)["rows"] == kept, kept
+    # ...and a bad leaf still degrades ALONE, leaving its siblings intact.
+    assert _journal_safe_params({"rows": [1, b"x"]}, unwind)["rows"] == [1, None]
+
+
+def test_a_NULL_inside_an_ARRAY_is_refused_because_the_engine_rejects_it():
+    """#7406 review: `_annotator_value_ok(None)` is True, which is right at the
+    TOP level (a null clears the property, and replay must match), but
+    FalkorDB REFUSES a null INSIDE a stored array — measured: "Property values
+    can only be of primitive types or arrays of primitive types" — so
+    `create_point(..., tags=["a", None])` aborted on the raw handle. `_value_ok`
+    is now the single stated home for this rule and must implement it.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for arr in ([None], ["a", None], [[None]]):
+        assert _value_ok(arr) is False, arr
+        assert _journal_safe_params({"p": {"v": arr}}, write)["p"]["v"] is None
+    assert _value_ok(None) is True  # top level still clears the property
+    assert _value_ok(["a", "b"]) is True
+
+
+def test_a_NUL_map_KEY_is_dropped_because_the_ENGINE_parse_rejects_it():
+    """#7406 review: the key guard knew only the DRIVER's rule, not the engine's.
+
+    `_map_key_ok` covers what the driver RAISES on before dispatch (empty /
+    backtick). It does not cover what the ENGINE parse-rejects — a key carrying
+    a NUL or a lone surrogate. Measured: a PointAdded whose property KEY
+    carries a NUL reaches `_EntityHandlers._persist_extra_props`
+    (`entities.py`, `... SET n += $extra`) and aborted a `rebuild_all` with
+    "Failed to parse query parameter 'extra' value". The walker now applies
+    both rules to a key.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    out = _journal_safe_params({"p": {"a\x00b": 1, "good": 2}}, write)
+    assert out["p"] == {"good": 2}, out["p"]
+
+
+def test_the_IDENTITY_param_is_never_nulled_in_a_CREATE_map():
+    """#7406 review: a regression — a corrupted id wrote an unmatchable node.
+
+    `_GATE_MERGE_KEY_RE` recognises only `MERGE` property maps, so the `id` of a
+    `CREATE (n:Point {`id`: $id, ...})` was a value position and got degraded.
+    Measured through the real engine: `create_point(..., id="a\x00b")` RAISED
+    on the raw handle but, with the boundary on, created a
+    `(:Point {id: null})` no later statement can ever address. Nulling an
+    identity is not a degraded property — it is a different failure.
+
+    Asserted in BOTH production spellings (the key is backticked in the SDK) and
+    for MERGE, plus the other direction: a NON-identity field in the same map is
+    still degraded, so this cannot become a blanket exemption for the map.
+    """
+    corrupt = "x\x00y"
+    for stmt in (
+        "CREATE (n:Point {`id`: $id, content: $c})",
+        "CREATE (n:Point {id: $id, content: $c})",
+        "MERGE (n:Point {id: $id, content: $c})",
+    ):
+        out = _journal_safe_params({"id": corrupt, "c": "C"}, stmt)
+        assert out["id"] == corrupt, (stmt, out["id"])
+        assert out["c"] == "C", stmt
+
+    out = _journal_safe_params(
+        {"id": "x", "c": "a\x00b"}, "CREATE (n:Point {`id`: $id, content: $c})"
+    )
+    assert out["c"] is None, out["c"]
+
+    # ...and the OTHER direction, which the first cut of this fix broke by
+    # protecting the id in EVERY clause. A MATCH writes nothing, so a null there
+    # simply matches nothing and the lookup SUCCEEDS; protecting it forwarded a
+    # parse reject instead. Measured: `get_point`, `delete_point`, `traverse`
+    # and `_update_entity` all raised again on a NUL id, and the replay fold
+    # `_fold_entity_mutation` raised inside `rebuild_all`'s pass-1b — which has
+    # no per-event try/except, so the rebuild stopped half-built.
+    for match in (
+        "MATCH (n:Point {id:$id}) RETURN properties(n)",
+        "MATCH (n:Point {id:$id}) DETACH DELETE n",
+        "MATCH (n:Point {id:$id})-[:IMPL]->(m) RETURN m",
+        "MATCH (n:Point {id:$id}) SET n += $props RETURN count(n)",
+    ):
+        assert _journal_safe_params({"id": corrupt}, match)["id"] is None, match
+
+
+def test_a_map_key_is_judged_by_the_KEY_encoding_not_the_value_predicate():
+    """#7406 review: reusing the value predicate over-rejected whole key classes.
+
+    A key is inlined as a BACKTICKED string, so the driver renders `bytes` via
+    `decode()` and everything else via `str()` — a bytes, numeric or `nan` key
+    is therefore perfectly writable, while a NUL-bearing one is not (the engine
+    parse-rejects it). Judging keys with the VALUE predicate dropped the former
+    class: measured, `{b"foo": 1}` and `{nan: 1}` lost the entry although the
+    engine stores both.
+    """
+    for key in ("plain", b"foo", 7, 3.5, float("nan"), "a b", "a'b", "ü"):
+        assert _map_key_ok(key) is True, key
+    for key in ("", "a`b", "a\x00b"):
+        assert _map_key_ok(key) is False, key
