@@ -3011,6 +3011,84 @@ def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
         assert _team_graph("team_pt") in caplog.text, caplog.text
 
 
+def test_every_skip_path_fails_the_aggregate_unit_5331(monkeypatch):
+    """#5331 review round 1: ALL THREE skip paths must fail the aggregate.
+
+    This change's headline invariant — "every skipped graph appends a FAILED
+    reading, so a partial read can never be recorded as the org's figure" — was
+    asserted NOWHERE. MEASURED: reverting `readings.append(_failed_reading(...))`
+    at either sibling skip path to a bare `continue` left all 69 tests green, and
+    the third path (a measurement RAISE) appended nothing at all, so a two-graph
+    org whose data-rich graph raised recorded the SURVIVOR's total as the ORG's
+    figure (`('org_a', 5.0, True)`).
+
+    EVERY case therefore carries a survivor: with only the broken graph in the
+    list a dropped reading and a failed reading both end in "nothing recorded",
+    so the assertion would hold vacuously and prove nothing. Driven through
+    `_record_org_storage` with a stub db rather than a real sweep because the
+    sweep routes `select_graph` through the backup path too, which would conflate
+    the two and make the select-failure case unattributable.
+    """
+    import tortoise.backup_sweep as bs_mod
+    from tortoise.graph_storage import GraphStorageReading
+
+    def _ok(name, total):
+        return GraphStorageReading(
+            graph_name=name, total_mb=total, samples=100, repeats=1,
+            readings_mb=(total,), min_mb=total, max_mb=total, spread_mb=0.0,
+            indices_mb=None, node_attributes_mb={}, ok=True, error=None,
+            measured_at="2026-10-07T00:00:00Z")
+
+    class _Db:
+        """`select_graph` raises only for the name the case under test injects."""
+
+        def __init__(self, raises_for=None):
+            self.raises_for = raises_for
+
+        def select_graph(self, name, *a, **kw):
+            if name == self.raises_for:
+                raise RuntimeError("injected select_graph raise")
+            return object()
+
+    def _measure_ok(p, **kw):
+        return _ok(p.graph_name, 1.0)
+
+    def _measure_raises(p, **kw):
+        if p.graph_name == "g_meas":
+            raise RuntimeError("injected measurement raise")
+        return _ok(p.graph_name, 5.0)
+
+    cases = [
+        # (a) an `_invalid` row resolves to graph_name == "" — the guard at the
+        #     top of the loop, which must not let the survivor through.
+        ("invalid-row", [{"graph_id": "a", "graph_name": "g_ok1"},
+                         {"graph_id": "g_bad", "graph_name": ""}],
+         None, _measure_ok),
+        # (b) select_graph raises for one of the org's graphs.
+        ("select-raises", [{"graph_id": "b", "graph_name": "g_ok2"},
+                           {"graph_id": "c", "graph_name": "g_sel"}],
+         "g_sel", _measure_ok),
+        # (c) the measurement itself raises — the fail-open this review found.
+        ("measure-raises", [{"graph_id": "d", "graph_name": "g_ok3"},
+                            {"graph_id": "e", "graph_name": "g_meas"}],
+         None, _measure_raises),
+    ]
+
+    recorded: list = []
+    monkeypatch.setattr(
+        bs_mod, "record_graph_storage",
+        lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+    for label, graphs, raises_for, measure in cases:
+        recorded.clear()
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", measure)
+        bs_mod._record_org_storage(_Db(raises_for), "org_a", graphs)
+        assert recorded == [], (
+            f"[{label}] a skipped graph MUST fail the aggregate — recording the "
+            f"survivors' sum as the ORG's figure is the silent understatement "
+            f"this rule exists to prevent. Got: {recorded}")
+
+
 def test_combine_graph_storage_readings_unit_5331():
     """#5331: DIRECT unit test for the aggregator — the three fixes cycle 3 and 4
     made (summed range ends, `None`-propagating index share, least-precise

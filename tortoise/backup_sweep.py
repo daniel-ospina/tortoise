@@ -675,10 +675,24 @@ def _record_org_storage(db, org_id: str, graphs: list[dict[str, Any]]) -> None:
             try:
                 readings.append(measure_projection_storage(
                     SimpleNamespace(g=g, db=db, graph_name=gname)))
-            except Exception:
+            except Exception as e:
+                # ⛔ THE THIRD SKIP PATH — and until review round 1 it was the ONE
+                # that dropped the graph instead of failing the aggregate. Its two
+                # siblings above append `_failed_reading` for exactly this reason:
+                # with nothing appended, `len(ok) == len(readings)`, so `combine`
+                # returns ok=True and the SURVIVORS' sum is written as the ORG's
+                # figure — the same silent understatement the aggregator and the
+                # guard at the top of this loop exist to prevent. MEASURED before
+                # this fix: a two-graph org whose data-rich graph raised recorded
+                # `('org_a', 5.0, True)` — the SMALL graph's bytes as the org's.
+                # (The meter is total by contract, so this is belt-and-braces for
+                # an unexpected raise; belt-and-braces that fails OPEN is worse
+                # than none, because it is the opposite of what the docstring and
+                # the commit message promise.)
                 logger.exception(
-                    "storage metering: measurement raised for %s/%s — continuing",
-                    org_id, gname)
+                    "storage metering: measurement raised for %s/%s — failing "
+                    "the aggregate", org_id, gname)
+                readings.append(_failed_reading(gname, 0, 0, "", e))
         combined = combine_graph_storage_readings(readings, graph_name=org_id)
         if combined is None:
             logger.debug("storage metering: no measurable graph for %s", org_id)
