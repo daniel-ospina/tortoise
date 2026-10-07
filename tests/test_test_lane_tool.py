@@ -16,8 +16,7 @@ tool's CONTRACT, not Docker's behaviour:
 Where a function's real body is the safety property (``container_state``,
 ``_graph_count``, ``_container_publishes``, ``repo_root``), it is tested
 DIRECTLY. Stubbing such a function to test its caller pins the caller and
-leaves the property itself free to regress: this file's own history includes a
-suite that stayed green with the ``absent``/``unknown`` classifier reverted.
+leaves the property itself free to regress.
 """
 from __future__ import annotations
 
@@ -247,10 +246,10 @@ def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
     assert tl._graph_count("fdb-lane-x") == 3
 
 
-def test_container_publishes_consults_stopped_containers(monkeypatch):
-    """A stopped container still reserves its published host port, so the scan
-    must ask for the full list (`-a`/`--all`); without it `pick_port` returns a
-    port `docker run -p` then refuses."""
+def test_published_scan_asks_for_all_containers(monkeypatch):
+    """The scan must ask for the full list (`-a`/`--all`) rather than running
+    containers only, so a container this tool did not start is still seen as an
+    owner of the port."""
     seen = {}
 
     def _fake(*args, **kwargs):
@@ -591,10 +590,8 @@ def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
-    # A FAILED `docker port` is not an answer either. This case used to fall
-    # through to 0, so a caller keying the exit code read "could not ask" as
-    # SUCCESS while the state branch above returned 1 — the test's own name
-    # claimed the opposite of what it asserted.
+    # A FAILED `docker port` is not an answer either: without this, a caller
+    # keying the exit code reads "could not ask" as success.
     assert tl.main(["status"]) == 1
     err = capsys.readouterr().err
     assert "port=unknown" in err
@@ -622,7 +619,8 @@ def test_status_fails_when_a_running_container_publishes_no_port(monkeypatch, ca
 
 
 def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch):
-    """The reuse path must RETURN, not fall through: falling through would\n    `docker rm -f` + recreate a live lane container, destroying the test graphs
+    """The reuse path must RETURN, not fall through: falling through would
+    `docker rm -f` + recreate a live lane container, destroying the test graphs
     of the run that is using it — the opposite of what reuse is for."""
     removed = []
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
@@ -647,6 +645,36 @@ def test_uri_for_warns_when_docker_host_is_set(monkeypatch, capsys):
     _out, err = capsys.readouterr()
     assert "DOCKER_HOST is set" in err
     assert uri == "docker://:@127.0.0.1:16390/tortoise_test_matrix"
+
+
+def test_start_refuses_a_port_it_cannot_move_a_live_lane_to(lane, monkeypatch):
+    """Honour-or-refuse: a running container's published port cannot be changed,
+    so an explicit `--port` that disagrees must FAIL — silently ignoring it would
+    make the flag a lie, and recreating the container would destroy the graphs of
+    the run using it."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("no docker call may touch a live lane container")
+    monkeypatch.setattr(tl, "_docker", _boom)
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+
+    with pytest.raises(SystemExit) as e:
+        tl.start(port=16391)
+    assert "already running on port 16390" in str(e.value)
+
+
+def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
+    """The guard must be an EQUALITY, not a refusal of the flag: asking for the
+    port the lane already publishes is not a conflict."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda n: (_ for _ in ()).throw(
+                            AssertionError("must not remove a live lane")))
+    assert tl.start(port=16390) == ("fdb-lane-0123456789", 16390)
 
 
 def test_docker_forwards_its_timeout_to_subprocess(monkeypatch):
@@ -825,8 +853,7 @@ def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monk
 
 
 def test_cleanup_refuses_an_unmanaged_name(lane, monkeypatch):
-    """Every removal intent passes the ownership check; this was the one that
-    bypassed it."""
+    """Every removal intent passes the ownership check."""
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("cleanup reached docker for an unmanaged name")
 

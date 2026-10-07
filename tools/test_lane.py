@@ -59,8 +59,11 @@ Also fail-closed by design:
 * persistence is OFF (``--appendonly no --save ''``) — the data is disposable;
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
-* ````docker ps -a`` is consulted for port collisions, because a stopped
-  container still reserves its published port;
+* ````docker ps -a`` is consulted for port collisions (kept for
+  created-but-not-started and foreign containers). A STOPPED container does NOT
+  reserve its published host port — measured on Docker 29.4.0 — so the guard
+  covers RUNNING containers, and a lost race is caught by ``docker run`` itself
+  refusing the binding;
 * ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike ``GIT_DIR``/
   ``GIT_WORK_TREE``): a remote daemon is addressed as-is, so the printed
   ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
@@ -296,8 +299,11 @@ def _published_scan() -> str | None:
     timed-out call is not evidence for it. This tool exists for an overloaded
     host, so a failed scan is an expected case, not an exotic one.
     """
-    # `-a`: a STOPPED container still reserves its published host port, so a
-    # running-only scan can hand back a port `docker run -p` will then refuse.
+    # `-a` is kept for created-but-not-started and foreign containers. A STOPPED
+    # container does NOT reserve its published host port (measured on Docker
+    # 29.4.0: an exited container reports no `Ports`, and the port rebinds at
+    # once), so this guard covers RUNNING containers — a lost race is caught by
+    # `docker run` refusing the binding, not here.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return None if r.returncode != 0 else (r.stdout or "")
 
@@ -450,6 +456,16 @@ def start(port: int | None = None) -> tuple[str, int]:
             )
         if published is None:
             raise SystemExit(f"test-lane: {name} is running but publishes no port")
+        if port is not None and port != published:
+            # Honour-or-refuse: the help says this flag publishes the lane on the
+            # port you name. A running container's mapping cannot be changed, so
+            # silently returning a DIFFERENT port would make the flag a lie (and
+            # could send a test run at another lane's container).
+            raise SystemExit(
+                f"test-lane: {name} is already running on port {published} — "
+                f"--port {port} cannot be applied to it; run `uv run python "
+                f"tools/test_lane.py down` first to move it"
+            )
         if not _wait_ready(name):
             raise SystemExit(
                 f"test-lane: {name} is running but never answered PING within "
@@ -609,8 +625,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print("  port=unknown (the `docker port` query failed)",
                   file=sys.stderr)
             # Same rule as the `unknown` STATE above: a failed query is not an
-            # answer, so the CLI verdict must not read as success. It did — the
-            # state branch returned 1 while this one fell through to 0.
+            # answer, so the CLI verdict must not read as success.
             return 1
         if published is None:
             # `start()` calls this identical state a hard error ("running but
@@ -653,7 +668,9 @@ def build_parser() -> argparse.ArgumentParser:
                                  f"(default {DEFAULT_GRAPH})")
     mapper = argparse.ArgumentParser(add_help=False, parents=[graph_only])
     mapper.add_argument("--port", type=int, default=None,
-                        help="publish on this loopback port (default: first free)")
+                        help="publish on this loopback port (default: first "
+                             "free). Refused, not ignored or adopted, when "
+                             "this lane's container already runs elsewhere")
     plain = argparse.ArgumentParser(add_help=False)
     sub = p.add_subparsers(dest="command", required=True)
     for name, fn, help_, parent in (
