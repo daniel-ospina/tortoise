@@ -4446,6 +4446,59 @@ class TortoiseSDK:
         from tortoise.exceptions import EmbeddedStoreBusyError
         raise EmbeddedStoreBusyError(db_path, pid)
 
+    def _graph_write_with_retry(self, fn, *, what: str):
+        """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
+
+        A rebuild/replace invalidates the cached projection's graph handle; the
+        write then dies with ``ResponseError("graph was deleted or replaced while
+        the query was running, aborting")`` while reads keep succeeding (each read
+        re-resolves). The recorded recovery is **re-resolve and re-issue**, so
+        ``on_retry`` drops the cached projection and the next attempt rebuilds it
+        through ``_get_proj()``. Retrying the SAME stale handle is the failure mode
+        #7405 describes, which is why the re-resolve lives here rather than being
+        left to each caller.
+
+        What this buys, stated honestly: a rebuild window lasting seconds now
+        heals in place. The window #7405 measured lasted **over an hour**, and no
+        bounded retry should wait that long — so on exhaustion the error still
+        surfaces (it always did; the *fail loudly* half was never missing). The
+        durable win is the second half: the known-invalidated handle is **never
+        left cached**, so the caller's next write re-resolves and is not
+        permanently poisoned. That is what made the wedge a dead end.
+
+        ``retryable_transient`` re-raises anything it does not recognise, so a
+        deterministic failure (a malformed statement, ``WRONGTYPE``) is never
+        retried and never wrapped in the sentinel.
+
+        Invariant this helper guarantees: **it never returns, and never raises,
+        leaving a handle cached that it knows was invalidated.** ``on_retry``
+        alone cannot deliver that — it does not fire on the FINAL attempt, which
+        re-resolves and then dies — so the exhausted path drops the cache too.
+        Clearing is cheap: ``select_graph`` is client-side with no server call
+        (see the note on the registry-graph path), so it costs a rebuild, not a
+        round trip.
+        """
+        from .retry import (
+            WriteStageRetriesExhausted,
+            call_with_predicate,
+            retryable_transient,
+        )
+
+        def _reref(_exc: BaseException) -> None:
+            # Drop the cached projection: it holds the invalidated handle.
+            self._proj = None
+
+        try:
+            return call_with_predicate(
+                fn, predicate=retryable_transient, retries=3,
+                what=what, base=1.0, cap=8.0, on_retry=_reref)
+        except WriteStageRetriesExhausted:
+            # The last attempt re-resolved and then died, so the cache holds a
+            # handle known to be dead. Drop it: the caller's NEXT write must
+            # re-resolve rather than inherit the wedge (#7405's dead end).
+            self._proj = None
+            raise
+
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
             # Resolve the URI's own graph name first (used as the fallback
@@ -5474,10 +5527,18 @@ class TortoiseSDK:
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
-        proj.g.query(
-            "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-            params=_create_params,
+        self._graph_write_with_retry(
+            lambda: self._get_proj().g.query(
+                "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                params=_create_params,
+            ),
+            what="create_point CREATE(:Point)",
         )
+        # A retry (or an exhausted retry) drops the cached projection, because its
+        # handle may have been invalidated by a rebuild. Re-bind before the
+        # post-CREATE ops below (`_sync_tags`, `_link_source`) so they run against a
+        # handle that is known live rather than the stale one (#7405).
+        proj = self._get_proj()
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):

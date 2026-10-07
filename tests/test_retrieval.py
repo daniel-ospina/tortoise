@@ -798,6 +798,16 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
+    # #7405: a REPLACED graph handle is retryable — the statement is valid and
+    # succeeds on a fresh handle, and the recorded recovery is re-resolve +
+    # re-issue (the wedge healed on its own after ~1h, which is why it looked
+    # permanent). Case-insensitive, and only for THIS message.
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_transient(redis_exc.ResponseError(
+        "Graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
     for code in (401, 429, 500):
@@ -895,6 +905,69 @@ def test_call_with_predicate_retry_loop():
     with pytest.raises(redis_exc.TimeoutError):
         call_with_predicate(_always_transient, predicate=retryable_transient,
                             retries=1, what="t", marker_armed=False)
+
+
+def test_graph_write_retry_rerefs_the_handle_on_a_replaced_graph():
+    """#7405: a rebuilt/replaced graph invalidates the cached projection's handle.
+
+    Two obligations, and the second is the one that matters — the failure was a
+    *dead end* precisely because a lane stayed poisoned:
+      1. re-issue the write against a RE-RESOLVED handle (never the dead one);
+      2. never leave a known-invalidated handle cached, even when the retry
+         budget is exhausted — so the caller's NEXT write re-resolves.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    def _sdk_with(behaviour):
+        """A TortoiseSDK with no __init__ — no DB, no embedder — whose graph
+        handle fails according to `behaviour(call_index)`."""
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        calls = {"query": 0, "resolve": 0}
+
+        class _G:
+            def query(self, *a, **k):
+                calls["query"] += 1
+                return behaviour(calls["query"])
+
+        class _Proj:
+            g = _G()
+
+        def _get_proj():
+            calls["resolve"] += 1
+            if sdk._proj is None:
+                sdk._proj = _Proj()
+            return sdk._proj
+
+        sdk._proj = _Proj()
+        sdk._get_proj = _get_proj
+        return sdk, calls
+
+    # 1. one replace, then success -> the write is re-issued on a fresh handle
+    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
+    assert sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
+    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} query attempt(s)"
+    assert calls["resolve"] == 2, "the handle must be re-resolved before the retry"
+
+    # 2. exhaustion: the error still surfaces AND the dead handle is not left cached
+    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
+    with pytest.raises(WriteStageRetriesExhausted):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert sdk._proj is None, (
+        "an exhausted retry must still drop the invalidated handle — leaving it "
+        "cached is what made #7405 a dead end for the caller's next write")
+    assert calls["resolve"] == 4, "every attempt re-resolves (1 initial + 3 retries)"
+
+    # 3. a NON-retryable error is re-raised unchanged, is not retried at all,
+    #    and does not drop a perfectly good handle
+    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(
+        redis_exc.ResponseError("WRONGTYPE Operation against a key")))
+    with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert calls["query"] == 1, "a deterministic error must never be retried"
+    assert sdk._proj is not None, "a deterministic failure does not invalidate the handle"
 
 
 def test_retry_import_identity():

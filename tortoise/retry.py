@@ -43,6 +43,15 @@ _NETWORK_ERRNOS = frozenset({
 #: pressure IS the retry; unrelated ResponseErrors (WRONGTYPE, ...) are not.
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 
+#: A rebuilt/replaced graph invalidates a cached graph HANDLE, and the writer then
+#: gets ``ResponseError("graph was deleted or replaced while the query was running,
+#: aborting")`` (#7405). Reads keep working (each read re-resolves) while writes on
+#: the stale handle are refused. **Retryable**: the recovery is to re-resolve the
+#: handle and re-issue — which is what #7405 did by hand; it healed after ~1h, a
+#: window no caller will wait for. This is NOT a deterministic caller bug like
+#: WRONGTYPE: the statement is valid and succeeds on a fresh handle.
+_GRAPH_REPLACED_RE = re.compile(r"graph was deleted or replaced", re.IGNORECASE)
+
 
 class WriteStageRetriesExhausted(Exception):
     """Write-stage retry sentinel (R1, #1786/#1806).
@@ -74,6 +83,12 @@ def retryable_transient(exc: BaseException) -> bool:
       → True — the verified write-path loss mechanism.
     - redis ``ResponseError`` matching ``/MISCONF|Can't persist/`` (AOF
       fsync / disk-full write refusal) → True; unrelated ResponseErrors → False.
+    - redis ``ResponseError`` for a REPLACED graph handle (``graph was deleted
+      or replaced while the query was running``, #7405) → True: a rebuild
+      invalidates the handle, and the recorded recovery is re-resolve +
+      re-issue (the wedge healed on its own after ~1h, which is why it looked
+      permanent). The caller must re-resolve via ``on_retry`` — retrying the
+      same stale handle is the failure mode #7405 describes.
     - ``requests``/``urllib`` provider-network errors (LLM provider
       transients) → True.
     - ``OSError`` narrowed to transport errnos (ECONNRESET/ETIMEDOUT/
@@ -105,7 +120,10 @@ def retryable_transient(exc: BaseException) -> bool:
         return True
     if isinstance(exc, _re.ConnectionError):
         return True
-    if isinstance(exc, _re.ResponseError) and _MISCONF_RE.search(str(exc)):
+    if isinstance(exc, _re.ResponseError) and (
+        _MISCONF_RE.search(str(exc))
+        or _GRAPH_REPLACED_RE.search(str(exc))
+    ):
         return True
     if isinstance(exc, requests.exceptions.Timeout):
         return True

@@ -240,6 +240,18 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
+    # #7405: a REPLACED graph handle is retryable — the statement is valid and
+    # succeeds on a fresh handle, and the recorded recovery is re-resolve +
+    # re-issue (the wedge healed on its own after ~1h, which is why it looked
+    # permanent). Case-insensitive, and only for THIS message. Pinned here as
+    # well as in tests/test_retrieval.py because the eval harness re-exports the
+    # SAME predicate object — one contract, two consumers.
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_transient(redis_exc.ResponseError(
+        "Graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
     for code in (401, 429, 500):
