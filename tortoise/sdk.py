@@ -4449,34 +4449,42 @@ class TortoiseSDK:
     def _graph_write_with_retry(self, fn, *, what: str):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
 
-        A rebuild/replace invalidates the cached projection's graph handle; the
-        write then dies with ``ResponseError("graph was deleted or replaced while
-        the query was running, aborting")`` while reads keep succeeding (each read
-        re-resolves). The recorded recovery is **re-resolve and re-issue**, so
-        ``on_retry`` drops the cached projection and the next attempt rebuilds it
-        through ``_get_proj()``. Retrying the SAME stale handle is the failure mode
-        #7405 describes, which is why the re-resolve lives here rather than being
-        left to each caller.
+        A rebuild/replace aborts an IN-FLIGHT query with
+        ``ResponseError("graph was deleted or replaced while the query was
+        running, aborting")``. Measured against THIS client (``falkordb``), that
+        abort is a **per-query race, not a poisoned handle**: ``Graph`` is
+        stateless — it holds only ``name`` + ``execute_command`` and re-issues
+        ``GRAPH.QUERY <name>`` on every call — so the SAME cached handle and
+        client succeed on a plain re-issue (reviewer reproduced: abort, then
+        retry on the same handle, one write, no duplicate). No re-resolution is
+        needed, and an earlier ``on_retry`` cache-drop was REMOVED: it rebuilt
+        the whole ``FalkorProjection`` (connection pool + embedding warm-up) for
+        nothing, and its test assertion held with or without the drop.
 
-        What this buys, stated honestly: a rebuild window lasting up to ~10 s now
-        heals in place (``base=2.0``, 3 retries). The window #7405 measured lasted
-        **over an hour**, and no bounded retry should wait that long — so on
-        exhaustion the original error still surfaces, **unchanged in type**. The
-        durable win is the second half: the known-invalidated handle is **never
-        left cached**, so the caller's next write re-resolves and is not
-        permanently poisoned. That is what made the wedge a dead end.
+        What this buys, stated honestly: a rebuild window of roughly 7-14 s now
+        heals in place (``base=2.0``, 3 retries). The window #7405 measured
+        lasted **over an hour**, and no bounded retry should wait that long — so
+        on exhaustion the original error still surfaces, **unchanged in type**.
 
-        ``retryable_transient`` re-raises anything it does not recognise, so a
-        deterministic failure (a malformed statement, ``WRONGTYPE``) is never
+        ``retryable_aborted_write`` re-raises anything it does not recognise, so
+        a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
         retried and never wrapped in the sentinel.
 
-        Invariant this helper guarantees: **it never returns, and never raises,
-        leaving a handle cached that it knows was invalidated.** ``on_retry``
-        alone cannot deliver that — it does not fire on the FINAL attempt, which
-        re-resolves and then dies — so the exhausted path drops the cache too.
-        Clearing is cheap: ``select_graph`` is client-side with no server call
-        (see the note on the registry-graph path), so it costs a rebuild, not a
-        round trip.
+        Retry budget (#7405 P2-2). This inner loop owns the write refusals
+        (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
+        is the ONLY retry for a replaced graph — ``retryable_transient`` (the
+        eval's outer phase predicate) deliberately does not carry that arm, so a
+        graph-replaced error is not multiplied 3x4. MISCONF IS still in the outer
+        predicate (it predates #7405 and the eval's UNWRAPPED direct writes rely
+        on the outer loop), so a MISCONF on a ``create_point`` write may nest;
+        the outer loop engages only once this inner loop EXHAUSTS, bounding it at
+        4 inner x 4 outer attempts.
+
+        Observability (#7405 P1-1): the retry count is accumulated in
+        ``self._graph_write_retry_count`` (private, monotonic) so a caller that
+        measures retry behaviour — the eval's ``ingest_retries`` Layer-1 outcome
+        — can observe a retry that happened INSIDE the SDK, not only the outer
+        phase retry.
         """
         from .retry import (
             WriteStageRetriesExhausted,
@@ -4484,19 +4492,15 @@ class TortoiseSDK:
             retryable_aborted_write,
         )
 
-        def _reref(_exc: BaseException) -> None:
-            # Drop the cached projection: it holds the invalidated handle.
-            self._proj = None
+        def _note_retry(_exc: BaseException) -> None:
+            self._graph_write_retry_count = getattr(
+                self, "_graph_write_retry_count", 0) + 1
 
         try:
             return call_with_predicate(
                 fn, predicate=retryable_aborted_write, retries=3,
-                what=what, base=2.0, cap=8.0, on_retry=_reref)
+                what=what, base=2.0, cap=8.0, on_retry=_note_retry)
         except WriteStageRetriesExhausted as exc:
-            # The last attempt re-resolved and then died, so the cache holds a
-            # handle known to be dead. Drop it: the caller's NEXT write must
-            # re-resolve rather than inherit the wedge (#7405's dead end).
-            self._proj = None
             # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
             # marker, not for create_point's contract: surface the ORIGINAL error,
             # whose TYPE callers depend on — `_classify_db_failure` buckets the
@@ -5389,10 +5393,10 @@ class TortoiseSDK:
         # born-terminal surface.
         _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
         # THE FIRST WRITE in this method is `_advance_ep_version`, which stamps the
-        # epoch the CREATE below reuses — so a stale handle fails THERE, and wrapping
-        # only the CREATE would leave this path unretried and the cached handle
-        # un-dropped, making the retry dead code in the failure mode it targets
-        # (#7405 review P0). Both writes therefore go through the helper.
+        # epoch the CREATE below reuses — so an aborted write fails THERE, and
+        # wrapping only the CREATE would leave this path unretried, making the
+        # retry dead code in the failure mode it targets (#7405 review P0). Both
+        # writes therefore go through the helper, on the same (stateless) handle.
         _epv = self._advance_ep_version()
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
                                 "now": now, "embedding": embedding,
@@ -5538,17 +5542,16 @@ class TortoiseSDK:
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
         self._graph_write_with_retry(
-            lambda: self._get_proj().g.query(
+            lambda: proj.g.query(
                 "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
                 params=_create_params,
             ),
             what="create_point CREATE(:Point)",
         )
-        # A retry (or an exhausted retry) drops the cached projection, because its
-        # handle may have been invalidated by a rebuild. Re-bind before the
-        # post-CREATE ops below (`_sync_tags`, `_link_source`) so they run against a
-        # handle that is known live rather than the stale one (#7405).
-        proj = self._get_proj()
+        # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+        # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+        # a per-query race and `proj` is as valid after a retry as before it
+        # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):
@@ -14350,8 +14353,9 @@ class TortoiseSDK:
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
         """
+        proj = self._get_proj()
         rows = self._graph_write_with_retry(
-            lambda: self._get_proj().g.query(
+            lambda: proj.g.query(
                 "MERGE (m:EpMeta) "
                 "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
                 "RETURN m.ep_version"

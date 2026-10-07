@@ -4,17 +4,19 @@ fix/invert-retrieval-to-product).
 
 Moved from ``tools/longmem_eval/errors.py`` (where the eval's ingest write
 path consumed it) so the product owns the capability: ``retryable_transient``
-is the pinned transport-class predicate and ``call_with_predicate`` is the
-bounded jittered retry loop. The eval harness re-exports both unchanged
-from ``tools/longmem_eval/errors.py`` and keeps its own run knobs
-(``INGEST_WRITE_RETRIES`` etc.) eval-side.
+is the pinned transport-class predicate, ``retryable_aborted_write`` is the
+narrower write-path predicate (the SDK's direct graph writes, #7405), and
+``call_with_predicate`` is the bounded jittered retry loop. The eval harness
+re-exports ``retryable_transient`` / ``call_with_predicate`` /
+``WriteStageRetriesExhausted`` unchanged from ``tools/longmem_eval/errors.py``
+and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
 
-⚠️ FOLLOW-UP (documented, NOT in this PR): wiring this module into the SDK
-write path — ``_post_commit`` (tortoise/sdk.py) and the capture/commit
-graph writes — is a separate change (audit G8). The product's write
+⚠️ PARTIALLY WIRED (#7405): ``TortoiseSDK._graph_write_with_retry`` retries
+``create_point``'s two direct writes through ``retryable_aborted_write``.
+Wiring the remaining write surfaces — ``_post_commit`` (tortoise/sdk.py) and
+the capture/commit graph writes — is separate work (audit G8); those paths'
 robustness today remains idempotent-MERGE + ``client_commit_id`` replay +
-server-side dedup; this module is the reusable bounded-retry primitive for
-when the retry decision ships.
+server-side dedup.
 """
 from __future__ import annotations
 
@@ -43,14 +45,20 @@ _NETWORK_ERRNOS = frozenset({
 #: pressure IS the retry; unrelated ResponseErrors (WRONGTYPE, ...) are not.
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 
-#: A rebuilt/replaced graph invalidates a cached graph HANDLE, and the writer then
-#: gets ``ResponseError("graph was deleted or replaced while the query was running,
-#: aborting")`` (#7405). Reads keep working (each read re-resolves) while writes on
-#: the stale handle are refused. **Retryable**: the recovery is to re-resolve the
-#: handle and re-issue — which is what #7405 did by hand; it healed after ~1h, a
-#: window no caller will wait for. This is NOT a deterministic caller bug like
-#: WRONGTYPE: the statement is valid and succeeds on a fresh handle.
-_GRAPH_REPLACED_RE = re.compile(r"graph was deleted or replaced", re.IGNORECASE)
+#: Write refusals where the engine ABORTED the statement, so the outcome is
+#: definitively *did not land* (#7405). Two measured messages:
+#:   - a rebuild/replace aborts an in-flight query: ``graph was deleted or
+#:     replaced while the query was running, aborting``;
+#:   - a concurrent writer holds the write lock: ``Write query aborted: another
+#:     write is in progress``.
+#: Both are **retryable**, but ONLY on the write path — see
+#: :func:`retryable_aborted_write` for the layering, and
+#: :func:`retryable_transient` for why they are deliberately NOT in the
+#: transport predicate (putting them there made one error retryable at two
+#: nested layers).
+_ABORTED_WRITE_RE = re.compile(
+    r"graph was deleted or replaced|another write is in progress",
+    re.IGNORECASE)
 
 
 def retryable_aborted_write(exc: BaseException) -> bool:
@@ -71,15 +79,27 @@ def retryable_aborted_write(exc: BaseException) -> bool:
     ``derived == replay(journal)``. Both arms below instead mean the engine
     ABORTED the statement, so nothing was applied and re-issuing cannot duplicate:
 
-    - the graph was replaced underneath the running query (#7405) — the verb is
-      *aborting*, and the replaced key discards anything written into the old one;
+    - the graph was replaced underneath the running query, or a concurrent writer
+      held the write lock (#7405) — both are the engine's own *aborting* refusal;
     - persistence refused the write (``MISCONF`` / ``Can't persist``) — a write
       refusal, not a completed write.
+
+    **The server guarantee this rests on** (no test pins it — it is an engine
+    property, measured by reading the engine source; see PR #7615's verification
+    table): the replaced-graph check is ``WriteAbort::GraphUnregistered``, whose
+    registration test runs BEFORE mutation under one continuous GIL hold, and
+    the engine's own test says it *"aborted before mutating"*; ``MISCONF`` is a
+    pre-execution command rejection. So neither can come back after the write
+    applied — which is what makes a bare ``CREATE`` safe to re-issue.
+
+    This predicate is the SDK write path's own gate; it is intentionally NOT
+    :func:`retryable_transient`, which stays the transport-class predicate the
+    eval's OUTER phase loops use (see the layering note there).
     """
     import redis.exceptions as _re
 
     if isinstance(exc, _re.ResponseError):
-        return bool(_MISCONF_RE.search(str(exc)) or _GRAPH_REPLACED_RE.search(str(exc)))
+        return bool(_MISCONF_RE.search(str(exc)) or _ABORTED_WRITE_RE.search(str(exc)))
     return False
 
 
@@ -113,12 +133,13 @@ def retryable_transient(exc: BaseException) -> bool:
       → True — the verified write-path loss mechanism.
     - redis ``ResponseError`` matching ``/MISCONF|Can't persist/`` (AOF
       fsync / disk-full write refusal) → True; unrelated ResponseErrors → False.
-    - redis ``ResponseError`` for a REPLACED graph handle (``graph was deleted
-      or replaced while the query was running``, #7405) → True: a rebuild
-      invalidates the handle, and the recorded recovery is re-resolve +
-      re-issue (the wedge healed on its own after ~1h, which is why it looked
-      permanent). The caller must re-resolve via ``on_retry`` — retrying the
-      same stale handle is the failure mode #7405 describes.
+      **Deliberately NOT here: the replaced-graph / write-lock aborts** (#7405).
+      They ARE retryable, but only on the write path
+      (:func:`retryable_aborted_write`). Adding them to this predicate as well
+      made ONE error retryable at two nested layers — the eval's outer phase
+      loop (``tools/longmem_eval/ingest_v2.py``) wrapping the SDK's inner write
+      retry — which multiplies the budget with no benefit, because the SDK
+      retry already covers the write. So this predicate returns False for them.
     - ``requests``/``urllib`` provider-network errors (LLM provider
       transients) → True.
     - ``OSError`` narrowed to transport errnos (ECONNRESET/ETIMEDOUT/
@@ -150,10 +171,7 @@ def retryable_transient(exc: BaseException) -> bool:
         return True
     if isinstance(exc, _re.ConnectionError):
         return True
-    if isinstance(exc, _re.ResponseError) and (
-        _MISCONF_RE.search(str(exc))
-        or _GRAPH_REPLACED_RE.search(str(exc))
-    ):
+    if isinstance(exc, _re.ResponseError) and _MISCONF_RE.search(str(exc)):
         return True
     if isinstance(exc, requests.exceptions.Timeout):
         return True

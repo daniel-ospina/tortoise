@@ -240,16 +240,15 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
-    # #7405: a REPLACED graph handle is retryable — the statement is valid and
-    # succeeds on a fresh handle, and the recorded recovery is re-resolve +
-    # re-issue (the wedge healed on its own after ~1h, which is why it looked
-    # permanent). Case-insensitive, and only for THIS message. Pinned here as
-    # well as in tests/test_retrieval.py because the eval harness re-exports the
-    # SAME predicate object — one contract, two consumers.
+    # #7405 (review P2-2): the replaced-graph / write-lock aborts are NOT in
+    # this transport predicate (the eval harness re-exports the SAME product
+    # object, so this holds here too). They are retryable only on the SDK write
+    # path (`retryable_aborted_write`), which is what keeps the eval's outer
+    # phase loop from multiplying the SDK's inner write retry 3x4.
     assert retryable_transient(redis_exc.ResponseError(
-        "graph was deleted or replaced while the query was running, aborting")) is True
+        "graph was deleted or replaced while the query was running, aborting")) is False
     assert retryable_transient(redis_exc.ResponseError(
-        "Graph was deleted or replaced while the query was running, aborting")) is True
+        "Write query aborted: another write is in progress")) is False
     assert retryable_transient(redis_exc.ResponseError(
         "graph is read-only")) is False
 

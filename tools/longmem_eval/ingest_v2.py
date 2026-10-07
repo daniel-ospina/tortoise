@@ -868,12 +868,27 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # counters are approximate (attempt-1 items now in the graph but
         # skipped by the re-probe are NOT re-counted). Recall@k is computed
         # from live graph queries, so outcomes are UNAFFECTED.
-        # ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════
-        # Write-stage retries (#1806) are EVAL-ONLY — the product SDK
-        # write path has NO bounded retry (idempotency-only). Full note at
-        # errors.py::retryable_transient. Not shipped; candidate port
-        # (audit G8).
+        # ══ PRODUCT-PARITY NOTE (updated #7405) ═════════════════════════
+        # The write-stage retry machinery is no longer eval-only: the product
+        # SDK's direct graph-write path retries via `_graph_write_with_retry`
+        # (#7405). This outer loop therefore remains the retry layer for the
+        # PHASE (E7 probe + the UNWRAPPED direct writes + a whole-question
+        # re-attempt), while the SDK owns the write refusals it wraps. The two
+        # layers cover disjoint error classes for the replaced-graph abort
+        # (`retryable_transient` deliberately no longer matches it); a MISCONF
+        # can nest, bounded by the SDK exhausting before the outer retries.
         # ═════════════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════════
+        # #7405 P1-1: the SDK now retries its OWN direct graph writes
+        # internally (replaced-graph / write-lock / MISCONF), one layer
+        # BELOW this loop — so a transient absorbed there would leave
+        # `ingest_retries` (a Layer-1 outcome field) reading 0. Snapshot the
+        # SDK's private, monotonic inner-retry counter and fold the delta
+        # in: the metric must observe a write retry wherever it happened.
+        # The delta is exact because Phase A writes are sequential (the
+        # session-parallel pool below runs Phase B extraction only).
+        # ══════════════════════════════════════════════════════════════
+        _inner_a0 = getattr(sdk, "_graph_write_retry_count", 0)
         _phase_a = call_with_predicate(
             partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
                     s_node=s_node, session=session,
@@ -887,7 +902,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             on_retry=partial(_bump_retry, _retries_a))
         stats["sessions"] += _phase_a["sessions"]
         stats["chunks"] += _phase_a["chunks"]
-        stats["ingest_retries"] += _retries_a["n"]
+        stats["ingest_retries"] += _retries_a["n"] + (
+            getattr(sdk, "_graph_write_retry_count", 0) - _inner_a0)
         hb.stage(f"s{si}:extract")
 
         return {
@@ -1045,6 +1061,10 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # mid-consolidation (noop/deletion/supersession write) is absorbed
         # here instead of falling straight to the ~25-min R2 re-burn.
         _retries_c: dict[str, int] = {"n": 0}
+        # #7405 P1-1: same fold-in as Phase A — the SDK's inner write retry is
+        # invisible to this outer loop when it absorbs the transient, so fold
+        # the SDK counter delta into `ingest_retries`.
+        _inner_c0 = getattr(sdk, "_graph_write_retry_count", 0)
         # #1786 (R1): same FINAL-attempt delta semantics as phase A — the
         # counters reflect the last successful attempt (a retried partial
         # write is approximate; recall@k is live-graph-derived, unaffected).
@@ -1060,7 +1080,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             what=f"payload write for {qid} s{si}",
             marker_armed=write_marker_armed,
             on_retry=partial(_bump_retry, _retries_c))
-        stats["ingest_retries"] += _retries_c["n"]
+        stats["ingest_retries"] += _retries_c["n"] + (
+            getattr(sdk, "_graph_write_retry_count", 0) - _inner_c0)
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += _written.get(k, 0)

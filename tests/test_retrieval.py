@@ -799,14 +799,16 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
-    # #7405: a REPLACED graph handle is retryable — the statement is valid and
-    # succeeds on a fresh handle, and the recorded recovery is re-resolve +
-    # re-issue (the wedge healed on its own after ~1h, which is why it looked
-    # permanent). Case-insensitive, and only for THIS message.
+    # #7405 (review P2-2): the replaced-graph / write-lock aborts are NOT in
+    # this transport predicate. They ARE retryable, but only on the SDK write
+    # path (`retryable_aborted_write`): an error retryable at BOTH layers was
+    # multiplied by the eval's outer phase loop wrapping the SDK's inner write
+    # retry. Keeping them out of the phase predicate is what makes the layers
+    # disjoint. See test_retryable_aborted_write_excludes_ambiguous_transports.
     assert retryable_transient(redis_exc.ResponseError(
-        "graph was deleted or replaced while the query was running, aborting")) is True
+        "graph was deleted or replaced while the query was running, aborting")) is False
     assert retryable_transient(redis_exc.ResponseError(
-        "Graph was deleted or replaced while the query was running, aborting")) is True
+        "Write query aborted: another write is in progress")) is False
     assert retryable_transient(redis_exc.ResponseError(
         "graph is read-only")) is False
 
@@ -908,14 +910,19 @@ def test_call_with_predicate_retry_loop():
                             retries=1, what="t", marker_armed=False)
 
 
-def test_graph_write_retry_rerefs_the_handle_on_a_replaced_graph():
-    """#7405: a rebuilt/replaced graph invalidates the cached projection's handle.
+def test_graph_write_retry_reissues_on_the_same_stateless_handle():
+    """#7405 (review P1-2): the retry re-issues on the SAME cached handle.
 
-    Two obligations, and the second is the one that matters — the failure was a
-    *dead end* precisely because a lane stayed poisoned:
-      1. re-issue the write against a RE-RESOLVED handle (never the dead one);
-      2. never leave a known-invalidated handle cached, even when the retry
-         budget is exhausted — so the caller's NEXT write re-resolves.
+    Measured contract for this client: ``falkordb``'s ``Graph`` is STATELESS —
+    it holds only ``name`` + ``execute_command`` and re-issues ``GRAPH.QUERY
+    <name>`` on every call — so the replaced-graph abort is a per-query race,
+    NOT a poisoned handle. The reviewer reproduced an abort, then a retry on the
+    same handle/client that succeeded with one write and no duplicate.
+
+    The earlier ``on_retry`` cache-drop (and its ``calls['resolve'] == 2``
+    assertion) was therefore REMOVED: it rebuilt the whole ``FalkorProjection``
+    for nothing, and the assertion held with or without the drop (the retry
+    lambda calls ``_get_proj()`` on every attempt anyway).
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -927,60 +934,62 @@ def test_graph_write_retry_rerefs_the_handle_on_a_replaced_graph():
         handle fails according to `behaviour(call_index)`."""
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         calls = {"query": 0, "resolve": 0}
+        handles: list[int] = []
 
         class _G:
             def query(self, *a, **k):
                 calls["query"] += 1
                 return behaviour(calls["query"])
 
-        class _Proj:
-            g = _G()
+        proj = type("_Proj", (), {"g": _G()})()
 
         def _get_proj():
             calls["resolve"] += 1
-            if sdk._proj is None:
-                sdk._proj = _Proj()
-            return sdk._proj
+            handles.append(id(proj))
+            return proj
 
-        sdk._proj = _Proj()
+        sdk._proj = proj
         sdk._get_proj = _get_proj
-        return sdk, calls
+        sdk._graph_write_retry_count = 0
+        return sdk, calls, handles
 
-    # 1. one replace, then success -> the write is re-issued on a fresh handle
-    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
-    assert sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
-    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} query attempt(s)"
-    assert calls["resolve"] == 2, "the handle must be re-resolved before the retry"
+    # 1. one abort, then success -> the write is re-issued on the SAME handle
+    sdk, calls, handles = _sdk_with(
+        lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
+    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} attempt(s)"
+    assert len(set(handles)) == 1, (
+        "the retry must reuse the same (stateless) handle — no re-resolution")
+    assert sdk._graph_write_retry_count == 1, (
+        "the inner retry must be observable: the eval's ingest_retries folds "
+        "this private counter in (#7405 P1-1)")
 
-    # 2. exhaustion: the ORIGINAL error surfaces (unchanged in TYPE — callers bucket
-    #    on the class, so a wrapper type would silently misbucket), the dead handle
-    #    is not left cached, and the sentinel is not leaked to the caller
-    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
+    # 2. exhaustion: the ORIGINAL error surfaces (unchanged in TYPE — callers
+    #    bucket on the class, so a wrapper type would silently misbucket), the
+    #    sentinel is not leaked, and the counter still counts
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
     with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
-    assert sdk._proj is None, (
-        "an exhausted retry must still drop the invalidated handle — leaving it "
-        "cached is what made #7405 a dead end for the caller's next write")
-    assert calls["resolve"] >= 2, "the retry must re-resolve, never reuse the dead handle"
+    assert calls["query"] == 4, "1 attempt + 3 retries before exhaustion"
+    assert sdk._graph_write_retry_count == 3
 
-    # 3. a NON-retryable error is re-raised unchanged, is not retried at all,
-    #    and does not drop a perfectly good handle
-    sdk, calls = _sdk_with(lambda n: (_ for _ in ()).throw(
+    # 3. a NON-retryable error is re-raised unchanged and is not retried at all
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(
         redis_exc.ResponseError("WRONGTYPE Operation against a key")))
     with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
     assert calls["query"] == 1, "a deterministic error must never be retried"
-    assert sdk._proj is not None, "a deterministic failure does not invalidate the handle"
+    assert sdk._graph_write_retry_count == 0
 
 
 def test_the_FIRST_write_of_create_point_goes_through_the_retry():
     """#7405, review P0: ``_advance_ep_version`` is create_point's FIRST graph write.
 
     Wrapping only the later ``CREATE`` left the retry DEAD CODE in the failure mode
-    it targets: under #7405 *every* write on the stale handle is refused, so the
-    epoch MERGE raises first and the wrapper is never entered — the cached handle is
-    never dropped, and the caller's next write inherits the wedge. This pins the
-    ORDER, not merely the presence, of the fix.
+    it targets: under #7405 *every* write is refused, so the epoch MERGE raises
+    first and the wrapper is never entered. This pins the ORDER of the fix, and
+    (review P1-2) that the re-issue happens on the SAME handle the abort hit.
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -990,6 +999,7 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
     sdk = TortoiseSDK.__new__(TortoiseSDK)
     seen: list[str] = []
     state = {"query": 0, "resolve": 0}
+    handles: list[int] = []
 
     class _G:
         def query(self, cypher, *a, **k):
@@ -999,22 +1009,25 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
                 raise replaced
             return type("R", (), {"result_set": [[7]]})()
 
-    class _Proj:
-        g = _G()
+    proj = type("_Proj", (), {"g": _G()})()
 
     def _get_proj():
         state["resolve"] += 1
-        if sdk._proj is None:
-            sdk._proj = _Proj()
-        return sdk._proj
+        handles.append(id(proj))
+        return proj
 
-    sdk._proj = _Proj()
+    sdk._proj = proj
     sdk._get_proj = _get_proj
+    sdk._graph_write_retry_count = 0
 
     assert sdk._advance_ep_version() == 7
-    assert state["resolve"] == 2, (
-        "the FIRST write must re-resolve after a replace — if it does not, the "
-        "wrapper around the later CREATE is unreachable and the fix is dead code")
+    assert state["query"] == 2, "the FIRST write was retried once"
+    assert state["resolve"] == 1, (
+        "one resolve; the retry reuses the same (stateless) handle — no "
+        "cache-drop. If the FIRST write is not wrapped, the abort escapes and "
+        "the wrapper around the later CREATE is unreachable (dead code)")
+    assert len(set(handles)) == 1, "the same handle was reused across attempts"
+    assert sdk._graph_write_retry_count == 1
     assert "EpMeta" in seen[0], "the first write is the epoch MERGE"
 
 
@@ -1030,6 +1043,12 @@ def test_retryable_aborted_write_excludes_ambiguous_transports():
     # definitively not applied -> safe to re-issue even for a bare CREATE
     assert retryable_aborted_write(redis_exc.ResponseError(
         "graph was deleted or replaced while the query was running, aborting")) is True
+    # case-insensitive (the engine's casing is not a contract)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Graph was deleted or replaced while the query was running, aborting")) is True
+    # the SAME "aborted before mutating" family: the write lock is held
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
     assert retryable_aborted_write(redis_exc.ResponseError(
         "MISCONF Errors writing to the AOF file: No space left on device")) is True
     assert retryable_aborted_write(redis_exc.ResponseError(
