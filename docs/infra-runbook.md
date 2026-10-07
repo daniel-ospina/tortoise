@@ -1989,6 +1989,73 @@ strongest observed predicate (`/health/ready`, an AND of both planes) *decides*,
 because two independent probes on different budgets can disagree and only the
 stronger one is evidence that the release is actually unready.
 
+### 8.6 When a `deploy-hosted` job fails, an issue files itself — and pages Telegram (#2240)
+
+**What fires.** One step at the end of each of `deploy-hosted.yml`'s three jobs —
+`Alert on failure (out-of-band) — {packaging-smoke,deploy-api,post-deploy-verify} (#2240)`,
+each guarded by `if: failure()`. It runs `.github/scripts/deploy-api-alert.sh`, which
+
+1. reads the step list the workflow passes (`id=${{ steps.<id>.outcome }}`) and
+   takes the **first** step whose outcome is `failure` — the causal one;
+2. **files or updates ONE GitHub issue** titled
+   `deploy-hosted: deploy-api failed at '<step-id>'` (job-level
+   `deploy-hosted: deploy-api failed` when no step was reported), through the
+   shared substrate `.github/scripts/auto-file-issue.sh` — so a second failure
+   of the **same step** comments `Recurrence #N` on the same issue instead of
+   filing a duplicate, and a failure at a **different step** files its own;
+3. pages Telegram best-effort through `.github/scripts/telegram-send.sh`.
+
+**Why it exists.** `deploy-api` had no failure observability at all: no
+`if: failure()` step anywhere in the workflow, `post-deploy-verify` skipped
+exactly when the deploy fails, the availability watchdog reads a stale build as
+UP (a stale build still answers `401`), and `deploy-api` is not a required
+branch-protection context. A blocked deploy lane was therefore silent — 4.6 days
+in 2026-08-30→09-04 (22 consecutive failed runs, zero alerts) and ~2 more days
+in 2026-09-29→10-01. This is the missing channel.
+
+**Why all three sites, and not just `deploy-api`.** The three are **mutually
+exclusive at runtime** (`deploy-api` is gated on `packaging-smoke`'s result and
+`post-deploy-verify` on `deploy-api`'s, so a skipped job cannot also fail), so at
+most one alert fires per run. They are all needed: a failed **pack smoke** leaves
+the deploy *skipped*, which is as silent as the 4.6-day stall this exists to end.
+The issue body says **what a red in that job means**, because the three are not
+interchangeable:
+
+| failed job | what it means |
+|---|---|
+| `deploy-api` | the release was **not** verified end-to-end — nothing shipped if the failure was **before** `Deploy`; **at or after** it a release may be live but unverified (read the `failed step` row) |
+| `packaging-smoke` | the deploy was **skipped** — the app did not flip |
+| `post-deploy-verify` | the release is **live and unhealthy** (there is no rollback) — the deploy itself succeeded |
+
+**Within `deploy-api`, the notifier covers the JOB, not one gate.** ≥8 steps there
+are fail-closed (dependency parity, verify secrets, Fly secret provenance,
+migration drift, Fly machines, set secrets, deploy, plus
+`check-fly-secret-drift.py`'s exit-2 provisioning path); a per-gate alert would
+leave the same silence on the rest. The step id in the title is what keeps a
+per-gate reading possible.
+
+**When the failing step is the migration-drift gate**, the issue body additionally
+carries the gate's **own** report verbatim — the `BLOCKING` versions, the
+`OUT OF ORDER` subset, and the ordered remediation. That report is the gate's
+stdout, teed to a file in the same step (`$DRIFT_REPORT_FILE`), deliberately
+**not** a second run of the gate: a second reading of prod could name a different
+blocking set than the run being reported.
+
+**What to do when it fires.** Read the issue, then the linked run. For a drift
+block, the remediation is the one the report prints — resolve any `OUT OF ORDER`
+version first, then `gh workflow run supabase-deploy.yml --ref main`. **A lane
+must never take a production action here:** no DDL, and no
+`supabase migration repair --status applied` (the band-aid `#2240` ruled out; a
+blanket repair hides real drift, #1001). Close the issue when the streak ends —
+that is what ends it; while it stays open the counter keeps climbing.
+
+**OVERRIDES:** the usual "one monitor, one gate" shape — each notifier is
+attached to its **job**, not to the drift gate it was filed for, because ≥8 steps
+in `deploy-api` are fail-closed and a per-gate alert would leave the same silence
+on the rest; and it is one issue per **failing step** rather than one per run,
+because a key carrying `${{ github.run_id }}` files a new issue on every failing
+run (#2706).
+
 ## Secrets Matrix
 
 | Secret | tortoise-api (Fly.io) | FalkorDB Cloud | GitHub Actions |

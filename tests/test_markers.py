@@ -22,6 +22,7 @@ Guards (the census's executable form — cycle-5 P1-5 / cycle-6 P2-10/P2-15):
 from __future__ import annotations
 
 import ast
+import contextlib
 import re
 from pathlib import Path
 
@@ -628,6 +629,16 @@ def test_no_redirect_stems_registry_exact():
         # gate on main (the #4047/#4524 shape). Registered in all three homes:
         # ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here.
         "test_write_path_unreachable_seam_5148",
+        # #4921: the construct-lock pin builds two REAL embedded servers under
+        # a forced check-then-act interleave (one server over one RDB, plus the
+        # unguarded red half) and skips under the docker redirect, so the file
+        # belongs in the carve-out lane. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS already
+        # carried the stem (the file would otherwise flip its embedded
+        # constructions to the server lane on an out-of-band URI run) — this
+        # pin reding on the addition is the pin working as designed, so the
+        # stem is DECLARED here rather than exempted.
+        "test_4921_construct_lock",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
@@ -1032,6 +1043,312 @@ def test_p4_uri_required_enforcement(monkeypatch):
     # ... but CARVE_OUT=1 still opts the operator out of the URI-less shape
     monkeypatch.setenv("TORTOISE_TEST_CARVE_OUT", "1")
     _assert_p4_uri_required()
+
+
+# ── #6073: the wedged-runtime tripwire ─────────────────────────────────────
+# REPLY vs SILENCE is the distinction that matters: a reply of any kind (even
+# a rejection) proves the runtime is up, and only the absence of one is the
+# wedge. The socket-driven tests below pin that against real loopback peers.
+@pytest.fixture
+def _silent_listener():
+    """Loopback TCP server that ACCEPTS the connection and never answers —
+    the #6073 signature. Yields its port."""
+    import socket
+    import threading
+    import time
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    held = []
+
+    def run():
+        try:
+            srv.settimeout(10.0)
+            while True:
+                conn, _ = srv.accept()
+                held.append(conn)
+                time.sleep(10.0)  # accepted, then silence
+        except Exception:  # server lifetime ends with the test
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        yield srv.getsockname()[1]
+    finally:
+        for c in held:
+            with contextlib.suppress(Exception):
+                c.close()
+        srv.close()
+
+
+def test_probe_reports_silence_as_the_wedge(monkeypatch, _silent_listener):
+    """Connected, then no reply ever → the wedge signature."""
+    import time
+
+    import tests._embedded as emb
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", f"docker://:@127.0.0.1:{_silent_listener}/g")
+    t0 = time.monotonic()
+    assert emb._probe_configured_db(0.5, 1) == "silent"
+    elapsed = time.monotonic() - t0
+    # The configured timeout is HONOURED — the probe is a bare socket, not a
+    # client library whose handshake pays the timeout once per round trip.
+    # Generous bound (10x the 0.5s this call should take) so a loaded box
+    # cannot flake it.
+    assert elapsed < 5.0, f"probe overran its bound: {elapsed:.2f}s"
+
+
+def test_probe_treats_any_reply_as_alive(monkeypatch):
+    """A rejection is still a REPLY — the runtime is up, so it is not a wedge.
+
+    This is why the probe needs no credential: a server that demands auth
+    answers `-NOAUTH`, and any bytes back prove it is alive. Reporting that
+    as a wedge would send the reader after the wrong root.
+    """
+    import socket
+    import threading
+
+    import tests._embedded as emb
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+
+    def run():
+        try:
+            srv.settimeout(10.0)
+            while True:
+                conn, _ = srv.accept()
+                with contextlib.suppress(Exception):
+                    conn.sendall(b"-NOAUTH Authentication required.\r\n")
+        except Exception:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI",
+            f"docker://:secret@127.0.0.1:{srv.getsockname()[1]}/g")
+        assert emb._probe_configured_db(0.5, 1) is None
+    finally:
+        srv.close()
+
+
+def test_probe_reports_a_refused_port_as_unreachable(monkeypatch):
+    """A URI pointing at nothing is a different diagnosis from a wedge."""
+    import socket
+
+    import tests._embedded as emb
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()  # bound then released: nothing listens now
+    monkeypatch.setenv("TORTOISE_DB_URI", f"docker://:@127.0.0.1:{free_port}/g")
+    assert emb._probe_configured_db(0.5, 1) == "unreachable"
+
+
+def test_wedged_runtime_fails_the_session_unmistakably(monkeypatch):
+    """The failure messages are distinct, loud, and leak no credential."""
+    import tests._embedded as emb
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:16379/g")
+    monkeypatch.setattr(emb, "_probe_configured_db", lambda t, a: "silent")
+    with pytest.raises(pytest.fail.Exception) as exc:
+        emb._assert_configured_db_answers(will_connect=True)
+    msg = str(exc.value)
+    assert "did not answer a PING" in msg
+    assert "THIS IS NOT YOUR DIFF" in msg and "#6073" in msg
+    assert "127.0.0.1:16379" in msg        # names the target it measured
+    assert "topsecret" not in msg           # ... and never the credential
+    # The measured window is stated, and the escape hatch for a
+    # healthy-but-BUSY runtime is in the message: without it a reader who is
+    # merely hitting a slow server has no way to tell the two apart.
+    assert "TORTOISE_TEST_DB_PROBE_TIMEOUT_S" in msg
+
+    monkeypatch.setattr(emb, "_probe_configured_db", lambda t, a: "unreachable")
+    with pytest.raises(pytest.fail.Exception) as exc2:
+        emb._assert_configured_db_answers(will_connect=True)
+    assert "did not answer a PING" not in str(exc2.value)  # a different diagnosis
+
+
+def test_malformed_port_fails_cleanly_without_echoing_the_uri(monkeypatch):
+    """A non-numeric port must not become a credential leak.
+
+    `urlparse(...).port` raises ValueError whose pytest locals render the
+    whole ParseResult — including the password. The probe must return a
+    verdict instead of letting that escape (#3039 credential class).
+    """
+    import tests._embedded as emb
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:notaport/g")
+    assert emb._probe_configured_db(0.5, 1) == "malformed"
+    with pytest.raises(pytest.fail.Exception) as exc:
+        emb._assert_configured_db_answers(will_connect=True)
+    msg = str(exc.value)
+    assert "malformed port" in msg and "THIS IS NOT YOUR DIFF" in msg
+    assert "topsecret" not in msg and "notaport" not in msg
+
+
+def test_failure_frame_holds_no_credential(monkeypatch):
+    """No frame pytest would RENDER may hold the credential in its locals.
+
+    `--showlocals` renders every local of every frame in the traceback, so
+    checking the message text is not enough. The walk covers CALLER frames
+    too — an exception's traceback starts at the outermost frame and
+    `tb_next` descends into the callees — which is why the call is routed
+    through a `wrapper` that reproduces the real caller's statement order
+    (probe first, URI binding after). The caller frame therefore appears in
+    the walk but holds no credential, and `uri` being absent from it is
+    asserted explicitly.
+
+    Scope note: this covers the frames that REACH the traceback. A helper
+    that returns normally (e.g. `_probe_configured_db`) is never in it, so a
+    credential in its locals is not what this asserts — and not what
+    `--showlocals` renders either.
+    """
+    import os
+
+    import tests._embedded as emb
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "docker://:topsecret@127.0.0.1:notaport/g")
+
+    def wrapper():  # mirrors the real caller's statement ORDER
+        emb._assert_configured_db_answers(will_connect=True)
+        uri = os.environ.get("TORTOISE_DB_URI", "")  # never reached
+        assert uri
+
+    # A plain try/except rather than pytest.raises: the exception object is
+    # bound directly here, so the walk below needs no intermediary.
+    caught: BaseException | None = None
+    try:
+        wrapper()
+    except BaseException as err:
+        caught = err
+    assert caught is not None, "the probe was expected to fail"
+    seen = []
+    frame = caught.__traceback__
+    while frame is not None:
+        for name, value in list(frame.tb_frame.f_locals.items()):
+            seen.append((frame.tb_frame.f_code.co_name, name))
+            assert "topsecret" not in repr(value), f"{name!r} leaks it"
+        frame = frame.tb_next
+    # Non-vacuity: the walk really did visit the caller frame. It holds no
+    # credential because the probe FAILED BEFORE the binding — which is the
+    # invariant (and why the AST guard below exists as well).
+    assert ("wrapper", "uri") not in seen, "wrapper bound uri before failing"
+    assert any(name == "wrapper" for name, _ in seen), "walk missed the caller"
+
+
+def test_probe_timeout_env_is_garbage_safe(monkeypatch):
+    """An unusable override must not raise, nor disarm the probe.
+
+    `settimeout(0)` is NON-BLOCKING, so a zero override would report a wedged
+    server as merely unreachable — the wrong-root diagnosis this probe exists
+    to prevent. A negative one raised ValueError at session start.
+    """
+    import tests._embedded as emb
+
+    for bad in ("abc", "-1", "-0.5", "0", "0.0", "inf", "nan", ""):
+        monkeypatch.setenv("TORTOISE_TEST_DB_PROBE_TIMEOUT_S", bad)
+        assert emb._probe_timeout_s() == emb._DB_PROBE_TIMEOUT_S, bad
+    monkeypatch.setenv("TORTOISE_TEST_DB_PROBE_TIMEOUT_S", "2.5")
+    assert emb._probe_timeout_s() == 2.5
+    # The explicit parameter must be sanitized the same way: `settimeout(-1)`
+    # raises inside the probe, whose `parsed` local carries the credential.
+    assert emb._sanitize_timeout(-1) == emb._DB_PROBE_TIMEOUT_S
+    assert emb._sanitize_timeout(0) == emb._DB_PROBE_TIMEOUT_S
+    assert emb._sanitize_timeout(None) == emb._DB_PROBE_TIMEOUT_S
+    assert emb._sanitize_timeout(1.5) == 1.5
+
+
+def test_probe_runs_before_any_local_can_hold_the_uri():
+    """`_assert_configured_db_answers()` must be the FIRST statement.
+
+    The credential leak this guards lives in the CALLER's frame —
+    `_assert_backend_identity` binds `uri = os.environ.get("TORTOISE_DB_URI",
+    "")` — and `--showlocals` renders every local of every frame. Failing
+    before that binding is what keeps the password out of the report, and the
+    ordering is the only thing asserting it: a traceback walk cannot be relied
+    on here, because a test that calls the helper directly never puts that
+    frame on the stack at all.
+    """
+    import ast
+
+    src = (Path(__file__).parent / "conftest.py").read_text()
+    tree = ast.parse(src)
+    fn = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_assert_backend_identity"
+    )
+    first = fn.body[1] if isinstance(fn.body[0], ast.Expr) else fn.body[0]
+    assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Call), \
+        "the probe must be a bare call, as the first statement of the body"
+    assert getattr(first.value.func, "id", None) == \
+        "_assert_configured_db_answers", \
+        "a statement runs before the probe — if it binds the URI, " \
+        "--showlocals will render its password"
+    # ... and it must pass the SHARED gate, not a constant: two gates that can
+    # disagree are how the probe came to preempt the locality refusal.
+    kw = {k.arg: k.value for k in first.value.keywords}
+    assert "will_connect" in kw, "the probe must be told whether the session connects"
+    assert "_session_will_connect" in ast.dump(kw["will_connect"]), \
+        "the caller must pass conftest's shared gate, not its own copy"
+
+
+def test_probe_is_inert_when_the_caller_declines(monkeypatch):
+    """``will_connect=False`` must mean NO probe.
+
+    The caller decides whether the session will connect at all (a non-loopback
+    URI is refused on locality grounds without any I/O, #1647 E2E-6, and that
+    refusal is the more precise diagnosis). The helper must not reach for the
+    network once told no. The session-level behaviour — the refusal message
+    itself — is pinned by `tests/test_tripwire.py`.
+    """
+    import tests._embedded as emb
+
+    def _boom(timeout_s, attempts):  # pragma: no cover - must not be reached
+        raise AssertionError("probed although the caller said the session won't")
+
+    monkeypatch.setattr(emb, "_probe_configured_db", _boom)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@db.internal.example.com:6379/g")
+    emb._assert_configured_db_answers(will_connect=False)
+
+
+def test_probe_runs_when_the_caller_says_the_session_connects(monkeypatch):
+    """``will_connect=True`` must mean the target IS probed.
+
+    With `TORTOISE_TEST_ALLOW_REMOTE=1` the session connects to a non-loopback
+    target; skipping the probe there would resurrect the bare
+    `redis.exceptions.TimeoutError` this change exists to remove.
+    """
+    import tests._embedded as emb
+
+    calls = []
+    monkeypatch.setattr(
+        emb, "_probe_configured_db", lambda t, a: calls.append((t, a)) or None)
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://:pw@db.internal.example.com:6379/0")
+    emb._assert_configured_db_answers(will_connect=True)
+    assert calls, "a target the session connects to must still be probed"
+
+
+def test_probe_is_inert_without_a_supported_uri(monkeypatch):
+    """The embedded/carve-out lanes do no network I/O here."""
+    import tests._embedded as emb
+
+    def _boom(timeout_s, attempts):  # pragma: no cover - must not be reached
+        raise AssertionError("probed without a configured URI")
+
+    monkeypatch.setattr(emb, "_probe_configured_db", _boom)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    emb._assert_configured_db_answers(will_connect=True)
+    monkeypatch.setenv("TORTOISE_DB_URI", "postgres://x@y/z")  # unsupported
+    emb._assert_configured_db_answers(will_connect=True)
 
 
 # ── #4164: the marked tests must be SELECTED BY THE MARKER in CI ────────────

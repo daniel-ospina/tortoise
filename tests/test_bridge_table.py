@@ -794,9 +794,20 @@ def _part_d_citations() -> dict[str, str]:
         "the generated doc has no Part D — the citation corpus is unreachable, so a "
         "truncated citation is invisible to every reader"
     )
-    d1 = doc.split("### D1")[1].split("### D2")[0]
+    # The slice's real end is the `**Documented hops.**` cut below, NOT `_section`'s heading
+    # bound: the marker sits inside D1 and ahead of the next heading, so the cut truncates
+    # first and the bound never determines the parse (bound, old literal, and no bound all
+    # yield the same 4 443 chars / 19 rows). The assert below does not ADD detection — a moved
+    # marker is already caught downstream by the row/quote parity checks; it exists so the
+    # failure is named here instead of surfacing as four unrelated row-parity failures.
+    d1 = _section(doc, "### D1")
+    hops = "**Documented hops.**"
+    assert hops in d1, (
+        f"the D1 slice contains no {hops!r} marker — the citation corpus end moved, so this "
+        "parse would run past the documented-hop block instead of stopping at the D1 rows"
+    )
     # The documented-hop block uses the same bullet+quote shape, so cut it off first.
-    d1 = d1.split("**Documented hops.**")[0]
+    d1 = d1.split(hops, 1)[0]
     rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
     quotes = re.findall(r"^  > (.+)$", d1, re.M)
     assert rows, "Part D1 rendered no citation rows — the citation guard is unarmed"
@@ -828,9 +839,25 @@ def _is_maximal(quote: str, text: str) -> bool:
 
 
 def _section(doc: str, heading: str) -> str:
-    """The body of `heading`, up to the next heading of the same-or-higher level."""
+    """The body of `heading`, up to the next heading of the same-or-higher level.
+
+    `#{2,3}` is same-or-higher than the level-3 `###` headings this is called with, so a
+    deeper `####` inside a section does not truncate it. The split is asserted to have applied:
+    without that, a section with no following heading silently returns the rest of the doc.
+
+    PRECONDITION: `heading` must be followed by another h2/h3 heading. This helper cannot
+    serve the document's FINAL section — there the rest of the doc IS the correct body, but
+    the assert cannot tell that case apart from a bound that failed to apply, so it raises.
+    No call site targets a final section; add one only with a different helper.
+    """
     assert heading in doc, f"the generated doc has no {heading!r} section"
-    return re.split(r"\n#{2,4} ", doc.split(heading)[1])[0]
+    parts = re.split(r"\n#{2,3} ", doc.split(heading)[1])
+    assert len(parts) > 1, (
+        f"no heading follows {heading!r} at level 2-3 — either the section bound did not "
+        "apply (so this would return the rest of the document), or this is the document's "
+        "final section, which _section does not support"
+    )
+    return parts[0]
 
 
 def _cited_findings() -> tuple[set[str], set[str], set[str]]:

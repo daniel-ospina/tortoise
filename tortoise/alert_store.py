@@ -224,6 +224,26 @@ class OpenOutcome(Enum):
     SUPPRESSED = "suppressed"
 
 
+def incident_is_on_record(fact: OpenOutcome) -> bool:
+    """True iff ``fact`` means an incident IS on record (#4781).
+
+    The SINGLE source of the on-record rule — ``FILED`` and ``DEDUP`` each left
+    the create-once object behind, so an incident exists; ``SUPPRESSED`` created
+    nothing. It lives here, beside :class:`OpenOutcome`, because it is a pure
+    function of the store's own fact and nothing else: both call sites already
+    depend on this module, and the enum's docstring is where "on record" is
+    defined. ``operator_alert.file_operator_incident`` and
+    ``hosted_api._analytics_open_incident`` route through it instead of each
+    writing ``is not SUPPRESSED`` (the duplicate rule that drifted in #3820,
+    deduplicated in #4781).
+
+    A total function of the enum, not a ``in (FILED, DEDUP)`` membership list,
+    so a fourth fact added to :class:`OpenOutcome` is classified by the same
+    rule and cannot be silently omitted from one of the copies.
+    """
+    return fact is not OpenOutcome.SUPPRESSED
+
+
 class AlertStore:
     """Per-incident alert lifecycle over a BackupStorage (R2 create-once)."""
 
