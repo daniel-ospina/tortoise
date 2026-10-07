@@ -310,6 +310,16 @@ def test_base_is_resolved_from_the_base_branch_tip_not_the_merge_base():
         "the diff step must consume the RESOLVED tip (#7628)"
     )
 
+    # ...and the resolver must run BEFORE its consumer. Reordering the two makes
+    # `steps.base_tip.outputs.sha` evaluate EMPTY when `changed` reads it, and
+    # `changed`'s own fail-closed guard then reds EVERY pull request — a
+    # whole-fleet outage that a suite asserting only the binding would ship
+    # (#7628 review).
+    ids = [s.get("id") for s in steps]
+    assert ids.index(BASE_TIP_STEP_ID) < ids.index("changed"), (
+        "the base-tip resolver must precede `changed`, or its output is empty there (#7628)"
+    )
+
     # The regression itself: the merge-base field is no longer the base.
     for step in steps:
         assert "pull_request.base.sha" not in yaml.safe_dump(step), (
@@ -346,7 +356,28 @@ def _repo_with_bare_remote(tmp_path: Path) -> tuple[Path, str]:
     sha = _commit(repo, "base")
     _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "-q", "origin", "main")
+    # The push leaves a LOCAL tracking ref behind. Delete it and ASSERT it is gone, so
+    # the positive control can only be satisfied by the step's OWN fetch — otherwise a
+    # mutation to the fetch DESTINATION still resolves (#7628 review).
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "-d", "refs/remotes/origin/main"],
+        check=True, capture_output=True,
+    )
+    assert not _has_tracking_ref(repo), (
+        "the fixture must start with NO local tracking ref, or the fetch is not tested"
+    )
     return repo, sha
+
+
+def _has_tracking_ref(repo: Path) -> bool:
+    """Does `refs/remotes/origin/main` exist locally?"""
+    return (
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "refs/remotes/origin/main"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def _run_base_tip(
@@ -371,8 +402,11 @@ def _run_base_tip(
     if base_ref is not None:
         env["BASE_REF"] = base_ref
 
+    # NO harness-supplied `-e`: the body's own `set -euo pipefail` must be the thing
+    # that aborts a failing step, or a mutation deleting it escapes the suite while
+    # the assignment-discipline test above still passes (#7628 review).
     proc = subprocess.run(
-        ["bash", "-e", str(script)],
+        ["bash", str(script)],
         cwd=str(repo),
         env=env,
         capture_output=True,
@@ -405,6 +439,12 @@ def test_base_tip_step_publishes_the_resolved_tip(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     assert f"sha={sha}" in output, (
         f"the resolver must publish the base branch TIP as `sha=` (#7628); got {output!r}"
+    )
+    # ...and it must be the STEP'S OWN fetch that created the ref it read — the
+    # fixture removed it, so a mutation to the fetch destination cannot pass here.
+    assert _has_tracking_ref(repo), (
+        "the step's own `git fetch` must create refs/remotes/origin/main; it was absent "
+        "before the step ran, so resolving it means the fetch DID NOT put it there (#7628)"
     )
 
 
@@ -470,6 +510,72 @@ def test_detection_reports_changed_markdown(tmp_path: Path):
     assert _output_count(output) == "2"
     # `./`-prefixed NUL entries: a filename is data, never shell text (#4449).
     assert _changed_list(tmp_path) == ["./a.md", "./b.md"]
+
+
+def test_detection_excludes_the_base_branch_when_the_tip_moved_past_the_merge(
+    tmp_path: Path,
+):
+    """#7628: the shape the fix EXISTS for — a base tip NEWER than HEAD's first parent.
+
+    Every other detection test builds a LINEAR graph, where `BASE_SHA` is an ancestor
+    of HEAD and `A...HEAD` and `A..HEAD` are the SAME diff — so none of them can tell
+    the fix from the bug. Here the tip is a SIBLING of the merge commit, which is the
+    state production is in whenever the base branch moves after the merge ref is cut:
+    `base..HEAD` then inverts the base branch's own commits into the changed set (a
+    modified `.md` comes back as `M`, and `--diff-filter=ACMR` keeps `M`), while
+    `base...HEAD` stays exactly this PR's changes.
+    """
+    repo = _repo(tmp_path)
+    (repo / "seed.md").write_text("# seed\n", encoding="utf-8")
+    a = _commit(repo, "A")
+    (repo / "main1.md").write_text("# main1\n", encoding="utf-8")
+    m1 = _commit(repo, "M1")  # the base tip at the moment the merge ref is cut
+
+    _git(repo, "checkout", "-q", "-b", "pr", a)
+    (repo / "pr.md").write_text("# pr\n", encoding="utf-8")
+    _commit(repo, "PR")
+
+    # The merge ref itself: a MERGE of the then-current tip and the PR head, on NO
+    # branch — which is what `actions/checkout` puts at HEAD for a `pull_request`.
+    _git(repo, "checkout", "-q", "--detach", m1)
+    _git(
+        repo,
+        "-c",
+        "user.email=pin@example.com",
+        "-c",
+        "user.name=pin",
+        "merge",
+        "--no-ff",
+        "-m",
+        "merge",
+        "pr",
+    )
+    merged = _git(repo, "rev-parse", "HEAD")
+
+    # ...and the base branch moves on again, so the TIP is NOT an ancestor of HEAD.
+    # It MODIFIES a file that exists on both sides — a modification comes back as `M`
+    # and `--diff-filter=ACMR` KEEPS it, which is what makes the two-dot form differ.
+    _git(repo, "checkout", "-q", "main")
+    (repo / "seed.md").write_text("# seed\n\nmain moved on\n", encoding="utf-8")
+    (repo / "main2.md").write_text("# main2\n", encoding="utf-8")
+    tip = _commit(repo, "M2")
+
+    assert _git(repo, "merge-base", tip, merged) == m1, (
+        "the fixture must be DIVERGENT: the tip and the merge commit share only M1"
+    )
+
+    # HEAD is what `actions/checkout` leaves behind — the MERGE ref, not the branch —
+    # while the base tip is a SIBLING of it. That pair is the production shape.
+    _git(repo, "checkout", "-q", "--detach", merged)
+    assert _git(repo, "rev-parse", "HEAD") == merged
+
+    proc, output = _run_detection(tmp_path, repo, tip)
+    assert proc.returncode == 0, proc.stderr
+    assert _changed_list(tmp_path) == ["./pr.md"], (
+        "the changed set must be THIS PR's markdown only; the base branch's own "
+        f"main1.md/main2.md are not this PR's changes (#7628) — got {_changed_list(tmp_path)}"
+    )
+    assert _output_count(output) == "1"
 
 
 def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
