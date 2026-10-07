@@ -26,11 +26,9 @@ import tortoise.oauth as oauth
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import _FAULT_CPS, ErrorControlPlane, FakeControlPlane  # noqa: RUF100
 from tests.test_oauth_mcp import (  # noqa: RUF100
-    CIMD_CLIENT_ID,
     _U1,
     _enable_supabase,
     _pkce,
-    cimd_document,
 )
 from tortoise.hosted_api import app
 from tortoise.oauth import (  # noqa: RUF100
@@ -889,19 +887,30 @@ def test_transient_503_conventions_agree_on_status():
 # trips, so a control plane that is slow-but-alive MULTIPLIES into request
 # latency and can cross the OAuth budget without anything being "down".
 #
-# Three legs, because the endpoint has three request shapes and they do NOT cost
-# the same (all measured, all pinned below):
+# PINNED BELOW — the four series that exist on this endpoint, all MEASURED:
 #
 #   authorization_code, registry client ........ 6 round-trips  (10 s budget)
-#   refresh_token ............................ 9 round-trips  (30 s budget)
-#   authorization_code, CIMD client, FIRST ... 8 round-trips  (10 s budget)
-#   authorization_code, CIMD client, later ... 6 round-trips
+#   authorization_code, mint ABORT ............. 10 round-trips (10 s budget)
+#   refresh_token .............................. 9 round-trips  (30 s budget)
+#   refresh_token, mint ABORT .................. 12 round-trips (30 s budget)
 #
-# The CIMD leg is the one this issue is actually about (#2847 added CIMD for
-# Claude connectors), and it is the most exposed: its FIRST exchange of a
-# process pays two extra round-trips to provision and re-read the client row,
-# on the SHORTER of the two budgets. The registry leg alone would have reported
-# 6 as the connector path's cost, which understates it by a third.
+# The success rows are the ones a naive measurement finds; the ABORT rows are the
+# ones that fire when the control plane is degraded, and they are the LONGEST —
+# the abort path does strictly more work (unwinding the half-minted pair) at
+# exactly the moment nothing is keeping up, then answers a RETRYABLE 503.
+#
+# METHOD NOTE — one shape MEASURED and deliberately NOT pinned, recorded so the
+# next lane does not re-derive it:
+#
+#   * A CIMD client's ("Claude connector") token exchange is ALSO 6. A CIMD row
+#     cannot reach /oauth/token for the first time: both doors that mint a code
+#     (GET /oauth/authorize, POST /oauth/consent) call `resolve_client`, which is
+#     what provisions the row. Measured in the production order —
+#     `validate_authorize_params` (3 round-trips) then `exchange_auth_code` (6).
+#     The 8 you get by calling `exchange_auth_code` with a hand-seeded code is an
+#     ARTIFACT of skipping that prerequisite, not a shape the token budget sees;
+#     the provisioning cost is real but is paid on the authorize/consent doors,
+#     which are not on the token budget.
 #
 # These tests pin the serial COUNT and the additivity, and deliberately assert no
 # wall-clock SLI, which would be a load-dependent flake rather than a contract.
@@ -1079,48 +1088,90 @@ def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
         f"the refresh series changed between runs: {n} then {len(counter.calls)}")
 
 
-def test_cimd_client_first_exchange_pays_more_round_trips(cimd_document):
-    """The CIMD client path — the one #2847 added FOR Claude connectors, and
-    the path this issue is actually about — pays MORE control-plane round-trips
-    on its first exchange of a process: MEASURED as 8, against 6 for a registry
-    client and 6 for itself thereafter.
+def _fail_access_token_mint(cp):
+    """Make the access-token INSERT raise: the mint-abort path.
 
-    The two extra are the provisioning (a MISS on `oauth_clients`, then the
-    `_persist_cimd_client` POST, then the re-read that acts as the duplicate
-    guard). The registry leg above seeds an ``oauth_clients`` row by hand, so it
-    never enters the CIMD branch; that made its count a FLOOR for the connector
-    path rather than the connector path's own count. Varying only ``client_id``
-    (an https URL, which is what routes to CIMD) isolates the difference.
+    Patches the instance rather than using ``fail_query`` deliberately — this
+    test wants the fault, not the ``_FAULT_CPS`` accounting the other tests in
+    this file are built around.
     """
+    original = cp.query
+
+    def _q(table, **kw):
+        if table == "oauth_access_tokens" and kw.get("method") == "POST":
+            raise RuntimeError("control plane 500")
+        return original(table, **kw)
+
+    cp.query = _q
+
+
+def test_abort_path_is_longer_than_the_success_series_on_both_grants():
+    """The series that fires under a DEGRADED control plane is the LONGEST one
+    — MEASURED as 10 for the code grant (against 6 on success) and 12 for
+    refresh (against 9) — and both answer a RETRYABLE 503.
+
+    This is the number a bound must be chosen from, and it is the opposite of
+    the intuition the success legs invite: the abort path does strictly MORE
+    work (``_rollback_minted`` / ``_mint_observably_clean`` to unwind the
+    half-minted pair, plus ``_restore_code`` on the code grant) at exactly the
+    moment the control plane is already slow — and then tells the client to
+    retry the whole exchange. A bound sized from 6 or 9 would be a bound for the
+    healthy path only.
+    """
+    # ── authorization_code ──
     cp = FakeControlPlane()
     _seed_base_tables(cp)
     counter = _RoundTripCounter(cp)
-    _exchange_auth_code(counter, cp, "cimd-code", client_id=CIMD_CLIENT_ID)
+    _fail_access_token_mint(cp)
+    verifier = _seed_code(cp, "abort-code")
 
-    n = len(counter.calls)
+    with pytest.raises(oauth.OAuthTemporarilyUnavailable):
+        oauth.exchange_auth_code(
+            counter, {"grant_type": "authorization_code", "code": "abort-code",
+                      "code_verifier": verifier, "client_id": _CLIENT_ID,
+                      "redirect_uri": _REDIRECT, "resource": None},
+            "https://tortoise.example")
+
     assert counter.calls == [
-        "query:oauth_clients",               # resolve_client: registry MISS
-        "query:oauth_clients:POST",          # ... so the CIMD row is provisioned
-        "query:oauth_clients",               # ... and re-read (the duplicate guard)
-        "query:oauth_codes:PATCH",
+        "query:oauth_clients",               # _verify_client_auth
+        "query:oauth_codes:PATCH",           # the atomic claim
+        "query:organizations",               # _assert_org_usable
+        "query:oauth_refresh_tokens:POST",   # mint 1 of 2 ...
+        "query:oauth_access_tokens:POST",    # ... mint 2 of 2 FAILS
+        "query:oauth_refresh_tokens:PATCH",  # rollback: revoke the minted refresh
+        "query:oauth_access_tokens:PATCH",   # rollback: revoke any access row
+        "query:oauth_refresh_tokens",        # rollback: re-read to confirm
+        "query:oauth_access_tokens",         # rollback: re-read to confirm
+        "query:oauth_codes:PATCH",           # _restore_code (a retry can work)
+    ], counter.calls
+
+    # ── refresh_token ──
+    cp2 = FakeControlPlane()
+    _seed_base_tables(cp2)
+    rid, token = _seed_refresh_token(cp2, "abort-rt")
+    _seed_access_token(cp2, refresh_id=rid)
+    counter2 = _RoundTripCounter(cp2)
+    _fail_access_token_mint(cp2)
+
+    with pytest.raises(oauth.OAuthTemporarilyUnavailable):
+        oauth.refresh_grant(
+            counter2, {"grant_type": "refresh_token", "refresh_token": token,
+                       "client_id": _CLIENT_ID}, "https://tortoise.example")
+
+    assert counter2.calls == [
+        "query:oauth_clients",
+        "query:oauth_refresh_tokens",
         "query:organizations",
+        "query:org_memberships",
+        "query:oauth_access_tokens",
         "query:oauth_refresh_tokens:POST",
-        "query:oauth_access_tokens:POST",
-        "query:oauth_codes:PATCH",
-    ], counter.calls
+        "query:oauth_access_tokens:POST",    # FAILS
+        "query:oauth_refresh_tokens:PATCH",
+        "query:oauth_access_tokens:PATCH",
+        "query:oauth_refresh_tokens",
+        "query:oauth_access_tokens",
+        "query:oauth_refresh_tokens",
+    ], counter2.calls
 
-    counter.per_call_s = 0.05
-    counter.calls.clear()
-    t0 = time.perf_counter()
-    _exchange_auth_code(counter, cp, "cimd-code-2", client_id=CIMD_CLIENT_ID)
-    elapsed = time.perf_counter() - t0
-
-    # Steady state: the client row now exists, so the two provisioning
-    # round-trips are gone and the CIMD series EQUALS the registry series.
-    assert counter.calls == [
-        "query:oauth_clients", "query:oauth_codes:PATCH", "query:organizations",
-        "query:oauth_refresh_tokens:POST", "query:oauth_access_tokens:POST",
-        "query:oauth_codes:PATCH",
-    ], counter.calls
-    assert n == 8, f"the first CIMD exchange changed shape: {n} calls"
-    _assert_serial_additivity(counter, t0, elapsed)
+    assert len(counter.calls) == 10 and len(counter2.calls) == 12, (
+        f"the abort series changed shape: {len(counter.calls)} / {len(counter2.calls)}")
