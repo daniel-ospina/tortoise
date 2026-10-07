@@ -102,6 +102,9 @@ import {
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
 import { DeleteAccountSection } from './accountDeletion.js'
+// #4946 item 3: the real GitHub disconnect control + its consequence copy. A
+// createElement module so the dashboard suite can execute-render it.
+import { GithubDisconnectControl } from './githubDisconnect.js'
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
@@ -453,6 +456,7 @@ function SettingsTab(props) {
   const {
     state, loading, onResumeSetup,
     github, githubConnected, reposCount, onConnectGithub, githubError,
+    githubDisconnect, onOpenGithubDisconnect, onCloseGithubDisconnect, onConfirmGithubDisconnect,
     sessions, sessionsOn, sessionsLoading,
     memorySourcesProps,
     // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
@@ -498,10 +502,26 @@ function SettingsTab(props) {
         {loading ? (
           <p className="dim">Loading GitHub status…</p>
         ) : githubConnected ? (
-          <p className="dim small">
-            <span className="live">Connected</span>{reposNote ? ` — ${reposNote}. ` : '. '}
-            Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
-          </p>
+          <>
+            <p className="dim small">
+              <span className="live">Connected</span>{reposNote ? ` — ${reposNote}. ` : '. '}
+              Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
+            </p>
+            {/* #4946 item 3: the disconnect control. The server endpoint landed
+                in #5598 with no caller; this home owns the OAuth connection
+                state, so the control (and its consequence copy) live here. */}
+            <div style={{ marginTop: '0.5rem' }}>
+              <GithubDisconnectControl
+                open={githubDisconnect.open}
+                busy={githubDisconnect.busy}
+                error={githubDisconnect.error}
+                result={githubDisconnect.result}
+                onOpen={onOpenGithubDisconnect}
+                onClose={onCloseGithubDisconnect}
+                onConfirm={onConfirmGithubDisconnect}
+              />
+            </div>
+          </>
         ) : (
           <>
             <p className="dim small">
@@ -1052,6 +1072,12 @@ function App() {
   // note) drives a confirmation shown BEFORE the session ends, so the user is
   // told what was removed instead of landing on the sign-in page.
   const [deleteAccountResult, setDeleteAccountResult] = React.useState(null)
+  // #4946 item 3: the GitHub disconnect control's state — open/busy/error plus
+  // the endpoint's response body, which the dialog reports honestly (a
+  // revocation GitHub did not confirm is never shown as a clean disconnect).
+  const [githubDisconnect, setGithubDisconnect] = React.useState({
+    open: false, busy: false, error: '', result: null,
+  })
   // #2392 (a11y): focus-restore holder — the opener is captured at the gesture
   // and every non-logout close hands focus back instead of dropping it on
   // <body>.
@@ -2563,6 +2589,32 @@ function claimIntentInFlight() {
     } finally {
       setReauthBusy(false)
     }
+  }
+
+  // #4946 item 3: the real GitHub disconnect. POSTs the endpoint that shipped
+  // in #5598 (revoke at GitHub → clear locally → `github_connected: false`),
+  // then refreshes the onboarding projection so the connect card reads the new
+  // state. The response body is kept for the dialog: the endpoint's `revoked`
+  // flag is the only thing that makes a disconnect read as clean.
+  async function disconnectGithub() {
+    setGithubDisconnect((s) => ({ ...s, busy: true, error: '' }))
+    try {
+      const res = await api(`/v1/onboarding/github/disconnect${onboardingTeamQ()}`, { method: 'POST', useSession: true })
+      setGithubDisconnect((s) => ({ ...s, busy: false, result: res || {} }))
+      refreshOnboarding().catch(() => {})
+    } catch (e) {
+      setGithubDisconnect((s) => ({ ...s, busy: false, error: (e && e.message) || 'Could not disconnect GitHub — try again.' }))
+    }
+  }
+
+  function openGithubDisconnect() {
+    setGithubDisconnect((s) => ({ ...s, open: true, error: '', result: null }))
+  }
+
+  // Every close path (Cancel, backdrop, Escape, the outcome panel's Close): a
+  // pure local close — no request, and any stale response state is dropped.
+  function closeGithubDisconnect() {
+    setGithubDisconnect({ open: false, busy: false, error: '', result: null })
   }
 
   async function handleReauthProvider(provider) {
@@ -9191,6 +9243,10 @@ function claimIntentInFlight() {
             reposCount={reposLoaded ? reposList.length : null}
             onConnectGithub={wizardConnectGithub}
             githubError={memoryErrors.issues}
+            githubDisconnect={githubDisconnect}
+            onOpenGithubDisconnect={openGithubDisconnect}
+            onCloseGithubDisconnect={closeGithubDisconnect}
+            onConfirmGithubDisconnect={disconnectGithub}
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
