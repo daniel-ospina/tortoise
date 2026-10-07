@@ -576,6 +576,14 @@ cannot reach the graph (never decide against a dead connection):
    Use stable ids (returned ids or your own) — the graph is edge-based and
    the ranking reads the wiring.
 
+   The local `tortoise-decide` skill labels the SAME option nodes
+   `pointKind: option` (its anti-pattern list forbids storing the decision
+   itself as a Point). Both labels are valid and both are OBSERVED: the
+   onboarding `decide-completed` step fires on either `decision` or `option`
+   (`tortoise/mcp_server.py` `DECISION_SHAPED_POINT_KINDS`, #3916). Follow
+   whichever protocol you have — never re-label the nodes to unblock a step
+   that looks open.
+
    **Calibration is automatic (#2199) — no promote/calibrate chores.**
    Decision parts are HUMAN-authored judgment, so they are born LIVE with an
    explicit, provenance-recorded starting belief: omit `credibility` and the

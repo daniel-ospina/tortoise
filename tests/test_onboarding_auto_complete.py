@@ -492,3 +492,111 @@ class TestCallSiteObservation:
         res = mcp.tortoise_create_point("decision", "irrelevant")
         assert "error" in res, res
         assert recorded == []
+
+
+class TestDecideProtocolKinds:
+    """#3916 — the `decide-completed` truth table over BOTH documented decide
+    protocols.
+
+    Two shipped protocols file the SAME node (the option set) under two
+    different labels: ``tortoise/onboarding/SKILL.md`` §5 files one ``decision``
+    point per option, while the ``tortoise-decide`` skill files each option as
+    ``option`` (its anti-pattern list forbids storing the decision itself as a
+    Point). Keying the observation on one label made it a FALSE NEGATIVE for
+    the other: the user made a decision and the product told them they had not.
+
+    The discriminating half matters as much as the widening — a fix that
+    reports "completed" for anything is worse than the bug, so the reason
+    kinds both protocols write (``criterion``/``evidence``) and the setup
+    prompt's plain point must still observe nothing.
+
+    | write                                   | kind        | observed |
+    |-----------------------------------------|-------------|----------|
+    | onboarding §5 — the option set          | `decision`  | yes      |
+    | tortoise-decide — the option set        | `option`    | yes      |
+    | file_decision — the committed choice    | `decision`  | yes      |
+    | a criterion alone (a reason, no choice) | `criterion` | no       |
+    | an evidence point alone (a finding)     | `evidence`  | no       |
+    | the setup prompt's point (#3784)        | `statement` | no       |
+    """
+
+    def test_the_observed_set_is_exactly_the_two_protocol_labels(self):
+        """Pins the widening to the two documented labels. A re-narrowing (the
+        #3916 false negative) and a reflexive widening to the whole
+        ``sdk.DECIDE_PART_KINDS`` / ``DECISION_EVIDENCE_POINT_KINDS`` set (the
+        #3784 false positive, which would fire on a bare reason) both red."""
+        assert {"decision", "option"} == mcp.DECISION_SHAPED_POINT_KINDS
+
+    def test_onboarding_protocol_decision_write_observes_a_decision(
+            self, handler_env):
+        """Protocol A — `tortoise/onboarding/SKILL.md` §5 files one
+        `decision` point per option."""
+        sdk, recorded = handler_env
+        res = mcp.tortoise_create_point("decision", "Decision: Postgres")
+        assert "error" not in res, res
+        assert sdk.calls and sdk.calls[0][1] == "decision"
+        assert recorded == [{"decision_observed": True}]
+
+    def test_tortoise_decide_protocol_option_write_observes_a_decision(
+            self, handler_env):
+        """Protocol B — the false negative #3916 closes. The `tortoise-decide`
+        skill files each option as `option` and writes no `decision` point at
+        all, so before this fix a full EP decide was never observed."""
+        sdk, recorded = handler_env
+        res = mcp.tortoise_create_point("option", "Option A: Postgres")
+        assert "error" not in res, res
+        assert sdk.calls and sdk.calls[0][1] == "option"
+        assert recorded == [{"decision_observed": True}], (
+            "a decision recorded by the `tortoise-decide` protocol was not "
+            "observed — the #3916 false negative")
+
+    @pytest.mark.parametrize("kind", ["criterion", "evidence", "statement"])
+    def test_a_reason_or_plain_point_observes_no_decision(self, handler_env,
+                                                          kind):
+        """The other direction: a reason is not a choice, and the setup
+        prompt's plain point is the #3784 defect — neither may claim a
+        decision, or the fix would be "completed unconditionally"."""
+        sdk, recorded = handler_env
+        res = mcp.tortoise_create_point(kind, f"{kind} content")
+        assert "error" not in res, res
+        assert sdk.calls and sdk.calls[0][1] == kind
+        assert recorded == [{"decision_observed": False}], (
+            f"a bare `{kind}` write claimed a decision — a reason (or a plain "
+            "point) is not a decision")
+
+    def test_observation_follows_the_persisted_option_kind(self, stdio_mode,
+                                                           monkeypatch):
+        """Same persisted-kind rule as the `decision` case: a handler that
+        normalizes ` Option ` still observes the option."""
+        sdk = _FakeSDK()
+        monkeypatch.setattr(mcp, "_get_org_sdk", lambda: sdk)
+        recorded: list[dict] = []
+        monkeypatch.setattr(mcp, "_maybe_onboarding_auto_complete",
+                            lambda **kw: recorded.append(dict(kw)))
+
+        def _normalized(kind, content, **kwargs):
+            return {"id": "p-3", "pointKind": (kind or "").strip().lower(),
+                    "content": content}
+        sdk.create_point = _normalized
+        res = mcp.tortoise_create_point(" Option ", "Option A")
+        assert "error" not in res, res
+        assert recorded == [{"decision_observed": True}]
+
+    def test_option_write_completes_a_self_fork_org_end_to_end(
+            self, stdio_mode, monkeypatch, org_ctx):
+        """The whole path for the EP protocol, through the REAL fork-aware
+        gate: `tortoise_create_point(kind="option")` → observation → the
+        canonical completion eval. Before #3916 this org stayed `active`."""
+        sdk = _FakeSDK()
+        monkeypatch.setattr(mcp, "_get_org_sdk", lambda: sdk)
+        # The hosted org context makes the real quota gate look the org up in
+        # the team registry (absent in a unit test) — stub ONLY that lookup;
+        # the observation, the writers and the fork-aware gate are all real.
+        monkeypatch.setattr(mcp, "_enforce_quota", lambda *a, **k: None)
+        g = _FakeGraph(fork="self")
+        g.install(monkeypatch)
+        res = mcp.tortoise_create_point("option", "Option A: Postgres")
+        assert "error" not in res, res
+        assert "decide-completed" in g.steps
+        assert g.node["status"] == "complete"
+        assert mcp._onboarding_state_cache[ORG][1] is True
