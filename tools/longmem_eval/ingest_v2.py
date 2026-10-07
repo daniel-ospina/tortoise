@@ -874,9 +874,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # (#7405). This outer loop therefore remains the retry layer for the
         # PHASE (E7 probe + the UNWRAPPED direct writes + a whole-question
         # re-attempt), while the SDK owns the write refusals it wraps. The two
-        # layers cover disjoint error classes for the replaced-graph abort
-        # (`retryable_transient` deliberately no longer matches it); a MISCONF
-        # can nest, bounded by the SDK exhausting before the outer retries.
+        # layers are disjoint ONLY for the replaced-graph / write-lock family
+        # (`retryable_transient` deliberately no longer matches either, so only
+        # the SDK's inner loop retries them). MISCONF is deliberately in BOTH
+        # predicates — it predates #7405 and the eval's UNWRAPPED direct writes
+        # rely on the outer loop — so a MISCONF can nest, bounded by the SDK
+        # exhausting before the outer retries.
         # ═════════════════════════════════════════════════════════════════
         # ══════════════════════════════════════════════════════════════
         # #7405 P1-1: the SDK now retries its OWN direct graph writes

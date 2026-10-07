@@ -803,8 +803,10 @@ def test_retryable_transient_predicate_matrix():
     # this transport predicate. They ARE retryable, but only on the SDK write
     # path (`retryable_aborted_write`): an error retryable at BOTH layers was
     # multiplied by the eval's outer phase loop wrapping the SDK's inner write
-    # retry. Keeping them out of the phase predicate is what makes the layers
-    # disjoint. See test_retryable_aborted_write_excludes_ambiguous_transports.
+    # retry. Keeping the replaced-graph / write-lock family out of the phase
+    # predicate makes the layers disjoint for THAT family only — MISCONF is
+    # deliberately in BOTH predicates, so its nesting is bounded, not disjoint.
+    # See test_retryable_aborted_write_excludes_ambiguous_transports.
     assert retryable_transient(redis_exc.ResponseError(
         "graph was deleted or replaced while the query was running, aborting")) is False
     assert retryable_transient(redis_exc.ResponseError(
@@ -931,7 +933,15 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
 
     def _sdk_with(behaviour):
         """A TortoiseSDK with no __init__ — no DB, no embedder — whose graph
-        handle fails according to `behaviour(call_index)`."""
+        handle fails according to `behaviour(call_index)`.
+
+        ``_get_proj`` HONOURS the ``sdk._proj`` cache the way the real method
+        does, and appends the id of whatever it returns. Returning a fixed local
+        object instead would make ``len(set(handles)) == 1`` a TAUTOLOGY: every
+        element would be the same object by construction, so no production change
+        could falsify it (measured: reintroducing ``self._proj = None`` on the
+        retry path left the old version of this test GREEN).
+        """
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         calls = {"query": 0, "resolve": 0}
         handles: list[int] = []
@@ -941,14 +951,14 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
                 calls["query"] += 1
                 return behaviour(calls["query"])
 
-        proj = type("_Proj", (), {"g": _G()})()
-
         def _get_proj():
             calls["resolve"] += 1
-            handles.append(id(proj))
-            return proj
+            if sdk._proj is None:
+                sdk._proj = type("_Proj", (), {"g": _G()})()
+            handles.append(id(sdk._proj))
+            return sdk._proj
 
-        sdk._proj = proj
+        sdk._proj = None
         sdk._get_proj = _get_proj
         sdk._graph_write_retry_count = 0
         return sdk, calls, handles
@@ -1009,14 +1019,18 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
                 raise replaced
             return type("R", (), {"result_set": [[7]]})()
 
-    proj = type("_Proj", (), {"g": _G()})()
-
     def _get_proj():
+        # Same honest cache contract as the sibling test above: a re-resolve
+        # must produce a DIFFERENT id, so `len(set(handles)) == 1` (and the
+        # `state['resolve'] == 1` assertion) can actually fail if production
+        # re-resolves on the retry path.
         state["resolve"] += 1
-        handles.append(id(proj))
-        return proj
+        if sdk._proj is None:
+            sdk._proj = type("_Proj", (), {"g": _G()})()
+        handles.append(id(sdk._proj))
+        return sdk._proj
 
-    sdk._proj = proj
+    sdk._proj = None
     sdk._get_proj = _get_proj
     sdk._graph_write_retry_count = 0
 
@@ -1066,6 +1080,32 @@ def test_retryable_aborted_write_excludes_ambiguous_transports():
     # unrelated responses stay out
     assert retryable_aborted_write(redis_exc.ResponseError("WRONGTYPE x")) is False
     assert retryable_aborted_write(redis_exc.ResponseError("graph is read-only")) is False
+
+
+def test_aborted_write_predicate_is_anchored_on_the_abort_context():
+    """#7405 (review P3): the predicate must not fire on a message that merely
+    CONTAINS an abort-ish phrase.
+
+    It gates a bare, NON-IDEMPOTENT ``CREATE`` (no uniqueness constraint on
+    ``Point.id``), so a false positive is exactly the duplicate-point failure
+    this PR exists to prevent. The unanchored alternation matched any message
+    containing the phrases — measured: three crafted non-abort diagnostics all
+    returned True. Only the two MEASURED engine refusals may match.
+    """
+    # the two messages the engine actually emits still match
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
+
+    # lookalikes: the phrase appears, but NOT as an abort refusal — retrying
+    # these would re-issue a CREATE that may well have landed.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced appears in this unrelated diagnostic")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "metrics report saw another write is in progress counters")) is False
 
 
 def test_retry_import_identity():

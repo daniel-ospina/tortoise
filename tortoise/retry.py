@@ -56,8 +56,16 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #: :func:`retryable_transient` for why they are deliberately NOT in the
 #: transport predicate (putting them there made one error retryable at two
 #: nested layers).
+#:
+#: ANCHORED on the full abort context, deliberately: a bare alternation over
+#: ``re.search`` matches ANY message merely CONTAINING the phrases (measured:
+#: three crafted non-abort diagnostics all returned True). Because the predicate
+#: gates a re-issued bare ``CREATE`` — non-idempotent, no uniqueness constraint
+#: on ``Point.id`` — a false positive IS the duplicate-point failure this PR
+#: exists to prevent, so the whole refusal clause must be present.
 _ABORTED_WRITE_RE = re.compile(
-    r"graph was deleted or replaced|another write is in progress",
+    r"graph was deleted or replaced while the query was running, aborting"
+    r"|(?:write query )?aborted:\s*another write is in progress",
     re.IGNORECASE)
 
 
