@@ -4719,5 +4719,245 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("COLLISION-uncertain", out)
 
 
+class BranchTerminalLookupTests(unittest.TestCase):
+    """#5485: the TARGETED terminal lookup, and the two arms that close the gap.
+
+    Why it exists: every terminal test in the tool read data already in hand, so
+    a squash-merge older than `CLOSED_PR_LIMIT` (100) was invisible — and
+    `refs/heads/fix/6134-6146-6151-graph-correctness` therefore blocked #6151
+    permanently, because its PR #6156 merged 2026-09-28 (measured 2026-10-06).
+    The branch had 1 commit ahead of main, 0 worktrees, no open PR, and no
+    assignee: it was the one row the priority stack labels UNHELD, held by
+    nothing but a stale ref.
+    """
+
+    SHA = "adcfedc4221329a0f5ae9079248b3b0261134a73"
+    PR_HEAD = "a749c662d075a5dc0c96560b21b784578e5c1d63"
+    MAIN_TIP = "b9c1a1323000000000000000000000000000000000"
+    BRANCH = "refs/heads/fix/6134-6146-6151-graph-correctness"
+    SHORT = "fix/6134-6146-6151-graph-correctness"
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "collision_preflight.py"
+        spec = importlib.util.spec_from_file_location("cp_under_test", path)
+        cls.mod = importlib.util.module_from_spec(spec)
+        sys.modules["cp_under_test"] = cls.mod
+        spec.loader.exec_module(cls.mod)
+
+    def _call(self, prs, status="ahead", sha=None, main_tip=None, raises=False,
+              first_parent=None, ancestor_merged=frozenset(), branch=None):
+        """Drive the real function with `_gh_json` stubbed at the boundary.
+
+        `ancestor_merged` defaults to an EMPTY frozen set, i.e. "the `--merged`
+        walk RAN and this ref was not in it" — the ordinary production state.
+        `None` is the different, deliberate state where that walk could NOT run,
+        and the function must then refuse the demotion (fail-closed); pass it
+        explicitly to pin that arm. (`frozenset()` rather than `set()` only to
+        avoid a mutable default.)
+
+        The stub records every `args` list it is called with (`self.seen`) so a
+        test can pin the REQUEST, not just the response: a projection or filter
+        regression would otherwise make these arms silently inert while every
+        response-shaped assertion still passed (the class PR #5595's cycle 1
+        raised on this same file).
+        """
+        self.seen = []
+
+        def fake(_gh, args, _cwd, _timeout):
+            self.seen.append(list(args))
+            if raises:
+                raise self.mod.SurfaceError("gh failed")
+            if any("compare" in a for a in args):
+                return {"status": status}
+            return prs
+
+        with mock.patch.object(self.mod, "_gh_json", side_effect=fake):
+            return self.mod._branch_terminal_state_from_prs(
+                "gh", "daniel-ospina/tortoise", ".", 30.0,
+                self.BRANCH if branch is None else branch,
+                self.SHA if sha is None else sha,
+                self.MAIN_TIP if main_tip is None else main_tip,
+                first_parent=first_parent,
+                ancestor_merged=ancestor_merged,
+            )
+
+    def _merged_pr(self, head_sha):
+        return [{"number": 6156, "state": "closed", "headSha": head_sha,
+                 "mergedAt": "2026-09-29T00:03:52Z"}]
+
+    def test_exact_tip_match_demotes(self):
+        # Predicate 1, carried past the sample's edge.
+        reason = self._call(self._merged_pr(self.SHA))
+        self.assertIsNotNone(reason, "an exact head match must demote")
+        self.assertIn("#6156", reason)
+
+    def test_containment_demotes_when_the_pr_head_is_not_the_tip(self):
+        # ⛔ THE CASE #6151 ACTUALLY HIT, and the reason equality alone does not
+        # close #5485's half: a merged PR's head is often a MERGE COMMIT (main
+        # merged into the branch) or an amend, so the local tip is its ANCESTOR.
+        # Equality refuses it; containment is what proves the work landed.
+        reason = self._call(self._merged_pr(self.PR_HEAD))
+        self.assertIsNotNone(reason, "a contained tip must demote")
+        self.assertIn("contained in the MERGED PR #6156", reason)
+
+    def test_compare_polarity_is_ahead_not_behind(self):
+        # ⛔ THE TRAP THAT MADE THE FIRST IMPLEMENTATION SILENTLY INERT: for
+        # `compare/{base}...{head}` the status describes the HEAD relative to the
+        # BASE, so `tip` being an ancestor of `head_sha` is reported as AHEAD.
+        # Reading it as `behind` meant every containment failed, the arm never
+        # fired, and the run looked like a pass (#6151 still returned COLLISION).
+        for status in ("behind", "diverged"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    self._call(self._merged_pr(self.PR_HEAD), status=status),
+                    f"status={status} is NOT containment and must keep blocking",
+                )
+        self.assertIsNotNone(
+            self._call(self._merged_pr(self.PR_HEAD), status="ahead")
+        )
+
+    def test_fresh_branch_sitting_on_a_merged_head_never_demotes(self):
+        # The fail-OPEN this test exists to prevent: a lane that has just created
+        # its worktree sits on main's tip, and if that tip is itself a merged
+        # PR's head (fast-forward or empty-diff landing) an unguarded arm would
+        # call a branch with NO COMMITS OF ITS OWN terminal — a live lane read as
+        # free, which is the dangerous direction for every demotion here.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), sha=self.SHA, main_tip=self.SHA),
+            "tip == main's tip must never demote",
+        )
+
+    def test_closed_unmerged_pr_does_not_demote(self):
+        # An abandoned PR is not a landing. `_pr_terminal_state` names it
+        # "closed"; only "merged" may demote.
+        prs = [{"number": 6156, "state": "closed", "headSha": self.SHA,
+                "mergedAt": ""}]
+        self.assertIsNone(self._call(prs))
+
+    def test_missing_head_sha_does_not_crash_and_does_not_demote(self):
+        self.assertIsNone(self._call(self._merged_pr("")))
+
+    def test_tip_on_mains_first_parent_chain_never_demotes(self):
+        # ⛔ THE P0 BOTH REVIEWERS FOUND, and the reason `sha != main_tip` is not
+        # enough: `_branch_terminal_state_from_prs` is reached precisely when
+        # `_branch_terminal_state` has ALREADY refused, so any guard omitted here
+        # is bypassed BY CONSTRUCTION. A lane that merely CLAIMED the issue by
+        # creating `fix/<N>-…` sits on a main-line commit; that commit can be a
+        # merged PR's head (fast-forward / rebase / empty-diff landing); and ONE
+        # commit of drift makes the weak guard pass. Predicate 1 refuses on the
+        # first-parent witness for exactly this state, so this arm must too —
+        # otherwise a branch with no commits of its own is read terminal, i.e. a
+        # live lane reported free.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), first_parent={self.SHA}),
+            "a tip on main's first-parent chain must never demote",
+        )
+
+    def test_tip_in_the_merged_fallback_set_never_demotes(self):
+        # The second half of predicate 1's exclusion: with the first-parent
+        # witness UNAVAILABLE, a tip in the `--merged` walk's set is still a
+        # commit main already contains, so it cannot be an absorbed branch head.
+        # `ancestor_merged` holds FULL refnames (`for-each-ref %(refname)`), which
+        # is the shape the production call site passes — pinned here, and in both
+        # spellings below, so the guard cannot be dodged by how a caller spells
+        # the ref.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNone(
+                    self._call(
+                        self._merged_pr(self.SHA),
+                        first_parent=None,
+                        ancestor_merged={self.BRANCH},
+                        branch=spelling,
+                    ),
+                    "a tip in the --merged set must never demote",
+                )
+
+    def test_the_lookup_is_shape_agnostic_for_the_ref_name(self):
+        # ⛔ Review round 2: the guard compares against `ancestor_merged`, which is
+        # a set of REFNAMES, while the URL needs the SHORT branch name. The one
+        # production caller happens to pass the full refname, so the equivalence
+        # rested on an undocumented coincidence — and a caller (or refactor) passing
+        # the natural short name would have made the guard compare a short name
+        # against refnames, never match, and re-open the fail-open with a GREEN
+        # suite. The function now normalises, so BOTH spellings must behave
+        # identically on the wire AND behind the guard.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNotNone(
+                    self._call(self._merged_pr(self.SHA), branch=spelling),
+                    "the demotion must not depend on how the ref is spelled",
+                )
+                url = next(a for a in self.seen[0] if "pulls?" in a)
+                self.assertIn("head=daniel-ospina:fix/6134-", url)
+                self.assertNotIn("refs%2Fheads", url)
+                self.assertNotIn("refs/heads", url)
+
+    def test_a_full_page_is_refused_rather_than_read_as_not_found(self):
+        # `sort=created desc` puts the OLDEST PR last — so the merged PR this
+        # lookup exists to find is exactly what falls off a full page. Reading
+        # that as "not found" would re-create the very bug #5485 removes, while
+        # looking like a completed lookup.
+        page = [self._merged_pr("aa" * 20)[0]] * self.mod._TARGETED_PR_PAGE
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(page)
+
+    def test_a_missing_merged_walk_refuses_rather_than_demoting(self):
+        # The third clause of predicate 1's exclusion, and the state it exists for:
+        # main's tip is known, the first-parent witness is NOT readable, and the
+        # `--merged` walk could not run either. Then `sha != main_tip` is the only
+        # witness left — one commit deep — so the demotion is REFUSED. This is the
+        # fail-closed direction and it must survive any refactor of the guards.
+        self.assertIsNone(
+            self._call(
+                self._merged_pr(self.SHA),
+                first_parent=None,
+                ancestor_merged=None,
+            ),
+            "with no witness available the demotion must be refused",
+        )
+
+    def test_gh_failure_propagates_so_the_caller_can_report_it(self):
+        # ⛔ THE DEAD-CODE DEFECT THE REVIEW FOUND: swallowing `SurfaceError` here
+        # made the caller's `except` unreachable, so `targeted_failures` was always
+        # 0 and the promised "⚠ … could not run" note could never print — leaving
+        # "I could not ask" indistinguishable from "there is no such PR". The
+        # failure must PROPAGATE; the caller counts it and the ref keeps blocking.
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(self._merged_pr(self.SHA), raises=True)
+
+    def test_a_non_list_payload_is_refused_not_demoted(self):
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call("not-a-list")
+
+    def test_the_request_is_scoped_sorted_and_percent_encoded(self):
+        # Pins the WIRE, not the response. Both halves are load-bearing:
+        #  * a ref may legally contain `&`, `#`, `+`, `%` (git check-ref-format),
+        #    so an unencoded name like `fix/N&head=owner:other` would append a
+        #    SECOND `head=` parameter — honored LAST by the API — and the lookup
+        #    would be answered by another branch's PRs, breaking the scoping the
+        #    demotion rests on;
+        #  * `sort=created desc` is what makes the page cap meaningful.
+        hostile = "fix/6151&head=daniel-ospina:some-other-branch#frag"
+        self._call(self._merged_pr(self.SHA), branch=hostile)
+        url = next(a for a in self.seen[0] if "pulls?" in a)
+        self.assertNotIn("&head=daniel-ospina:some-other-branch", url)
+        self.assertIn("%26", url)
+        self.assertIn("%23", url)
+        self.assertIn("state=all", url)
+        self.assertIn("sort=created", url)
+        self.assertIn("direction=desc", url)
+        # ⛔ `per_page` is UNPINNED COUPLING unless asserted here: the same constant
+        # is both the page size and the truncation bound, so a request that drifts
+        # below it can never fill the page, `test_a_full_page_is_refused…` would
+        # still pass on its fabricated fixture, and the refusal would be dead code
+        # while an off-page merged PR silently read as "not found" (#5485 again).
+        self.assertIn(f"per_page={self.mod._TARGETED_PR_PAGE}", url)
+        # And the projection the arms read is still requested.
+        self.assertIn("headSha", " ".join(self.seen[0]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

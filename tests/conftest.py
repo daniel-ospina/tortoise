@@ -206,6 +206,34 @@ else:
     os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
     os.environ["TORTOISE_TEST_SESSION_OWNER_PID"] = _SESSION_OWNER_PID
 
+
+# ── #6136 (epic #5215 D3): xdist run identity for the active-suite markers ──
+# pytest-xdist writes the SAME PYTEST_XDIST_TESTRUNUID into every worker of
+# ONE `pytest -n` invocation (xdist/remote.py), so it names the RUN while the
+# pid names the PROCESS. Both active-suite fixtures stamp it into their
+# markers, letting a teardown distinguish a SIBLING WORKER (a different pid
+# in THIS run — a concurrent process, but the same logical suite, with its
+# OWN per-process journal) from a GENUINELY CONCURRENT SUITE (a different
+# run, or a non-xdist process carrying no run id). Empty when xdist is not
+# driving the session: a single process has no siblings, so nothing is ever
+# reclassified as one. Without this split, `-n` made every worker but the
+# last see a sibling as `others` and the per-session E2E-7 survivor
+# assertion collapsed to once-per-job (defect 2 on #6136).
+def _test_run_uid() -> str:
+    """The identity shared by all workers of one `pytest -n` run ('' if none)."""
+    return os.environ.get("PYTEST_XDIST_TESTRUNUID", "") or ""
+
+
+def _is_sibling_marker(marker: dict, run_uid: str) -> bool:
+    """True when `marker` belongs to another worker of THIS xdist run.
+
+    Fail-closed: with no run id (`run_uid` empty — not under xdist, or a
+    marker written before #6136) nothing is a sibling, so every foreign
+    marker keeps its pre-#6136 deferral semantics.
+    """
+    return bool(run_uid) and marker.get("run") == run_uid
+
+
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
 # side appends (the redirect + the frame-gated from_uri seam) fire during
@@ -217,6 +245,30 @@ else:
 # dead sessions' drop sets (their graphs were never minted on the server).
 from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402
 from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # noqa: E402
+
+# ── Hand the pytest-LOADED instance of this module to the tests that need its
+# globals ─────────────────────────────────────────────────────────────────
+#
+# ⛔ DO NOT look it up as ``sys.modules["conftest"]``. That KEY is shared by
+# EVERY ``__init__``-less conftest in the tree, and pytest lets a later one take
+# it over. Measured 2026-10-06 at the #6269 head: once
+# ``tests/e2e/auth/conftest.py`` has been collected — which the default
+# ``uv run pytest tests/`` lane does, and every fast shard does NOT — the ONLY
+# ``conftest.py`` module left in ``sys.modules`` is the nested one, and this
+# module is in no entry at all (so a scan by ``__file__`` finds nothing either).
+# Tests that then monkeypatch ``_ACTIVE_SUITES_DIR`` or drive
+# ``_server_graph_hygiene`` reach a foreign module and die with
+# ``AttributeError: <module 'conftest' from '.../tests/e2e/auth/conftest.py'>
+# has no attribute '_ACTIVE_SUITES_DIR'`` — 10 failures, invisible to CI
+# because no fast shard selects an ``e2e/`` file.
+#
+# ``__name__`` is the pytest-loaded name HERE; the ``tests.conftest``
+# double-import carries ``__name__ == "tests.conftest"`` and is excluded by
+# this guard (its body re-execution is its own documented hazard — see
+# ``tests/_embedded.py``).
+if __name__ == "conftest":
+    import tests._embedded as _embedded_publish
+    _embedded_publish.LOADED_CONFTEST = sys.modules[__name__]
 
 # ── #4071: the embedded lane must not reach the CANONICAL store ───────────
 # (ask #1 of #4028). A bare ``TortoiseSDK()`` resolves through
@@ -267,6 +319,21 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
+def _session_will_connect(uri: str) -> bool:
+    """Will this session actually connect to ``uri``? The SINGLE gate (#6073).
+
+    Mirrors `_assert_backend_identity`'s own predicate: a loopback target, or a
+    non-loopback one under the explicit `TORTOISE_TEST_ALLOW_REMOTE=1`
+    override. It lives here, not in `tests/_embedded.py`, so the probe and the
+    session can never disagree about whether a target is in play — and because
+    that module is inside the #4097 env-read scan surface, where a new raw
+    read would require a recorded ledger decision.
+    """
+    from tortoise.config import is_loopback_uri
+
+    return is_loopback_uri(uri) or os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") == "1"
+
+
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
 # Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
 # surface. Declared FIRST among the session fixtures so the enforcement
@@ -274,6 +341,7 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
 # helper lives in tests/_embedded.py (pinned by test_markers.py — the
 # tests.conftest import would re-execute conftest's top-level code).
 from tests._embedded import (  # noqa: E402
+    _assert_configured_db_answers,
     _assert_p4_uri_required,
     serialize_embedded_construction,
 )
@@ -287,8 +355,16 @@ def _p4_uri_required():
     TORTOISE_TEST_CARVE_OUT=1 is set (the carve-out job / tier-2 URI-less
     legs / e2e surfaces opt in). A URI-less run that is not the carve-out is
     the pre-epic shape — migrated files would construct embedded and
-    green-pass on the wrong backend."""
+    green-pass on the wrong backend.
+
+    #6073: then prove the configured DB actually ANSWERS. The URI gate above
+    is a configuration check; against a wedged runtime it passes while every
+    test below dies on its own socket timeout, which reads like a diff
+    regression. Run second so the unambiguous URI-less failure wins.
+    """
     _assert_p4_uri_required()
+    _assert_configured_db_answers(
+        will_connect=_session_will_connect(os.environ.get("TORTOISE_DB_URI", "")))
 
 
 # ── #4883: per-test isolation for the process-shared routing env vars ──────
@@ -666,6 +742,14 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
             fh.write(f"pid={os.getpid()}\n")
             if start is not None:
                 fh.write(f"start={start}\n")
+            # #6136: run identity — a sibling xdist worker (different pid,
+            # same run) must be distinguishable from a genuinely concurrent
+            # suite at sweep time. Omitted (not written empty) when not under
+            # xdist, so active_suite_markers() reads run=None exactly like a
+            # pre-#6136 marker.
+            run_uid = _test_run_uid()
+            if run_uid:
+                fh.write(f"run={run_uid}\n")
     except OSError:
         # never fail the suite over hygiene; remove any partial marker so a
         # poison file cannot degrade every future suite's sweep to only-safe
@@ -947,6 +1031,10 @@ def _server_graph_hygiene(_redislite_hygiene):
             fh.write(f"pid={os.getpid()}\n")
             if start is not None:
                 fh.write(f"start={start}\n")
+            # #6136: run identity — see the embedded-marker note above.
+            run_uid = _test_run_uid()
+            if run_uid:
+                fh.write(f"run={run_uid}\n")
     except OSError:
         marker_path = None  # never fail the suite over marker hygiene
 
@@ -990,12 +1078,31 @@ def _server_graph_hygiene(_redislite_hygiene):
         own = {"error": str(exc)}
         print(f"[server-graph-hygiene] session-end sweep failed: {exc}")
     # Cycle-6 P2-16: deferral is PID-grouped — same-pid markers (our own
-    # embedded + docker markers) never defer; only a DIFFERENT pid (a
-    # genuinely concurrent suite) defers the FULL leftover sweep.
-    others = [m for m in active_suite_markers()
-              if m.get("pid") != os.getpid()]
+    # embedded + docker markers) never defer; only a DIFFERENT pid does.
+    # #6136 (epic #5215, D3): under `-n` a different pid is NOT sufficient.
+    # xdist workers are different pids belonging to ONE run, each owning its
+    # OWN per-process journal (the session nonce is per-process), so a
+    # sibling's graphs are never in OUR journal. Two predicates are kept
+    # distinct because they guard actions with different scope:
+    #   * others_all — ANY other marker (sibling OR foreign). Guards the FULL
+    #     leftover sweep and the whole-server GRAPH.LIST bound: both act on
+    #     the WHOLE server, so a sibling still running must not have its live
+    #     graphs wiped or counted. Deferral to "last suite standing" keeps
+    #     that meaning here (do NOT relax it).
+    #   * others_foreign — markers NOT of this xdist run (a genuinely
+    #     concurrent suite; with no run id, EVERY marker is foreign). Guards
+    #     the per-session E2E-7 survivor gate below, which reads only OUR
+    #     journal names and is therefore safe to run while a sibling is live.
+    # Before this split, `-n` made every worker but the last see a sibling as
+    # `others`, collapsing the per-session leak assertion to once-per-job
+    # (#6136 defect 2).
+    run_uid = _test_run_uid()
+    others_all = [m for m in active_suite_markers()
+                  if m.get("pid") != os.getpid()]
+    others_foreign = [m for m in others_all
+                      if not _is_sibling_marker(m, run_uid)]
     full = None
-    if not others:
+    if not others_all:
         try:
             full = _leftover_sweep(uri, skip_on_non_loopback=True)
         except Exception as exc:
@@ -1013,7 +1120,7 @@ def _server_graph_hygiene(_redislite_hygiene):
     # docker with many non-test graphs must not fail the suite at teardown
     # (cycle-8 P2-3 — hygiene never fails the suite); a trip is logged loudly
     # and mirrored to the hygiene log so the E2E-7 leak stays visible.
-    if not others and not own.get("skipped") \
+    if not others_all and not own.get("skipped") \
             and full and full.get("full_sweep", False):
         try:
             with _sweep_proj(uri) as probe:
@@ -1039,22 +1146,26 @@ def _server_graph_hygiene(_redislite_hygiene):
             print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
 
     # ── E2E-7 gate (#3634 Task 5). A SIBLING of the bound-check `if` above and a
-    # direct child of `if not others:` (last-suite-standing only — do NOT widen
-    # that). It gates ONLY on `not others` + the three own-sweep flags, NEVER on
-    # the bound check's `full_sweep` condition (P1-A, Task 5 review): nested
-    # inside that `if`, the gate was DISABLED exactly when the leftover sweep
-    # failed or reported full_sweep=False — i.e. precisely when cleanup was
-    # incomplete and survivors are most likely. It must also stay OUTSIDE every
-    # `try` (an AssertionError under a broad `except Exception` is swallowed and
-    # the gate is vacuous). Short-circuit on `error` too: a sweep that RAISED
+    # direct child of `if not others_foreign:` — the SIBLING-AWARE
+    # last-suite-standing predicate (#6136): a genuinely concurrent suite
+    # still defers it, a sibling xdist worker does NOT (its graphs are never
+    # in our journal, so deferring to it would collapse this per-session
+    # assertion to once-per-job). It gates ONLY on `not others_foreign` + the
+    # three own-sweep flags, NEVER on the bound check's `full_sweep`
+    # condition (P1-A, Task 5 review): nested inside that `if`, the gate was
+    # DISABLED exactly when the leftover sweep failed or reported
+    # full_sweep=False — i.e. precisely when cleanup was incomplete and
+    # survivors are most likely. It must also stay OUTSIDE every `try` (an
+    # AssertionError under a broad `except Exception` is swallowed and the
+    # gate is vacuous). Short-circuit on `error` too: a sweep that RAISED
     # sets own={"error": ...} with no `failed` key, so `not own.get("failed")`
     # alone would run the gate over names a dead sweep left and red the suite
     # (violating cycle-8 P2-3).
-    # The nesting is DELIBERATE (SIM102): the `if not others` node must remain a
-    # distinct AST ancestor of the gate's Raise (its own guard), not be folded
-    # into the three-flag condition — the placement is itself pinned by
-    # tests/test_server_hygiene_gate.py.
-    if not others:  # noqa: SIM102
+    # The nesting is DELIBERATE (SIM102): the `if not others_foreign` node must
+    # remain a distinct AST ancestor of the gate's Raise (its own guard), not
+    # be folded into the three-flag condition — the placement is itself pinned
+    # by tests/test_server_hygiene_gate.py.
+    if not others_foreign:  # noqa: SIM102
         if not own.get("skipped") and not own.get("failed") and not own.get("error"):
             # P1-C (Task 5 review): the survivor probe is the ONLY unguarded
             # server call on the teardown path. Its failure (connection, auth,
@@ -1063,19 +1174,38 @@ def _server_graph_hygiene(_redislite_hygiene):
             # INDISTINGUISHABLE in CI from a real E2E-7 leak, the one signal
             # this gate exists to make unambiguous. Only the genuine leak
             # AssertionError below may raise from this block; a failed probe
-            # leaves `live_names` empty, so the gate reports no survivors.
+            # leaves the leak count UNMEASURED (not zero), so no survivor
+            # verdict is emitted from it.
+            probe_ok = True
             live_names: set[str] = set()
             try:
                 live_names = _live_graph_names(uri)
             except Exception as exc:
+                probe_ok = False
                 print(f"[server-graph-hygiene] E2E-7 survivor probe failed — "
                       f"gate skipped (infra skip, NOT a leak signal): {exc}")
-            survivors = _owned_survivors(journal_names, live_names,
-                                         _uri_default_graph_name())
-            if survivors:
-                raise AssertionError(
-                    f"E2E-7: {len(survivors)} owned journalled graph(s) survived the "
-                    f"sweep: {sorted(survivors)}")
+            if not probe_ok:
+                print("[server-graph-hygiene] E2E-7 leak count: UNMEASURED "
+                      "(survivor probe failed — not a leak signal)")
+            else:
+                survivors = _owned_survivors(journal_names, live_names,
+                                             _uri_default_graph_name())
+                # D3 leak-count assertion (#5215): PER WORKER. Each xdist
+                # worker owns a separate journal, so the count below covers
+                # exactly the graphs THIS worker minted and is asserted zero
+                # here rather than only in whichever worker happens to tear
+                # down last. Stated as a count so the teardown log shows the
+                # measurement, not just its verdict.
+                leak_count = len(survivors)
+                siblings = len(others_all) - len(others_foreign)
+                print(f"[server-graph-hygiene] E2E-7 leak count: {leak_count} "
+                      f"(journalled={len(journal_names)} live={len(live_names)} "
+                      f"sibling_workers={siblings} "
+                      f"foreign_suites={len(others_foreign)})")
+                if survivors:
+                    raise AssertionError(
+                        f"E2E-7: {leak_count} owned journalled graph(s) survived "
+                        f"the sweep: {sorted(survivors)}")
 
 
 # ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
@@ -1133,7 +1263,19 @@ def _assert_backend_identity():
     either way (never a vacuous green); the predicate split is left
     untouched because is_db_uri is the wide seam predicate.
     """
-    from tortoise.config import is_db_uri, is_loopback_uri  # shared predicates
+    # #6073: run the probe BEFORE the check that connects, so an unresponsive
+    # runtime is diagnosed instead of surfacing as a bare
+    # `redis.exceptions.TimeoutError` (which reads like a diff regression).
+    # pytest sets THIS fixture up before `_p4_uri_required` — not because of
+    # declaration order, but because conftest fixtures are registered via
+    # `dir()`, so the order is alphabetical plus dependencies.
+    #
+    # First statement of the body, deliberately: the `uri` local bound just
+    # below holds the raw URI, credential included, and pytest's
+    # `--showlocals` renders every local of every traceback frame.
+    _assert_configured_db_answers(
+        will_connect=_session_will_connect(os.environ.get("TORTOISE_DB_URI", "")))
+    from tortoise.config import is_db_uri  # shared predicate
     uri = os.environ.get("TORTOISE_DB_URI", "")
     # VGATE P2-2: EXPECT_URI must fail not only on an UNSET URI but also on
     # a set-but-unsupported-scheme URI (postgres://... or a bare path) —
@@ -1159,7 +1301,7 @@ def _assert_backend_identity():
         BACKEND_IDENTITY.uri = uri
         yield
         return
-    if not is_loopback_uri(uri) and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+    if not _session_will_connect(uri):
         pytest.fail(
             f"TORTOISE_DB_URI {uri!r} is not loopback — refusing before "
             f"any test writes (epic #1647 D-4/P0-2); set "
