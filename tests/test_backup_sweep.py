@@ -2931,3 +2931,70 @@ def test_sweep_logs_and_survives_a_failed_storage_reading_5331(
         assert recorded == [], (
             "a FAILED reading must not be written to the ledger — a fabricated "
             "zero would be read as a real storage figure")
+
+
+def test_sweep_writes_nothing_when_ONE_graph_of_the_org_fails_5331(
+        shared_proj, monkeypatch, caplog):
+    """#5331: a PARTIAL measurement failure records NOTHING and says so.
+
+    `combine_graph_storage_readings` used to fold the *surviving* graphs into a
+    recorded total, so an org whose default graph failed to measure but whose
+    small custom graph succeeded got the custom graph's bytes written as the
+    ORG's figure — a silent understatement of exactly the cap input this
+    exists to supply, with the per-graph failure only at DEBUG. A partial total
+    is not a measurement of the org, which is the same rule as "never write a
+    fabricated zero".
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_pt', tier:'pro'})")
+        proj.db.select_graph(_team_graph("team_pt")).query(
+            "CREATE (p:Point {id:'pt-pt', content:'s', pointKind:'claim'})")
+        ns = "team_team_pt_g_c1"
+        reg.query("CREATE (g:Graph {id:'g_c1', org_id:'team_pt', kind:'custom',"
+                  " namespace:$ns, status:'active'})", params={"ns": ns})
+        proj.db.select_graph(ns).query(
+            "CREATE (p:Point {id:'pt-c1', content:'c', pointKind:'claim'})")
+        store = MemoryStorage()
+
+        import tortoise.backup_sweep as bs_mod
+        from tortoise.graph_storage import GraphStorageReading, _failed_reading
+
+        def _default_fails(p, **kw):
+            name = getattr(p, "graph_name", "")
+            if name == _team_graph("team_pt"):  # the DEFAULT graph fails
+                return _failed_reading(name, 100, 1, "2026-10-07T00:00:00Z",
+                                       "injected default-graph failure")
+            return GraphStorageReading(
+                graph_name=name, total_mb=100.0, samples=100, repeats=1,
+                readings_mb=(100.0,), min_mb=100.0, max_mb=100.0,
+                spread_mb=0.0, indices_mb=None, node_attributes_mb={},
+                ok=True, error=None, measured_at="2026-10-07T00:00:00Z")
+
+        recorded: list = []
+        monkeypatch.setattr(bs_mod, "measure_projection_storage", _default_fails)
+        monkeypatch.setattr(
+            bs_mod, "record_graph_storage",
+            lambda org_id, reading, **kw: recorded.append((org_id, reading)))
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="tortoise.backup_sweep"):
+            r = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                 config=_config())
+        # The backup itself is unaffected — metering never aborts a backup.
+        assert r["results"]["team_pt"]["status"] == "backed_up", r["results"]
+        assert store.list("backups/"), "backup object must still be written"
+
+        # The partial total (100.0 from the custom graph alone) must NOT land.
+        assert recorded == [], (
+            "a PARTIAL measurement must not be recorded — the surviving graphs' "
+            f"sum understates the org. Got: {recorded}")
+        assert "storage metering FAILED" in caplog.text, (
+            "the per-graph failure must be LOUD, not DEBUG-only — that path is "
+            f"how the meter stayed dormant. Got: {caplog.text!r}")
+        # ...and the warning must NAME the graph that failed.
+        assert _team_graph("team_pt") in caplog.text, caplog.text
