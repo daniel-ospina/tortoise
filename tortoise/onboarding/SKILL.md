@@ -578,11 +578,13 @@ cannot reach the graph (never decide against a dead connection):
 
    The local `tortoise-decide` skill labels the SAME option nodes
    `pointKind: option` (its anti-pattern list forbids storing the decision
-   itself as a Point). Both labels are valid and both are OBSERVED: the
-   onboarding `decide-completed` step fires on either `decision` or `option`
-   (`tortoise/mcp_server.py` `DECISION_SHAPED_POINT_KINDS`, #3916). Follow
-   whichever protocol you have — never re-label the nodes to unblock a step
-   that looks open.
+   itself as a Point). `option` is an SDK-registered kind
+   (`tortoise/sdk.py`), not an ONTOLOGY §5 canonical one, and
+   `tortoise_create_point` stores it verbatim — so both labels are accepted,
+   and the server OBSERVES both: the onboarding `decide-completed` step fires
+   on either `decision` or `option` (`tortoise/mcp_server.py`
+   `DECISION_SHAPED_POINT_KINDS`, #3916). Follow whichever protocol you have —
+   never re-label the nodes to unblock a step that looks open.
 
    **Calibration is automatic (#2199) — no promote/calibrate chores.**
    Decision parts are HUMAN-authored judgment, so they are born LIVE with an

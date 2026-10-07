@@ -405,12 +405,14 @@ rows:
   proposed: false
   exemption: false
   # PR #4173 (#3926 typed-error guard), PR #3949 (#3784 fail-closed decision
-  # observation) and #3916 (the observation accepts BOTH decide-protocol
-  # pointKinds) all changed the implementation served as `tortoise_create_point`.
-  # The merged implementation carries all three, at 068bffeb250a7729; no tool was
-  # added, removed or renamed and the callable's job is unchanged, so the
-  # recorded approvals stand.
-  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
+  # observation) and PR #7651 (#3916: the observation accepts BOTH
+  # decide-protocol pointKinds) each changed the implementation served as
+  # `tortoise_create_point`; the merged implementation carries all three, at
+  # 068bffeb250a7729. No tool was added, removed or renamed. #7651 IS a
+  # behaviour change — the observation now fires on `option` as well as
+  # `decision` — so its own approval is appended rather than assumed; the earlier
+  # two approved the narrower `decision`-only observation, not this one.
+  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina, #7651 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary

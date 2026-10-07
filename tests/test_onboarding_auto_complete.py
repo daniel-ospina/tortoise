@@ -518,14 +518,36 @@ class TestDecideProtocolKinds:
     | a criterion alone (a reason, no choice) | `criterion` | no       |
     | an evidence point alone (a finding)     | `evidence`  | no       |
     | the setup prompt's point (#3784)        | `statement` | no       |
+    | a `vision`/`plan` write                 | `vision`    | no       |
+    | a human approval                        | `humanApproval` | no   |
+
+    The `decision` and `statement` rows restate coverage that exists in
+    ``TestCallSiteObservation``; they are kept here because that redundancy is
+    the table's point — the acceptance criterion is a SINGLE self-contained
+    truth table over both protocols, and a reader must not have to reassemble
+    it from two classes.
     """
 
-    def test_the_observed_set_is_exactly_the_two_protocol_labels(self):
-        """Pins the widening to the two documented labels. A re-narrowing (the
-        #3916 false negative) and a reflexive widening to the whole
-        ``sdk.DECIDE_PART_KINDS`` / ``DECISION_EVIDENCE_POINT_KINDS`` set (the
-        #3784 false positive, which would fire on a bare reason) both red."""
-        assert {"decision", "option"} == mcp.DECISION_SHAPED_POINT_KINDS
+    def test_the_observed_set_is_protocol_derived(self):
+        """Pins the RELATIONSHIP rather than the literal. The observation
+        accepts the decide-part vocabulary MINUS the two reason kinds, and is a
+        subset of what the repair path (#3912) treats as decision evidence.
+
+        Encoding the derivation (not the two strings) means a new decide kind,
+        or an upstream change to the vocabulary, reds HERE and forces a
+        decision about the observation — instead of silently restoring the
+        #3916 false negative or, worse, an automatic widening to a kind that is
+        a reason.
+        """
+        from tortoise.onboarding.state import DECISION_EVIDENCE_POINT_KINDS
+        from tortoise.sdk import DECIDE_PART_KINDS
+        assert (DECIDE_PART_KINDS - {"criterion", "evidence"}
+                == mcp.DECISION_SHAPED_POINT_KINDS)
+        assert DECISION_EVIDENCE_POINT_KINDS >= mcp.DECISION_SHAPED_POINT_KINDS
+        # The two exclusions are REASONS, not choices — named here as well as
+        # asserted behaviourally in the negative rows below.
+        assert "criterion" not in mcp.DECISION_SHAPED_POINT_KINDS
+        assert "evidence" not in mcp.DECISION_SHAPED_POINT_KINDS
 
     def test_onboarding_protocol_decision_write_observes_a_decision(
             self, handler_env):
@@ -550,12 +572,15 @@ class TestDecideProtocolKinds:
             "a decision recorded by the `tortoise-decide` protocol was not "
             "observed — the #3916 false negative")
 
-    @pytest.mark.parametrize("kind", ["criterion", "evidence", "statement"])
+    @pytest.mark.parametrize("kind", ["criterion", "evidence", "statement",
+                                      "vision", "plan", "humanApproval"])
     def test_a_reason_or_plain_point_observes_no_decision(self, handler_env,
                                                           kind):
-        """The other direction: a reason is not a choice, and the setup
-        prompt's plain point is the #3784 defect — neither may claim a
-        decision, or the fix would be "completed unconditionally"."""
+        """The other direction. A reason is not a choice; the setup prompt's
+        plain point is the #3784 defect; and a `vision`/`plan`/`humanApproval`
+        write is in the storage-ROUTING set (`DECISION_POINT_KINDS`) but is not
+        a decide-protocol option write — none may claim a decision, or the fix
+        would be "completed unconditionally" (or "for the routing set")."""
         sdk, recorded = handler_env
         res = mcp.tortoise_create_point(kind, f"{kind} content")
         assert "error" not in res, res
@@ -564,23 +589,59 @@ class TestDecideProtocolKinds:
             f"a bare `{kind}` write claimed a decision — a reason (or a plain "
             "point) is not a decision")
 
+    @pytest.mark.parametrize(("kind", "observed"),
+                             [("Option", True), (" OPTION ", True),
+                              ("Decision", True), (" Criterion ", False)])
+    def test_the_kind_match_is_normalized(self, handler_env, kind, observed):
+        """The match is `str(kind).strip().lower()` over the PERSISTED kind.
+        `_FakeSDK` echoes the requested spelling verbatim — as the graph does,
+        since `register_kind` only WARNS and the store keeps the caller's
+        spelling — so this reds if the normalization is dropped."""
+        sdk, recorded = handler_env
+        res = mcp.tortoise_create_point(kind, f"{kind} content")
+        assert "error" not in res, res
+        assert sdk.calls and sdk.calls[0][1] == kind
+        assert recorded == [{"decision_observed": observed}]
+
+    def test_a_non_dict_write_result_falls_back_to_the_requested_kind(
+            self, stdio_mode, monkeypatch):
+        """A success result that is not a dict carries no recorded kind, so the
+        observation falls back to the REQUESTED one — the `else kind` branch.
+        Without it a non-dict success would raise in the caller."""
+        sdk = _FakeSDK()
+        monkeypatch.setattr(mcp, "_get_org_sdk", lambda: sdk)
+        recorded: list[dict] = []
+        monkeypatch.setattr(mcp, "_maybe_onboarding_auto_complete",
+                            lambda **kw: recorded.append(dict(kw)))
+        sdk.create_point = lambda kind, content, **kw: "ok"
+        res = mcp.tortoise_create_point("option", "Option A")
+        assert res == "ok", res
+        assert recorded == [{"decision_observed": True}]
+
     def test_observation_follows_the_persisted_option_kind(self, stdio_mode,
                                                            monkeypatch):
-        """Same persisted-kind rule as the `decision` case: a handler that
-        normalizes ` Option ` still observes the option."""
+        """A handler that persists a DIFFERENT kind than the request is
+        believed over the request — both ways round."""
         sdk = _FakeSDK()
         monkeypatch.setattr(mcp, "_get_org_sdk", lambda: sdk)
         recorded: list[dict] = []
         monkeypatch.setattr(mcp, "_maybe_onboarding_auto_complete",
                             lambda **kw: recorded.append(dict(kw)))
 
-        def _normalized(kind, content, **kwargs):
-            return {"id": "p-3", "pointKind": (kind or "").strip().lower(),
-                    "content": content}
-        sdk.create_point = _normalized
-        res = mcp.tortoise_create_point(" Option ", "Option A")
-        assert "error" not in res, res
-        assert recorded == [{"decision_observed": True}]
+        def _persisting(persisted: str):
+            def _f(kind, content, **kwargs):
+                return {"id": "p-3", "pointKind": persisted,
+                        "content": content}
+            return _f
+
+        # asked for an option, the store recorded something else → no decision
+        sdk.create_point = _persisting("statement")
+        assert "error" not in mcp.tortoise_create_point("option", "asked")
+        # asked for a plain kind, the store recorded an option → a decision
+        sdk.create_point = _persisting("option")
+        assert "error" not in mcp.tortoise_create_point("statement", "asked")
+        assert recorded == [{"decision_observed": False},
+                            {"decision_observed": True}]
 
     def test_option_write_completes_a_self_fork_org_end_to_end(
             self, stdio_mode, monkeypatch, org_ctx):
