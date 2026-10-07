@@ -578,18 +578,18 @@ jobs:
         # this suite's `node --test` passes no `--experimental-strip-types` flag).
         with:
           node-version: '22'
-      - uses: ./.github/actions/install-cpu-torch
       - name: Cache uv + pip dependency caches (#7612)
-        # #7612: the runners are EPHEMERAL (ubuntu-latest), and nothing cached
-        # the dependency caches — so all 17 install sites resolved and downloaded
-        # the full lockfile from cold on every run. Measured baseline: the
-        # `Install package + test extras` step = 26-47s x 17 jobs = 632s = 10.5
-        # job-min per run (run 37547203551).
-        # Why this cannot change coverage: the key is bound to uv.lock, so a lock
-        # change invalidates it, and `uv sync --frozen` still ENFORCES the lock.
-        # A warm cache only supplies already-downloaded artifacts; it cannot
-        # change WHICH versions are installed, so no test can exercise anything
-        # different. Reverting this step costs wall-clock only.
+        # #7612: the runners are EPHEMERAL (ubuntu-latest) and nothing cached the
+        # dependency caches, so every job resolved and downloaded its deps from
+        # cold on every run. This step sits BEFORE install-cpu-torch so that the
+        # LARGER cold download is served from cache too (torch: 140 wheels,
+        # ~3.2 GB, 93-219s per job, per that action's own measurement) — not just
+        # the `Install package + test extras` step it originally targeted
+        # (measured 26-47s x 16 expanded instances, run 37547203551).
+        # Why this cannot change what CI catches: a warm cache only supplies
+        # already-downloaded artifacts. In THIS job `uv sync --frozen` still runs
+        # afterwards and enforces uv.lock, so the installed versions are
+        # unchanged. Reverting this step costs wall-clock only.
         uses: actions/cache@v4
         with:
           path: |
@@ -598,6 +598,7 @@ jobs:
           key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-pip-${{ runner.os }}-
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
@@ -1490,18 +1491,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
-      - uses: ./.github/actions/install-cpu-torch
-      - name: Cache uv + pip dependency caches (#7612)
-        # #7612 — see the matrix job's step of the same name for the full note:
-        # lock-bound key, lock-enforcing `uv sync --frozen`, coverage-neutral.
+      - name: Cache pip dependency caches (#7612)
+        # #7612: ephemeral runners, no dependency cache — every job downloaded
+        # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
+        # (140 wheels, ~3.2 GB) is served from the cache as well.
+        # Coverage-neutral: this job is pip-only — it never reads uv.lock, so
+        # there is no lock enforcement here to weaken (a pre-existing property,
+        # documented in .github/actions/install-cpu-torch/action.yml). pip's
+        # cache is content-addressed: it can only serve the artifact for the URL
+        # pip already resolved, never substitute a different version.
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-pip-${{ runner.os }}-
+            pip-${{ runner.os }}-
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]' build==1.6.0
         # build pinned (#1929 code-review P2): test_pack_shipping_wheel.py's
@@ -1867,18 +1872,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: ./.github/actions/install-cpu-torch
-      - name: Cache uv + pip dependency caches (#7612)
-        # #7612 — see the matrix job's step of the same name for the full note:
-        # lock-bound key, lock-enforcing `uv sync --frozen`, coverage-neutral.
+      - name: Cache pip dependency caches (#7612)
+        # #7612: ephemeral runners, no dependency cache — every job downloaded
+        # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
+        # (140 wheels, ~3.2 GB) is served from the cache as well.
+        # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
+        # content-addressed and cannot substitute a different version.
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-pip-${{ runner.os }}-
+            pip-${{ runner.os }}-
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         # [test,embeddings] — NOT just [test]: the pre-cache step imports
         # sentence_transformers (embeddings extra), and create_point calls
@@ -2241,18 +2247,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: ./.github/actions/install-cpu-torch
-      - name: Cache uv + pip dependency caches (#7612)
-        # #7612 — see the matrix job's step of the same name for the full note:
-        # lock-bound key, lock-enforcing `uv sync --frozen`, coverage-neutral.
+      - name: Cache pip dependency caches (#7612)
+        # #7612: ephemeral runners, no dependency cache — every job downloaded
+        # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
+        # (140 wheels, ~3.2 GB) is served from the cache as well.
+        # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
+        # content-addressed and cannot substitute a different version.
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-pip-${{ runner.os }}-
+            pip-${{ runner.os }}-
+      - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
