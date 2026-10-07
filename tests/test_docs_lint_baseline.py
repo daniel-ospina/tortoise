@@ -1075,6 +1075,37 @@ def test_policy_digest_covers_the_lychee_carrier_files(tmp_path: Path):
     )
     git("commit", "-qam", "json lychee policy")
     assert dlb._config_digest(repo)["package.json"] != before["package.json"]
+    # `Cargo.toml` carries TWO sections lychee reads: its loader prefers
+    # `[package.metadata.lychee]` and FALLS BACK to `[workspace.metadata.lychee]`,
+    # so digesting only the first would let a workspace-level `exclude` change the
+    # link policy with the map unmoved (#7542 review round 6) — latent while no
+    # root `Cargo.toml` is tracked, which is exactly why it needed a test.
+    cargo = repo / "Cargo.toml"
+    cargo.write_text(
+        '[package]\nname = "demo"\nversion = "0.1.0"\n\n'
+        '[workspace.metadata.lychee]\nexclude = ["^https://example.invalid"]\n',
+        encoding="utf-8",
+    )
+    git("add", "-A")
+    git("commit", "-qm", "cargo workspace lychee policy")
+    with_ws = dlb._config_digest(repo)["Cargo.toml"]
+    # An unrelated edit elsewhere in the carrier is NOT a policy change.
+    cargo.write_text(
+        '[package]\nname = "demo"\nversion = "0.2.0"\n\n'
+        '[workspace.metadata.lychee]\nexclude = ["^https://example.invalid"]\n',
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "cargo bump")
+    assert dlb._config_digest(repo)["Cargo.toml"] == with_ws
+    # MOVING the policy into the OTHER section IS one, even though the section's
+    # text is byte-identical — the two sections are digested separately.
+    cargo.write_text(
+        '[package]\nname = "demo"\nversion = "0.2.0"\n\n'
+        '[package.metadata.lychee]\nexclude = ["^https://example.invalid"]\n',
+        encoding="utf-8",
+    )
+    git("commit", "-qam", "cargo package lychee policy")
+    assert dlb._config_digest(repo)["Cargo.toml"] != with_ws
 
 
 def _extract_suppression_guard(run: str) -> str:
@@ -1262,8 +1293,10 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     assert "mdlint-pr.txt" in changed_lint
     main_lint = _by_name("Markdownlint (main health, changed files)")["run"]
     assert "mdlint-mh.txt" in main_lint
-    for lint in (changed_lint, main_lint):
-        assert ".rc" not in lint, "an exit-code file is meaningless under xargs (#7435)"
+    # (No `assert ".rc" not in lint` here. No step writes a `.rc` file — the status
+    # is captured in a shell variable — so that assert could not fail and only read
+    # as if it pinned the property; a vacuous assert is worse than none. #7542
+    # review round 6 called it and this removes it rather than re-wording it.)
 
     for name in ("Link check (changed files)", "Link check (main health, changed files)"):
         with_block = _by_name(name)["with"]

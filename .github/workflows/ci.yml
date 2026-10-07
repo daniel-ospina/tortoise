@@ -757,7 +757,13 @@ jobs:
           # to cli2 either) and alphanumerics (prose that NAMES the directive
           # stays a non-failure), and it matches zero characters, so the bare
           # form is unaffected.
-          if ! git diff --find-renames -U0 "${BASE_SHA}...HEAD" -- '*.md' \
+          #
+          # `--text` because git treats a `.md` containing a NUL byte as BINARY
+          # and prints `Binary files ... differ` with no `+` lines at all, while
+          # cli2 still lints that file and honours a directive inside it
+          # (measured): without this flag the guard was blind and the suppression
+          # silent.
+          if ! git diff --find-renames -U0 --text "${BASE_SHA}...HEAD" -- '*.md' \
               > "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
@@ -882,9 +888,10 @@ jobs:
           # including why the gap class is `[^[:alnum:]>-]*` and not
           # `[[:space:]]*`): the grep reads a FILE, not a pipe, so a large diff
           # cannot skip it by SIGPIPE; it is case-insensitive like cli2's own
-          # parser; and `--find-renames` keeps a pure rename from reading as an
-          # added file.
-          if ! git diff --find-renames -U0 HEAD^ HEAD -- '*.md' \
+          # parser; `--find-renames` keeps a pure rename from reading as an
+          # added file; and `--text` keeps a NUL-bearing `.md` from reading as a
+          # binary diff with no `+` lines to grep.
+          if ! git diff --find-renames -U0 --text HEAD^ HEAD -- '*.md' \
               > "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1

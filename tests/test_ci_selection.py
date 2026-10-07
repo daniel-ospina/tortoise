@@ -1010,7 +1010,7 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
 
 def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     # #7435 review P1: tools/docs_lint_baseline.py owns
-    # tests/test_docs_lint_baseline.py (`core`), whose 33 cases pin the differ's
+    # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's
     # fail-CLOSED behaviour — the unreadable report, the missing `Summary:`, the
     # count mismatch, the multiset semantics, the generated-file fix target.
     #
@@ -1030,30 +1030,46 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
-def test_nested_linter_policy_file_selects_a_surface_not_tier1():
-    # #7435 review P2: cli2 reads a `.markdownlint*` config from ANY directory on
-    # the path to a linted file and lets a more specific config OVERRIDE the repo
-    # one, so `docs/.markdownlint.json` turns a rule off for every doc beneath it.
-    # That path was DROPPED — `docs/` is a NON_PYTHON_PREFIXES entry and the
-    # basename matches no SOURCE_PATTERNS row — so a policy-only PR selected the
-    # 31-file tier-1 smoke set, where
-    # `test_committed_policy_map_matches_the_checkout` never runs, while the `docs`
-    # job's differ steps were skipped for want of a changed `.md`. The policy
-    # change then landed with the snapshot unmoved.
+def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
+    # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
+    # config from ANY directory on the path to a linted file, and a more specific
+    # config OVERRIDES the repo one — so `docs/.markdownlint.json` turns a rule off
+    # for every doc beneath it, and `battery/.markdownlint.json` does the same for
+    # `battery/`.
     #
-    # Keeping the path sends it down the existing fail-closed `unknown` branch,
-    # which selects the FULL matrix — the behaviour a ROOT policy file already
-    # had, so this ADDS coverage and narrows none.
-    # Mutation check: dropping the `_is_linter_policy_path` claim makes both
-    # nested cases come back surfaces=[], full=False.
-    for path in ("docs/.markdownlint.json", "website/.markdownlintrc"):
+    # TWO silent routes out of the gate had to be closed, and the first fix closed
+    # only one. (a) `_keep_changed` DROPPED the path — `docs/` is a
+    # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the basename —
+    # so the PR selected the 31-file tier-1 smoke set. (b) Keeping the path is not
+    # enough: the match loop still CLAIMED it under a surface-owned prefix
+    # (`battery/.markdownlint.json` → ['battery'], `tools/longmem_eval/...` →
+    # ['eval']), and neither of those legs runs
+    # `tests/test_docs_lint_baseline.py` — whose committed-policy pin is the only
+    # thing that makes a config edit move the snapshot. A config-only PR also skips
+    # the `docs` job's differ steps (there is no changed `.md`), so the edit landed
+    # with the snapshot unmoved: exactly the invariant
+    # `docs/ci/docs-lint-baseline.md` promises.
+    #
+    # Mutation check: each half fails on its own. Dropping the
+    # `_is_linter_policy_path` claim in `_keep_changed` makes the `docs/` and
+    # `website/` cases tier-1, and dropping the early `_full_selection` return in
+    # `select()` makes every surface-owned case select its surface instead of ALL.
+    for path in (
+        "docs/.markdownlint.json",                 # dropped by the prefix fallback
+        "website/.markdownlintrc",                 # dropped by the prefix fallback
+        "battery/.markdownlint.json",              # CLAIMED by a surface
+        "battery/.lycheeignore",                   # CLAIMED by a surface
+        "battery/lychee.toml",                     # CLAIMED by a surface
+        "tools/longmem_eval/.markdownlint.json",   # CLAIMED as `eval`
+        ".markdownlint-cli2.jsonc",                # root: already full
+        "lychee.toml",                             # root: already full
+    ):
         r = _sel([path])
         assert r["full"] is True, (path, r)
         assert r["test_files"] == "ALL", (path, r)
-    # A ROOT policy file keeps the full matrix it already selected.
-    assert _sel([".markdownlint-cli2.jsonc"])["full"] is True
     # An ordinary nested doc is still docs-only (tier 1) — not swept into `full`.
     assert _sel(["docs/notes.md"])["surfaces"] == []
+    assert _sel(["docs/notes.md"])["full"] is False
 
 
 def test_queue_resweep_tool_change_selects_core_not_tier1():

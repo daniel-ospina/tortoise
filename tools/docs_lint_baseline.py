@@ -252,19 +252,32 @@ _PROGRAMMATIC_CONFIG_NAMES = frozenset({
 _PLAIN_LIST_CONFIG_NAMES = frozenset({".markdownlintignore", ".lycheeignore"})
 
 # lychee 0.24.2 does NOT take its policy from `lychee.toml` alone: it also
-# auto-loads a section out of `Cargo.toml` (`[package.metadata.lychee]`),
-# `pyproject.toml` (`[tool.lychee]`) and `package.json` (`"lychee"`) in its
-# WORKING DIRECTORY — which is the repo root, because `_run_lychee` runs there.
-# Digesting those files WHOLE would red the required check on every dependency
-# bump, which is not a policy change, so only the lychee section is digested —
-# and a MISSING section digests to a fixed marker, so ADDING one is a policy
-# change too (measured: `[tool.lychee] exclude = ["..."]` in the tracked
-# `pyproject.toml` emptied the link half while every digested file stayed
-# byte-identical, and the differ then reported `0 new`).
-LYCHEE_CARRIERS: dict[str, tuple[str, ...]] = {
-    "Cargo.toml": ("package", "metadata", "lychee"),
-    "pyproject.toml": ("tool", "lychee"),
-    "package.json": ("lychee",),
+# auto-loads a section out of `Cargo.toml`, `pyproject.toml` (`[tool.lychee]`)
+# and `package.json` (`"lychee"`) in its WORKING DIRECTORY — which is the repo
+# root, because `_run_lychee` runs there. Digesting those files WHOLE would red
+# the required check on every dependency bump, which is not a policy change, so
+# only the lychee sections are digested — and a MISSING section digests to a
+# fixed marker, so ADDING one is a policy change too (measured:
+# `[tool.lychee] exclude = ["..."]` in the tracked `pyproject.toml` emptied the
+# link half while every digested file stayed byte-identical, and the differ then
+# reported `0 new`).
+#
+# A carrier can hold MORE THAN ONE section lychee reads, so the value is a tuple
+# of key PATHS and every one of them is digested. `Cargo.toml` is the case that
+# matters: its loader prefers `[package.metadata.lychee]` and FALLS BACK to
+# `[workspace.metadata.lychee]` (lychee 0.24.2
+# `lychee-bin/src/config/loaders/cargo_toml.rs`, whose own
+# `test_load_workspace_config` covers the fallback), so digesting the package
+# section alone would let a workspace-level `exclude` change lychee's policy
+# without moving the map — the same `0 new` fail-open this module exists to
+# prevent, and it would be invisible because no root `Cargo.toml` is tracked yet.
+LYCHEE_CARRIERS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "Cargo.toml": (
+        ("package", "metadata", "lychee"),
+        ("workspace", "metadata", "lychee"),
+    ),
+    "pyproject.toml": (("tool", "lychee"),),
+    "package.json": (("lychee",),),
 }
 _NO_LYCHEE_SECTION = hashlib.sha256(b"<no lychee section>").hexdigest()
 
@@ -497,13 +510,20 @@ def _lychee_section_digest(path: Path, rel: str) -> str:
         raise FailClosed(
             f"cannot read {rel} to attest the lychee policy it may carry: {exc}"
         ) from exc
-    node: object = data
-    for key in LYCHEE_CARRIERS[rel]:
-        node = node.get(key) if isinstance(node, dict) else None
-    if node is None:
+    # EVERY section the carrier may hold, in a fixed order: a carrier with NO
+    # lychee section digests to the marker, and one holding one section is still
+    # distinguished from one holding another — so adding, removing or editing any
+    # of them moves the digest.
+    sections: list[object] = []
+    for keys in LYCHEE_CARRIERS[rel]:
+        node: object = data
+        for key in keys:
+            node = node.get(key) if isinstance(node, dict) else None
+        sections.append(node)
+    if all(section is None for section in sections):
         return _NO_LYCHEE_SECTION
     return hashlib.sha256(
-        json.dumps(node, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(sections, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 

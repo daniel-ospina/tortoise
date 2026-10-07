@@ -129,8 +129,10 @@ turn a rule off. The snapshot therefore records a content digest of **every
 tracked file with one of those basenames, at any depth**, keyed by repo path — so
 *adding* a config is a policy change too. lychee does not take its policy from
 `lychee.toml` alone: it also auto-loads `[tool.lychee]` from `pyproject.toml`,
-`"lychee"` from `package.json` and `[package.metadata.lychee]` from `Cargo.toml`,
-so those sections are digested too — only the section, never the whole file,
+`"lychee"` from `package.json`, and from `Cargo.toml` both
+`[package.metadata.lychee]` and its **fallback** `[workspace.metadata.lychee]`
+(its loader prefers the former and reads the latter only when that is absent), so
+those sections are digested too — only the sections, never the whole file,
 because a dependency bump is not a policy change, while a *missing* section is a
 fixed marker, so adding one still fails closed. The whole map is **required**:
 `check` fails closed if the field is absent, because a snapshot that simply
@@ -147,14 +149,21 @@ honours (a JSONC `\u` escape, a YAML flow mapping), and a config that cannot be
 parsed fails closed. Separately, both `docs` paths reject a
 changed `.md` that **adds** a `markdownlint-disable` directive — a suppressed
 finding is not a fixed one. A pre-existing directive is part of the baselined
-debt and is unaffected; that guard greps the added-markdown diff read from a
-**file**, never a pipe, because `grep -q` exits at its first match and the
+debt and is unaffected: the guard reacts only to **added** lines, and when a
+directive is merely *moved*, git's diff over a commit RANGE aligns it as
+unchanged and moves the surrounding lines instead — measured in four
+arrangements, and note that a `git diff --no-index` comparison does NOT behave
+this way and will mislead you. The guard greps the added-markdown diff read from
+a **file**, never a pipe, because `grep -q` exits at its first match and the
 resulting SIGPIPE under `set -o pipefail` made the pipeline non-zero — silently
 skipping the guard on a large diff. It matches **case-insensitively**, because
 cli2's own directive parser does (an uppercase `MARKDOWNLINT-DISABLE` comment
-suppresses a finding just as the lowercase form does), and it runs with rename
+suppresses a finding just as the lowercase form does). It runs with rename
 detection on, so a pure `git mv` of a file that already carries a directive is
-not mistaken for an added one. It is a **heuristic over added lines**, and it
+not mistaken for an added one, and with `--text`, so a `.md` that git would
+otherwise read as BINARY (a NUL byte) cannot hide an added directive behind a
+`Binary files ... differ` line with no added lines to grep. It is a **heuristic
+over added lines**, and it
 fails loud rather than quiet. It matches the added line even when the directive
 sits inside a code FENCE, and that is NOT a false positive: cli2 honours a fenced
 directive too (measured: a `markdownlint-disable MD001` comment inside a fenced

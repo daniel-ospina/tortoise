@@ -741,7 +741,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_docs_lint_baseline.py, which is `core`-registered, but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
              # SOURCE_PATTERNS entry matches the tool — so a differ-only change
-             # selected NO surface and dropped to tier-1 smoke, and the 33 tests
+             # selected NO surface and dropped to tier-1 smoke, and the 58 cases
              # covering the differ's fail-closed paths never ran on the very PR
              # that can make the differ fail OPEN. Same #1349/#3332/#3616
              # silent-drop class as tools/queue_resweep.py above. Pinned by
@@ -1217,6 +1217,22 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
     # Shared module -> full
     if any(c.startswith(SHARED_MODULES) for c in changed):
+        return _full_selection(manifest, slow)
+
+    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
+    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
+    # the selection must be the WHOLE matrix — the only selection containing
+    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
+    # a config edit move the snapshot.
+    #
+    # `_keep_changed` above only stops such a path being DROPPED as an unknown
+    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
+    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
+    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
+    # pin — so the policy edit landed with the snapshot unmoved, which is the very
+    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
+    # "this path's blast radius is not its own directory".
+    if any(_is_linter_policy_path(c) for c in changed):
         return _full_selection(manifest, slow)
 
     matched: set[str] = set()
