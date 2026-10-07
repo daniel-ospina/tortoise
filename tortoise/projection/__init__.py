@@ -2233,7 +2233,21 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = []
             for i, row in enumerate(value):
-                walked = _walk(row, f"{path}[{i}]", "map", _depth + 1)
+                # A row is a MAP only when it IS one. `UNWIND` does NOT require
+                # maps: `UNWIND $ids AS pid` with a list of id STRINGS is the
+                # shape `TortoiseSDK._mark_dirty` uses, and
+                # `UNWIND $names AS name` the shape longmem's ingest uses.
+                # Passing "map" for every row sent a scalar row into the
+                # shape-mismatch degrade, so every id became null, the MATCH
+                # below matched nothing, and `ep_dirty` was never set — worse,
+                # an EXISTING `ep_dirty = true` was cleared. Measured both ways
+                # against the raw handle. A scalar row is a value position.
+                walked = _walk(
+                    row,
+                    f"{path}[{i}]",
+                    "map" if isinstance(row, dict) else None,
+                    _depth + 1,
+                )
                 if walked is not row:
                     changed = True
                 out.append(walked)
@@ -3158,7 +3172,13 @@ def _value_ok(val, _depth: int = 0) -> bool:
     if isinstance(val, (list, tuple)):
         if _depth >= _PERSISTABLE_MAX_DEPTH:
             return False
-        return all(_value_ok(v, _depth + 1) for v in val)
+        # `None` is EXCLUDED at leaf level here, though `_annotator_value_ok`
+        # accepts it: a TOP-LEVEL null clears the property (and replay must
+        # match the live write by clearing it), but FalkorDB REFUSES a null
+        # INSIDE a stored array ("Property values can only be of primitive
+        # types or arrays of primitive types", measured). `create_point(...,
+        # tags=["a", None])` aborted on the raw handle for exactly this.
+        return all(v is not None and _value_ok(v, _depth + 1) for v in val)
     return _annotator_value_ok(val) or _engine_coerces(val)
 
 

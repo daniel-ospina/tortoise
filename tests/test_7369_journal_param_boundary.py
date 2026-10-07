@@ -1325,3 +1325,40 @@ def test_a_SHAPE_mismatch_degrades_instead_of_being_forwarded():
     for bad in ([1, 2], "abc", 7):
         assert _journal_safe_params({"p": bad}, write)["p"] is None, bad
     assert _journal_safe_params({"p": {"a": 1}}, write)["p"] == {"a": 1}
+
+
+def test_an_UNWIND_list_of_SCALARS_is_kept_not_nulled():
+    """#7406 review: the regression the shape guard introduced.
+
+    `UNWIND` does NOT require maps — measured, the engine accepts `[1,2,3]`,
+    nested lists and a bare map. The rows branch passed shape `"map"` for EVERY
+    row, so a scalar row fell into the shape-mismatch degrade and became null.
+    That is the exact shape `TortoiseSDK._mark_dirty` uses
+    (`UNWIND $ids AS pid MATCH (n:Point {id: pid}) … SET n.ep_dirty = true`,
+    sdk.py with `ids` a list of id strings) and longmem's `ingest_v2` uses for
+    `UNWIND $names AS name`. Measured end-to-end through `_GuardedGraph`
+    against the raw handle: every `n.ep_dirty` was left null, an existing
+    `ep_dirty = true` was CLEARED, and the in-memory mirror was pruned — EP
+    recompute stopped silently. A row is a map only when it IS one.
+    """
+    unwind = "UNWIND $rows AS r RETURN r"
+    for kept in (["pt-1", "pt-2"], [1, 2, 3], [[1, 2], [3, 4]], [{"id": "a"}]):
+        assert _journal_safe_params({"rows": kept}, unwind)["rows"] == kept, kept
+    # ...and a bad leaf still degrades ALONE, leaving its siblings intact.
+    assert _journal_safe_params({"rows": [1, b"x"]}, unwind)["rows"] == [1, None]
+
+
+def test_a_NULL_inside_an_ARRAY_is_refused_because_the_engine_rejects_it():
+    """#7406 review: `_annotator_value_ok(None)` is True, which is right at the
+    TOP level (a null clears the property, and replay must match), but
+    FalkorDB REFUSES a null INSIDE a stored array — measured: "Property values
+    can only be of primitive types or arrays of primitive types" — so
+    `create_point(..., tags=["a", None])` aborted on the raw handle. `_value_ok`
+    is now the single stated home for this rule and must implement it.
+    """
+    write = "MATCH (n:Point {id:$id}) SET n += $p RETURN count(n)"
+    for arr in ([None], ["a", None], [[None]]):
+        assert _value_ok(arr) is False, arr
+        assert _journal_safe_params({"p": {"v": arr}}, write)["p"]["v"] is None
+    assert _value_ok(None) is True  # top level still clears the property
+    assert _value_ok(["a", "b"]) is True
