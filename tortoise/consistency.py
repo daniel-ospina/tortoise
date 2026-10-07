@@ -1084,6 +1084,25 @@ def _fold_journal(events: list[dict]) -> dict:
 #     states it): a node the GRAPH holds with no journal record is not a
 #     divergence here, because several in-tree paths write the projection
 #     without journaling (e.g. `sdk`'s direct `proj.apply`).
+#   * ACCEPT/REFUSE parity is JOURNAL-WIDE; CONTENT parity is not, for one
+#     DEFERRED fold. `rebuild_all` folds an `ObjectSuperseded` in a trailing
+#     sweep, so a supersede the sweep resolves differently from a chronological
+#     inline fold — a FORWARD reference (its `ObjectRegistered` later in the
+#     journal), or a delete-then-recreate (the sweep folds the LAST
+#     incarnation) — is folded there. The apply-based engines (`rebuild`,
+#     `recover_from_log`, `backup.restore`) fold it inline, chronologically,
+#     and leave the final node `live`. All the engines therefore AGREE on
+#     accept/refuse, but `check_consistency` run against an apply-replayed
+#     graph reports `divergence="content"` for that one field where the same
+#     journal checked against a `rebuild_all` graph is `ok/None`. This is the
+#     SAME class as the deliberately-deferred
+#     `DirectEdgeCreated`/`DirectEdgeRepoint` folds (A10 #1048): a STATED
+#     bound, not a hidden caveat. Closing it means re-implementing the sweep's
+#     after-creations pass + #4743 state re-fold inside the apply engines —
+#     the larger change this lane declines in favour of one canonical sweep.
+#     The invariant this leg enforces is accept/refuse; the content bound is
+#     named here, in the `apply()` branch's STATED PARITY BOUND comment, and in
+#     the PR body.
 _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
     (label, _ENTITY_ID_PROP[label])
     for label in ("Object", "Subject", "Event")
@@ -1139,23 +1158,26 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # #3585 re-review (cycle 2, FIX B): `rebuild_all` DEFERS the
     # `ObjectSuperseded` fold to a sweep AFTER every Object-creation event AND
     # every delete, so a supersede that PRECEDES its own `ObjectRegistered` is
-    # legitimately foldable there. This reference fold is chronological, so it
-    # must ask the JOURNAL which Objects exist at the END before it treats an
-    # unresolvable supersede as a miss — the entity-leg analogue of
-    # `journal_point_creation_ids`. Resolving a forward-referenced supersede
-    # when its target is created is what `rebuild_all`'s deferred sweep
-    # produces for the field this leg compares (`status`); a chronological
-    # refusal instead reds a journal the graph reproduces exactly (and invents
-    # a bogus status divergence).
-    surviving_ids, surviving_names = journal_object_surviving_keys(events)
+    # legitimately foldable there. This reference fold therefore resolves EVERY
+    # supersede in ONE trailing sweep against the journal's END index — the
+    # entity-leg analogue of `journal_point_creation_ids`.
+    #
+    # #5285 cycle-4 (FIX 1): there is exactly ONE resolution path. An earlier
+    # cut applied non-held supersedes INLINE at their own seq and re-evaluated
+    # only the held ones; an inline resolve is never re-examined, so a later
+    # delete+recreate left the reference fold at `superseded` while
+    # `rebuild_all`'s sweep folds the LAST incarnation (a false `content`
+    # divergence on a correct journal). Deferring EVERY supersede subsumes the
+    # forward-reference case and removes the second path that kept drifting.
+    surviving_ids, _surviving_names = journal_object_surviving_keys(events)
     # Ids the journal HARD-DELETES anywhere — the named
     # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries.
     hard_deleted_objects = journal_object_hard_deleted_ids(events)
-    # Supersedes naming an Object created LATER, held until that creation
-    # materializes it.
-    pending: list[tuple[int, dict]] = []
+    # EVERY `ObjectSuperseded`, in journal order, resolved by the ONE trailing
+    # sweep below — never applied inline.
+    supersede_events: list[tuple[int, dict]] = []
     # The seq of the last `status`-writing state op per entity, so the
-    # FINAL-STATE pending sweep honours the sweep's #4743 ordering (FIX 2).
+    # trailing sweep honours `rebuild_all`'s #4743 ordering.
     last_status_seq: dict = {}
 
     def _object_target(oid, oname):
@@ -1166,8 +1188,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         or every LATER zero-carrier supersede of a once-ambiguous name is
         silently exempted — passing a journal `rebuild_all` refuses.
 
-        #5285 cycle-3 (FIX 1): a `status != "superseded"` predicate here
-        gated target EXISTENCE, not just the ambiguity decision. The graph
+        #5285 cycle-3: a `status != "superseded"` predicate here gated
+        # target EXISTENCE, not just the ambiguity decision. The graph
         fold matches a name-only supersede on NAME and re-folds
         UNCONDITIONALLY (`_fold_object_superseded`, `cas=False`), so a SINGLE
         carrier is resolvable whether or not it is already terminal: a SECOND
@@ -1180,7 +1202,19 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         decision: `EXISTENCE` is "any carrier at all", and one already-terminal
         carrier resolves.
         """
-        if isinstance(oid, str) and ("Object", oid) in entities:
+        if (isinstance(oid, str) and ("Object", oid) in entities
+                and oid in surviving_ids):
+            # #5285 cycle-4 (FIX 2): the graph MERGEs Objects by NAME, so two
+            # ids sharing a name collapse into ONE node carrying the LAST id —
+            # `MATCH (o:Object {id:$oid})` then folds 0 rows for the
+            # collapsed-away id and every replay engine REFUSES
+            # (`object-superseded-miss`). A bare `entities` membership test
+            # recorded NO miss (the collapsed-away id is still in the
+            # reference index), so `check_consistency` passed a journal the
+            # graph refuses — the fail-open this lane exists to remove. An id
+            # is a live carrier only when it is the SURVIVING id for its name
+            # (the same journal-end key set the apply engines' refusal gate
+            # reads); otherwise fall through to the name branch / miss path.
             return ("Object", oid), False
         if isinstance(oname, str) and oname:
             carriers = [
@@ -1198,11 +1232,6 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     return live[0], False
                 return None, True
         return None, False
-
-    def _will_be_created(oid, oname) -> bool:
-        return ((isinstance(oid, str) and oid in surviving_ids)
-                or (isinstance(oname, str) and bool(oname)
-                    and oname in surviving_names))
 
     def _object_hard_deleted(oid) -> bool:
         return isinstance(oid, str) and oid in hard_deleted_objects
@@ -1290,8 +1319,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 status = state.get("status")
                 if isinstance(status, str) and status:
                     rec["status"] = status
-                    # Remember WHERE a status write sits so the FINAL-STATE
-                    # pending sweep below honours `rebuild_all`'s #4743
+                    # Remember WHERE a status write sits so the trailing
+                    # supersede sweep below honours `rebuild_all`'s #4743
                     # un-clobber (a state op AFTER the deferred supersede
                     # wins); see that loop.
                     last_status_seq[(label, eid)] = seq
@@ -1299,47 +1328,20 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 if isinstance(newname, str) and newname:
                     rec["name"] = newname
         elif t == "ObjectSuperseded":
-            oid, oname = ev.get("id"), ev.get("name")
-            target, ambiguous_here = _object_target(oid, oname)
-            if target is not None:
-                entities[target]["status"] = "superseded"
-            elif ambiguous_here:
-                # Genuine >1-carrier ambiguity: the fold's STATUS resolution
-                # is heuristic, so the status leg is excluded (and reported).
-                # The carve-out is LOCAL to THIS event (FIX C) — never the
-                # never-cleared `ambiguous` set, which would silently exempt
-                # every later zero-carrier supersede of a once-ambiguous name.
-                ambiguous.add(oname)
-            elif _will_be_created(oid, oname):
-                # Forward reference (FIX B): `rebuild_all`'s deferred sweep
-                # folds it, so it must NOT be refused here. Hold it until the
-                # target's creation event materializes it.
-                pending.append((seq, ev))
-            elif _object_hard_deleted(oid):
-                # Named exemption: the journal HARD-DELETED the target, so the
-                # deferred sweep's 0-row match is legitimate
-                # (`supersede-target-deleted`), never a miss.
-                pass
-            else:
-                # Genuinely unresolvable: an id no journaled registration
-                # created (and no usable name) matched nothing in the graph
-                # fold either, which records `object-superseded-miss` and
-                # fails — so the reference fold must refuse too, or
-                # `check_consistency` passes a journal `rebuild_all` refuses.
-                _record_supersede_miss(seq, ev)
-    # ── #5285 cycle-3 (FIX 2): resolve the HELD forward references against
-    # the FINAL entity index, not only at creation events.
+            # #5285 cycle-4 (FIX 1): defer EVERY supersede to the ONE trailing
+            # sweep — never apply it here. See the sweep below.
+            supersede_events.append((seq, ev))
+    # ── #5285 cycle-4 (FIX 1): the ONE trailing supersede sweep.
     #
-    # `pending` was consulted exclusively from `_resolve_pending` (a creation
-    # event) and flushed as a miss otherwise. That is chronological, but
-    # `rebuild_all`'s sweep resolves a supersede against the END state — so a
-    # target materialized WITHOUT a creation event, by an `op=rename` that
-    # moved an existing Object ONTO the held name, resolved there and was
-    # refused here (a bogus `object-superseded-miss` plus the cycle-2 status
-    # divergence). Resolving after the whole loop covers every way the final
-    # index can acquire the name (rename included) and subsumes the
-    # creation-time call: the same query against the same index, once more at
-    # the end.
+    # EVERY `ObjectSuperseded` resolves here, against the journal's END index —
+    # exactly the query `rebuild_all`'s deferred sweep runs. Nothing is applied
+    # inline: an inline resolve happens at its own seq and is never
+    # re-evaluated, so `[Reg(x,X), Sup(id=x), Del(x), Reg(x,X)]` left the
+    # reference fold `superseded` (the resolve died with the deleted
+    # incarnation) while the sweep folds the LAST incarnation — a false
+    # `content` divergence on a correct journal. Resolving after the whole loop
+    # also subsumes the held-forward-reference case, so there is no second path
+    # to drift from.
     #
     # The `seq > last_status_seq` guard reproduces the sweep's ORDER, not just
     # its membership: `rebuild_all` applies the deferred supersede LAST and
@@ -1348,22 +1350,32 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # at the end unconditionally would clobber it and invent a divergence on a
     # journal the graph folds correctly. A creation's default status is NOT
     # such a write (it precedes the sweep), so it is deliberately not counted.
-    for seq, ev in list(pending):
-        target, ambiguous_here = _object_target(ev.get("id"), ev.get("name"))
+    for seq, ev in supersede_events:
+        oid, oname = ev.get("id"), ev.get("name")
+        target, ambiguous_here = _object_target(oid, oname)
         if target is not None:
             if seq > last_status_seq.get(target, -1):
                 entities[target]["status"] = "superseded"
-            pending.remove((seq, ev))
         elif ambiguous_here:
-            ambiguous.add(ev.get("name"))
-            pending.remove((seq, ev))
-    # Still held: the journal index named the target, but a delete (or a
-    # creation the fold could not read) removed it first. Mirror the deferred
-    # sweep's 0-row classification, carrying the deleted-target exemption.
-    for seq, ev in pending:
-        if _object_hard_deleted(ev.get("id")):
-            continue
-        _record_supersede_miss(seq, ev)
+            # Genuine >1-carrier ambiguity: the fold's STATUS resolution is
+            # heuristic, so the status leg is excluded (and reported). The
+            # carve-out is LOCAL to THIS event — never the never-cleared
+            # `ambiguous` set consulted by later events, which would silently
+            # exempt every later zero-carrier supersede of a once-ambiguous
+            # name.
+            ambiguous.add(oname)
+        elif _object_hard_deleted(oid):
+            # Named exemption: the journal HARD-DELETED the target, so the
+            # deferred sweep's 0-row match is legitimate
+            # (`supersede-target-deleted`), never a miss.
+            pass
+        else:
+            # Genuinely unresolvable: an id no journaled registration leaves
+            # in place (and no usable name) matched nothing in the graph fold
+            # either, which records `object-superseded-miss` and fails — so
+            # the reference fold must refuse too, or `check_consistency`
+            # passes a journal `rebuild_all` refuses.
+            _record_supersede_miss(seq, ev)
     return entities, deleted, ambiguous
 
 
