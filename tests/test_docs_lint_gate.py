@@ -81,6 +81,13 @@ def _step(name: str) -> dict:
     raise AssertionError(f"no step named {name!r} in the `docs` job (#2386)")
 
 
+def _step_by_id(step_id: str) -> dict:
+    for step in _docs_job().get("steps") or []:
+        if step.get("id") == step_id:
+            return step
+    raise AssertionError(f"no step with id {step_id!r} in the `docs` job (#7628)")
+
+
 def _checkout_step() -> dict:
     for step in _docs_job().get("steps") or []:
         if str(step.get("uses", "")).startswith("actions/checkout"):
@@ -310,6 +317,139 @@ def test_base_is_resolved_from_the_base_branch_tip_not_the_merge_base():
             "in the `docs` job — that is the #7628 defect, and using it in a second "
             "place would reintroduce it (#545 DRIFT_BASE_SHA is a separate job)"
         )
+
+
+# ── the base-tip resolver (executed) ─────────────────────────────────────────
+#
+# #7628 review: the resolver's fail-closed behaviour was asserted only by STRING
+# PRESENCE (`"::error::" in code and "exit 1" in code`) while the sibling diff
+# step's body is EXECUTED. That is the text-scan this module exists to replace, and
+# it left the resolver's own discipline unpinned: deleting the load-bearing
+# `SHA="$(git rev-parse …)"` ASSIGNMENT (whose exit status `set -e` propagates) in
+# favour of a nested `echo "sha=$(…)"` — whose status is DISCARDED — kept the suite
+# green. The body is executable offline, so it is executed: the remote is a LOCAL
+# bare repo, so no step of this test touches the network.
+
+BASE_TIP_STEP_ID = "base_tip"
+
+
+def _repo_with_bare_remote(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose `origin` is a LOCAL bare remote, already carrying `main`."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(remote)],
+        check=True,
+        capture_output=True,
+    )
+    repo = _repo(tmp_path)
+    (repo / "seed.md").write_text("# seed\n", encoding="utf-8")
+    sha = _commit(repo, "base")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-q", "origin", "main")
+    return repo, sha
+
+
+def _run_base_tip(
+    tmp_path: Path, repo: Path, base_ref: str | None, shim_dir: Path | None = None
+) -> tuple[subprocess.CompletedProcess, str]:
+    """Run the workflow's real resolver `run:` body inside `repo`.
+
+    `base_ref=None` leaves `BASE_REF` UNSET (not empty) — the other spelling the
+    `${BASE_REF:-}` guard must survive. `shim_dir` is prepended to PATH so a test
+    can make `git` itself misbehave.
+    """
+    body = _step_by_id(BASE_TIP_STEP_ID)["run"]
+    script = tmp_path / "base-tip.sh"
+    script.write_text(body, encoding="utf-8")
+    output = tmp_path / "base-tip-output"
+    output.write_text("", encoding="utf-8")
+
+    env = {key: value for key, value in os.environ.items() if key in ("PATH", "HOME", "LANG")}
+    if shim_dir is not None:
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["GITHUB_OUTPUT"] = str(output)
+    if base_ref is not None:
+        env["BASE_REF"] = base_ref
+
+    proc = subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return proc, output.read_text(encoding="utf-8")
+
+
+def _git_shim_failing(tmp_path: Path, subcommand: str) -> Path:
+    """A PATH shim whose `git <subcommand>` exits 1 and delegates everything else."""
+    real = subprocess.run(["command", "-v", "git"], shell=False, capture_output=True, text=True)
+    resolved = real.stdout.strip() or "git"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "{subcommand}" ]; then exit 1; fi\n'
+        f'exec "{resolved}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return shim_dir
+
+
+def test_base_tip_step_publishes_the_resolved_tip(tmp_path: Path):
+    """Positive control: the resolver fetches the base branch and publishes its tip."""
+    repo, sha = _repo_with_bare_remote(tmp_path)
+    proc, output = _run_base_tip(tmp_path, repo, "main")
+    assert proc.returncode == 0, proc.stderr
+    assert f"sha={sha}" in output, (
+        f"the resolver must publish the base branch TIP as `sha=` (#7628); got {output!r}"
+    )
+
+
+def test_base_tip_step_fails_closed_on_an_empty_ref(tmp_path: Path):
+    """An empty ref must fail LOUDLY, not publish an empty output (#2386 one input over)."""
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    for spelling in ("", None):
+        proc, output = _run_base_tip(tmp_path, repo, spelling)
+        assert proc.returncode != 0, (
+            f"BASE_REF={spelling!r} must fail closed, not leave an empty `sha=` (#7628)"
+        )
+        assert "sha=" not in output, "an empty ref must not publish an output"
+
+
+def test_base_tip_step_fails_closed_when_the_ref_does_not_resolve(tmp_path: Path):
+    """A ref that cannot be fetched takes the step down rather than yielding empty."""
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    proc, output = _run_base_tip(tmp_path, repo, "no-such-branch")
+    assert proc.returncode != 0, proc.stderr
+    assert "sha=" not in output
+
+
+def test_base_tip_step_fails_when_rev_parse_fails_even_though_the_fetch_succeeded(
+    tmp_path: Path,
+):
+    """#7628 review: the ASSIGNMENT is load-bearing, and this is what pins it.
+
+    `SHA="$(git rev-parse …)"` propagates the substitution's exit status under
+    `set -e`, so a failed `rev-parse` fails the STEP; the nested
+    `echo "sha=$(…)"` spelling DISCARDS that status and publishes whatever the
+    substitution printed while still exiting 0 — a silent green. The fetch is made
+    to SUCCEED and only `rev-parse` to fail, so the fetch's own failure cannot be
+    what this test is observing; it observes the assignment discipline itself.
+    """
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    shim_dir = _git_shim_failing(tmp_path, "rev-parse")
+    proc, output = _run_base_tip(tmp_path, repo, "main", shim_dir=shim_dir)
+    assert proc.returncode != 0, (
+        "a failed `git rev-parse` must FAIL THE STEP (the assignment propagates its "
+        f"status under `set -e`); the step exited 0 and published {output!r}"
+    )
+    assert "sha=" not in output, (
+        "a failed `rev-parse` must not publish an output — that is the silent green "
+        "the guard exists to prevent (#2386/#7628)"
+    )
 
 
 # ── the detection step's verdicts (executed) ─────────────────────────────────
