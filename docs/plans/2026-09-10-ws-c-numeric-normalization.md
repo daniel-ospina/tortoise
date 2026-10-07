@@ -273,14 +273,14 @@ surface**, not the foundation. Numbering is re-derived and does not carry over f
 | **OD2** | `minorUnitExponent`: store it on the value, or derive it from a version-pinned ISO 4217 table? | **Store it** (self-describing; no silent runtime table dependency) and check `(currency, exponent)` consistency against the table. | Derive-only is one field leaner, but every reader depends on the table, and a table change silently reinterprets historical values. |
 | **OD3** | `asOf` when the text states no date: fall back to `when`, to the session date, or leave it absent? | **Leave it absent** when the text states no date. When a date is taken from elsewhere, record its source so a derived date is never read as a stated one. | A silent default stamps an assertion date the text never asserted. |
 | **OD4** | Sub-minor precision (`R$ 0,123`): drop, or round to the currency's exponent? | **Drop the typed value; never round silently.** The raw text remains, so the drop is non-destructive. | Rounding needs a documented direction applied on every write path — a policy decision that does not belong to the parse. |
-| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text, and no client value is accepted.** *(v3 follow-up, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare a client value against, so none is accepted. |
+| **OD5** | Client-supplied values on the direct write path (MCP/SDK/HTTP): derive server-side, validate a client value, or reject it? | **The server derives from the raw text; there is no client-supplied value to adjudicate.** *(v3 follow-up, 2026-10-07: the cross-check half is **closed** by the owner's Option (a) decision — see the note below and §2.3.)* | Trusting a client value would let an unverified amount (e.g. `999999`) land with no relation to the prose; under Option (a) there is nothing to compare one against, so a client-supplied value is not adjudicated — the server-derived value is the field's source. |
 
 ⚠️ **v3 note on OD5 — the cross-check half is CLOSED by the 2026-10-07 decision.** The server-derives
 half stands. The cross-check half is **not implementable**: comparing a client value to a server-derived
 value is the same comparison §2.3's circular argument needed, and Option (a) rejects the anchored
 separator rule it depends on. There is no client-supplied amount to adjudicate, so **no cross-check is
-performed and no client value is accepted**. `create_entity` therefore carries a **derived,
-server-written** field.
+performed**. `create_entity` therefore carries a **derived,
+server-written** field, and the derivation — not any client-supplied prop — is the value's source.
 
 Bare `M` magnitude and locale hints are **dropped, not open**: `M` is 10³ in fixed-income/Roman notation
 and 10⁶ in SI (Chicago Manual of Style; Corporate Finance Institute), and a session/document locale hint
@@ -390,7 +390,7 @@ field today**, because both filter by **deny-list** rather than allow-list; what
 | --- | --- | --- | --- |
 | **S1** | MCP tool — **target `create_entity`** (absorbs today's `tortoise_create_point`, `tortoise/mcp_server.py:1366`; registry entry `tortoise/tool_registry.py:101`). Lands in **#4282 Phase 3.1**, on the frozen SDK | Takes `props` and filters it with a **deny-list** (`_SERVER_MANAGED_PROPS`, `tortoise/mcp_server.py:1285`); unknown keys pass through. | Declare the value field on `create_entity` for the entity types that carry an amount, so it is accepted and documented; no boundary rejection blocks it. |
 | **S2** | SDK — **target `create_entity`** (absorbs today's `TortoiseSDK.create_point`, `tortoise/sdk.py:4937`). Lands in **#4282 Phase 2** | Already takes a `**props` passthrough, filtered by `_sanitize_props` (`tortoise/sdk.py:2596`, also a deny-list). | The `**props` passthrough means this is an **allow-list/declaration extension, not a signature change** — which materially lowers the cost of this surface. |
-| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-derived and never client-supplied**: there is no client value to accept, so nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design requires **no** surface change at all. |
+| **S3** | HTTP commit validator `Point` (`tortoise/commit_schema.py:500`, `extra="forbid"` at `:503`) | Closed: a customer **cannot send an amount today** — and **needs no way to**. | **No change.** Under the owner's 2026-10-07 decision (§2.3, §3/OD5) the field is **server-derived and never client-supplied**: there is no client value to accept, so nothing is added to the `Point` model. The single contract change this row previously carried is **closed** — this design carries **no contract change** at all; its only surface work is the S1/S2 declaration above. |
 
 The **persistence surface** is a dependency, not a fourth approval: the projection's Point property list
 is fixed (`_upsert_point_props`, `tortoise/projection/entities.py:801`), but Point carries the **same
@@ -410,7 +410,7 @@ The work cannot begin at the derivation. The dependency order is:
 1. **Owner decisions** — the surfaces (§7.1) and the open register (§3). Nothing below starts before
    these. **S1/S2 need declaration, not permission**, and they ride #4282's Phase 2/3.1. **S3 is resolved
    too** by the 2026-10-07 decision: the field is server-derived and never client-supplied, so the HTTP
-   `Point` model is untouched and this design requires **no** surface change.
+   `Point` model is untouched, and the only surface work this design carries is the S1/S2 declaration.
 2. **Declare the field** on the accepted schema: the Point property list. (The HTTP `Point` model is
    **untouched** — the field is server-derived and never client-supplied, §7.1/S3.) No behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
