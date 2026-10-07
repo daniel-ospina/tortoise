@@ -46,7 +46,14 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows
 # `format('{0}', secrets)` use to dump the whole context into shell source.
 # Member access (`secrets.X`, `secrets['X']`, `secrets[matrix.name]`) is the
 # common subset. `MY_SECRETS` is a different identifier and is not matched.
-_SECRET_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
+# ⛔ NOR IS A HYPHENATED MEMBER. `\b` treats `-` as a boundary, so
+# `steps.verify-secrets.outcome` matched `\bsecrets\b` and was reported as a
+# secret interpolation — a FALSE POSITIVE on any step id (or expression member)
+# ending in `-secrets`, which is exactly how a workflow names its
+# secrets-checking steps (#2240's `verify-secrets`). The lookbehind makes the
+# documented intent true: the standalone context only, never a suffix of a
+# hyphenated identifier. A hyphen can never precede the real context.
+_SECRET_CONTEXT = re.compile(r"(?<![\w-])secrets\b", re.IGNORECASE)
 # `env` context references — dot and index form, both case-insensitive like the
 # runner's context lookup: `env.KEY`, `env['KEY']`, `env["KEY"]`.
 _ENV_DOT_REF = re.compile(r"\benv\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
@@ -448,6 +455,38 @@ def test_offender_scan_is_case_insensitive_on_the_secret_context():
     `SECRETS.FOO` is a real interpolation the guard must not miss."""
     for spelling in ("secrets.FOO", "SECRETS.FOO", "Secrets.FOO"):
         assert _secret_interpolations(f'x="${{{{ {spelling} }}}}"'), spelling
+
+
+def test_offender_scan_ignores_a_hyphenated_member_named_secrets():
+    """`steps.<id>.outcome` where the STEP ID ends in `-secrets` is NOT a secret.
+
+    A false positive of the bare-token rule: `\\b` treats `-` as a boundary, so
+    `steps.verify-secrets.outcome` matched `\\bsecrets\\b`. Any workflow that
+    names a secrets-checking step `verify-secrets` / `set-secrets` (the natural
+    naming, and this repo's own) then reports every `${{ steps.<id>.outcome }}`
+    interpolation as a secret leak — and the fix for a false positive is to
+    reword the workflow, which is how a guard teaches the wrong lesson. The
+    lookbehind implements the rule the comment already stated (`MY_SECRETS` is a
+    different identifier): the standalone context only.
+
+    Both directions are pinned, so the narrowing cannot have gone too far.
+    """
+    for member in (
+        "steps.verify-secrets.outcome",
+        "steps.set-secrets.outcome",
+        "steps.some-secrets.conclusion",
+    ):
+        assert not _secret_interpolations(f'x="${{{{ {member} }}}}"'), member
+    # …while the real context — bare, member, indexed, wrapped, one hyphen away
+    # from an identifier — is still caught.
+    for real in (
+        "secrets.FOO",
+        "secrets['FOO']",
+        "toJSON(secrets)",
+        "format('{0}', secrets)",
+        "format('{0}', secrets.FOO)",
+    ):
+        assert _secret_interpolations(f'x="${{{{ {real} }}}}"'), real
 
 
 def test_offender_scan_catches_a_bare_secrets_context():
