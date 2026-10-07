@@ -1085,3 +1085,97 @@ class TestBackupRestoreFailsLoud:
                          events_path=str(tmp_path / "ok.jsonl"),
                          into_falkor=True)
         assert result["status"] == "ok", result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle-4 — the single supersede sweep + the name-MERGE id collapse
+# (#5285 re-review). Rounds 2-4 each found the previous round's fix had
+# introduced a new asymmetry. Cycle 4 found the root fix was only HALF
+# applied (inline supersedes still resolved mid-journal) and a fail-open
+# (the id branch ignored the graph's name-MERGE collapse). These tests pin
+# BOTH — the cycle-3 tests pinned only the forward ordering and caught
+# neither.
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCycleFourSingleSweepAndNameCollapse:
+    def test_inline_supersede_survives_a_delete_and_recreate(
+            self, env, tmp_path):
+        """FIX 1 (#5285 cycle 4). FAILS IF a supersede is applied INLINE
+        instead of in the one trailing sweep.
+
+        The emitter's real shape (`commit_ops` journals `ObjectSuperseded`
+        with id+name): `[Reg(x,X), Sup(id=x,name=X), Del(x), Reg(x,X)]`.
+        `rebuild_all`'s sweep folds the supersede AFTER the delete+recreate,
+        so the re-created incarnation is `superseded`. An inline reference
+        fold resolved it at its own seq, the delete discarded the record, and
+        the recreate left it `live` — `check_consistency(<rebuild_all graph>)`
+        then reported `divergence='content'` with `{field:'status',
+        expected:'live', found:'superseded'}` on a correct journal.
+
+        All engines must ACCEPT; the rebuild_all graph must be `superseded`;
+        and the reference fold must agree with that graph."""
+        _sdk, events = env
+        oid = "obj-5285-inline"
+        _raw(events, type="ObjectRegistered", id=oid, name="INLINE",
+             status="live", event_id="e-i0")
+        _raw(events, type="ObjectSuperseded", id=oid, name="INLINE",
+             supersedes_by="y", event_id="e-i1")
+        _raw(events, type="EntityMutated", label="Object", id=oid,
+             op="delete", event_id="e-i2")
+        _raw(events, type="ObjectRegistered", id=oid, name="INLINE",
+             status="live", event_id="e-i3")
+        # APPLY/REFUSE parity: every engine ACCEPTS the journal.
+        for engine in ENGINES:
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            proj.close()
+        proj = _drive("rebuild_all", tmp_path, events,
+                      _fresh(tmp_path, "c4single"))
+        try:
+            assert _objects(proj) == [(oid, "INLINE", "superseded")], \
+                _objects(proj)
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is True, r["divergence"]
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+
+    @pytest.mark.parametrize("also_supersede_survivor", [False, True])
+    def test_collapsed_away_id_supersede_refuses_like_the_graph(
+            self, env, tmp_path, also_supersede_survivor):
+        """FIX 2 (#5285 cycle 4). FAILS IF the id branch treats a
+        collapsed-away id as a live carrier.
+
+        The graph MERGEs Objects by NAME, so `Reg(a,N), Reg(b,N)` is ONE node
+        carrying id `b`; `Sup(id=a)` folds 0 rows and every replay engine
+        REFUSES `object-superseded-miss`. The reference fold's id index still
+        held `(Object, a)`, so it recorded NO miss and `check_consistency`
+        returned `ok=True, nf=0` — the fail-open this lane exists to remove.
+
+        The `also_supersede_survivor` variant appends `Sup(id=b)`: that one
+        folds the surviving node, so the journal still carries the collapsed
+        id's miss. Both must REFUSE (`divergence='non-folded'`, nf>=1)."""
+        sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-a", name="COLL",
+             status="live", event_id="e-c-a")
+        _raw(events, type="ObjectRegistered", id="obj-5285-b", name="COLL",
+             status="live", event_id="e-c-b")
+        _raw(events, type="ObjectSuperseded", id="obj-5285-a",
+             supersedes_by="y", event_id="e-c-sup-a")
+        if also_supersede_survivor:
+            _raw(events, type="ObjectSuperseded", id="obj-5285-b",
+                 supersedes_by="y", event_id="e-c-sup-b")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(str(events),
+                                        confirm_destructive=True)
+        assert "object-superseded-miss" in str(ei.value), str(ei.value)
+        proj = _fresh(tmp_path, "c4collapse")
+        try:
+            r = check_consistency(str(events / "events.jsonl"), proj)
+        finally:
+            proj.close()
+        assert r["ok"] is False, r
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+        assert any("object-superseded-miss" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]
