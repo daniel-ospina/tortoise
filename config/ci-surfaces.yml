@@ -1050,6 +1050,12 @@ surfaces:
   # embedded-only). Under a URI lane the #1647 test-mode redirect sends it to
   # the docker server as a per-path derived graph.
   - test_source_version_extractedfrom_5038.py
+  # #5516: the write-time source-change notice (the write half of #5038) —
+  # `tortoise/sdk.py` (SHARED_MODULE) forces the full matrix and
+  # `tortoise/projection/edges.py` selects `sdk`+`CORE_ALSO`, so registering it
+  # under `core` runs it with the code it guards. Lane: DOCKER (the #1647
+  # default; verified green there) — deliberately NOT carve_out-registered.
+  - test_source_change_notice_5516.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_test_lane_tool.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
@@ -3414,6 +3420,7 @@ durations:
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
+  test_source_change_notice_5516.py: 65.0  # #5516: 12 tests; docker lane (#1647 default) — locally measured (64s docker, 66s embedded)
   test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

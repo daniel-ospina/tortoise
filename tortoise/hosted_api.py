@@ -137,6 +137,7 @@ from tortoise.sdk import (
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
+    _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -13368,6 +13369,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
+    # #5516: the write-time notice that a fact was written against a Source
+    # whose recorded read version is no longer current (shared with the SDK
+    # receipt via the ONE home, so the two cannot drift).
+    _attach_source_change_notices(resp, meta)
     # W5 (#2104): the memory_write_v1 envelope wraps the (additive) legacy
     # response — protocol_version, status, provenance, error; the verb's
     # per-point entries ride the enriched ``resp["points"]`` list (extra

@@ -3050,6 +3050,25 @@ def _capture_resp_error_split(errors: list[str]) -> tuple[list[str], list[str]]:
             list(errors))
 
 
+def _attach_source_change_notices(resp: dict, meta: dict) -> None:
+    """#5516: surface a capture's write-time source-change notices on its receipt.
+
+    The v2 point loop discards each ``create_point`` result, so the notices it
+    produced are aggregated into ``meta["source_change_notices"]``; both capture
+    lanes call this to put them on the receipt the WRITER sees (otherwise the
+    notice would be written-but-unread — the #4041 class).
+
+    Additive by contract: the key is present ONLY when a Source actually
+    changed, so an ordinary capture's receipt is unchanged. ONE home for the
+    condition — the SDK and hosted receipts are kept byte-identical by
+    contract, and duplicating the ``if`` in each is exactly how such a mirror
+    rots silently.
+    """
+    notices = (meta or {}).get("source_change_notices")
+    if notices:
+        resp["source_change_notices"] = notices
+
+
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
                               turns: int, meta: dict) -> None:
     """#2335 WI-1d: the structured observation leg — ONE JSON line per
@@ -5336,6 +5355,29 @@ class TortoiseSDK:
             _source_versions = resolve_source_versions(
                 proj.g, props["extractedFrom"])
             _source_version_sv = _source_version_transit(_source_versions)
+        # #5516: the write-time notice that the Source being written against has
+        # changed since it was last read. Computed HERE, BEFORE the new Point's
+        # `extractedFrom` edge is stamped below, so the comparison reads the
+        # PRIOR recorded read version (`r.sourceVersion`, #5256) rather than the
+        # version this very write is about to record. It never blocks or fails
+        # the write — a broken notice read is logged and dropped (the advisory
+        # contract). It is a READ over the recorded links; the only side effect
+        # is `resolve_source_key`'s idempotent adopt-on-touch, and
+        # `resolve_source_versions` above already ran the identical resolution
+        # for these refs, so no NEW write occurs here (see the helper docstring).
+        # The notice rides the write RESULT only; it is never a node property and
+        # is never journaled.
+        _source_change_notices: list[dict] = []
+        if props.get("extractedFrom"):
+            try:
+                from .projection.edges import source_change_notices
+                _source_change_notices = source_change_notices(
+                    proj.g, props["extractedFrom"], _source_versions)
+            except Exception:  # noqa: BLE001, RUF100 — advisory only
+                _logger.warning(
+                    "create_point: source-change notice read failed — "
+                    "continuing without a notice (#5516)", exc_info=True)
+                _source_change_notices = []
         _create_map: dict[str, str] = {
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
@@ -5489,9 +5531,17 @@ class TortoiseSDK:
                          pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        _snapshot = self.get_point(pid)
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
-                         point=self.get_point(pid))
-        return self.get_point(pid)
+                         point=_snapshot)
+        if _source_change_notices:
+            # #5516: the notice is TRANSIENT — it rides the write result the
+            # writer sees, on a COPY, so the journaled snapshot above and every
+            # later `get_point` stay free of it. Present only when a Source
+            # actually changed: an unchanged-source write's result is byte-
+            # identical to before this feature.
+            return {**_snapshot, "source_change_notices": _source_change_notices}
+        return _snapshot
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
@@ -6622,6 +6672,10 @@ class TortoiseSDK:
         # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
             resp["extraction_provider"] = meta.get("provider")
+        # #5516: the write-time notice that a fact was written against a Source
+        # whose recorded read version is no longer current (shared with the
+        # hosted receipt via the ONE home, so the two cannot drift).
+        _attach_source_change_notices(resp, meta)
         # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
         # capture write path (after provenance stamp + operators wired) the
         # extracted claims are promoted draft→live and the BOUNDED ingest EP
@@ -7053,6 +7107,13 @@ class TortoiseSDK:
         errors = [e if isinstance(e, str) else f"{type(e).__name__}: {e}"
                   for e in (out.get("errors") or [])]
         warnings = list(out.get("warnings") or [])
+        # #5516: the write-time source-change notices produced by THIS capture's
+        # point writes. Aggregated here (a dict key, not a warning string) so the
+        # capture RECEIPT carries the structured notice — otherwise the notice
+        # reaches only `create_point`'s own return and the per-point write result
+        # is discarded, i.e. the #4041 "written-but-unread" class the issue
+        # names. Additive: absent (not []) on every receipt that produced none.
+        source_change_notices: list[dict] = []
         proj = self._get_proj()
 
         # ── entities ──
@@ -7254,7 +7315,7 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
-                    self.create_point(
+                    _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
                         is_episodic=False, status="draft",
@@ -7271,6 +7332,12 @@ class TortoiseSDK:
                         # that whitelist, so the response never advertises it.
                         **create_props,
                     )
+                    # #5516: a fresh create may have found the session Source
+                    # changed since it was last read — carry its notice to the
+                    # capture receipt. A dedup hit (the other branch) writes no
+                    # edge, so it contributes nothing.
+                    source_change_notices.extend(
+                        _created.get("source_change_notices") or [])
                 pid = resolved
                 # #4716 Part 1: remember which graph id this payload id
                 # resolved to (identity on a fresh create) — the remap source
@@ -7644,6 +7711,9 @@ class TortoiseSDK:
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.
             "error_census": out.get("error_census") or {},
+            # #5516: this capture's write-time source-change notices — the
+            # capture RECEIPT is the write result its caller sees.
+            "source_change_notices": source_change_notices,
         }
         return extracted, meta
 
