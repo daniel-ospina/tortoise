@@ -3293,6 +3293,79 @@ def journal_point_creation_ids(events: list[dict]) -> frozenset[str]:
     return frozenset(out)
 
 
+def journal_object_surviving_keys(
+        events: list[dict]) -> tuple[frozenset[str], frozenset[str]]:
+    """``(ids, names)`` of every Object that EXISTS after the journal replays.
+
+    `rebuild_all` DEFERS the `ObjectSuperseded` fold to a trailing sweep that
+    runs after every Object-creation event AND after every `EntityMutated`
+    delete, so a supersede folds there iff its target exists at the END of the
+    journal. The apply()-based engines (`rebuild`, `recover_from_log`) fold it
+    inline and chronologically, so for their 0-row refusal to mirror
+    `rebuild_all` WITHOUT a false positive they must ask the JOURNAL's END
+    STATE: an Object that exists at the end is resolvable at the sweep (no
+    refusal), one that does not is not (refusal) — unless the journal
+    hard-deleted it, which is the separately-carried
+    `supersede-target-deleted` exemption. This is the entity-leg analogue of
+    `journal_point_creation_ids`; it additionally accounts for the sweep's
+    position after the deletes.
+
+    The Object graph MERGEs by NAME (`_upsert_object`), so a later registration
+    of one name under a fresh id REPLACES the earlier carrier — the model maps
+    each name to its current id, not to a set. A delete removes the id that
+    actually carries the node (`_delete_entity_by_id`), so a delete naming a
+    superseded-away id is a no-op here too.
+    """
+    name_to_id: dict[str, str] = {}
+    id_to_name: dict[str, str] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ev = _norm(ev)
+        t = ev.get("type")
+        if t == "ObjectRegistered":
+            oid, name = ev.get("id"), ev.get("name")
+            if not (isinstance(oid, str) and oid
+                    and isinstance(name, str) and name):
+                continue
+            old = name_to_id.get(name)
+            if old is not None and old != oid:
+                id_to_name.pop(old, None)
+            name_to_id[name] = oid
+            id_to_name[oid] = name
+        elif t == "EntityMutated" and ev.get("op") == "delete":
+            rid, label = ev.get("id"), ev.get("label")
+            if not isinstance(rid, str):
+                continue
+            # `_delete_entity_by_id` is scoped to the record's own canonical
+            # label, falling back to the legacy id-wide delete for a missing/
+            # unknown one (#3860). Only those remove an Object.
+            if (isinstance(label, str)
+                    and label in _CANONICAL_ENTITY_LABELS
+                    and label != "Object"):
+                continue
+            nm = id_to_name.pop(rid, None)
+            if nm is not None and name_to_id.get(nm) == rid:
+                name_to_id.pop(nm, None)
+    return frozenset(id_to_name), frozenset(name_to_id)
+
+
+def journal_object_hard_deleted_ids(events) -> frozenset[str]:
+    """Ids of every Object the journal HARD-DELETES.
+
+    The named `supersede-target-deleted` exemption: a supersede whose target
+    the journal removed can legitimately fold 0 rows in `rebuild_all`'s
+    deferred sweep, so the apply()-based engines must not refuse it either.
+    Derived from `journal_hard_delete_seqs` (the same per-``(id, label)``
+    reader the `EntityLinked` sweep uses), scoped to the ``Object`` label.
+    """
+    out: set[str] = set()
+    for rid, by_label in journal_hard_delete_seqs(events).items():
+        if "Object" in by_label:
+            out.add(rid)
+    return frozenset(out)
+
+
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_created_ids: frozenset[str] | None = None) -> None:
     ev = _norm(ev)
@@ -4671,7 +4744,15 @@ class FalkorProjection(
         return ev
 
     @tolerates_altered_numbers
-    def apply(self, event: dict) -> None:
+    def apply(self, event: dict, *, journal_object_surviving=None,
+              journal_object_deleted=None) -> None:
+        # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
+        # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
+        # and `journal_object_deleted` the ids it hard-deletes. They are
+        # supplied by the whole-journal apply()-based engines (`rebuild`,
+        # `recover_from_log`) and default to None for the one-record LIVE path
+        # (which has no journal to consult and must record nothing).
+        #
         # #3947 review: read the capture's structural directive from the RAW
         # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
         # is `{**ev, **ev["point"]}`, so a point key of the same name would
@@ -4844,7 +4925,42 @@ class FalkorProjection(
             # #1350: fold the client-derived supersession into Object.status
             # (projection-owned cache of the event stream — §11 'derived
             # values may be CACHED'). Rebuild-replay-safe via this branch.
-            return self._fold_object_superseded(ev)
+            #
+            # #3585 re-review (cycle 2, FIX A): this was the last fold-miss
+            # site with no refusal — a 0-row fold returned silently, so
+            # `rebuild(log)` / `recover_from_log` PASSED a journal `rebuild_all`
+            # refuses. The refusal is gated on the JOURNAL-WIDE surviving
+            # Object keys, the entity-leg analogue of the belief/annotator
+            # legs' `journal_point_creation_ids`: `rebuild_all` folds this
+            # supersede in a sweep AFTER every creation AND every delete, so an
+            # Object that exists at the journal's END (a forward reference
+            # included) IS folded there — refusing it here would red a journal
+            # the graph reproduces. An Object that survives nowhere matched
+            # nothing there either, and `object-superseded-miss` fails the run.
+            # The named `supersede-target-deleted` exemption is carried too.
+            # With no journal context (the LIVE one-record path) nothing is
+            # recorded.
+            folded, _ = self._fold_object_superseded(ev)
+            if folded == 0 and journal_object_surviving is not None:
+                _cids, _cnames = journal_object_surviving
+                _oid, _oname = ev.get("id"), ev.get("name")
+                _survives = (
+                    (isinstance(_oid, str) and _oid in _cids)
+                    or (isinstance(_oname, str) and bool(_oname)
+                        and _oname in _cnames))
+                _deleted = (isinstance(_oid, str)
+                            and journal_object_deleted is not None
+                            and _oid in journal_object_deleted)
+                if not _survives and not _deleted:
+                    record_non_folded(
+                        SHAPE_OBJECT_SUPERSEDED_MISS,
+                        event_id=ev.get("event_id"),
+                        event_type="ObjectSuperseded", id=_oid,
+                        candidates=((_oname,) if isinstance(_oname, str)
+                                    and _oname else (_oid,)),
+                        detail="graph fold: supersede matched no Object",
+                    )
+            return
         elif t == "ObjectRegistered":
             self._upsert_object(ev)
         elif t == "DocumentCreated":
@@ -5128,6 +5244,12 @@ class FalkorProjection(
         # link whose endpoint was hard-deleted AFTER it must not resurrect.
         hard_delete_seqs = journal_hard_delete_seqs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
+        # keys + the ids it hard-deletes, so ``apply()`` can refuse a supersede
+        # whose target the journal never leaves in place while NOT refusing a
+        # forward reference (which ``rebuild_all``'s deferred sweep folds).
+        journal_object_surviving = journal_object_surviving_keys(events)
+        journal_object_deleted = journal_object_hard_deleted_ids(events)
         # #3305: compute the shared terminalizer SELECTION once for the whole
         # journal. This engine replays one record at a time, so it cannot use
         # ``apply()``'s inline branch for these two types — that branch folds
@@ -5156,7 +5278,8 @@ class FalkorProjection(
                 if edge is not None:
                     deferred_corrects.append(edge)
                 continue
-            self.apply(ev)
+            self.apply(ev, journal_object_surviving=journal_object_surviving,
+                       journal_object_deleted=journal_object_deleted)
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
             # must never abort a post-wipe replay (the graph was already
