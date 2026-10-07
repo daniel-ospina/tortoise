@@ -27,15 +27,24 @@ Isolation, NOT speed. The same single test on the docker lane took **90.59 s**
 on a private container versus **92.66 s** on the shared one — the wall time is
 dominated by per-session work (embedder load), not by the container's state.
 
-CONTRACT
---------
-* The container is named ``fdb-lane-<slug>`` and bound to ``127.0.0.1`` only.
-* Persistence is OFF (``--appendonly no --save ''``): the lane's data is
-  disposable, which is the point.
-* ``down`` refuses every name that is not ``fdb-lane-*``, so the shared
-  dev/test instances (``falkordb``, ``falkordb-16379``, ...) can never be
-  removed by this tool. This is the fail-closed half of the design and it is
-  covered by ``tests/test_test_lane_tool.py``.
+CONTRACT — THE TARGET IS NOT A PARAMETER
+----------------------------------------
+The container this tool acts on is ALWAYS ``fdb-lane-<sha1(worktree)[:10]>``,
+derived inside ``start()``/``stop()`` from the worktree the command runs in.
+There is no ``--name``, no ``--slug``, and no function argument that selects a
+container: two review rounds showed that each override, however spelled, is a
+way for one lane to delete or silently adopt another lane's isolated DB (a
+peer's slug is a computable ``sha1(path)[:10]``). ``repo_root()`` scrubs
+``GIT_DIR``/``GIT_WORK_TREE`` for the same reason — an inherited git env var
+would otherwise retarget the CLI at a peer worktree with no flag involved.
+
+Also fail-closed by design:
+* the container is bound to ``127.0.0.1`` only;
+* persistence is OFF (``--appendonly no --save ''``) — the data is disposable;
+* ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
+  instances) is what a removal intent is keyed on, and it is pinned by tests;
+* ````docker ps -a`` is consulted for port collisions, because a stopped
+  container still reserves its published port.
 
 USAGE
 -----
@@ -50,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import socket
 import subprocess
@@ -65,28 +75,42 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"`uv run python tools/test_lane.py`"
     )
 
-IMAGE = "falkordb/falkordb:latest"
+#: Overridable so CI can pin a digest/version; `latest` matches the existing
+#: in-repo precedent (scripts/restore-smoke.sh also runs falkordb/falkordb:latest).
+IMAGE = os.environ.get("TORTOISE_TEST_LANE_IMAGE", "falkordb/falkordb:latest")
 NAME_PREFIX = "fdb-lane-"
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
-#: Container names this tool must NEVER remove: the shared instances every lane
-#: and the orchestration graph depend on.
+#: The shared instances every lane and the orchestration graph depend on. They
+#: do not carry NAME_PREFIX, so the prefix rule already refuses them; this
+#: constant documents them AND is what `is_managed` consults, so a future shared
+#: container that DID share the prefix would still be refused (pinned by
+#: tests/test_test_lane_tool.py::test_is_managed_refuses_a_protected_name_that_shares_the_prefix).
 PROTECTED_NAMES = frozenset({
-    "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb", "fdb-5084-e",
+    "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb",
 })
+GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
 def repo_root() -> Path:
-    """The worktree this invocation belongs to (never the hub main checkout)."""
+    """The git worktree this invocation belongs to.
+
+    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED rather than inherited: with
+    ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) `rev-parse`
+    reports the OTHER tree, so the tool would compute a peer lane's container
+    name and act on it with no flag involved (review round 3, P2).
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE")}
     out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, check=False)
+                         capture_output=True, text=True, check=False, env=env)
     return Path(out.stdout.strip()) if out.stdout.strip() else Path.cwd()
 
 
 def slug_for(path: Path | str) -> str:
     """A short, stable, filesystem-safe slug for a worktree path.
 
-    Deterministic so two invocations in the same worktree reuse ONE container
+    Deterministic, so two invocations in the same worktree reuse ONE container
     instead of racing to create two.
     """
     digest = hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()
@@ -97,18 +121,20 @@ def container_name(slug: str) -> str:
     return f"{NAME_PREFIX}{slug}"
 
 
+def lane_name() -> str:
+    """The one container this tool can act on. Never a parameter."""
+    return container_name(slug_for(repo_root()))
+
+
 def is_managed(name: str) -> bool:
-    """True only for names this tool owns. The guard `down` keys on."""
+    """True only for names this tool may remove."""
     return name.startswith(NAME_PREFIX) and name not in PROTECTED_NAMES
-
-
-GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
 def _validate_graph(graph: str) -> str:
     """Reject a graph name that would corrupt the eval-ed export line.
 
-    Called BEFORE a container is created (an invalid name must not leave a
+    Called before a container is created (an invalid name must not leave a
     running container behind) and again inside `uri_for`, so the contract holds
     for every caller and not just the CLI.
     """
@@ -125,8 +151,11 @@ def uri_for(port: int, graph: str = DEFAULT_GRAPH) -> str:
     """The URI shape the docker lane's tests expect (`docker://` + loopback).
 
     No password: this tool starts the container without `requirepass` (it is
-    loopback-bound and disposable), so the URI carries an empty password.
+    loopback-bound and disposable), so the URI carries an empty password. Both
+    fields are validated because this string is printed into an eval-ed line.
     """
+    if not isinstance(port, int) or not (0 < port < 65536):
+        raise SystemExit(f"test-lane: {port!r} is not a valid TCP port")
     return f"docker://:@127.0.0.1:{port}/{_validate_graph(graph)}"
 
 
@@ -138,16 +167,6 @@ def port_is_free(port: int) -> bool:
         except OSError:
             return False
     return True
-
-
-def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
-    for port in range(lo, hi + 1):
-        if port_is_free(port) and not _container_publishes(port):
-            return port
-    raise SystemExit(
-        f"test-lane: no free port in {lo}-{hi}; remove stale fdb-lane-* "
-        f"containers (`uv run python tools/test_lane.py list`)"
-    )
 
 
 def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -162,13 +181,24 @@ def _container_publishes(port: int) -> bool:
     return f":{port}->" in (r.stdout or "")
 
 
+def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
+    for port in range(lo, hi + 1):
+        if port_is_free(port) and not _container_publishes(port):
+            return port
+    raise SystemExit(
+        f"test-lane: no free port in {lo}-{hi}; remove stale fdb-lane-* "
+        f"containers (`uv run python tools/test_lane.py list`)"
+    )
+
+
 def container_state(name: str) -> str:
     """`running` | `stopped` | `absent` | `unknown`.
 
     `absent` (the container does not exist) is deliberately distinguished from
     `unknown` (docker itself failed — daemon down, permission): reporting the
     first when the second is true is how `status` would claim a lane has no
-    container when it merely could not ask.
+    container when it merely could not ask, and `start()` would go on to
+    `docker rm` a container that may belong to another lane.
     """
     r = _docker("inspect", "--format", "{{.State.Status}}", name, check=False)
     if r.returncode == 0:
@@ -193,6 +223,8 @@ def _graph_count(name: str) -> int | None:
 def _published_port(name: str) -> int | None:
     """The loopback port a container publishes for 6379, or None."""
     r = _docker("port", name, "6379/tcp", check=False)
+    if r.returncode != 0:
+        return None
     for token in (r.stdout or "").replace("\n", " ").split():
         if ":" in token:
             try:
@@ -202,20 +234,22 @@ def _published_port(name: str) -> int | None:
     return None
 
 
-def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
-    """Start (or reuse) this lane's container. Returns (name, published port).
+def start(port: int | None = None, *, image: str = IMAGE) -> tuple[str, int]:
+    """Start (or reuse) THIS LANE's container. Returns (name, published port).
 
-    The returned port is always the one Docker PUBLISHES, never the one that was
-    requested: `-p 0:6379` makes Docker choose an ephemeral port, so echoing the
-    requested value would hand the caller a URI pointing at nothing.
+    There is no container parameter — see the module docstring's CONTRACT.
+
+    The published port is returned rather than the requested one because it is
+    the only authoritative value: it is what the lane's URI must name, and the
+    two can differ whenever Docker resolves the mapping itself.
 
     A requested port is validated FIRST — before `container_state` and before
     the stale-container `docker rm` — so an invalid value cannot reach docker at
-    all (the guard is only as good as its ordering).
+    all (a guard is only as good as its ordering).
     """
     if port is not None and not (0 < port < 65536):
         raise SystemExit(f"test-lane: --port {port} is not a valid TCP port")
-    name = container_name(slug)
+    name = lane_name()
     state = container_state(name)
     if state == "running":
         published = _published_port(name)
@@ -229,8 +263,6 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
             f"belong to another lane would be unforgivable)"
         )
     if state != "absent":
-        # Defence in depth, and NOT an `assert`: this guard must survive
-        # `python -O`, so it is a real refusal rather than a stripped one.
         if not is_managed(name):
             raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
         _docker("rm", "-f", name, check=False)
@@ -270,10 +302,15 @@ def start(slug: str, port: int | None = None, *, image: str = IMAGE) -> tuple[st
     )
 
 
-def stop(name: str) -> str:
-    """Remove a container, taking the FULL name. Refuses anything not
-    `fdb-lane-*` — there is deliberately no force/bypass flag: the shared
-    dev/test instances are not removable by this tool under any argument."""
+def stop() -> str:
+    """Remove THIS LANE's container. Takes no argument, by design.
+
+    Two review rounds established that any way to name another container —
+    `--name`, `--slug`, or a parameter — is a way for one lane to delete
+    another lane's isolated DB, so there is nothing to name. `is_managed()`
+    remains the prefix rule that a removal must satisfy.
+    """
+    name = lane_name()
     if not is_managed(name):
         raise SystemExit(
             f"test-lane: refusing to remove {name!r} — not a test-lane "
@@ -295,7 +332,7 @@ def stop(name: str) -> str:
 
 def cmd_up(args: argparse.Namespace) -> int:
     _validate_graph(args.graph)      # refuse BEFORE a container exists
-    name, port = start(slug_for(repo_root()), args.port)
+    name, port = start(args.port)
     graphs = _graph_count(name)
     shown = "unknown" if graphs is None else str(graphs)
     print(f"test-lane: {name} on 127.0.0.1:{port} (graphs={shown})",
@@ -308,32 +345,19 @@ def cmd_uri(args: argparse.Namespace) -> int:
     return cmd_up(args)
 
 
-def _target_name(args: argparse.Namespace) -> str:
-    """The container this invocation acts on.
-
-    ALWAYS the worktree-derived name. There is no override — not `--name` and
-    not `--slug`: a review round removed only `--name`, and the next one showed
-    that `down --slug <peer>` still targeted another lane's live container, since
-    a peer's slug is a computable `sha1(path)[:10]` and `is_managed()` can only
-    reject the non-`fdb-lane-*` family. `stop()` keeps that family refusal as
-    defence in depth, and it is unit-tested directly.
-    """
-    return container_name(slug_for(repo_root()))
-
-
 def cmd_down(args: argparse.Namespace) -> int:
-    name = _target_name(args)
-    print(f"test-lane: {name} -> {stop(name)}", file=sys.stderr)
+    print(f"test-lane: {lane_name()} -> {stop()}", file=sys.stderr)
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    name = _target_name(args)
+    name = lane_name()
     state = container_state(name)
     print(f"{name}: {state}", file=sys.stderr)
     if state == "running":
         graphs = _graph_count(name)
-        print(f"  graphs={'unknown' if graphs is None else graphs}", file=sys.stderr)
+        print(f"  graphs={'unknown' if graphs is None else graphs}",
+              file=sys.stderr)
         published = _published_port(name)
         if published is not None:
             print(f"  uri={uri_for(published, args.graph)}", file=sys.stderr)
@@ -343,6 +367,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     r = _docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}",
                 check=False)
+    if r.returncode != 0:
+        # The rest of this module refuses to infer absence from a failed call;
+        # `list` must not be the exception.
+        print(f"test-lane: docker ps failed: "
+              f"{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+        return 1
     managed = [ln for ln in (r.stdout or "").splitlines()
                if ln.startswith(NAME_PREFIX)]
     print("\n".join(managed) if managed else "no fdb-lane-* containers",
@@ -355,26 +385,28 @@ def build_parser() -> argparse.ArgumentParser:
         prog="test_lane.py",
         description="Private throwaway FalkorDB for the docker test lane (#5084)",
     )
-    # The flags live on the SUBcommands so the natural spelling works:
-    # `uri --port 16390`. There is deliberately NO override of WHICH container
-    # this tool acts on — not `--name`, not `--slug`: either would let one lane
-    # delete (or silently adopt) another lane's `fdb-lane-<slug>`, which is the
-    # cross-lane destruction this whole tool exists to prevent. The target is
-    # always derived from this worktree.
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--port", type=int, default=None,
+    # Flags live on the SUBcommands so the natural spelling works
+    # (`uri --port 16390`), and ONLY on the commands that use them: `down` takes
+    # no target and no mapping, so accepting a flag it ignores would read as
+    # "down that port" (review round 3, P3).
+    mapper = argparse.ArgumentParser(add_help=False)
+    mapper.add_argument("--port", type=int, default=None,
                         help="publish on this loopback port (default: first free)")
-    common.add_argument("--graph", default=DEFAULT_GRAPH,
-                        help=f"graph/database name for the URI (default {DEFAULT_GRAPH})")
+    mapper.add_argument("--graph", default=DEFAULT_GRAPH,
+                        help=f"graph/database name for the URI "
+                             f"(default {DEFAULT_GRAPH})")
+    plain = argparse.ArgumentParser(add_help=False)
     sub = p.add_subparsers(dest="command", required=True)
-    for name, fn, help_ in (
-        ("up", cmd_up, "start this lane's container and print the export line"),
-        ("uri", cmd_uri, "same as `up` (reads better inside $( ))"),
-        ("down", cmd_down, "remove this lane's container"),
-        ("status", cmd_status, "is it running, and how many graphs does it hold"),
-        ("list", cmd_list, "list every fdb-lane-* container"),
+    for name, fn, help_, parent in (
+        ("up", cmd_up, "start this lane's container and print the export line",
+         mapper),
+        ("uri", cmd_uri, "same as `up` (reads better inside $( ))", mapper),
+        ("down", cmd_down, "remove this lane's container", plain),
+        ("status", cmd_status, "is it running, and how many graphs does it hold",
+         mapper),
+        ("list", cmd_list, "list every fdb-lane-* container", plain),
     ):
-        sp = sub.add_parser(name, help=help_, parents=[common])
+        sp = sub.add_parser(name, help=help_, parents=[parent])
         sp.set_defaults(func=fn)
     return p
 

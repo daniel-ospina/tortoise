@@ -4,17 +4,26 @@ These are pure unit tests: nothing here talks to Docker (every docker-touching
 function is monkeypatched), because the properties that must hold are the
 tool's CONTRACT, not Docker's behaviour:
 
-  * it only ever acts on ``fdb-lane-*`` containers — the shared dev/test
-    instances must not be removable by it under any argument (the fail-closed
-    half of the design; the whole point, since a wrong `down` in the wrong
-    lane would take out every other lane's test target), and
+  * the container it acts on is ALWAYS derived from the worktree — there is no
+    argument, flag, or function parameter that can name another lane's
+    container (the whole point: a wrong `down` in the wrong lane would take out
+    another lane's private test DB, and the shared dev/test instances must not
+    be removable by it either), and
   * ``uri`` prints an ``eval``-able export line on stdout, with diagnostics on
     stderr only — the documented ``eval "$(uv run python tools/test_lane.py
     uri)"`` usage silently breaks if a diagnostic lands on stdout.
+
+Where a function's real body is the safety property (``container_state``,
+``_graph_count``, ``_container_publishes``, ``repo_root``), it is tested
+DIRECTLY. Stubbing such a function to test its caller pins the caller and
+leaves the property itself free to regress — review round 3 caught exactly
+that: the suite stayed green with the ``absent``/``unknown`` classifier
+reverted.
 """
 from __future__ import annotations
 
-import argparse
+import inspect
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,6 +33,21 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools import test_lane as tl  # noqa: E402
+
+
+class _R:
+    """Just enough of a CompletedProcess for the docker seam."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+@pytest.fixture
+def lane(monkeypatch):
+    """Pin the lane's container name so tests do not depend on the CWD."""
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
+    return "fdb-lane-0123456789"
+
 
 # ── the ownership guard (the part that must never be wrong) ────────────────
 
@@ -49,22 +73,93 @@ def test_is_managed_refuses_every_other_container(name):
     assert tl.is_managed(name) is False
 
 
-def test_stop_refuses_an_unmanaged_name_and_never_calls_docker(monkeypatch):
+def test_a_protected_name_sharing_the_prefix_is_still_refused(monkeypatch):
+    """`PROTECTED_NAMES` must be load-bearing, not decoration: if a shared
+    instance ever acquired the `fdb-lane-` prefix, the guard still has to
+    refuse it."""
+    monkeypatch.setattr(tl, "PROTECTED_NAMES", tl.PROTECTED_NAMES | {"fdb-lane-shared"})
+    assert tl.is_managed("fdb-lane-shared") is False
+    assert tl.is_managed("fdb-lane-other") is True
+
+
+def test_the_protected_names_are_the_shared_instances_this_lane_must_never_touch():
+    for shared in ("falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb"):
+        assert shared in tl.PROTECTED_NAMES
+        assert tl.is_managed(shared) is False
+
+
+def test_stop_refuses_an_unmanaged_lane_name_and_never_calls_docker(monkeypatch):
     """The guard must fire BEFORE any docker call — a refusal that had already
     inspected (or worse, removed) the container would defeat the point."""
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("stop() reached docker for a protected name")
 
+    monkeypatch.setattr(tl, "lane_name", lambda: "falkordb")
     monkeypatch.setattr(tl, "container_state", _boom)
-    for protected in ("falkordb", "falkordb-16379", "w6213-fdb"):
-        with pytest.raises(SystemExit) as exc:
-            tl.stop(protected)
-        assert "refusing to remove" in str(exc.value)
+    with pytest.raises(SystemExit) as exc:
+        tl.stop()
+    assert "refusing to remove" in str(exc.value)
 
 
-def test_stop_reports_absent_for_a_managed_container_that_is_not_running(monkeypatch):
+def test_stop_reports_absent_for_a_managed_container_that_is_not_running(lane, monkeypatch):
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
-    assert tl.stop("fdb-lane-0123456789") == "absent"
+    assert tl.stop() == "absent"
+
+
+# ── no name is a parameter: the promise is structural, not argparse-deep ────
+
+def test_no_function_parameter_can_select_a_container():
+    """Review round 3, P1: the CLI was locked but `stop(name)`/`start(slug)`
+    still accepted a peer's container name (`is_managed` passes it — a peer's
+    name IS `fdb-lane-<sha1(path)[:10]>`). The fix is structural: the target is
+    derived inside the function, so the only parameters left are properties of
+    THIS lane. Re-adding a name/slug parameter fails here."""
+    assert list(inspect.signature(tl.stop).parameters) == []
+    assert list(inspect.signature(tl.start).parameters) == ["port", "image"]
+    assert "slug" not in inspect.signature(tl.start).parameters
+    assert list(inspect.signature(tl.lane_name).parameters) == []
+
+
+def test_no_flag_can_target_another_lanes_container():
+    """Review round 2: removing only `--name` left `--slug`, which still mapped
+    to `fdb-lane-<peer>` (a peer's slug is a computable `sha1(path)[:10]`). Both
+    overrides are gone, so neither spelling can name another lane's container."""
+    for flag, value in (("--name", "fdb-lane-peer-slug"),
+                        ("--slug", "peer-slug")):
+        with pytest.raises(SystemExit) as exc:
+            tl.main(["down", flag, value])
+        assert exc.value.code == 2, f"argparse must reject {flag} (usage error)"
+
+
+@pytest.mark.parametrize("command", ["down", "list"])
+@pytest.mark.parametrize("flag,value", [("--port", "16390"), ("--graph", "g")])
+def test_a_command_that_ignores_a_flag_must_not_accept_it(command, flag, value):
+    """Round 3, P3: `down --port 16390` exited 0, which reads as "down that
+    port". A command that takes no mapping must reject the flag loudly."""
+    with pytest.raises(SystemExit) as exc:
+        tl.main([command, flag, value])
+    assert exc.value.code == 2
+
+
+def test_lane_name_is_derived_from_this_worktree(monkeypatch):
+    monkeypatch.setattr(tl, "repo_root", lambda: "/tmp/wt-under-test")
+    assert tl.lane_name() == tl.container_name(tl.slug_for("/tmp/wt-under-test"))
+
+
+def test_repo_root_ignores_an_inherited_git_work_tree(tmp_path, monkeypatch):
+    """Round 3, P2: `rev-parse --show-toplevel` honours `GIT_WORK_TREE`, so an
+    inherited env var silently retargeted the tool at a peer worktree's
+    container. The scrub is the fix, and this pins it.
+
+    The decoy is a REAL repository: a non-existent path makes git fail and fall
+    back to the CWD, which would let the unscrubbed code pass this test.
+    """
+    decoy = tmp_path / "decoy-worktree"
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True)
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    assert tl.repo_root().resolve() == ROOT.resolve()
+    assert tl.lane_name() == tl.container_name(tl.slug_for(ROOT))
 
 
 # ── naming / URI shape ─────────────────────────────────────────────────────
@@ -91,6 +186,68 @@ def test_uri_matches_the_shape_the_docker_lane_expects():
     assert tl.uri_for(16399, "some_graph") == (
         "docker://:@127.0.0.1:16399/some_graph"
     )
+
+
+@pytest.mark.parametrize("bad", [0, -1, 65536, "16399"])
+def test_uri_for_refuses_a_port_that_is_not_a_port(bad):
+    """`uri_for` builds the eval-ed string, so its contract must be as strict as
+    the CLI's (`cmd_up` range-checks `--port`; a library caller does not)."""
+    with pytest.raises(SystemExit) as exc:
+        tl.uri_for(bad)
+    assert "not a valid TCP port" in str(exc.value)
+
+
+# ── docker-state classification (tested directly — see the module docstring) ─
+
+@pytest.mark.parametrize("rc,stdout,stderr,expected", [
+    (0, "running\n", "", "running"),
+    (0, "exited\n", "", "exited"),
+    (0, "", "", "unknown"),                      # no status is not a status
+    (1, "", "Error: No such object: fdb-lane-x", "absent"),
+    (1, "", "Error: No such container: fdb-lane-x", "absent"),
+    (1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+     "unknown"),                                 # daemon down != no container
+    (1, "", "permission denied while trying to connect", "unknown"),
+])
+def test_container_state_distinguishes_absent_from_unknown(monkeypatch, rc, stdout, stderr, expected):
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(rc, stdout, stderr))
+    assert tl.container_state("fdb-lane-x") == expected
+
+
+def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
+    """`graphs=0` is a claim about the container; a failed exec is not evidence
+    for it. `status`/`up` must print `unknown` instead."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
+    assert tl._graph_count("fdb-lane-x") is None
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "g1\ng2\ng3\n", ""))
+    assert tl._graph_count("fdb-lane-x") == 3
+
+
+def test_container_publishes_consults_stopped_containers(monkeypatch):
+    """A stopped container still reserves its published host port, so the scan
+    must pass `-a`; without it `pick_port` returns a port `docker run -p`
+    then refuses."""
+    seen = {}
+
+    def _fake(*args, **kwargs):
+        seen["args"] = args
+        return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp", "")
+
+    monkeypatch.setattr(tl, "_docker", _fake)
+    assert tl._container_publishes(16390) is True
+    assert "-a" in seen["args"]
+    assert tl._container_publishes(16490) is False
+
+
+def test_list_reports_a_failed_docker_ps_instead_of_claiming_none_exist(monkeypatch, capsys):
+    """Round 3, P3: a failed `docker ps` yielded empty stdout, which was
+    reported as "no fdb-lane-* containers" — absence inferred from a failure,
+    the exact inference the rest of this module refuses to make."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    assert tl.main(["list"]) == 1
+    _out, err = capsys.readouterr()
+    assert "docker ps failed" in err
+    assert "no fdb-lane-* containers" not in err
 
 
 # ── port selection ─────────────────────────────────────────────────────────
@@ -121,7 +278,8 @@ def test_pick_port_raises_when_the_range_is_exhausted(monkeypatch):
 # ── the eval contract ──────────────────────────────────────────────────────
 
 def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
-    monkeypatch.setattr(tl, "start", lambda slug, port, **k: ("fdb-lane-x", 16399))
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-x")
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     rc = tl.main(["uri"])
     out, err = capsys.readouterr()
@@ -130,34 +288,25 @@ def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
     assert "fdb-lane-x" in err, "the human-readable diagnostic belongs on stderr"
 
 
+def test_uri_command_says_unknown_rather_than_zero_graphs(monkeypatch, capsys):
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: None)
+    assert tl.main(["uri"]) == 0
+    _out, err = capsys.readouterr()
+    assert "graphs=unknown" in err
+
+
 def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
     """`uri --port N` is the natural spelling.
 
     Regression (#5084 self-review): the flags were declared on the ROOT parser,
     so post-subcommand flags died in argparse before reaching any guard.
     """
-    monkeypatch.setattr(tl, "start", lambda slug, port, **k: ("fdb-lane-x", port))
+    monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", port))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     assert tl.main(["uri", "--port", "16401"]) == 0
     out, _err = capsys.readouterr()
     assert "127.0.0.1:16401" in out
-
-
-def test_no_flag_can_target_another_lanes_container():
-    """Review round 2: removing only `--name` left `--slug`, which still mapped
-    to `fdb-lane-<peer>` (a peer's slug is a computable `sha1(path)[:10]`). Both
-    overrides are gone, so neither spelling can name another lane's container."""
-    for flag, value in (("--name", "fdb-lane-peer-slug"),
-                        ("--slug", "peer-slug")):
-        with pytest.raises(SystemExit) as exc:
-            tl.main(["down", flag, value])
-        assert exc.value.code == 2, f"argparse must reject {flag} (usage error)"
-
-
-def test_target_name_is_always_derived_from_this_worktree(monkeypatch):
-    monkeypatch.setattr(tl, "repo_root", lambda: "/tmp/wt-under-test")
-    args = argparse.Namespace(graph=tl.DEFAULT_GRAPH)
-    assert tl._target_name(args) == tl.container_name(tl.slug_for("/tmp/wt-under-test"))
 
 
 def test_start_refuses_when_docker_state_is_unknown(monkeypatch):
@@ -170,7 +319,7 @@ def test_start_refuses_when_docker_state_is_unknown(monkeypatch):
 
     monkeypatch.setattr(tl, "_docker", _boom)
     with pytest.raises(SystemExit) as exc:
-        tl.start("slug")
+        tl.start()
     assert "cannot determine the state" in str(exc.value)
 
 
@@ -186,7 +335,7 @@ def test_an_invalid_graph_name_is_refused_before_a_container_exists(monkeypatch)
     assert "refusing graph name" in str(exc.value)
 
 
-def test_status_reports_the_published_port_not_the_requested_one(monkeypatch, capsys):
+def test_status_reports_the_published_port(monkeypatch, capsys):
     """`status` must state the port the container actually publishes (the one a
     lane needs for its URI), never a placeholder."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
@@ -200,24 +349,17 @@ def test_status_reports_the_published_port_not_the_requested_one(monkeypatch, ca
 
 # ── start(): the port handed to the caller must be the PUBLISHED one ───────
 
-class _R:
-    """Just enough of a CompletedProcess for the docker seam."""
-
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
-def test_start_returns_the_published_port_not_the_requested_one(monkeypatch):
+def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatch):
     """Review P2-1: `-p 0:6379` lets Docker choose the port, so echoing the
     requested value would print a URI pointing at nothing."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: 16400)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
-    assert tl.start("slug") == ("fdb-lane-slug", 16400)
+    assert tl.start() == ("fdb-lane-0123456789", 16400)
 
 
-def test_start_rejects_an_invalid_port_before_touching_docker(monkeypatch):
+def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch):
     """The ordering IS the guard: validation must precede `container_state` (a
     docker call) and the stale-container `docker rm`, or an invalid value still
     reaches docker. Both seams are booby-trapped here, so this test fails if the
@@ -229,16 +371,46 @@ def test_start_rejects_an_invalid_port_before_touching_docker(monkeypatch):
     monkeypatch.setattr(tl, "_docker", _boom)
     for bad in (0, -1, 65536):
         with pytest.raises(SystemExit) as exc:
-            tl.start("slug", port=bad)
+            tl.start(port=bad)
         assert "not a valid TCP port" in str(exc.value)
 
 
-def test_stop_surfaces_a_failed_removal(monkeypatch):
+def test_start_removes_only_a_container_this_tool_manages(lane, monkeypatch):
+    """The stale-container `rm` must satisfy the ownership guard (a real
+    refusal, not an `assert` — `python -O` strips those)."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "is_managed", lambda _n: False)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "refusing to remove unmanaged" in str(exc.value)
+
+
+def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, monkeypatch):
+    """A container that cannot be addressed must not be left running."""
+    calls = []
+
+    def _fake(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "exec":
+            return _R(0, "PONG", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: None)
+    monkeypatch.setattr(tl, "_docker", _fake)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "publishes no port" in str(exc.value)
+    assert ("rm", "-f", "fdb-lane-0123456789") in calls
+
+
+def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
     """Review P3: `stop` returned "removed" even when `docker rm` failed."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
     with pytest.raises(SystemExit) as exc:
-        tl.stop("fdb-lane-0123456789")
+        tl.stop()
     assert "failed to remove" in str(exc.value)
 
 
