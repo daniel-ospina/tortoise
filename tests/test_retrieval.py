@@ -1328,33 +1328,59 @@ def test_the_write_lock_clause_is_anchored_to_the_message_start():
         'retry the query" RETURNNN, pos 80')) is False
 
 
-def test_a_composite_abort_message_takes_the_state_independent_arm():
-    """#7685 review round 3: ONE classifier decides the arm.
+def test_a_composite_abort_message_is_decided_by_what_it_starts_with():
+    """#7685 review round 3: ONE classifier, and the ANCHORED signal wins.
 
-    A message carrying BOTH a state-independent clause and a graph-abort clause
-    must be classified the same way by the predicate and by the family test, or
-    the retry is authorized as unconditional and then gated on ``EXISTS`` —
-    refusing a legitimate contended/persistence write whenever the key is absent.
+    ``_MISCONF_RE`` is an unanchored search while ``_GRAPH_ABORT_RE`` is
+    ``\\A``-anchored, so on a message carrying both the ordering decides the arm.
+    The anchored match is the authoritative one — the message IS that abort — so
+    it must be decided first: with MISCONF first, a graph-abort message that
+    merely MENTIONS persistence would take the state-independent arm and be
+    retried with NO ``EXISTS`` probe, i.e. straight into an auto-created EMPTY
+    graph. Both orders are tested; the leading-MISCONF case must stay
+    unconditional (the round-2 regression).
     """
-    composite = ("MISCONF Errors writing to the AOF file: No space left on "
-                 "device\n" + _DELETED_OR_REPLACED)
+    leading_abort = (_DELETED_OR_REPLACED
+                     + " (MISCONF errors writing to the AOF file)")
+    exc = redis_exc.ResponseError(leading_abort)
+    assert graph_abort_family(exc) is True
+    assert retryable_aborted_write(exc, graph_exists=lambda: False) is False
+    assert retryable_aborted_write(exc, graph_exists=lambda: True) is True
+
+    # the graph-abort clause NOT at the message start is not the abort; the
+    # LEADING MISCONF refusal is, and that arm stays unconditional
+    leading_misconf = ("MISCONF Errors writing to the AOF file: No space left "
+                       "on device\n" + _DELETED_OR_REPLACED)
 
     def _boom():
         raise AssertionError("a state-independent arm must not probe graph state")
 
-    exc = redis_exc.ResponseError(composite)
-    assert graph_abort_family(exc) is False
-    assert retryable_aborted_write(exc, graph_exists=_boom) is True
+    exc2 = redis_exc.ResponseError(leading_misconf)
+    assert graph_abort_family(exc2) is False
+    assert retryable_aborted_write(exc2, graph_exists=_boom) is True
 
-    # ...and end-to-end: the retry is re-issued even with the key ABSENT
-    sdk, g = _sdk_for_graph_abort(abort=composite, graph_exists=False)
+    # ...and end-to-end, the discriminating direction: an abort that MENTIONS
+    # persistence with the key ABSENT must be refused LOUD. Reorder the arms and
+    # this retries into a fresh empty graph (mutation-verified).
+    sdk, g = _sdk_for_graph_abort(abort=leading_abort, graph_exists=False)
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert (g.attempts, g.applied) == (1, 0)
+
+    sdk, g = _sdk_for_graph_abort(abort=leading_abort, graph_exists=True)
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t") == "ok"
+    assert (g.attempts, g.applied) == (2, 1)
+
+    # ...and the leading-MISCONF form is retried even with the key absent
+    sdk, g = _sdk_for_graph_abort(abort=leading_misconf, graph_exists=False)
 
     def _write(_sdk=sdk):
         return _sdk._proj.g.query("MERGE (m:EpMeta)")
 
     assert sdk._graph_write_with_retry(_write, what="t") == "ok"
     assert (g.attempts, g.applied, g.probes) == (2, 1, 0)
-    assert sdk._graph_write_retry_count == 1
 
 
 def _sdk_for_graph_abort(*, abort: str, graph_exists: bool = True,

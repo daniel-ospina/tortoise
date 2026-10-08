@@ -142,22 +142,29 @@ def _abort_arm(exc: BaseException) -> str | None:
     :func:`graph_abort_family` read this, so the arm that AUTHORIZES a retry and
     the arm that DECIDES whether it needs graph state are always the same one.
     Two independent regex tests disagreed on a message carrying both an
-    unconditional clause and a graph-abort clause: the predicate short-circuits to
-    retryable as state-independent, while a graph-abort-only family test would then
-    gate it on ``EXISTS`` — refusing a legitimate contended/persistence write
-    whenever the key was missing (#7685 review round 3). Precedence is therefore
-    explicit: the unconditional arms win, matching the predicate's own
-    short-circuit order.
+    unconditional clause and a graph-abort clause: the predicate short-circuited to
+    retryable as state-independent while a graph-abort-only family test then gated
+    it on ``EXISTS``, refusing a legitimate contended/persistence write whenever
+    the key was missing (#7685 review round 2).
+
+    Precedence: the ``\A``-ANCHORED arm is decided FIRST. A match at the message
+    start is the strongest signal available — the message IS that abort — while
+    ``_MISCONF_RE`` is an unanchored search. On a message that carries both, the
+    unanchored MISCONF must therefore NOT win: that would send a genuine
+    graph-abort to the state-independent arm, which retries with no ``EXISTS``
+    probe at all — straight into an auto-created EMPTY graph, the #6666 silent
+    success this predicate exists to prevent. With the anchored arm first, such a
+    message is gated, and a message merely MENTIONING persistence is unaffected.
     """
     import redis.exceptions as _re
 
     if not isinstance(exc, _re.ResponseError):
         return None
     text = _ERR_PREFIX_RE.sub("", str(exc).strip(), count=1)
-    if _MISCONF_RE.search(text) or _WRITE_LOCK_RE.search(text):
-        return _ARM_STATE_INDEPENDENT
     if _GRAPH_ABORT_RE.search(text):
         return _ARM_GRAPH_ABORT
+    if _MISCONF_RE.search(text) or _WRITE_LOCK_RE.search(text):
+        return _ARM_STATE_INDEPENDENT
     return None
 
 
