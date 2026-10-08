@@ -62,15 +62,21 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #: Both are v6 literals; the engine's own concurrency test documents the
 #: message as retryable and the message itself instructs a retry.
 #:
-#: ANCHORED on the full abort context, deliberately: a bare alternation over
-#: ``re.search`` matches ANY message merely CONTAINING the phrases (measured:
-#: three crafted non-abort diagnostics all returned True). Because the predicate
-#: gates a re-issued bare ``CREATE`` — non-idempotent, no uniqueness constraint
-#: on ``Point.id`` — a false positive IS the duplicate-point failure #7405's fix
-#: exists to prevent, so the whole refusal clause must be present.
+#: ANCHORED TO THE START OF THE MESSAGE (``\A``), deliberately: a bare
+#: alternation over ``re.search`` matches ANY message merely CONTAINING the
+#: phrases (measured: three crafted non-abort diagnostics all returned True),
+#: and a LINE-start anchor is not enough either — a parse error ECHOES the
+#: offending CYPHER, so user source containing the phrase would authorize a
+#: re-issue. Because the predicate gates a re-issued bare ``CREATE`` —
+#: non-idempotent, no uniqueness constraint on ``Point.id`` — a false positive
+#: IS the duplicate-point failure #7405's fix exists to prevent: under-matching
+#: (a loud miss) is the safe direction. Measured live on v6 (ver 60001), a parse
+#: error collapses newlines to SPACES in its ``errCtx:`` echo, so the phrase
+#: lands mid-message, never at position 0 (``_abort_arm`` normalizes the ``ERR``
+#: prefix so one anchored pattern serves both the wire and the stripped form).
 _WRITE_LOCK_RE = re.compile(
-    r"(?:write query )?aborted:\s*another write is in progress"
-    r"|another write is in progress, retry the query",
+    r"\A\s*(?:(?:write query )?aborted:\s*another write is in progress"
+    r"|another write is in progress, retry the query)",
     re.IGNORECASE)
 
 #: The graph-deleted-or-replaced abort family — the ONE class whose retry
@@ -104,17 +110,55 @@ _WRITE_LOCK_RE = re.compile(
 #: the REBUILD's outcome, not the retry's, and separating the two fully would
 #: need an engine-level identity token (out of scope, #7685's escalation line).
 #:
-#: All three literals are LINE-ANCHORED (``^\s*``): they are whole engine
-#: messages, so a diagnostic that merely quotes one must not match. Measured on
-#: v6, a parse error echoes the offending CYPHER — which can contain the sentence
-#: — inside ``errCtx:`` on the SAME line, never at line start. A false positive
-#: re-issues a bare, non-idempotent ``CREATE``, so under-matching is the safe
-#: direction.
+#: All three literals are ANCHORED TO THE START OF THE MESSAGE (``\A``): they
+#: are whole engine messages, so a diagnostic that merely quotes one must not
+#: match — and a LINE-start anchor is not enough, because a parse error echoes the
+#: offending source (which can contain the sentence) inside ``errCtx:``. Measured
+#: live on v6 (ver 60001): that echo collapses newlines to SPACES, so the sentence
+#: lands mid-message and cannot match; ``\A`` makes that structural rather than
+#: dependent on the engine's newline handling. A false positive re-issues a bare,
+#: non-idempotent ``CREATE``, so under-matching is the safe direction.
 _GRAPH_ABORT_RE = re.compile(
-    r"^\s*graph was deleted or replaced while the query was running, aborting"
-    r"|^\s*encountered an empty key when opened key "
-    r"|^\s*encountered different graph value when opened key ",
-    re.IGNORECASE | re.MULTILINE)
+    r"\A\s*graph was deleted or replaced while the query was running, aborting"
+    r"|\A\s*encountered an empty key when opened key "
+    r"|\A\s*encountered different graph value when opened key ",
+    re.IGNORECASE)
+
+#: The RESP simple-error code. ``redis-py`` strips a leading ``ERR `` from wire
+#: errors (measured), but a directly constructed ``ResponseError("ERR …")`` — or
+#: a transport that does not strip it — keeps it; normalizing once lets the
+#: anchored patterns above serve both forms.
+_ERR_PREFIX_RE = re.compile(r"\AERR\s+", re.IGNORECASE)
+
+#: The retry arms, named so ONE classifier decides which one an exception takes.
+_ARM_STATE_INDEPENDENT = "state_independent"
+_ARM_GRAPH_ABORT = "graph_abort"
+
+
+def _abort_arm(exc: BaseException) -> str | None:
+    """Classify *exc* into its retry arm, or ``None`` when it is not retryable.
+
+    THE single classifier: both :func:`retryable_aborted_write` and
+    :func:`graph_abort_family` read this, so the arm that AUTHORIZES a retry and
+    the arm that DECIDES whether it needs graph state are always the same one.
+    Two independent regex tests disagreed on a message carrying both an
+    unconditional clause and a graph-abort clause: the predicate short-circuits to
+    retryable as state-independent, while a graph-abort-only family test would then
+    gate it on ``EXISTS`` — refusing a legitimate contended/persistence write
+    whenever the key was missing (#7685 review round 3). Precedence is therefore
+    explicit: the unconditional arms win, matching the predicate's own
+    short-circuit order.
+    """
+    import redis.exceptions as _re
+
+    if not isinstance(exc, _re.ResponseError):
+        return None
+    text = _ERR_PREFIX_RE.sub("", str(exc).strip(), count=1)
+    if _MISCONF_RE.search(text) or _WRITE_LOCK_RE.search(text):
+        return _ARM_STATE_INDEPENDENT
+    if _GRAPH_ABORT_RE.search(text):
+        return _ARM_GRAPH_ABORT
+    return None
 
 
 def retryable_aborted_write(
@@ -188,15 +232,11 @@ def retryable_aborted_write(
     :func:`retryable_transient`, which stays the transport-class predicate the
     eval's OUTER phase loops use (see the layering note there).
     """
-    import redis.exceptions as _re
-
-    if not isinstance(exc, _re.ResponseError):
+    arm = _abort_arm(exc)
+    if arm is None:
         return False
-    text = str(exc)
-    if _MISCONF_RE.search(text) or _WRITE_LOCK_RE.search(text):
+    if arm == _ARM_STATE_INDEPENDENT:
         return True
-    if not _GRAPH_ABORT_RE.search(text):
-        return False
     # The graph-abort family. The text cannot distinguish a rebuild from a
     # deletion, so the STATE decides — and a retry we cannot authorize is
     # refused (loud), never guessed.
@@ -221,11 +261,13 @@ def graph_abort_family(exc: BaseException) -> bool:
     to do with the graph's presence. (#7685 review round 2: the SDK's
     re-issue-time probe was applied to every arm, which turned a contended or
     persistence-refused write into a hard failure whenever the key was missing.)
-    """
-    import redis.exceptions as _re
 
-    return (isinstance(exc, _re.ResponseError)
-            and bool(_GRAPH_ABORT_RE.search(str(exc))))
+    Reads :func:`_abort_arm`, the same classifier the predicate uses, so a
+    message that carries BOTH an unconditional clause and a graph-abort clause is
+    classified state-independent by both — never authorized as one and gated as
+    the other (#7685 review round 3).
+    """
+    return _abort_arm(exc) == _ARM_GRAPH_ABORT
 
 
 class WriteStageRetriesExhausted(Exception):

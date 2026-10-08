@@ -52,6 +52,7 @@ from tortoise.retrieval import (
 from tortoise.retry import (
     WriteStageRetriesExhausted,
     call_with_predicate,
+    graph_abort_family,
     retryable_aborted_write,
     retryable_transient,
 )
@@ -1153,8 +1154,9 @@ def test_aborted_write_predicate_covers_the_graph_query_write_path():
     instructs a retry; the engine's comment at the raise site records that the
     slot was NOT claimed, i.e. the same *did not land* semantics.
     """
-    # the write-path refusal, exactly as the engine emits it (with the ERR
-    # protocol prefix the client surfaces as part of the ResponseError text)
+    # the write-path refusal, exactly as the engine emits it (the client strips
+    # the ``ERR`` code from wire errors — measured on v6 — but a directly
+    # constructed ``ResponseError`` may keep it, so both forms are accepted)
     assert retryable_aborted_write(redis_exc.ResponseError(
         "ERR another write is in progress, retry the query")) is True
     assert retryable_aborted_write(redis_exc.ResponseError(
@@ -1267,26 +1269,92 @@ def test_c_core_abort_clauses_are_anchored():
             redis_exc.ResponseError(text), graph_exists=lambda: True) is False
 
 
-def test_the_v6_abort_clause_is_line_anchored():
-    """#7685(A), review round 1: a parse-error ECHO must not authorize a retry.
+def test_the_v6_abort_clause_is_anchored_to_the_message_start():
+    """#7685 review rounds 1+3: a parse-error ECHO must not authorize a retry.
 
-    Measured on v6 (ver 60001): a Cypher parse error echoes the offending source
-    into ``errCtx: CYPHER …`` on the SAME line, and that source can contain the
-    abort sentence. The real abort arrives verbatim at line start, so the clause
-    is ``^\\s*``-anchored like the C-core ones — under-matching is the safe
-    direction for a non-idempotent re-issue.
+    Measured on v6 (ver 60001) with the abort sentence embedded in the offending
+    CYPHER: the engine echoes it inside ``errCtx:`` with newlines COLLAPSED TO
+    SPACES — ``Invalid input 'RETURNNN': expected end of input, errCtx: MATCH (n)
+    RETURNNN graph was deleted or replaced while the query was running, aborting
+    RE..., pos 9`` — so the sentence lands MID-message, never at position 0. The
+    clause is therefore anchored with ``\\A`` (message start), not ``^`` +
+    MULTILINE: a line-start anchor still matches a multi-line echo, which
+    ``\\A`` makes structurally impossible. Under-matching is the safe direction
+    for a non-idempotent re-issue.
     """
     assert retryable_aborted_write(
         redis_exc.ResponseError(_DELETED_OR_REPLACED),
         graph_exists=lambda: True) is True
+    # the client strips ``ERR`` from wire errors, but a message that still
+    # carries the code is the same abort
     assert retryable_aborted_write(
-        redis_exc.ResponseError("\n" + _DELETED_OR_REPLACED),
+        redis_exc.ResponseError("ERR " + _DELETED_OR_REPLACED),
         graph_exists=lambda: True) is True
-    echo = ("Invalid input 'RETURNNN': expected end of input, errCtx: CYPHER "
-            "c=\"graph was deleted or replaced while the query was running, "
-            "aborting\" RETURNNN, pos 80")
+    # leading/trailing WHITESPACE is normalized — a bare newline is not an echo
     assert retryable_aborted_write(
-        redis_exc.ResponseError(echo), graph_exists=lambda: True) is False
+        redis_exc.ResponseError("\n" + _DELETED_OR_REPLACED + "\n"),
+        graph_exists=lambda: True) is True
+    # ...but the abort must be THE MESSAGE, not a clause inside a diagnostic
+    # the MEASURED v6 echo (newlines collapsed) — not a crafted approximation
+    measured_echo = (
+        "Invalid input 'RETURNNN': expected end of input, errCtx: MATCH (n) "
+        "RETURNNN " + _DELETED_OR_REPLACED + " RE..., pos 9")
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(measured_echo),
+        graph_exists=lambda: True) is False
+    # and a multi-line echo cannot slip through either (#7685 review round 3)
+    multiline_echo = (
+        "Invalid input 'RETURNNN': expected end of input, errCtx: CYPHER "
+        "c=\"MATCH (n)\n" + _DELETED_OR_REPLACED + "\" RETURNNN, pos 9")
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(multiline_echo),
+        graph_exists=lambda: True) is False
+
+
+def test_the_write_lock_clause_is_anchored_to_the_message_start():
+    """#7685 review round 3: the echo hazard applies to the write-slot arm too.
+
+    The write-slot refusal is state-INDEPENDENT, so it bypasses the EXISTS probe
+    entirely — a false positive would re-issue a bare, non-idempotent ``CREATE``
+    with no state check at all. Anchoring to the message start (not a line start)
+    closes the echo path for this arm as well.
+    """
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        'Invalid input ... errCtx: CYPHER c="another write is in progress, '
+        'retry the query" RETURNNN, pos 80')) is False
+
+
+def test_a_composite_abort_message_takes_the_state_independent_arm():
+    """#7685 review round 3: ONE classifier decides the arm.
+
+    A message carrying BOTH a state-independent clause and a graph-abort clause
+    must be classified the same way by the predicate and by the family test, or
+    the retry is authorized as unconditional and then gated on ``EXISTS`` —
+    refusing a legitimate contended/persistence write whenever the key is absent.
+    """
+    composite = ("MISCONF Errors writing to the AOF file: No space left on "
+                 "device\n" + _DELETED_OR_REPLACED)
+
+    def _boom():
+        raise AssertionError("a state-independent arm must not probe graph state")
+
+    exc = redis_exc.ResponseError(composite)
+    assert graph_abort_family(exc) is False
+    assert retryable_aborted_write(exc, graph_exists=_boom) is True
+
+    # ...and end-to-end: the retry is re-issued even with the key ABSENT
+    sdk, g = _sdk_for_graph_abort(abort=composite, graph_exists=False)
+
+    def _write(_sdk=sdk):
+        return _sdk._proj.g.query("MERGE (m:EpMeta)")
+
+    assert sdk._graph_write_with_retry(_write, what="t") == "ok"
+    assert (g.attempts, g.applied, g.probes) == (2, 1, 0)
+    assert sdk._graph_write_retry_count == 1
 
 
 def _sdk_for_graph_abort(*, abort: str, graph_exists: bool = True,
