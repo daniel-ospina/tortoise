@@ -115,6 +115,21 @@ those bytes are what the prompt consumes. Readiness is an asymmetry — the prom
 marker AND the absence of pi's status bar (see `boot_blocked`) — never a
 position-based guess.
 
+NO FOOTER, NO SEND (#7158)
+--------------------------
+Readiness is a POSITIVE signal about the LIVE pane, not the absence of a known
+failure: pi's footer (status bar) must be drawn and no shell prompt may appear
+BELOW it before the tool writes. Two dead-pane shapes otherwise pass a "is a bar
+present anywhere" test — one with no footer at all, and one whose previous pi
+session left its footer in the scrollback above a freshly printed shell prompt —
+and in both the bytes go to a bare login shell, which EXECUTES them. The earlier
+revision treated the no-footer shape as a slow boot and sent anyway
+("confirmation will decide"); but confirmation runs AFTER the bytes are written,
+so it cannot un-execute a command. The gate now fails CLOSED — a footer drawn
+with no shell prompt below it, on the initial attempt AND on the dismiss-and-
+resend recovery. A genuinely slow boot is raised via `--ready-timeout`; a refusal
+is recoverable, an executed brief is not.
+
 USAGE
 -----
     uv run python tools/cmux_dispatch.py send --workspace workspace:12 \
@@ -212,12 +227,62 @@ from pathlib import Path
 #: The exact string pi prints before awaiting a keypress.
 BOOT_BLOCK_MARKER = "Press any key to continue"
 
-#: pi's status bar context-window indicator, e.g. `0.0%/700k (auto)` on a fresh
-#: idle pane and `3.8%/700k (auto)` mid-turn. Its presence is the cheapest
-#: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
-#: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
-#: NO `↑`/`↓` counters — do not key readiness off those.
-READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
+#: pi's footer markers. The canonical one is the context-budget token
+#: (`N.N%/Nk (auto)`, or `?/Nk (auto)` when `getContextUsage()` has a null percent
+#: after a compaction). Its presence is the cheapest reliable "the TUI owns stdin
+#: now" signal: the footer is drawn only after the boot-block prompt has been
+#: satisfied, and a *fresh idle* pane shows NO `↑`/`↓` counters — do not key
+#: readiness off those.
+#:
+#: The token can also be MISSING on a live pane: a banner printed over the footer
+#: tears the line and leaves only the model badge (verbatim capture, 2026-09-26:
+#: `…jsonlepseek) deepseek-flash • high`). This fleet's own liveness checks accept
+#: the badge for exactly that reason (`orchestrator-heartbeat.sh` `_pane_has_pi`,
+#: `safe-send.sh`), so requiring the token alone refused a healthy lane (#7158
+#: round 7).
+#:
+#: The badge is `${modelName} • ${thinkingLevel}` (`footer.js`), and the levels are
+#: `off|minimal|low|medium|high|xhigh|max` (`thinking off` when off). The level SET
+#: is finite and known, so it is ENUMERATED — a generic `• <word>` let ordinary
+#: output (a markdown bullet) forge a footer block and move the prompt scan anchor
+#: below a live shell prompt (#7158 round 9).
+#:
+#: `(auto)` is deliberately NOT a marker: it is only ever appended to the budget
+#: token (so it adds no coverage), and as a lone token it is the easiest thing for
+#: arbitrary output to hit.
+READY_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b"  # N.N%/Nk or ?/Nk
+    r"|\u2022 (?:thinking off|off|minimal|low|medium|high|xhigh|max)\b"  # model badge
+)
+
+#: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
+#: line — `FooterComponent.render` builds `[pwdLine, statsLine, ...statuses]` — so
+#: a stats-shaped line with a pwd line above it is a genuine footer BLOCK, while
+#: one without is output that merely LOOKS like a stats line. That distinction is
+#: what keeps shell output which mimics the stats shape from hiding the prompt
+#: ABOVE it (#7158 round 6). `formatCwdForFooter` renders the cwd as an absolute
+#: path or a `~`-relative one and appends `(branch)` and ` • <sessionName>` — so
+#: the pwd line can be BARE `~` (cwd == HOME), which a `\S` requirement rejected,
+#: losing the anchor and refusing a healthy lane (#7158 round 9). Match the
+#: PREFIX only; a missed real pwd line is the fail-open direction.
+PWD_LINE_RE = re.compile(r"^\s*(?:~|/)")
+
+#: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
+#: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
+#: STANDALONE token (`%`, `$`, `#`, `>` at a whitespace/line boundary), or a
+#: line-ending `%` not preceded by a digit, or a `$ # >` followed by whitespace or
+#: end anywhere (which catches `bash-3.2$ `, `[root@host ~]# ls -la`). The digit
+#: guard on line-ending `%` is what keeps a real percentage (`Uploading 50%`,
+#: `Progress 99%`) from being read as a prompt; `#general thread` has no sigil
+#: followed by whitespace, so pi's own status text is not flagged.
+#: RESIDUAL (FAIL-OPEN, not fail-closed): a `%` prompt whose sigil abuts a digit
+#: (`~/proj2%`) is indistinguishable from a percentage and is not flagged, as are
+#: arrow prompts (`❯`, `➜`). Neither is emitted by this fleet's shells
+#: (`/bin/zsh -ic 'exec pi'` → `%n@%m %1~ %# `, bash → `\h:\W \u\$ ` — the sigil
+#: always follows a space). An extension status containing `[#$>]` followed by
+#: whitespace (`Cost: $ 0.003`, `# general`) IS flagged — that direction is
+#: fail-closed, and no status this fleet sets contains such a token.
+SHELL_PROMPT_RE = re.compile(r"(?:(?:^|\s)[%$#>](?=\s|$)|(?<!\d)%\s*$|[#$>](?=\s|$))")
 
 #: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
 #: chars with a trailing `…`, so the fingerprint MUST come from the head of the
@@ -395,6 +460,33 @@ def _last_status_bar_end(screen: str | None) -> int:
     return matches[-1].end() if matches else -1
 
 
+def _is_pwd_line(line: str) -> bool:
+    """True when a line looks like pi's footer pwd line (not a shell prompt)."""
+    return bool(PWD_LINE_RE.match(line)) and not SHELL_PROMPT_RE.search(line)
+
+
+def _footer_stats_end(screen: str | None) -> int:
+    """Offset just past the LAST stats line that belongs to a pi footer BLOCK,
+    i.e. is directly preceded (ignoring blank lines) by a pwd line, or -1.
+
+    This is the anchor `shell_prompt_below_footer` scans from: a stats-shaped
+    line WITHOUT a pwd line above it is not a footer — it is output. See
+    `PWD_LINE_RE`.
+    """
+    text = screen or ""
+    prev_nonempty: str | None = None
+    pos = 0
+    best = -1
+    for line in text.split("\n"):
+        match = READY_RE.search(line)
+        if match and prev_nonempty is not None and _is_pwd_line(prev_nonempty):
+            best = pos + match.end()
+        if line.strip():
+            prev_nonempty = line
+        pos += len(line) + 1
+    return best
+
+
 def status_bar_present(screen: str | None) -> bool:
     """pi's TUI status bar appears somewhere in the capture."""
     return _last_status_bar_end(screen) >= 0
@@ -431,9 +523,110 @@ def boot_blocked(screen: str | None) -> bool:
     return _last_status_bar_end(screen) < marker_at
 
 
+def shell_prompt_below_footer(screen: str | None) -> bool:
+    """True when a shell prompt is drawn BELOW the last pi footer.
+
+    A status bar ANYWHERE is not evidence that the CURRENT process owns stdin.
+    pi renders inline, so a pane whose pi exited retains the dead session's
+    footer in the scrollback while the shell prints its prompt BELOW it — the
+    same ordering trap `boot_blocked` documents for the boot-block marker, in
+    the case where no marker is present to catch it. That prompt is what makes
+    the stale frame EXECUTABLE: bytes sent there run as commands (#7158).
+
+    A prompt is detected by a shell sigil used as a prompt token — standalone
+    (`host % ls -la`), line-ending (`user@host dir %`), or followed by
+    whitespace/end anywhere (`bash-3.2$ `, `[root@host ~]# ls -la`). pi's own
+    footer and its EXTENSION-STATUS lines carry no such sigil (`Loop: <slug>
+    (cycle 2)`, `#general thread`), and a line-ending `%` preceded by a digit is
+    excluded so `Uploading 50%` stays READY. pi pushes status lines BELOW its
+    stats line whenever an extension calls `ctx.ui.setStatus` (verified in the
+    installed renderer: `modes/interactive/components/footer.js`), so "the footer
+    must be the literal last line" would refuse healthy lanes.
+
+    The scan starts just past the last FOOTER BLOCK — the last stats line with a
+    pwd line above it (`_footer_stats_end`) — and covers every line after it, plus
+    the remainder of the anchor line itself (a crash mid-render leaves the prompt
+    appended to the footer's own row). Anchoring on "the last stats-shaped line"
+    alone is bypassable: shell OUTPUT below the prompt which mimics the stats shape
+    (`host % ` then a line reading `42.0%/700k (auto)`) would place the prompt ABOVE
+    the anchor and hide it. Requiring a real footer block (a pwd line above the
+    stats) rejects that; when no block exists at all the anchor falls back to the
+    last stats-shaped line, which is the conservative (more-scanning) choice.
+
+    RESIDUALS — direction stated honestly:
+    * FAIL-OPEN (INHERENT to judging liveness from screen content, not fixable by
+      this heuristic): shell output that reproduces an ENTIRE pi footer block — a
+      pwd-shaped line (`~`/`/` prefix) directly above a line carrying a genuine
+      marker (a real budget token, or a real badge level such as `• high`) — moves
+      the anchor down past the prompt. Enumerating the badge levels (round 9) makes
+      an arbitrary bullet like `• item one` no longer a marker, but a shell can
+      still print `• high`. The durable signal is process/session liveness, not
+      screen content (#7159).
+    * FAIL-OPEN (narrow): a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
+      indistinguishable from a percentage, and arrow prompts (`❯`, `➜`) are
+      outside the class. Neither is emitted by this fleet's shells.
+    * FAIL-CLOSED: an extension status containing `[#$>]` followed by whitespace
+      (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does,
+      and when there is no footer block at all the whole capture is scanned (see
+      below), which can only over-refuse.
+    """
+    text = screen or ""
+    end = _footer_stats_end(text)
+    if end < 0:
+        # ⛔ NO TRUSTWORTHY FOOTER BLOCK. Anchor on the last marker alone and the
+        # scan sits BELOW the marker, so a loose marker printed by the shell
+        # (`host % echo '(auto)'` then `(auto)`) hides the prompt ABOVE it and
+        # declares a bare shell READY (#7158 round 8). Without a block, scan the
+        # WHOLE capture — the fail-closed direction. A live pane does not reach
+        # this branch: pi always draws the pwd line above the stats line
+        # (`footer.js` `[pwdLine, statsLine, ...statuses]`).
+        return any(
+            line.strip() and SHELL_PROMPT_RE.search(line)
+            for line in text.splitlines()
+        )
+    # Scan the whole tail INCLUDING the remainder of the anchor line, so a prompt
+    # appended to a non-newline-terminated footer row is still caught.
+    return any(
+        line.strip() and SHELL_PROMPT_RE.search(line)
+        for line in text[end:].splitlines()
+    )
+
+
+def not_ready_reason(screen: str | None) -> str:
+    """Why a pane is not ready, in operator terms.
+
+    `shell_prompt_below_footer` falls back to scanning the WHOLE capture when no
+    footer BLOCK exists, so a pane with NO footer at all (a bare login shell)
+    also reports True. Branching on it alone would therefore tell the operator
+    "a shell prompt is drawn BELOW pi's footer" for a pane where no footer was
+    ever drawn — naming a footer that does not exist and sending the reader
+    after the wrong failure. Check presence first, then position.
+    """
+    if boot_blocked(screen):
+        return (
+            "pi is sitting on its `Press any key to continue...` boot-block "
+            "prompt, which eats what is typed at it"
+        )
+    if status_bar_present(screen) and shell_prompt_below_footer(screen):
+        return (
+            "a shell prompt is drawn BELOW pi's footer, so the pane has "
+            "returned to a shell"
+        )
+    return "no pi footer (status bar) was drawn"
+
+
 def screen_ready(screen: str | None) -> bool:
-    """True when pi's TUI owns stdin: a status bar drawn after any prompt."""
-    return status_bar_present(screen) and not boot_blocked(screen)
+    """True when pi's LIVE TUI owns stdin.
+
+    Three requirements: a footer is present, no boot-block marker follows it, and
+    no shell prompt is drawn below it — a stale footer above a live shell prompt
+    is an executable pane, not a ready one (#7158).
+    """
+    return (
+        status_bar_present(screen)
+        and not boot_blocked(screen)
+        and not shell_prompt_below_footer(screen)
+    )
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -1142,9 +1335,10 @@ class Dispatcher:
         Returns `(ready, blocked_now, last_screen)`.
 
         `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
-        is PROVABLY not accepting input, so the caller must refuse. If the prompt
-        was seen earlier but is gone now, the caller may proceed best-effort —
-        confirmation and recovery still gate success.
+        is PROVABLY not accepting input, so the caller must refuse. `ready=False`
+        means no pi footer was drawn by the deadline; the caller must ALSO refuse
+        — there is no "best-effort proceed" (removed in #7158): a readable pane
+        with no live pi is a bare shell, and bytes written there are executed.
         """
         deadline = self.now() + timeout
         screen: str | None = ""
@@ -1293,9 +1487,25 @@ class Dispatcher:
                 fingerprint=fp,
             )
         if not ready:
-            self.log(
-                f"{tag}no ready signal after {ready_timeout:g}s — sending anyway "
-                f"(confirmation will decide)"
+            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but pi does not
+            # own stdin: either no footer was ever drawn, or a stale footer sits
+            # above a live shell prompt. In both cases the pane may be a bare
+            # login shell (a dead lane), which EXECUTES the bytes as a command.
+            # The old fail-open ("sending anyway — confirmation will decide")
+            # wrote the brief first and observed afterwards; confirmation cannot
+            # undo an executed command. A genuinely slow boot is a caller concern
+            # (--ready-timeout); a refusal is recoverable, an executed brief is
+            # not.
+            reason = not_ready_reason(gate_screen)
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: {reason} within {ready_timeout:g}s — "
+                f"refusing to send into a pane with no live pi: the bytes would "
+                f"be typed into a bare shell and EXECUTED. Confirm the lane has "
+                f"a live pi (or raise --ready-timeout for a slow boot), then "
+                f"re-dispatch.",
+                fingerprint=fp,
             )
 
         # --- pre-send baseline (novelty for the pending-turn check) --------- #
@@ -1309,14 +1519,57 @@ class Dispatcher:
         # novel.
         before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
         if before_screen is None:
-            # A transient `read-screen` failure is recoverable — retry once before
-            # giving up the `queued` verdict for this send.
+            # A transient `read-screen` failure is recoverable — retry once.
             before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
-            if before_screen is None:
-                self.log(
-                    f"{tag}no readable pre-send baseline — the queued verdict "
-                    f"will fail closed for this attempt"
-                )
+
+        # ⛔ RE-ASSERT READINESS ON THE FRESH READ (#7158, TOCTOU). The gate
+        # (`wait_until_safe_to_send`) was ready, but the pane can die in the gap
+        # before this read — the window is one `read-screen`, which is not bounded
+        # under fleet load. Writing on a stale `ready` is how the brief lands in a
+        # bare shell; judge the read we already hold instead. An UNREADABLE read is
+        # a refusal too, not a licence to write blind: with the pane state unknown,
+        # a dead pane would EXECUTE the brief, and a refusal is recoverable while an
+        # executed brief is not. This mirrors the resend path, which already
+        # refuses when its fresh read is unreadable (`screen_ready(None)` is False).
+        if before_screen is None:
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: the pre-send read failed twice, so readiness "
+                f"could not be re-checked — refusing to write blind: had the pane "
+                f"died after the gate passed, the bytes would be typed into a bare "
+                f"shell and EXECUTED. Re-dispatch once the pane is readable.",
+                fingerprint=fp,
+            )
+        # Judge readiness on the SAME window depth the gate used. `before_screen`
+        # is deliberately read deeper (`RECOVERY_SCREEN_LINES`) because the
+        # pending-turn baseline below must share the CONFIRMATION read's scope —
+        # but `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        # capture, so a 300-line window can carry an older shell prompt line that
+        # the gate's 80-line window does not. Without this slice the two judgements
+        # disagree about the same pane: the gate declares READY, the deeper
+        # re-assert refuses, and the refusal is reported as "a shell prompt is drawn
+        # BELOW pi's footer" when the truth is that no footer BLOCK was found at all
+        # (the shape `SCREEN_LIVE_WITH_TORN_FOOTER` models). The last
+        # `DEFAULT_SCREEN_LINES` lines are exactly what a `read-screen --lines 80`
+        # returns, so this is the gate's own window. A pane that genuinely died
+        # still draws its prompt in those last lines, so the fail-closed direction
+        # is intact — only the lines BELOW the gate's view stop being able to
+        # over-refuse.
+        gate_window = "\n".join(
+            before_screen.splitlines()[-DEFAULT_SCREEN_LINES:]
+        )
+        if not screen_ready(gate_window):
+            reason = not_ready_reason(gate_window)
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: {reason} on the pre-send read — refusing to "
+                f"send into a pane with no live pi: the bytes would be typed "
+                f"into a bare shell and EXECUTED. Re-dispatch once the pane is "
+                f"idle.",
+                fingerprint=fp,
+            )
 
         # --- transmit ------------------------------------------------------- #
         self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
@@ -1487,13 +1740,57 @@ class Dispatcher:
                     )
                     return result
                 if not recovery_ready:
-                    self.log(
-                        f"{tag}recovery: no ready signal — re-sending anyway "
-                        f"(confirmation will decide)"
+                    # ⛔ SAME FAIL-CLOSED RULE AS THE INITIAL GATE (#7158): the
+                    # pane became readable after the dismissal but never drew
+                    # pi's footer, so there is still no evidence a pi owns
+                    # stdin. Re-sending would write the brief into whatever is
+                    # there. Refuse rather than fall back to the old
+                    # "re-sending anyway (confirmation will decide)".
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was dismissed but never presented "
+                        f"pi's footer within {RECOVERY_READY_TIMEOUT:g}s — the "
+                        f"re-send was REFUSED rather than written into a pane "
+                        f"with no live pi. Re-dispatch once the pane is idle."
                     )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
             else:
+                # ⛔ R_RESEND writes the brief a SECOND time, so it must face the
+                # same liveness gate as the first send (#7158). The `screen` used
+                # by `recovery_action` was read BEFORE the duplicate-guard grace
+                # window (`grace`, up to a full consume budget), so it can be
+                # stale by the time we write; re-read immediately before the
+                # write and re-assert readiness rather than trusting the older
+                # frame.
+                fresh_screen = self.screen(
+                    workspace, surface, lines=RECOVERY_SCREEN_LINES
+                )
+                # Judged on the SAME window as the gate, for the SAME reason the
+                # pre-send re-assert is sliced (see `gate_window` above): this
+                # read is `RECOVERY_SCREEN_LINES` deep, and
+                # `shell_prompt_below_footer`'s no-footer-block fallback scans the
+                # WHOLE capture, so an unsliced window can carry an older shell
+                # prompt line the gate's 80-line window never saw. Without this
+                # slice the gate approves the pane and this re-assert refuses it,
+                # reporting "a shell prompt is drawn BELOW pi's footer" when no
+                # footer BLOCK was found at all — a lost delivery, in the one path
+                # that exists to RESCUE a delivery.
+                fresh_window = "\n".join(
+                    (fresh_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
+                )
+                if not screen_ready(fresh_window):
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was not ready immediately before the "
+                        f"recovery re-send ({not_ready_reason(fresh_window)}) — the "
+                        f"re-send was REFUSED rather than written into a pane with "
+                        f"no live pi. Re-dispatch once the pane is idle."
+                    )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
 

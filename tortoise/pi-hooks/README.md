@@ -111,9 +111,11 @@ credential (at 2026-09-22, the **B1 lane**, which owns objective 1's exit eviden
 1. Ensure `TORTOISE_API_KEY` is set and the organization's Agent-sessions toggle is **on** (otherwise
    the server refuses the capture with a 409 and no receipt prints).
 2. Run a non-dogfood session with only this seam loaded:
+
    ```bash
    pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"
    ```
+
    `--no-extensions` disables discovery **and** settings-registered extensions, so the probe is
    single-producer even on a host carrying the legacy `tortoise-capture/` (`#3713`).
 3. **Pass condition = `retrievable` — read the specific captured content back.** A row in

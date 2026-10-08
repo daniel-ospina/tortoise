@@ -21,6 +21,7 @@ aboutObjects: github-actions-workflow, ci, post-merge-validation, python-ci
 **Role:** (none set)
 
 **Key empirical facts (verified 2026-08-19, live API calls):**
+
 - The `head_sha` filter on `GET actions/workflows/{file}/runs` returns 0 results for an **abbreviated** SHA — the poll must pass the full 40-char `context.sha`.
 - Push runs serialize on `python-ci-${{ github.event_name }}-${{ github.ref }}` with `cancel-in-progress: false` — a run for our SHA can be queued behind a previous merge's run (queue + ~45-55m suite ⇒ poll cap 110m).
 - 2 of the last 3 push runs were `conclusion=cancelled` (2026-08-19, runs 1989/1990) — dedup will often fall open on this repo's back-to-back-merge traffic; fall-open is correct by design.
@@ -65,6 +66,7 @@ CLI modes for the contract tests: `parse-pr "<msg>"`, `parse-issue "<body>"`, `d
 ### Tests `tests/test_postmerge_dedup.py`
 
 Subprocess CLI contract tests (same shape as `test_postmerge_verdict.py` — pure, no network/DB):
+
 - parse-pr: merge commit → 1467; `Merge branch 'main'` → null; squash-format → null.
 - parse-issue: Closes/Fixes/Resolves + case-insensitive → number; none → null.
 - decide: (completed, success) → true; every other (failure/cancelled/neutral/skipped/in_progress/queued) → false; **null/missing/empty status & conclusion → false (verifier P2)**.

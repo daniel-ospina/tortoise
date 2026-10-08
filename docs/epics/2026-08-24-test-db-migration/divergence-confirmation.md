@@ -45,9 +45,13 @@ aboutObjects: FalkorProjection, TortoiseSDK
 ## Expected-divergence nodeids
 
 # Format: `D#: <nodeid-prefix>` — one entry per line, parsed by the canary
+
 # classifier. Prefixes are the E2E-8 conformance tests (parametrized over the
+
 # `leg` fixture — both `[embedded]` and `[server]` legs of a D-branch match
+
 # the prefix).
+
 D1: tests/test_divergence_conformance.py::test_d1_is_embedded_seam_flag
 D2: tests/test_divergence_conformance.py::test_d2_probe_failure_recovery
 D3: tests/test_divergence_conformance.py::test_d3_lost_graph_recovery

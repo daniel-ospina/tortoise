@@ -31,6 +31,7 @@ backfilled:
 | Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (pre-existing, #518 — predates the epic) |
 
 Consequences (E2E-5 exit gate):
+
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
@@ -70,6 +71,7 @@ the same fields.
 ## 3. Rollback path (R18 reversibility)
 
 Drop the C1 additions in reverse:
+
 ```sql
 ALTER TABLE public.api_keys
     DROP COLUMN IF EXISTS graph_id,
@@ -79,6 +81,7 @@ ALTER TABLE public.api_keys
 DROP INDEX IF EXISTS idx_api_keys_graph_id;
 DROP TABLE IF EXISTS public.graphs CASCADE;
 ```
+
 Restored behavior: no `graphs` rows, api_keys without graph columns,
 `teams.graph_name` intact → `graph_metadata` derives the default only,
 every key is the legacy full-access class. **No application change

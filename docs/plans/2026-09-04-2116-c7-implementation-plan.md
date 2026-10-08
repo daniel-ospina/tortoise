@@ -8,6 +8,7 @@ NOT required (control-plane only). No backend changes.
 
 Enhance the EXISTING Graphs tab (create/list already render) in
 `website/apps/dashboard/src/main.jsx`:
+
 1. Meter line under the header: "N graphs · ∞ cap" (pro/team) / "N/total used"
    (free/solo — used/total from the loaded graphs list + team.max_graphs).
 2. Create flow → nested 201 envelope → **one-time reveal modal** (key shown
@@ -45,6 +46,7 @@ Enhance the EXISTING Graphs tab (create/list already render) in
 ## Design decisions
 
 ### D-C7-1 — pure module `graphs.js` + unit tests
+
 Extract the derivations main.jsx cannot test: `graphsMeter(rows, tier)` →
 `{used, cap: number|null, label}` (∞ when cap null); `graphCanDelete(g)`
 (kind !== 'default'); `tierCreateLocked(tier)` (free/solo → locked);
@@ -52,6 +54,7 @@ Extract the derivations main.jsx cannot test: `graphsMeter(rows, tier)` →
 (default-first, then name). `graphs.test.js` via node --test.
 
 ### D-C7-2 — Graphs tab delta (main.jsx)
+
 - Meter: after the h2 row — `graphs.length` used; cap = team.max_graphs (null
   → ∞). Free/solo used/total.
 - Table cols: Name | Kind | Status | Keys | actions ([Keys] [Delete]); default
@@ -82,6 +85,7 @@ Extract the derivations main.jsx cannot test: `graphsMeter(rows, tier)` →
   place; extend for the panel (loading/empty/error rows).
 
 ### D-C7-3 — e2e `tests/e2e/test_graphs_management.py`
+
 Two-server harness copied from test_keys_table_mixed.py; layered route handler
 mocking: GET /v1/graphs (default + custom rows w/ status/key_count), POST
 /v1/graphs → 201 nested envelope (one-time plaintext — assert the modal shows
@@ -92,10 +96,12 @@ RUN_DASHBOARD_E2E-gated + changes-gate wiring in ci.yml if a new surface job
 is needed (mirror the keys-table job wiring).
 
 ### D-C7-4 — committed dist rebuild
+
 `cd website/apps/dashboard && npm run build` + commit `dist/assets/*` — the
 dashboard-e2e job serves the committed dist; a stale dist tripwires CI.
 
 ## Tasks
+
 - T1 graphs.js + graphs.test.js (pure derivations).
 - T2 main.jsx Graphs tab delta (meter, table, panel, modal, delete, tier
   gate, inline errors) + index.css additions (modal/panel/meter styles).
@@ -105,6 +111,7 @@ dashboard-e2e job serves the committed dist; a stale dist tripwires CI.
   self-pass (modal focus, lock copy, contrast).
 
 ## Risks
+
 - R1 (P1): key_plaintext leaks — the reveal modal state must be
   request-scoped + cleared on dismiss/team switch; the e2e asserts no
   re-show route.

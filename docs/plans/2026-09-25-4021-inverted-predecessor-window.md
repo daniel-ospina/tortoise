@@ -115,6 +115,7 @@ The body says the A/B fork (refuse vs normalise) is a product decision. The re-d
 ## 2. Scope
 
 **In scope**
+
 - `supersede_point`: refuse (before any mutation/emit) when the resolved predecessor end is
   strictly before the predecessor's own `validFrom`.
 - The shared helper owning the successor-window resolution **and** the new refusal.
@@ -125,6 +126,7 @@ The body says the A/B fork (refuse vs normalise) is a product decision. The re-d
 - Tests in the already-CI-subscribed `tests/test_validity_windows.py` + `tests/test_dry_run_preview.py`.
 
 **Out of scope (separate roots → separate issues, §6)**
+
 - `invalidate_point`'s `validTo = now` (documented in ONTOLOGY §4.7; changing it is an unrequested
   semantics decision — refusing could be *worse* than the current corruption for a future-dated
   claim, and `retract_point` is the window-agnostic alternative).
@@ -364,6 +366,7 @@ change needed**. Class-B question answered per test: **(1) what value makes it f
 fixture make that value reachable?**
 
 Helper tests (import `_supersede_window_end`):
+
 1. `test_window_end_refuses_inverted_start` — table `(old_vf, succ_vf)`; `('2026-06-10','2026-06-01')` refused.
 2. `test_window_end_equal_start_allowed` — equal + format-only-equal (`…Z` vs `…+00:00`) allowed.
 3. `test_window_end_falsey_or_unparseable_start_refused` — presence/orderability predicate: `old_vf=""` + a parseable end (`'2026-06-01'`) is refused (an unparseable start sorts AFTER the end); `old_vf=0` + a **pre-epoch** end (`'1969-12-31T00:00:00+00:00'`) is refused; and a **truthy** unparseable start (`old_vf="not-a-date"`) against a parseable end is refused (B5's truthy half — distinct from the falsey `""` half). (A post-epoch end with `old_vf=0` is NOT an inversion — `(0, 0.0) < (0, <epoch>)` — so the `0` half must use the pre-epoch end to exercise the predicate.) ⚠️ **SUPERSEDED by the §5 addendum**: the shipped test refuses only the `0` row and asserts the `""`/`'not-a-date'` rows are SKIPPED — see the addendum above for why.

@@ -147,6 +147,7 @@ defaults to `None` in local single-user mode. Nobody lets attribution silently v
 make one of (require it, default it to the authenticated principal, or scope it so
 single-user needs no stamp). A session→user link (2B) matches Graphiti/LangMem/Letta; where
 per-node provenance is genuinely needed, Mem0 shows the cheap form: one indexed scope property
+
 + an actor field on the *event/history* log, not a stamp duplicated onto every derived memory
 node. No product was found that shipped per-node actor stamps and later removed them; the
 observed movement is the opposite direction (basic-memory added per-entity audit columns later).

@@ -8,6 +8,7 @@
 **Quality over convenience:** The easy path (issue's own framing) is writing `tier` from a webhook. The right path is fixing the tier→limits lever (the value half of the loop) *and* building the subscription state mirror (Stripe as billing authority, registry Team node as enforcement mirror), with idempotent webhook handling.
 
 ### Why This Framing
+
 - The issue's framing ("bolt Stripe onto the tier field") was **rejected** — E1 proves the field has no causal power. Both diverge agents independently landed this kill-shot.
 - Full F2 (5-event idempotent set + reconciliation jobs + dunning) over-scopes a standard project — trimmed to MVP event set (below) with a single reconcile path.
 - "Supabase-first" (F4) rejected for #310: #669 is an OPEN complex epic with no landing date; the confirmed problem must not block revenue on it. (Note: #669 *depends on* this epic's tier state — #296 → #310 — so shipping billing state in the registry first is the correct ordering; the sound rejection rationale is that #669's Supabase schema is undecided, making Stripe-against-Supabase speculative.)
@@ -15,23 +16,28 @@
 - "Manual provisioning + receipts" (F3) rejected: same pay-for-nothing failure, plus churn leakage (no revert), no portal, no grace.
 
 ### Falsification Check
+
 This definition is wrong if any of:
+
 1. A tier→limits mapping exists in any reachable code path (falsifies E1 → collapses toward F1). **Not found.**
 2. `max_api_keys/max_points/max_sessions` are settable via team creation/update (shrinks enforcement work to config). **Not found** — `team_update` allowlist (sdk.py:2697) excludes them.
 3. Stripe keys already present in deploy env or an existing webhook/durable-queue infra. **Not found** — deploy secrets are `FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, FALKORDB_CLOUD_URI` only.
 4. #669 lands first → F4 becomes viable and the FalkorDB mirror is obsolete. **#669 OPEN as of scoping.**
 
 ### Confidence: 78
+
 Core diagnosis (inert tier, no metering, no pricing home, no webhook infra, identity gap) is directly code-verified. Boundary uncertainty: exact webhook lifecycle depth, Apresto Stripe account transferability (unverifiable from this repo), owner-bridge acceptability.
 
 ## Verification Gates
 
 ### problem-verify: 1 cycle — NO P0; 3 P1s incorporated
+
 - **problem-diverge:** 2 sub-agents (alternatives + devil's advocate). 5 framings generated; adversarial kill-shot (inert tier field) verified correct.
 - **problem-converge:** 1 sub-agent; trimmed F2 selected, confidence 78; F1/F3/F4/F5 rejected with rationale.
 - **P1s incorporated (controller):** (1) enforcement mechanism plumbing must be explicit — `get_current_org` must return the enforced fields and `_check_team_limit` must resolve limits from a tier→limits map; (2) idempotency/orphan guard was dropped in converge — restored: event-ID dedup + one-active-subscription guard on Checkout creation; (3) owner bridge made honest — solve identity at point of truth (`checkout.session.completed.customer_details.email` → store on Team node) and name the notification channel explicitly.
 
 ### solution-verify: 1 cycle — NO P0; 4 P1s incorporated
+
 - **solution-diverge:** 1 sub-agent; 3 architecturally distinct approaches (graph mirror / Supabase ledger / stateless read-through).
 - **solution-converge (controller):** Approach A selected (below). B and C rejected with rationale.
 - **P1s incorporated:** (1) atomic dedup-vs-SET ordering (retry-drop race) — single atomic Cypher write guarded by `WHERE NOT EXISTS (WebhookEvent {event_id})`, or marker-last with idempotent SET; (2) persist `stripe_customer_id` **synchronously at Checkout creation** (before redirect) so reconcile survives a missed first event; (3) `customer.subscription.updated` with `cancel_at_period_end=true` keeps tier until period end vs `customer.subscription.deleted` reverts — distinct semantics; (4) `.github/workflows/deploy-hosted.yml` must add `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (and `STRIPE_PRICE_IDS` if env-driven) to both the secrets-verify step and `flyctl secrets set`.
@@ -39,6 +45,7 @@ Core diagnosis (inert tier, no metering, no pricing home, no webhook infra, iden
 ## Plan
 
 ### Problem Statement
+
 Tortoise Hosted has no way for customers to pay. The Stripe integration as scoped in #310 would write a `tier` field that nothing reads — enforcement is hardcoded and tier-blind, so paid tiers would deliver no benefit. The MVP must deliver a loop: dashboard Upgrade → Stripe Checkout → webhook → team actually gets higher limits → portal/grace/cancel handled. Subscription state lives on the FalkorDB registry Team node (already has `stripe_customer_id`/`subscription_id` fields) as a **derived mirror** of Stripe, with Stripe as billing authority. Billing state is designed lift-and-shift for #669.
 
 ### Proposed Solution — Approach A: Graph-native billing mirror with lazy grace enforcement
@@ -46,6 +53,7 @@ Tortoise Hosted has no way for customers to pay. The Stripe integration as scope
 **Architecture:** Stripe = authority for *money*; FalkorDB registry Team node = authority for *enforcement*. Single data plane (graph), single process (webhook writes graph; requests read graph), no scheduler, no queue, no second DB. Grace is enforced **lazily** at request time in `get_current_org`/`_check_team_limit` — no cron. Reconcile repairs drift at boot.
 
 **New module: `tortoise/billing.py`**
+
 ```python
 # ── Tier → limits mapping (canonical pricing — mirrors product/pricing.json) ──
 TIERS = {
@@ -90,12 +98,14 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
 **Step 3 — Stripe client + secrets + deps:** Add `tortoise/billing.py` (`StripeClient` over `httpx`, already imported in-file; pin `httpx` in requirements.txt — currently transitive/unpinned via fastmcp). Add `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_IDS` to `.env.example`, `deploy-hosted.yml` secrets-verify step, and the `flyctl secrets set` command. Ops checklist: register webhook endpoint in Stripe dashboard with event types `checkout.session.completed`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`; enable Customer Portal config; create 8 price IDs (4 tiers × monthly/annual, annual −20%, `annual_default: true`). **Do NOT create a new Stripe account** — use the existing Apresto Internal gmail account (same as El Dato); document test/live key separation.
 
 **Step 4 — Checkout + Portal endpoints (hosted_api.py):**
+
 - `POST /v1/billing/checkout` — body `{price_id}`; validates price_id against catalog; **persists `stripe_customer_id` synchronously before redirect** (create-or-fetch Customer via `Team.email` — set at `/v1/register`; `APIKey.created_by` fallback; `customer_details.email` from webhook for provision-path teams); **guards: one active subscription per team** (reject if `subscription_status in {active, past_due, trialing}`); returns `{checkout_url}`. `success_url`/`cancel_url` env-driven → dashboard.
 - `POST /v1/billing/portal` — creates portal session for existing customer, returns `{portal_url}` (existing subscribers route here, not new checkout).
 - Extended `GET /v1/team` already returns plan/status (Step 2).
 
 **Step 5 — Webhook handler (hosted_api.py):**
 `POST /webhooks/stripe` — added to `RateLimitMiddleware.SKIP` and `SKIP_AUTH` (public surface). Flow:
+
 1. Verify `Stripe-Signature` (HMAC over raw body, `STRIPE_WEBHOOK_SECRET`, `hmac.compare_digest`, **±5 min timestamp tolerance** — pattern from `_check_internal` at hosted_api.py:277).
 2. **Idempotency:** single atomic Cypher write — `MERGE/CREATE (:WebhookEvent {event_id:$id})` + Team SET **guarded by `WHERE NOT EXISTS (WebhookEvent {event_id})`** so a retry mid-write cannot drop the upgrade (fixes retry-drop race). Return 200 only after durable write; 500 on processing failure (Stripe retries); 400 on bad signature; 200-ack on unhandled event types.
 3. Event semantics:
@@ -114,6 +124,7 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
 **Step 9 — Tests:** New `tests/test_billing.py` (monkeypatched `StripeClient`, FalkorDBLite): signature verify (+tampered payload, +expired timestamp), webhook idempotency (replay → single processing), event semantics (all 4 events + cancel_at_period_end), lazy grace degrade, limits resolution per tier, checkout guard (active subscription → 409), reconcile repair. Extend `tests/test_hosted_api.py` (tier-aware 402 + plan display) and `tests/test_control_plane.py` (new `team_update` allowlist fields). E2E (E2E-3-D, designed by #7738): upgrade flow → Pro tier active → subscription billing.
 
 ### Acceptance Criteria
+
 1. **AC1:** Paying team's `GET /v1/team` shows upgraded plan + limits within seconds of `checkout.session.completed`.
 2. **AC2:** Replayed webhook event → processed exactly once (event-ID dedup); no double subscription creation.
 3. **AC3:** Portal plan change (Solo→Pro) → limits update (via `subscription.updated`).
@@ -126,12 +137,14 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
 10. **AC10:** `billing_*` audit events + analytics events recorded.
 
 ### Testing Strategy
+
 - **Unit:** `tests/test_billing.py` — StripeClient mock, signature math, effective_tier, limits_for_tier, pricing-parity test.
 - **Integration:** `tests/test_hosted_api.py` — webhook endpoint with monkeypatched client; tier-aware 402; plan display.
 - **Regression:** `tests/test_control_plane.py`, existing hosted tests pass unchanged.
 - **E2E:** E2E-3-D (upgrade flow → Pro active) per #7738 design; Stripe test-mode keys.
 
 ### Runtime Prerequisites
+
 - Stripe account (EXISTING Apresto Internal gmail account — no new account), test-mode + live-mode keys, webhook endpoint registered (4 event types), Customer Portal enabled, 8 price IDs created.
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_IDS` as Fly secrets via `deploy-hosted.yml`.
 - `product/pricing.json` landed on main (canonical, owner-confirmed 2026-08-07: Free 10k ops post-#662).
@@ -141,14 +154,17 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
 ## Rejected Alternatives
 
 ### Approach B — Supabase-first billing ledger mirrored to graph (dual-write)
+
 **Rejected because:** Heavier MVP for a standard project (2 new tables + RLS + dual-write discipline + background reconciler). The durable-ledger advantage (survives #669, queryable billing records) is real but conditional on #669's timeline, which is OPEN and undecided on schema. The confirmed problem's scope (metering out, #669 out) makes the ledger speculative insurance, and dual-write is a genuine source of consistency bugs.
 **When this WOULD have been better:** If #669 lands within ~a quarter — then billing built directly in Supabase is the end-state and the graph mirror becomes vestigial. **Migration path if A is later abandoned:** graph billing fields seed future Supabase tables via the same reconcile pattern; event history reconstructible from Stripe's List Events API.
 
 ### Approach C — Stripe-hosted, stateless read-through (Payment Links + TTL cache)
+
 **Rejected because:** Structurally cannot close the payment→team loop — Payment Links cannot bind server-side `org_id` metadata (no customer creation, no metadata association), violating the confirmed problem's "webhook-driven subscription state mirror." Also couples the enforcement hot path to Stripe API latency/availability (fail-open vs fail-closed decision with product consequences), leaves no durable billing record (orphans undetectable), and Payment Links are less expressive (no backend checkout customization).
 **When this WOULD have been better:** If #669 landed immediately AND the team accepted read-through enforcement with an explicit fail-open decision AND no event-driven behavior was needed. None hold.
 
 ### Inline-extension of the issue's own approach (webhook → tier field only)
+
 **Rejected because:** The tier field has no causal power (E1). Shipping it = real money for zero value = chargeback liability. This is the convenience path the double diamond exists to reject.
 
 ## Wiring Check
@@ -176,6 +192,7 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> None:
 ## Review Cycle Log
 
 **Cycle 1:**
+
 - problem-diverge (2 sub-agents): 5 framings; devil's advocate landed inert-tier kill-shot (verified against code).
 - problem-converge (1 sub-agent): trimmed F2, confidence 78.
 - **problem-verify** (2 verifiers): NO P0. P1s: enforcement plumbing, dropped idempotency/orphan guard, half-honest owner bridge + no delivery channel. → Controller incorporated all 3.

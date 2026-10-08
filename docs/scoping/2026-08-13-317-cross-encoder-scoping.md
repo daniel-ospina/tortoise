@@ -32,6 +32,7 @@ The cross-encoder precision claim is **unfalsifiable as scoped** — no labeled 
 ## Verification Gates
 
 ### problem-verify: 5 cycles, clean
+
 | Cycle | Verifier A | Verifier B | Controller action |
 |---|---|---|---|
 | 1 | P0=0 P1=0 P2=2 | P0=0 P1=1 P2=1 | Fixed P1 (gate can't fire without labeled-judgment owner/construction path) → added Gate Input B step-0 + separate work item; fixed P2s (boundary phrasing, pre-anchored gate numbers) |
@@ -43,6 +44,7 @@ The cross-encoder precision claim is **unfalsifiable as scoped** — no labeled 
 **Exit: no P0/P1 remain. GATE PASSES.**
 
 ### solution-verify: 5 cycles, clean
+
 | Cycle | Verifier A | Verifier B | Controller action |
 |---|---|---|---|
 | 1 | P0=0 P1=5 P2=5 | P0=0 P1=3 P2=4 | Fixed P1s (pool survival at sdk.py:4644/4527; inter-request inference race; routing lever missing; eval composite confound; query-bound footgun; shipped-config pinning) |
@@ -54,6 +56,7 @@ The cross-encoder precision claim is **unfalsifiable as scoped** — no labeled 
 **Exit: no P0/P1 remain. GATE PASSES.**
 
 ### Coherence check (Phase 5.6): PASS
+
 - Scheduled `qwen3.8-max` reviewer **unavailable** — API key blocked (401, 2 attempts, skill's 2-cycle cap). **`[QWEN-GATE]` note: Qwen coherence check could not converge — substituted a fresh-context reviewer with the identical prompt.**
 - Substitute result: no P0; P1-1 (no explicit gate-runner task producing the gate record) and P1-2 (stage-2 query population unestablished) — both fixed with pre-registration amendments; confirmation pass: **PASS**, 5 P2 carrier pins (A–E) folded into the gate-runner spec + eval-set filing.
 
@@ -66,12 +69,14 @@ The cross-encoder precision claim is **unfalsifiable as scoped** — no labeled 
 > **Mandate re-anchoring (documented deviation):** the gate is not strictly "#316 greenlight" — #316 alone cannot falsify the precision claim (it measures latency + baselines, not gold-labeled Tortoise relevance). The gate re-anchors on TWO inputs: latency headroom (A) AND a labeled eval-set precision baseline (B). Stated in this plan comment so the "GATED on #316" issue language doesn't conflict with the designed gate. E2E-8's "latency records, doesn't block" is superseded for this issue — latency is a hard greenlight/close condition; the record-and-block semantic applies only to flag-off operation (zero added latency).
 
 **GATE INPUT A — latency headroom** (primary #316; in-repo fallback)
+
 - **Decision variable = joint triple** `(pool ∈ {20,30,50}, quant ∈ {fp32,qint8}, routing ∈ {0%, 15-20%})`. Selection rule: argmax pool subject to `routing_weighted_rerank_cost(pool, quant, routing) @ measured p95 + RRF_p95 ≤ 300ms` AND `pool ≥ 2×K` (min meaningful pool 20). **Gate basis: p95 only.** Top-10 is NOT selection-valid. Among feasible configs prefer the largest pool; record the reason when < 50. Tiebreak: fewer new deps (fp32) → lower routing → lowest weighted cost.
 - **Dependency declaration:** onnxruntime/optimum appear in NO manifest (verified); sentence-transformers is a non-base optional extra. qint8 selection ⇒ slice declares onnxruntime+optimum as an optional extra with build-time export; otherwise selection is constrained to fp32 rows.
 - **#316 greenlight numbers:** #316 must show RRF-only p95 leaves ≥ the cross-encoder's cost at the gate-selected pool under 300ms total (per-row `(pool, quant, routing)` measured p95, Docker FalkorDB prod mode on stated hardware, p50/p95/p99). Time-box: #316 stalls past **2026-09-30** → in-repo measurement fallback (same ~150-query mix, concurrent load, Docker prod — NEVER FalkorDBLite; deployment mode + hardware recorded). A-fallback completion rule: verdict by **2026-11-30**, else A = FAILED → close (a).
 - **Cap:** `TORTOISE_CE_TIMEOUT_MS` derived from the gate record = `ceil(1.5 × routed-conditional CE-stage p95)` of the selected triple — identical in harness and production. 150ms is a pre-selection placeholder that must NEVER serve (flag-on invalid before a gate record exists). Two-step protocol: measure uncapped → derive cap → re-measure under cap → record served p95. Cap-fired fraction > ~5% of CE executions → re-measure/raise trigger.
 
 **GATE INPUT B — eval-set precision baseline** (separate work item → **amended into open issue #1144**, which owns labeled retrieval set construction and explicitly feeds #317)
+
 - **Step 0 — provenance search** (owner: epistemic-team, by **2026-09-30**): org-wide search for existing labeled retrieval relevance sets; reuse if found (kappa ≥ 0.6 evidence or spot re-validation).
 - **Two-stage labeling contract** (filed with #1144 before labeling):
   - **Stage 1:** n≈150 representative set (routing=0 case + latency mix + (b)/(e) diagnostic); kappa ≥ 0.6 via tools/kappa.py; JSONL schema pinned in #1144; judge_harness/min_signal reuse.
@@ -121,6 +126,7 @@ The cross-encoder precision claim is **unfalsifiable as scoped** — no labeled 
 No clarifying questions needed — all human-judgment decisions were already specified in the issue body (model, flag name, targets, gate). Pass B (deferred to research) seeded Phase 1.5: rerank-vs-GraphRanker composition, gate numbers #316 must show, candidate-pool sizing, model-missing failure mode, precision measurement method.
 
 ### Deferred to Research (Pass B — answered in Phase 1.5)
+
 - Composition order of cross-encoder vs existing GraphRanker (#25) — answered: two-baseline comparison + mutual exclusion + opt-in composite.
 - What #316 must show (numbers) — answered: per-row (pool, quant, routing) p95 headroom under 300ms.
 - Candidate-pool sizing — answered: gate decision variable {20,30,50}, min-pool 20, 50-floor preference.
@@ -137,6 +143,7 @@ No clarifying questions needed — all human-judgment decisions were already spe
 > **Post-dedup queries: 6** (≤ 8 Fast cap): Perplexity ×2 (production latency-budget failures; two-stage canonical), Exa ×4 (ms-marco-MiniLM-L-6-v2 CPU latency; when-reranking-hurts; ColBERT comparison; sentence-transformers production pitfalls). Persisted as 5 source-tagged findings in `docs/research/2026-08-13-317-cross-encoder-reranking.md` (canonical ×1, pitfalls ×3, competitor ×1).
 
 **Findings (persisted, with provenance):**
+
 - **Canonical — two-stage best practices** (Hybrid Search Book; superteams.ai; devtechtools; Pinecone; Vespa docs; TREC DL): candidate pool sweet spot 50–100 (gains plateau ~200; "cap at 50" — 72technologies); RRF BEFORE rerank; truncate at index time (latency is bimodal — p50 vs p99 driven by doc length); cross-encoder score is a LOGIT not a probability (ranking only, never threshold); weighted fusion of first-stage + reranker often beats reranker alone; max_length 512 / chunk ≤ 1500 chars.
 - **Pitfalls — model latency** (Metarank; DadOps; OneUptime; temsa ONNX qint8; tianpan.co; towardsdatascience queue sim): ms-marco-MiniLM-L-6-v2 (22.7M params, ~80–90MB): GPU 12.3ms/1, 58.7ms/10, 740ms/100; CPU ~210ms/10, ~410ms/20, ~980ms/50, ~2.1s/100; CPU batch=1 2500ms/100; ONNX qint8 ~30–40% faster (210ms/20, 578ms/50); production case study: +4 nDCG@5 offline but p99 +700ms over SLO → perceived quality DOWN; QPS collapse (p99.9 > 21s @ 40 QPS). **Top-100 CPU rerank violates 300ms by 3–8×.**
 - **Pitfalls — when reranking HURTS** (bigdataboutique; folarin.dev; 72technologies; adaptiverecall; theneuralbase; arXiv 2411.11767): corpora < ~1,000 docs / recall@3 > 0.9 → skip ("shuffling cards that are all correct"); value window = recall@50 high but ordering poor (correct doc buried rank 20–30); practitioner diagnostic: label 100 queries — correct in top-50 > 90% but top-5 < 60% ⇒ reranker moves the needle; missing from top-50 ⇒ fix retrieval first; arXiv 2411.11767 cited PRECISELY (candidate-count scaling + full-retrieval degradation — NOT the small-corpus inference, which rests on the marginal-recall argument).
@@ -152,6 +159,7 @@ No clarifying questions needed — all human-judgment decisions were already spe
 | `scipy` | optional | Paired one-sided test in the harness when available; bootstrap fallback (mirrors tools/kappa.py) — zero hard deps. |
 
 **API-surface findings — `sentence_transformers.CrossEncoder` (3.x–5.x):**
+
 - Constructor `CrossEncoder(model_name, max_length=512)`; **device="cpu" explicit** (CPU is the deployment profile; gate basis is CPU p95). ⚠️ v5.4+ renamed `max_length` → `max_seq_length` (softly-breaking, deprecation warning) — the `>=3,<6` range spans both; CrossEncoderModel is version-tolerant (try max_length → TypeError → max_seq_length; accept-and-document 5.x warning).
 - `predict(pairs: list[list[str]], batch_size=32, show_progress_bar=False)` → **logits** (ms-marco family; higher = more relevant; logit ≠ probability — ranking only). Use `predict` directly (not `rank`) for explicit pool control. Batch size affects cost (gate's cited numbers are batch-dependent — measurement protocol records it).
 - Output scale: logits unbounded vs GraphRanker 0–1 weighted sums → **min-max normalize within the pool** before any α-blend (`ranking._min_max_normalize` precedent; degenerate all-equal → midpoint guard, stable order).
@@ -162,6 +170,7 @@ No clarifying questions needed — all human-judgment decisions were already spe
 ## Rejected Alternatives
 
 **Problem framings (Phase 2):**
+
 - **Framing 1 (precision-lever selection):** rejected as the definition — presumes levers comparable; #7701 (EP confidence vs relevance) unanswered. Absorbed as the gate's first action (RRF-vs-GraphRanker comparison before any cross-encoder earns the latency budget).
 - **Framing 3 (recall vs ordering):** rejected as the definition — diagnostic lens, largely pre-answered (coverage, given corpus size). Absorbed into the (b)/(e) diagnostic.
 - **Framing 4 (original, conditional):** rejected — every condition provably unmet (benchmark deferred, no eval set, latency binding, corpus small). The original's escape hatch was the gate; the gate is now the deliverable.
@@ -169,6 +178,7 @@ No clarifying questions needed — all human-judgment decisions were already spe
 - **Fix root-cause principle applied:** the issue's symptom was "add cross-encoder"; the root cause is unfalsifiable precision claims + an unevaluated existing lever. The scope targets measurement + gate, not the symptom.
 
 **Solution approaches (Phase 5):**
+
 - **Approach 1 — pipeline-stage rerank ("CE as a first-class search stage"):** rejected as primary — CE logic across 3 order_by branches in the hottest path; sequential-only stacking with no tunable blend; heavier harness axes; uniform application would contaminate the GraphRanker baseline (never-silent double-rerank). **Would have been better if** the gate mandated a fixed unconditional rerank with no GraphRanker comparison. **Adopted:** the stage function lives in search_engine.py (the gate's "two-stage pipeline" language).
 - **Approach 3 — rerank sidecar service:** rejected — the gate explicitly mandates embeddings.py host-parity (in-process lazy singleton); a sidecar violates it (needs sign-off we don't have); adds network dep + auth + ops to a self-contained search path; breaks selfhost parity. **Would have been better if** in-repo measurement showed in-process cannot hold p95 ≤ 300ms on stated hardware — documented escalation path, not a silent choice.
 - **On-demand model download (no Docker bake):** rejected for hosted (HF_HUB_OFFLINE regime requires build-time bake + pre-warm); kept for selfhost (on-demand per embeddings.py pattern).

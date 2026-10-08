@@ -20,15 +20,18 @@
 **Library docs (preflight)** — FalkorDB FTS (only third-party surface). context7 unavailable in session; Perplexity used instead.
 
 **Library version & API surface** — 3 calls, confirmed:
+
 - Canonical: `CALL db.idx.fulltext.createNodeIndex('Document', '_searchText')` + `CALL db.idx.fulltext.queryNodes('Document', $q) YIELD node, score` (docs.falkordb.com/cypher/indexing/fulltext-index.html)
 - Competitor variance: GraphRAG SDK uses same `createNodeIndex` pattern for `__Entity__` label
 - Known pitfall: FTS indexes **scalar** properties; list/array FTS is NOT the documented pattern — validates the plan's scalar `_searchText` design
 
 **Idiomatic usage patterns** — 2 calls:
+
 - Canonical: array membership filter = `WHERE topic IN d.topics` or `any(topic IN d.topics WHERE ...)` (docs.falkordb.com/cypher/functions.html)
 - Known pitfall: array fields support native indexing via `IN`; filter predicates should move to indexed properties
 
 **Library/framework pitfalls** — 1 call:
+
 - Known pitfall: FTS index creation is **idempotent** — "already exists"/"already indexed" errors are silently caught (GraphRAG SDK pattern). Matches `_ensure_indexes`' existing try/except convention.
 
 **#49 Phase 1 coordination** — `context` field is being removed (stop-writes landed). The plan's 22K migration uses `pointKind`/property markers, NOT `context`. `query_suggestions.py` is kind-based (orthogonal to Document search). `references` edge is Source→Entity (≠ aboutSubject Subject↔Entity).
@@ -51,6 +54,7 @@
 | Migration | 22K legacy Points FTS floor | Write | backfill_document_search_text() idempotent | Integration |
 
 **Bug Pattern Flags:**
+
 - `_upsert_event` uses-handler: str→'other', dict→kind, bare-dict normalize (else corrupt Object names)
 - `produces→Document` vs `produces→Object`: objectType hint required (else Object clone, broken provenance)
 - FTS index missing → `run_fts_query` returns [] silently (index-not-found caught) — backfill + index both required
@@ -61,6 +65,7 @@
 ---
 
 ### Tech Stack
+
 - Python 3.11+, FalkorDB 4.x+ (FTS), TypeScript (capture extension), ULID (ids.py)
 
 ---
@@ -72,6 +77,7 @@
 **Acceptance:** `_upsert_document` SETs topics (list), summary (str), sessionId (str), eventId (str), doc_status (str), and `_searchText` (computed) on EVERY write (ON CREATE + ON MATCH). aboutSubject edges created when about_entities present.
 
 **Files:**
+
 - Modify: `tortoise/projection/entities.py` (_upsert_document, ~147-171)
 - Test: `tests/test_projection.py`
 
@@ -115,6 +121,7 @@ def _build_search_text(title, summary, topics):
 ```
 
 In `_upsert_document`, add to SET clauses:
+
 ```python
 "d.topics=coalesce($topics, d.topics, [])",
 "d.summary=coalesce($summary, d.summary, '')",
@@ -123,12 +130,15 @@ In `_upsert_document`, add to SET clauses:
 "d.doc_status=coalesce($ds, d.doc_status, 'draft')",
 "d._searchText=coalesce($st, d._searchText, d.title)",
 ```
+
 params add: `"topics": ev.get("topics"), "summary": ev.get("summary"), "sid": ev.get("session_id"), "eid": ev.get("event_id"), "ds": ev.get("doc_status")` — use `ev.get(field)` with NO default so `None` → Cypher `null`, letting `coalesce` fall through to the existing value on partial updates. (CRITICAL: `""` is non-null in Cypher — `coalesce("", d.field, ...)` returns `""` and WIPES existing. Never use `""` defaults in these SET clauses.)
 Compute `_searchText` CONDITIONALLY:
+
 ```python
 has_text = bool(ev.get("title") or ev.get("summary") or ev.get("topics"))
 st = _build_search_text(ev.get("title", ""), ev.get("summary", ""), ev.get("topics") or []) if has_text else None
 ```
+
 `None` (Cypher null) → `coalesce($st, d._searchText, d.title)` preserves existing on partial updates; non-null updates when the event carries text.
 
 After the MERGE, if `ev.get("about_entities")`: call generalized `_create_about_edges(did, ev["about_entities"])`. **Do the label-agnostic generalization (source MATCH `(n:Point {id:$pid})` → `(n {id:$pid})`) HERE in Task 1** — Task 1's test needs it (the about-edge test creates a Document source). Task 2 then handles the rename `point_id`→`source_id` + docstring + `_upsert_event` changes. (This resolves the ordering ambiguity: Task 1 self-contained.)
@@ -154,6 +164,7 @@ git commit -m "feat: Document capture fields — topics/summary/sessionId/eventI
 **Acceptance:** `_create_about_edges` source MATCH is label-agnostic. `_upsert_event` handles uses as str/list[str]/list[dict] (dict→name+kind), creates `uses→Object {objectKind:kind}`, and routes `produces→Document` when objectType="document" (else Object).
 
 **Files:**
+
 - Modify: `tortoise/projection/edges.py` (_create_about_edges, ~55-87), `tortoise/projection/entities.py` (_upsert_event, ~172-211)
 - Test: `tests/test_projection.py`
 
@@ -185,7 +196,8 @@ Expected: FAIL — uses dict → str() corruption; produces→Object always.
 
 `edges.py _create_about_edges`: change source MATCH `(n:Point {id:$pid})` → `(n {id:$pid})` (label-agnostic; verify `_try_about_edge` cascade already label-agnostic). Also rename `point_id` → `source_id` and update docstring to "Link entity (Point, Document, or Event) to named entity" — the method now serves Document/Event sources too.
 
-`entities.py _upsert_event`: 
+`entities.py _upsert_event`:
+
 - uses loop: `if isinstance(uses, str): uses=[uses]; elif isinstance(uses, dict): uses=[uses]`; per item: `if isinstance(item, dict): name=item.get("name",""); kind=item.get("kind","other") else: name=str(item); kind="other"`; MERGE Object with `objectKind=$kind`.
 - produces: `object_type = inner.get("objectType", "")`; if `object_type == "Document"`: `MERGE (d:Document {id:$obj})` + `MERGE (e)-[:produces]->(d)`; else existing `MERGE (o:Object {name:$obj})` path.
 
@@ -210,6 +222,7 @@ git commit -m "feat: uses-dict bridge (kind→objectKind) + produces→Document 
 **Acceptance:** `add_document()` accepts topics/summary/session_id/event_id/about_entities and passes to DocumentCreated event. `add_event()` exists, emits EventRecorded with id=eid, subject, eventKind, object, objectType, uses, about_entities, startedAt, endedAt.
 
 **Files:**
+
 - Modify: `tortoise/api.py` (add_document ~205-239, add add_event after add_document)
 - Test: `tests/test_api.py`
 
@@ -239,6 +252,7 @@ Expected: FAIL — TypeError (unexpected kwargs).
 `add_document`: add params `topics=None, summary="", session_id="", event_id="", about_entities=None`; pass through to `_emit("DocumentCreated", ..., topics=topics or [], summary=summary, session_id=session_id, event_id=event_id, about_entities=about_entities or [])`.
 
 `add_event`: new method:
+
 ```python
 def add_event(self, event_id, event_kind, *, subject="", object_name="", object_type="",
               uses=None, about_entities=None, participants=None, started_at="",
@@ -271,6 +285,7 @@ git commit -m "feat: add_document capture fields + add_event public method"
 **Acceptance:** `sessionCaptured` in `CANONICAL_EVENT_KINDS`; pack registry validation accepts it.
 
 **Files:**
+
 - Modify: `tortoise/pack_registry.py` (~33-36)
 - Test: `tests/test_pack_registry.py`
 
@@ -311,6 +326,7 @@ git commit -m "feat: register sessionCaptured event kind"
 **Acceptance:** `_ensure_indexes` creates FTS `("Document","_searchText")` idempotently. `backfill_document_search_text()` sets `_searchText=title` where NULL.
 
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` (_ensure_indexes ~355-385)
 - Test: `tests/test_search_engine_gaps.py`
 
@@ -339,6 +355,7 @@ Expected: FAIL — no index, backfill absent.
 **Step 3: Implement**
 
 `_ensure_indexes`: add to FTS creation list (guarded by FalkorDB 4.x check + try/except):
+
 ```python
 try:
     self.g.query("CALL db.idx.fulltext.createNodeIndex('Document', '_searchText')")
@@ -347,6 +364,7 @@ except Exception:
 ```
 
 Also add a `documentKind` range index (structural queries filter by it; prevents full label scan at scale):
+
 ```python
 try:
     self.g.query("CREATE INDEX FOR (n:Document) ON (n.documentKind)")
@@ -355,6 +373,7 @@ except Exception:
 ```
 
 `backfill_document_search_text(proj=None)`:
+
 ```python
 def backfill_document_search_text(proj):
     proj.g.query("MATCH (d:Document) WHERE d._searchText IS NULL SET d._searchText = coalesce(d.title, '')")
@@ -380,6 +399,7 @@ git commit -m "feat: Document FTS index on _searchText + idempotent backfill"
 **Acceptance:** `search_engine` returns Document results via FTS (on _searchText) and structural (documentKind); topic-list filter works via `any()`/`IN`.
 
 **Files:**
+
 - Modify: `tortoise/search_engine.py` (verify ~100-131, ~256-263; add ANY topic filter)
 - Test: `tests/test_search_engine_gaps.py`
 
@@ -432,6 +452,7 @@ git commit -m "feat: verify document search read path + topic-list structural fi
 **Acceptance:** SDK document batch fetch returns the new fields; search pipeline returns Documents with correct result shape.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (~1818-1830 batch fetch, verify ~1627-1648 search)
 - Test: `tests/test_search_engine.py`
 
@@ -480,6 +501,7 @@ git commit -m "feat: SDK document search returns capture metadata"
 **Acceptance:** Extension writes topics/summary to frontmatter, doc_id = ulid, spawns `ingest --capture-metadata`, no runClassify call. TS heuristics produce non-empty topics for a real conversation.
 
 **Files:**
+
 - Modify: `operations/pi-config/extensions/tortoise-capture/index.ts` (buildMarkdown ~94-123, runIngest ~218, agent_end ~210)
 - Test: `operations/pi-config/extensions/tortoise-capture/index.test.ts`
 
@@ -530,6 +552,7 @@ git commit -m "feat: capture extension — TS topics/summary heuristics, ulid do
 **Acceptance:** `ingest.py --capture-metadata <file>` creates Document + sessionCaptured Event + uses→Skill, ZERO Points. `ingest.py <file>` (no flag) still fully extracts. doc_id = ULID filename.
 
 **Files:**
+
 - Modify: `tortoise/ingest.py` (argparse ~87-110, main ~115-200)
 - Test: `tests/test_ingest.py`
 
@@ -595,6 +618,7 @@ git commit -m "feat: ingest --capture-metadata — Document+Event, skip extracti
 **Acceptance:** All integration checks pass (below). Tests use test-prefixed graphs + test_guard.
 
 **Files:**
+
 - Test: `tests/test_session_capture_e2e.py` (NEW)
 
 **Step 1: Write the E2E test**

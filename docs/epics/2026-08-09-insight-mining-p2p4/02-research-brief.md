@@ -25,6 +25,7 @@ aboutObjects: tortoise
 **[Users]** trying to **[recall what was decided and what entities exist across hundreds of agent sessions]** but **[each session is mined into isolated Points/Events with no entity backbone or cross-session consolidation]** which results in **[repeated decisions ("we already decided this"), duplicate entities, and a graph that can't answer "what changed over time" across sessions]**.
 
 **5 Whys:**
+
 1. Why mine conversations? → Sessions contain decisions/entities only agents saw once.
 2. Why do insights vanish? → Each session's Points sit unconnected in the epistemic graph.
 3. Why unconnected? → No shared Object nodes; entities are inline strings in `aboutEntities`, never resolved.
@@ -32,11 +33,13 @@ aboutObjects: tortoise
 5. Why does that matter? → Graph queries answer "what exists" (Semantic) only if entities are first-class, deduplicated Objects.
 
 **Alternative framings considered:**
+
 - *HMW achieve cross-session recall without entity extraction?* → Search-only (rejected in align: doesn't consolidate), full-text (rejected: not graph-native).
 - *HMW let the graph learn entities passively?* → #438 connection discovery (SEPARATE epic — graph-driven, not conversation-driven; boundary preserved).
 - *HMW avoid dedup entirely?* → Accept duplicates; only viable at small scale, poisons semantic search at 4,190 sessions (rejected).
 
 **Assumption mapping:**
+
 - [unverified] LLM extraction precision ≥70% (Gate B pending)
 - [unverified] Embedding-similarity dedup precision adequate at scale (Phase 2 risk)
 - [validated] ONTOLOGY v3.2 about* edges are the wiring mechanism (§3.2, §3.5)
@@ -89,21 +92,27 @@ aboutObjects: tortoise
 > Confidence: 2+ independent sources per cluster. ⚠️ emerging where single-source.
 
 ### 3.1 Resolution pipeline pattern (multi-source, High)
+
 Pragmatic entity resolution for KG construction is a **short-circuit chain: exact match → fuzzy match → semantic (embedding) match**, each with thresholds; unmatched → new node. Duplicate detection is a SEPARATE decision from resolution (embedding similarity + context comparison, then merge/review/new-node). Sources: Connected Data World 5-step KG cleaning; Till Freitag entity-extraction blog; DecodingAI "keep your KG clean". **[HIGH — 3 sources]**
 
 ### 3.2 LLM reconciliation for uncertain matches (multi-source, Medium)
+
 When embedding similarity is ambiguous (0.6–0.9 band), an LLM reconciliation pass decides same-entity vs distinct — cheaper and more accurate than pure thresholding. KGGen (arXiv 2502.09956) uses embeddings + BM25 retrieval + LLM dedup iteratively. Human-in-the-loop only for high-stakes uncertain matches. **[MEDIUM — 2 sources]**
 
 ### 3.3 Embedding dedup with thresholds (multi-source, High)
+
 Llamaindex property-graph index and Mem0-class agent memory use text embeddings + word similarity for entity dedup with explicit thresholds: auto-merge below X, human review in band, new node above. **[HIGH — 3 sources]**
 
 ### 3.4 Temporal agent memory graphs (Medium)
+
 Temporal KG architectures for agent memory (arXiv 2501.13956) timestamp entity/claim states and track evolution — validates Phase 4's temporal belief tracking as a first-class design (validFrom/validTo + supersession), not an afterthought. **[MEDIUM — 2 sources]**
 
 ### 3.5 Cost discipline for batch extraction (Medium)
+
 Batch LLM extraction at scale: model tiering (cheap classifier → expensive extractor), fire-and-forget async, resumable progress. Already the Phase-1 architecture (two-tier) — Phase 2/4 should follow the same shape. **[MEDIUM — 2 sources]**
 
 ### 3.6 Adversarial findings (what fails in practice)
+
 - Pure fuzzy matching (no semantic) produces unmanageable false merges at scale → semantic layer required for open-domain entities. [1 source — ⚠️ emerging]
 - Auto-merge without review band pollutes the graph with wrong canonical names — the #438-adjacent failure mode; our draft-status gate is the correct mitigation. [2 sources — Medium]
 - Embedding similarity alone conflates "mentions same string" with "is same entity" (polysemy) → need context comparison, not just string proximity. [2 sources — Medium]
@@ -113,12 +122,14 @@ Batch LLM extraction at scale: model tiering (cheap classifier → expensive ext
 ## 4. Synthesized Approach (what to build)
 
 ### Phase 2 — Entity extraction & cross-session dedup
+
 1. **Extraction:** Extend the Phase-1 extraction harness to a dedicated entity stage (reuse `_DocumentPointStage` pattern, LLM returns entities with canonical-name candidates + types mapped to `objectKind` vocab). Keep deterministic identity from segmenter; model cleans/supplies entity spans.
 2. **Resolution (short-circuit chain):** exact (normalized string) → fuzzy (normalized edit distance, pre-filtered by `_graph_entity_keywords`-style mention detection) → semantic (embedding cosine, thresholds: <0.6 new node, 0.6–0.9 LLM reconciliation, >0.9 merge). v1 non-goal: perfect resolution — fuzzy+semantic is the stated v1.
 3. **Write:** `create_object` (MERGE by canonical id — deterministic hash of canonical name, mirroring `_connect_issue_objects`), then `(Point)-[:aboutObject]->(Object)` + `(Event)-[:aboutObject]->(Object)` wiring. Content dedup ("we already decided this"): semantic similarity across extracted `decision`-kind Points, linked via IMPL or supersession after review — NOT auto-merge.
 4. **Fix drift:** replace `INSTANTIATES` wiring with `aboutObject` (or `references`) in `_connect_issue_objects` + session_indexer.py; update ranking.py boost query to the new edge; sync security.py whitelist.
 
 ### Phase 4 — Cross-ontology integration
+
 1. **about*/structural wiring:** use `create_event`'s existing about* props and `create_about_edge`; Event→Object `produces`/`uses` per §3.5 where the conversation shows artifact production (mandate's Phase-3 replacement — actions are events, not nodes).
 2. **EP propagation on extracted Points (gated):** extracted Points created `status: draft`; draft excluded from EP (`ep.py` change); no auto-mitigation wiring from extraction; calibration gate before live promotion. EP runs on the extraction batch produce confidence only for reviewed/live Points.
 3. **Temporal belief tracking:** extracted Points get `validFrom` = session date; NAND operators link contradictory session decisions; belief-over-time query surfaces "decided X on D1, contradicted on D2". Reuse supersede/CORRECTS for explicit replacement.

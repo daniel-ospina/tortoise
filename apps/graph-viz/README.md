@@ -80,4 +80,3 @@ See `.env.example` for all options (`FALKORDB_USERNAME`, `FALKORDB_SSL`, `FALKOR
 - Confidence badges on nodes (green >70%, yellow 40-70%, red <40%)
 - EP ▶ button runs belief propagation
 - Right-click on canvas to add new claims at specific positions
-

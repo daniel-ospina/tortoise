@@ -49,9 +49,11 @@ subjects.team: epistemic-team
 ## Viable Delivery Topologies for the Tortoise Reflex + Why-Recall
 
 ### Topology A — SDK callback / embedded component
+
 The reflex + why-assembly ships as a library method on the existing `TortoiseSDK`; the third-party app embeds Tortoise's Python package (or the thin `tortoise-client` driver, #526) and calls it per turn.
 
 - **Integration contract (request/response):**
+
   ```
   volunteer_context(window: list[Turn], session_id: str | None,
                     prior_context: str | None, min_confidence: float = 0.7,
@@ -61,6 +63,7 @@ The reflex + why-assembly ships as a library method on the existing `TortoiseSDK
                             contested, nands, superseded_by, dig_deeper: [...]}],
                      degraded_reason: str | None }
   ```
+
   Mirrors gbrain's `turn_context` request/response shape (`resolve-ipc.ts`: `{kind, window, priorContextText, maxPointers}` → `{ok, block}`), with `prior_context` driving re-mention suppression and `why` gating the why-assembly.
 - **Latency budget:** in-process; regex/entity pass ~sub-ms; search fast-path ≤300 ms p95 (measured E2E-8); EP `compute_confidence` = single-node α/β read (µs–ms); why-block assembly from already-annotated `recall_state` output (contested / counter_evidence / nands / mitigations keys exist today) — **total typically 50–200 ms, worst case bounded by the 500 ms collective search cap**.
 - **Statelessness:** fully stateless per call (window passed in, nothing persisted server-side); session state lives in the app.
@@ -69,6 +72,7 @@ The reflex + why-assembly ships as a library method on the existing `TortoiseSDK
 - **What it takes to build:** extract the reflex (salience → resolve → gate → budget → suppress) as a pure function over the existing search/EP code; add the why-block assembler over `recall_state`'s existing annotations (fill the 4 documented gaps: contentiousness-as-signal, support-chain narrative, trade-offs join, dig-deeper pointers — all in-place, no new tool); ~1–2 weeks on top of the W4 in-place work.
 
 ### Topology B — Synchronous HTTP service (event-in → context-out, latency-bounded)
+
 The same code path exposed as a hosted API endpoint; the app POSTs the turn and receives the block to inject. The gbrain serve socket is exactly this shape for localhost — Tortoise already runs the hosted FastAPI.
 
 - **Integration contract (request/response):** `POST /v1/context` with `{window: [Turn], session_id?, prior_context?, min_confidence?, max_pointers?, why?}` → `200 {pointers, why, degraded_reason}` (or `204`/`{pointers: []}` when silent). Content-type/JSON; ~15 KB request cap mirroring `SessionRequest.conversation` (max_length=1000 turns).
@@ -79,6 +83,7 @@ The same code path exposed as a hosted API endpoint; the app POSTs the turn and 
 - **What it takes to build:** one endpoint wrapping the Topology-A function; reuse `get_current_org`, `_make_sdk`, `asyncio.to_thread` (the #1676 pattern), metering; contract test + a W3-style know-to-ask/false-fire replay against the HTTP seam. The hosted `ask` gating (#2013) does **not** block this — the reflex is deterministic and the why-block is reads, not the reader model; the #2013 decision stays confined to the `ask` surface.
 
 ### Topology C — Event pipeline / async push (sessions → precompute → webhook/SSE)
+
 The app streams session events (already shipped: `POST /v1/sessions` with `session_id` idempotency, harness vocab, receipts); Tortoise ingests, runs EP updates, **precomputes** per-point why-context, and pushes context back via webhook or SSE.
 
 - **Integration contract (event shape):** in = existing `SessionRequest` (`conversation`, `session_id`, `harness`, `source`); out = webhook `POST <app-url>/context` with `{session_id, turn_range, points: [{id, why_block}]}` or an SSE stream for live turn-by-turn; subscription registered per team key (`POST /v1/context/subscriptions {url, events}`).
@@ -89,6 +94,7 @@ The app streams session events (already shipped: `POST /v1/sessions` with `sessi
 - **What it takes to build:** subscription registry + webhook dispatcher + SSE route; hook the why-assembly into the post-EP pipeline (dream cycle) instead of the hot path; Zep's async-precompute precedent is the reference architecture. Medium build; **defer to phase 2** unless a pilot app needs push.
 
 ### Topology D — MCP server (the existing surface, evaluated honestly)
+
 Tortoise already ships MCP (`tortoise_search` / `tortoise_recall` / `tortoise_ask` (gated) / `tortoise_analyze` / `tortoise_session_capture`), team-scoped via `mcp_auth` (Bearer `tt_` in HTTP mode, `SELFHOST_ORG_ID` for stdio).
 
 - **Integration contract:** tools, not events. A `tortoise_volunteer_context(window, ...)` tool would mirror gbrain's `volunteer_context` op (one call per turn) and the why-block rides the existing search/recall tool output.

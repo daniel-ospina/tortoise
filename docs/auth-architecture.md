@@ -455,6 +455,7 @@ mints, not a policy engine.
 
 The supabase `api_keys` table mirrors the registry shape exactly
 (`graph_id`, `scopes` jsonb FLAT, `delegation_depth`, `created_by_key_id`,
+
 + the `chk_minted_key_no_escalation` CHECK + `idx_api_keys_graph_id`).
 The C1 migration is pure-additive and drops cleanly (rollback drill in the
 C8 runbook — apply → rollback → re-apply passes in CI).

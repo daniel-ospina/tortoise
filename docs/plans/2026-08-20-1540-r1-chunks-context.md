@@ -20,6 +20,7 @@
 > **Gate skipped: zero third-party dependencies.** The plan touches no new third-party libraries — chunking is pure Python slicing over the existing `_session_transcript` renderer; retrieval uses the in-repo hybrid engine (`TortoiseSDK.tortoise_fts_query`); the reader/judge wiring is the existing in-repo provider pattern. All design-relevant external evidence (context-bloat anti-pattern, LightMem budget-dependence, Verbatim-Chunks union verdict) is already triangulated in the epic brief's `### UX Pattern Research` / `### Tech Stack Research` and `## Raw Notes` (2026-08-20) — no fresh queries needed. The R1 chunk-granularity choice is an **empirical sweep, not an external-knowledge question** (run protocol step 2 — exactly why the micro-test exists).
 
 Prior-research anchors consumed (Step A — epic brief + v2 measurement):
+
 - **Context bloat (measured):** v2 fed the reader ~35k tokens of whole-session transcripts (**4.4× baseline**) → refusals/hallucination under flood (9/18 TR losses had full session recall yet failed). Baseline context ≈ 8k tokens → the default cap is set at 8000.
 - **LightMem reproduction:** constructed-memory advantage **vanishes as the answering budget grows** (~330 tokens: +5.5pp; ~935 tokens: small disadvantage) → compact points win only under tight budgets → cap + structure context, don't flood.
 - **Verbatim-Chunks (arXiv 2601.00821):** the union (chunks ∪ artifacts) matches chunks; artifacts alone forfeit ~22pp → raw chunks are the recall floor and must stay in the pool AND in the rendered context (points-first *backfill*, not points-only).
@@ -30,6 +31,7 @@ Prior-research anchors consumed (Step A — epic brief + v2 measurement):
 ## Design Decisions
 
 ### D1. Chunking scheme — non-overlapping verbatim turn windows
+
 - Replace the whole-session blob point (`lme:{qid}:s{si}:raw`, content = `_session_transcript(session)`) with non-overlapping consecutive windows of `chunk_turns` turns, rendered with the same role-prefixed verbatim format (`_session_transcript` on the window slice). Union of chunks == full session → verbatim coverage preserved (owner invariant: extraction never replaces verbatim evidence).
 - Chunk ids: `lme:{qid}:s{si}:c{ci}` (ci = 0-based window index). **The `:raw` id is retired** (only consumers: tests + `ingest_v2.py` — verified by grep; every eval question uses a fresh isolated graph, so no live graph carries a stale blob).
 - Chunk point properties (all additive): `pointKind=SESSION_TRANSCRIPT_KIND` (**reused — no new kind**, epic ontology invariant), `lme_question_id`, `lme_session_index`, `session_id`, `lme_chunk_index` (new, eval-instrumentation, window index), `lme_chunk_turns` (new, eval-instrumentation, **the ACTUAL number of turns in the window** — `len(turn_idxs)`; the remainder window of a 3-turn session at `chunk_turns=2` carries `lme_chunk_turns=1`. The knob VALUE used is recorded in report methodology, not on the chunk), `is_episodic=True`, `status="draft"`.
@@ -39,11 +41,13 @@ Prior-research anchors consumed (Step A — epic brief + v2 measurement):
 - **Validation:** `chunk_turns` must be ≥ 1 — `_session_chunks` raises `ValueError` otherwise (`chunk_turns=0` → `range(step=0)` crash mid-ingest; negative → silently zero chunks = verbatim leg silently deleted, the owner invariant violated). CLI rejects it too (T4).
 
 ### D2. Granularity knob + sweep points (run protocol step 2)
+
 - Knob: `chunk_turns` (turns per window). Sweep points: **{1, 2, 4} — one very low (1), two middle (2, 4)**. Default code value: `2` (working default until the sweep selects; the pilot and 500-Q run use the *selected* value — run protocol steps 3/5).
 - Sweep harness: `tools/longmem_eval/sweep_granularity.py` (T5) runs the eval over a small question subset across the 3 points with all other knobs fixed, and emits a comparison table + a deterministic winner.
 - Selection rule (recorded in the sweep output, consumed by the run protocol step 2 gate): **v2 mode** — maximize `evidence_recall@10` (extracted-point evidence; the denominator is granularity-neutral, D5), with `chunk_evidence_recall@10` and `context_tokens_mean` recorded alongside; subject to `context_tokens_mean ≤ context_token_cap`; tie-break → smaller `chunk_turns` (finer evidence localization, less bloat). **Deterministic mode** the selection metric is knob-insensitive (chunks unmarked, D3; turn recall over uncapped turn points) — the deterministic sweep cell is a context-token/underfill-only view, not a granularity selector.
 
 ### D3. Per-session dedup — cap applies to the raw-chunk leg
+
 - Cap: `max_chunks_per_session` (default `2`, aligned with E2E-10's ≤1–2 MMR cap; the R6 MMR variant tunes it post-baseline). Applied in search rank order — keep the top `cap` chunks per session.
 - **Bucket key: `session_id` when present, else `lme_session_index`** (formatted as a string key) — hits with a missing/invalid index must NOT collapse into one shared `-1` bucket (that would over-dedup chunks from *different* sessions together). Never silently merges sessions.
 - **Scope of the cap: raw chunks only** (`pointKind == session-transcript`). Extracted points (v2 `statement`) and deterministic turn points (`event`) are the compact epistemic surface and stay uncapped (they carry the evidence marks; capping them risks dropping evidence).
@@ -52,6 +56,7 @@ Prior-research anchors consumed (Step A — epic brief + v2 measurement):
 - **Validation:** `max_chunks_per_session` ≥ 1 (0 would silently delete the raw-evidence leg) — CLI + function boundary.
 
 ### D4. Budget-capped context — points first, chunks backfill (UX decision 3)
+
 - Knob: `context_token_cap` (default `8000` ≈ the pre-v2 baseline context size, a 4.4× reduction from the measured 35k flood; LightMem: compact evidence wins under tight budgets). Env `TORTOISE_LME_CONTEXT_CAP`, CLI `--context-cap`. Validated `≥ 1` (cap=0 → empty context; if it happens the empty result is recorded honestly, never silent).
 - Assembly (`_assemble_context`, pure function in `retrieve.py`), input = deduped pool truncated to `top_k` items (top_k retains its documented meaning — the max number of context items; the token budget then bounds it further):
   1. Partition into **points** (non-`session-transcript` kinds) and **chunks** (`session-transcript`), each preserving search rank order.
@@ -61,17 +66,20 @@ Prior-research anchors consumed (Step A — epic brief + v2 measurement):
 - **Estimator limitation (documented, tested):** `_estimate_tokens` counts whitespace-separated words ×1.1 — a long whitespace-free turn (URL/base64/code) is undercounted. The cap is enforced in estimate-space; the `token_estimator` methodology string already records the estimator; a pathological-content test (T6) guards that a single such turn cannot silently reproduce the 35k flood.
 
 ### D5. Evidence marking on chunks (v2 mode only — M6 raw-chunk containment)
+
 - v2 ingest marks a chunk `has_answer=True` when **any contained turn** has `has_answer` (raw-chunk containment, the third M6 mark; the union of chunk contents is the session, so no evidence turn is orphaned).
 - **Denominator hygiene (granularity-bias fix):** `evidence_point_count` (the `evidence_recall@k`/`turn_recall@k` denominator and the top-k numerator) counts **extracted points only** — `pointKind <> 'session-transcript'`. Rationale: if containment-marked chunks entered the shared denominator, the per-session chunk cap would structurally cap the numerator below it (a session with ≥3 evidence chunks could never reach recall 1.0), AND the ceiling would tighten as `chunk_turns` shrinks (more, smaller evidence chunks) — a confound that would bias the granularity sweep toward larger chunks. Keeping the denominator to extracted points preserves comparability with the v2 baseline.
 - **New `chunk_evidence_recall@k`** (reported alongside): containment-marked chunk hits in top-k / total containment-marked chunks — the raw-chunk containment view (M6), granularity-aware by construction.
 - v2 point `has_answer` marking (existing `_evidence_marked` content-overlap) is **unchanged**.
 
 ### D6. Reader consumes the budget-capped context (contract fix)
+
 - Today `run.py` passes `ret["hits"]` (the full, uncapped, undeduped pool) to `reader.answer(...)` while `retrieve_for_question` computes `context_tokens` on `annotated[:top_k]` — the reader can see MORE than the reported context. R1 fixes this: the reader receives `ret["context_points"]` (the D4 output). This is the S25 reader-context-format surface and the M5 pinning contract.
 - `render_context` is shared by both — the token metric and the reader input stay identical.
 - **`top_k` role post-R1:** `top_k` remains "the maximum number of context items" (pool truncation before the token budget, D4) — the `--top-k` help text and `top_k_context` methodology label keep their meaning; the token cap is the additional, dominant bound. Both are reported.
 
 ### D7. Knob provenance (M7/M8 discipline)
+
 - Report methodology gains `chunk_turns`, `context_token_cap`, `max_chunks_per_session` (recorded verbatim — the run protocol step 2 gate consumes them; the 500-Q report must show which granularity ran).
 - **Methodology strings updated together** (they describe the corpus + metric semantics — stale strings would misdescribe the published numbers): `retrieval` ("turn-granular raw chunks (chunk_turns) + extracted points …"), `recall_definition` ("session-level: fraction of answer_session_ids in top-k over the DEDUPED pool; turn-level: fraction of has_answer extracted points in top-k; chunk containment reported as chunk_evidence_recall@k"), `reader_context_format` (points-first budget-capped shape).
 - `EXTRACTION_APPROACH` / `EXTRACTION_APPROACH_V2` strings updated to describe turn-granular raw chunks.
@@ -97,6 +105,7 @@ Surfaces from test-design #1515 (28-surface epic map), R1-relevant subset — **
 **Explicitly NOT touched (verify-gate correction):** S11 (FTS-vs-TFIDF dual stack — R2/M7), S15 (pipeline state — M3/M4), S7/S8/S9 real-backend surfaces (E2E-1's real stack — gated on P3/M7/R3 deps, see ⛔ G4). `tests/eval/retrieval/` is a self-contained harness with zero imports of `tools.longmem_eval` — not coupled (review-verified).
 
 **Bug pattern flags (from #1515 + review):**
+
 - **One-session monopoly** (the R1 fix) — pool-depth headroom + dedup cap; regression guards: T3 pool test + T6 8-turn monopoly test.
 - **Silent evidence-leg emptiness** — unmarked chunks or capped-to-zero chunks would silently drop evidence; guards: containment-mark test (T2), denominator split (D5), `max_chunks_per_session ≥ 1` validation, extractor-failure chunk-retention test (T2).
 - **Reader-consumes-uncapped-hits** — the D6 contract fix; guard: run_evaluation integration test capturing the reader's `context_hits` (T4).
@@ -117,6 +126,7 @@ Surfaces from test-design #1515 (28-surface epic map), R1-relevant subset — **
 | **J2 — Verbatim evidence still searchable (owner invariant)** | Answer-bearing chunks surface + render; chunks survive extractor failure → `test_chunk_containment_marking`, `test_v2_extractor_failure_retains_chunks`, `test_chunk_evidence_recall_non_vacuous` |
 
 ### Failure Modes
+
 - Evidence chunk beyond dedup cap → **expected:** pool/context omits it, session recall unaffected (session present via its capped chunks/points); `chunk_evidence_recall` reflects the cap honestly → assert `session_recall` stable under dedup (T6).
 - All chunks of a session's evidence beyond cap → **expected:** recall drops for that session — the knob trade the sweep validates (Open Q3).
 - Extractor failure mid-session (v2) → **expected:** chunks + containment marks still written (written pre-extraction), `errors` recorded, run continues → `test_v2_extractor_failure_retains_chunks` (T2).
@@ -146,10 +156,12 @@ Surfaces from test-design #1515 (28-surface epic map), R1-relevant subset — **
 **Acceptance:** `ingest_haystack` writes windowed `session-transcript` chunk points (ids `lme:{qid}:s{si}:c{ci}`, props `lme_chunk_index`/`lme_chunk_turns`=actual window length, CONTAINS edges) instead of one `:raw` blob; `stats["chunks"]` counts written (post-guard) chunks; `chunk_turns < 1` raises `ValueError`; re-ingest is a no-op; union of chunk contents == full verbatim session; zero-turn session writes nothing and does not crash.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest.py`
 - Test: `tests/test_longmem_runner.py`
 
 **Step 1: Write the failing tests** (update structure assertions to chunk semantics):
+
 - `test_ingestion_creates_session_turn_raw_structure`: for `mini_ie_user_001` (2 sessions × 3 turns) at default `chunk_turns=2` → `stats["chunks"] == 4` (windows [t0,t1]+[t2] per session); `session-transcript` count == 4; `lme:mini_ie_user_001:s1` CONTAINS count == 5 (3 turns + 2 chunks); no point with id ending `:raw`; chunk props: `lme_chunk_index ∈ {0, 1}`, **`lme_chunk_turns == [2, 1]`** (actual lengths — remainder window carries 1); evidence turn (s1) is contained in a chunk (chunk `has_answer` stays **unset** in deterministic mode — D3).
 - `test_ingestion_idempotent`: 2 sessions × (3 turns + 2 chunks) == 10 points after double ingest; **`stats["chunks"] == 4` after the second ingest too** (post-guard count matches graph state).
 - `test_ingestion_chunk_window_boundaries`: 1-turn session → 1 chunk; 2-turn session at `chunk_turns=2` → 1 chunk; 5-turn session → 3 chunks ([0,1],[2,3],[4]); empty session → 0 chunks, no exception.
@@ -217,10 +229,12 @@ Add `chunk_turns: int = 2` as a keyword arg on `ingest_haystack`; update the sta
 **Acceptance:** `ingest_haystack_v2` writes windowed chunks (shared helper, single binding) **before `extract_session_v2`** (preserving the current `:raw` block position), marks a chunk `has_answer=True` iff any contained turn is an evidence turn; extracted-point marking unchanged; `:raw` id gone; extractor failure still retains chunks + marks + records the error; re-ingest no-op.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest_v2.py`
 - Test: `tests/test_longmem_runner.py`
 
 **Step 1: Write the failing tests**:
+
 - Extend `test_v2_ingest_writes_payload_with_evidence_marks`: the 2-turn question session (`s0`, turn 0 has_answer) now yields one chunk `lme:test_v2_q:s0:c0` (chunk_turns=2) whose `has_answer == True` (containment), CONTAINS count == 3 (1 chunk + 2 points); `:raw` id absent.
 - `test_v2_chunks_marked_by_containment`: a 4-turn session with evidence in turn 3 → chunk `c1` (turns 2–3) marked, `c0` unmarked.
 - `test_v2_extractor_failure_retains_chunks`: monkeypatch `extract_session_v2` to raise → assert the chunk point + CONTAINS edge + containment marks are still written for that session, `stats["errors"]` populated, the run continues, and `retrieve_for_question` still surfaces the session via its chunks (the exact "silent evidence-leg emptiness" guard).
@@ -270,11 +284,13 @@ Add `chunk_turns: int = 2` kwarg to `ingest_haystack_v2`; update the stats dict 
 **Acceptance:** `retrieve_for_question` fetches candidates at `max(ks) * 3` depth, returns `"hits"` = the **deduped pool** (pinned contract), computes recall@k on the deduped pool, splits the evidence denominator (extracted points only + new `chunk_evidence_recall@k`), and returns `context_points` = budget-capped points-first context with `context_tokens == _estimate_tokens(render_context(context_points, question_date))` exactly; oversized hits skip-not-starve; degenerate knobs raise.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/retrieve.py`
 - Modify: `tools/longmem_eval/ingest.py` (`point_props_for_hits` gains `pointKind`)
 - Test: `tests/test_longmem_runner.py`
 
 **Step 1: Write the failing tests:**
+
 - `test_session_dedup_cap_in_pool`: 5 chunks from one session + 1 point from another → the pool (`ret["hits"]`) contains ≤ 2 chunks from that session; `dedup_stats["chunks_capped"] == 3`; **pins `ret["hits"] == pool`**.
 - `test_dedup_missing_session_index_no_collapse`: hits with distinct `session_id`s but missing/`-1` `lme_session_index` → not capped against each other (bucket by `session_id`).
 - `test_session_crowded_out_still_surfaces`: one session whose points alone exceed `max(ks)` (20) candidates + a second session's point ranked beyond the raw top-20 → with the pool multiplier, the second session's point still appears in the deduped pool and its `session_recall@k` is not zero (the real E2E-1 assertion — distinct from the synthetic 6-hit test).
@@ -367,6 +383,7 @@ def _assemble_context(pool: list[dict], *, top_k: int,
 `render_context` refactor: `text = "\n\n".join(_render_block(h) for h in hits)`; prepend `f"Current Date: {question_date}\n\n"` when set — **byte-identical output** for existing inputs (the existing render tests pin this).
 
 Update `retrieve_for_question`:
+
 - `hits_raw = hybrid_search(sdk, query, limit=max(ks) * DEFAULT_POOL_MULTIPLIER)`.
 - `_annotate_hits` gains `point_kind` (via `point_props_for_hits` returning `pointKind` — extend the Cypher in `ingest.py` to `RETURN n.id, session_id, has_answer, lme_session_index, pointKind`).
 - `pool = _dedup_pool(annotated, max_chunks_per_session=…)`; **`"hits"` in the return dict = `pool`** (pinned contract).
@@ -389,11 +406,13 @@ Update `retrieve_for_question`:
 **Acceptance:** `run_evaluation` passes `ret["context_points"]` to `reader.answer`; knobs resolve env-first then CLI (`TORTOISE_LME_CHUNK_TURNS`, `TORTOISE_LME_CONTEXT_CAP`, `TORTOISE_LME_MAX_CHUNKS_PER_SESSION`), with CLI validation (chunk_turns ≥ 1, caps ≥ 1); report methodology records the three values + updated `retrieval`/`recall_definition`/`reader_context_format` strings; `test_longmem_reader_prompting.py` end-to-end tests stay green.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py`
 - Modify: `tools/longmem_eval/report.py`
 - Test: `tests/test_longmem_runner.py`
 
 **Step 1: Write the failing tests:**
+
 - `test_reader_receives_capped_context`: run `run_evaluation` over `_mini()` with a recording reader (wraps MockReader, captures `context_hits`); assert the captured list == the question's `ret["context_points"]` (bounded by cap, points-first) and its rendered token estimate ≤ cap.
 - `test_knob_cli_flags`: monkeypatch `tools.longmem_eval.run.ingest_haystack` to capture the `chunk_turns` kwarg; run `run_main([..., "--chunk-turns", "4", "--context-cap", "5000", "--max-chunks-per-session", "1", "--mock"])` → methodology records the three values and the captured kwarg == 4. (The report does NOT carry per-question ingest stats — assert via the captured kwarg + methodology, not the report's outcomes.)
 - `test_knob_env_vars`: set the three `TORTOISE_LME_*` env vars → `run_main` picks them up without CLI flags (mirrors the existing `--reader-model`/env pattern).
@@ -404,6 +423,7 @@ Update `retrieve_for_question`:
 **Step 2: Run and confirm failure** — `uv run pytest tests/test_longmem_runner.py::test_reader_receives_capped_context -v`: FAIL (reader today gets `ret["hits"]`).
 
 **Step 3: Implement:**
+
 - `run.py`: in `_run_one`, `reader.answer(context_hits=ret["context_points"], …)`; add `--chunk-turns`, `--context-cap`, `--max-chunks-per-session` args **with `type=` guards** (`_positive_int`); resolve each as `os.environ.get("TORTOISE_LME_*", default)` with the argparse value overriding env — mirror the `--reader-model`/`TORTOISE_LME_READER_MODEL` pattern; thread into `run_evaluation(..., chunk_turns=…, max_context_tokens=…, max_chunks_per_session=…)` → `ingest_haystack(_v2)(sdk, question, chunk_turns=…)` and `retrieve_for_question(..., max_context_tokens=…, max_chunks_per_session=…)`; pass the three values into `outcomes_to_report(..., r1_knobs={...})` → `build_report(..., r1_knobs)`.
 - `report.py`: `build_report` gains `r1_knobs: dict | None = None` merged into `methodology`; update `retrieval`, `recall_definition`, and `reader_context_format` methodology strings (D7).
 - `run.py`: update `EXTRACTION_APPROACH` / `EXTRACTION_APPROACH_V2` (turn-granular raw chunks) and `reader_prompt_source()` (points-first budget-capped shape — ⛔ G3 parity hash note).
@@ -422,6 +442,7 @@ Update `retrieve_for_question`:
 **Acceptance:** `python -m tools.longmem_eval.sweep_granularity --split s --limit N` runs the eval across `chunk_turns ∈ {1, 2, 4}` with other knobs fixed, prints a comparison table (per config: evidence/chunk-evidence/session recall@10, context_tokens_mean, context_point_count_mean) and a deterministic winner per the D2 selection rule; `--mock` implies deterministic ingest (fully offline); a CI-safe variant passes in pytest.
 
 **Files:**
+
 - Create: `tools/longmem_eval/sweep_granularity.py`
 - Test: `tests/test_longmem_runner.py`
 
@@ -430,6 +451,7 @@ Update `retrieve_for_question`:
 **Step 2: Run and confirm failure** — `uv run pytest tests/test_longmem_runner.py::test_granularity_sweep_ci -v`: FAIL (no sweep module).
 
 **Step 3: Implement** `tools/longmem_eval/sweep_granularity.py`:
+
 - CLI: `--split`, `--limit` (default 20), `--data`, `--ingest-mode {deterministic,v2}` (default `v2` — the V3 primary path), `--mock` (**implies `--ingest-mode deterministic` when `--ingest-mode` is unset — a "mock" run must be fully offline; real v2 sweeps need `--extractor-model`/keys**), `--chunk-turns 1,2,4`, `--context-cap 8000`, `--max-chunks-per-session 2`, `--extractor-model` (for v2 real runs), `--output <json>`.
 - Loop: for each `chunk_turns`, run `run_evaluation(instances[:limit], chunk_turns=…, max_context_tokens=…, max_chunks_per_session=…, reader, judge, …)`; collect `evidence_recall@k["10"]` (v2) / `turn_recall@k["10"]` (deterministic), `chunk_evidence_recall@k["10"]` (v2), `session_recall@k["10"]`, `context_tokens_mean`, `context_point_count_mean`.
 - Emit the table (stdout) + JSON; apply the D2 selection rule; print the winner; exit non-zero if the winner's `context_tokens_mean > cap`.
@@ -448,10 +470,12 @@ Update `retrieve_for_question`:
 **Acceptance:** The two genuinely distinct E2E scenarios (single-session monopoly; near-duplicate-chunk budget) asserted in embedded CI; pathological-content and mixed-blob/chunk-graph robustness tests pass; README documents the three knobs, the sweep, and the retirement of the `:raw` id. (E2E-1's real-backend variant documented as gated — ⛔ G4. These tests are THIN: they assert the distinct integration scenarios only, not re-assertions of T3/T4 unit coverage.)
 
 **Files:**
+
 - Test: `tests/test_longmem_runner.py`
 - Modify: `tools/longmem_eval/README.md`
 
 **Step 1: Add the distinct E2E-derived integration tests** (embedded FalkorDBLite, mini fixture + synthetic inputs):
+
 - `test_e2e1_dedup_cap_assertion` (DISTINCT input — 8-turn single session + second session): with `max_chunks_per_session=2`, per-session chunk count in `ret["hits"]` (the pool) ≤ 2 AND in `context_points` ≤ 2 (E2E-1 "≤ the cap"); `session_recall@k` for the second session is preserved (the crowd-out scenario).
 - `test_e2e10_budget_capped_context_v3_part` (DISTINCT input — many near-duplicate chunks from one session): context stays ≤ cap; points render before chunks; `context_tokens` honest (E2E-10 V3 part; cross-encoder/MMR assertions remain V4-conditional — not asserted here).
 - `test_context_cap_holds_under_pathological_content`: a chunk whose content is a long no-whitespace string (URL/base64) → the rendered context's real length stays bounded and the estimator limitation is documented in the methodology string (no silent 35k-flood reintroduction).
@@ -474,6 +498,7 @@ Update `retrieve_for_question`:
 **Acceptance:** Full CI suite green (`uv run pytest tests/ -m "not slow"`); no stray `:raw` id consumers; report methodology shows R1 knobs on a mock run; `tests/test_longmem_reader_prompting.py` (the real cross-consumer of the D6 rewiring) green; verification-before-completion evidence captured.
 
 **Files:**
+
 - Test: whole suite
 - Modify: none expected
 

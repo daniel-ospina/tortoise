@@ -229,6 +229,143 @@ Press any key to continue...
 
 
 
+#: A BARE LOGIN SHELL pane. Readable, but it never draws pi's footer (status bar)
+#: and carries no boot-block marker — the exact state a DEAD lane's pane is in, and
+#: the state #7158 wrote a dispatch brief into (a shell EXECUTES the bytes).
+SCREEN_BARE_SHELL = """\
+Last login: Wed Oct  8 20:58:11 on ttys004
+danielospina@Daniels-MacBook-Pro 7158-bare-shell % 
+"""
+
+#: A DEAD pane whose PREVIOUS pi session left its footer in the scrollback while
+#: the shell printed its prompt BELOW it. There is no boot-block marker, so
+#: `boot_blocked` is silent — a "is a bar present anywhere" readiness test declares
+#: this pane ready and writes the brief into the shell (#7158, the shape the
+#: no-footer fixture misses). Ordering is the discriminator: the footer must be
+#: the LAST thing drawn. The pwd line is part of the footer block a real capture
+#: always carries (`[pwdLine, statsLine, ...statuses]`) — its absence would make
+#: the stats line look like mere output (the round-6 bypass).
+SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT = """\
+[tortoise-capture] Captured session abc (2 turns)
+~/Documents/GitHub/tortoise (main)
+\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)                    (deepseek) deepseek-flash \u2022 high
+danielospina@Daniels-MacBook-Pro 7158-stale-footer % 
+"""
+
+#: A LIVE pi pane whose footer carries an EXTENSION-STATUS line below the stats
+#: line. pi pushes that line whenever any extension calls `ctx.ui.setStatus`
+#: (loop-enforcer sets `Loop: <slug> (cycle N)`; slack-bridge sets a channel
+#: thread) — both are loaded in every fleet pane. The stats line is therefore NOT
+#: the literal last line, and readiness must still say YES: this is pi's own
+#: output, not a shell prompt. Shape taken from the installed renderer's
+#: `FooterComponent.render` (lines = [pwdLine, statsLine, ...statuses]).
+SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER = SCREEN_IDLE_READY + (
+    "Loop: 7158-heartbeat-dead-lane (cycle 2)\n"
+)
+
+#: A LIVE pi pane right after a compaction: `getContextUsage()` returns a null
+#: percent, so pi renders `?/Nk (auto)` instead of `N.N%/Nk (auto)`. VERBATIM shape
+#: from this box's session logs (`↑1.3M ↓643k R103M CH99.9% $0.887 ?/300k (auto)`
+#: under `~/Documents/GitHub/tortoise (main)`). Readiness must say YES — a
+#: digit-only indicator refused this healthy lane (#7158 round 6).
+SCREEN_LIVE_WITH_UNKNOWN_CONTEXT_FOOTER = SCREEN_IDLE_READY.replace(
+    "0.0%/700k", "?/700k"
+)
+
+#: A LIVE pi pane whose footer has been TORN by a banner printed over it: the
+#: context-budget token is gone and only the model badge survives (banner VERBATIM
+#: from this box's session logs, 2026-09-26; the pwd line above it survives, as a
+#: real capture always has — `[pwdLine, statsLine, ...statuses]`). Readiness must
+#: say YES — requiring the token refused a healthy lane (#7158 round 7).
+SCREEN_LIVE_WITH_TORN_FOOTER = (
+    "~/Documents/GitHub/tortoise (main)\n"
+    "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 a manual-recovery "
+    "JSONL record was kept at /Users/danielospina/.tortoise/session-events/"
+    "2026-09-26.jsonlepseek) deepseek-flash \u2022 high\n"
+)
+
+#: A LIVE pane whose TRANSCRIPT carries lines that look like shell prompts
+#: (`$ \u2026`, `# heading`) above a genuine footer block — routine in agent panes.
+#: The block anchor must keep the prompt scan BELOW the footer; a whole-capture
+#: scan would refuse a healthy lane (#7158 round 9).
+SCREEN_LIVE_WITH_TRANSCRIPT = "$ uv run pytest tests/ -q\n# Findings\nall green\n" + SCREEN_IDLE_READY
+
+#: A LIVE pane whose cwd IS `$HOME`, so `formatCwdForFooter` renders the pwd line as
+#: bare `~` — which a `\S` requirement rejected, losing the block anchor and
+#: refusing a healthy lane (#7158 round 9).
+SCREEN_LIVE_WITH_HOME_PWD = (
+    "$ uv run pytest -q\n# Findings\nall green\n~\n"
+    "\u21911.3M \u2193643k R103M CH99.9% $0.887 3.0%/700k (auto)"
+    "  (deepseek) deepseek-flash \u2022 high\n"
+)
+
+#: A DEAD pane whose stale footer carries a ` \u2022 <sessionName>` suffix on the pwd
+#: line (the shape `pi --name` produces). The pwd anchor must still recognise the
+#: footer block, or the stats-mimicking output below re-opens the round-6 bypass
+#: (#7158 round 7).
+SCREEN_STALE_FOOTER_WITH_SESSION_NAME = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "~/Documents/GitHub/tortoise (main) \u2022 7158-lane\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "danielospina@Daniels-MacBook-Pro 7158-stale % \n"
+    "42.0%/700k (auto)\ndone\n"
+)
+
+#: A DEAD pane whose stale footer is followed by a shell prompt WITH a typed
+#: command — the line ends in text, not a sigil, so an end-anchored detector misses
+#: it and the brief is EXECUTED (round-3 finding).
+SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND = (
+    SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT.rstrip("\n") + " ls -la\n"
+)
+
+#: A LIVE pi extension-status line carrying a percent. pi's own status text, not a
+#: prompt: the digit guard must keep readiness TRUE.
+SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER = SCREEN_IDLE_READY + "Uploading 50%\n"
+
+#: A DEAD pane whose stale footer is followed by a bash/sh prompt whose sigil
+#: ABUTS A DIGIT (`bash-3.2$ `) — the shape a digit-guarded line-end rule misses.
+SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "bash-3.2$ \n"
+)
+
+#: A DEAD pane whose stale footer is followed by a ROOT prompt with a command, so
+#: the sigil abuts `]` and the line does not end in a sigil.
+SCREEN_STALE_FOOTER_ABOVE_ROOT_PROMPT = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "[root@host ~]# ls -la\n"
+)
+
+#: A DEAD pane whose prompt is followed by OUTPUT that itself matches the stats
+#: shape AND a further ordinary line. Anchoring on the last stats-shaped line alone
+#: hides the prompt above it (round-5/6: a fixed-width tail window just moves the
+#: problem down one line); the pwd-anchored footer block sees through it.
+SCREEN_STALE_FOOTER_THEN_STATUS_LIKE_OUTPUT = (
+    SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT + "42.0%/700k (auto)\ndone\n"
+)
+
+#: A DEAD pane whose footer row is NOT newline-terminated and the shell prompt is
+#: appended to it (a crash mid-line). Same-line prompt (#7158 round 5).
+SCREEN_STALE_FOOTER_AND_PROMPT_SAME_LINE = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high"
+    " danielospina@Daniels-MacBook-Pro 7158 % "
+)
+
+#: A DEAD pane that still parses as pi's composer (two rules) while showing a bare
+#: shell prompt — the shape where recovery picks `R_RESEND` (the second write site).
+SCREEN_DEAD_SHELL_WITH_COMPOSER = (
+    "\u2500" * 36 + "\n" + "\u2500" * 36 + "\n"
+    + "danielospina@Daniels-MacBook-Pro 7158-dead % \n"
+)
+
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers
@@ -1068,6 +1205,81 @@ class FakeCmux:
         return cd.CmuxResult(0, "OK")
 
 
+#: A LIVE pane read at the RECOVERY depth (`RECOVERY_SCREEN_LINES`), whose
+#: transcript carries a shell-prompt-shaped line EXACTLY ONE LINE OUTSIDE the
+#: gate's window (`DEFAULT_SCREEN_LINES`) and ends in a stats line with NO pwd line
+#: above it. Because no footer BLOCK exists (`_footer_stats_end` == -1),
+#: `shell_prompt_below_footer` falls back to scanning the WHOLE capture and sees
+#: that old prompt — so the SAME pane is not ready at 300 lines and ready at 80.
+#:
+#: The one-line-outside placement is load-bearing. With the prompt deeper in the
+#: capture (say 100 lines from the end) the test passes for ANY slice that drops
+#: it, including a wrong 100-line window; here only a slice of `DEFAULT_SCREEN_LINES`
+#: or less drops the prompt, so the test pins the window it claims to pin.
+DEEP_READ_WITH_A_TORN_FOOTER = (
+    "$ uv run pytest tests/ -q\n"
+    + ("filler line\n" * 79)
+    + "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 kept a JSONL "
+    "record deepseek-flash \u2022 high\n"
+)
+
+
+class DeepReadTornFooterCmux(FakeCmux):
+    """A pane whose RECOVERY-depth read carries an old shell prompt above the
+    gate's window, with no footer block (see `DEEP_READ_WITH_A_TORN_FOOTER`).
+    Shallower reads behave normally, so the gate and the pre-send re-assert both
+    pass normally and only the recovery re-send sees the wide capture."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deep_reads = 0
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        # Delegate FIRST: the base fake advances its state machine, its read
+        # counter and its failure injection on every read, and the recovery
+        # decision depends on that state. Only the CONTENT of the re-read taken
+        # immediately before the re-send is substituted (deep read #3: the first
+        # two are the recovery decision's own probes, which must see the pane as
+        # it really is or the decision picks `release` instead of `resend`). That
+        # ordering is the point of the test, not an accident of it: the dispatcher
+        # re-reads precisely because the pane can CHANGE during the grace window,
+        # and the change modelled here is the footer being torn mid-redraw.
+        result = super().read_screen(workspace, lines=lines, surface=surface)
+        if lines >= cd.RECOVERY_SCREEN_LINES:
+            self.deep_reads += 1
+            if self.deep_reads >= 3 and result.rc == 0:
+                return cd.CmuxResult(0, DEEP_READ_WITH_A_TORN_FOOTER)
+        return result
+
+
+class BareShellCmux(FakeCmux):
+    """A pane that is a BARE LOGIN SHELL: readable, but it never draws pi's footer
+    and carries no boot-block marker. The #7158 target."""
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+
+
+class BareShellAtTheGateThenReadyCmux(FakeCmux):
+    """A pane that is a BARE LOGIN SHELL on the GATE's probe and a live pi after.
+
+    This exists to pin the GATE, which `BareShellCmux` cannot do. `BareShellCmux`
+    is bare on EVERY read, so the pre-send re-assert refuses it too and the
+    refusal is reported identically whichever check made it — measured by
+    mutation: with the gate's fail-closed branch disabled (`if not ready:` never
+    refusing), 133 of 133 tests still passed, because the pre-send re-assert
+    produced the same status and the same zero writes. Here the pane is bare ONLY
+    for the gate's probe, so if the gate stops refusing, the send proceeds and the
+    bytes reach a bare shell — which is the failure #7158 exists to prevent.
+    """
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        self.read_calls += 1
+        if self.read_calls <= 1:
+            return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+        return cd.CmuxResult(0, SCREEN_IDLE_READY)
+
+
 class FakeClock:
     """A clock whose `sleep` advances it, so bounded-wait loops terminate in
     `timeout / poll` iterations instead of spinning forever."""
@@ -1137,18 +1349,25 @@ class TestDispatcherRecovery(unittest.TestCase):
 
     def test_prompt_eats_text_then_full_message_is_re_sent(self):
         # Send lands while the prompt is up AND the pre-send gate was skipped
-        # (simulated by the prompt appearing only after the gate's first look).
+        # (simulated by the prompt appearing only after the gate AND the pre-send
+        # baseline read — the pre-send read now re-asserts readiness, #7158).
         fake = FakeCmux(boot_block=True, boot_polls=1)
         fake.prompt_eats_prefix = 0
         dispatcher = _dispatcher(fake)
-        # Force the gate to return before the prompt is visible.
+        # Force the readiness gate and the baseline read to see a ready pane.
         original = dispatcher.screen
+        lies = [2]
 
-        def screen_after_first_call(ws, surface=None):
-            dispatcher.screen = original  # only lie once
-            return SCREEN_IDLE_READY
+        def screen_before_prompt(ws, surface=None, lines=None):
+            if lies[0] > 0:
+                lies[0] -= 1
+                return SCREEN_IDLE_READY
+            dispatcher.screen = original
+            if lines is None:
+                return original(ws, surface)
+            return original(ws, surface, lines=lines)
 
-        dispatcher.screen = screen_after_first_call
+        dispatcher.screen = screen_before_prompt
         result = dispatcher.send_message("workspace:99", PROBE, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(fake.submitted[-1], PROBE)
@@ -1267,16 +1486,39 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE])
         self.assertEqual(fake.sent_log.count(PROBE), 2)
 
-    def test_an_unreadable_pre_send_baseline_fails_closed(self):
-        """Novelty cannot be established without a baseline, and a `queued` verdict
-        without novelty is exactly the stale-line false success. The pre-send read
-        failing (twice) must leave the pane's genuinely-queued message reported as
-        `sent-but-not-consumed`, never as `queued`."""
+    def test_the_recovery_re_send_judges_the_SAME_window_as_the_gate(self):
+        """The recovery re-send reads `RECOVERY_SCREEN_LINES` (300) deep, and
+        `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        capture — so an unsliced re-assert can refuse a pane the gate just
+        approved, reporting a shell prompt below a footer that was never drawn.
+        That is a LOST delivery, in the one path that exists to RESCUE a delivery.
+        The pre-send re-assert already slices to the gate's window for exactly this
+        reason; this pins the recovery path to the same window."""
+        fake = DeepReadTornFooterCmux(
+            drop_first_send=True, pre_queued="an unrelated brief"
+        )
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertEqual(result.recoveries, [cd.R_RESEND])
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            2,
+            "the re-send must happen: the old prompt is above the gate's window",
+        )
+
+    def test_an_unreadable_pre_send_baseline_is_refused(self):
+        """Round-6 finding (TOCTOU): the pre-send read is the readiness re-check. If
+        it fails twice the pane state is unknown, and writing blind into a pane that
+        died after the gate passed would EXECUTE the brief. A refusal is
+        recoverable; an executed brief is not. Mirrors the resend path, which
+        already refuses on an unreadable fresh read."""
         # read #1 is the readiness probe; reads #2 and #3 are the baseline + retry.
         fake = FakeCmux(queued_turn=True, fail_read_indices={2, 3})
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
-        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
 
     def test_a_transient_baseline_read_failure_still_confirms_the_queue(self):
         """The pre-send baseline is read twice: a single transient `read-screen`
@@ -1289,10 +1531,10 @@ class TestDispatcherRecovery(unittest.TestCase):
 
     def test_a_baseline_at_a_DIFFERENT_depth_than_the_confirmation_is_refused(self):
         """DEPTH-MIXING. The readiness probe reads a shallower window than the
-        confirmation. If the baseline falls back to that shallower capture, a
-        pending line outside it reads as NOVEL — a stale queue entry would confirm
-        a send whose bytes never landed. With the deep baseline unreadable the
-        verdict must fail closed, never borrow the shallow capture."""
+        confirmation. The baseline is NEVER borrowed from that shallower capture (a
+        pending line outside it would read as NOVEL, confirming a send whose bytes
+        never landed), and with the deep baseline unreadable the send is refused
+        outright — never written blind."""
         fake = FakeCmux(
             queued_turn=True,
             shallow_screen_without_queue=True,
@@ -1300,7 +1542,8 @@ class TestDispatcherRecovery(unittest.TestCase):
         )
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
-        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
 
     def test_a_MULTI_LINE_body_is_flattened_so_it_can_be_confirmed(self):
         """A newline would submit early in pi's one-line composer, and pi renders a
@@ -1489,6 +1732,388 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = _dispatcher(FakeCmux()).send_message("workspace:99", "   ")
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "empty-message")
+
+    def test_a_readable_pane_with_no_pi_footer_is_REFUSED_not_sent_into(self):
+        """#7158: a readable pane with NO pi footer and no boot marker is a bare
+        login shell (a dead lane), not a slow boot. The old fail-open logged
+        "sending anyway (confirmation will decide)" and wrote the brief into the
+        shell, which EXECUTES it as a command; confirmation runs after the bytes
+        and cannot undo that."""
+        fake = BareShellCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(fake.sent_log, [], "no bytes may reach a bare shell")
+
+    def test_the_GATE_itself_refuses_a_bare_shell_before_any_write(self):
+        """The GATE's own pin, which the test above does not provide.
+
+        Both refusals produce the same status and the same zero writes, so a pane
+        that is bare for every read cannot tell them apart — and with the gate's
+        fail-closed branch deleted the suite stayed green (mutation-proven). This
+        pane is a bare shell for the gate's single probe and a live pi afterwards,
+        so the gate is the ONLY thing between the brief and a shell. If the gate
+        stops refusing, the pre-send read sees a ready pane, the bytes are written,
+        and `sent_log` is no longer empty.
+        """
+        fake = BareShellAtTheGateThenReadyCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "the gate must refuse before any write")
+        self.assertNotIn(
+            "on the pre-send read",
+            result.detail,
+            "the refusal must come from the GATE, not from the pre-send re-assert",
+        )
+        self.assertEqual(fake.read_calls, 1, "the gate refuses on its first probe")
+
+    def test_STALE_footer_above_a_LIVE_SHELL_PROMPT_is_not_ready(self):
+        """#7158, the shape a "bar present anywhere" test misses: a DEAD pane keeps
+        the previous pi session's footer in the scrollback while the shell prompt
+        prints BELOW it. No boot marker, so `boot_blocked` is silent; readiness
+        must require the footer to be the LAST thing drawn."""
+        stale = SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT
+        self.assertTrue(cd.status_bar_present(stale), "the stale bar IS present")
+        self.assertFalse(cd.boot_blocked(stale), "no boot marker catches it")
+        self.assertTrue(
+            cd.shell_prompt_below_footer(stale),
+            "the shell prompt BELOW the stale footer is what makes it executable",
+        )
+        self.assertFalse(cd.screen_ready(stale))
+
+    def test_a_LIVE_pi_with_an_EXTENSION_STATUS_below_the_footer_is_READY(self):
+        """pi renders an extension-status line BELOW its stats line whenever an
+        extension calls `ctx.ui.setStatus` (loop-enforcer, slack-bridge — loaded
+        in every fleet pane). That is pi's own output, not a shell prompt, so
+        readiness must NOT require the stats line to be the literal last line."""
+        screen = SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.boot_blocked(screen))
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen), "a live pi must stay dispatchable")
+
+    def test_trailing_blank_lines_after_the_footer_are_READY(self):
+        """`cmux read-screen` pads the capture; blank lines are not a prompt."""
+        self.assertTrue(cd.screen_ready(SCREEN_IDLE_READY + "\n\n   \n"))
+
+    def test_dispatch_into_a_LIVE_pi_with_an_extension_status_is_NOT_refused(self):
+        """The end-to-end guard for the shape above: a healthy lane mid-loop must
+        still receive its brief."""
+
+        class ExtensionStatusCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER)
+
+        fake = ExtensionStatusCmux()
+        result = self._send(fake, ready_timeout=0.0, consume_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(fake.submitted, [PROBE])
+
+    def test_a_stale_footer_above_a_PROMPT_WITH_A_COMMAND_is_not_ready(self):
+        """Round-3 finding: an end-anchored prompt detector misses a prompt line
+        that carries a typed command (`host % ls -la`) — the sigil is mid-line, so
+        readiness said YES and the brief was executed. The STANDALONE-sigil rule
+        catches it while leaving pi's status text alone."""
+        stale = SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND
+        self.assertTrue(cd.status_bar_present(stale))
+        self.assertFalse(cd.boot_blocked(stale))
+        self.assertTrue(cd.shell_prompt_below_footer(stale))
+        self.assertFalse(cd.screen_ready(stale))
+
+    def test_dispatch_into_a_STALE_footer_above_a_shell_COMMAND_is_REFUSED(self):
+        class StaleCommandCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND)
+
+        fake = StaleCommandCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertIn("shell prompt", result.detail)
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_a_LIVE_pi_with_a_PERCENT_in_its_extension_status_is_READY(self):
+        """The digit guard: `Uploading 50%` is pi's own status text, not a prompt,
+        and must not be refused (the round-2 over-refusal class)."""
+        screen = SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_stale_footer_above_a_DIGIT_PROMPT_is_not_ready(self):
+        """Round-4 finding: `bash-3.2$ ` / `sh-3.2$ ` abut a digit, so a
+        digit-guarded line-end rule missed them and the brief was executed."""
+        for screen in (
+            SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT,
+            SCREEN_STALE_FOOTER_ABOVE_ROOT_PROMPT,
+        ):
+            with self.subTest(screen=screen.splitlines()[-1]):
+                self.assertTrue(cd.status_bar_present(screen))
+                self.assertFalse(cd.boot_blocked(screen))
+                self.assertTrue(cd.shell_prompt_below_footer(screen))
+                self.assertFalse(cd.screen_ready(screen))
+
+    def test_dispatch_into_a_STALE_footer_above_a_DIGIT_PROMPT_is_REFUSED(self):
+        class DigitPromptCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT)
+
+        fake = DigitPromptCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_a_status_shaped_line_below_the_prompt_does_not_hide_it(self):
+        """Round-6 finding: anchoring the scan on the last stats-shaped line lets
+        shell output that mimics the stats line hide the prompt ABOVE it (and a
+        fixed-width tail window only moves the problem one line down)."""
+        screen = SCREEN_STALE_FOOTER_THEN_STATUS_LIKE_OUTPUT
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
+    def test_a_torn_footer_with_only_the_model_badge_is_still_LIVE(self):
+        """Round-7 finding: a banner printed over the footer removes the
+        context-budget token but leaves the model badge. This fleet's own liveness
+        checks accept the badge; requiring the token refused a healthy lane."""
+        screen = SCREEN_LIVE_WITH_TORN_FOOTER
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_every_thinking_level_badge_is_LIVE(self):
+        """Round-8 finding: the badge is `${model} • ${level}` and the levels are
+        off|minimal|low|medium|high|xhigh|max — enumerating three of them refused a
+        torn footer at `• max`/`• xhigh`, shapes this box's models.json produces."""
+        for level in ("max", "xhigh", "minimal", "low", "medium", "high"):
+            screen = (
+                "~/Documents/GitHub/tortoise (main)\n"
+                "↑1.3M ↓643k R103M CH99.9% $0.887 "
+                f"(deepseek) deepseek-flash \u2022 {level}\n"
+            )
+            with self.subTest(level=level):
+                self.assertTrue(cd.status_bar_present(screen))
+                self.assertTrue(cd.screen_ready(screen), level)
+        off = (
+            "~/Documents/GitHub/tortoise (main)\n"
+            "↑1.3M ↓643k (deepseek) deepseek-flash \u2022 thinking off\n"
+        )
+        self.assertTrue(cd.status_bar_present(off))
+        self.assertTrue(cd.screen_ready(off))
+
+    def test_a_bare_shell_printing_a_LOOSE_marker_is_still_not_ready(self):
+        """Round-8/9 finding: without a pwd+stats footer BLOCK the anchor must not
+        be the last marker line — the shell's own output (`(auto)`, a markdown
+        bullet) would sit below the prompt and hide it, declaring a bare shell
+        READY. With no block the WHOLE capture is scanned, and the badge level set
+        is enumerated so an arbitrary bullet is not a marker at all."""
+        for screen in (
+            "Last login: Wed Oct  8 20:58:11 on ttys004\nhost % echo '(auto)'\n(auto)\n",
+            "host % cat priorities.md\n\u2022 high \u2014 fix send boundary\n",
+            "host % cat notes.md\n\u2022 item one\n",
+        ):
+            with self.subTest(screen=screen):
+                self.assertFalse(cd.screen_ready(screen))
+
+    def test_an_arbitrary_bullet_is_not_a_footer_marker(self):
+        """Round-9 finding: a generic `• <word>` badge let ordinary output forge a
+        footer block. The level set is finite, so it is enumerated."""
+        self.assertFalse(cd.status_bar_present("host % cat notes.md\n\u2022 item one\n"))
+        self.assertFalse(cd.status_bar_present("host % ls\n\u2022 item\n"))
+
+    def test_a_LIVE_pane_with_prompt_like_transcript_lines_is_READY(self):
+        """Round-9 finding: the block anchor is what keeps the prompt scan below
+        the footer. Without it (whole-capture fallback) a live pane whose
+        TRANSCRIPT contains `$ \u2026` / `# \u2026` lines is refused. This pins the
+        anchor: mutating `_footer_stats_end` to -1 turns this READY into a refusal."""
+        screen = SCREEN_LIVE_WITH_TRANSCRIPT
+        self.assertGreaterEqual(cd._footer_stats_end(screen), 0)
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_bare_HOME_pwd_line_still_anchors_the_footer_block(self):
+        r"""Round-9 finding: `formatCwdForFooter(HOME)` renders the pwd line as a
+        bare `~`; a `\S` requirement rejected it, disabling the anchor and
+        refusing a healthy lane at $HOME."""
+        screen = SCREEN_LIVE_WITH_HOME_PWD
+        self.assertGreaterEqual(cd._footer_stats_end(screen), 0)
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_pwd_line_with_a_session_name_still_anchors_the_footer_block(self):
+        """Round-7 finding: a real pwd line can carry ` \u2022 <sessionName>`. If the
+        pwd anchor rejects it the block anchor silently disappears and the
+        stats-mimicking output below re-opens the round-6 bypass."""
+        screen = SCREEN_STALE_FOOTER_WITH_SESSION_NAME
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
+    def test_an_unknown_context_indicator_is_a_LIVE_footer(self):
+        """Round-6 finding: pi renders `?/Nk (auto)` after a compaction, so an
+        indicator that requires digits refused a healthy lane (#7158)."""
+        screen = SCREEN_LIVE_WITH_UNKNOWN_CONTEXT_FOOTER
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_dispatch_succeeds_on_an_unknown_context_footer(self):
+        class UnknownContextCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                result = super().read_screen(workspace, lines=lines, surface=surface)
+                return cd.CmuxResult(
+                    result.rc, result.out.replace("0.0%/700k", "?/700k"), result.err
+                )
+
+        fake = UnknownContextCmux()
+        result = self._send(fake, ready_timeout=0.0, consume_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(fake.submitted, [PROBE])
+
+    def test_a_same_line_footer_and_shell_prompt_is_not_ready(self):
+        """A footer row that is not newline-terminated (crash mid-line) with the
+        prompt appended must still be refused."""
+        screen = SCREEN_STALE_FOOTER_AND_PROMPT_SAME_LINE
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.boot_blocked(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
+    def test_initial_send_reasserts_readiness_on_the_pre_send_read(self):
+        """Round-5 finding (TOCTOU): the gate can be ready and the pane can die
+        before the baseline read, one read-screen later. The brief must not be
+        written on the stale `ready`."""
+
+        class DiesAfterGate(FakeCmux):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads <= 1:      # the readiness gate's read
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+        fake = DiesAfterGate()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log, [], "the pre-send read must gate the first write"
+        )
+
+    def test_recovery_RESEND_refuses_when_the_pane_died_BEFORE_the_write(self):
+        """The R_RESEND gate must judge a screen read IMMEDIATELY before the
+        second write, not the recovery read taken before the duplicate-guard
+        grace window (up to a full consume budget): a pane that dies in that
+        window would otherwise be written into."""
+
+        class DiesBeforeResend(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads <= 3:      # gate, baseline, recovery read
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                # A footer IS present, so the refusal must come from the shell
+                # prompt BELOW it — not from a missing footer (round-7 test gap).
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+        fake = DiesBeforeResend()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the second write must be gated on a FRESH readiness read",
+        )
+
+    def test_recovery_RESEND_refuses_when_the_pane_died_after_the_gate(self):
+        """Round-3 finding: the `R_RESEND` recovery writes the brief a SECOND time,
+        so a pane that dies between the readiness gate and the recovery must be
+        refused there too — otherwise the bytes land in the shell."""
+
+        class DiesAfterSend(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.dead = False
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                if self.dead:
+                    return cd.CmuxResult(0, SCREEN_DEAD_SHELL_WITH_COMPOSER)
+                return cd.CmuxResult(0, SCREEN_IDLE_READY)
+
+            def send_text(self, workspace, text, surface=None):
+                if text != "\\n":
+                    self.dead = True
+                return super().send_text(workspace, text, surface)
+
+        fake = DiesAfterSend()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the brief must not be re-sent into a pane that became a shell",
+        )
+
+    def test_a_pane_with_a_STALE_footer_above_a_shell_prompt_is_REFUSED(self):
+        """The no-footer refusal alone does not cover the stale-footer shape: the
+        pane LOOKS ready (a footer is on screen) while a shell prompt below it
+        would execute the bytes. The dispatch must be refused with zero writes."""
+
+        class StaleFooterCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+        fake = StaleFooterCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_recovery_refuses_to_re_send_into_a_pane_that_never_drew_the_footer(self):
+        """#7158 on the RECOVERY path: after a boot-block dismissal the pane
+        became readable but never drew pi's footer (the pi died), so the
+        dismiss-and-resend recovery must REFUSE rather than write the brief a
+        second time into whatever is there."""
+
+        class DiesAfterDismiss(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.phase = "ready"
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                if self.phase == "ready":
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                if self.phase == "blocked":
+                    self.phase = "shell"
+                    return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
+                # A stale footer is still on screen; only the prompt below it
+                # makes the pane unsafe (round-7 test gap).
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+            def send_text(self, workspace, text, surface=None):
+                if text != "\\n":
+                    self.phase = "blocked"
+                return super().send_text(workspace, text, surface)
+
+        fake = DiesAfterDismiss()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the brief must not be re-sent into a pane with no live pi",
+        )
 
 
 # --------------------------------------------------------------------------- #

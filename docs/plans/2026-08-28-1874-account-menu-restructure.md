@@ -31,15 +31,18 @@ Standard-tier condensed map (test-design skill — proportional application: the
 ### Journey Test Map
 
 **Journey: "I want to add a second login method to my account"**
+
 1. Click avatar → **Acceptance:** menu shows identity block + Profile entry → **Test:** `test_recovery_banner_shows_and_routes_to_profile` (adapted), `test_account_menu_identity_block_single_team` (new)
 2. Click Profile → **Acceptance:** Login methods surface renders → **Test:** existing profile tests (navigation adapted to menu entry)
 3. (Single-team user) Click avatar → **Acceptance:** Profile + Log out present, no empty switch section → **Test:** `test_account_menu_identity_block_single_team`
 
 **Journey: "I want to know which team I'm working in"**
+
 1. Nav shows team-scoped tabs only → **Acceptance:** no "Profile" button in nav → **Test:** nav assertion (new)
 2. Members tab → **Acceptance:** heading reads "Team members" → **Test:** heading assertion (new)
 
 ### Failure Modes
+
 - **Nav Profile button removed but a flow still clicks the nav-tab by name** → expected: tests navigate via the account menu; selectors scoped to `.account-menu` while the nav button still exists (strict-mode double-match) → covered by Task 1/2 ordering.
 - **Session user with empty `display_name`** → expected: email-prefix fallback (existing pattern `main.jsx:1227`) — team name must NOT be shown as personal identity (that's the original bug) → Task 2 fallback.
 - **Anon key-login / no-session rendering** → expected: NOT e2e-tested (no-session redirects to /auth; claim-intent shows the claim-paste screen; key-login anon teams get the Protect screen — the account menu never renders without a session in the current architecture). The `currentOrgName` fallback in the identity block is **defensive dead code** — annotated in Task 2, not asserted.
@@ -62,6 +65,7 @@ All decisions made interactively with the product owner (2026-08-28) — recorde
 ### Verification Plan
 
 (test-routing, proportional — UI-only change)
+
 - **e2e (full):** `tests/e2e/test_dashboard_identity.py` (adapted navigation + new assertions), `tests/e2e/test_dashboard_gate.py` (regression), narrow-viewport test — all with `RUN_DASHBOARD_E2E=1`
 - **Unit:** none (no logic module changes; `identity.js` untouched)
 - **Backend/integration/pgTAP:** skipped — zero backend surface (documented in surface map)
@@ -77,15 +81,18 @@ All decisions made interactively with the product owner (2026-08-28) — recorde
 **Acceptance:** `RUN_DASHBOARD_E2E=1` runs FAIL (not skip) on the new assertions; harness carries `user_metadata.display_name` and `org_name` mocks.
 
 **Files:**
+
 - Modify: `tests/e2e/test_dashboard_identity.py`
 - Test: same file
 
 **Step 1 — Harness fixes:**
+
 - `_session()` (~lines 47–63): add `"user_metadata": {"display_name": "danielospinabotero"}` (mirror `test_dashboard_gate.py:217` which already uses `user_metadata`).
 - `_wire` `/v1/organizations` + `/v1/team` mocks: use `org_name` (main.jsx reads `t.org_name` at :452 — the `name` field renders empty). E.g. `{"org_id": "team_e2e", "org_name": "E2E", "tier": "free"}`.
 - Add a two-team variant for the multi-team test: key team-scoped responses (`/v1/team`, `/v1/session/key`) by the `org_id` query param so switching actually re-hydrates.
 
 **Step 2 — Navigation helper (regex match — the blob aria-label is `Account menu — {team}`):**
+
 ```python
 def _open_account_menu(page: Page):
     page.get_by_role("button", name=/Account menu/).click()
@@ -93,9 +100,11 @@ def _open_account_menu(page: Page):
 def _open_profile_via_menu(page: Page):
     page.locator(".account-menu").get_by_role("button", name="Profile").click()
 ```
+
 Update the two existing nav-tab clicks (`test_dashboard_identity.py:209, 245`) to `_open_account_menu(page)` + `_open_profile_via_menu(page)`.
 
 **Step 3 — New assertions (fail until Task 2):**
+
 ```python
 def test_account_menu_identity_block_single_team(page: Page):
     _seed(page); _wire(page, inv=_inventory(login_methods=1))
@@ -123,6 +132,7 @@ def test_account_menu_email_prefix_fallback(page: Page):
     _open_account_menu(page)
     expect(page.locator(".account-menu").get_by_text("identity-e2e")).to_be_visible()
 ```
+
 (`test_members_heading_and_nav` partially fails until Task 2/3 — split the nav assertion and heading assertion if needed so each task has a clean red target.)
 
 **Step 4 — Run to confirm RED (not skip):**
@@ -135,11 +145,13 @@ Expected: FAIL on the new menu assertions (Profile not in menu yet).
 **Acceptance:** Menu shows identity block (display_name/email-prefix fallback/plan; team-name fallback for anon), Profile entry → `setTab('profile')`, workspace switch section, separated Log out. Nav has no Profile button.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (account blob block ~3664–3725; nav button at :3654)
 - Modify: `website/apps/dashboard/src/index.css` (~207–242)
 - Test: `tests/e2e/test_dashboard_identity.py`
 
 **Step 1 — Identity block (in `.account-menu`, above the switch section):**
+
 ```jsx
 {/* #1874: identity block — the PERSON. Session: display_name → email-prefix fallback
     (pattern main.jsx:1227). Anon (no sessionMetaRef): team name, no email. */}
@@ -169,6 +181,7 @@ Expected: FAIL on the new menu assertions (Profile not in menu yet).
 </button>
 <div className="account-menu-divider" />
 ```
+
 (Verify `sessionMetaRef.current` shape at `main.jsx:1552–1555` — `{ display_name, email }`.)
 
 **Step 2 — Keep the existing "Switch team" section (`teams.length > 1` guard) and Log out unchanged.**
@@ -177,6 +190,7 @@ Expected: FAIL on the new menu assertions (Profile not in menu yet).
 
 **Step 4 — CSS additions + fix dead menu-button styles (`index.css` near `.account-menu`):**
 The committed DOM uses `role="group"` + plain buttons (P2-1 a11y change), so the existing `.account-menu button[role='menuitem']` rules (index.css:232–238) are DEAD — menu buttons fall through to the global filled-accent `button` rule (index.css:40). Replace them with a live disclosure-row style and add the identity block:
+
 ```css
 .account-identity { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
 .account-identity-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
@@ -188,6 +202,7 @@ The committed DOM uses `role="group"` + plain buttons (P2-1 a11y change), so the
 .account-menu .account-check { margin-left: auto; }
 .account-menu-logout { color: #f87171 !important; }
 ```
+
 (This replaces the dead `button[role='menuitem']` selectors; covers switch rows + Profile + Log out.)
 
 **Step 5 — Run:**
@@ -200,6 +215,7 @@ Expected: menu assertions pass; adapted profile flows pass via the menu helper. 
 **Acceptance:** Members `<h2>` reads "Team members" (`main.jsx:4164`); heading + nav assertions green; no dead references.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (Members heading at :4164)
 
 **Step 1:** Change `<h2>Members</h2>` → `<h2>Team members</h2>` (nav button label stays "Members").
@@ -216,6 +232,7 @@ Expected: PASS.
 **Acceptance:** All dashboard e2e green (identity adapted + new, gate logout regression, narrow viewport); vite build regenerates `dist`; commit via `commit-workflow`.
 
 **Files:**
+
 - Test: `tests/e2e/test_dashboard_identity.py`, `tests/e2e/test_dashboard_gate.py`
 
 **Step 1:** Full dashboard e2e:

@@ -600,6 +600,30 @@ def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
     assert _changed_list(tmp_path) == []
 
 
+def test_detection_excludes_vendored_markdown(tmp_path: Path):
+    """Vendored markdown is not in the lint population (#7534).
+
+    A `node_modules` re-install rewrites those files, so a finding there cannot be
+    fixed by hand and the baseline generator (`_population`), the cli2 config's
+    `ignores` and THIS diff all exclude the tree. A vendored-only change must
+    yield `count=0` — not a lint step that lints fewer files than the differ is
+    told to expect and reds the required check fail-closed.
+    """
+    repo = _repo(tmp_path)
+    (repo / "a.md").write_text("# a\n", encoding="utf-8")
+    vend = repo / "website" / "apps" / "dashboard" / "node_modules" / "pkg"
+    vend.mkdir(parents=True)
+    (vend / "README.md").write_text("# v\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (vend / "README.md").write_text("# v\n\nchanged\n", encoding="utf-8")
+    _commit(repo, "change")
+
+    proc, output = _run_detection(tmp_path, repo, base)
+    assert proc.returncode == 0, proc.stderr
+    assert _output_count(output) == "0"
+    assert _changed_list(tmp_path) == []
+
+
 def test_detection_fails_closed_on_empty_base(tmp_path: Path):
     """An empty base makes `...HEAD` read `HEAD...HEAD` — empty, exit 0."""
     repo = _repo(tmp_path)

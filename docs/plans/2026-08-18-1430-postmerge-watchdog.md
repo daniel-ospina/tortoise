@@ -48,6 +48,7 @@ n/a — no user-facing journeys.
 **Acceptance:** The step's `run:` block is replaced per the exact block below; `name:` ("Run tests (embedded suite, per-test timeout)") and `id: tests` are byte-identical; no other step, job id, trigger, or `timeout-minutes: 60` changes.
 
 **Files:**
+
 - Modify: `.github/workflows/post-merge-validation.yml` (the `tests` step's `run:` block + the header comment note)
 
 **Step 1: Replace the run block**
@@ -105,6 +106,7 @@ Replace the current body (which is `set -o pipefail` + `python -m pytest tests/ 
 ```
 
 **Load-bearing details (do not regress):**
+
 - `set +e` is the FIRST line — GitHub runs steps under `bash -eo pipefail`; without it, `timeout` returning 124 aborts the step BEFORE the tail/banner/exit-code print (silent #798, reintroduced).
 - Do NOT copy python-ci's `$FILES` / `needs.changes` / `matrix.half` machinery — nonexistent in this workflow; the target stays `tests/ -m 'not track_b' --ignore=tests/e2e`.
 - The step's final `exit $rc` propagates the real code → `steps.tests.outcome` = 'failure' on rc 124/137/2/1 → comment step + fail step behave as today (verified: a step failure keeps `if: always()` successors running; a JOB cancel is what kills them).
@@ -126,6 +128,7 @@ Confirm the transplant differs from python-ci's `test` job block ONLY in the doc
 **Acceptance:** All three validations below pass; the rc-path simulation exercises rc 0/1/124.
 
 **Files:**
+
 - Test: (none in repo — validations run from the worktree shell)
 
 **Step 1: YAML parse**
@@ -140,6 +143,7 @@ Extract the `tests` step's `run:` block (strip 10-space YAML indentation) and ru
 **Step 3: rc-path simulation (local, shrunk timeouts)**
 
 Copy the block to a scratch dir; replace `50m` with `3s` and `-k 10` with `-k 2`; point pytest at fixture files. Run three probes:
+
 - hang fixture (a test sleeping 60s) → expect HEARTBEAT lines, tail, `WATCHDOG: pytest killed after 3s (...)`, `pytest exit code: 124`, non-zero rc
 - failing fixture → expect tail with failure, NO banner, `pytest exit code: 1`
 - passing fixture → expect tail with counts, `pytest exit code: 0`
@@ -153,6 +157,7 @@ Expected: all three rc paths behave per the design (banner only on 124/137/2; re
 **Acceptance:** A DRAFT PR with the change; self-review + verifier review posted; PR marked ready; NOT merged (issue direction: fix/1430-postmerge-watchdog branch, draft PR, do not merge).
 
 **Files:**
+
 - Modify: (nothing new — branch + PR)
 
 **Step 1:** Run the commit-workflow skill (branch `fix/1430-postmerge-watchdog` off origin/main, commit with message file, draft PR with body file, review gate, mark ready, update issue labels).

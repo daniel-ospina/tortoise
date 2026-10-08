@@ -23,6 +23,7 @@ created: 2026-08-13
 **Key precedent — Graphiti/Zep (arXiv:2501.13956):** bi-temporal knowledge graph (`valid_at` / `invalid_at` / `expired_at` fields), facts *invalidated* not deleted, point-in-time queries. Benchmarks: LongMemEval up to 18.5% improvement, LoCoMo 94.7% accuracy @ 155ms, DMR 94.8% vs 93.4%. **Graphiti handles *fact* freshness via temporal validity windows — it does NOT do belief propagation or background confidence recomputation.** No competitor runs a loopy-BP freshness scheduler. Tortoise's dreaming is differentiated: it refreshes *derived beliefs* (confidence), not just stored facts. The state-centric model (issue comments: confidence derived from points) makes this the mechanism that keeps derived state honest.
 
 **Staleness is the documented #1 failure mode** (multiple independent sources):
+
 - n26modi head-to-head: staleness error 87%→20% with temporal-KG memory (single-engineer experiment — treat magnitude as unverified).
 - 2026 field reports (memory-drift / reconciliation articles): *"The world simply moved while the agent was looking elsewhere… drift is a thermodynamic property"*; the fix pattern is **reconciliation = watermark + change-feed + lazy revalidation**, exactly the cache-invalidation primitives that make replicas honest.
 - MemFail (arXiv 2605.26667): memory systems fail by architecture, not by model quality — **no single backend dominates**; graph-based systems excel at causal reasoning but collapse on coexisting-fact retrieval.

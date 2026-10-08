@@ -39,6 +39,7 @@ governingAgreement: "#1746 (epic #1509, M3/M4/M7 lineage; issue-scoping solution
 > **Findings date:** 2026-08-26. **Gate skipped:** plan touches ZERO new third-party dependencies — `json`/`re` (stdlib), in-repo patterns only (M3 retry/census, `_bump_census` taxonomy, bounded stage caps). Step B (Perplexity verification gate) does not fire per the zero-deps skip rule. Step A (prior research intake) ran: the solution-diverge artifact's cited research + epic 02-research-brief (prompt-efficiency: JSON mode, parse-retry) + 03-scope (M3/M4/M7) + 05-detailed-e2e (E2E-2).
 
 **Canonical + codebase-verification (from the solution-approaches artifact, re-verified against source 2026-08-26):**
+
 - **H1 is real in code:** `DeepSeekDirectModel.complete` never sends `response_format`; `OpenRouterModel.complete` does (model_adapters.py:111-113, toggle `TORTOISE_JSON_MODE` default "1"). The pilot's direct path therefore ran JSON-mode-free. JSON mode is an UNTESTED lever on that path; DeepSeek docs warn JSON mode breaks at `max_tokens` (truncation still possible → JSON mode must be paired with truncation-aware handling, never assumed to fix H3).
 - **Parse → bounded repair beats vague re-prompt** for deterministic defects (missing commas, trailing junk); **error-informed re-prompt beats same-prompt retry** for sloppiness (the retry carries the failure signal). Same-prompt retry is deterministic for truncation (same input + same cap → same length) — it must be skipped, not retried (confirmed-problem H3 note).
 - **Control-char contamination defeats tail-cuts** (H2): raw newlines/tabs inside string values make `json.loads` fail regardless of tail state; string-aware escaping is lossless via `json.loads` round-trip.
@@ -61,7 +62,9 @@ governingAgreement: "#1746 (epic #1509, M3/M4/M7 lineage; issue-scoping solution
 ## Design decisions
 
 ### D1 — Census vocabulary: deterministic 1:1 error classes + warning-only classes (exact keys)
+
 **Error classes** (every one appends a human-readable string to `errors` AND bumps `error_census[class]` — 1:1, enforced by test):
+
 - `parse_error` — S2/S4 final parse failure, first parse-failing attempt `finish_reason != "length"` (existing key, semantics narrowed per D2).
 - `truncated_parse_error` — S2/S4 final parse failure, first parse-failing attempt `finish_reason == "length"` (NEW).
 - `partial_parse` — schema-validated partial-accept applied; the truncated tail was dropped (NEW; an ERROR — the embed list is incomplete; `valid=false`; D4 rung 4).
@@ -76,16 +79,21 @@ governingAgreement: "#1746 (epic #1509, M3/M4/M7 lineage; issue-scoping solution
 **Invariant:** for every `extract_session_v2` result, `len(errors) == sum(error_census.values())` — enforced by a unit test on a synthetic mixed-error session and the integration census-equality test (criterion 2).
 
 ### D2 — finish_reason re-link: `_ParseError` carries the class-decision signal
+
 `_ParseError` gains attributes: `truncated: bool` (first parse-failing attempt's `getattr(model, "last_finish_reason", None) == "length"`), `attempt: int`, `excerpt: str` (bounded error region, D3). `_bump_census` maps `_ParseError` → `"truncated_parse_error" if e.truncated else "parse_error"`; all other exceptions keep `_classify_error`. Capture rule: read `model.last_finish_reason` immediately after each `_complete` return, hold the FIRST parse-failing attempt's value (the retry only runs for the stop/None class, so first-attempt == the only attempt in the truncation case; a stop-fail followed by a length-fail is classed `parse_error` — per the confirmed problem's FIRST-attempt rule). The `stats["llm"]` rollup (`calls`/`retries`/`truncated`) stays structurally as-is; precision note: `_rollup_llm` accumulates a per-STAGE truncated flag (`int(bool(stage_stats["truncated"]))`) and `_complete_parsed`'s parse-retries land in the nested per-call `stats["llm"]["retries"]` — distinct from the session `llm_stats["retries"]` (transient backoff only). The readout needs only `> 0`, but the two counters must not be conflated in the report labels (documented, not load-bearing).
 
 ### D3 — Retry policy: error-informed re-prompt, truncation-aware skip
+
 `_PARSE_RETRIES` stays 1. Attempt 1 runs the ladder (D4). Then:
+
 - First parse-failing attempt `finish_reason == "length"` → **skip the same-prompt retry** (deterministic failure — same prompt + same cap) → censused fallback (`truncated_parse_error`). Truncation-aware handling = the ladder's rung-4 partial-accept already ran in-process on attempt 1; nothing more to recover by re-prompting.
 - `finish_reason == "stop"` (or `None`, e.g. MockModel / adapters that don't set it) → attempt 2 is the **error-informed re-prompt**: the user message is the original plus a bounded block: `\n\nYour previous response did not parse as the required JSON.\nParse error: {msg}\nOffending region: {excerpt}\nRespond with ONLY the JSON object, no explanation.` where `msg` = the JSONDecodeError message ≤ 300 chars and `excerpt` = the region around `err.pos` (±150 chars) if available else the last 400 chars of the response (total ≤ 500 chars). Attempt 2 runs the ladder too; final failure → censused fallback.
 - No mid-run re-prompt for truncation; no same-prompt retry ever again.
 
 ### D4 — Parse-boundary recovery ladder (`_parse_json_robust`)
+
 `_parse_json_robust(response, *, stats) -> dict` raises `_ParseError` on final failure. Rungs per attempt:
+
 1. **Canonical** — existing `_parse_json` (fences, brace-balance, tail-cuts). Success → return.
 2. **Sanitize (H2, output-side)** — string-aware scan (same in_str/esc tracker as `_parse_json`); escape raw C0 control chars (0x00-0x1F, incl. raw newlines/tabs) INSIDE string literals as their JSON escapes (`\n`, `\t`, `\uXXXX`); structural whitespace untouched. Re-parse. Success → `stats["recovery"]["sanitize"] += 1` + return. On rung-2 REPARSE FAILURE, the sanitized text (when it differs from the original) becomes the `working` input to rungs 3 and 4; a mis-tracked scan is backstopped by the D5 schema gate before any rung-3/4 output is accepted (worst case it fails schema and falls through — never corrupting). The event "rung 2 altered but did not parse" increments `stats["recovery"]["sanitize_insufficient"]` — the gate can measure the contamination-repair gap.
 3. **Bounded repair** — runs on the **`working` text from rung 2** (sanitized when it differs from the original, else original) — the H2∧H3/structural intersection (raw control char inside a string AND a missing comma / unterminated object) is otherwise unrecoverable and falls to data-loss partial-accept; bounded, schema-gated (D5), first-valid-wins: (a) unterminated object → append `}` up to 8 closers; (b) unambiguous missing commas at boundary joins (`}"{`, `]"{"`, `}"[`, `]"[`, `"["`… bounded rule list); (c) trailing junk (already in tail-cuts). Re-parse + schema-validate (D5). Success → `stats["recovery"]["repair"] += 1` + return. No free-form json-repair library, no unbounded heuristics.
@@ -95,23 +103,30 @@ governingAgreement: "#1746 (epic #1509, M3/M4/M7 lineage; issue-scoping solution
 Caller wiring (`extract_session_v2`): after a successful `run_s2`/`run_s4`, `stage_stats.get("partial")` → append the error string + `_bump_census_class(error_census, "partial_parse")`; `stats["recovery"]` rolls into the session result (never an error string).
 
 ### D5 — Output-shape schema validator (structural, permissive on extras)
+
 `_validate_output_shape(parsed) -> (bool, issues)` from a machine-readable `_OUTPUT_SCHEMA` derived from `OUTPUT_CONTRACT` (kept adjacent with a coupling comment — contract edit → schema edit is a NEW coupling, tracked in Open questions): top-level is a dict; each present section (`entities`/`events`/`points`/`operators`/`chain_notes`/`link_before_create`/`retractions`) is a LIST of dicts; required keys with primitive types — `entities: name/kind`; `events: content/eventKind`; `points: content`; `operators: src/dst/op_type`; `chain_notes: chain/finding/action`; `link_before_create: searched_for/found`; `retractions: content|id`. Unknown keys and empty arrays are VALID (fields ride through by reference; S5's execution validation owns semantic repair). Structural-only strictness: catches valid-JSON-wrong-shape (e.g. `points` as a dict) → error-informed re-prompt. Reused by rungs 3-4.
 
 ### D6 — JSON-mode parity on the direct path + pre-flight probe (H1)
+
 `DeepSeekDirectModel.complete` mirrors `OpenRouterModel`: when `os.environ.get("TORTOISE_JSON_MODE", "1") == "1"` (read at call time) the body gains `"response_format": {"type": "json_object"}`. DeepSeek's "json"+example requirement is already satisfied (S2/S4 prompts contain "JSON object" + the OUTPUT_CONTRACT example). The `TORTOISE_JSON_MODE=0` escape stays documented. **Pairing note:** JSON mode does NOT fix truncation (breaks at max_tokens) — the ladder (D4) is the truncation pairing; no cap raise in this issue. New `tools/longmem_eval/probe_json_mode.py`: `--n` (default 10) S2-shaped completions per mode (on/off, same prompts), verdict ∈ {honored, ignored, rejected, inconclusive}: rejected = any HTTP 400/404; honored = (malformed-rate(mode-on) < malformed-rate(mode-off) AND ≥ 1 parse success) OR (mode-on malformed == 0 AND mode-off malformed > 0) — the both-zero case is **inconclusive** (n too small to distinguish an inert mode from a clean model; a false-honored would mislabel the H1 test); ignored = statistically indistinguishable (recorded as heuristic in the run record — no significance claim at n=10; a strictly WORSE mode-on rate is still verdict `ignored` but records `mode_delta: "worse"` in the verdict JSON so the harmful-direction signal is not lost — the ladder + C4 backstop it); inconclusive = n too small / transient errors. **Probe-verdict → run-mode mapping (operational):** `rejected` → the closing run aborts pre-flight OR re-runs with `TORTOISE_JSON_MODE=0` (documented escape) — never a wholesale-400 mid-run; `inconclusive` → re-probe at `--n 20` (or add an S4-shaped sample — S4 is the heavier, more truncation-prone call) and make an explicit mode decision that lands in the run record; `honored`/`ignored` → proceed with the verdict noted. **Probe adapter selection (H1 validity):** the probe must exercise the pilot's path — `DeepSeekDirectModel` when `DEEPSEEK_API_KEY` is set AND `TORTOISE_EXTRACTOR_PROVIDER != "openrouter"`, else the resolved default — or its verdict does not test H1. Verdict JSON written to `--out`; the closing run record (Task 5) consumes it.
 
 ### D7 — Warning-only truncation readout (criterion 3, structural)
+
 `ingest_v2` threads `stats["llm"]` (calls/retries/truncated) + `stats["recovery"]` from each session's extractor result (summed; the session-level exception path contributes 1 call / 0 truncated). `run.py` outcome gains `llm_calls`/`llm_retries`/`llm_truncated`/`recovery`. `report.py` computes `integrity.truncated_valid_qids = [qid for o in outcomes if o["llm_truncated"] > 0 and o["valid"]]` + count — warning-only, never in `error_census` (criterion 2's class universe unchanged). Criterion 3 becomes structural: every truncated question is either an error class (invalid) or a listed `truncated_valid` qid — no truncation is unrecorded.
 
 ### D8 — Report projection persistence (additive, M1-regression-class pin)
+
 `outcomes_to_report` key list gains `ingest_error_text` (already computed at run.py:1338), `llm_calls`, `llm_retries`, `llm_truncated`, `recovery`. `test_outcomes_to_report_golden_shape`'s exact key-set is updated to the new contract — the planned, intentional contract change (M7 Gate-4 precedent; #1414 parity battery is hash-based on methodology → additive keys verified safe).
 
 ### D9 — Census-equality enforcement (criterion 2)
+
 Deterministic-append rule: every `errors.append` site must bump exactly one census class (1:1). Enforced by (a) the D1 invariant unit test, (b) an integration test asserting per-question `n_ingest_errors == sum(error_classes.values())` and report-level `integrity.error_census == Σ per-question error_classes` on a synthetic mixed-error outcome set. `report.py`'s existing rollup (Counter over `error_classes`) already satisfies the report half once per-question equality holds.
 
 ### D10 — Two-stage escalation, consumed by the closing-run gate (closing criteria 1–4, NOT `integrity.valid`)
+
 Closing run (fresh non-resumed 50-Q) reads: the **parse-failure family** = `{parse_error, truncated_parse_error, partial_parse}`, counted **per question** (a question with S2 `parse_error` + S4 `truncated_parse_error` counts ONCE — the family is a qid set, not a class-count total; pinned in the run-record template). #1746 **closes when ALL of**: **C1** family ≤ 1 question; **C2** census equality holds (D9) on all outcomes; **C3** no UNRECORDED truncation — every outcome with `llm_truncated > 0` is either in an error class (invalid) or listed in `truncated_valid_qids` (recorded-ness reading; a non-empty `truncated_valid_qids` is a #1747-flagged observation, not a close-blocker — benign truncation recovered by the ladder is legitimate); **C4** no accuracy/retrieval regression vs the pinned baselines (accuracy ≥ 0.74, `session@20` ≥ 0.90, `chunk_evidence_recall@20` ≥ 0.5465 vs the blended-50 same-question-set; fresh-30 clean-population reference 0.867 / 1.00 / 0.567 stated alongside; CI/margin rule). The `integrity.valid == true` flag is DELIBERATELY NOT a closing condition: at threshold 0.0 it requires ZERO error-class questions, which would make C1's "≤ 1" vacuous and reproduce #1747's unreachability inside this issue's own gate — the flag's semantics are #1747's lane.
 Escalation taxonomy (mutually exclusive; both fire when both apply):
+
 - **C1 violated** (family > 1 question) → **escalate to the B-delta follow-up** (#XXXX, filed in Task 5): the S4 gaps-only contract as a SECOND fresh run (documented escalation, never a mid-run patch). The family is the honest readout — a run that trades `truncated_parse_error` for `partial_parse` en masse has NOT closed — no class-gaming loophole. #1746 closes upon the closing-run verdict + escalation decision; the second run's execution and contract land in #XXXX's scope.
 - **Non-parse-class invalidity** (e.g. `transient_429`/`s5_failed`/`entity_resolution_failed` qids) → **#1747 trigger** (criterion + justification policy; the run records a justified gate via the existing `threshold_violation_justification` surface) — not this issue's fix lane.
 - **C2 violated** (census inequality) → harness bug in THIS issue's deliverables (D9/D1 machinery) → fix + re-run, not an external escalation.
@@ -119,6 +134,7 @@ Escalation taxonomy (mutually exclusive; both fire when both apply):
 - **C4 violated** (accuracy/retrieval regression vs the baseline) → do NOT close; investigate vs the cited baseline (re-run or re-baseline; the #XXXX follow-up owns criterion-4 re-baseline) — a content regression is the one outcome no census can excuse.
 
 ### D11 — #1695 coordination: zero prompt-TEXT changes
+
 This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT; JSON mode is a request-body field; the re-prompt error block is assembled at call time from the original message (not a template edit); census/projection are harness-side. Input-side quote sanitation (B's second lever) is REJECTED for this issue (see Rejected alternatives) — it would alter what the model sees in the source-transcript block and risk the M6 quote→turn anchor match. If #1695 lands before the closing run, the run measures a joint effect — the run record MUST note it (Task 5 template).
 
 ---
@@ -130,6 +146,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 **Intent:** make the parse-error class truthful (truncation vs sloppiness) and make `n_ingest_errors == sum(error_census)` structurally achievable — the eyes of the decision gate.
 **Acceptance:** `_ParseError` carries `truncated`; `_bump_census` emits `truncated_parse_error` vs `parse_error`; the four previously-uncensused append paths (S1 summary, entity resolution, no-embed-list, S5) each append a deterministic class; `len(errors) == sum(error_census.values())` on a synthetic mixed-error session; `ingest_v2` threads `stats["llm"]` + `stats["recovery"]` to its stats.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (`_ParseError`, `_bump_census`, `_bump_census_class`, `extract_session_v2` append sites, `_complete_parsed` capture)
 - Modify: `tools/longmem_eval/ingest_v2.py` (session-loop llm/recovery rollup — the LIVE copy used by run.py, ~line 655, which shadows the earlier definition at ~line 358; patch the live copy and note the dead duplicate, do not patch both)
 - Test: `tests/test_extractor_reliability.py`
@@ -147,6 +164,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 **Intent:** the report can answer "which question failed, why, with what first error, and was any call truncated" — criterion 2 + 3 auditable post-hoc.
 **Acceptance:** outcomes project `ingest_error_text`/`llm_calls`/`llm_retries`/`llm_truncated`/`recovery`; `integrity.truncated_valid_qids` present and excluded from `error_census`; golden-shape pin updated.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (outcome fields from `ingest_stats`, projection key list)
 - Modify: `tools/longmem_eval/report.py` (integrity truncation readout)
 - Test: `tests/test_longmem_runner.py`
@@ -163,6 +181,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 **Intent:** test H1 for pennies and make the direct path's JSON-mode behavior identical to the OpenRouter path — reversible, prompt-gated (mode only when the prompt requests JSON — #1782).
 **Acceptance:** `DeepSeekDirectModel.complete` sends `response_format={"type":"json_object"}` when `TORTOISE_JSON_MODE=1` (default) AND the prompt requests JSON ("json" present, case-insensitive — #1782) and omits it when `=0` or the prompt lacks the text "json" (DeepSeek 400s on the mode-without-token combination; non-JSON calls like the preflight probe/ping omit the mode); `probe_json_mode.py` CLI produces a verdict JSON applying the D6 rules (both-zero → inconclusive pinned in `test_probe_verdict_logic`); the live probe selects the adapter per the D6 rule and the @slow live test skips when the direct-path key/provider env is absent; a dry-run mode is unit-testable.
 **Files:**
+
 - Modify: `tortoise/model_adapters.py` (`DeepSeekDirectModel.complete`)
 - Create: `tools/longmem_eval/probe_json_mode.py`
 - Test: `tests/test_models.py` (or `tests/test_model_adapters_routing.py`), new `tests/test_probe_json_mode.py`
@@ -178,6 +197,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 **Intent:** recover parseable, schema-valid output from H2 contamination and H3 truncation at the boundary, with every recovery recorded and every failure classed by mechanism — the consumption-side floor.
 **Acceptance:** `_parse_json_robust` implements rungs 1-5 with per-rung recovery counters; `_complete_parsed` skips the retry on first-attempt truncation and error-informs on stop-class; `partial_parse` is a recorded error class with the partial list used; recovered outputs are schema-valid and warned, not errored; no prompt-TEXT change.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (`_parse_json_robust`, `_validate_output_shape` + `_OUTPUT_SCHEMA`, `_complete_parsed` retry policy, `extract_session_v2` partial wiring, `_error_excerpt`)
 - Test: `tests/test_extractor_v2.py`, `tests/test_extractor_reliability.py`
 
@@ -198,6 +218,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 **Intent:** the closing run is interpretable, gated, and the escalation path + neighbors are explicit — no absorbed scope, no lost coordination.
 **Acceptance:** README/plan sections document the new census keys, `TORTOISE_JSON_MODE` direct-path behavior, probe usage, and the closing-run record template; follow-up issues filed (#1747 companion noted; B-delta follow-up filed with the trigger); #1695 coordination note in the plan and issue.
 **Files:**
+
 - Modify: `tools/longmem_eval/README.md` (probe + census + readout)
 - Modify: `docs/epics/2026-08-20-1509-extractor-v3/04-plan.md` (run protocol: step-3/5 notes reference the probe + parse-family census) — advisory only
 - Test: n/a (docs + orchestration)
@@ -223,6 +244,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 ### Test list (new/updated)
 
 `tests/test_extractor_v2.py`:
+
 - updated `test_rejects_unparseable` / `test_parse_retry_recovers` (error-informed attempt-2 prompt asserted) (Task 4)
 - `test_sanitize_rung_recovers_control_chars`, `test_sanitize_preserves_structural_whitespace` (Task 4)
 - `test_repair_rung_missing_comma`, `test_repair_rung_trailing_brace` (Task 4)
@@ -231,6 +253,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 - `test_truncated_skips_same_prompt_retry` (Task 4)
 
 `tests/test_extractor_reliability.py`:
+
 - updated `test_extract_census_parse_error` (finish_reason=None → `parse_error` preserved) (Task 1)
 - `test_extract_census_truncated_parse_error` (Task 1)
 - `test_census_equality_mixed_errors` (Task 1 — the D1 invariant)
@@ -238,6 +261,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 - `test_llm_truncated_warning_only_not_error` (Task 1 — truncated-valid is not an error class at the extractor level)
 
 `tests/test_longmem_runner.py`:
+
 - updated `test_outcomes_to_report_golden_shape` (new key contract — **intentional contract change**, M1-regression guard) (Task 2)
 - `test_report_truncation_readout_warning_only` (Task 2)
 - `test_census_equality_integration_mixed_outcomes` (Task 2 — criterion 2)

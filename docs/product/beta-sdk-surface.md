@@ -111,9 +111,7 @@ owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 �
 Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
 *current* tool to its destination but does not name the target's replacing name.
 
-
 ## Tenancy is not on the MCP
-
 
 > **On the competitor evidence below:** these figures come from a competitive research pass and
 > are **not independently verified in this repo**. Treat them as *reported*, not *confirmed* —

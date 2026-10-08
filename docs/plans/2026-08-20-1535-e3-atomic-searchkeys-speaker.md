@@ -17,6 +17,7 @@
 > Gate skipped: the plan touches **zero third-party dependencies** — pure in-repo Python (`extractor_v2.py`, `commit_schema.py`, `hosted_api.py`, `tools/longmem_eval/*`) over the in-repo SDK + FalkorDB queries. No library docs preflight, no Perplexity gate (writing-plans workflow/02 skip rule).
 
 **Prior research consumed (no re-query):**
+
 - Epic `03-scope.md` E3 ("atomic points + speaker attribution — existing subject mechanism: `quote`/offsets → source-turn role; `aboutSubject`) + `search_keys`"), Data Model §4 rows ("Point carries `source_turn_id`; **no new `source_role` property** — speaker DERIVED at read time from the source-turn link; `quote` already in commit_schema"), Interfaces §6 S2/S4 OUTPUT_CONTRACT row.
 - Epic `04-plan.md` §4 Data Model + §6 Interfaces (the review-gate patch of 2026-08-20 removed the stale `source_role` from §6 — implementer must NOT reintroduce it; issue #1535 review-gate note).
 - Issue #1535 verification checklist (S15 → unit+integration: single-fact granularity; search_keys 2–4 aliases + verbatim tokens; point carries `source_turn_id`; speaker derived from the turn's `speaker`/`[role]` at read time) and MECE fix note (E2E-5's evidence-marked assertion is CONDITIONAL on M6 recalibrated marks).
@@ -47,10 +48,13 @@ Boundaries this issue crosses (from the epic's test-design surface map #1515; on
 ## 1. Design Decisions
 
 ### D1. Atomicity is prompt-enforced + warn-guarded (never hard-blocked)
+
 The S2/S4 prompt gains an **ATOMIC POINTS** rule: one claim per point; compound statements split ("we moved to X and dropped Y" → two points); the claim's **value survives verbatim** — never replace "27:12" with "the value" (this is the E2 value-filter carve-out language, restated for E3's `quote`). A deterministic **soft guard** in `execute_embed` warns (only) when a point's content contains 2+ sentences (reuses `_split_sentences`), mirroring the chain warn+repair discipline. E2E-5's "verbatim value (27:12) retrievable" is the observable test — atomicity itself is semantic and can't be hard-checked deterministically.
 
 ### D2. OUTPUT_CONTRACT: three additive point keys — `quote`, `search_keys`, `source_turn_id`. NO `source_role`.
+
 Points in the S2/S4 contract gain (all optional, all additive):
+
 - `quote` — verbatim conversation text the claim came from (≤ 200 chars, matches the existing `Point.quote` schema cap).
 - `search_keys` — 2–4 alias strings: paraphrases/synonyms a questioner might use + the verbatim value tokens ("27:12", "five-K time").
 - `source_turn_id` — the `{index}:` turn marker from the SOURCE TRANSCRIPT that asserted the claim (0-based int).
@@ -58,10 +62,13 @@ Points in the S2/S4 contract gain (all optional, all additive):
 The contract's inline comment states: **speaker is NOT a point property — derived at read time from the source turn's existing `speaker`/`[role]`** (the review-gate fix, verbatim intent).
 
 ### D3. Turn-indexed SOURCE TRANSCRIPT injected into S2/S4 (capped)
+
 The S1 story is a compiled narrative — turn indices don't survive it. To let the model pick accurate `source_turn_id`s, `render_s2_prompt`/`render_s4_prompt` gain an optional `edus` kwarg that appends the already-indexed EDU stream (`_edus_to_text` produces `{index}: {role}: {text}`) as a **SOURCE TRANSCRIPT** block, capped at `_SOURCE_TRANSCRIPT_CAP = 8000` chars (~2k tokens) to protect the S2/S4 token budget (M3's bounded `max_tokens` is separate but adjacent). Over cap → block omitted; the deterministic resolver (D4) still works from `quote` alone. This is additive and backward-compatible (`edus=None` → prompt byte-identical).
 
 ### D4. Deterministic quote→turn resolution wins (execute_embed)
+
 New helper `_resolve_source_turn(p, edus, *, warnings)` computes the authoritative turn index:
+
 1. **Verbatim anchor:** find the turn whose text contains the normalized `quote` (whitespace-folded substring match).
 2. **Model-index validation:** if the model emitted `source_turn_id` and that turn contains the quote → use it. If it disagrees with the deterministic match → **deterministic match wins + warning** (the model index is advisory; this is the never-guess discipline from `_resolve_superseded`).
 3. **Quote empty but index present** → use the index if in range (warning: unverified).
@@ -71,24 +78,30 @@ New helper `_resolve_source_turn(p, edus, *, warnings)` computes the authoritati
 `execute_embed` gains `edus: list[dict] | None = None`; the `pt_entry` replaces the hardcoded `"quote": ""` with the validated `quote`, and adds `search_keys` (cleaned: list, ≤ 4 entries, each 1–60 chars, deduped, non-str dropped w/ warning) and `source_turn_id` (resolved int or None). `extract_session_v2` passes the conversation's `edus` through to S2/S4/S5.
 
 ### D5. commit_schema: additive fields + additive canonical parity (#1350 pattern)
+
 `Point` (`extra="forbid"` — new fields are REQUIRED or every commit 422s) gains:
+
 - `search_keys: list[str] = Field(default_factory=list)` — validator: strip, 1–60 chars each, dedup, max 4.
 - `source_turn_id: int | None = None` — the 0-based conversation turn index.
 
 `canonical_payload`'s points entry folds both in **only when present** (the exact `supersessions` pattern from #1350: "the additive contract must not change the id of a payload that never had them"). A pre-E3-shaped point renders byte-identically → `client_commit_id` parity preserved (P4). Test locks this.
 
 ### D6. Two-level `source_turn_id`: payload int index ↔ graph resolved node id
+
 The payload's `source_turn_id` is the **0-based conversation turn index** (the extractor's world). Each graph write surface resolves it to the session's turn-point id scheme at write time:
+
 - **Hosted commit** (`_execute_commit_writes`): turns are `{session_id}_t{i}` (capture path). The commit path stores the int index as the property (the hosted join is a future read-side surface — see Open questions Q2).
 - **Eval v2 ingest** (`_write_payload`): resolves index → `lme:{qid}:s{si}:t{index}` and stores the **node id** string as the property (the eval read path is this issue's derivation surface).
 
 ### D7. Read-time speaker derivation (retrieve.py)
+
 - `point_props_for_hits` (ingest.py) extends its RETURN to also fetch `quote`, `search_keys`, `source_turn_id`, `speaker` (one Cypher query — no N+1).
 - New `_speaker_for_turns(proj, turn_ids)` in retrieve.py: one `MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, coalesce(n.speaker,'')`.
 - `_annotate_hits` adds `speaker` per hit: a hit with `source_turn_id` (node id) resolves via the batch; a hit that IS a turn point carries its own `speaker` prop. Also passes `quote`/`search_keys` through (R2's future query-expansion consumer).
 - `render_context` renders `[speaker]` between the session prefix and content when known — e.g. `[session 0] [user] my personal best 5K time is 27:12` — byte-identical to today when unknown (backward-compat).
 
 ### D8. Speaker is derivation-only, and v2 mode must have turn points to derive from
+
 `--ingest-mode v2` runs **only** `ingest_haystack_v2` — turn points are NOT written today, so a `source_turn_id` link would dangle. `ingest_haystack_v2` gains the v1 leg's turn-point loop (same ids `lme:{qid}:s{si}:t{ti}`, same `speaker=str(role)` property) with `has_answer=False` (v2's recall surface is the extracted evidence points — the deterministic turn branch must not double-enter the metric; evidence-point recall stays authoritative in v2 mode). This is the substrate D7 derives from. **No `speaker`/`role` is ever written on extracted points.**
 
 ---
@@ -100,6 +113,7 @@ The payload's `source_turn_id` is the **0-based conversation turn index** (the e
 **Intent:** Give S2/S4 the E3 extraction contract — atomic single-claim points with verbatim `quote`, 2–4 `search_keys`, and a `source_turn_id` reference — while explicitly forbidding any speaker/role on the point (the review-gate fix).
 **Acceptance:** `OUTPUT_CONTRACT` has the three new point keys with inline no-`source_role` guidance; S2_TMPL and S4_TMPL contain the ATOMIC POINTS + USER-VS-ASSISTANT rules; a test asserts `source_role` appears nowhere in the prompt module.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py:350` (OUTPUT_CONTRACT), `tortoise/extractor_v2.py:362` (S2_TMPL rules block), `tortoise/extractor_v2.py:667` (S4_TMPL rules block)
 - Test: `tests/test_extractor_v2.py` (new `TestE3Contract`)
 
@@ -170,6 +184,7 @@ class TestE3Contract:
 **Intent:** Give the model a turn-indexed source to cite `source_turn_id` from (D3); without it the model's indices would be guesses.
 **Acceptance:** `render_s2_prompt`/`render_s4_prompt` with `edus` append a `SOURCE TRANSCRIPT (turn-indexed)` block with `{index}: {role}: {text}` lines; over the 8000-char cap the block is omitted; `edus=None` renders byte-identically to today; `extract_session_v2` passes the conversation's EDUs through.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (`_SOURCE_TRANSCRIPT_CAP` const near OUTPUT_CONTRACT; `render_s2_prompt` @473, `render_s4_prompt` @735; `run_s2` @481, `run_s4` @747; `extract_session_v2` @1467)
 - Test: `tests/test_extractor_v2.py` (new `TestE3SourceTranscript`)
 
@@ -229,6 +244,7 @@ def _render_source_transcript(edus: list[dict] | None) -> str:
 **Intent:** Compute the authoritative `source_turn_id` deterministically from the verbatim `quote` (D4) and land `quote`/`search_keys`/`source_turn_id` on every payload point — replacing the hardcoded `"quote": ""` @`extractor_v2.py:1321`.
 **Acceptance:** `execute_embed(embed_list, search, session_id=..., edus=edus)` emits payload points with validated `quote` (≤200), cleaned `search_keys` (0–4 × 1–60 chars, deduped, non-str dropped with warning), and `source_turn_id` (int|None) resolved quote-first; conflicting model indices warn and lose; no-match → None + warn; atomicity soft-guard warns on multi-sentence content.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (`_resolve_source_turn` helper near `_resolve_superseded` @~1050; `_clean_search_keys`; `execute_embed` @1142 points loop @~1310-1325; atomicity warn in the points loop)
 - Test: `tests/test_extractor_v2.py` (new `TestE3Resolution`)
 
@@ -346,6 +362,7 @@ def _resolve_source_turn(p: dict, edus: list[dict] | None,
 ```
 
 - In `execute_embed`'s points loop (before building `pt_entry`):
+
 ```python
 quote = str(p.get("quote") or "").strip()[:200]
 search_keys = _clean_search_keys(p.get("search_keys"), warnings,
@@ -356,7 +373,9 @@ if len(sents) > 1:
     warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
                     "E3 atomicity expects ONE claim per point")
 ```
+
 - Replace the hardcoded entry (was `"quote": ""`):
+
 ```python
 pt_entry = {
     "id": pid, "content": content, "pointKind": pkind,
@@ -367,6 +386,7 @@ pt_entry = {
     "source_turn_id": turn_idx,
 }
 ```
+
 - `execute_embed` signature gains `edus: list[dict] | None = None`; `extract_session_v2` passes `edus=edus` (the `_edus_from_conversation` result — already in scope).
 
 **Step 4 — Run to verify pass.** **Step 5 — Commit** via `commit-workflow`.
@@ -378,6 +398,7 @@ pt_entry = {
 **Intent:** Make the Layer-1 gate accept (and reject correctly) the E3 fields, and keep `client_commit_id` byte-stable for pre-E3 payloads (D5).
 **Acceptance:** `Point` validates `search_keys` (≤4 × 1–60, deduped) and `source_turn_id` (int|None); `search_keys` violations 422; a `source_role` key 422s (extra="forbid" — regression-proofs the review-gate fix); a point WITHOUT the new fields computes an identical `client_commit_id` to today.
 **Files:**
+
 - Modify: `tortoise/commit_schema.py` (`Point` @~245-270; `canonical_payload` points entry @~849-859)
 - Test: `tests/test_commit_schema.py` (extend `_point` fixture or add tests)
 
@@ -474,6 +495,7 @@ def test_e3_fields_do_not_change_legacy_commit_id():
 **Intent:** Extracted points actually land `search_keys`/`source_turn_id`/`quote` on the graph via the commit path (S12).
 **Acceptance:** `_execute_commit_writes` step 5 passes the fields in BOTH the `supersede` and plain `create_point` branches; a commit test asserts the properties exist on the written Point node.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_execute_commit_writes` @3727, step 5 `create_point` calls @~3884-3900)
 - Test: `tests/test_commit_endpoint.py` (extend `test_commit_writes_four_node_chain` @273 or add a focused test)
 
@@ -519,6 +541,7 @@ def test_e3_fields_do_not_change_legacy_commit_id():
 **Intent:** In v2-only eval runs the turn points must exist (D8) and extracted points must resolve `source_turn_id` (index) → turn node id at write time (D6), so the read path can derive speaker.
 **Acceptance:** `ingest_haystack_v2` writes turn points `lme:{qid}:s{si}:t{ti}` with `speaker=str(role)` and `has_answer=False`; extracted points store `quote`, `search_keys`, and `source_turn_id` = the resolved turn node id; the existing v2-ingest test still passes with the CONTAINS count unchanged semantics.
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest_v2.py` (`_write_payload` @74 points loop; `ingest_haystack_v2` @174 after the Session node write)
 - Test: `tests/test_longmem_runner.py` (extend `test_v2_ingest_writes_payload_with_evidence_marks` @~661)
 
@@ -593,6 +616,7 @@ def test_e3_fields_do_not_change_legacy_commit_id():
 **Intent:** Derive speaker from the source-turn link at read time (D7) so the reader sees who asserted each fact — the E3 surface E2E-5's "user-asserted wins" builds on (answer-level wording is A1/A2's).
 **Acceptance:** `point_props_for_hits` returns `quote`/`search_keys`/`source_turn_id`/`speaker`; `_annotate_hits` adds `speaker` per hit (from `source_turn_id` → turn node, or the hit's own speaker prop) and passes `quote`/`search_keys` through; `render_context` renders `[speaker]` when known and is byte-identical when not; retrieval still passes all existing tests.
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest.py` (`point_props_for_hits` @189), `tools/longmem_eval/retrieve.py` (`_speaker_for_turns` new; `_annotate_hits` @38; `render_context` @89)
 - Test: `tests/test_longmem_runner.py` (new `TestE3SpeakerDerivation`)
 
@@ -713,15 +737,19 @@ def _speaker_for_turns(proj, turn_ids: list[str]) -> dict[str, str]:
 **Files:** none (verification only)
 
 **Step 1 — Run the full non-slow suite:**
+
 ```bash
 uv run pytest tests/ -m "not slow" -q
 ```
+
 Expected: PASS (pre-existing failures, if any, must be unrelated — note them in the PR body).
 
 **Step 2 — Review-gate invariant grep:**
+
 ```bash
 grep -rn "source_role" tortoise/ tools/longmem_eval/ tests/ || echo "CLEAN: no source_role anywhere"
 ```
+
 Expected: `CLEAN` (the ONLY allowed occurrence is a test asserting absence / the error message string in `test_source_role_extra_field_422`).
 
 **Step 3 — Commit** (via `commit-workflow`), then hand to code-review.

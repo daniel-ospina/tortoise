@@ -58,6 +58,7 @@ Standard-tier condensed map (test-design skill — surfaces from the touched cod
 ### Journey Test Map
 
 **Journey: "I selected specific repos; they must be there after I reload/log back in"**
+
 1. Select specific issues repos (uncheck "All repos") → **Acceptance:** `PATCH /v1/onboarding/state` fires with `{"github_issues_scope": ["a","b"]}` → **Test:** server round-trip (surface 2) + `serializeIssuesScope` node test (surface 4)
 2. Pick a docs repo + branch (or "all") → **Acceptance:** PATCH fires with `{"github_docs_scope": [{"repo":"a","branch":"dev"}]}` → **Test:** server round-trip + `serializeDocsScope` node test
 3. Reload / log out + in → **Acceptance:** selectors show the persisted repos (reconciled against the org repo list) → **Test:** `reconcileIssuesScope`/`reconcileDocsScope` node tests + manual clickthrough
@@ -65,6 +66,7 @@ Standard-tier condensed map (test-design skill — surfaces from the touched cod
 5. Re-index / index docs → **Acceptance:** job bodies carry the restored scope (not org-wide) → **Test:** `buildIssuesJobBody`/`buildDocsJobBody` node tests (wired at main.jsx:1167/1204-1210)
 
 ### Failure Modes
+
 - **Logout during REAUTH_REQUIRED <400ms after a toggle** → **Expected:** persist already fired instantly (no debounce — A1) → **Test:** persist path is synchronous-with-render in `handleIssuesScopeChange`/`handleDocsScopeChange`
 - **Repos removed from the org between sessions** → **Expected:** reconcile prunes them; pruned-to-empty = all repos (safe default) → **Test:** reconcile prune cases in sourceScope.test.js
 - **`GET /v1/onboarding/github/repos` fails at load (rate-limit/network)** → **Expected:** `reposLoadFailed` is set; hydration is SKIPPED (no seed, no latch, `scopeReadyRef` stays false) so the displayed default empty selection can never be persisted over the real stored one; a reload re-attempts the fetch. This is deliberately asymmetric with "repos removed from the org" — a failed fetch is not evidence of an empty org, so nothing is pruned. → **Test:** `shouldHydrate` predicate case (reposLoadFailed=true → false) in sourceScope.test.js
@@ -83,6 +85,7 @@ Standard-tier condensed map (test-design skill — surfaces from the touched cod
 **Acceptance:** `test_state_keys_registered_parametrized` passes with the two new keys; `test_capture_surface_keys_shared_across_defaults` still passes; no dashboard change yet.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:1925` (DEFAULT_ONBOARDING_STATE), `tortoise/hosted_api.py:9584` (_ONBOARDING_DEFAULT_STATE), `tortoise/hosted_api.py:9739` (OnboardingStatePatchRequest)
 - Test: `tests/test_onboarding_endpoints.py:476` (_STATE_KEY_TABLE), `tests/test_onboarding_endpoints.py:497` (parametrized test)
 
@@ -132,17 +135,22 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 Expected: FAIL — `github_issues_scope missing from _ONBOARDING_DEFAULT_STATE`.
 
 **Step 4: Register the keys (GREEN).**
+
 - `_ONBOARDING_DEFAULT_STATE` (hosted_api.py:9584, inside the dict — append-only):
+
   ```python
   "github_issues_scope": [],  # #1893: persisted issues source-scope (short names; [] = all)
   "github_docs_scope": [],    # #1893: persisted docs source-scope ([{repo, branch}]; [] = all)
   ```
+
 - `DEFAULT_ONBOARDING_STATE` (hosted_api.py:1925): same two lines.
 - `OnboardingStatePatchRequest` (hosted_api.py:9739):
+
   ```python
   github_issues_scope: list[str] | None = None
   github_docs_scope: list[dict] | None = None
   ```
+
   `_ALLOWED_STATE_KEYS` is derived (`set(_ONBOARDING_DEFAULT_STATE.keys())`, hosted_api.py:9624) — auto-covered. Underscore names → no `_PATCH_FIELD_TO_STATE_KEY` translation needed.
 
 **Step 5: Run to verify GREEN.**
@@ -155,6 +163,7 @@ Expected: PASS (both tests).
 **Acceptance:** invalid scopes → 400 with nothing stored; `[]` PATCH round-trips as `[]` through GET; valid non-empty scope round-trips (issues: strip/dedupe-normalized; docs: `""`/None branch → `null` at persist — the normalized form is what GET returns, pinned by test).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` — new `_validate_scope_payload` near `_validate_repo_scope` (hosted_api.py:10642) + call in `patch_onboarding_state` (hosted_api.py:9802)
 - Test: `tests/test_onboarding_endpoints.py` — new tests in `TestOnboardingState`
 
@@ -271,6 +280,7 @@ Expected: PASS (all scope tests + existing TestOnboardingState tests).
 **Acceptance:** `node --test src/sourceScope.test.js` passes; the module has NO imports (pure).
 
 **Files:**
+
 - Create: `website/apps/dashboard/src/sourceScope.js`, `website/apps/dashboard/src/sourceScope.test.js`
 
 **Step 1: Write the failing test file.**
@@ -491,6 +501,7 @@ Expected: PASS (19 tests — 13 derivation + 6 gating/reset predicates).
 **Acceptance:** `npm run build` passes; scope changes PATCH immediately (no debounce); selectors rehydrate once per team session after `reposLoaded`; nothing persists before the initial GET resolves.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` — import (~line 14), scope-state block (after line 321), wiring lines 3598-3599 + 4121-4122, `reindexGithub` body (1167), `indexDocs` payload (1204-1210)
 
 **Step 1: Import the pure helpers** (after the sessionKey.js import, ~line 14):
@@ -607,13 +618,16 @@ import {
 onDocsScopeChange={handleDocsScopeChange}
 onIssuesScopeChange={handleIssuesScopeChange}
 ```
+
 (both sites — wizard + overview)
 
 **Step 4: Switch the job-body constructions to the pure builders** (behavior-identical):
+
 - main.jsx:1167: `const body = buildIssuesJobBody(issuesScope)`
 - main.jsx:1204-1210: `const payload = buildDocsJobBody(docsScope, org)`
 
 **Step 5: Track repos-fetch failure + reset stale branches** (region-local additions):
+
 - `loadRepos()` (main.jsx:1044-1053): add `setReposLoadFailed(false)` on success / `setReposLoadFailed(true)` on catch (before `setReposLoaded(true)`). A failed fetch → `reposLoadFailed` → `shouldHydrate` returns false → nothing seeds/prunes/latches; the selectors stay at defaults and the server data stays intact (reload re-attempts).
 - The branchLists auto-seed effect (main.jsx:1076-1092): extend the per-repo branch fill with the stale-branch reset — when `branchLists[r]` is loaded and `shouldResetBranch(branches[r], branchLists[r])` is true, reset `branches[r]` to `''` (default). Prevents a persisted branch that no longer exists on GitHub from sticking a blank picker and failing the docs job. Note: the reset and the existing `defaultBranch` fill may race within the same effect run — either outcome (`''` or the API `defaultBranch`) is safe and consistent with design decision 6.
 
@@ -629,6 +643,7 @@ Expected: PASS (vite build, no import/lint errors). The committed `dist/` is reg
 **Acceptance:** all commands below pass; `git diff --stat` shows only the 5 touched files (+ dist assets); no unrelated changes.
 
 **Files:**
+
 - Verify: all of the above
 
 **Step 1: Server tests (docker lane).**
@@ -648,6 +663,7 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 Expected: PASS (shared validation surface unchanged).
 
 **Step 5: Commit via @commit-workflow** (mandatory gate — pre-flight typecheck/tests + PR + review).
+
 ```bash
 git add tortoise/hosted_api.py tests/test_onboarding_endpoints.py \
   website/apps/dashboard/src/sourceScope.js website/apps/dashboard/src/sourceScope.test.js \

@@ -56,6 +56,7 @@ ownedBy: epistemic-team
 **Acceptance:** `_check_foreign_kinds` raises ValueError ("predates pack-config") for props-nested foreign kinds; passes for bare/starter/core kinds, non-string values, missing/non-dict props, and self-contained PackManifest dumps; lists ≤5 foreign kinds.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_check_foreign_kinds` ~7872, add module-level `_KIND_PROP_KEYS`)
 - Test: `tests/test_export_pack_config.py` (TestForeignKindsGuard)
 
@@ -249,6 +250,7 @@ git commit -m "fix(hosted): scan props for foreign kinds in pre-v1.1 import guar
 **Acceptance:** `_check_foreign_kinds(dump_graph(...))` raises for a graph containing a `tenant-ops:contract` object; passes for a core-only graph.
 
 **Files:**
+
 - Test: `tests/test_export_pack_config.py` (add to TestForeignKindsGuard)
 
 **Step 1: Write the failing test**
@@ -305,6 +307,7 @@ git commit -m "test(hosted): guard against real dump_graph output (#2028)"
 **Acceptance:** Import endpoint returns 422 + `quarantined_import` audit for a pre-v1.1 foreign-kind artifact with live-graph ids unchanged; a post-v1.1 artifact with the same kinds still imports 200.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (import flow ~8009)
 - Test: `tests/test_import_endpoint.py` (TestImportValidationFailClosed + TestImportHappyPath)
 

@@ -5,11 +5,13 @@
 ## Phase 1 — problem-diverge (2 sub-agents: framing explorer + devil's advocate)
 
 ### Alternative framings surfaced
+
 1. **JSONL "source of truth" is opt-in and unreachable in the default config** — `TortoiseSDK(event_log_path=None)` by default (sdk.py:234,269); zero production callers set it (mcp_server.py:284, mcp_auth.py:69, 10+ CLI sites in __main__.py). The documented recovery path (indicator 2) verifies a path nothing runs by default. ≥6 write paths bypass it even when enabled (`_create_entity` sdk.py:4624 claims "event log + FalkorDB" but only calls `proj.apply()`; connectors linear.py:138 / slack.py:104 / github.py:238 call `proj.apply` directly; EP belief writes are raw).
 2. **Silent-loss observability gap** — after kill -9, `_auto_health_recover`'s probe PASSES (fresh empty RDB boots) and with no adjacent log it silently continues with an empty graph (projection/__init__.py:382-393). No hard signal.
 3. **Original framing (valid, with precision fixes)** — "loses entire graph" is the fresh-DB worst case: redislite's graceful close DOES SAVE (`shutdown(save=True)` verified in redislite/client.py `_cleanup`), so warm DBs lose only writes since the last RDB save. The mechanics framing is empirically sound and testable.
 
 ### Assumption map (validated)
+
 | Assumption | Status | Evidence |
 |---|---|---|
 | JSONL log is the embedded safety net | FALSIFIED as stated | Opt-in only; default config logs nothing |
@@ -20,6 +22,7 @@
 | Hosted/prod unaffected | VALIDATED | FLY_APP_NAME guard; embedded-only scope correct |
 
 ### Devil's advocate — strongest challenges (all verified by controller)
+
 1. **Daemon-reuse trap**: redislite `Redis.__init__` line 69-70 — when a daemon already runs for a path, `_load_setting_registry()` SKIPS `_start_redis()` → serverconfig applies only at COLD start. **Verified real. Benign for the loss scenario**: the reopen after kill -9 is always cold — AOF applies exactly when needed. Warm-daemon reuse holds live memory (no data at risk).
 2. **Loss shape is partial, not "entire graph"** — verified: fresh-DB = 0/5; warm DB (any prior graceful close) loses only post-save writes. The honest test must cover both shapes.
 3. **AOF is the least architecture-aligned option** — counterpoint: it is the only option that closes the gap for ALL write paths at the storage layer with 1 line; JSONL-contract (c) done properly is a multi-file change with a destructive failure mode (divergence rebuild) and weaker outcome (write-then-append crash window).
@@ -45,6 +48,7 @@
 **Chosen: (a) AOF via serverconfig — `quality over convenience`.**
 
 Rationale (outcome quality, not diff size):
+
 1. **Closes the gap completely for ALL write paths** — storage-layer durability covers raw `_upsert`, SDK, entities, connectors, graph-scripts. (b) only covers wrapped paths; (c) needs an unbounded write-path audit.
 2. **Empirically verified in this environment** — 5/5 keys survive kill -9 with AOF; 0/5 without. No speculation.
 3. **The honest test is deterministic** — everysec fsync settles in ≤1.5s; cold-start reopen after kill -9 is guaranteed (old PID dead + socket teardown polled).
@@ -53,6 +57,7 @@ Rationale (outcome quality, not diff size):
 6. Residual risk (AOF everysec ≤1s window; appendonlydir/ artifact; daemon-reuse applies only at cold start) is documented in code + tests — satisfying indicator 3's documentation branch and target 2's "decision documented in code". NOTE: the appendonlydir/ artifact introduces ONE real integration regression (restore/migrate stale-AOF shadowing) — fixed in plan v2 via remove_stale_aof (see Plan item 2).
 
 **Rejected alternatives (with when they'd be better):**
+
 - (b) would be better if redislite lacked serverconfig/AOF support or graphs were tiny AND write rates trivial — it keeps RDB as the single artifact.
 - (c) would be better if the goal were zero new persistence artifacts AND a full write-path audit were in scope — the log is the architecture's stated source of truth (consistency.py:1-4, backup.py, #548).
 
@@ -70,6 +75,7 @@ Rationale (outcome quality, not diff size):
 5. **Adjacent findings (NOT absorbed, rate-limited filing — noted in plan/report)**: `_create_entity` docstring falsely claims "event log + FalkorDB" (sdk.py:4624); entity writes absent from JSONL log; event_log_path opt-in default.
 
 ## Wiring Check
+
 | Touch Point | Type | Covered By | Status |
 |---|---|---|---|
 | projection/__init__.py serverconfig | code | this issue | ✅ |
@@ -84,6 +90,7 @@ Rationale (outcome quality, not diff size):
 | consistency.py lost-graph docstrings | docs | trigger now db AND appendonlydir deleted | ✅ |
 
 ## Complexity
+
 | Domain | Rating |
 |--------|--------|
 | Architecture | standard |

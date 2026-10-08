@@ -10,6 +10,7 @@
 **Complexity:** standard (Level: task → task-workflow-standard, gated)
 
 **Architecture:** Three additive layers on the existing registered-state-key pattern:
+
 1. **Backend state** (`tortoise/hosted_api.py`): register `github_indexed_at` + `github_docs_indexed_at` (ISO timestamp, `str|None`) in all four registration surfaces (both default dicts, derived allowlist, PATCH model), stamp them in the same completion branch that flips `*_indexed=True`, and write live per-repo `_job(...)` progress during both walks.
 2. **Frontend derivation** (new pure module `memorySourcesStatus.js`, repo's zero-dep node --test convention): `formatRelativeTime`, `docsIndexedLabel`, `jobStatusLine` (elapsed always; progress/ETA only when real fields exist; ETA suppressed at progress 0).
 3. **Frontend render** (`main.jsx` + `index.css`): unconditional "Indexed · <rel time>" docs label, github-row "Last indexed" suffix (null-guarded), CSS `.switch[disabled][data-on='true']` full-opacity, live status lines, `maxTries` 100 for index polls, `refreshOnboarding()` in both polls' `onDone`.
@@ -22,6 +23,7 @@
 > Gate skipped: plan touches zero third-party dependencies (backend stdlib only; frontend uses existing React 19 + vite + node --test — no new library, no version change). In-repo patterns used exclusively (registered-state-key pattern, `install_probe_*` str-key precedent, pure-module node --test convention). Scoping Phase 1.5 `### Axis Research` (UX axis) already triangulated the relevant external guidance; embedded below as PRIOR_RESEARCH.
 
 **PRIOR_RESEARCH (from scope, source-tagged):**
+
 - [atomica11y] disabled switch stays in a11y tree; `aria-checked` must stay truthful or the switch is announced "off" — accessibility failure. Our fix keeps `aria-checked={docsOn}` truthful (already is) and fixes the visual via CSS.
 - [accessibility.build] disabled switch state must remain discoverable; dimming alone is not a state signal.
 - [nngroup] percentage/time-remaining only for waits >10s; step-based progress when accurate percentage impossible; fake precise progress misleads more than a spinner.
@@ -62,10 +64,12 @@ Per-issue verification checklist (Standalone — no epic test-design); surfaces 
 **Acceptance:** `github_indexed_at` + `github_docs_indexed_at` (default `None`, ISO-string values) present in `_ONBOARDING_DEFAULT_STATE`, `DEFAULT_ONBOARDING_STATE`, `_ALLOWED_STATE_KEYS`, and `OnboardingStatePatchRequest.model_fields`; PATCH round-trips an ISO value.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_ONBOARDING_DEFAULT_STATE` ~9584-9622, `DEFAULT_ONBOARDING_STATE` ~1924-1960, `OnboardingStatePatchRequest` ~9759-9820)
 - Test: `tests/test_onboarding_endpoints.py` (`_STATE_KEY_TABLE` ~476-507)
 
 **Step 1:** Add to `_ONBOARDING_DEFAULT_STATE` (next to `github_docs_indexed`):
+
 ```python
 "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
 "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
@@ -74,12 +78,14 @@ Per-issue verification checklist (Standalone — no epic test-design); surfaces 
 **Step 2:** Add the same two keys to `DEFAULT_ONBOARDING_STATE` (next to `github_docs_indexed`).
 
 **Step 3:** Add to `OnboardingStatePatchRequest` (next to `github_docs_indexed`):
+
 ```python
 github_indexed_at: str | None = None
 github_docs_indexed_at: str | None = None
 ```
 
 **Step 4:** Add both keys to `_STATE_KEY_TABLE` in `tests/test_onboarding_endpoints.py` (values are ISO strings — the parametrized test's existing `patch_value` branch already sends ISO strings for non-bool keys, so zero test-logic change):
+
 ```python
 "github_indexed_at": "github_indexed_at",
 "github_docs_indexed_at": "github_docs_indexed_at",
@@ -97,18 +103,22 @@ Expected: PASS (all 4 surfaces + PATCH round-trip for both keys).
 **Acceptance:** After a github index job completes with ≥1 repo processed, `github_indexed_at` is an ISO timestamp in onboarding_state; same for `github_docs_indexed_at` after a docs job; neither is stamped on a 0-repo failure.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_run_indexing` finally ~10852-10860, `_run_docs_indexing` finally ~11220-11227)
 - Test: `tests/test_github_index_lifecycle.py` (`test_cursor_and_backfill_marker_persisted` ~457-464), `tests/test_index_docs_api.py` (`test_docs_job_poll_completed` ~241-256, `test_docs_job_midwalk_quota_hit` ~327-351)
 
 **Step 1:** In `_run_indexing` finally, extend the `repos_processed > 0` branch (plan-review cycle-1 P1/P2 fix: use the MODULE-SCOPE name `datetime` — hosted_api.py line 23 imports `from datetime import UTC, datetime, timedelta`; `_dt` is only a function-local alias at line 1229 and would NameError inside the finally, silently dropping `github_index_cursor` persistence):
+
 ```python
 if totals["repos_processed"] > 0:
     updates["github_indexed"] = True
     updates["github_indexed_at"] = datetime.now(UTC).isoformat()
 ```
+
 (same pattern as line ~916 `datetime.now(UTC).isoformat()`.)
 
 **Step 2:** In `_run_docs_indexing` finally, same for docs (`datetime`, module-scope):
+
 ```python
 if totals["repos_processed"] > 0:
     updates["github_docs_indexed"] = True
@@ -122,9 +132,11 @@ if totals["repos_processed"] > 0:
 **Step 5:** Extend `test_docs_job_midwalk_quota_hit` to assert `github_docs_indexed_at` IS stamped on the quota-partial run (parity policy — pins the semantics so the partial-run case is not ambiguous).
 
 **Step 6:** Run:
+
 ```
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_index_lifecycle.py::test_cursor_and_backfill_marker_persisted tests/test_index_docs_api.py::test_docs_job_poll_completed tests/test_index_docs_api.py::test_docs_job_midwalk_quota_hit -v
 ```
+
 Expected: PASS.
 
 **Step 7:** Commit.
@@ -136,10 +148,12 @@ Expected: PASS.
 **Acceptance:** During a multi-repo walk, polling the job shows `progress` = round(repos_processed/repos_total*100), `repos_processed`, `repos_total`, and (github) `points_created` updated per repo before completion.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_run_indexing` walk loop ~10801-10815, `_run_docs_indexing` walk loop ~11147-11195)
 - Test: `tests/test_github_index_lifecycle.py` (new test near `test_in_flight_single_flight_reuses`)
 
 **Step 1:** In `_run_indexing`, immediately AFTER `totals["repos_processed"] += 1` (and after the quota-break guard, which is before the increment):
+
 ```python
 _job(progress=round(totals["repos_processed"] * 100 / max(len(walk_repos), 1)),
      points_created=totals["points_created"],
@@ -148,6 +162,7 @@ _job(progress=round(totals["repos_processed"] * 100 / max(len(walk_repos), 1)),
 ```
 
 **Step 2:** In `_run_docs_indexing`, immediately AFTER `totals["repos_processed"] += 1` in BOTH branches (`scope_branch == "all"` and the else branch — note `repos_total` is already set at ~11115; `documents_indexed` reads the running total BEFORE the current repo's ingest, so the doc count trails by one repo — "indexed so far" semantics, documented; also note the docs DOCUMENTS-gate check runs AFTER the increment, so a quota-hit repo IS counted):
+
 ```python
 _job(progress=round(totals["repos_processed"] * 100 / max(totals["repos_total"], 1)),
      documents_indexed=totals["documents_indexed"],
@@ -156,6 +171,7 @@ _job(progress=round(totals["repos_processed"] * 100 / max(totals["repos_total"],
 ```
 
 **Step 3:** New test `test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch)` — **pump-aware mechanics** (plan-review cycle-1 P2 fix: a `threading` barrier inside patched `index_repo` would block the portal loop and deadlock — background tasks only advance WHILE a request is being serviced, per `_drain_jobs` comment test_github_index_lifecycle.py:163-166):
+
 1. PATCH `github_indexed=True` on the team's onboarding_state (registered key) to defeat the first-run ONE-repo bound so the org-wide walk resolves both repos (`mock_github` resolves `["acme/repo1", "acme/repo2"]`).
 2. Capture the original `GitHubIndexer.index_repo`; wrap it: delegate repo 1 to the REAL method (mock transport = deterministic), and for repo 2 `await asyncio.sleep(1.0)` (loop-friendly — never a threading barrier) then call the real method. The wrapper must return the full contract the loop destructures (`points_created`, `statements_superseded`, `events_minted`, `issues_beyond_window`, `errors`, `cursor`, `quota_hit`) — delegate to the real method to inherit it.
 3. POST `/v1/index/github/re-poll`, then INTERLEAVE request pumps with `_wait_for` polls of `ha._INDEX_JOBS[job_id]` (each `provisioned.tc.get("/v1/onboarding/state")` pumps the portal — mirrors `_poll_until`), asserting `repos_processed >= 1` and `0 < progress < 100` mid-flight, then settle to terminal.
@@ -173,11 +189,13 @@ Expected: PASS (incl. `test_in_flight_single_flight_reuses`, `test_stuck_started
 **Acceptance:** `formatRelativeTime`, `docsIndexedLabel`, `jobStatusLine`, `jobElapsedSecs` exported; all edge cases (absent timestamps, absent repo fields, progress 0) covered by node --test.
 
 **Files:**
+
 - Create: `website/apps/dashboard/src/memorySourcesStatus.js`
 - Create: `website/apps/dashboard/src/memorySourcesStatus.test.js`
 - Test: `website/apps/dashboard/src/memorySourcesStatus.test.js`
 
 **Step 1:** Write `memorySourcesStatus.js` (pure, no React):
+
 ```js
 // memorySourcesStatus.js — #1894: indexed-state + job-progress derivations
 // for the memory-source panel. Pure (no React), node --test unit-tested
@@ -250,6 +268,7 @@ export function jobStatusLine(job, nowMs) {
 ```
 
 **Step 2:** Write `memorySourcesStatus.test.js` covering:
+
 - `formatRelativeTime`: fresh (<60s → "just now"), minutes, hours, absent → null, invalid → null. Stale (>24h) → assert `typeof result === 'string' && result.length > 0` — NEVER a locale-specific date string (`toLocaleDateString()` output varies across locales/CI; plan-review cycle-1 P3 + cycle-2 P4).
 - `docsIndexedLabel`: indexed+timestamp → "Indexed · 2 min ago"; indexed, no timestamp → "Indexed" (legacy team, honest); not indexed → null; disconnected-but-indexed → still returns the label (no githubConnected dependency).
 - `jobElapsedSecs`: epoch started_at; created_at fallback; missing → null.
@@ -268,33 +287,42 @@ Expected: all PASS.
 **Acceptance:** After implementation: docs switch full-opacity ON when indexed with "Indexed · <rel time>" label visible (even when disconnected); github row suffix only when timestamp present; in-progress job cards show elapsed + progress + ETA; job completion refreshes the timestamp without manual reload; `vite build` passes.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (imports ~top, MemorySources ~4514-4770, toggleDocs ~1148-1157, indexDocs ~1188-1236, reindexGithub ~1159-1191, GithubIndexStatus ~4804, DocsIndexStatus ~4841, startBoundedPoll call sites)
 - Modify: `website/apps/dashboard/src/index.css` (.switch block ~194-204, disabled ~328)
 
 **Step 1:** Import the module at the top of main.jsx (alongside the existing captureStatus/sessionKey imports):
+
 ```js
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
 ```
 
 **Step 2:** In `MemorySources`, derive the docs label from the shared ticker (plan-review cycle-1 P4: `docsLabel` and the status lines must consume the SAME `now` value so "2 min ago" stays fresh — see Step 4 for the ticker, declared BEFORE the component's early returns):
+
 ```js
 const docsLabel = docsIndexedLabel(state, now)
 ```
+
 Replace the gated copy at ~4656-4658 (`{docsIndexed && githubConnected && (...)}`) with the unconditional label (when `docsIndexed`, regardless of `githubConnected`):
+
 ```jsx
 {docsIndexed && docsLabel && (
   <p className="memory-source-state" aria-live="polite">{docsLabel}</p>
 )}
 ```
+
 **Contradictory-copy fix (plan-review cycle-1 P2):** also gate the "Connect GitHub first to index docs." branches (~4649-4653 and the `!githubConnected && docsWantOn` branch) on `!docsIndexed` — an indexed-but-disconnected team must NOT render "Connect GitHub first" under the "Indexed · <time>" label (contradictory instructions on the very row this issue fixes):
+
 ```jsx
 {!githubConnected && !docsIndexed && docsWantOn ? ( ... ) : !githubConnected && !docsIndexed ? (
   <p className="dim small">Connect GitHub first to index docs.</p>
 ) : null}
 ```
+
 Keep the Re-index docs affordance (rendered when `githubConnected`); the existing "Docs are indexed and active as a source. Use 'Re-index docs' to refresh." copy may be merged into the label line or kept as secondary — keep the button semantics intact.
 
 **Step 3:** Github row (~4569): append the last-indexed suffix with a FULL null-guard (plan-review cycle-1 P3: an outer guard alone would render "· Last indexed null" for a present-but-unparseable value; mirror `docsIndexedLabel`'s inner-null contract):
+
 ```jsx
 const lastIndexed = formatRelativeTime(state.github_indexed_at, now)
 ...
@@ -304,11 +332,14 @@ const lastIndexed = formatRelativeTime(state.github_indexed_at, now)
 ```
 
 **Step 4:** `GithubIndexStatus` started branch (~4806-4809): replace the bare "Indexing in progress…" with the live line:
+
 ```jsx
 const line = jobStatusLine(job, now)
 return <p className="dim small" aria-live="polite">{line ? `Indexing… · ${line}` : 'Indexing in progress…'}</p>
 ```
+
 Same for `DocsIndexStatus` (~4846-4849): `Docs indexing… · ${line}`. Both status components consume the `now` prop passed from `MemorySources` (they are already rendered by it — `{indexJob && <GithubIndexStatus job={indexJob} />}` at ~4626, `{docsJob && <DocsIndexStatus job={docsJob} />}` at ~4749). **Ticker placement (plan-review cycle-1 P3):** `MemorySources` has EARLY RETURNS (`if (loading) return`, `if (!state) return`) — the hook MUST be declared at the TOP of the component body, BEFORE those early returns, or React throws "Rendered more hooks than during the previous render" when loading flips:
+
 ```js
 const [now, setNow] = React.useState(Date.now())
 React.useEffect(() => {
@@ -316,22 +347,28 @@ React.useEffect(() => {
   return () => clearInterval(t)
 }, [])
 ```
+
 Pass `now` to the status components and use it for `docsLabel` + the github-row suffix (single source, no per-component intervals).
 
 **Step 5:** `maxTries: 100` for the two index-job polls only (`reindexGithub` ~1174, `indexDocs` ~1216) — `startBoundedPoll` default 40 stays for the wizard connect poll.
 
 **Step 6:** `onDone` refresh: in `reindexGithub` and `indexDocs`, after `onDone: setIndexJob/setDocsJob`, ALSO call `refreshOnboarding()`:
+
 ```js
 onDone: (job) => { setIndexJob(job); refreshOnboarding().catch(() => {}) }
 ```
+
 (the wizard connect poll's `onDone` already calls `reindexGithub()`, which funnels through this same choke point — transitive coverage.)
 
 **Step 7:** CSS (`index.css` ~328, after `.switch[disabled]`):
+
 ```css
 /* #1894: an indexed docs switch is disabled but ON — never dim it to look off */
 .switch[disabled][data-on='true'] { opacity: 1; cursor: not-allowed; }
 ```
+
 Add a `.memory-source-state` style (emphasized, non-dim indexed label):
+
 ```css
 .memory-source-state { font-size: 13px; margin: 4px 0 0; color: var(--accent, #06b6d4); }
 ```
@@ -354,6 +391,7 @@ Run: `cd website/apps/dashboard && node --test src/memorySourcesStatus.test.js` 
 **Acceptance:** A docs job polled mid-walk shows `progress` between 0 and 100 with `repos_processed`/`repos_total` populated.
 
 **Files:**
+
 - Test: `tests/test_index_docs_api.py` (extend `test_docs_job_midwalk_quota_hit` ~327-351 OR new test patching `GitHubDocsIndexer.walk_repo` with a loop-friendly `asyncio.sleep`)
 
 **Step 1 (PRIMARY — mid-walk, mandatory):** new test patching `GitHubDocsIndexer.walk_repo`: capture the original method, **delegate repo 1 to the REAL method** (the walk loop destructures `walk["blobs_fetched"]`/`["skipped_binary"]`/`["skipped_oversized"]` — a wrapper returning a partial dict raises KeyError; the real method inherits the full contract), make repo 2 `await asyncio.sleep(0.5)` then delegate, POST `/v1/index/docs`, and INTERLEAVE `provisioned.tc.get("/v1/onboarding/state")` pumps with `_wait_for` polls of `_INDEX_JOBS[job_id]` asserting `0 < progress < 100` and `repos_processed`/`repos_total` populated mid-flight, then settle to terminal (same pump-aware pattern as Task 3 Step 3).
@@ -374,16 +412,20 @@ Run: `cd website/apps/dashboard && node --test src/memorySourcesStatus.test.js` 
 **Files:** none (verification)
 
 **Step 1:** Embedded carve-out lane:
+
 ```
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_onboarding_endpoints.py tests/test_github_index_lifecycle.py tests/test_index_docs_api.py -v
 ```
+
 Expected: PASS.
 
 **Step 2:** Docker lane (full suite):
+
 ```
 export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/ -v
 ```
+
 Expected: PASS (or pre-existing failures documented — tech-debt pre-flight).
 
 **Step 3:** Frontend: `cd website/apps/dashboard && node --test src/ && npm run build` — expected: PASS.
@@ -393,6 +435,7 @@ Expected: PASS (or pre-existing failures documented — tech-debt pre-flight).
 **Step 5:** Label lifecycle: `gh issue edit 1894 --remove-label implementing --add-label implemented`.
 
 ## Known Limitations (documented, not in scope)
+
 - Runs >300s degrade to the existing honest timeout copy ("Still running — check back in a moment") + one late `refreshOnboarding()` — no auto-resume beyond the bounded window (scope-verify P2 resolution; documented).
 - Legacy indexed teams (pre-deploy) show "Indexed" without a time — no truthful backfill exists (in-memory jobs evicted).
 - `docsWantOn` toggle intent still unpersisted (deferred — separate state-model change).

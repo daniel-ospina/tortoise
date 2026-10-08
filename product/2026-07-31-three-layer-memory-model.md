@@ -17,6 +17,7 @@ Of the five layers, Tortoise directly owns and builds three: State, Episodic, an
 This is the customer's organizational reality. Defined by the core ontology + expansion packs. It answers: "What is the current state of the organization?"
 
 **Examples:**
+
 - What teams exist? What roles do they have?
 - What products do we offer? What features do they have?
 - What campaigns are running? On what channels?
@@ -31,6 +32,7 @@ The state layer is **deterministic** — these are facts, not beliefs. A team ei
 External data sources that connect to the state layer and update it. This is the "what happened" layer.
 
 **Examples:**
+
 - GitHub issues: "Bug #452 was closed" → updates product state
 - Project management: "Sprint 14 completed" → updates sprint state
 - Meta Ads: "Campaign #7 finished its run" → updates campaign lifecycle
@@ -45,6 +47,7 @@ The episodic layer is **deterministic** — events are facts. They carry timesta
 The Tortoise EP graph. Arguments, evidence, confidence scores. This is the "what do we believe?" layer.
 
 **Examples:**
+
 - "We believe customer segment X is declining because..."
 - "Strategy Y is preferred over Z with 75% confidence"
 - "Competitor analysis suggests market shift toward W"
@@ -61,6 +64,7 @@ The epistemic layer is **probabilistic** — these are beliefs backed by evidenc
 This is where business processes, workflows, and standard operating procedures live. It answers: "How do we do things?"
 
 **Examples:**
+
 - Sales pipeline stages and transitions
 - Content publishing workflow
 - Bug triage process
@@ -80,6 +84,7 @@ This is where business processes, workflows, and standard operating procedures l
 This is where agents operate. It answers: "What is being worked on right now?"
 
 **Examples:**
+
 - Which agent is executing which workflow step?
 - What's in the agent's current context window?
 - Which tasks are in progress vs queued?
@@ -129,6 +134,7 @@ The state layer is the **anchor.** Episodic events update it with facts. Epistem
 ## What This Means for Expansion Packs
 
 Expansion packs ARE the state layer schema. They define:
+
 - What kinds of entities the customer tracks (objectKinds)
 - What relationships exist between them
 - What lifecycle states entities can be in

@@ -23,6 +23,7 @@ ownedBy: organisation-design-team
 ## Context
 
 **Shipped and reusable:**
+
 - **#318 pack isolation (MERGED, PR #1261):** `tortoise/pack_registry.py` + `pack_state.py` — shared catalog + per-tenant `PackInstall` activation records written graph-natively into `org_{org_id}` graphs; idempotent additive MERGE; read-only `GET /v1/packs` + MCP `packs_list`; D6 existence masking; `graph-scripts/backfill_pack_installs.py`. The tenant graph **is** the isolation boundary ("a query with tenant B's identity reads tenant B's graph — no tenant selector exists on any surface").
 - **#524 OAuth 2.1 MCP auth (MERGED, PR #1264):** `tortoise/oauth.py` — auth-code + PKCE, DCR, RFC 8707 token→team mapping (`{origin}/mcp` single-team vs `{origin}/mcp/organizations/{org_id}` team-scoped resource, membership-verified at token mint, unknown resources rejected per RFC 8707 §2), rotating refresh tokens revoked on team suspension.
 - **Decoupling + provisioning foundations:** user↔team↔graph decoupling (#568/#615, ec8cd71); `/internal/provision` (hosted_api.py), `provision_team` RPC (supabase_control.py), tenant-provision Edge Function with caller-JWT auth (#802); per-team write-op metering (`tortoise/metering.py`, `:MeteringRecord` keyed `(org_id, period)`, registry graph); per-team pricing (`product/pricing.json`, overage $5/10k write-ops).

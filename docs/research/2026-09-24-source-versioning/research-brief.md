@@ -47,6 +47,7 @@ subjects.team: epistemic-team
 **⇒ The version model is not a new invention. It is *populating declared slots*** — and §4.7 already separates the two axes correctly, which is the single most important thing to preserve.
 
 **Supporting internal decisions:**
+
 - **D7** — changes are handled by **correction events, not in-place edits**.
 - **`#2489`** — the rebuild machinery: `aboutDocument` is snapshot-derivable and **re-created at the old point**; `aboutSource` is deliberately excluded and never resurrects.
 - **`#5024` (T6)** — the version bump is **unjournalled**, so `derived = replay(journal)` is false for the source layer.

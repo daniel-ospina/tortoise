@@ -118,6 +118,7 @@ Notes: (1) the current kind/relation/chain branch sits INSIDE the per-pack loop;
 **Acceptance:** `tests/test_enforcement.py` and `tests/test_kind_classifier.py` contain the new cases; the discriminating assertions FAIL on current code (agent-ops:rule resolves `warn` today → both red); existing tests in both files still pass.
 
 **Files:**
+
 - Modify: `tests/test_enforcement.py`
 - Modify: `tests/test_kind_classifier.py`
 - Test: `tests/test_enforcement.py`, `tests/test_kind_classifier.py`
@@ -192,6 +193,7 @@ Expected — **FIVE tests fail (all RED on current code, exactly the bug)**: (1)
 **Acceptance:** All Task-1 red tests pass; every pre-existing test in `tests/test_enforcement.py`, `tests/test_kind_classifier.py` passes unchanged.
 
 **Files:**
+
 - Modify: `tortoise/enforcement.py:38-75`
 
 **Step 1: Restructure `resolve_enforcement`'s kind arm per the behavioral spec above**
@@ -214,6 +216,7 @@ Expected: all green (Task-1 reds now pass; bare `rule` → `retry` unchanged).
 **Acceptance:** `near_miss_retries: 0` present in the stats init **iff** the Intent's grep verification confirms no exact-dict/keys-iteration consumer (expected to pass — consumers read specific keys); comment completed; full `tests/test_kind_classifier.py` green with zero behavioral diffs.
 
 **Files:**
+
 - Modify: `tortoise/kind_classifier.py` (stats dict init, ~line 189-200; comment at line 289)
 
 **Step 1:** Subject to the Intent's grep verification passing (no exact-dict/keys-iteration consumer of the classifier stats dict — check BOTH `stats[` reads AND the raw-dict report embedding at extractor_v2.py:3777-78 where `classify_later` carries `s2`/`union` stats by reference; that embedding is a pass-through, so the always-present key appears in the flag-gated payload as an ADDITIVE key — consistent with the documented "additive keys only" convention at :3769, but the Task-3 change note must name it), add `"near_miss_retries": 0` to the stats dict init alongside the other counters (the hook's `.get()` fallback at line 287 becomes a no-op guard; no behavior change). If the grep finds a full-dict consumer, skip the init and keep only the comment fix.
@@ -229,6 +232,7 @@ Expected: all green (Task-1 reds now pass; bare `rule` → `retry` unchanged).
 **Acceptance:** A clarifying comment block at the relation check; zero logic changes; existing `TestCreateOperatorWarnNotBlock` green.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py:3898-3911`
 
 **Step 1:** Add a comment block above `declared = {r.get("predicate") for r in reg.list_relations()}` noting: predicates are declared and matched BARE by contract (manifest `relations[].predicate`); namespaced relation labels are out of scope for this check (verified bare-vs-bare, not a bug — #2030 pin d); enforcement namespacing applies to the kind arm only. Also note (epic §6 scope): the epic's §6 "undeclared relation/**kind-pair** → warn-not-block" contract has NO kind-pair leg implemented on the write path — this check covers only the relation leg; the kind-pair leg is an epic-level gap, out of #2030 scope.
@@ -278,6 +282,7 @@ Expected: green (17 embedded-only files excluded by the docker lane by design; e
 ## Verification Plan (test-routing)
 
 Domain: **code** (pure Python, in-repo, zero third-party deps). Complexity: standard.
+
 - Unit depth: full (seam contract matrix above).
 - Integration depth: full (hook end-to-end with stub encoder).
 - Regression: full docker-lane suite.

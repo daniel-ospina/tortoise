@@ -26,6 +26,7 @@ aboutObjects: eval dataset construction, error analysis, owner-in-the-loop label
 **⇒ The dataset IS the specification.** Each owner-labelled row converts one sentence of prose into one checkable instance. The loop the owner describes is not "QA" — it is **how the specification gets built**.
 
 **Assumption map:**
+
 - `[validated]` Prose rules are unverifiable without real rows — established by the owner's own METHODOLOGY 1 (below).
 - `[validated]` The corpus contains real instances of every boundary we care about — the 25k-node graph is the source.
 - `[unverified]` That a small sample **saturates** (stops surprising us). This is the hypothesis the loop tests. Stated methods give ~30 traces as a starting point; see the contradiction note in the adoption gate.

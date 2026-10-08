@@ -16,6 +16,7 @@ session dates.
 
 `tortoise_fts_query` results carry promoted D8 fields (additive keys, emitted
 only when known):
+
 - `status` — live/superseded/deprecated/retracted/draft
 - `superseded_by` — `{id, content_snippet, created_at}` of the newest
   superseding claim (incoming CORRECTS)
@@ -56,6 +57,7 @@ no-op in embedded CI and fires on the Docker/HNSW path where the real
 render byte-identically to today.
 
 ## Test plan (tests/test_longmem_runner.py — already registered in
+
 config/ci-surfaces.yml, no new file ⇒ no ci-surfaces change)
 
 1. `test_render_context_annotates_superseded_and_superseding_hits` — unit:

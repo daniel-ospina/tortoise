@@ -54,6 +54,7 @@ inputs: owner design review 2026-08-12, extraction criteria v1 §1.5, graph-as-m
 ## 2. The research basis (2026-08-12, 14 sources)
 
 **FOR (direct evidence):**
+
 - **Temporal KG beats flat/summary memory on exactly our axes.** Zep/Graphiti
   (arXiv:2501.13956): beats MemGPT on DMR (94.8 vs 93.4) and LongMemEval
   (+18.5% accuracy, −90% latency), strongest on multi-session + temporal
@@ -73,6 +74,7 @@ inputs: owner design review 2026-08-12, extraction criteria v1 §1.5, graph-as-m
   GraphRAG surveys): graphs win where reasoning is multi-hop/relational.
 
 **AGAINST / tradeoffs (design constraints, not refutations):**
+
 - **Write-before-query omission** (TierMem arXiv:2602.17913): write-time
   extraction causes unverifiable omissions — a discarded detail is
   unrecoverable. Extraction noise poisons the record (our measured 88% noise

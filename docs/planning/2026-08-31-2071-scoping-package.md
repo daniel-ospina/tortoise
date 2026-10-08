@@ -67,6 +67,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 3. **The judge is inconsistent run-to-run.** Even gpt-4o at temp 0 has variance; without an agreement check, the 3 questions flip between correct/wrong across spot-check runs and the gate verdict is unreproducible. **Guard:** temp 0 locked (existing `OfficialJudgeModel.build_request`), double-judge on the 3 questions, agreement recorded in the spot-check output.
 
 **Boundary check (OUT of scope):**
+
 - Reader-model upgrades for the ask lane (#2069) — the runbook proves the reader MODEL is the binding constraint on the content failure class (deepseek-v4-flash cannot hold both derived-commit and near-miss-abstain; qwen3.8-max probe proves it). NOT this issue.
 - Retrieval top-k/reranking for the ask lane (#2070) — the FTS top-40 miss class (ceb54acb rank ~70, etc.). NOT this issue.
 - The (d) gate aggregate ≥0.8 — already MOOT by product decision (PR #2013: reader shipped, exposure gated); this fix does not unblock the gate and is not expected to (realistic verdict-count impact: 1 now — d6233ab6 cleanly flips on the judge fix alone; 1d4e3b97 needs #2070's retrieval fix too; b0479f84 fails on #2069's model class; the aggregate stays bound by model+retrieval classes).
@@ -84,6 +85,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 **Why this framing:** (1) the runbook measured the failure empirically (containment-judge-bar row); (2) the arithmetic is structural (≥½ gold-word overlap on a rubric-gold); (3) the benchmark-authoritative judge is semantic and in-repo — the defect is wiring, not capability; (4) indicator 2 (no short-gold regression) is satisfiable and strongest under the owner decision: the spot-check uses the SAME judge as the graded eval (benchmark-identical by construction), so "no regression" means spot-check verdicts agree with the benchmark's semantic verdicts — a consistency check, not a hybrid boundary; (5) the issue's own options list points here ("LLM-as-judge semantic scoring for long-gold questions"), and the owner extended it to all questions for benchmark parity.
 
 **Rejected framings (with why):**
+
 - *"The similarity metric is wrong for any length"* (a): correct in theory, but short-gold containment is precise in practice, deterministic, key-free, and indicator 2 mandates keeping it. Adopted as a long-gold-only correction.
 - *"The questions are the problem — reword them"* (b): breaks official-benchmark comparability; the official rubric is semantic by design and handles them.
 - *"Exclusion + comparability note is the fix"* (c): hides the defect, leaves the class ungradeable, contradicts indicator 1's "receive a fair score"; the note is a required accompaniment, not the fix.
@@ -98,18 +100,21 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 ### Axis Research (per axis, with citations + sources)
 
 **Architecture axis — how the judge is built and wired.**
+
 - *Codebase-first precedent scan:* `tools/longmem_eval/judge.py` — `LLMJudge`/`OfficialJudgeModel` (official gpt-4o anscheck, temp 0, max_tokens 10, no system message, `urllib` transport) is the semantic judge; `MockJudge` (containment + `_ABSTRACTION_MARKERS`) is the deterministic CI substitute; `NEAR_MISS_GRADING = "strict"` (#1949 decision record — the precedent for judge-rubric decision notes); `grade_label`/`classify_answer` (substring containment). `tools/ask_spotcheck.py::_grade` (word-overlap bar, lines 66-92). `tools/longmem_eval/run.py` judge call site 3507-3518; `JUDGE_RUBRIC_ID` (4221) + `judge_rubric_id_hash` fingerprint (1289, 4173); `report.py` methodology block (~696, `abstention_n` at 1664). `tortoise/embeddings.py` (bge-small, `compute_embedding`, `cosine_similarity_matrix`, calibrated 0.72/0.89). `battery/judge/gate.py` (KAPPA_MIN, position-bias AB/BA, IRT, stress — the repo's own LLM-judge validation discipline, from #1410).
 - *External canonical + competitor precedent:* RAGAS answer-correctness = LLM-based weighted (factual-correctness claim-level NLI + semantic similarity) — the industry norm for long answers (docs.ragas.io/concepts/metrics/available_metrics/answer_correctness; arXiv 2407.12873). DeepEval = LLM-judge (G-Eval) with pytest-native CI regression gates (deepeval.com/blog/deepeval-vs-ragas; particula.tech/blog/deepeval-vs-ragas-vs-trulens-rag-evaluation-stack). LangSmith ships BOTH `correctness` (semantic similarity to reference via LLM-judge) AND `embedding_cosine_distance` as separate off-the-shelf evaluators — direct precedent for the hybrid (LLM semantic + deterministic) (docs.smith.langchain.com/reference/sdk_reference/langchain_evaluators; docs.langchain.com/langsmith/evaluation-concepts). TruLens = production tracing/observability (datasumi.com/blog/rag-evaluation-frameworks-comparison) — not applicable to a graded eval, noted for completeness.
 - *Pitfalls:* LLM-judge position/verbosity/self-enhancement bias + prompt sensitivity (arXiv 2412.05579; wandb.ai/site/articles/exploring-llm-as-a-judge; arXiv 2410.20266); kappa over raw agreement (arXiv 2406.12624); BLEU/ROUGE failure on paraphrase (digitalocean.com/resources/articles/llm-as-a-judge).
 - *Synthesis:* the architecture precedent (LangSmith's dual evaluators; RAGAS's LLM-based semantic scoring; the repo's own official judge) all point to: semantic LLM judge for long/paraphrase-tolerant scoring, deterministic for precise short-gold containment, with validation gates (kappa, position-swap) the repo already implements in `battery/judge/gate.py`.
 
 **Research axis — evidence and methodology.**
+
 - *Codebase-first:* `docs/runbook/1987-ask-abstention-check.md` (containment-judge-bar row: "the judge's `max(2, len(gold_words)//2)` word-overlap bar on ~70-90-word synthesis golds is structurally unreachable"; 0.38/0.43 spot-check aggregates; (d) MOOT by product decision); `docs/plans/2026-08-29-1987-ask-reader.md` (judge-stays-eval; Task 12 spot-check composition; the anscheck judge is the official rubric); `docs/research/2026-08-29-reader-answer-surface-competitors.md` (prior research artifact); judge.py #1949 decision record.
 - *External:* LongMemEval official methodology = GPT-4o LLM-based judge with >97% agreement with human experts (emergentmind.com/topics/longmemeval; supermemory.ai/research/longmembench; mastra.ai/research/observational-memory); hybrid evaluation = GPT-4o judge for answer correctness + retrieval metrics (emergentmind.com/topics/longmemeval-benchmark); LongMemEval-V2 keeps the LLM-judge binary-label harness (arXiv 2605.12493); RAGAS factual correctness = claim-level NLI (docs.ragas.io).
 - *Pitfalls:* term-overlap metrics fail on paraphrased long-form personalized generation (arXiv 2501.14956); token-overlap metrics (ROUGE, BERTScore) favor surface similarity and miss information-level equivalence (arXiv 2407.04969); benchmark scores depend on harness/protocol and incomparable surfaces must not be averaged (tensor.news/methodology) — the comparability-note requirement.
 - *Synthesis:* the research evidence confirms (1) the defect is real and documented in-class, (2) the official judge is the authoritative semantic scorer, (3) any scoring-methodology change must be recorded (comparability note) — all three feed the plan.
 
 **Ontology axis — graph/artifact implications.**
+
 - *Codebase-first:* `docs/ONTOLOGY.md` v3.6 governs graph entities (Points/operators/edges, §1-§12); the judge is measurement-layer code in `tools/longmem_eval` + `tools/ask_spotcheck.py` — **no graph nodes, no operators, no edge types, no ontology change**. The relevant repo pattern is the *decision record*: `NEAR_MISS_GRADING = "strict"` (judge.py:65, #1949) and the #2027 calibration notes are code-adjacent decision records — the precedent for documenting "judge rubric/methodology change" next to the code. If the owner later wants the decision on the Tortoise graph, the `how-to-use-tortoise` skill governs it (out of scope here — the graph is not a required artifact of this fix).
 - *External:* benchmark methodology governance — record the scoring change + comparability note so historical numbers stay interpretable (tensor.news/methodology; thrivesparrow benchmark-methodology docs on normalization across formats).
 - *Synthesis:* the ontology axis contributes exactly one requirement: a decision-record note (like #1949) in `judge.py`/the runbook documenting the #2071 scoring change, its scope (spot-check/CI surfaces; graded eval untouched), and the comparability consequence for historical 0.38/0.43 aggregates.
@@ -142,6 +147,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 ### Codebase Explorer Findings
 
 **AFFECTED_FILES (paths + lines):**
+
 - `tools/ask_spotcheck.py:62-92` — `_normalize` (:62) + `_grade` (:66): the containment fallback (:82-84) and the word-overlap bar (:88, `max(2, len(gold_words)//2)`). **PRIMARY fix site.**
 - `tools/longmem_eval/judge.py:201-239` (`_normalize_answer_text`/`classify_answer`/`grade_label`), `:313-381` (`LLMJudge`/`MockJudge`), `:65` (`NEAR_MISS_GRADING`) — add a deterministic semantic variant for MockJudge; add the #2071 decision-record note; do NOT touch the official templates.
 - `tools/longmem_eval/run.py:3507-3518` (judge call site), `:4221` (`JUDGE_RUBRIC_ID`), `:1289/:4173` (fingerprint) — READ-ONLY: verify no change needed (eval already semantic).
@@ -151,6 +157,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 - **NEW (missing):** the 21-question spot-check composition generator — `/tmp/ask_spotcheck.json` is produced outside the repo (no committed generator found; only `ask_spotcheck.py:94` reads it). The 3 questions must be committed as a fixture as part of this work (reproducibility gap).
 
 **PATTERNS_OBSERVED (existing judge/scoring patterns):**
+
 1. **Official-rubric-verbatim discipline:** templates are copied verbatim from the benchmark (judge.py docstring) so published numbers stay comparable — any deviation is a documented decision record (#1949).
 2. **Deterministic substitutes for offline lanes:** MockJudge (containment) + MockReader (evidence concat) give CI a key-free graded loop; the spot-check `_grade` is a third, weaker substitute.
 3. **Compliant-model fakes for behavioral pins:** `test_reader_abstention_calibration.py` uses context-reading fakes that mechanically execute the pinned rule, so red→green legs verify END-TO-END WIRING offline. This is the pattern for testing the semantic judge offline.
@@ -162,6 +169,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 **PARTIAL_IMPLEMENTATIONS:** the semantic LLM judge (`LLMJudge`/`OfficialJudgeModel`) is fully implemented but wired ONLY to the graded eval lane (`run.py` `build_judge`); the spot-check and MockJudge lanes re-implement weaker lexical bars instead of reusing it. No embedding-based answer checking exists anywhere (embeddings are retrieval/dedup-only). The `(d)` gate is MOOT by product decision, so the judge fix is follow-up (3) — measurement integrity, not gate unblocking.
 
 **RECOMMENDED_TESTS:**
+
 - Unit: length-gate classification (long/short boundary both sides, constant pinned); semantic path with a scripted fake judge (correct paraphrase → True; wrong/hedged answer → False; abstained-marker path for `_abs`); containment pins unchanged (existing `test_reader_abstention_calibration.py` + judge tests stay green); spot-check output records scoring method + judge model per question.
 - Integration: spot-check on the 3 long-gold questions with the fake semantic judge (all True on correct paraphrases); short-gold no-regression agreement run (containment vs semantic → identical verdicts on the recorded sample).
 - Contract: report/spot-check output records the scoring change + comparability note; runbook row updated; `JUDGE_RUBRIC_ID` verified untouched (eval surface unchanged); key-gated real-model probe (live gpt-4o on the 3 questions → fair verdicts on correct paraphrases).
@@ -173,6 +181,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 ### Solution Approaches (diverge — 2-3 distinct)
 
 **Approach A — Hybrid LLM-as-judge: containment for short golds, semantic for long golds (the issue's option a).**
+
 - *Description:* Add a length gate (`gold_words > N`, N=30 default, env-tunable) to the spot-check `_grade`; long golds route to the existing `LLMJudge` via `build_judge` (official gpt-4o anscheck — benchmark-authoritative, semantic, >97% human agreement). Add a deterministic semantic variant to `MockJudge` (scripted rubric fake) so CI can pin long-gold fixtures offline. Short golds keep containment + word-overlap exactly as today. Spot-check output records per-question scoring method + judge model; runbook gets the comparability note.
 - *Files:* `tools/ask_spotcheck.py`, `tools/longmem_eval/judge.py` (MockJudge variant + decision note), committed spot-check fixture (3 questions), `tests/` (unit + integration + key-gated probe), `docs/runbook/1987-ask-abstention-check.md`.
 - *Architecture:* judge router in `_grade`; `build_judge(mock=False)` for the long-gold path; no changes to `run.py`/report.py eval wiring (already semantic).
@@ -181,6 +190,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 - *Best-fit-if:* the goal is benchmark-comparable semantic fairness with minimal surface change and the OpenAI key is acceptable.
 
 **Approach B — Embedding-similarity threshold judge (deterministic, key-free).**
+
 - *Description:* For long golds, compute `cosine(compute_embedding(gold), compute_embedding(answer))` with bge-small and compare to a threshold calibrated for the answer-vs-rubric distribution (new calibration set from the 3 questions + negatives, following `tools/calibrate_thresholds` discipline). Deterministic, offline, CI-safe, no LLM key.
 - *Files:* judge.py extension or a small new scorer module, calibration set + script, tests.
 - *Architecture:* reuse `tortoise.embeddings` (`compute_embedding`, `cosine_similarity_matrix`); gate by gold length as in A.
@@ -189,6 +199,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 - *Best-fit-if:* OpenAI keys cannot be used on the spot-check lane AND the calibration measurement separates cleanly; also the natural deterministic CI fallback if the LLM judge cannot be faked.
 
 **Approach C — Rework/exclude the 3 questions + documented comparability note (the issue's option b).**
+
 - *Description:* Exclude d6233ab6/1d4e3b97/b0479f84 from the spot-check composition (or reword their golds into short verbatim-matchable forms) and record a methodology note in the runbook + spot-check output explaining why and what historical numbers mean.
 - *Files:* composition fixture (exclusion list), `tools/ask_spotcheck.py` (skip/reword handling), runbook.
 - *Architecture:* none — composition-level change.
@@ -197,6 +208,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 - *Best-fit-if:* the semantic judge cannot be validated (no key, poor agreement) — the honest fallback that keeps the gate from lying.
 
 **Approach D — Hybrid + precision measurement (rigorous A).**
+
 - *Description:* Approach A PLUS a measured no-regression gate: run BOTH containment and the **REAL key-gated `build_judge()` judge** over the short-gold population (spot-check short-gold questions + a labeled sample) and assert identical verdicts with the divergence taxonomy applied (indicator 2 becomes a measured fact, not a claim; the scripted fake is a CI smoke only); the 3 long-gold questions get live-judge fair-verdict assertions (indicator 1). Report records scoring method per question + the agreement numbers + the comparability note.
 - *Files:* A's files + the agreement-run harness/assertions.
 - *Architecture:* A + a small agreement harness (containment vs semantic on the short-gold sample).
@@ -211,6 +223,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 **PICK (owner decision 2026-08-31): full semantic judge on the spot-check lane — word-overlap/containment demoted to CI-only MockJudge substitute + precision measurement.**
 
 **Rationale (QUALITY-OVER-CONVENIENCE):**
+
 1. **Indicator 1 (fair long-gold scores) is met with the benchmark-authoritative tool.** The official gpt-4o anscheck judge is the scorer the benchmark itself uses (>97% human agreement, semantic rubric template), already implemented and tested in `judge.py`. **Under the owner decision the spot-check grades EVERY question with it — benchmark-identical, one grader to reason about, no hybrid boundary to explain.** No rubric change, no comparability break with published LongMemEval numbers.
 2. **Indicator 2 (no short-gold regression) is preserved BY CONSTRUCTION and verified BY MEASUREMENT.** The spot-check now uses the SAME semantic judge as the graded eval — so short-gold verdicts on the spot-check agree with the benchmark's own semantic verdicts by construction. The consistency check (spot-check semantic vs graded-eval semantic over the shared short-gold population) measures that agreement; any divergence is a finding. The key-free CI path (MockJudge) keeps the deterministic bar for offline runs and is verified to not drift.
 3. **It fixes the CLASS, not just the 3 questions.** Every rubric-gold/long-gold question becomes gradeable (27/30 SSP questions are ≥40 words) — future-proof, unlike exclusion.
@@ -218,6 +231,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 5. **The fallback ladder is documented:** if the live judge fails validation (kappa/agreement) or no judge key is acceptable → Approach C (exclusion + note); if determinism is mandatory → Approach B's embedding judge (pending a clean calibration).
 
 **Rejected alternatives (with "when this WOULD have been better"):**
+
 - **Approach B (embedding threshold):** rejected as the primary because rubric-vs-answer similarity is not the paraphrase-pair distribution its calibrated threshold serves, and external evidence shows embedding thresholds are model-specific and fragile; a failed calibration would burn the whole fix. *Would be better:* when the spot-check lane must stay fully deterministic/key-free and the calibration measurement separates correct-paraphrase from wrong at a stable threshold — and as the deterministic CI fixture grader if the LLM judge can't be scripted offline.
 - **Approach C (exclusion + note):** rejected as the primary because it hides the defect and leaves the class ungradeable; the note is still REQUIRED as part of D. *Would be better:* if the semantic judge's kappa validation fails or no judge provider key is acceptable — exclusion + comparability note keeps the gate honest rather than flaky.
 - **Approach A (hybrid without the agreement run):** rejected as the primary only because it would claim no-regression without measuring it — D costs one small harness and upgrades a claim into evidence. *Would be better:* if the owner accepts a documented (unmeasured) no-regression statement and wants the smallest possible diff.
@@ -231,6 +245,7 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 **Proposed solution (approved):** full semantic judge on the spot-check lane + precision measurement (consistency vs the graded eval + CI parity) + full provenance (per-question scoring method, comparability note, decision record, committed fixture).
 
 **Implementation steps (ordered):**
+
 1. **Commit the spot-check fixture.** Add the 21-question composition (incl. d6233ab6/1d4e3b97/b0479f84 with their golds) as `tests/fixtures/ask_spotcheck_composition.json` (or a generator in `tools/`) so the gate is reproducible; update `tools/ask_spotcheck.py` to read it (path env-overridable, fallback to `/tmp` for compat).
 2. **Replace the word-overlap bar with the semantic judge in `tools/ask_spotcheck.py::_grade` (owner-decision full-semantic).** `_grade` calls `build_judge()` (the official LLM judge) for EVERY question — short and long; the word-overlap bar (`ask_spotcheck.py:88`) is REMOVED from the product spot-check path. `abstention` handled by the existing `_abs` marker path (unchanged). **No length gate — there is no containment-vs-semantic split on the spot-check lane; benchmark-identical grading is the point.** Cost: 21 verdicts ≈ $0.02/run (negligible).
 3. **Keep `MockJudge` as the deterministic CI substitute** (`judge.py`): containment + word-overlap + the `_ABSTRACTION_MARKERS` path stay as-is for OFFLINE/key-free CI runs (they pin wiring, not grading quality); add a deterministic semantic variant for long-gold CI fixtures (scripted rubric fake mirroring `test_reader_abstention_calibration.py`) so long-gold fixtures can be pinned offline. The CI surface is explicitly a substitute — the LIVE spot-check uses the semantic judge for everything.
@@ -240,17 +255,20 @@ The measurement judges used on the product-lane QA surface — the word-overlap 
 7. **Documentation:** `docs/runbook/1987-ask-abstention-check.md` (scoring-change + comparability note), `docs/ONTOLOGY.md` untouched (measurement-layer only), no graph writes.
 
 **Testing strategy:**
+
 - *Unit:* semantic path with the scripted fake (correct paraphrase → True; wrong/hedged → False; `_abs` marker path intact); the removed word-overlap bar has no remaining callers on the live path; containment/MockJudge pins unchanged (existing judge + calibration suites stay green — the CI-parity floor); spot-check output fields (judge, judge_model) present.
 - *Integration:* spot-check over the 3 long-gold questions with the fake semantic judge → 3/3 True on correct paraphrases; live-path spot-check over the 21-question composition with the semantic judge → all questions graded, verdicts recorded per-question; consistency vs graded-eval semantic verdicts on the shared population.
 - *Contract:* report/spot-check output records the scoring change + comparability note; runbook updated; `JUDGE_RUBRIC_ID`/fingerprint verified UNCHANGED (graded eval surface untouched); key-gated probe recorded.
 
 **Acceptance criteria (mapped to O/I/T):**
+
 - **I1 →** key-gated live judge returns True on a **curated, human-verified correct-but-paraphrased answer (injected directly, isolating the judge from reader capability)** for all 3 of d6233ab6/1d4e3b97/b0479f84 (and the fake-judge integration test pins the same offline).
 - **I2 →** the consistency harness records **spot-check semantic verdicts agreeing with the graded eval's semantic verdicts on the shared short-gold population (0 unexpected flips)**; expected classes (temporal off-by-one — semantic is benchmark-correct where containment penalized it; marker-vocabulary `_abs`) are recorded as documented findings + owner-signed comparability note, NOT defects; any flip where the semantic judge over-credits a factually-wrong answer IS blocking; existing containment tests (CI path) stay green.
 - **T1 →** 3/3 long-gold questions gradeable by the semantic judge (live probe + offline fake both green).
 - **T2 →** 0 unexpected regression on short-gold verdicts (measured consistency vs the graded eval + unchanged CI pins).
 
 **Runtime prerequisites:**
+
 - `OPENAI_API_KEY` (or another `TORTOISE_LME_JUDGE_MODEL` provider key) — NEW and REQUIRED for the spot-check's live grading path (judge grades EVERY question now, ≈ $0.02/21-verdict run); `DEEPSEEK_API_KEY`/`OPENROUTER_API_KEY`/`VENICE_API_KEY` (reader, existing); dataset cache (existing); no new deps, no migrations, no graph writes.
 
 ---

@@ -25,12 +25,14 @@
 ## Design Decisions
 
 ### D1 — `session_date` kwarg, optional and date-blind by default
+
 `extract_session_v2(model, conversation, *, sdk=None, session_id=None, chunk_size=50, master=None, session_date: str | None = None)`.
 
 - `None` / `""` → **date-blind**: S1/S2/S4 system prompts byte-identical to today; `execute_embed` emits no `when` / `started_at` keys. This preserves the payload byte-identical guarantee for undated sessions (same discipline as the #1350 supersessions additive-optional contract) and satisfies E2E-4's owned negative (undated session → no false date-answer).
 - Semantics: the ISO date/datetime the conversation "happened on" (the eval's `haystack_dates[si]`). Passed through as-is; no timezone math in E1.
 
 ### D2 — Prompt anchoring is a bounded insert, not a rewrite
+
 `S1_TMPL`/`S2_TMPL`/`S4_TMPL` are validated + owner-approved. Add ONE `{date_anchor}` placeholder paragraph (rendered to `""` when undated — byte-identical prompt text), carrying the mem0 rule:
 
 > **DATE ANCHOR — today is `{session_date}`.** Anchor every state change, decision, and event to this date. Express time with ABSOLUTE ISO dates (YYYY-MM-DD); resolve relative expressions ("yesterday", "last week", "recently") against today. Never leave relative time in the narrative.
@@ -38,6 +40,7 @@
 S1 must produce dates in the story; S2/S4 must map them onto `when`/`startedAt` per D3.
 
 ### D3 — `when` / `startedAt` emission rules (S2 + S4, OUTPUT_CONTRACT)
+
 OUTPUT_CONTRACT gains two optional fields:
 
 ```json
@@ -46,10 +49,12 @@ OUTPUT_CONTRACT gains two optional fields:
 ```
 
 Prompt guidance (identical text in S2_TMPL and S4_TMPL):
+
 - **EVENT `startedAt`** — every event is a time-bound occurrence/decision: use the conversation's stated date when present, else **default to the session date**; `null` only when the session date is unknown.
 - **POINT `when`** — emit an ISO date when the point is a state-change, decision, or date-bearing fact ("as of {date}", "on {date}", "since {date}"); `null` for timeless durable beliefs (operational lessons, stable facts) — do NOT stamp every point.
 
 ### D4 — Deterministic normalization in S5 (`execute_embed`) — events always dated, points only when anchored
+
 The model output is untrusted; `execute_embed` is deterministic (never blocks — design §7.4):
 
 - New helper `_valid_iso_date(v)` — accepts `^\d{4}-\d{2}-\d{2}([Tt ].*)?$`; anything else → warning + dropped.
@@ -59,6 +64,7 @@ The model output is untrusted; `execute_embed` is deterministic (never blocks �
 - `execute_embed` gains `session_date: str | None = None` kwarg (threaded from `extract_session_v2`). `derive_supersessions`/`_supersession_records` untouched.
 
 ### D5 — Layer-1 payload schema (commit_schema, REQUIRED — `extra="forbid"`)
+
 `Point` and `CommitEvent` models use `ConfigDict(extra="forbid")` — a payload carrying `when`/`started_at` **rejects validation without the field additions**. Both additive-optional (defaults = absent → old payloads byte-identical):
 
 ```python
@@ -74,18 +80,23 @@ class CommitEvent(BaseModel):
 Naming: `started_at` on the payload (matches the existing `captured_at` payload field); the graph property stays `startedAt` (ontology §4.5). Eval path doesn't validate via commit_schema — it writes nodes directly — but the commit path (`commit_session` → POST /v1/sessions/commit) must validate.
 
 ### D6 — Server-side commit writes event `startedAt`
+
 `tortoise/hosted_api.py` extracted-occurrences block (~line 3805): add `e.startedAt=coalesce(e.startedAt, $sat)` to the MERGE SET with `"sat": ev.started_at or ev.captured_at or now`. P4 parity: commit path events carry the same date semantics as the eval path's direct writes. The sessionCaptured Event already gets `startedAt=$cap` (block 3) — untouched.
 
 ### D7 — Eval call site (the "dropped today" fix)
+
 `ingest_haystack_v2` (ingest_v2.py:191) already computes `session_date = dates[si] if si < len(dates) else ""` — currently only used for the Session node's `created_at`. Changes:
+
 - Pass it: `out = extract_session_v2(model, turns, sdk=sdk, session_id=s_node, session_date=session_date or None)`.
 - `_write_payload(..., session_date: str | None = None)`: points → `when=p.get("when") or None` on `create_point` (only when non-empty); events → `startedAt=ev.get("started_at") or ev.get("startedAt") or session_date` on `create_event`.
 - `_sanitize_props` does not block `when` (verified — only rejects sourcePath/source_path/id), so the prop lands on the node.
 
 ### D8 — SDK `commit_session` path (production BYOK)
+
 `commit_session(..., session_date: str | None = None)` → `_commit_session_v2` resolves `None` → `datetime.now(timezone.utc).isoformat()` (capture time = session date; consistent with `capture_session`'s `created_at=$now`). Effect: production commits get date-anchored extraction by default — this IS the E1 product behavior (01-align: "production capture already runs v2"). Reversibility: pass `session_date` explicitly; undated behavior remains available to direct `extract_session_v2` callers.
 
 ### D9 — Scope boundary: write-side only
+
 E1 ships the WRITE side (dated points/events in the graph). Read-side decoration ("as of {when}" rendering, date-weight RRF, time-ordered hits) is R5's issue; the reader already receives `session_date` per hit (`_annotate_hits`, retrieve.py:38). `capture_session` (M2 extractor path, `_extract_session_llm`) is NOT touched — it doesn't call `extract_session_v2`; its Session/Event already carry `now`. Cross-lane contract in the Cross-lane section.
 
 ---
@@ -97,6 +108,7 @@ E1 ships the WRITE side (dated points/events in the graph). Read-side decoration
 **Intent:** Make the extractor date-aware: `session_date` threads into S1/S2/S4 prompts and into deterministic S5 output, without changing undated behavior.
 **Acceptance:** `extract_session_v2` accepts `session_date`; dated runs produce prompts containing the anchor and payloads carrying `when`/`started_at`; undated runs are byte-identical to today (prompts AND payloads).
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` — `S1_TMPL` (200), `run_s1` (258), `OUTPUT_CONTRACT` (336), `S2_TMPL` (348), `render_s2_prompt` (443), `run_s2` (451), `S4_TMPL` (631), `render_s4_prompt` (691), `run_s4` (703), `execute_embed` (997), `extract_session_v2` (1303)
 - Test: `tests/test_extractor_v2.py`
 
@@ -107,6 +119,7 @@ E1 ships the WRITE side (dated points/events in the graph). Read-side decoration
 **Step 3 — Extend `OUTPUT_CONTRACT`** with `"when"` (points) and `"startedAt"` (events) per D3. Add the D3 emission-rule paragraph to `S2_TMPL` (via the `{date_anchor}` block, which for S2/S4 renders the D2+D3 text combined) and to `S4_TMPL`. Update `render_s2_prompt(master=None, session_date=None)` and `render_s4_prompt(story, search, embed_list, master=None, session_date=None)` and `run_s2`/`run_s4` to take and render `session_date`.
 
 **Step 4 — `execute_embed` gains `session_date` and normalizes output:**
+
 - Signature: `execute_embed(embed_list, search, *, session_id, story_arc="", summary="", extractor_version="value@0.5.0+v2", master=None, session_date: str | None = None)`.
 - Events loop (~line 1108): `started_at = str(ev.get("startedAt") or "").strip(); if not started_at and session_date: started_at = session_date; if started_at and _valid_iso_date(started_at): payload event gains "started_at": started_at; elif started_at: warning "event startedAt not a valid ISO date → dropped"`.
 - Points loop (~line 1140): `when = str(p.get("when") or "").strip(); if when and _valid_iso_date(when): payload point gains "when": when; elif when: warning "point when not a valid ISO date → dropped"`.
@@ -124,6 +137,7 @@ E1 ships the WRITE side (dated points/events in the graph). Read-side decoration
 **Intent:** Layer-1 validation accepts the new date fields (extra="forbid" would otherwise reject dated payloads) and the server persists event dates.
 **Acceptance:** `validate_payload_dict` passes payloads with AND without `when`/`started_at`; commit-path Event nodes carry `startedAt`.
 **Files:**
+
 - Modify: `tortoise/commit_schema.py` — `Point` (~218), `CommitEvent` (~330)
 - Modify: `tortoise/hosted_api.py` — extracted-occurrences block (~3805)
 - Test: `tests/test_extractor_v2.py` (schema assertion) or `tests/test_ingest_validation.py`
@@ -138,6 +152,7 @@ E1 ships the WRITE side (dated points/events in the graph). Read-side decoration
 **Intent:** The eval harness actually hands the dataset's session date to the extractor and writes the resulting dates onto nodes.
 **Acceptance:** A dated haystack session produces graph Points with `when` and Events with `startedAt`; an undated session writes neither (E2E-4 negative).
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest_v2.py` — `_write_payload` (73), `ingest_haystack_v2` (179)
 - Test: `tests/test_longmem_runner.py` (extend the #1369 v2-ingest test at ~661)
 
@@ -150,6 +165,7 @@ E1 ships the WRITE side (dated points/events in the graph). Read-side decoration
 **Intent:** Production `commit_session` sessions get date-anchored extraction (default = capture time).
 **Acceptance:** `commit_session` passes a `session_date` (ISO now by default) through to `extract_session_v2`; explicit `session_date=` is honored.
 **Files:**
+
 - Modify: `tortoise/sdk.py` — `commit_session` (1523), `_commit_session_v2` (1567)
 - Test: `tests/test_sdk_group3.py` or `tests/test_capture_session.py`
 

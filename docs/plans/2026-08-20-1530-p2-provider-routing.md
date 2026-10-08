@@ -133,6 +133,7 @@ Classification table (must be exhaustively unit-tested):
 | Non-HTTP anything else (parse errors, KeyError on body) | `UNKNOWN` → TRANSIENT-safe | fail-safe: allow one retry/failover; M3 caps retry count |
 
 Consumer wiring (owned by M2/M3 issues, contract fixed here):
+
 - **M2 pre-flight:** pings each provider from `resolve_extractor_provider()`; probe failure classified — 402 → fatal with the billing-vs-cap message; uses `classify_llm_error`/`is_fatal`.
 - **M3 retry/backoff:** `extractor_v2._complete` (and eval `_call_with_backoff`) gate retries on `is_transient(exc)`; FATAL/FATAL_CONFIG abort immediately — no backoff burn.
 
@@ -141,7 +142,9 @@ Consumer wiring (owned by M2/M3 issues, contract fixed here):
 Ordered; each step independently verifiable.
 
 ### Step 1 — `tortoise/model_adapters.py` (new)
+
 Port from `tests/model_adapters.py`:
+
 - `OpenRouterModel` (provider="openrouter", OR URL + key; keyword-only `complete(*, system, user)`; `last_prompt_tokens`/`last_completion_tokens`/`last_cost` usage tracking).
 - `DeepSeekDirectModel(OpenRouterModel)` (provider="deepseek-direct", DS URL + key; bare model-id normalization).
 - `MODELS` registry (production copy: `deepseek-flash`, `deepseek-flash-direct`, `deepseek-v4-pro`, `deepseek-v4-pro-direct`, `deepseek-r1-xhigh`, `qwen3.8-max`, `claude-opus-5`, … matching the eval registry names).
@@ -151,9 +154,11 @@ Port from `tests/model_adapters.py`:
 - `build_extractor_model(model_id=None, *, max_tokens=4000, temperature=0.0)` → `RoutingModel` (production entry).
 
 ### Step 2 — `tests/model_adapters.py` → re-export shim
+
 Replace the class bodies with `from tortoise.model_adapters import OpenRouterModel, DeepSeekDirectModel, MODELS, ...` (keep module-level names + `OLLAMA_MODELS` unchanged). Eval harness smoke: `tests/eval_harness.py` / `tests/e018_harness.py` import it.
 
 ### Step 3 — `tortoise/sdk.py`
+
 - Rewrite `_model_adapter` body: `RoutingModel` via `build_extractor_model(model_id, max_tokens=max_tokens, temperature=temperature)`. Signature unchanged. Lenient build (D3).
 - `_extract_session_v2` gate: mock seam OR `resolve_extractor_provider() is not None` (DEEPSEEK/OPENROUTER only); remove `OPENAI_API_KEY`; message names `TORTOISE_EXTRACTOR_PROVIDER` + valid keys.
 - `_extract_session_v2` build: unchanged call shapes (configured override capped 4000; default `"deepseek/deepseek-v4-flash"` uncapped) — both route internally now.
@@ -161,29 +166,35 @@ Replace the class bodies with `from tortoise.model_adapters import OpenRouterMod
 - `capture_session` (sdk, ~1846): unpack tuple; response `"extraction_mode": f"llm:{meta['route']}"`, `"extraction_provider": meta["provider"]`.
 
 ### Step 4 — `tortoise/hosted_api.py`
+
 - `capture_session` (~3548): unpack `(extracted, meta)`; wrap `_extract_session_v2` in `try/except ValueError` → HTTP 503 with the gate message (D3 divergence handling).
 - Response: same `extraction_mode`/`extraction_provider` shape as the SDK path (parity).
 
 ### Step 5 — `tools/longmem_eval/run.py`
+
 `--ingest-mode v2` model selection: keep `--extractor-model` explicit override (registry lookup, unchanged); unset case delegates to the production router (`build_extractor_model`) — delete the bespoke env branch. `extractor_model` becomes optional; `run_evaluation` unchanged.
 
 ### Step 6 — env docs
+
 `.env.example` entries deferred by scope ("P4 adjacency; fold in later") — do NOT touch in this issue. The three vars (`TORTOISE_EXTRACTOR_PROVIDER`, `TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN`; `TORTOISE_EXTRACT_MODEL` exists) are documented in the module docstring.
 
 ## Tests
 
 ### Unit — taxonomy (`tests/test_model_adapters_taxonomy.py`, new)
+
 - Every status code in each frozenset → its class (parameterized).
 - Unknown 4xx → `FATAL_CONFIG`; unknown 5xx → `TRANSIENT`.
 - `requests.HTTPError` (status 401/402/403 → FATAL; 429 → TRANSIENT), `urllib.error.HTTPError`, `requests.ConnectionError`, `requests.Timeout`, `socket.timeout`, generic `Exception` → UNKNOWN, plain `TimeoutError` → TRANSIENT.
 - `is_transient`/`is_fatal` boolean contract per class.
 
 ### Unit — routing (`tests/test_model_adapters_routing.py`, new)
+
 - `resolve_extractor_provider` full D2 table (explicit, inferred, invalid value, key-absent fail-closed).
 - Model-id normalization: direct sends bare id, openrouter sends family-prefixed (monkeypatched `requests.post`, assert body["model"] and URL).
 - `RoutingModel`: primary raises ConnectionError → fallback called, `last_route` = fallback, `failover_used=True`; primary raises `HTTPError` 401 → exception propagates, **fallback never called**; sticky (second `complete` still on fallback); cooldown (primary skipped while in cooldown; `cooldown_s=0` disables).
 
 ### Integration — capture path (`tests/test_capture_session.py` additions + `tests/test_session_extraction_modes.py` additions)
+
 - **Gate match:** `OPENAI_API_KEY` alone → `_extract_session_v2` raises ValueError with the routing message (was: gate passed). `DEEPSEEK_API_KEY` alone → direct adapter used (assert request URL). `TORTOISE_EXTRACTOR_PROVIDER=deepseek-direct` with only OPENROUTER key → ValueError.
 - **Hosted 503 conversion:** openai-only key + v2 default extractor → HTTP 503 (clean fail-closed), not 500.
 - **Route recording:** capture response has `extraction_mode == "llm:deepseek-direct"` (or `"llm:openrouter"` per env) + `extraction_provider`.
@@ -191,6 +202,7 @@ Replace the class bodies with `from tortoise.model_adapters import OpenRouterMod
 - **Regression pins (must stay green):** `test_capture_session_v2_default_adapter_is_uncapped` (call shape + uncapped), `test_capture_session_v2_extract_model_override_stays_capped`, `TestModelAdapterBounds` (no-key lenient build, body model id), `test_provider_key_parity_all_keys`, `test_sdk_and_hosted_availability_agree`, `test_no_tests_imports_in_production`, `test_provider_availability`/`test_provider_availability_mock_seam`.
 
 ### Eval shim smoke
+
 - `tests/eval_harness.py` / `tests/e018_harness.py` imports resolve via the shim; `tools/longmem_eval/run.py --ingest-mode v2 --mock` still starts (no network).
 
 ## Cross-lane interfaces

@@ -8,6 +8,7 @@
 > Verified against source 2026-08-26.
 
 **Verdict — Family 2 (SERVER-AUTHORITY) as the core**, combined with:
+
 - **Family 4 C2 invariant** ("identity flows never write `teams.email`") as a
   hard rule enforced by construction + a guard test; the C1 demotion is a
   probe-gated contingency with the consumer map already inventoried (§11).
@@ -94,6 +95,7 @@ check-and-delete a single server-side critical section.
 ## 3. Rejected alternatives — when each WOULD have been better
 
 ### Family 1 (client-first) — rejected as primary
+
 - **Would have been better:** if linking were a non-security-critical
   experiment (internal tool, no real accounts) and the team accepted
   client-dominant gates + zero audit. Also if the codebase had no service-role
@@ -106,6 +108,7 @@ check-and-delete a single server-side critical section.
   behind an ops gate).
 
 ### Family 3 (data-plane) — rejected as primary
+
 - **Would have been better:** if P2 linking were dropped entirely and the
   profile were read-only — a `SECURITY DEFINER` view over `auth.identities` +
   RLS `auth.uid()` + a `has_password()` function is genuinely simpler than a
@@ -116,6 +119,7 @@ check-and-delete a single server-side critical section.
   endpoint is a thin wrapper.
 
 ### Family 4 C1 (schema-first demotion) — rejected as default, kept as contingency
+
 - **Would have been better:** if the falsification probes had ALREADY
   confirmed real multi-team/one-identity demand. The `user_emails` mirror is
   the correct long-term model — one queryable, RLS-able identity fact store,
@@ -160,6 +164,7 @@ password-reset away from lockout; keys don't fix that. Documented in the UI
 copy, not just the code.
 
 **Honesty guardrails:**
+
 - The profile's identity list reads `auth.identities` via the RPC — **never**
   `teams.email` (a team attribute can differ from identity emails; `reg-*`
   identities exist without `auth.users` rows, C15).
@@ -216,6 +221,7 @@ api_keys(created_by, C10-filtered)                                 (keys tier)
 
 **`GET /v1/user/identity`** (session-authed via existing `get_current_user`;
 registry/selfhost mode → `{"unsupported": true}` — `claim_status` precedent):
+
 ```json
 {
   "username": "daniel" | null,
@@ -227,12 +233,14 @@ registry/selfhost mode → `{"unsupported": true}` — `claim_status` precedent)
   "linking_enabled": false
 }
 ```
+
 `linking_enabled` mirrors an ops-controlled env flag (`TORTOISE_MANUAL_LINKING_ENABLED`)
 that is flipped together with the GoTrue setting; P1 always returns the env
 value (false default), P2 hard-gates on it and additionally fails closed on any
 422 leaked by GoTrue.
 
 **`POST /v1/user/username`** — two-phase with compensation:
+
 1. `reserve_username` RPC: validate `^[a-z0-9_]{3,30}$` → INSERT into
    `public.user_usernames` (unique index → `username_taken`, mapped to 409;
    invalid → 422). The INSERT is the atomic claim — the unique index is the
@@ -277,6 +285,7 @@ precedent for tab-scoped render blocks.
 ### 6.3 P2 key flows (design locked now, shipped gated)
 
 **Add OAuth (GitHub/Google):**
+
 1. User clicks "Add GitHub login" → client re-auth challenge (password prompt,
    or an OAuth re-login round for passwordless accounts) → fresh access token.
 2. `POST /v1/user/identity/link-intent {provider}` with the fresh token →
@@ -298,6 +307,7 @@ precedent for tab-scoped render blocks.
 NOT OTP-sign-in (which would sign the user into whichever account owns the
 email — account-confusion vector) and NEVER admin-create (C6 — no
 `auth.users` INSERT, so the `handle_new_user` placeholder never fires):
+
 1. Fresh-iat gate (same as link-intent) → client `updateUser({email})` →
    GoTrue change-email confirmation (the C2 verified-email gate; confirmations
    enabled, config.toml:249).
@@ -310,6 +320,7 @@ email — account-confusion vector) and NEVER admin-create (C6 — no
    `has_password` — documented and tested either way.
 
 **Unlink (the race-closing design):**
+
 ```
 [tab A] POST /v1/user/identity/unlink {identity_id}   [tab B] same, concurrent
         │                                                       │

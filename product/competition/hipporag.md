@@ -309,12 +309,14 @@ From SEEM (arXiv:2601.06411v2, Feb 2026), Table 1:
 **Sources checked:** GitHub open/closed issues (all, via API), repo README, the two papers' own error-analysis appendices, third-party papers that benchmark against HippoRAG 2, Perplexity-surfaced discussion. ⚠️ No review-site presence (no G2/Capterra/Product Hunt) — research OSS, so none expected.
 
 **What users praise:**
+
 - The PPR-over-open-KG formulation itself — clean enough that competitors cite it as "elegant" (issue #178: "The clean PPR-over-KG formulation is elegant, and the OpenIE pipeline + index-build flow has been very useful as a reference").
 - Offline cost discipline vs GraphRAG/LightRAG (9.2M input tokens vs 68.5M/115.5M on the same corpus).
 - Runnable docs — multiple providers, vector stores, local vLLM paths out of the box.
 - Benchmark credibility — it is the baseline others must beat in the memory space.
 
 **What users complain about:**
+
 - **PPR-only ranking underperforms plain cosine in realistic settings.** Issue #154: "Since HippoRAG relies mainly on triple-level similarity, it tends to retrieve these conceptually close but evidence-poor passages… Overall, its performance is even worse than standard vector retrieval." Issue #178's ablation quantifies it (0.565 PPR-only vs 0.819 cosine, HotpotQA dev).
 - **Triple filter removes the right answer.** The authors' own error analysis: after LLM triple filtering, 26% of failed samples matched no phrase from the supporting documents; 18% were left with **zero** triples; in 8% the matched-phrase proportion *decreased* after filtering. One worked example in the paper shows the filter returning an **empty** list for a query whose five retrieved triples all contained supporting-passage phrases.
 - **Corpus-density sensitivity** — HippoRAG assumes roughly uniform information density across passages; it does not handle "some passages are complete, others just list entity names."

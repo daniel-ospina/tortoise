@@ -29,14 +29,17 @@ Build the hosted platform's transactional email path (Resend) for exactly two no
 ## Verification Gates
 
 ### problem-verify — 1 cycle, clean (0 P0/P1)
+
 - Cycle 1: Verifier A P0=0 P1=0 P2=3 P3=1 · Verifier B P0=0 P1=0 P2=2 P3=1 P4=1
 - Controller: Pass (pass-through rule). 6 amendments incorporated: send-mechanism divergence recorded; per-notification delivery profiles (invites best-effort+logging / recovery must-arrive); failure-mode contract carried (render/bounce/rate-limit/timeout + #801/#885 rate-limit headroom); test anchor for notification 2 (delivery via resend.dev + single-use/expiry + anti-enumeration); boundary per-invitee-type branch; assumptions count reconciled (13).
 
 ### solution-verify — 1 cycle, clean (0 P0/P1)
+
 - Cycle 1: Verifier A P0=0 P1=0 P2=4 P3=4 P4=3 · Verifier B P0=0 P1=0 P2=3 P3=4 P4=1
 - Controller: Pass (pass-through rule). 10 amendments incorporated: pepper source = existing `TORTOISE_SECRET_PEPPER`; consume-order fixed (fail-prone validation BEFORE atomic rowcount-gated consume); uniform 503 when sender config-missing (no silent skip); per-replica bucket multiplier documented (accepted; shared store = follow-up); TTL 15→30 min; dashboard manual-share fallback; recover_code URL strip parity; no-email-session + timing-oracle branches specified; multi-replica no-duplicate paragraph; invite idempotency key `invite:{token_hash}`.
 
 ### Coherence check — 2 cycles (max honored); qwen3.8-max unavailable
+
 - **`[QWEN-GATE]` qwen3.8-max was unavailable** (provider 401 blocked API key) — the coherence review ran with the default fresh-context reviewer as fallback.
 - Cycle 1: P1×2 (manual-share fallback source undefined; env-gated silent skip in hosted mode), P1 research (domain verification absent), P2×5, P3×3, P4×1 → all fixed.
 - Cycle 2: P1×1 (TTL split 15 vs 30 min across sections) + propagation gaps (503 contract contradictions, idempotency-key format, semaphore wording, pepper deploy confirmation, UA claim, folded-endpoint decision log) → all fixed by controller. No 3rd cycle (max-2 rule); residual risk documented.
@@ -47,6 +50,7 @@ Build the hosted platform's transactional email path (Resend) for exactly two no
 Full task-by-task plan: `docs/scoping/2026-08-13-307-email-notifications-scope.md` (9 tasks).
 
 **Approach (chosen):** A — in-API Python monolith, with refinements from C.
+
 - New `tortoise/email_notify.py` mirroring `notify.py` (httpx POST `https://api.resend.com/emails`, Bearer, User-Agent, `timeout=15.0`, `raise_for_status`, `_env`/`_skip_channel` env-gating, `redact_safe` logging).
 - Two profiles: `send_invite_email` (best-effort; `asyncio.create_task` + task registry drained at `_lifespan` shutdown; 0.5s transient retry; `Idempotency-Key: invite:{token_hash}`; redacted WARNING + `email_status` on failure) and `send_recovery_link` (awaited; retry 0/0.5/2/8s transient-only — 429/408/502/503/504/timeout/network; 4xx never retried; `Idempotency-Key: recovery:{code_hash}`; 5xx on exhaustion).
 - Sender-config contract: `unconfigured` ≠ `failed`; recovery endpoint returns **uniform 503** when config-missing (enumeration-free, loud deploy gate); invites mint succeeds with `email_status: "unconfigured"` + dashboard manual-share fallback; silent env-gated skip only in local/dev.
@@ -76,6 +80,7 @@ Full task-by-task plan: `docs/scoping/2026-08-13-307-email-notifications-scope.m
 No Pass-A (human-required) questions survived the research-first pass — all specified or researchable.
 
 ### Deferred to Research (Pass B → answered in Phase 1.5)
+
 - Invite email UX/destination pattern (link vs code, landing) *(Impact 7)*
 - Key-email security pattern (link-based recovery) *(Impact 9)*
 - Unknown-recipient handling / anti-enumeration *(Impact 6)*
@@ -93,11 +98,13 @@ No Pass-A (human-required) questions survived the research-first pass — all sp
 ### Axis Research
 
 **Architecture (medium):**
+
 - *canonical* — Resend API: `POST https://api.resend.com/emails` (Bearer `re_` key; User-Agent documented required — verify against live billing sender, notify.py sends none today; 10 req/s/team; Idempotency-Key header 24h/256 chars; test addresses `delivered|bounced|complained|suppressed@resend.dev`; webhooks `email.bounced|delivered|delivery_delayed|complained` at-least-once with svix-id dedup, retry 5s→10h; `GET /emails/{id}` → last_event; domain verification DNS TXT/SPF/DKIM, subdomain recommended) — resend.com/docs.
 - *competitor-precedent* — DVARA flightdeck: durable delivery record + idempotency + exponential backoff (30s→120s ×5) + DLQ + `log` transport for dev/CI; Courier: ESP + thin internal layer (template registry, suppression, retries) is where most systems land — dvarahq.com, courier.com.
 - *pitfalls* — photonconsole: provider 200 ≠ delivered; spam-folder routing invisible to SMTP metrics; retry 4xx vs 5xx distinction (retrying 5xx burns reputation); fixed-interval retry storms under throttle; greylisting delay vs token expiry — photonconsole.com; courier.com deliverability baselines (98-99% delivered, hard bounce <0.5%, complaints <0.3%).
 
 **UX (medium):**
+
 - *competitor-precedent* — securepatterns.dev "Designing a Safe Team Invitation Flow": token = proof of link possession, NOT email verification; accept requires independently verified identity; POST-only accept (GET side-effect-free); unauthenticated accept → 401; session email-match guard; 7-day member / 24-48h admin TTL; CSPRNG ≥256-bit; SHA-256(token) stored; per-token/IP/global rate limits; Referrer-Policy no-referrer; link host from config never Host header; revoke supersedes pending. viprasol.com: Resend sendInvitationEmail with token-in-URL + separate accept flows new/existing users. skycloak.io: manual accept required for all auth types.
 - *pitfalls/adversarial* — OWASP Forgot-Password Cheat Sheet: never send password/key in email; URL token single-use/time-limited/hashed; per-account 3-5/hr + per-IP 5-10; identical response known/unknown (incl. timing); HTTPS; noreferrer; link host from config. guptadeepak.com CIAM compass: recovery flows probed before login; 5/hr/account + 50/hr/IP; unverified-email recovery = ATO vector. ttl.space / LinkPilot / PrivateNote: email creates durable searchable copies; one-time burn-after-read link + passphrase via second channel is the strongest simple pattern; scoped+expiring keys limit blast radius.
 
@@ -110,6 +117,7 @@ No Pass-A (human-required) questions survived the research-first pass — all sp
 **Dependency:** none new at runtime. Reuses `httpx>=0.27` (pyproject.toml:19; pinned `httpx==0.28.1`). **Plain httpx, not the `resend` Python SDK (v2.35.0, MIT, py≥3.7, async via httpx extra)** — notify.py:66-74 ships the exact pattern in production; the SDK adds a dep for a one-POST surface with no async/retry value we don't implement ourselves. No jinja2 (in-repo string templates, html.escape'd).
 
 **Resend API surface (verified 2026-08-13, resend.com/docs):**
+
 - `POST https://api.resend.com/emails` — Bearer `re_<key>`; User-Agent documented REQUIRED (403 without) — verify against live billing at implementation (notify.py sends httpx default UA and works); body `from`/`to[]` (max 50)/`subject`/`html`/`text`/`reply_to`/`bcc`/`cc`/`tags`/`template{id,variables}` (hosted templates rejected: unversioned); response `200 {"id": …}`.
 - Rate limit 10 req/s per TEAM (all keys share) — concurrency cap + retry-on-429 (transient-only budget).
 - `Idempotency-Key` header: 24h expiry, 256 chars — used on both profiles.
@@ -169,24 +177,29 @@ No Pass-A (human-required) questions survived the research-first pass — all sp
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1 (PASS)
+
 - Verifier A: P0=0, P1=0, P2=3, P3=1 · Verifier B: P0=0, P1=0, P2=2, P3=1, P4=1
 - Controller: pass-through (P2+ only) → 6 amendments incorporated. No re-dispatch needed.
 
 ### solution-verify — Cycle 1 (PASS)
+
 - Verifier A: P0=0, P1=0, P2=4, P3=4, P4=3 · Verifier B: P0=0, P1=0, P2=3, P3=4, P4=1
 - Controller: pass-through → 10 amendments incorporated. No re-dispatch needed.
 
 ### Coherence — Cycle 1 (2 P1s → fixed → re-run)
+
 - P1-1 manual-share fallback source → fixed (token from POST /v1/invites response; invariant restated to only-AUTOMATED).
 - P1-2 env-gated silent skip in hosted mode → fixed (sender-config contract: uniform 503 recovery / email_status invites / local-dev skip only).
 - P1-3 domain verification absent → fixed (Task 8 pre-deploy GET /domains probe). P2×5/P3×3/P4×1 also fixed.
 
 ### Coherence — Cycle 2 (1 P1 → fixed; max cycles honored)
+
 - P1 TTL split (15 vs 30 min) → unified to 30 min across §1/§3/Task 4/Task 5/§7.
 - Propagation gaps (503 contract contradictions; idempotency-key format `invite:{token_hash}`; semaphore wording; pepper deploy confirm; UA claim softened; folded-endpoint decision log; re-mint invalidates prior code) → all fixed by controller.
 - No 3rd cycle (max-2 rule). Post-fix grep confirms internal consistency.
 
 ### Phase 7 — Parallel Review (logged)
+
 Per session instruction, the two diamond verification gates + the 2-cycle coherence review served as the fresh-context review cycle for Phase 7 (each dispatched fresh `task` sessions, independent conclusions, controller tiebreak). No additional 4-agent dispatch; exit conditions met: all gates passed with 0 P0/P1; 2 re-review cycles completed for the coherence gate; cycle log posted here.
 
 ## Complexity

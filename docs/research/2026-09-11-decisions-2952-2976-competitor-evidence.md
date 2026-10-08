@@ -88,6 +88,7 @@ lever here — a **cross-encoder rerank** — is exactly what Hindsight does **b
 that its cost is the industry norm rather than an exotic add-on.
 
 **Reading**
+
 - Add a **temporal retrieval leg** (window parse → overlap → semantic rank → spread) for the
   window/relative-date class; our TR machinery has the intent but no leg (it is inert 0/55).
 - Budget by **tokens, not item counts** — fixes #2978's measurement *and* matches the field.

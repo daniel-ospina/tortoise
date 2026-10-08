@@ -55,6 +55,7 @@ The horizon is **path-dependent** — re-derived from the code, not the issue bo
 | **Second-region mirror** (shipped, `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only `s3 sync`; the sweep never deletes mirror objects) | `docs/ops/registry-backup-dr.md`; `backup_config.mirror_enabled=False` |
 
 **Corrections to the issue body's diagnosis (the body is a hypothesis, verified against code):**
+
 1. The issue says `retention_weekly = 4` makes "permanently erased — including any stored
    backup copies" **false**. For the **primary** store on the **graph** path this is **not**
    the case. The genuine residuals are the **team-account** path (all org pools survive),
@@ -120,10 +121,12 @@ activation rule**.
 ## Implementation plan
 
 ### 1. New `tortoise/retention.py` — the window authority
+
 Leaf module, no imports. `RESTORE_WINDOW_DAYS = 7`, `RESTORE_WINDOW_HOURS = 168`. Docstring
 points at `docs/retention-and-deletion.md`.
 
 ### 1b. New `docs/retention-and-deletion.md` — the canonical document
+
 Author the document with: the reconciliation table (the path-dependent horizon above); the
 **rule** ("any file that states a window links here or is a named implementation constant");
 the **named constants** (`retention.RESTORE_WINDOW_DAYS` = sole window authority;
@@ -134,6 +137,7 @@ privacy/dpa text, pending owner approval). Register in `docs/00_index.md`; cross
 `docs/data-safety.md`.
 
 ### 2. Derive every path from it
+
 - `tortoise/backup_sweep.py`: `_GRAPH_PURGE_GRACE_DAYS = RESTORE_WINDOW_DAYS` (was `= 7`).
 - `tortoise/hosted_api.py`: module constants `TEAM_DELETE_GRACE_HOURS` and
   `USER_ACCOUNT_DELETE_GRACE_HOURS` from `retention`; both env reads
@@ -145,8 +149,10 @@ privacy/dpa text, pending owner approval). Register in `docs/00_index.md`; cross
 - `tortoise/sdk.py`: add the doc pointer beside the 30-day event-retention default.
 
 ### 3. Tests — `tests/test_retention_promise.py` (NEW)
+
 Registered in `config/ci-surfaces.yml` under **`api` + `core` + `onboarding`**. No
 `select_graph` literals → no `ROUTED_SELECT_GRAPH_SITES` entry.
+
 - `test_restore_window_constants_agree` — asserts the unit-normalized equality
   `backup_sweep._GRAPH_PURGE_GRACE_DAYS * 24 == retention.RESTORE_WINDOW_HOURS ==
   hosted_api.TEAM_DELETE_GRACE_HOURS`; the `USER_ACCOUNT_DELETE_GRACE_HOURS` equality is
@@ -174,7 +180,9 @@ Registered in `config/ci-surfaces.yml` under **`api` + `core` + `onboarding`**. 
   `docs/event-catalog.md`. The issue's own plan doc is allowlisted with reason.
 
 ### 4. Update the existing tests the new default breaks
+
 `tests/test_export_delete.py` — **six** sites:
+
 - `test_delete_cascade` (`grace_hours == 24` ×2) → derived window;
 - `test_delete_cascade_registry` (`rows[0][1] == 24`) → derived window;
 - module docstring line 6 ("24h grace") → 7-day, and the prose comment at ~L857 ("a 24h
@@ -186,6 +194,7 @@ Registered in `config/ci-surfaces.yml` under **`api` + `core` + `onboarding`**. 
 The `grace_hours == 0` env-override case is unchanged.
 
 ### 5. Point the scattered places at the doc
+
 Add a one-line reference to `docs/retention-and-deletion.md` in the surveyed places, and let
 the scan (step 3) be the completeness authority. Enumerated floor:
 `tortoise/{backup_sweep,backup_config,hosted_api,sdk,supabase_control,hosted_backup}.py`;
@@ -200,6 +209,7 @@ Unrelated numbers (invite/session-cookie expiry, price-notice 30 days, API-key 3
 login-session 24h key) are allowlisted **with a reason**, never silently.
 
 ### 6. Privacy + DPA wording — DRAFTED, OWNER-GATED
+
 `website/privacy.html` §6 **and `website/dpa.html`** (the same unbounded phrase) are fixed in
 one **owner-gated wording commit** (drafted in `docs/retention-and-deletion.md` §"Proposed
 public wording", applied to the pages, with the step-3 privacy test). **⛔ Do not merge/publish
@@ -208,6 +218,7 @@ commits are independent; the owner may approve-and-merge, or drop the wording co
 privacy test with it) and merge the rest.
 
 ### 7. Follow-up
+
 File the team-cascade widening (D5): purge **all** org backup artifacts (default + custom
 nested pools + ops state) and custom-graph namespaces on team purge; link from the doc.
 
@@ -227,13 +238,17 @@ nested pools + ops state) and custom-graph namespaces on team purge; link from t
 | user-account window | doc pin | recorded + documented (support-operated; no code path today) |
 
 ### RED evidence protocol
+
 Create `tortoise/retention.py` (step 1), write the test file (step 3), and run **before**
 step 2:
+
 ```
 uv run pytest tests/test_retention_promise.py tests/test_export_delete.py \
   -k "retention or delete_cascade or purge" --import-mode=importlib
 ```
+
 Three-stage sequence (so RED is recorded for the right reason):
+
 1. **After steps 1+3, before step 2** — RED is the missing-symbol failure
    (`ImportError`/`AttributeError`) in `tests/test_retention_promise.py`. The
    `test_export_delete.py` sites still **pass** (env default is still `24`).
@@ -243,6 +258,7 @@ Three-stage sequence (so RED is recorded for the right reason):
 3. **After step 4** — GREEN.
 
 ## Acceptance criteria
+
 - [ ] 0 disagreeing windows across the three paths (constants-agree test green; user path = doc pin)
 - [ ] 1 canonical document (`docs/retention-and-deletion.md`), registered in the index
 - [ ] 0 unlinked numeric retention claims outside it (recursive scan green)

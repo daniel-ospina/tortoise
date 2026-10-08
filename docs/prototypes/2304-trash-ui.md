@@ -65,6 +65,7 @@ Restore "old-bot"?
   Rename or delete the live "old-bot" first, then restore again.
                  [Done]
 ```
+
 (No auto-rename in v1 — keep it deterministic; rename is a future item.)
 
 **Purged (raced the 7-day clock):** restore is refused by the server (410);
@@ -103,6 +104,7 @@ Longer variant (if inline space allows a modal later — not in v1):
 
 > **Delete "old-bot"?**
 > This moves the graph to your team's Trash.
+>
 > - API keys are revoked immediately (permanent — you'll mint new ones if you
 >   ever restore).
 > - You can restore the graph for the next **7 days**.
@@ -115,28 +117,37 @@ Longer variant (if inline space allows a modal later — not in v1):
 ## 5. Copy blocks — FOR APPROVAL
 
 ### 5a. Delete confirm (inline) — EN
+
 "Delete \"{name}\"? Keys are revoked now. The graph goes to Trash, where you can restore it for 7 days — then it and its backups are permanently erased."
 
 ### 5b. Trash section heading — EN
+
 "Trash (N) — deleted graphs are kept 7 days, then permanently erased"
 
 ### 5c. Restore modal title/body — EN
+
 "Restore \"{name}\"?" / "This brings the graph back as active with its data intact. Its API keys stay revoked — you'll mint fresh keys after restoring. Available: {n} days left of the 7-day recovery window."
 
 ### 5d. Name-conflict notice — EN
+
 "Two active graphs can't share a name. Rename or delete the live \"{name}\" first, then restore again."
 
 ### 5e. Rescue panel — EN
+
 Heading "Inspect \"{name}\""; body rows "Deleted: {date} · erases in {n} days", "Backups kept: {n}", "Latest backup: {date} · {nodes} nodes / {edges} edges"; footnote "After 7 days, the graph and its backups are permanently erased."
 
 ### 5f. Success note after restore — EN
+
 "\"{name}\" restored. Mint fresh keys for it under Keys."
 
 ### 5g. Erasure/410 — EN
+
 "This graph was permanently erased after its recovery window."
 
 ### 5h. Privacy-page copy (draft, website/privacy.html §6/§16 touch) — EN
+
 Replace permanent-delete phrasing with:
+
 - "Deleting a knowledge graph moves it to a 7-day recovery window (Trash). During that window you can restore it; API keys are revoked immediately. After 7 days the graph is permanently erased, including any stored backup copies. We do not keep deleted graphs beyond the recovery window except as required by law or for fraud/security investigations."
 (Owner decision recorded: GDPR basis = disclosed contractual window + restore-time re-erasure; counsel review of §16 remains the mandatory gate.)
 

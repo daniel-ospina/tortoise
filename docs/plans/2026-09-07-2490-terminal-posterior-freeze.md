@@ -10,9 +10,11 @@
 **Architecture:** Terminal claims never re-enter EP → their posterior pins at the pre-terminal value (0.904 repro). Fix = write-side vacuity decay appended to the 4 live terminalizing SETs (retract/supersede/invalidate/assess_source) AND the rebuild-fold SETs (_retract, _fold_point_superseded — closing the capture-lane retraction + rebuild replay), plus a shared terminal predicate (status vocab OR outdated=true — reuse live.py `_terminal_excluded` composition) applied to every contested computation (annotate, GraphRanker, StateRanker/GapsRanker, get_contested_claims, Q2-crit queries + Python assembly, sdk `_review_prune`).
 
 ### Pattern Research
+
 Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (live.py:42-55 `_terminal_excluded`, TERMINAL_EXCLUDED_STATUSES).
 
 ### Integration Surface Map
+
 | Surface | Layer | Notes |
 |---|---|---|
 | 4 live terminalizing SETs (sdk.py:4589-4596 retract CAS, 4511-4515 supersede, 4160-4163 invalidate, 18140-18144 assess_source) | unit | decay fragment appended, crash-atomic with status write. **assess_source rebuild non-durable: emits NO event (no fold) — assess-outdated claims resurrect flagless + frozen-posterior on rebuild_all. #2488 fixes this class for invalidate only; assess_source scoped out + follow-up (2nd-model P1)** |
@@ -31,6 +33,7 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Tech Stack:** Python 3.12, FalkorDB/Cypher.
 
 ---
+
 ## Tasks
 
 ### Task 1: Shared vacuity decay fragment + 4 live SETs
@@ -38,10 +41,12 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Intent:** Terminalizing writers neutralize the frozen posterior atomically with the status write.
 **Acceptance:** After retract/supersede/invalidate/assess_source terminalization, claim reads confidence=0.5, posterior (1,1); stable across dream; live behavior otherwise unchanged.
 **Files:**
+
 - Modify: `tortoise/live.py` (add VACUITY_DECAY fragment constant + shared terminal predicate — sdk.py already imports live.py:26; entities.py imports only datetime, so the fragment must NOT live in sdk.py — entities.py importing sdk would cycle)
 - Modify: `tortoise/sdk.py` (retract CAS :4589-4596 — the SET is at :4592-4593, DO NOT append at 4603-4608 which is the trailing #2422 comment block; supersede block :4511-4515; invalidate :4160-4163; assess_source older-set :18140-18144)
 
 **Steps:**
+
 1. Add the vacuity-decay fragment + alias-parameterized SET-clause builder ONCE in live.py: `VACUITY = (confidence=0.5, posterior_alpha=1.0, posterior_beta=1.0)` + `decay_clause(alias)` → `f"{a}.confidence=0.5, {a}.posterior_alpha=1.0, {a}.posterior_beta=1.0"`. Aliases: retract/supersede/invalidate use `n`; assess_source uses `p`. **Defined once in live.py — NOT 4 inline copies, NOT in sdk.py** (Task 2's projection/entities.py folds import from live.py without a cycle; a helper in sdk.py would force entities.py→sdk.py import = cycle via sdk.py:31 `from .projection import`).
 2. Append `decay_clause(alias)` to all four terminalizing SET clauses (crash-atomic with the status/flag write).
 3. Confirm ep_alpha/ep_beta remain untouched (prior history preserved; every coalesce reader prefers posterior_alpha first — verified). Re-scope the caveat precisely: "the only ep_alpha-ONLY reads are live-gated" refers to coalesce/posterior readers; the ep_alpha-only has_ep reader (GraphRanker :405-429) is NOT live-gated and is the bug surface — remediated in Task 3 step 6/9.
@@ -53,9 +58,11 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Intent:** Capture-lane retractions (api.py:103-106 → projection.apply → _retract) + rebuild replay also decay. Closes the fifth writer AND answers rebuild parity (post-rebuild terminal reads 0.5, not ep_alpha-coalesced 0.909).
 **Acceptance:** A superseded-then-rebuilt claim reads 0.5; capture-lane retraction decays.
 **Files:**
+
 - Modify: `tortoise/projection/entities.py:265` (_retract), `:308` (_fold_point_superseded)
 
 **Steps:**
+
 1. Append `decay_clause('n')` (live.py constant from Task 1 — import, don't re-inline) to both fold SETs (both use alias `n`, single SET — appends cleanly, idempotent on replay; pre-#2490 journals replay fine since decay constants need no journal fields).
 2. Run: `tests/test_pointsuperseded_rebuild.py tests/test_ep_terminal_ghost.py` — expect PASS.
 3. Commit: `git add -A && git commit -m "feat(projection): decay terminal posteriors in rebuild folds"`
@@ -66,6 +73,7 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Intent:** Decayed (1,1) has var 1/12 > 0.04 — WITHOUT this, every terminal flips to "contested" in include-terminal surfaces. One predicate everywhere (status IN TERMINAL_EXCLUDED_STATUSES OR coalesce(outdated,false)) — reuse live.py:42-55 `_terminal_excluded` composition as the single source of truth (search_engine.py:23's `_exclude_status_clause` must delegate, not duplicate).
 **Acceptance:** No contested computation lists a terminal claim (carve-out: `_review_prune`'s NAND-challenged branch :8833-37 stays status='live'-only per pre-existing #913 — acceptance scoped to the main contested scan); live unmeasured claims stay contested (pin intact); no circular imports; search_engine's terminal vocabulary DELEGATES to live.py (single source of truth).
 **Files:**
+
 - Modify: `tortoise/live.py` (terminal predicate usable in SELECT projections + expose TERMINAL_EXCLUDED_STATUSES for delegation)
 - Modify: `tortoise/search_engine.py` (annotate :1216/1265, `_exclude_status_clause` :20-22 DELEGATES to live.py, Q2-crit op_crit :1488-99 / op_support :1543, assembly :1590/:1613)
 - Modify: `tortoise/ranking.py` (GraphRanker :411-429, StateRanker :678-708, GapsRanker :991-1002)
@@ -74,6 +82,7 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 
 **Steps:**
 0. **Operationalize the single-source-of-truth delegation** (P2): search_engine.py:20-22 carries its own parallel TERMINAL_EXCLUDED_STATUSES tuple + WHERE composition used at 8+ sites — replace its vocab with live.py's frozenset import and make `_exclude_status_clause` delegate to live.py's fragment (acceptance check: grep search_engine.py for a second literal terminal vocabulary — must be none).
+
 1. Add `n.status, n.outdated` to the relevant SELECTs (GraphRanker/StateRanker/GapsRanker/_fetch_point_signals ranking.py:411-429 + siblings; annotate_ep_batch search_engine.py:1216/1265). Terminal rows → has_ep=False, contested=False.
 2. Gate has_ep by the terminal predicate in BOTH Q2-crit queries (op_crit :1486-1500, op_support :1523-1537 — the :1543 cite is a blank/comment line; has_ep projects at :1533). **Add `other.status, other.outdated` to BOTH query RETURN projections** (tuples unpack positionally at :1503-1505/:1539-1541 — classification of outdated/archived peers is unreachable until the columns are fetched) AND handle op_crit's fetch WHERE :1486 3-status literal via the delegated frozenset (else step 0's no-second-vocabulary grep fails there). **The Python-side assembly (:1590/:1613) filter must extend to the outdated FLAG/COLUMN, not just the status tuple** — a flag-outdated live-status peer is in no status-set member; only the column expresses it (and :1613's tuple must be the delegated live.py frozenset, per step 0's no-second-vocabulary grep). The aligned has_ep boolean is explicit: `(posterior_alpha IS NOT NULL OR ep_alpha IS NOT NULL) AND NOT terminal_predicate` — the status/outdated gate lives INSIDE the has_ep expression, same SELECT edit, because decay-written (1,1) is column-indistinguishable from measured (1,1). `_terminal_excluded` emits a WHERE fragment — add a negated-expression/WHERE-in-CALL adapter for the has_ep projection booleans (small adapter, not drop-in).
 3. get_contested_claims (ep.py:1156): terminal-predicate exclusion ONLY. **Do NOT add a has_ep gate** — test_agent_ops_supersede:169 pins that an unmeasured LIVE claim (Beta(1,1) fallback) MUST list as contested.
@@ -90,9 +99,11 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Intent:** Pin decay across every surface + reader.
 **Acceptance:** listed cases green.
 **Files:**
+
 - Modify: `tests/test_ep_terminal_ghost.py`
 
 **Steps:**
+
 1. Per-surface decay: retract/supersede/invalidate/assess_source → confidence 0.5 stable post-dream.
 2. Capture-lane retraction decay (EventAPI re-ingest path).
 3. Rebuild decay parity: supersede → rebuild → 0.5 (not 0.909); retract → rebuild → 0.5 (retract fold-decay shipped in Task 2 must not go untested).
@@ -106,9 +117,11 @@ Skipped — zero third-party deps. Prior: #2422 terminal exclusion machinery (li
 **Intent:** Document decay semantics; confirm the one-shot backfill.
 **Acceptance:** docs updated; #2500 scope note.
 **Files:**
+
 - Modify: `docs/ONTOLOGY.md` (EP one-liner: terminal claims read vacuous 0.5)
 
 **Steps:**
+
 1. ONTOLOGY EP section: one line — terminalized claims decay to vacuity (0.5, (1,1)); ep_alpha/beta retained as prior history. **Decay is UNIFORM across #2421 Case-1 restatement and Case-2 correction** (sound for the old either way — terminal; successor recomputes independently) — but no unsupersede path recovers the old's posterior; ep_alpha/beta retention is the SOLE recovery vector. State both in the one-liner (2nd-model P2).
 2. **#2500 backfill predicate MUST include outdated=true + legacy status='outdated' rows (not status-only)** — pre-existing flagged assessments are status='live'. Confirmed still needed for rows frozen pre-deploy (folds fire only on rebuild/event-replay). #2500's body ALREADY carries the correct predicate (status ∈ {retracted,superseded,outdated,archived,deprecated} OR outdated=true) — no edit needed; verify at implementation time.
 3. **Rebuild-parity scope + assess_source follow-up (2nd-model P1):** decay rides supersede/retract/invalidate folds only. assess_source emits NO event → its rebuild decay waits on a future assess-outdated fold event (parallel to #2488's PointInvalidated); the one-shot #2500 backfill covers EXISTING assess-outdated rows, but new assess-outdated claims between this merge and that fold still resurrect frozen on rebuild — accepted + tracked as a follow-up issue.

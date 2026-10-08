@@ -119,37 +119,48 @@ def find_cross_lens_matches(points, *, threshold=DEFAULT_THRESHOLD,
 ## Design Decisions
 
 ### D1 — New module `cross_lens.py` instead of growing `embeddings.py` or the extractor
+
 `embeddings.py` is shared search infra (`compute_embedding`/`search_points` consumed by `search_engine.py:871`, `session_indexer.py:411`, `projection/entities.py`, `hosted_api.py:100`) — it must not acquire cross-lens semantics. `cross_lens.py` is the #399 deliverable: isolated, recall-only, unit-testable with zero graph/API surface, and the natural home for #6306's verifier evolution. The extractor stays thin (cue-gate orchestration only).
 
 ### D2 — `embeddings.py` keeps backward compat (wrapper, not rewrite)
+
 `find_cross_source_matches` and `search_points` are public API consumed by tests (`tests/test_embeddings.py`, `tests/test_embeddings_filters.py`, `tests/test_tortoise_search.py`, `tests/test_search_engine_gaps.py`, `tests/test_session_semantic_search.py`) and `search_engine.py`. The refactor is a **bug fix** (singleton reuse) plus internal sharing — semantics stay identical. This is what makes "legacy tests unchanged" a meaningful backward-compat proof. Side benefit: model loads drop from per-call to once-per-process (measured: affected-file suite ~7.5 min → ~1 min).
 
 ### D3 — Threshold policy: default 0.40, `NEAR_DUPLICATE_THRESHOLD = 0.75`
+
 The issue spec proposed 0.75 — but the measured cross-vocab paraphrase band is **0.35–0.51** (e.g. the 0.448 pair), so 0.75 would find only near-duplicates and reproduce today's zero-cross-vocab result. 0.40 sits inside the target band with margin: above the noise floor (≤0.15) by 2.6×, and below the motivating pair (0.291) so **the boundary case stays a candidate-absent non-event** — topical similarity ≠ logical implication, and verification (not similarity) decides that. 0.75 is preserved as a named constant documenting the issue's original near-dup-only semantics. Thresholds are model-specific — documented in both module docstrings so a future model swap recalibrates.
 
 ### D4 — Lens derivation chain (lens → source → provenance.source_id → speaker → unknown)
+
 The root cause is that speaker is a **person** dimension, not a **lens** dimension (document points all say `speaker="document"`). The chain picks the most lens-y field present, in stable priority order: explicit `lens` (future), `source` (extractor conversation mode), `provenance.source_id` (document mode — provenance is built by `tortoise/api.py:17` and always carries `source_id`), then `speaker` as a last-resort identity (makes `lens_key=None` behave like the old speaker-keyed function when no lens metadata exists), then `"unknown"`. Unknown-lens pairs are cross-lens by construction (excluded only when both sides resolve identically).
 
 ### D5 — Cue-gate verifier, NOT similarity→IMPL
+
 Direct similarity→IMPL would fabricate epistemic structure: the 0.291 motivating pair is topically similar but neither implies nor refutes the other. IMPL/NAND edges feed EP belief propagation — an unverified IMPL would inflate confidence in both points. The existing cue-word regexes (`_SUPPORT`/`_REFUTE`, `extractor.py:19-22`) are the M0 semantic for *speaker-asserted* relations, so reusing them as the verifier is deterministic, zero-cost, and consistent with sequential-mode semantics. #6306 upgrades the verifier to the LLM without changing candidate generation.
 
 ### D6 — Candidate recording (`self._last_candidates`) = the #6306 integration point
+
 Similarity computation is the expensive part; re-running it inside the #6306 verifier would double the cost. Recording the raw candidates (post-similarity, pre-cue) on the extractor instance makes the LLM verifier a pure consumer of an existing list. No graph writes, no new API — just an attribute (`MockExtractor` currently has no `__init__`; the attribute is set at the top of `run()`).
 
 ### D7 — Degraded mode (embeddings optional, extraction never fails)
+
 Embeddings are explicitly optional infra (documented in `EmbeddingModel`'s docstring: "point creation and search must never depend on them"). Three degradation levels, all backward compatible:
+
 - ST missing, sklearn present → `_encode` TF-IDF, candidates flagged `degraded=True` → extractor still similarity-gates them via the cue-gate (code-review correction: pre-#399's TF-IDF path was similarity-gated too; the all-pairs cue-gate fired ONLY on exception).
 - ST **and** sklearn missing → `_encode`'s lazy sklearn import raises ImportError → propagates to the extractor's existing `except` → all-pairs cue-gate.
 - Any runtime failure → same `except` path.
 `test_mock_extractor_multi_source_fallback` (which forces ImportError via `builtins.__import__` patch) is the regression proof.
 
 ### D8 — Alternative C (DI verifier protocol) REJECTED
+
 A dependency-injection verifier protocol (abstract provider + registry) adds interface surface for a single in-repo consumer. YAGNI: the cue-gate is the deterministic verifier today; #6306 adds the LLM verifier via the documented `_last_candidates` contract. No DI needed to keep those two pluggable.
 
 ### D9 — Lazy `from tortoise.embeddings import _encode` inside `find_cross_lens_matches` (P0 subtlety)
+
 `test_mock_extractor_multi_source_fallback` patches `builtins.__import__` to raise on any module name containing `"embeddings"`. pytest imports test files alphabetically → `tests/test_cross_lens.py` runs before `tests/test_extractor.py` → `tortoise.cross_lens` is already cached in `sys.modules`. A **module-level** `from tortoise.embeddings import _encode` in cross_lens would therefore never re-execute under the patch: the extractor's `from tortoise.cross_lens import find_cross_lens_matches` becomes a cache hit (patched `__import__` sees `"tortoise.cross_lens"` — no `"embeddings"` substring — and does not raise), the real embedding path runs, the fallback test's text finds no matches, and the test fails. **The function-level lazy import is what trips the patch inside `find_cross_lens_matches` → ImportError → extractor fallback.** Verified by reading the current test's mechanics.
 
 ### D9b — Legacy test #12 (`test_sentence_transformers_path`) requires TWO inserted `_reset()` lines
+
 The test seeds `sys.modules["sentence_transformers"]` with a mock and asserts `mock_st.SentenceTransformer.assert_called_once_with("all-MiniLM-L6-v2")` + `mock_model.encode.assert_called_once()`. Under the singleton refactor, tests #1–11 (same file, same process) warm the singleton with the **real** model first, so test #12's mock is bypassed and both assertions fail. The fix is a 2-line change: `EmbeddingModel._reset()` before the mock seeding (the public test hook at `embeddings.py:69`) — after reset, the singleton is cold, the worker thread's import picks up the seeded mock, and both existing assertions pass unchanged — PLUS a second `_reset()` in the test's `finally` block so the mock-loaded singleton cannot poison later `search_points`/`_encode` callers in the same process. This is the ONLY legacy-test edit in the whole plan; the other 11 tests are byte-identical. (Note: the controller brief said "10 tests"; `tests/test_embeddings.py` actually contains 12 — this plan targets all 12.)
 
 ## Tasks
@@ -159,12 +170,14 @@ The test seeds `sys.modules["sentence_transformers"]` with a mock and asserts `m
 **Intent:** Fix the fresh-model-per-call bug and expose one shared deterministic encode path for all embedding consumers.
 **Acceptance:** `find_cross_source_matches` and `search_points` produce identical results to today (12 legacy `test_embeddings.py` tests green; 23 `test_embeddings_filters.py`; 16 `test_tortoise_search.py`; 128+4 `test_search_engine_gaps.py`+`test_session_semantic_search.py`); the SentenceTransformer is instantiated **at most once per process** (assert via test #12's mock after `_reset()`); `test_tortoise_search.py` runtime drops from ~116s toward <30s.
 **Files:**
+
 - Modify: `tortoise/embeddings.py` (add `_encode`, `cosine_similarity_matrix`; refactor `find_cross_source_matches`, `search_points`; extend module docstring with calibration table)
 - Modify: `tests/test_embeddings.py:234-273` (test #12: insert `EmbeddingModel._reset()` — the single documented legacy edit)
 
 **Step 1: Write the failing test (proves the bug) — a singleton-reuse regression test**
 
 Add to `tests/test_embeddings_filters.py` (or `test_cross_lens.py`):
+
 ```python
 def test_singleton_reused_across_calls():
     """#399: SentenceTransformer must be instantiated ONCE per process."""
@@ -179,7 +192,9 @@ def test_singleton_reused_across_calls():
         fake_st = fake_mod
         ...
 ```
+
 > Simpler deterministic variant (no sys.modules seeding): assert `EmbeddingModel._model is EmbeddingModel._instance._model` identity and that two consecutive `_encode` calls invoke the model's `encode` twice on the **same** object:
+
 ```python
 def test_singleton_reused_across_calls():
     from unittest.mock import MagicMock
@@ -241,10 +256,12 @@ def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
 ```
 
 **Step 6:** Run the full legacy regression battery:
+
 ```bash
 .venv/bin/python -m pytest tests/test_embeddings.py tests/test_embeddings_filters.py \
   tests/test_tortoise_search.py tests/test_search_engine_gaps.py tests/test_session_semantic_search.py -q
 ```
+
 Expected: all green (was 222 passed / 4 skipped). Sanity-check the runtime win on `test_tortoise_search.py` (~116s before → <30s after).
 
 **Step 7: Commit** — `feat(399): shared embedding encoder via singleton (fixes per-call 90MB reload)`.
@@ -254,6 +271,7 @@ Expected: all green (was 222 passed / 4 skipped). Sanity-check the runtime win o
 **Intent:** Provide recall-only cross-lens candidate generation — the missing lens dimension — as an isolated, graph-free, deterministically testable module.
 **Acceptance:** `find_cross_lens_matches` derives lens per the chain, excludes same-lens pairs, sorts by similarity desc, returns the exact candidate shape with `degraded` flags, honors injected `encode`, never imports EventAPI/graph modules; new `tests/test_cross_lens.py` green (deterministic fake-encode + one real-embedder e2e).
 **Files:**
+
 - Create: `tortoise/cross_lens.py`
 - Test: `tests/test_cross_lens.py`
 
@@ -346,6 +364,7 @@ def test_encode_param_used():
 ```
 
 Real-embedder e2e (guarded; measured values with margins):
+
 ```python
 def test_real_embedder_cross_vocab_in_band_and_noise():
     pytest.importorskip("sentence_transformers")
@@ -493,6 +512,7 @@ def find_cross_lens_matches(points, *, threshold: float = DEFAULT_THRESHOLD,
 **Intent:** Make the extractor's existing multi-source branch actually find cross-vocabulary connections (root-cause fixes #1/#2/#4) without activating production mining.
 **Acceptance:** cross-vocabulary zero-shared-words matched pairs create `IMPL` (support cue) / `NAND` (refute cue); matched pairs without cue words create **no** operator but appear in `extractor._last_candidates`; degraded/import-failure falls back to the existing all-pairs cue-gate; `test_mock_extractor_multi_source_fallback` and `test_mock_extractor_multi_source_embedding` stay green.
 **Files:**
+
 - Modify: `tortoise/extractor.py:179-262` (MockExtractor.run multi_source branch)
 - Modify: `tests/test_extractor.py:413-446` (rewrite `test_mock_extractor_multi_source_semantic_agreement`)
 - Test: `tests/test_extractor.py` (new cue-direction tests)
@@ -648,9 +668,11 @@ if multi_source:
 ```
 
 **Step 4:** Run the extractor suite:
+
 ```bash
 .venv/bin/python -m pytest tests/test_extractor.py -q
 ```
+
 Expected: all green — the three new tests + rewritten semantic-agreement + `test_mock_extractor_multi_source_fallback` + `test_mock_extractor_multi_source_embedding` (real-model near-dup pair with "because" cue → IMPL).
 
 **Step 5: Commit** — `feat(399): wire cross-lens candidates into MockExtractor multi_source (cue-gate direction, _last_candidates)`.
@@ -662,11 +684,13 @@ Expected: all green — the three new tests + rewritten semantic-agreement + `te
 **Files:** none (verification only)
 
 **Step 1:** Run the full affected battery:
+
 ```bash
 .venv/bin/python -m pytest tests/test_cross_lens.py tests/test_embeddings.py \
   tests/test_embeddings_filters.py tests/test_extractor.py tests/test_tortoise_search.py \
   tests/test_search_engine_gaps.py tests/test_session_semantic_search.py -q
 ```
+
 Expected: green; note runtime delta vs the pre-change baseline (~7.5 min).
 
 **Step 2:** Run `git diff --stat tortoise/mining.py` → empty (out of scope). Run the structural boundary grep from Task 2 Step 5.
@@ -706,6 +730,7 @@ Expected: green; note runtime delta vs the pre-change baseline (~7.5 min).
 **Consumer (#6306):** the LLM relation verifier (M2 `_RelationStage` / `_RELATIONS_SYS`'s successor) ingests `extractor._last_candidates` (or re-runs `find_cross_lens_matches` over a multi-document fold) and emits IMPL/NAND **only for candidates it verifies** — never similarity-only. This is the fix for root cause #5 (explicit-assertion-only prompt): the prompt gains the verified-candidates context.
 
 **Activation (#6306):**
+
 1. `mining.py:75` → `extractor.run(transcript, source_id, api, multi_source=True)` — flips on the branch this plan wires.
 2. Document-mode cross-source machinery: fold document points (currently `speaker="document"`, `provenance.source_id` — extractor.py:737) into `all_points` with the lens dimension and call `find_cross_lens_matches` (derivation chain already resolves `provenance.source_id`).
 3. Multi-document gather: a fold step aggregates points across documents into the `points` dict (today the branch only sees one transcript's utterances).

@@ -17,6 +17,7 @@
 Tortoise Hosted has no way for customers to pay. The MVP must deliver a working loop: **dashboard Upgrade → Stripe Checkout → webhook → team actually gets higher limits → portal/grace/cancel handled.** Subscription state lives on the FalkorDB registry Team node as a **derived mirror** of Stripe (Stripe = authority for money; registry Team node = authority for enforcement). Metering, overage billing, and the Supabase control-plane migration (#669) are explicitly out of scope.
 
 **Main-state correction (MAIN-DELTA 1):** the scoping doc's root-cause framing — "`tier` is inert, `_check_team_limit` enforces hardcoded defaults, `get_current_org` never returns enforced fields" — has been **substantially fixed on main** since scoping:
+
 - `tortoise/pricing.py` loads `product/pricing.json` and exposes `tier_limits()` (canonical limits source).
 - `tortoise/quota.py` provides fail-closed `enforce_org_limit` / `resolve_org_limits`; `_check_team_limit` already raises 402 via quota.
 - `get_current_org` already returns `tier, max_users, max_graphs, max_points, max_api_keys, max_sessions` (read from the Team node in one round-trip, with pricing/quota fallbacks).
@@ -26,6 +27,7 @@ Tortoise Hosted has no way for customers to pay. The MVP must deliver a working 
 What #310 must still build: the **subscription state mirror + webhook surface + billing endpoints + grace/reconcile + notification**, plus three **enforcement wiring gaps** (below) that keep paying teams under-capped. This plan targets the residual gap, not the full Step 2 rewrite the scoping anticipated.
 
 ### Remaining enforcement gaps (verified in code)
+
 1. **GAP-A — `max_points`/`max_sessions` never written at team creation.** Team creation writes `max_api_keys/ops_allowance/graph_size_cap` but NOT `max_points`/`max_sessions`. `get_current_org` falls back to `quota.DEFAULT_MAX_POINTS = 1000` — contradicting pricing.json's free-tier `10000` write-ops AND the written `ops_allowance` field. A fresh team is effectively capped at 1,000 graph nodes.
 2. **GAP-B — `points` quota maps to the wrong pricing field.** The `points` counter (`quota._count_resource`) counts **graph nodes** (`MATCH (n) RETURN count(n)`), but pricing.json's node cap is `max_graph_nodes` (10k/25k/100k/600k). The scoping doc's `max_points` values (10k/10k/50k/200k) match `included_write_ops_per_month` **exactly** — they are write-ops numbers, not the node count the quota actually enforces. **Decision (MAIN-DELTA 2): `max_points` mirrors `max_graph_nodes`** — the plan writes `max_points := tier_limits(tier)["max_graph_nodes"]` in `apply_limits` and at both Team CREATEs. Enforcement-correct because the points counter counts graph nodes; write-ops-based caps remain a metering prerequisite (#296/#308). Flagged in Open Items for owner confirmation.
 3. **GAP-C — stale pricing test.** `tests/test_pricing_tiers.py:43` asserts free `included_write_ops_per_month == 1000`; pricing.json on main says **10000** (post-#662). The test file's last change predates #662 — it is failing on main. Fixed in Task 1.
@@ -37,6 +39,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Architecture:** Stripe = authority for *money*; FalkorDB registry Team node = authority for *enforcement*. Single data plane (graph), single process (webhook writes graph; requests read graph), no scheduler, no queue, no second DB. Grace enforced **lazily** at request time in `get_current_org` (`effective_tier`) — no cron. `reconcile_org` repairs drift at boot (non-fatal).
 
 **New modules:**
+
 - `tortoise/billing.py` — `StripeClient` (thin `httpx` wrapper, HMAC webhook verify), price-catalog loader (`STRIPE_PRICE_IDS` env JSON validated against pricing.json; **missing catalog/key secrets degrade lazily via a catchable `BillingConfigError` — never at import/boot**, review fix 12), `effective_tier` (lazy grace), `apply_limits` (atomic tier+limits SET), `reconcile_org`.
 - `tortoise/notify.py` — best-effort Resend email + Telegram bot (both channels, never blocks the webhook).
 
@@ -55,16 +58,19 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Library docs (preflight)** — `stripe-python` exists (sync via `requests`, async via `httpx`; `HTTPXClient` option). Not used — scoping chose a thin `httpx` client; verdict below. `httpx` is already an in-file dependency of `hosted_api.py` (`_track_analytics_event`), currently transitive via `fastmcp` — pinned in Task 3.
 
 **Library version & API surface (Stripe REST API, 2026-08) — 3 calls**
+
 - *Canonical:* Checkout Sessions for subscriptions use `mode: "subscription"` with a recurring Price in `line_items`; `success_url`/`cancel_url` are required redirect URLs (can embed `{CHECKOUT_SESSION_ID}`); custom tracking data belongs in `metadata` (and `client_reference_id` — echoed in webhooks, the canonical team-binding field). Since the 2025-03-31 change, subscription-mode Checkout creates the Subscription **only after payment completes** — `checkout.session.completed` is the completion signal (do not rely on `payment_intent` fields). (docs.stripe.com/payments/subscriptions; docs.stripe.com/billing/quickstart; docs.stripe.com/changelog/basil/2025-03-31)
 - *Competitor variance:* reference integrations (stripe-samples) handle completion exclusively via `checkout.session.completed` webhook and read `data.object.customer_details.email` / `session.subscription`; the session's `subscription` field is the Subscription **ID** (object not embedded unless expanded) — a follow-up `GET /v1/subscriptions/{id}` (or `GET /v1/checkout/sessions/{id}?expand[]=line_items`) is required to learn the price id for tier resolution.
 - *Known pitfall:* creating a Customer at Checkout via `customer_creation` requires care with existing customers; for subscription Checkout pass `customer` (existing) OR `customer_email` (create-on-checkout). Use `client_reference_id=org_id` + `metadata.org_id` so the webhook can bind the event to the team without trusting email matching.
 
 **Idiomatic usage patterns (webhook signature verification) — 3 calls**
+
 - *Canonical:* `Stripe-Signature` header contains `t=<timestamp>,v1=<sig>[,v1=<sig2>...]` — **split on commas** and accept any matching signature. Signed payload = `f"{t}.{raw_body}"` (raw bytes, never re-serialized JSON); HMAC-SHA256 with the **webhook endpoint secret** (not the API key); `hmac.compare_digest`; **tolerance 300s (5 min)**; reject older timestamps. (docs.stripe.com/webhooks; docs.stripe.com/webhooks/signature; Stack Overflow #68288698)
 - *Competitor variance:* all Stripe samples use the SDK's `construct_event()` which wraps exactly this; frameworks that hand-roll (FastAPI/Starlette) must use `await request.body()` for the raw payload — a Pydantic-parsed model will fail verification (re-serialization mismatch).
 - *Known pitfall:* verify BEFORE parsing; on failure return 400 so Stripe dashboard shows the error; on processing failure return 5xx so Stripe **retries** (live: up to 3 days exponential backoff; test: ~3 attempts); always return 200 for already-processed events (dedup) to stop retries. Retries of the same event carry the **same `event.id`** with a new signature — event-ID dedup is the canonical idempotency key. (docs.stripe.com/webhooks; docs.stripe.com/webhooks/process-undelivered-events; svix Stripe review)
 
 **Library/framework pitfalls — 3 calls**
+
 - *Canonical:* Customer Portal = `POST /v1/billing_portal/sessions` with `customer` + `return_url` (return_url required unless a default is configured in the dashboard). Portal config (subscription management allowed) is dashboard-side. (docs.stripe.com/api/customer_portal/sessions/create; integrate-customer-portal)
 - *Competitor variance:* portal-initiated plan changes emit `customer.subscription.updated` (NOT `checkout.session.completed`) — the mirror must be authoritative on `.updated` for plan changes (scoping AC3).
 - *Known pitfall (SDK-vs-raw decision):* the scoping's thin-httpx choice **remains sound** — the MVP touches 5 Stripe endpoints + one signature verify, all stable form-encoded POST/GETs. `stripe-python`'s value (retries, version pinning, webhook helper) is marginal at this surface and would add `requests` as a dependency. **Revisit if** the API surface grows (metering #296/#308, invoices, payment methods) — a swap is contained behind `StripeClient`. Stripe API requests are `application/x-www-form-urlencoded` bodies, not JSON.
@@ -126,11 +132,13 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Confirm the canonical pricing artifact is on main and the limit resolver agrees with it, so every downstream tier decision has a verified source of truth.
 
 **Acceptance:**
+
 - `product/pricing.json` exists on main and matches the owner-confirmed version (free=10k ops, solo $9, pro $25, team $149, annual 20%, overage $5/10k) — verify via `git show origin/main:product/pricing.json` (no changes needed; landed via #662/#675).
 - `tests/test_pricing_tiers.py` passes with corrected free-ops assertion (1000 → 10000).
 - `tortoise.pricing.tier_limits()` documented as the single limits resolver used by `billing.py` (MAIN-DELTA 3) — no new TIERS map.
 
 **Files:**
+
 - Modify: `tests/test_pricing_tiers.py:43` — stale free-ops assertion
 - Test: `tests/test_pricing_tiers.py` (pytest)
 
@@ -149,6 +157,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Build the single billing module: Stripe API wrapper, `STRIPE_PRICE_IDS` catalog validated against pricing.json, lazy-grace tier resolution, and the atomic tier+limits writer used by webhook/reconcile.
 
 **Acceptance:**
+
 - `StripeClient` (httpx, form-encoded, timeouts) implements: `create_customer(email) -> str`, `create_checkout_session(org_id, price_id, customer, success_url, cancel_url) -> str` (takes the created Stripe customer id — see Task 5), `create_portal_session(customer_id, return_url) -> str`, `get_subscription(id) -> dict`, `list_subscriptions(customer_id) -> list[dict]`, `get_customer(id) -> dict`, `verify_webhook_signature(payload: bytes, sig_header, secret, tolerance_s=300) -> dict` (t= parse, comma-split multi-signature, HMAC-SHA256 over `f"{t}.{payload}"`, `hmac.compare_digest`, ±300s).
 - `PriceCatalog` loads `STRIPE_PRICE_IDS` (JSON: 8 ids — 4 tiers × monthly/annual) and rejects: unknown tier, missing monthly or annual per tier, annual discount ≠ pricing.json `display.annual_discount_pct` (20%), non-`price_` ids. `tier_for_price(price_id, interval)` resolves; an id absent from the catalog raises `BillingError(unknown_price_id)` — the caller decides (Task 7/8: log + ops-notify + **keep stored tier/status**, never downgrade a paid sub on an unparseable price, review fix 7).
 - **Lazy config degradation (review fix 12):** missing `STRIPE_PRICE_IDS` / `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` does NOT fail at import/boot — the catalog and StripeClient construct lazily and raise a catchable `BillingConfigError` at first use (billing endpoints 503; boot/lifespan unaffected). This is the implementation home for Task 3's boot-gating promise.
@@ -157,10 +166,12 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 - `reconcile_org(sdk, org_id, force=False)` — subscription_id → `get_subscription` → mirror; elif stripe_customer_id → `list_subscriptions` → first active → mirror; else no-op. Unknown price id → keep stored tier/status (Task 8). Best-effort (raises `BillingError`, caller decides).
 
 **Files:**
+
 - Create: `tortoise/billing.py`
 - Test: `tests/test_billing.py` (unit — monkeypatched httpx/StripeClient)
 
 **Step 1:** Write `tests/test_billing.py` (module-level fixtures defined ONCE — `billing_client` + `signed_payload`, see Task 7):
+
 - `test_signature_verify_ok` / `test_signature_tampered_payload_400` / `test_signature_expired_timestamp` (t= older than 300s → reject) / `test_signature_multiple_v1_accepted` (comma-split).
 - `test_catalog_loads_8_prices` / `test_catalog_rejects_unknown_tier` / `test_catalog_rejects_wrong_annual_discount` / `test_tier_for_price` / `test_tier_for_price_unknown_id_raises`.
 - `test_catalog_missing_env_degrades` (no `STRIPE_PRICE_IDS` → `BillingConfigError` on first use, not at import) / `test_stripe_client_missing_secret_raises_lazy`.
@@ -189,11 +200,13 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Make the Stripe + notification configuration deployable — missing secrets must gate features at boot, not fail the app.
 
 **Acceptance:**
+
 - `.env.example` documents `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_IDS`, `RESEND_API_KEY`, `BILLING_NOTIFY_TO` (ops inbox for billing emails — review fix 8), `BILLING_SUCCESS_URL`, `BILLING_CANCEL_URL` (Telegram pair already documented).
 - `deploy-hosted.yml` secrets-verify step requires `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (warn-only if `STRIPE_PRICE_IDS`/`RESEND_API_KEY`/`BILLING_NOTIFY_TO` missing — catalog/notify degrade lazily per Task 2); `flyctl secrets set` passes all seven when present.
 - `requirements.txt` pins `httpx` (currently transitive via fastmcp).
 
 **Files:**
+
 - Modify: `.env.example`, `.github/workflows/deploy-hosted.yml`, `requirements.txt`
 - Test: config review (no unit surface); verify by grepping the workflow
 
@@ -214,6 +227,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Close the enforcement gaps so a paid tier actually raises limits and `past_due`/expired teams degrade — the "value half" of the loop (already 80% landed; this task finishes it). 4a = enforcement + quota parity; 4b (below) = API surface/docs.
 
 **Acceptance:**
+
 - GAP-A at BOTH Team CREATEs, limits from `tier_limits("free")`:
   - `/internal/provision` CREATE (~427-441): adds `max_points` + `max_sessions` (currently missing).
   - `/v1/register` CREATE (~1086-1093): writes `max_api_keys` + `max_points` + `max_sessions` and aligns `max_users`/`max_graphs` from `tier_limits("free")` — currently hardcoded `1/1/1` with **no** `max_api_keys`, silently leaking the `DEFAULT_MAX_API_KEYS = 20` cap to free teams (review fix 2).
@@ -227,6 +241,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **MAIN-DELTA (402 detail — review fix 13):** the 402 `detail` from `quota.enforce_org_limit` ("Team {resource} limit reached ({limit}). Upgrade your plan to increase it.") is declared **acceptable as-is** — no plans/portal link appended to the API string. The user-facing upgrade hint (with plans/portal link) is the Task 9 dashboard renderer's job; duplicating env-dependent URLs into the API detail adds coupling for no MVP value.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (get_current_org ~628-646, provision CREATE ~427-441, register CREATE ~1086-1093)
 - Modify: `tortoise/quota.py` (`resolve_org_limits` None-fallback → `tier_limits(tier)`)
 - Modify: `tests/conftest.py` (`provision_test_user`)
@@ -251,12 +266,14 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Expose the extended billing fields over `GET /v1/team`, let the control plane set them, and keep the registry schema/indexes in step with the new fields.
 
 **Acceptance:**
+
 - `TeamInfoResponse` + `GET /v1/team` (`team_info` ~1010, model ~720) return `max_api_keys, max_points, max_sessions, subscription_status, current_period_end, grace_until, customer_email`.
 - `team_update` allowlist (~3271) gains `subscription_status, current_period_end, grace_until, customer_email`.
 - `_ensure_registry_indexes` (~320) gains `("Team", "stripe_customer_id")` — **Task 4b owns this index** (Task 8 owns only `("WebhookEvent", "event_id")` — review fix 14).
 - `docs/registry-graph-schema.md` Team entity updated with `subscription_status, current_period_end, grace_until, customer_email` + new `WebhookEvent` entity (`event_id`, `type`, `received_at`, `org_id`).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`TeamInfoResponse` ~720, `team_info` ~1010)
 - Modify: `tortoise/sdk.py` (`team_update` allowlist ~3271, `_ensure_registry_indexes` ~320)
 - Modify: `docs/registry-graph-schema.md`
@@ -277,12 +294,14 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Let an Owner start a Stripe Checkout for a valid price, persist the Stripe customer before redirect (survives a missed first event), and give existing subscribers a portal route — with a duplicate-subscription guard.
 
 **Acceptance:**
+
 - `POST /v1/billing/checkout` `{price_id}` → validates against catalog (400 unknown), resolves `customer_email` via the **fallback chain** (review fix 1): `Team.email` (set at register) → `APIKey.created_by` (provision-path teams have no `Team.email`; hosted_api.py ~455-464 stores `created_by` on the APIKey node) → **400 last-resort** with a clear message. Calls `StripeClient.create_customer(email)`; **persists `stripe_customer_id` + `customer_email` synchronously before redirect**; creates Checkout Session (`mode=subscription`, `customer=<customer_id>` — passes the created id, review fix 1, `client_reference_id=org_id`, `metadata.org_id`, `success_url`/`cancel_url` env-driven); returns `{checkout_url}`.
 - Guard (two layers): (1) stored `subscription_status in {active, past_due, trialing}` → **409** "team already has an active subscription"; (2) **stale-mirror race** (review fix 5) — even with a clean stored mirror, call `list_subscriptions(customer_id)` before creating the session and reject 409 if ANY subscription is `active`/`trialing`/`past_due` (the mirror may read "free" between checkout creation and the webhook landing; Stripe remains the authority for money).
 - `POST /v1/billing/portal` → creates portal session for existing customer, returns `{portal_url}`; 404 if no `stripe_customer_id`.
 - Both endpoints require team auth (Bearer key) — NOT in SKIP_AUTH.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (new routes + `CheckoutRequest`/`PortalResponse` models near TeamInfoResponse)
 - Test: `tests/test_billing.py` (TestClient with monkeypatched `billing.StripeClient`)
 
@@ -299,12 +318,14 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Deliver the 4 billing notifications over BOTH agreed channels (Resend email to premiselabs.co + Telegram `@Premislabs_notifications_bot`), best-effort — a notification failure must never block or fail the webhook.
 
 **Acceptance:**
+
 - `notify_billing_event(kind, team, details)` where kind ∈ {`billing_upgrade`, `billing_downgrade`, `billing_payment_failed`, `billing_cancel`}; sends (a) Resend email to **`BILLING_NOTIFY_TO`** (ops inbox env var — review fix 8) via `POST https://api.resend.com/emails` (Bearer `RESEND_API_KEY`, from `billing@premiselabs.co`), (b) Telegram `sendMessage` to `TELEGRAM_CHAT_ID` (reuse `alert_store.telegram_send` pattern or `httpx`).
 - Each channel wrapped in try/except + `logger.warning` — routed through `tortoise.security.redact_error` (review fix 9: **never log raw payloads, webhook bodies, `Stripe-Signature` headers, or secret values**); function never raises.
 - Both channels gated on their secrets being set (absent secret → skip channel, log once).
 - `RESEND_API_KEY` + `BILLING_NOTIFY_TO` + `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` consumed from env (Telegram already deployed; Resend + BILLING_NOTIFY_TO pending Fly secret per user decision — set in Task 3).
 
 **Files:**
+
 - Create: `tortoise/notify.py`
 - Test: `tests/test_notify.py` (monkeypatched `httpx.post` / `urllib`)
 
@@ -321,6 +342,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Receive Stripe's events, verify authenticity, dedup by event id, and apply the 4 event semantics so the registry mirror tracks Stripe exactly — with audit/analytics/notifications on first processing only.
 
 **Acceptance:**
+
 - `POST /webhooks/stripe` added to `RateLimitMiddleware.SKIP` AND `SKIP_AUTH` (public surface, signature-authenticated).
 - Raw-body HMAC verify (Task 2) → 400 on bad signature/expired timestamp; 200-ack on unhandled event types.
 - **Idempotency (SET-then-marker, resolves scoping P1-1 retry-drop race):** (1) idempotent Team SET (no marker condition); (2) `MERGE (:WebhookEvent {event_id})` with `ON CREATE` notification-flag; audit/analytics/notify fire ONLY when the marker was newly created. Replays → single processing (AC2). 500 on processing failure (Stripe retries; live up to 3 days).
@@ -335,6 +357,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 - **Log hygiene (review fix 9):** webhook/notify/StripeClient error logs route through `tortoise.security.redact_error`; never log raw webhook bodies, `Stripe-Signature` headers, or secret values.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (route ~after `/internal/*` block; SKIP sets at ~264/566; `_ALLOWED_ANALYTICS_PROPS` ~2281)
 - Test: `tests/test_billing.py::TestWebhook`
 
@@ -351,12 +374,14 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Repair mirror drift at startup — including teams that only have `stripe_customer_id` (missed `checkout.session.completed` blind spot) — without ever breaking boot/health.
 
 **Acceptance:**
+
 - `_lifespan` (hosted_api.py ~89) runs a best-effort reconcile pass for each team with `subscription_id` OR `stripe_customer_id`, `reconcile_org(...)`; whole pass wrapped in try/except → `logger.warning` (via `redact_error`), never raises (health check / release_command unaffected — AC7).
 - **Never awaited before lifespan yield** (review fix 3, #545 lesson — delayed bind breaks Fly health-grace/release_command): the pass MUST run in a daemon thread (mirror the `_prewarm_embeddings` pattern) or `asyncio.create_task` — never awaited inline before the lifespan yields. Budget: hard wall-clock cap (~20s) + per-call Stripe timeouts on `StripeClient`; a hanging Stripe API must not extend startup.
 - `_ensure_registry_indexes` gains `("WebhookEvent", "event_id")` only — **Task 8 owns this index**; `("Team", "stripe_customer_id")` is owned by Task 4b (no duplicate wording — review fix 14).
 - Unknown price id during reconcile (review fix 7): log at error level + ops notification, keep stored tier + `subscription_status` (Task 7 semantics).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_lifespan`), `tortoise/sdk.py` (`_ensure_registry_indexes`)
 - Test: `tests/test_billing.py` (uses the `billing_client`/`signed_payload` fixtures from Task 7)
 
@@ -373,6 +398,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Give the Owner the visible upgrade surface and the post-purchase plan/status display — the user-facing half of the loop, per the UX gate (fork-mode: the component IS the implementation).
 
 **Acceptance:**
+
 - Tier card shows plan (`team.tier`), subscription status, and enforced limits (`max_points`, `max_api_keys`) from the extended `GET /v1/team` (S6).
 - "Upgrade" CTA rendered only when no active subscription (`subscription_status` not in `{active, past_due, trialing}`); clicking → `POST /v1/billing/checkout {price_id}` (monthly default price) → opens `checkout_url`; button disabled while a checkout is pending (duplicate-subscription guard) — pending cleared when returning via `?checkout=cancelled` or on the next team refresh.
 - "Manage billing" link (active subscribers) → `POST /v1/billing/portal` → opens `portal_url` in new tab.
@@ -381,6 +407,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 - **Grep-verifiable anchors** (review fix 10b): `upgrade()` and `manageBilling()` handlers call `/v1/billing/checkout` and `/v1/billing/portal` respectively; CTA/portal render gated by `subscription_status` guards (`!== 'active' && !== 'past_due' && !== 'trialing'` for CTA; inverse for Manage billing); retry loop present in the mount effect.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (tier card + handlers + new 402 → upgrade-hint renderer; ~460 lines)
 - Test: manual clickthrough (fork-mode — no SPA test harness in repo); E2E-3-D covered in Task 10
 
@@ -397,12 +424,14 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Prove the full money loop end-to-end (upgrade → webhook → enforcement → portal) against Stripe test mode, and confirm zero regression across the suite.
 
 **Acceptance:**
+
 - `tests/e2e/test_billing_upgrade.py` marked `@pytest.mark.stripe` (mirrors the existing `postgres` marker pattern): **genuinely live leg only** (review fix 16c) — registers a team through the real `/v1/register`, creates a real Checkout session against Stripe test mode, asserts HTTP 200 + `checkout_url` returned + `stripe_customer_id` persisted on the Team node. **No simulated webhooks here.**
 - The **4-event semantics stay in Task 7 integration tests** (fixture payloads + monkeypatched StripeClient) — do NOT re-test simulated webhooks twice. AC1–AC5 verification lives in `tests/test_billing.py::TestWebhook*`, not E2E.
 - Skipped cleanly (no error) when `STRIPE_TEST_SECRET_KEY` / `STRIPE_TEST_WEBHOOK_SECRET` absent (skip-guard on `STRIPE_TEST_*` keys).
 - Full regression: `python -m pytest tests/ -m "not postgres and not stripe" -v` green; live test-mode run (with keys) green.
 
 **Files:**
+
 - Create: `tests/e2e/test_billing_upgrade.py`
 - Test: pytest (marked)
 

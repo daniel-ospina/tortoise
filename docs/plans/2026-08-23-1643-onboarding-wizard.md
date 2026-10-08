@@ -7,6 +7,7 @@
 **Base:** origin/main. Worktree `feat-1591-onboarding`.
 
 ## Plan-review resolutions (2026-08-23)
+
 - **P1-1 (STEP 0 rename):** DROP the rename sub-step — STEP 0 = show the auto-created team + create-another (POST /v1/organizations) + multi-team SELECT. No new PATCH endpoint.
 - **P1-2 (STEP 5 handoff):** the OAuth callback redirects to welcome.html?github=connected|denied — the dashboard popup POLLS GET /v1/onboarding/github/status until connected=true (or cancelled); denied → a cancel CTA, no error card. No repo PICKER exists — the index call uses the connect-time org (default org_id) + an optional free-text repo. Preview = repos_count + indexed state.
 - **P2-1 (Task 8):** the Object passes status via props (splats over the 'live' default); assert NODE-count idempotency (the event log grows on repeat); add an e2e asserting a seed write from graph_ready===false flips /v1/team graph_ready to true.

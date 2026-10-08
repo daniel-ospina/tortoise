@@ -23,6 +23,7 @@
 **🔴 `redislite` (embedded mode) likely does NOT support FTS/vector indexes.** RediSearch and vector index modules are Redis server modules that must be loaded by the Redis process. `redislite` is a Python-native Redis implementation — it almost certainly does not load these modules. FalkorDB-on-Docker likely does include them (FalkorDB ships with RediSearch).
 
 **Impact:** The architecture must handle mode-dependent capability detection:
+
 - Docker/server FalkorDB: FTS + vector indexes available → full RRF fusion
 - Embedded (redislite): FTS/vector likely unavailable → in-memory TF-IDF only
 - The graceful degradation chain must detect mode at startup, not at query time
@@ -42,11 +43,13 @@
 ## What We Have Internally
 
 ### Existing search infrastructure
+
 - `tortoise/embeddings.py`: `search_points()` — in-memory TF-IDF/sentence-transformers search over Points dict. Not integrated with FalkorDB. Uses `all-MiniLM-L6-v2` (384-dim).
 - `tortoise/sdk.py`: `search()` — wraps `search_points()`, loads ALL Points into memory via `self.query()`. No FalkorDB FTS/vector utilization.
 - `tortoise/projection/__init__.py`: `_ensure_indexes()` — creates range indexes (id, pointKind, content_hash, is_operator [non-embedded FalkorDB docker/server only — embedded drops it: falkordblite bool type-table degradation across reopen, so an indexed `= false` silently returns 0; see #522/#1069]) with try/except idempotency. Same pattern extends to FTS/vector.
 
 ### Gaps
+
 - **No FalkorDB index utilization in search**: All search is in-memory Python.
 - **No FTS or vector indexes created**: Only range indexes exist.
 - **No embedding storage**: Points don't store embedding vectors.
@@ -106,6 +109,7 @@ EP modulates by at most 50% (0.5x-1.0x range). Open question: does EP confidence
 **Primary path: RRF fusion of all available strategies.** The 3-tier hierarchy acts as a pre-filter determining which indexes are available for a given query (e.g., kind=statement → structural index always included; NL query → FTS + vector included). RRF fuses all available strategies into a single ranking.
 
 **Query flow:**
+
 1. **Pre-filter (3-tier hierarchy):** Query classifies as kind-match / abstract-text / core-semantic → determines which strategies to activate
 2. **Parallel retrieval:** All active strategies run simultaneously against FalkorDB indexes
 3. **RRF fusion:** Ranked lists combined via `sum(1/(60 + rank_i))`
@@ -127,6 +131,7 @@ All indexes missing → in-memory TF-IDF fallback
 ### Implementation Order
 
 **Phase 0 (Foundation):** ~600 lines across 6 functions (estimate based on prior implementation attempt in deleted worktree — no commit available, rebuild from scratch):
+
 1. Create FTS + vector indexes in `_ensure_indexes()` (extend existing range-index pattern)
 2. Implement `_run_fts_query()`, `_run_vector_query()`, `_run_structural_query()`
 3. Implement `_rrf_fusion()` engine
@@ -138,6 +143,7 @@ All indexes missing → in-memory TF-IDF fallback
 **Phase 3 (#7702, optional):** Cross-encoder reranking
 
 ### Open Questions
+
 - Does FalkorDB `falkordb-py` expose FTS/vector index creation APIs natively?
 - Can FalkorDB vector search return similarity scores?
 - Does EP confidence correlate with retrieval relevance? (empirical — #7701)

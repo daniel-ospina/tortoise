@@ -12,6 +12,7 @@ ownedBy: epistemic-team
 **Findings-date:** 2026-08-13
 **Trigger:** demonstrated gap in Phase 1.5 (Micro proportional) — SOC 2 roadmap phrasing is the highest-risk claim on the /security page; claim-accuracy is the issue's binding constraint.
 **Sources (independent domains, confidence: Medium — 2 practitioner categories):**
+
 - promise.legal — "SOC 2 Compliance Roadmap for Startups (2025)" (guide: scoping → readiness assessment → evidence collection → remediation; common controls: vulnerability scanning, patch management, penetration testing, dependency scanning)
 - soc2auditors.org — "SOC 2 Compliance for Startups: Close Bigger Deals (2026)" (minimum viable SOC 2 scope: access control, change management, vendor management, training, incident response)
 - lorikeetsecurity.com — "SOC 2 for Startups: The 6-Month Timeline" (separate "in progress / roadmap" language from "certified / compliant" claims; final SOC 2 report shared with customers/prospects)

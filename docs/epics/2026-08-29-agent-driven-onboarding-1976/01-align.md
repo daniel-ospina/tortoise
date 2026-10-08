@@ -16,6 +16,7 @@ aboutObjects: tortoise
 **Decision: PROCEED** (with two scope-guard rails — see Step 4).
 
 > **Baseline evidence verified this session (2026-08-29, codebase):** the issue's load-bearing factual claims check out:
+>
 > - **M7 (6 harnesses):** `website/apps/dashboard/src/harnesses.js` `HARNESS_NAMES` = Claude Code, Claude Desktop, Claude Web, Codex, Cursor, Pi. ✅
 > - **M6 (invite infra exists):** `tortoise/hosted_api.py` has `POST /v1/invites`, `GET /v1/invites/info`, `POST /v1/invites/accept`, `GET /v1/invites`, `GET /v1/invites/pending`, `POST /v1/invites/pending/{id}/accept`, `DELETE /v1/invites/pending/{id}`, `DELETE /v1/invites/{id}`. ✅
 > - **M9 (no telemetry events for seed/decide):** `tortoise/analytics.py` emits only `tenant_provisioned`, `api_key_created`, `first_api_call`. No seed/decide events exist. ✅ (W11's gap is real)
@@ -82,6 +83,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Decision:** PROCEED
 
 **Alternatives considered:**
+
 1. Polish the existing wizard (#1643) — rejected: wrong pattern for the product class (no comparable agent-tool product uses a post-signup wizard; 50% higher activation with agent-mediated setup)
 2. Minimal slice (command + prompt + seed = W1+W2+W3, no W4/W5/W9) — rejected: it reaches the aha (two Subjects + one decide via W3) but strands the user at an unchanged Overview (W4), keeps onboarding state in Supabase jsonb instead of the graph (W5 — hence no graph-held completion events)
 3. Wait for users — rejected: cost of re-onboarding the founding cohort outweighs the unmeasurable metrics; structural decisions (org semantics, fork) are cheap now, expensive to retrofit
@@ -92,6 +94,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Eisenhower placement:** Important / Not Urgent — Schedule (self-imposed urgency, no external clock; do it at full depth before production traffic exists).
 
 **Key assumptions:**
+
 - **A0 — the current wizard's friction is real and representative of the first-cohort experience — confidence: medium.** Evidence: one "toggle wall gives me anxiety" observation of unspecified provenance + the market-pattern claim (no comparable agent-tool product uses a post-signup wizard). The 50%-activation / 28%-drop-off stats are third-party onboarding stats (UserGuiding/ProductLed via Zylos) transferred to this product class — **the transferability caveat is registered here, and it is precisely what caps this premise at medium confidence**. This is the load-bearing premise for PROCEED-now vs polish-1643/wait-for-users — registered explicitly with its falsification path: W11 events + walk-through reviews on the first cohort are the test; if first-cohort friction is low, the rebuild was premature. "Known-stopgap" is earned; "known-bad" is not yet earned.
 - "Agent knows its own harness" holds for the 4 self-installable harnesses (Claude Code, Cursor, Codex, Pi); the other 2 (Claude Desktop, Claude Web) fall back to teach-the-human — confidence: **medium** (open question b; bounded risk via universal-command handoff)
 - The graph is the right store for onboarding state (idempotent writes, init-in-transaction, versioned) — confidence: **medium** (architecturally principled, but the highest-implosion-risk piece; Rail 1)
@@ -100,6 +103,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 - No existing orgs other than the owner's → migration is a one-org special case — confidence: **high** (fact-checked in the issue)
 
 **Scope-guard rails (applied by this align, binding on downstream stages):**
+
 - **Rail 1 — W5 sequencing (restated, unambiguous):** the `OnboardingState` node *plumbing* ships with W1/W2 — W2's agent skill reads the node, and W2 must NOT depend on the legacy Supabase store as its long-term source. The store-migration (backfill from `teams.onboarding_state` jsonb), completion-events, and dashboard-mirror portions land only after the agent flow is working. The state machine is the backbone, but the *agent's* ability to drive setup is the user-visible value; the store migration never gates the user experience.
 - **Rail 2 — launch slice discipline, with explicit couplings:** decompose for a launchable minimum (W1, W2, W3, W4, W5, W9, W11 — the critical path) with W6/W7/W8/W12 as follow-on waves, and W10 explicitly last (needs RBAC). Decomposition must make the launch slice independently mergeable. This is a *sequencing* rail, not a scope cut — all 12 Ws stay in the epic. **Named launch-slice couplings (follow-on surfaces the launch slice references — decomposition must not silently re-scope these):**
   - **Fork-build → W8 catalog:** the fork card's build branch shows the capability catalog (indexers+extractors). **W1 renders the fork card shell; the build-branch catalog is static placeholder content owned by W1** until W8's pullable registry endpoint lands — the journey map's builder branch is presented, but populated statically.
@@ -119,6 +123,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Gate:** fresh-context reviewer (dispatched via `task`).
 
 **Cycle 1 findings (reviewer):**
+
 1. P1 — A0 premise (wizard friction real/representative) unregistered → added to assumption register with medium confidence + falsification path; "known-bad" deflated to "known-stopgap" everywhere including Step 1's opportunity-cost paragraph; Alternative 1's "decisive" research claim downgraded with A0 transferability caveat.
 2. P1 — Rail 2 launch-slice presentation gaps (fork-build→W8 catalog, join→W7, capture-disclosed→W6) → explicit coupling language added to Rail 2 (fork-card shell + static catalog owned by W1; W6 fold targets W1's connect-consent step).
 3. P2 — Rail 1 internal ambiguity → restated as plumbing-with-W1/W2 vs migration/events/mirror-later.

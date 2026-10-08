@@ -18,6 +18,7 @@
 ## Root Cause
 
 **DeepSeek integrates 12 clean propositions perfectly regardless of presentation format.**
+
 - Total evidence: ~700 tokens (half a page of text)
 - Each proposition: pre-extracted, labeled, self-contained
 - Nothing to organize — the claims arrive already organized

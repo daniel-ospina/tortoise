@@ -10,6 +10,7 @@ extends: docs/epistemic-layer-eval-spec.md (engine), docs/product-success-eval.m
 ---
 
 # Tortoise — Agent-Reasoning Eval Battery
+
 ## Tests to prove Tortoise improves *reasoning* (not just recall) — memory, learning, and reasoning deltas
 
 > **Thesis being tested:** generic memory systems demonstrably help *remembering* but show weak gains on *reasoning* (arXiv 2604.20006; MemoryArena 2602.16313 shows LoCoMo-saturated agents fail agentic settings). Tortoise's claim is different: the epistemic graph is a *reasoning medium* (Decide skill, EP belief propagation, NAND/mitigation semantics, tiered credibility, contested surfacing, supersession). This battery is adversarial to the null hypothesis "Tortoise is just another memory system."
@@ -29,6 +30,7 @@ extends: docs/epistemic-layer-eval-spec.md (engine), docs/product-success-eval.m
 7. **Every test is deterministic where possible** (epistemic-layer §0): pinned seeds, fixed scenario builders, pre-registered rubrics.
 
 **Three tiers:**
+
 - **Tier 1 — Single-session reasoning probes** (no multi-session needed; the "tests without that" option): capability deltas within one session, graph-assisted agent vs plain agent.
 - **Tier 2 — Longitudinal learning tests** (multi-session): does the agent get measurably better over a task stream?
 - **Tier 3 — Differential** (the "we're different" claim): Tortoise vs no-memory, long-context stuffing, generic memory store, recall-RAG on the *same reasoning battery*.
@@ -40,6 +42,7 @@ extends: docs/epistemic-layer-eval-spec.md (engine), docs/product-success-eval.m
 Design: scenario → two arms (graph-assisted vs plain, same model/temp/seed) → blind-graded reasoning rubric → delta. 20+ runs per probe. These do NOT require multi-session: they test whether the graph changes *how* an agent reasons in one sitting.
 
 ### R1 — Contradiction surfacing (mid-session)
+
 - **Protocol:** agent works a decision scenario; mid-session, introduce a claim that logically contradicts its adopted position (scripted, pre-registered contradiction pairs).
 - **What it measures:** does the agent detect + surface the conflict (file NAND, flag contested, change position *explicitly*) vs silently adopting the new claim or flip-flopping without noting the reversal?
 - **Metrics:** surfaced-within-1-turn rate; explicit-resolution rate (supersede/mitigate with ledger entry); silent-flip-flop rate; false-positive rate on matched non-contradictory controls (≤5%, per product-success 1b).
@@ -47,6 +50,7 @@ Design: scenario → two arms (graph-assisted vs plain, same model/temp/seed) �
 - **Anchor:** product-success 1b; P9/A6 (epistemic-layer); graph-as-memory E1 (state + why + how-got-here). Generic memory systems score ~0 on surfacing by construction — they store, they don't detect contradiction.
 
 ### R2 — Adversarial deliberation coverage
+
 - **Protocol:** one decision scenario; compare final rationale (decision memo) produced by graph-assisted agent (Decide workflow) vs plain agent with equal time budget.
 - **What it measures:** reasoning *depth* of the DELIBERATION CONTENT — counter-arguments considered and weighed, specific risks/downsides named, support-vs-oppose weighing made explicit, position revision after counter-evidence. AMENDMENT (#2292): graded constructs are ARM-NEUTRAL (no tool names, edge counts, or arm identity in any judged item/evidence — the graph-only anchors “mitigations filed per support edge” were a verb-availability artifact and are RETIRED from the graded surface; evidence renders are tool-stripped + neutrality-linted).
 - **Judged subscore:** an anchored YES/NO coverage rubric (`r2-coverage.json`) grades each deliberation on four constructs (counter-argument weighing, what-could-be-wrong specificity, support-vs-oppose weighing, revision after counter-evidence); the rubric is VALIDATED on real deliberation text before any scoring (2026-09-08 record: retest 1.00, two-model raw agreement 0.886, Gwet AC1 0.849 — under docs/epics/1402-eval-battery/benchmarks/); scoring is BLOCKED without a validated rubric (JudgeGateBlocked). Delta = graph ≥ plain.
@@ -55,6 +59,7 @@ Design: scenario → two arms (graph-assisted vs plain, same model/temp/seed) �
 - **Anchor:** Decide skill CHALLENGE step; COLING 2025 dynamic-eval framework; 2607.05775 failure clusters (planning failures); graph-as-memory D5 (decisions carry rejected options + criteria).
 
 ### R3 — Epistemic calibration (honesty)
+
 - **Protocol:** scenario battery where outcomes are knowable; agent states confidence with each claim/decision (plain arm: verbal confidence; graph arm: EP-derived confidence). Score against ground truth.
 - **What it measures:** does the graph's confidence track reality *better* than the model's self-reported confidence? (overconfidence is a reasoning failure; generic memory doesn't touch it)
 - **Metrics:** Brier score / calibration curves; overconfidence rate (claims >0.8 confidence that are wrong); **undecided-honesty rate** (when the graph is genuinely contested, does the agent say "undecided" instead of a confident number?).
@@ -62,12 +67,14 @@ Design: scenario → two arms (graph-assisted vs plain, same model/temp/seed) �
 - **Anchor:** epistemic-layer R7/AC8 (contested = surfaced, never scored); P8 honest non-convergence; 2607.05775 measurement-validity cluster.
 
 ### R4 — Defeat conditions ("what would change your mind")
+
 - **Protocol:** after the agent adopts a position in the graph, ask: "what evidence would overturn this decision?" Grade whether the stated defeat conditions match the graph's actual NAND/mitigation structure (the *real* weakest links, not generic hedges).
 - **What it measures:** counterfactual reasoning — can the agent identify its own decision's defeat conditions? The graph encodes them as NAND edges + mitigations.
 - **Metrics:** precision of stated defeat conditions vs graph structure (≥ 70% of stated conditions correspond to real edges); completeness (≥ 1 real defeat condition found per decision).
 - **Anchor:** Decide CONVERGE "what we still do not know"; mitigation semantics (truth vs relevance) in decide.py.
 
 ### R5 — Belief-update responsiveness (evidence arrives / retracts)
+
 - **Protocol:** single session; evidence E supports position P; mid-session E is retracted/undercut (or stronger ¬E arrives). Does the agent's position move *correctly* — proportionally, not stubbornly, not erratically?
 - **What it measures:** responsiveness to evidence change vs the flat-store failure mode (nothing moves) and the recency-wins failure mode (position flips entirely).
 - **Metrics:** belief delta in response to evidence delta (monotone, bounded); undercut-vs-rebut distinction respected (attacking the inference ≠ asserting ¬claim); correct-position rate after retraction.
@@ -81,6 +88,7 @@ Design: scenario → two arms (graph-assisted vs plain, same model/temp/seed) �
 Design: sequential task streams, fresh context each session, **the only difference between arms is the graph**. Metrics are trajectories, not snapshots.
 
 ### L1 — Interdependent-task stream (MemoryArena-style)
+
 - **Protocol:** stream of 10+ tasks where later subtasks *depend on* information learned in earlier sessions (web-nav/planning/search/formal-reasoning settings, adapted from MemoryArena 2602.16313). Fresh conversation each session.
 - **What it measures:** does memory get *used* to guide later actions (not just recalled)?
 - **Metrics:** recall-before-re-derive (product-success 1a); correct-with-provenance (answer cites stored points + confidence); re-derivation tool-call count (≥ 5× fewer than control); time-to-correct (≤ 40% of control); overall task success on interdependent subtasks.
@@ -88,6 +96,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **Anchor:** MemoryArena (interdependent-loop design); product-success 2-session continuity experiment; IFCMemoryBench (real-session variant); graph-as-memory E1.
 
 ### L2 — SEA-Eval sequential stream (pseudo-evolution gate)
+
 - **Protocol:** repeated task *families* (5–8 families × 3+ repetitions each, interleaved across sessions, shuffled). Same families recur so reuse is possible; held-out family reserved.
 - **What it measures:** genuine evolution vs pseudo-evolution.
 - **Metrics (trajectories, not means):** Success Rate (SR) per repetition; **token consumption per task over repetitions** (must converge downward — the core SEA-Eval discriminator, 2604.08988); strategy-reuse rate (fraction of steps invoking a graph-retrieved strategy vs zero-shot reasoning); execution steps.
@@ -95,6 +104,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **Anchor:** SEA-Eval SR+T primitives; 2607.13104 "process over time" eval rule; strategy-reuse diagnostics; graph-as-memory E3 (cost ledger — extraction vs read-time tokens).
 
 ### L3 — Reasoning-quality trajectory (the core claim)
+
 - **Protocol:** the same decision-scenario battery repeated across the stream (Tier-1 probes as recurring checkpoints, plus harder held-out variants each wave).
 - **What it measures:** does *reasoning quality itself* improve with accumulated graph history — not just speed/recall?
 - **Metrics (per wave, blind LLM-judge rubric):** counter-argument coverage; calibration (Brier); contradiction-surfacing rate on planted contradictions; decision correctness. Trajectory slope across waves.
@@ -102,6 +112,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **Anchor:** 2607.13104 (improvement as process over time, held-out tasks); OPT-BENCH 2605.08904 (iterative improvement with feedback); LIGHT (ICLR 2026) as the long-horizon comparison.
 
 ### L4 — Cross-session contradiction accumulation
+
 - **Protocol:** plant contradictions that only become *visible* given claims from multiple prior sessions (A in session 1, ¬A in session 5; surface when the agent queries/decides in session 6+).
 - **What it measures:** does accumulated knowledge *create* new reasoning signals (contested claims) that a single session can't produce? Earlier-and-earlier surfacing as the graph grows.
 - **Metrics:** contested-claims recall over time (G5 at the agent level); surfacing latency (sessions between ¬A arriving and the conflict being raised); correct resolution (supersede with provenance).
@@ -109,6 +120,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **Anchor:** epistemic-layer G5/P9; MemoryArena interdependent tasks; product-success 1c (weeks-old memory still matters); graph-as-memory D1 (bi-temporal).
 
 ### L5 — Decision-drift resistance (weeks-long)
+
 - **Protocol:** decision D made at t0 with full rationale in graph. Re-derive D fresh-context at t+7d, t+21d (≥ 10 interleaved sessions, ≥ 5 consolidation runs). Control arm: same decision, no graph (rationale lost).
 - **What it measures:** consistency of judgment over time — the agent re-derives the *same* conclusion with the *same* reasons vs drifting.
 - **Metrics:** decision consistency (same option chosen); rationale consistency (rubric: same criteria weighted, same counter-arguments); drift magnitude per t; hallucinated-rationale rate (control fabricates ~100% — product-success 1c's finding).
@@ -116,6 +128,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **Anchor:** product-success 1a/1c; 2604.20006 task-dependence caveat (pick decision/workflow families where memory is load-bearing).
 
 ### L6 — Distillation fidelity
+
 - **Protocol:** after N sessions in a domain, the graph holds consolidated summaries (epistemic-topic-summarization). Test: reasoning tasks answered from *distilled* graph alone vs from raw sessions vs from nothing.
 - **What it measures:** consolidation preserves reasoning power (not just facts) — the "dream"/summarization layer must not flatten the reasoning chain (IMPL/NAND structure).
 - **Metrics:** same Tier-1 reasoning rubric (R1–R5) scored on distilled-vs-raw arms; information-loss (contradiction pairs lost in distillation); reasoning-fidelity = distilled-score / raw-score.
@@ -127,6 +140,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 ## Tier 3 — Differential (Tortoise vs the field)
 
 Design: **same battery, six arms**, recall controlled:
+
 | Arm | Description |
 |---|---|
 | A0 control | Plain agent, no memory (fresh context every session) |
@@ -137,23 +151,27 @@ Design: **same battery, six arms**, recall controlled:
 | A4 tortoise | Epistemic graph + Decide workflow (the treatment) |
 
 ### D1 — The reasoning battery sweep
+
 - Run Tier-1 probes (R1–R5) × all six arms, single-session. Recall/retrieval metrics are *diagnostics only*.
 - **Differentiation profile (no exclusions — owner decision 2026-08-14):** ALL probes (R1–R5; L1–L6; D2–D4) are scored on ALL arms and reported in a full delta profile. Every metric is classified: **STRONG** (Tortoise wins, delta ≥ [cal] threshold, empirically contested) / **STRUCTURAL** (Tortoise wins but by-construction — the graph's primitives firing; honest label: competitors could replicate the primitive) / **PARITY** (within ±[cal] threshold) / **WEAK** (comparator wins, delta ≥ [cal] threshold). Each metric carries a **load-bearing flag** — is the axis customer-visible (contradiction, staleness, calibration, decision consistency, improvement-over-time)?
 - **Matched-recall definition (ex ante):** equal top-K factual retrieval F1 (K=5) on a factual probe subset of the scenario corpus, measured before the reasoning battery runs. **Symmetric trigger:** if ANY arm (A0–A4) falls ≥0.10 F1 short of the corpus-best factual retrieval, rerun on a recall-matched balanced subset; if that subset is <50% of the corpus, the differential verdict is **INCONCLUSIVE** (reported, not re-interpreted). **Amendment (2026-09-12, #3327): the trigger's population is the retrieval-capable comparators `{a1, a2, a2b, a3, a4}` — `a0` is EXCLUDED from the trigger and RETAINED as the trigger's positive control and as a published profile row annotated *recall-confounded*. The original sentence above ("ANY arm (A0–A4)") is preserved and read by purpose. Basis: `a0`'s recall is 0.0 by construction (`battery/arms/a0_plain.py:26-27`), so an a0-inclusive trigger fires on every run and makes every differential run INCONCLUSIVE — which would make UNIQUE, and per review MECHANISM-NOT-UNIQUE and WEAK-UNMITIGATED, unreachable by construction. Decision: `docs/research/2026-09-12-matched-recall-a0-control.md`; contract rows §3.2.1/§7 of `docs/benchmarks/comparison-systems.md`. No `trigger_population` constant exists in `matcher.py` yet — wiring is tracked by #3327.** ⚠️ **Corrected 2026-09-13, #3346 — the sentence immediately above is stale/false on current `main` and is preserved verbatim as the pre-wiring record.** PR #3439 (#3327) landed the wiring: `battery/recall/matcher.py:49` defines `TRIGGER_POPULATION: tuple[str, ...] = ("a1", "a2", "a2b", "a3", "a4")`, and `match_recall` takes it as the default of its keyword-only `population` parameter (`matcher.py:206`, `population: Sequence[str] = TRIGGER_POPULATION`); `battery/recall/prepass.py` and `battery/runner/run.py` wire it into the run path. The amendment's **conclusion is unchanged** — the population is still caller-supplied, now explicitly via `population=`, so a test-local population remains expressible and the run-level default is the five comparators. (The same stale clause was corrected in `docs/benchmarks/comparison-systems.md` §3.2.1/§7.)
 - **Verdict rule (owner decision 2026-08-14, replaces the ≥2-of-3 gate):** the verdict is a **differentiation profile** — every metric scored on every arm, no exclusions ("if we're better we want to know"). The "unique" claim ships when **≥1 TRUE DIFFERENTIATOR** (STRONG on a load-bearing axis — empirically won, not structural) **AND no SERIOUS WEAKNESS** (no load-bearing WEAK lacking a documented mitigation path). Structural wins are reported and count toward the profile, but cannot alone support "unique" (competitors could replicate the primitive). WEAKs each carry a mitigation path; the battery is re-runnable so "improve enough that weaknesses are not serious" is testable.
 
 ### D2 — The longitudinal sweep
+
 - Run Tier-2 streams **L1/L2** × all arms (A2/A2b/A3 with their own memory backends). (D2 narrowing vs full L1–L6: the pseudo-evolution spread gate measures token-trajectory convergence + strategy reuse, which L1/L2 exercise; L3–L5 trajectory metrics are scored on the A4 arm in Tier-2 proper and appear on comparator arms only where their scenario families run there — see plan E2E-3.3.)
 - **Gate:** A4 shows the token-trajectory convergence + quality slope (L2/L3); A2/A2b/A3 show memory growth without behavior change (SEA-Eval pseudo-evolution) — pseudo-evolution spread threshold per AC-D2 (≥2× [cal]; literature reports up to 31.2×, ⚠️ single-source).
 - **Bonus metric:** LongMemEval/LoCoMo + ForgetEval-class staleness scores per arm, to *show saturation parity* — proving the reasoning delta is not explained by raw recall. (Existing infra: feat/1144 retrieval-eval + longmemevl-runner; staleness probe per scope in-scope #6.)
 
 ### D3 — Iterative feedback integration (OPT-BENCH-style)
+
 - **Protocol:** loop — agent does task, receives structured feedback, task repeats in harder form. Measure fix-rate and improvement-per-iteration.
 - **What it measures:** does the graph make feedback *integration* more effective (feedback filed as evidence → propagation → behavior change) vs in-context-only feedback?
 - **Gate:** A4 fix-rate ≥ A0 by a calibrated margin across ≥ 5 iterations; per-iteration improvement monotone.
 - **Anchor:** OPT-BENCH 2605.08904 (iterative self-optimization); SEAL co-evolution 2605.24426 (failure diagnoses driving policy improvement).
 
 ### D4 — Adversarial/robustness differential
+
 - **Protocol:** hostile inputs where memory systems break: poisoned retrievals (2% injection, epistemic-layer A8), Sybil floods (100 weak vs 1 strong source, P7), echo-chamber rings (A3), flapping (A6), outdated-claim anchoring (the ACL 2026 finding).
 - **Gate:** A4 rejects poisoned claims ≥ 80% at high confidence; rank ordering T0 > 10×T4 survives EP; anchored-but-superseded beliefs are abandoned, not persisted.
 - **Anchor:** epistemic-layer A1–A8; 2607.05775 failure clusters; graph-as-memory E2 (lifecycle stress).

@@ -24,7 +24,6 @@ aboutObjects: tortoise
 
 # PART A — STRATEGY ALIGNMENT DECISION
 
-
 # Strategy Alignment Decision — Epic #1976: Agent-driven onboarding
 
 **Feature:** Rebalance Tortoise onboarding toward agent-driven setup — the wizard shrinks to 5 defined human steps (orientation, org-create/join, fork, connect-consent, done), the agent completes install/seed/decide in-context, the graph itself holds per-org onboarding state, and the Overview calms to 3 elements with zero toggles.
@@ -32,6 +31,7 @@ aboutObjects: tortoise
 **Decision: PROCEED** (with two scope-guard rails — see Step 4).
 
 > **Baseline evidence verified this session (2026-08-29, codebase):** the issue's load-bearing factual claims check out:
+>
 > - **M7 (6 harnesses):** `website/apps/dashboard/src/harnesses.js` `HARNESS_NAMES` = Claude Code, Claude Desktop, Claude Web, Codex, Cursor, Pi. ✅
 > - **M6 (invite infra exists):** `tortoise/hosted_api.py` has `POST /v1/invites`, `GET /v1/invites/info`, `POST /v1/invites/accept`, `GET /v1/invites`, `GET /v1/invites/pending`, `POST /v1/invites/pending/{id}/accept`, `DELETE /v1/invites/pending/{id}`, `DELETE /v1/invites/{id}`. ✅
 > - **M9 (no telemetry events for seed/decide):** `tortoise/analytics.py` emits only `tenant_provisioned`, `api_key_created`, `first_api_call`. No seed/decide events exist. ✅ (W11's gap is real)
@@ -98,6 +98,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Decision:** PROCEED
 
 **Alternatives considered:**
+
 1. Polish the existing wizard (#1643) — rejected: wrong pattern for the product class (no comparable agent-tool product uses a post-signup wizard; 50% higher activation with agent-mediated setup)
 2. Minimal slice (command + prompt + seed = W1+W2+W3, no W4/W5/W9) — rejected: it reaches the aha (two Subjects + one decide via W3) but strands the user at an unchanged Overview (W4), keeps onboarding state in Supabase jsonb instead of the graph (W5 — hence no graph-held completion events)
 3. Wait for users — rejected: cost of re-onboarding the founding cohort outweighs the unmeasurable metrics; structural decisions (org semantics, fork) are cheap now, expensive to retrofit
@@ -108,6 +109,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Eisenhower placement:** Important / Not Urgent — Schedule (self-imposed urgency, no external clock; do it at full depth before production traffic exists).
 
 **Key assumptions:**
+
 - **A0 — the current wizard's friction is real and representative of the first-cohort experience — confidence: medium.** Evidence: one "toggle wall gives me anxiety" observation of unspecified provenance + the market-pattern claim (no comparable agent-tool product uses a post-signup wizard). The 50%-activation / 28%-drop-off stats are third-party onboarding stats (UserGuiding/ProductLed via Zylos) transferred to this product class — **the transferability caveat is registered here, and it is precisely what caps this premise at medium confidence**. This is the load-bearing premise for PROCEED-now vs polish-1643/wait-for-users — registered explicitly with its falsification path: W11 events + walk-through reviews on the first cohort are the test; if first-cohort friction is low, the rebuild was premature. "Known-stopgap" is earned; "known-bad" is not yet earned.
 - "Agent knows its own harness" holds for the 4 self-installable harnesses (Claude Code, Cursor, Codex, Pi); the other 2 (Claude Desktop, Claude Web) fall back to teach-the-human — confidence: **medium** (open question b; bounded risk via universal-command handoff)
 - The graph is the right store for onboarding state (idempotent writes, init-in-transaction, versioned) — confidence: **medium** (architecturally principled, but the highest-implosion-risk piece; Rail 1)
@@ -116,6 +118,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 - No existing orgs other than the owner's → migration is a one-org special case — confidence: **high** (fact-checked in the issue)
 
 **Scope-guard rails (applied by this align, binding on downstream stages):**
+
 - **Rail 1 — W5 sequencing (restated, unambiguous):** the `OnboardingState` node *plumbing* ships with W1/W2 — W2's agent skill reads the node, and W2 must NOT depend on the legacy Supabase store as its long-term source. The store-migration (backfill from `teams.onboarding_state` jsonb), completion-events, and dashboard-mirror portions land only after the agent flow is working. The state machine is the backbone, but the *agent's* ability to drive setup is the user-visible value; the store migration never gates the user experience.
 - **Rail 2 — launch slice discipline, with explicit couplings:** decompose for a launchable minimum (W1, W2, W3, W4, W5, W9, W11 — the critical path) with W6/W7/W8/W12 as follow-on waves, and W10 explicitly last (needs RBAC). Decomposition must make the launch slice independently mergeable. This is a *sequencing* rail, not a scope cut — all 12 Ws stay in the epic. **Named launch-slice couplings (follow-on surfaces the launch slice references — decomposition must not silently re-scope these):**
   - **Fork-build → W8 catalog:** the fork card's build branch shows the capability catalog (indexers+extractors). **W1 renders the fork card shell; the build-branch catalog is static placeholder content owned by W1** until W8's pullable registry endpoint lands — the journey map's builder branch is presented, but populated statically.
@@ -135,6 +138,7 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 **Gate:** fresh-context reviewer (dispatched via `task`).
 
 **Cycle 1 findings (reviewer):**
+
 1. P1 — A0 premise (wizard friction real/representative) unregistered → added to assumption register with medium confidence + falsification path; "known-bad" deflated to "known-stopgap" everywhere including Step 1's opportunity-cost paragraph; Alternative 1's "decisive" research claim downgraded with A0 transferability caveat.
 2. P1 — Rail 2 launch-slice presentation gaps (fork-build→W8 catalog, join→W7, capture-disclosed→W6) → explicit coupling language added to Rail 2 (fork-card shell + static catalog owned by W1; W6 fold targets W1's connect-consent step).
 3. P2 — Rail 1 internal ambiguity → restated as plumbing-with-W1/W2 vs migration/events/mirror-later.
@@ -152,11 +156,9 @@ If we didn't build this, the higher-leverage alternative is **not** another feat
 
 **Cycle 5 (final confirmation):** 1 P2 (critical-path set inconsistency) → fixed. **Final result: NO P0/P1/P2 outstanding — align gate CLEARED.** (Recorded cycles: 1-5.)
 
-
 ---
 
 # PART B — EPIC SCOPE
-
 
 # Epic Scope — Agent-driven onboarding (#1976)
 
@@ -249,69 +251,81 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 > Written BEFORE user journeys — behavioral, not presentational.
 
 ### E2E-1: One-sitting first-run (the north star)
+
 **Given:** a brand-new user with no Tortoise account and no org
 **When:** they sign up (identity + email only), create a named org, pick the fork, run ONE universal command
 **Then:** the agent files Organization + User as Subjects linked `memberOf`, and the user is nudged through one real `tortoise-decide`
 **And:** the user sees both anchors + the decision in the graph, in one sitting, with no 5-step wizard and no "what do I do now" moment
 
 ### E2E-2: Overview calm
+
 **Given:** a user who has completed onboarding
 **When:** they open the dashboard Overview
 **Then:** it shows exactly 3 elements (connection status, memory digest, next action) and zero feature toggles
 **And:** every source toggle (github_connected, github_indexed, github_docs_indexed, session_recording) is reachable only via Settings → Memory sources
 
 ### E2E-3: Org-name capture
+
 **Given:** a user creating an org (not via invite)
 **When:** the org-create step renders
 **Then:** the name field is REQUIRED with an editable prefill, and the org is never silently named after the username
 
 ### E2E-4: Ontology-precise seed
+
 **Given:** a user who has connected their agent
 **When:** the agent runs the seed step
 **Then:** Organization (Subject/organization) + User (Subject/naturalPerson) are filed, linked `memberOf`, from API data (hosted) or two prompts (self-hosted)
 **And:** neither anchor is filed as Object/Statement; existing `person` subjects are normalized to `naturalPerson`
 
 ### E2E-5: Agent install across harnesses
+
 **Given:** a user on each of the 6 harnesses (Claude Code, Claude Desktop, Claude Web, Codex, Cursor, Pi)
 **When:** they run the universal setup command
 **Then:** the agent self-adjudicates its harness and self-installs MCP (4 CLI harnesses) or teaches the human the manual path (Claude Desktop, Claude Web)
 **And:** the connection is verified and reported back to the onboarding state
 
 ### E2E-6: Graph-held state resumption
+
 **Given:** a user who started onboarding (e.g. connected the agent) but did not finish (no decide yet)
 **When:** they re-enter via the Settings Setup guide or the Continue-setup card
 **Then:** onboarding resumes at exactly the next incomplete step (idempotent, never restarts)
 **And:** the state lives in an `OnboardingState` graph node, mirrored as a dismissible checklist card
 
 ### E2E-7: Invite fusion (the most failure-prone surface)
+
 **Given:** an existing user with a DIFFERENT email than an invite they received (same person, two accounts)
 **When:** they click the invite link
 **Then:** they are offered the explicit three-path choice (fuse / log out and accept with new account / accept under current account with recorded mismatch), with fuse defaulting but never silent
 **And:** the mismatch-override path requires OTP proof-of-control of the invitee email; a mismatch of a DIFFERENT person errors and signs in as the invitee
 
 ### E2E-8: Atomic new-user accept
+
 **Given:** a brand-new user clicking an invite link
 **When:** they land on the pre-filled signup
 **Then:** account + membership are created ATOMICALLY (one action, no "create then accept")
 **And:** they land in the team with agent setup as an inline skippable first action
 
 ### E2E-9: Builder catalog
+
 **Given:** a user who picked the build-an-app fork
 **When:** the build path presents the capability overview
 **Then:** the indexers+extractors catalog is shown once (session recorder, session extractor, document indexer), pulled from a registry endpoint that extends tool_registry
 **And:** every extractor/indexer module carries the code-level catalog reference note
 
 ### E2E-10: Self-hosted onboarding
+
 **Given:** a self-hosted Tortoise instance with no Supabase
 **When:** a user sets up their agent on it
 **Then:** the agent asks the two prompts (name, org), files both Subjects linked `memberOf`, and completes a `tortoise-decide` — no Supabase involved
 
 ### E2E-11: Capture disclosure (self-use)
+
 **Given:** a self-use user with session recording enabled (default-ON per #1927)
 **When:** their first capture happens
 **Then:** the capture is announced in-conversation, and Settings shows view/delete of captured transcripts (DELETE /v1/sessions/{id} works, capture-receipt cleaned)
 
 ### E2E-12: Cross-W journey (owned by W5)
+
 **Given:** a fresh user
 **When:** they complete the full journey (signup → org → fork → connect → seed → decide)
 **Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the fork-aware completion gate

@@ -16,6 +16,7 @@
 > **Findings date:** 2026-08-28
 
 > Gate skipped: zero third-party dependencies (FastAPI/Supabase/FalkorDB in-repo). UX research consumed from the #1875 scoping `### Axis Research`:
+>
 > - **Team capacity by tier** [canonical]: tier-capped seat counts with in-product upgrade prompts at the capacity boundary (Vercel/Linear; the repo's pricing config free=1, solo=1, pro=2, team=∞ — the backend gate must match it).
 > - **Pending-invites surface** [canonical]: invitees expect a visible pending-invites list in the account/workspace switcher (Slack/GitHub/Notion workspace-switcher precedent) — the account menu is the established home.
 > - **MANDATORY:** any NEW UX decision → web_search first; record in the UX Design Decisions table.
@@ -34,11 +35,13 @@
 ### Journey Test Map
 
 **Journey: "I was invited to a team"**
+
 1. Open the account menu → "Invites" → **Acceptance:** pending invites list with team name + inviter → **Test:** e2e pending invites
 2. Accept → **Acceptance:** lands on the team (switchTeam) → **Test:** e2e accept-from-list
 3. Decline → **Acceptance:** invite removed, no ghost member → **Test:** e2e decline + registry integration
 
 ### Failure Modes
+
 - **Token-less accept**: the pending list cannot carry a token (hash-only storage) — accept must be token-less with email-match authz (cycle-3 P1).
 - **Capacity source**: active members + PENDING INVITATIONS (authoritative) — never org_memberships(status='invited') (cycle-1 P1: supabase never writes those rows; registry leaves stale fakes).
 - **Decline backend**: net-new invitee revoke (cycle-1 P1 — no invitee-side decline existed).
@@ -72,6 +75,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** the pricing gate matches free=1, solo=1, pro=2, team=∞; capacity counts active members + pending invitations (authoritative) in both modes; Team None-skip.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (invite_to_team ~6296)
 - Modify: `tortoise/supabase_control.py` (a pending-invitations count helper if needed)
 - Test: `tests/test_invites_http.py`
@@ -88,6 +92,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** GET /v1/invites/pending (own pending, both modes); POST /v1/invites/pending/{id}/accept (token-less, email-match, reuses a SHARED accept internal with all checks preserved, consumed-invite → clear error); DELETE /v1/invites/pending/{id} (email-match revoke + #1880 ghost cleanup).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (three new endpoints + a SHARED registry accept internal used by BOTH the token branch and the by-id branch — resolves the review P2s: ghost cleanup, preserved checks, free-cap on both entry points, consistent semantics)
 - Modify: `tortoise/supabase_control.py` (new email-scoped helpers: pending-by-email, accept-by-id, decline-by-email)
 - Test: `tests/test_invites_http.py` (both modes)
@@ -95,6 +100,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Step 1 — Failing tests:** pending list (own invites only, BOTH modes, expired excluded); token-less accept (email-match authz + consumed error, BOTH modes); decline (authz + idempotent + ghost row gone, BOTH modes); expired-invite reject on by-id accept.
 
 **Step 2 — Implement:**
+
 - **Shared registry accept internal** (used by the token branch AND by-id): preserves the FIVE checks (pending-status rejection, expiry, email-match, existing-membership 409, max_users quota gate), the free-cap pre-check (Task 3), marks accepted → membership_create → `_delete_fake_invite_membership` (#1880 — success AND the 402 path, mirroring the token branch), single-use semantics. The by-id accept pre-checks the free-cap BEFORE the accepted_at write (NON-consuming — the invitee can leave their free team and re-accept; documented divergence from the token branch's consumed-on-402).
 - **Supabase email-scoped seams**: pending-by-email (invitations where email = session email, status pending, not expired, join team name + inviter + expires_at), accept-by-id (id-keyed, preserving the invitation_accept checks incl. the max_users quota gate ~1015), decline-by-email (email-scoped revoke).
 - Register the decline route before the generic /v1/invites/{invitation_id} (convention, not correctness — cycle-4 P3).
@@ -107,6 +113,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** a free-capped invitee accepting into a team without an active subscription → blocked (mode-aware #1877 helper); joining a subscribed team always allowed. The free-cap applies to BOTH registry accept entry points (token + by-id) via the shared internal, and to the supabase invitation_accept core (before the single-use PATCH — already safe).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (the shared registry accept internal), `tortoise/supabase_control.py` (invitation_accept core)
 - Test: `tests/test_invites_http.py`
 
@@ -122,6 +129,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** "Invites" section (list + Accept/Decline), empty state hides, renders res.detail; the hardcoded main.jsx:2480 message replaced.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (account menu + Members-tab invite submit)
 - Modify: `website/apps/dashboard/src/index.css`
 - Test: `tests/e2e/test_dashboard_identity.py` (+ the harness gets /v1/invites/pending + accept/decline mocks)

@@ -5,6 +5,7 @@
 The onboarding wizard has 5 steps: Orientation (Step 0), org-create (Step 1), fork card (Step 2), connect (Step 3), done (Step 4).
 
 Invite handling has two paths:
+
 - **Invite link** (`?invite_token=XYZ`) — stashed in sessionStorage, auto-accepted at mount via `acceptStashedInvite()`, but only sets a banner — no `loadTeams()` call, so wizard state is stale
 - **Pending invites** (account menu) — correctly calls `loadTeams()` + `switchTeam()`, but only works post-onboarding
 

@@ -46,6 +46,7 @@ Root cause of "provider can read content" is not the three content fields: it is
 ### Falsification Check
 
 This definition is WRONG if any of:
+
 1. A labeled retrieval set or real query logs exist making server-side content search unnecessary (verified: none — #316 defers P/R@K to a future labeled-set issue).
 2. The hosted deployment never stores content-derived fields server-side (contradicted: search/EP/topic-summarization are server-side).
 3. An attacker with DB exfiltration (no keys) can recover customer content through any clear field not classified as a documented accepted leak — the classification matrix must be exhaustive (review-gated against the v3.7 record spec).
@@ -62,17 +63,21 @@ High on root-cause framing, execution-boundary finding, #307 staleness (primary-
 ## Verification Gates
 
 ### problem-verify — 2 cycles, PASSED
+
 - **Cycle 1:** Verifier A P0=0 P1=4 P2=3 P3=3; Verifier B P0=0 P1=3 P2=6 P3=2. Controller: FIXED all 5 P1 groups — (1) execution boundary mis-stated (code-verified: hosted MCP is provider-side, A9 re-tagged FALSE, per-write-path execution points added); (2) key-derivation contradiction (HKDF-from-API-key rejected — provider sees the API key; client-generated KEK + passphrase-wrapped registry copy); (3) stakeholder taxonomy (per-surface classify all 10 + Document.summary/topics); (4) dashboard web client (non-guaranteed surface, documented); (5) leak bound (quantification deliverable + pre-registered thresholds). Re-dispatched.
 - **Cycle 2:** Verifier A P0=0 P1=6 P2=3 P3=0; Verifier B P0=0 P1=5 P2=4 P3=2. Controller: INCORPORATED all via R1–R6 — key wrapping pinned (R1), multi-agent distribution restored as team passphrase (R2), per-field resolution rule (R3), MCP hard-gate reframed (R4), processing execution points (R5), proxy magnitude surfaced (R6). No re-dispatch left (max 1 used). Residual: none structural — remaining items are solution decisions + human Clarifications.
 - **Verdict:** PASSED. Both gates: all P0/P1 resolved or bound into the confirmed problem; no 3-cycle escalation trigger.
 
 ### solution-verify — 2 cycles, PASSED
+
 - **Cycle 1:** Verifier A P0=0 P1=4 P2=6 P3=0 P4=2; Verifier B P0=0 P1=4 P2=5 P3=2 P4=2. Controller: incorporated S-Fix 1–7 + P2/P3/P4 batch — (1) JSONL event-log/rebuild plaintext path (P0 → encrypted-verbatim snapshots + version-dependent replay); (2) gate teeth → acceptance criterion 12; (3) encrypted-payload contract + fail-closed write gate (server never recomputes embedding); (4) Point search surface (no title exists; Point._searchText built, parity = latency + quantified recall@k); (5) interim hosted-MCP behavior (content-bearing tools frozen for encrypted teams + metadata-only reads); (6) topic summarization v1 = metadata-only; (7) export/portability decrypt-export. Re-dispatched.
 - **Cycle 2:** Verifier A P0=0 P1=4 P2=8 P3=1; Verifier B P0=0 P1=3 P2=11 P3=0. Controller: incorporated C2-1..C2-6 — criterion-12 loophole closed (hard drop-dead date + expiry + non-vacuous slip consequences + O/I/T scoped per-surface); rebuild derived-field parity (snapshot embedding verbatim, dedup identity preserved); **two-key model** (client confidentiality key + server integrity key); #160 resolved (landed as "pending merge", client-side embedding + model-version pin); rotation bulk re-encrypt job allocated in P5; artifact persistence (this doc + research artifact). P2s: event-log surface corrected (hosted never sets event_log_path; gate SDK-level emission on encryptionVersion>=1), content_hash site enumeration, snippet bound pre-registered, C6 re-scope, dashboard carve-out (main.jsx:1332/1349 verified), migration enablement gate, topic-summary snippet source, Point FTS index + backfill.
 - **Verdict:** PASSED. Both gates: no P0 remained after incorporation; residual = product decisions + execution-phase detail, not structural.
 
 ### Phase 5.6 — Qwen Coherence Check
+
 **[QWEN-GATE] substitute reviewer used** — qwen3.8-max is blocked (401) on this session; one substitute fresh-context reviewer dispatched per the skill's coherence prompt.
+
 - Findings: P1×3 — (a) artifacts not persisted on disk (fixed by this doc + research artifact + #1137 comment + extra issues); (b) #1137 body + 307 scoping doc still encode the rejected HKDF-from-API-key design (addressed: #1137 comment + extra issue E1); (c) target wording "zero plaintext reachable" vs clear derived fields (reworded to "zero raw-content plaintext" + leak table names _searchText/topic-metadata/embeddings). P2×4 — #317 reranker disposition pinned per mode (skip at v1, disclosed impact); wrapped-key corruption + rotation-skew edge cases added to P3; P4 restructured as transport-level matrix-driven transform (79-tool enumeration = conformance test matrix only); #160 sequencing pinned in ADR addendum + zero-new-deps qualified to crypto core (client embedding dep noted).
 - Coherence verdict: strong on execution boundary, two-key split, scrypt-passphrase rejection, JSONL parity, MCP hard-gate, migration enablement, edge-case coverage. No problem-dimension dropped between diamonds.
 
@@ -97,9 +102,11 @@ High on root-cause framing, execution-boundary finding, #307 staleness (primary-
 **P5 — Latency, leaks, migration, export, artifacts:** read-latency regression < 5% per-op p50/p95 vs #316 baseline (FTS/vector/hybrid strategies + EP + traversal); write-path budget (AEAD + keyed-hash + client embedding) met; leak probes vs pre-registered thresholds; migration cutover per tenant class (backfill _searchText → enable client encryption → re-encrypt in place; SDK / MCP / dashboard classes; rollback criteria; legacy-search degradation window with bound) + **enablement gate** (new teams flagged at provision; existing teams opt-in client-side re-encrypt sweep or frozen-v0 decision); bulk re-encrypt job (rotation + migration machinery); export-decrypt (`tortoise export --decrypt` — ciphertext + envelope + recovery instructions); ADR-008 addendum (HKDF rejection, two-key model, #160 "pending merge" re-scope, C6 re-scope, FIPS note) at P2 time; #265 body sever via #1137; research artifact committed.
 
 ### Testing strategy
+
 Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (SDK write→DB ciphertext assertion incl. rebuild; HMAC dedup; EP/search parity; fail-closed gate; embedding==client vector) → adversarial (key-derivation harness go/no-go; tamper; wrong-key; corrupted wrapper; rotation skew) → leak probes (pre-registered thresholds) → latency (read p50/p95 vs #316 methodology; write-path budget) → E2E (proxy round-trip; MCP tool contract conformance; export-decrypt; backup→restore→decrypt; concurrent writers; degraded no-key read).
 
 ### Acceptance criteria
+
 1. No plaintext raw content at rest/transit on guaranteed paths (SDK/REST v1; MCP post-proxy) — DB-inspection incl. post-rebuild.
 2. content_hash = keyed HMAC everywhere on guaranteed paths; intra-team dedup + idempotent writes work; no plain-SHA256 content fingerprint reachable.
 3. Adversary harness ({API key + traffic + DB + registry + mint endpoint}) cannot decrypt content — automated go/no-go.
@@ -114,6 +121,7 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 12. **Gate (teeth):** epic close requires (a) MCP encrypt-proxy shipped + GA with read/write parity proven, OR (b) dated customer-facing disclosure with hard drop-dead date + expiry mechanism (auto-expire → re-ratify or re-classify by ADR) + non-vacuous slip consequences (content-tool freeze persists indefinitely + indefinite-state public disclosure re-issued + SDK/REST encryption GA withheld) + named accountable owner; guarantee claim scoped to SDK/REST until the proxy lands; disclosure enumerates exactly which surfaces remain plaintext for encrypted teams.
 
 ### Runtime prerequisites
+
 - `cryptography==50.0.0` (pinned; AESGCM/HKDF/HMAC/scrypt) — **zero new third-party deps for the crypto core**; client-side embedding needs the `[embeddings]` extra/ONNX on the client (noted — "zero new deps" qualified).
 - #316 vector-benchmark methodology (read baseline); new write-path baseline defined in P0.
 - #160 hosted embeddings: "implementation complete, verified — **pending merge**" — server-side pipeline bypassed for v1 teams (client-side embedding, model-version pinned); sequencing window pinned in ADR addendum.

@@ -65,6 +65,7 @@
 ### D4 — Fork semantics + universal-command + M8 tests
 
 New `tests/test_onboarding_w2_fork_card.py` (docker-lane; module-level skip when `TORTOISE_DB_URI` unset — mirrors split-test guard; registered under `onboarding:` in ci-surfaces.yml). API/wire-shape assertions complementing W5's raw-writer + sdk-inheritance tests (W5 already covers sdk-level inheritance — this file covers the DASHBOARD call sequence + wire shape):
+
 - first org (register fixture) → GET `/v1/onboarding/state`: `fork` null; checkpoint `{fork:'self'}` → 200 + GET shows self; replay same → 200 no-op (never re-asks); `{fork:'build'}` → 409 (set-once).
 - second org (sdk lane with prior membership + fork=build on first — W5 fixture pattern) → GET shows inherited `fork:'build'` + `compact:true`; fork re-POST on org B → 200 no-op (inherited — org B never re-asks).
 - negative: absent-node org first FLOW write (create-on-write seam) → node materializes with `compact:false` (never fabricated compact — guards a hook regression).
@@ -99,6 +100,7 @@ New JS: `harnesses.test.js` (node --test, pure module — harnesses.js has no im
 6. **Verify + commit**: node --test; docker-lane pytest (new file + split + state); carve-out pytest; ruff; frontmatter lint; dist build; final `git merge origin/main`; commit-workflow (VGATE; registry "<worktree>::<file>").
 
 ## Risks
+
 - W4 (merged to main) main.jsx overlap → final merge reconcile; regions disjoint (connect step vs Overview/Settings).
 - e2e not runnable locally → selector-stable changes + stale-count fix only.
 - SKILL.md name-vs-dir lint P0 → documented expected-fail (D5); mirror lint-clean.
