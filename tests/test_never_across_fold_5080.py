@@ -40,11 +40,15 @@ lossy direction (one capture order can still drop the claim), not the safe
 one.  Closing the class needs a model or an unbounded lexicon, not a longer
 list — a longer list only moves where the miss happens.  The residual is
 declared and pinned ``so it cannot go silent`` below, and is tracked on
-#5329 (marker vocabularies) and #7524 (the model/POS/NER-shaped residuals);
-no list is grown here.
+#5329 (marker vocabularies), #7524 (the model/POS/NER-shaped residuals) and
+#5325 (the connective-slot residuals); no list is grown here.  Every tracker a
+pin names is declared once in ``RESIDUAL_TRACKERS`` below, and
+``TestResidualPinsHaveLiveTrackers`` holds the pins to it.
 """
 from __future__ import annotations
 
+import ast
+import re
 import sys
 from pathlib import Path
 
@@ -54,6 +58,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import dedup_classify
 from tortoise import extractor_v2 as v2
+
+# ── the residual pins' live trackers ────────────────────────────────────────
+# Every ``*_is_a_known_limit`` test below is a DECLARED residual, written "so it
+# cannot go silent".  A pin whose tracker is CLOSED is precisely the silent case
+# the pins exist to prevent: the words stay and the accountability evaporates,
+# so a residual that still folds reports as healthy.  That happened over this
+# file — pins cited #5139 and #5134 for a month after BOTH closed — and four
+# pins (the apostrophe collapse, the two composing-mark pins, the month-as-name
+# pin) cited no tracker at all (#7524).
+#
+# So the trackers are declared HERE, once, and
+# ``test_every_residual_pin_names_a_declared_open_tracker`` reads the pin
+# references back out of this file and refuses any reference that is not
+# declared OPEN here.  The state is the RECORDED state, not a live query: the
+# suite is hermetic (#4387), so the table is the single place a closure is
+# recorded, and recording one here (or removing the entry) reddens every pin
+# that named it.  Re-verify against GitHub before editing:
+#
+#     gh issue view <n> --json number,state
+#
+# (verified 2026-10-06: all three OPEN).
+RESIDUAL_TRACKERS = {
+    # issue: (recorded state, the residual class it tracks)
+    5325: ("open", "the connective-slot residuals the #5139 floor still folds"),
+    5329: ("open", "the boundary's finite marker vocabularies"),
+    7524: ("open", "the boundary's NER/POS/syntax-shaped residuals"),
+}
 
 # (prior, candidate, dimension) — one row per dimension of the ruling's
 # boundary.  Each pair is a real rival claim, not a rewording of the prior.
@@ -549,7 +580,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("we need forty two crates", "we need 42 crates")
 
     def test_an_apostrophe_collapse_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent.
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         Apostrophes are removed before the content skeleton is compared, so
         that a contraction's spellings agree.  The cost is that a word needing
@@ -766,8 +797,12 @@ class TestDistinguishingDifference:
             assert not v2.fold_allowed(a, b)
 
     def test_a_combining_mark_that_composes_is_a_known_limit(self):
-        """Superseded by ``test_a_composing_mark_where_a_separator_would_be_is_a_known_limit``,
-        which names the class and pins it in all three dimensions."""
+        """Documented residual, pinned so it cannot go silent (#5329).
+
+        Superseded by
+        ``test_a_composing_mark_where_a_separator_would_be_is_a_known_limit``,
+        which names the class and pins it in all three dimensions.
+        """
         assert v2.fold_allowed("we ship the build", "we do\u0301not ship the build")
 
     def test_a_condition_marker_fused_on_either_side_is_still_one(self):
@@ -800,7 +835,7 @@ class TestDistinguishingDifference:
             assert not v2.fold_allowed(a, b)
 
     def test_a_composing_mark_where_a_separator_would_be_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent.
+        """Documented residual, pinned so it cannot go silent (#5329).
 
         A combining mark standing exactly where a separator would be COMPOSES
         with the letter before it under NFC, and the two parts become one word
@@ -2041,7 +2076,7 @@ class TestDistinguishingDifference:
         assert v2._CONNECTIVE_SLOTS[0] >= v2._COORDINATION_MEMBERS
 
     def test_a_month_used_as_a_name_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent.
+        """Documented residual, pinned so it cannot go silent (#7524).
 
         A month name is dropped from the content skeleton so that a real date
         change stays a supersedable value change; the cost is that a month
@@ -2248,3 +2283,71 @@ class TestFailClosed:
         # normalises to equal tokens reaches every sub-predicate, including
         # the one that walks characters.
         assert isinstance(v2.distinguishing_difference(a, b), (str, type(None)))
+
+
+class TestResidualPinsHaveLiveTrackers:
+    """A residual pin must name a tracker, and the tracker must be declared open.
+
+    Both halves were missing over this file, and each was measured:
+
+      * the pins cited ``#5139``/``#5134`` for a month after BOTH closed — a pin
+        whose tracker is closed reports health in the failing case, the silent
+        condition the pins exist to prevent (#7524);
+      * four pins (the apostrophe collapse, the two composing-mark pins, the
+        month-as-name pin) cited NO tracker at all, so they had no home even
+        before a tracker closed.
+
+    The guard is offline by construction (the suite is hermetic, #4387), so
+    "live" is the state recorded in ``RESIDUAL_TRACKERS``: that table is the
+    single place a closure is recorded, and a closure recorded there — or a pin
+    re-pointed at anything the table does not declare open — reddens this class.
+    """
+
+    @staticmethod
+    def _pin_trackers() -> dict[str, list[int]]:
+        """{pin test name: tracker numbers named on its first docstring line}.
+
+        The convention the guard enforces: a ``*_is_a_known_limit`` pin names
+        its tracker as ``#<issue>`` on the FIRST line of its docstring.  Later
+        lines are free prose — they carry historical references (#5139, PR
+        #5320) that are provenance, not the live tracker — so only the first
+        line is read.
+        """
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        pins: dict[str, list[int]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) \
+                    or not node.name.endswith("_is_a_known_limit"):
+                continue
+            lines = (ast.get_docstring(node) or "").splitlines()
+            first = lines[0] if lines else ""
+            pins[node.name] = [int(n) for n in re.findall(r"#(\d+)", first)]
+        return pins
+
+    def test_every_residual_pin_names_a_declared_open_tracker(self):
+        pins = self._pin_trackers()
+        assert pins, ("no *_is_a_known_limit pin found — the naming convention "
+                      "changed and this guard is now vacuous")
+        for name, refs in sorted(pins.items()):
+            assert len(refs) == 1, (
+                f"{name} must name exactly ONE tracker as #<issue> on the "
+                f"first line of its docstring; found {refs}")
+            tracker = refs[0]
+            assert tracker in RESIDUAL_TRACKERS, (
+                f"{name} names #{tracker}, which RESIDUAL_TRACKERS does not "
+                f"declare — a pin may not cite an issue that is not recorded "
+                f"OPEN (declared: {sorted(RESIDUAL_TRACKERS)}). If the tracker "
+                f"is live, declare it there; if it closed, re-point the pin.")
+            state, _covers = RESIDUAL_TRACKERS[tracker]
+            assert state == "open", (
+                f"{name} names #{tracker}, recorded {state!r} in "
+                f"RESIDUAL_TRACKERS — a closed tracker is a green light with "
+                f"no lamp behind it; re-point the pin at a live tracker")
+
+    def test_no_declared_tracker_is_orphaned(self):
+        referenced = {n for refs in self._pin_trackers().values() for n in refs}
+        orphans = sorted(set(RESIDUAL_TRACKERS) - referenced)
+        assert not orphans, (
+            f"RESIDUAL_TRACKERS declares {orphans} with no pin referencing "
+            f"them — a declared tracker nothing points at is a home for a "
+            f"residual that has none")
