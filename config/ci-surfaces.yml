@@ -721,6 +721,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
   # the writer path #4028 left open, so residue regenerated after each purge.
