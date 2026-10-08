@@ -130,7 +130,7 @@ changes the rate.
 ## Task 7 — CI registration + surface checks
 
 **Intent:** the tests actually run in CI; no accidental surface change.
-**Acceptance:** `config/ci-surfaces.yml` lists the new test under `core`; `python3 tools/ci_selection.py --integrity` exits 0; `tools/surface-guard.py` + `tools/surface_manifest.py check` pass (no new public SDK/MCP member).
+**Acceptance:** `config/ci-surfaces.yml` lists the new test under `core`; `uv run python tools/ci_selection.py --integrity` exits 0; `tools/surface-guard.py` + `tools/surface_manifest.py check` pass (no new public SDK/MCP member).
 **Files:** Modify `config/ci-surfaces.yml`.
 
 ## Risks

@@ -22,11 +22,11 @@ tooling picks the right restore path:
 Usage:
   # Env-based target (canonical):
   TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise \
-    python3 graph-scripts/connectivity_gate.py
+    uv run python graph-scripts/connectivity_gate.py
 
   # Explicit URI or embedded path:
-  python3 graph-scripts/connectivity_gate.py --uri docker://:pw@localhost:6379/tortoise
-  python3 graph-scripts/connectivity_gate.py --path /tmp/fresh-graph.db
+  uv run python graph-scripts/connectivity_gate.py --uri docker://:pw@localhost:6379/tortoise
+  uv run python graph-scripts/connectivity_gate.py --path /tmp/fresh-graph.db
 
 Exit codes: 0 = reachable (stats printed), 1 = unreachable/misconfigured,
 2 = usage error.

@@ -28,8 +28,8 @@ it via a GH Actions workflow or `gh secret` consumers), plus this repo's venv
 (`uv sync` — the falkordb client is a dependency).
 
 Usage:
-  python3 graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json            # dry-run: list
-  python3 graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json --execute   # GRAPH.DELETE
+  uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json            # dry-run: list
+  uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json --execute   # GRAPH.DELETE
   FALKORDB_CLOUD_URI=redis://:<pw>@<host>:<port> python3 ...   # URI via env (or TORTOISE_DB_URI directly)
 
 Rollback note: GRAPH.DELETE is irreversible and there is no backup of these

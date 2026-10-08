@@ -10,16 +10,16 @@ Block the REMOVE migration if there are unexplained operator-set deltas.
 Usage:
   # Sample 50 contexts from the DEV graph:
   TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
-    python3 graph-scripts/parity_sample.py
+    uv run python graph-scripts/parity_sample.py
 
   # With explicit limit and seed:
-  python3 graph-scripts/parity_sample.py --limit 30 --seed 42
+  uv run python graph-scripts/parity_sample.py --limit 30 --seed 42
 
   # Blocking mode (exit code 1 if unexplained deltas):
-  python3 graph-scripts/parity_sample.py --block
+  uv run python graph-scripts/parity_sample.py --block
 
   # Explain a specific delta (operator chain expected):
-  python3 graph-scripts/parity_sample.py --explain-deltas
+  uv run python graph-scripts/parity_sample.py --explain-deltas
 """
 from __future__ import annotations
 

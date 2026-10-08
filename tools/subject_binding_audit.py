@@ -19,9 +19,9 @@ are authored, not model-produced. Real per-model calibration (D4) needs model
 calls against a ~100–500-fact gold set and is out of scope here.
 
 Usage:
-    python3 tools/subject_binding_audit.py --gold tests/fixtures/subject_binding_gold.jsonl
-    python3 tools/subject_binding_audit.py --gold ... --calibrate
-    python3 tools/subject_binding_audit.py --db /tmp/memory.db --journal /tmp/events/events.jsonl
+    uv run python tools/subject_binding_audit.py --gold tests/fixtures/subject_binding_gold.jsonl
+    uv run python tools/subject_binding_audit.py --gold ... --calibrate
+    uv run python tools/subject_binding_audit.py --db /tmp/memory.db --journal /tmp/events/events.jsonl
 """
 from __future__ import annotations
 

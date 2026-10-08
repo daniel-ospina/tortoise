@@ -66,11 +66,11 @@ remote-state gate, not a file-content scan. It runs on CI for every PR and
 on demand via workflow_dispatch; local runs use the same code path.
 
 Usage:
-    python3 tools/drift-guard.py                 # origin/main
-    python3 tools/drift-guard.py --base origin/main --max-behind 20
-    DRIFT_MAX_BEHIND=10 python3 tools/drift-guard.py   # annotate past 10
-    python3 tools/drift-guard.py --json          # machine-readable output
-    python3 tools/drift-guard.py --head <ref>    # measure a ref other than HEAD
+    uv run python tools/drift-guard.py                 # origin/main, max-behind 20
+    uv run python tools/drift-guard.py --base origin/main --max-behind 20
+    DRIFT_MAX_BEHIND=10 uv run python tools/drift-guard.py   # env override
+    uv run python tools/drift-guard.py --json          # machine-readable output
+    uv run python tools/drift-guard.py --head <ref>    # measure a ref other than HEAD
 
 Exit codes:
     0  no silent revert — gate green (base distance is reported, never gating)

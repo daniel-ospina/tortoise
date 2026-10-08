@@ -29,9 +29,9 @@ the cause label and the closing rule.
   `sessionId:''`. The manual proof covered the READ path only.
 
 Usage:
-  python3 tools/embedded_evidence.py run  --selection family [--n 3] [--ref <sha>]
-  python3 tools/embedded_evidence.py red  --selection family [--ref <sha>]
-  python3 tools/embedded_evidence.py classify --redis-log <path>
+  uv run python tools/embedded_evidence.py run  --selection family [--n 3] [--ref <sha>]
+  uv run python tools/embedded_evidence.py red  --selection family [--ref <sha>]
+  uv run python tools/embedded_evidence.py classify --redis-log <path>
 
 Exit codes: 0 = all conjuncts hold (closing); 1 = violation (a red / moved tree /
 unattributable); 2 = environment error (measurement impossible); 3 = NOT-CLOSING.
@@ -1977,7 +1977,7 @@ def _build_record(args: argparse.Namespace) -> dict:
             "reasons": [],
         },
         "reproduce": (
-            f"python3 tools/embedded_evidence.py {args.cmd} --selection {args.selection} "
+            f"uv run python tools/embedded_evidence.py {args.cmd} --selection {args.selection} "
             f"--n {args.n} --ref {commit} --marker \"{args.marker}\""
         ),
     }

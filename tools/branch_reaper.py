@@ -136,12 +136,12 @@ Exit codes (a delegate code is never passed through unmodified)
 
 Usage
 -----
-    python3 tools/branch_reaper.py                      # dry-run, human report
-    python3 tools/branch_reaper.py --json               # dry-run, machine report
-    python3 tools/branch_reaper.py --report docs/runbook/4408-branch-reaper.md
-    python3 tools/branch_reaper.py --apply              # delete safe branches only
-    python3 tools/branch_reaper.py --apply --reap-worktrees
-    python3 tools/branch_reaper.py --apply --include-closed-unmerged
+    uv run python tools/branch_reaper.py                      # dry-run, human report
+    uv run python tools/branch_reaper.py --json               # dry-run, machine report
+    uv run python tools/branch_reaper.py --report docs/runbook/4408-branch-reaper.md
+    uv run python tools/branch_reaper.py --apply              # delete safe branches only
+    uv run python tools/branch_reaper.py --apply --reap-worktrees
+    uv run python tools/branch_reaper.py --apply --include-closed-unmerged
 """
 from __future__ import annotations
 

@@ -38,11 +38,11 @@ GUARD
     remove an edge the org had just legitimately earned.
 
 Usage:
-    python3 graph-scripts/repair_false_onboarding_completion.py --check
+    uv run python graph-scripts/repair_false_onboarding_completion.py --check
         # read-only guard; exit 1 when any false edge is present
-    python3 graph-scripts/repair_false_onboarding_completion.py
+    uv run python graph-scripts/repair_false_onboarding_completion.py
         # dry-run report of every decide-completed holder (no writes)
-    python3 graph-scripts/repair_false_onboarding_completion.py --apply
+    uv run python graph-scripts/repair_false_onboarding_completion.py --apply
         # apply the repairs (local URIs only unless --allow-remote)
 
 Env: TORTOISE_DB_URI (or --uri) — the store to sweep.

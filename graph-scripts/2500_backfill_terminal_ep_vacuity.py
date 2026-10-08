@@ -56,7 +56,7 @@ reversed — plus ``status``, ``outdated`` and ``validTo``/``expiredAt``. Only
 the three decay columns ``live.decay_clause`` names are written.
 
 Usage:
-    python3 graph-scripts/2500_backfill_terminal_ep_vacuity.py [--dry-run] [--yes] [--uri URI]
+    uv run python graph-scripts/2500_backfill_terminal_ep_vacuity.py [--dry-run] [--yes] [--uri URI]
 
 Defaults to the ``TORTOISE_DB_URI`` env var (or
 ``docker://:falkordb@localhost:6379/tortoise``).

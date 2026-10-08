@@ -55,9 +55,8 @@ check_version
 # it is there, else `uv run` (which finds the pinned 3.12). Nothing is silent —
 # if neither path yields >=3.12 the registration FAILS LOUDLY instead of being
 # skipped (that silent skip is the exact bug this hook exists to prevent), and
-# stderr is suppressed only on the dry-run, where a non-match is a normal
-# "nothing to register". Mirrors tools/install-reaper-schedule.sh's
-# $REPO/.venv/bin/python resolution.
+# the dry-run's OWN failure fails loudly too (#6937 P2-3). Mirrors
+# tools/install-reaper-schedule.sh's $REPO/.venv/bin/python resolution.
 PY_TOOL=""
 if [ -x .venv/bin/python ] && .venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
   PY_TOOL="venv"
@@ -79,7 +78,21 @@ if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
     echo "   create .venv with >=3.12) and re-run the commit." >&2
     exit 1
   fi
-  if py_tool tools/ci_selection.py --register --dry-run 2>/dev/null | grep -q "would register"; then
+  # #6937 P2-3: capture the tool's OWN exit status before matching the output.
+  # Piping straight into `grep` made the `if` take GREP's status, so any dry-run
+  # FAILURE (a YAML error, a crash, a refusal) was indistinguishable from the
+  # benign "nothing to register" non-match: stderr was in the 2>/dev/null
+  # bucket, stdout was empty, grep found nothing, the `if` was skipped, and the
+  # hook still PASSED with the #1429 registration silently dropped. The up-front
+  # interpreter validation above closes the refusal-swallowed case only.
+  if ! DRY_RUN="$(py_tool tools/ci_selection.py --register --dry-run 2>&1)"; then
+    echo "⛔ [hooks] tools/ci_selection.py --register --dry-run FAILED — the #1429" >&2
+    echo "   test-surface auto-registration did not run, and a failed dry-run must" >&2
+    echo "   never read as 'nothing to register'. Output follows:" >&2
+    printf '%s\n' "$DRY_RUN" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$DRY_RUN" | grep -q "would register"; then
     py_tool tools/ci_selection.py --register
     git add config/ci-surfaces.yml
   fi

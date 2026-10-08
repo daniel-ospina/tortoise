@@ -92,21 +92,21 @@
 ### Task 0: Register the test file in the CI manifest (do this FIRST — a new test file is not neutral)
 
 **Intent:** A new `tests/test_*.py` absent from `config/ci-surfaces.yml` fails `manifest-integrity` **and** never runs, so the whole Integration layer this plan promises would silently not execute.
-**Acceptance:** `python3 tools/ci_selection.py --integrity` exits 0 once the file exists **and** is listed; the diff to `config/ci-surfaces.yml` adds **only** the one entry for `test_4997_vector_index_parity.py` (assert with `git diff -- config/ci-surfaces.yml`); the entry carries a `#4997` comment; the edit is otherwise **additive only** (lane brief).
+**Acceptance:** `uv run python tools/ci_selection.py --integrity` exits 0 once the file exists **and** is listed; the diff to `config/ci-surfaces.yml` adds **only** the one entry for `test_4997_vector_index_parity.py` (assert with `git diff -- config/ci-surfaces.yml`); the entry carries a `#4997` comment; the edit is otherwise **additive only** (lane brief).
 
 **Files:**
 
 - Modify: `config/ci-surfaces.yml` (one commented entry, alphabetically placed, mirroring the `test_4999_vector_mechanism.py` entry at `:1008-1013`)
 - Create: `tests/test_4997_vector_index_parity.py` (placeholder that will grow)
 
-**Step 1** — `python3 tools/ci_selection.py --integrity` → record the baseline (expect exit 0).
+**Step 1** — `uv run python tools/ci_selection.py --integrity` → record the baseline (expect exit 0).
 **Step 2** — Create the test file with one trivial test; re-run `--integrity` → **it now reports the file missing** (this is the failure the registration prevents; record the output).
 **Step 3** — Register it. ⚠️ **The tool has no per-file argument** (`tools/ci_selection.py`'s parser defines no positional, and `--register` is a bare `store_true` that sweeps **every** unlisted `tests/*.py`). So:
 
 - prefer a **manual, commented append** in alphabetical position (this is what produces the `#4997:` comment the entry above carries — `--register` inserts a bare line with no comment); then
-- `python3 tools/ci_selection.py --integrity` → exit 0, and `git diff -- config/ci-surfaces.yml` → exactly one added line pair.
+- `uv run python tools/ci_selection.py --integrity` → exit 0, and `git diff -- config/ci-surfaces.yml` → exactly one added line pair.
   If `--register --surface core` is used instead (no path argument), note in the commit message that it is all-or-nothing and comment-free, and still assert the diff is one entry.
-  **`core` is the measured surface:** `printf 'tortoise/security.py\n' | python3 tools/ci_selection.py --changed-files - --event pull_request` → `{"surfaces": ["core"], "full": false}` (same for `tortoise/search_engine.py`); `tortoise/projection/__init__.py` is in `SHARED_MODULES` (`tools/ci_selection.py:114`) and forces the full matrix regardless.
+  **`core` is the measured surface:** `printf 'tortoise/security.py\n' | uv run python tools/ci_selection.py --changed-files - --event pull_request` → `{"surfaces": ["core"], "full": false}` (same for `tortoise/search_engine.py`); `tortoise/projection/__init__.py` is in `SHARED_MODULES` (`tools/ci_selection.py:114`) and forces the full matrix regardless.
 **Step 4** — Commit.
 
 ---

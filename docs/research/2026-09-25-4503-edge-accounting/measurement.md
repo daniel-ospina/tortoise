@@ -168,10 +168,10 @@ isolated** `falkordb/falkordb:latest` container, staged writes, `redis-cli INFO 
 `used_memory` read between stages. No other tenant shares the instance. Reproduce with:
 
 ```
-python3 tools/edge_census.py probe --n 5000
+uv run python tools/edge_census.py probe --n 5000
 ```
 
-**Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped tool's receipt of record, verbatim (`python3 tools/edge_census.py probe --n 5000 --json`):
+**Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped tool's receipt of record, verbatim (`uv run python tools/edge_census.py probe --n 5000 --json`):
 
 ```
 baseline (fresh instance)                                         2682184  per_element=0
@@ -258,7 +258,7 @@ tortoise/metering.py` → **0 matches**. The census tool reports the two axes si
 the absence is visible rather than inferred:
 
 ```
-$ python3 tools/edge_census.py census --uri 'docker://:falkordb@localhost:6379' \
+$ uv run python tools/edge_census.py census --uri 'docker://:falkordb@localhost:6379' \
       --graph probe4503_a --org org_edge_accounting_4503 --accept-schema-writes
 relationships: 2000
   by type  IMPL                     2000

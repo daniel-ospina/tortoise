@@ -101,6 +101,7 @@ Declared bounds — what this file does NOT verify
 from __future__ import annotations
 
 import ast
+import re
 import shutil
 import subprocess
 import sys
@@ -457,11 +458,18 @@ def test_the_corpus_is_not_vacuously_empty():
 def test_every_corpus_file_is_tracked():
     """The corpus is the SCOPE — an untracked stray must not silently join it.
 
-    Both directions are real assertions now (the old version globbed the
-    filesystem and then asserted those same paths were files — it could never
-    fail). An untracked, non-ignored ``.py`` under the corpus dirs reds by name,
-    and a tracked file that has vanished from disk reds because the corpus can
-    no longer be asserted for it.
+    Three directions, all real assertions (#6937 P2-2 added the third):
+
+    * *untracked -> corpus*: an untracked, non-ignored ``.py`` under the corpus
+      dirs reds by name.
+    * *tracked -> disk*: a tracked file that has vanished reds, because the
+      corpus can no longer be asserted for it.
+    * *tracked -> glob*: a tracked, on-disk file that ``_globbed()`` does not
+      reach drops out of ``_corpus()`` and therefore receives **no guard
+      assertion at all** — silently. Measured ``∅`` when this was added, so it
+      was a LATENT fail-open rather than a live symptom: a symlinked directory
+      or a rename the ``rglob`` cannot follow is the way it triggers, and the
+      file would go unguarded with every test still green.
     """
     strays = [
         rel
@@ -478,6 +486,77 @@ def test_every_corpus_file_is_tracked():
         rel for rel in sorted(_tracked()) if rel.endswith(".py") and not (ROOT / rel).is_file()
     ]
     assert not missing, f"tracked corpus files absent from disk: {missing}"
+    # #6937 P2-2: tracked -> glob. Without this, `_tracked()` is consumed only by
+    # `missing` above and by `_corpus()`, which INTERSECTS it with the glob — so a
+    # tracked file the glob cannot see is silently subtracted from the corpus and
+    # never asserted on.
+    globbed = {_rel(path) for path in _globbed()}
+    unreached = [
+        rel for rel in sorted(_tracked()) if rel.endswith(".py") and rel not in globbed
+    ]
+    assert not unreached, (
+        f"tracked corpus files _globbed() never reaches, so they receive no guard "
+        f"assertion at all: {unreached} — _globbed() expands {CORPUS_DIRS} with "
+        "rglob; a symlinked directory or a rename it cannot follow is the usual "
+        "cause, and the file would otherwise go unguarded with every test green"
+    )
+
+
+#: #6937 P2-1: the guarded form, and the carve-outs where the bare form is the
+#: DOCUMENTED, WORKING invocation (those tools are never guarded, so `python3`
+#: is correct for them — sweeping them would break a scheduled job or a test
+#: that RUNS them under `/usr/bin/python3`).
+_BARE_INVOCATION = re.compile(
+    r"(?<![\w./])python3 (tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)"
+)
+_CARVE_OUTS = frozenset(UNGUARDABLE) | frozenset(RUNTIME_39)
+
+#: Text-bearing files a reader copies an invocation FROM.
+_DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
+
+
+def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
+    """#6937 P2-1 — the RECURRENCE seam, not a re-assertion of the sweep.
+
+    A guarded entry point REFUSES `python3 <path>` on a pre-3.12 ambient
+    interpreter, so any doc or USAGE text advertising that form contradicts the
+    guard: the reader copies it and gets a refusal the docs nowhere predict.
+
+    The one-time sweep fixed the 152 occurrences in place. Without this
+    assertion it would simply be a fact about today, re-established by the next
+    person who writes a doc — which is exactly the #5128/#5136 failure the guard
+    was created for. Re-deriving it here makes the drift unrepresentable.
+
+    The `RUNTIME_39`/`UNGUARDABLE` carve-outs are exempt BY DESIGN and asserted
+    as such below: those tools are never guarded, so `python3 <path>` IS their
+    working form, and sweeping one would turn a working scheduled cron job into
+    a refusal (`test_the_runtime_39_exclusion_is_accurate` runs them to prove
+    it).
+    """
+    offenders: list[str] = []
+    for base in (*CORPUS_DIRS, "docs"):
+        for path in sorted((ROOT / base).rglob("*")):
+            if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "python3 tools/" not in text and "python3 graph-scripts/" not in text:
+                continue
+            where = _rel(path)
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for match in _BARE_INVOCATION.finditer(line):
+                    target = f"{match.group(1)}/{match.group(2)}"
+                    if target in _CARVE_OUTS:
+                        continue
+                    offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
+    assert not offenders, (
+        "these files advertise `python3 <path>`, the form the entry-point guard "
+        "REFUSES on a pre-3.12 interpreter, for a tool that IS guarded. Use "
+        f"`uv run python <path>` (or add the tool to RUNTIME_39 with a reason): "
+        f"{offenders}"
+    )
 
 
 def test_the_runtime_39_exclusion_is_accurate():

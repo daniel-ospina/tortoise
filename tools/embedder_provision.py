@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
 # MEASURED: run 37239542471 (PR #5339) spent 6.27m in this step, against 0.13m for
 # the same step on main (37240061542, 37229990684). Its log, with timestamps:
 #
-#     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5
+#     22:25:59.10  Run uv run python tools/embedder_provision.py --attempts 3 --backoff 5
 #     22:31:35.37  Loading weights:   0%| ...          <- 5m36s of SILENCE
 #     22:31:37.13  embedding model: cached, no download needed
 #     22:32:14.79  ##[error] ... has timed out after 6 minutes.

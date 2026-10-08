@@ -3252,7 +3252,7 @@ def _ci_manifest_module():
     ``ci_manifest`` imports this module back for the manifest helpers, so the
     import is lazy and must not create a second copy under a different name
     (which would split module state under pytest). The RUNNING module is probed
-    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    FIRST: ``uv run python tools/ci_manifest.py`` executes that file as ``__main__``,
     which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
     name-only lookup imported a SECOND copy of the same file.
     """

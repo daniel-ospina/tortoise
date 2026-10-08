@@ -3,8 +3,8 @@
 Event-[:aboutObject]->Object per ONTOLOGY v3.2 (predicate removed in #214).
 
 Usage:
-  python3 graph-scripts/migrate_instantiates_to_about.py --dry-run [--db URI] [--graphs a,b]
-  python3 graph-scripts/migrate_instantiates_to_about.py [--db URI] [--graphs a,b]
+  uv run python graph-scripts/migrate_instantiates_to_about.py --dry-run [--db URI] [--graphs a,b]
+  uv run python graph-scripts/migrate_instantiates_to_about.py [--db URI] [--graphs a,b]
 
 Runs against EVERY graph namespace that could carry the edge: the URI-default
 graph (derived exactly as sdk.py does — ``urlparse(uri).path.lstrip('/') or
