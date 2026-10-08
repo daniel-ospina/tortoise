@@ -26321,6 +26321,10 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #5868: a per-route by_stage sub-total that could not represent a charge.
+    # Without this key the disclosure is stripped here — the documented #3359
+    # loss mode — and the row's cost_usd-vs-by_stage gap stays unexplained.
+    "route_cost_overflows",
     # #3359: capture_graph_ops — the per-session physical graph work.
     # NAMESPACED (``graph_ops_*``) so these generic names do not widen the
     # global filter for EVERY event: the flat allowlist has no per-event
@@ -27768,6 +27772,14 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # token can sit beside a valid sibling and a valid charge, so the
         # call is not usage-less.)
         "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
+        # #5868: OVERFLOW EVENTS — per-route/bucket ``by_stage`` cost
+        # sub-totals that could not represent their FINITE sum (one event may
+        # stand for several calls at the merge seams). This asserts that the
+        # ``by_stage`` breakdown is incomplete; it is NOT a statement about
+        # ``cost_usd``'s completeness, which ``calls_without_cost`` owns. The
+        # two answer different questions and a row may legitimately carry both
+        # (an earlier route overflow beside a later session-total overflow).
+        "route_cost_overflows": int(llm.get("route_cost_overflows", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the

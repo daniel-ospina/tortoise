@@ -394,3 +394,75 @@ def test_recall_state_results_are_stable_across_a_reopen(tmp_path,
         "recall_state returned different results for the same unchanged store "
         f"before vs after a reopen. fresh={fresh} settled={settled}"
     )
+
+
+# ── 4. #7405: create_point's CREATE is retried on an aborted write ────────
+#
+# The change that wired the retry (#7615) wraps BOTH of create_point's graph
+# writes: the epoch MERGE in `_advance_ep_version` (its FIRST write) and the
+# Point CREATE below it. Unwrapping the CREATE alone left the whole suite green
+# (review P2-1 — the headline change could silently lose its retry), so this
+# test drives create_point with the abort raised on the CREATE itself and pins
+# (a) the retry happened and (b) exactly one Point landed. (b) is the safety
+# property the retry rests on: the engine aborts the statement before mutation,
+# so the abandoned attempt wrote nothing and re-issuing a bare, non-idempotent
+# `CREATE` cannot mint two points with one id.
+
+def test_create_point_retries_an_aborted_create_once_and_writes_one_point(
+        tmp_path, monkeypatch, force_sparse_tfidf):
+    """#7405 / #7615 review P2-1: an abort on the Point ``CREATE`` is retried.
+
+    The abort is raised on ``CREATE (n:Point`` — NOT on the epoch MERGE — so
+    this is the one test that fails if the CREATE's retry wrapper is removed
+    (mutation-proof; verified by locally unwrapping the helper).
+    """
+    import redis.exceptions as redis_exc
+
+    from tortoise.projection import _GuardedGraph
+
+    namespace = _new_namespace()
+    sdk = _open(tmp_path, namespace)
+
+    state = {"aborted": 0, "creates": 0}
+    original = _GuardedGraph.query
+
+    def _abort_the_create_once(self, cypher, *args, **kwargs):
+        text = " ".join(str(cypher).split())
+        if text.startswith("CREATE (n:Point"):
+            state["creates"] += 1
+            if state["aborted"] == 0:
+                state["aborted"] += 1
+                raise redis_exc.ResponseError(
+                    "graph was deleted or replaced while the query was "
+                    "running, aborting")
+        return original(self, cypher, *args, **kwargs)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _abort_the_create_once)
+    try:
+        point = sdk.create_point(
+            kind="evidence", content=FACTS[0], credibility="medium",
+            source_harness="battery-parity",
+            source_session="regression-2952")
+        pid = point["id"]
+        inner_retries = sdk._graph_write_retry_count
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(*)",
+            params={"id": pid}).result_set
+    finally:
+        sdk.close()
+
+    assert state["aborted"] == 1, "the CREATE abort must have fired exactly once"
+    assert state["creates"] == 2, (
+        "create_point must RE-ISSUE an aborted CREATE. Unwrapping the retry "
+        "makes this 1 (the abort escapes and create_point raises) — that is "
+        f"the mutation this test kills. saw {state['creates']} CREATE(s)"
+    )
+    assert inner_retries == 1, (
+        "the SDK's private inner-retry counter must observe the retry — the "
+        f"eval's ingest_retries folds it in (#7405 P1-1). saw {inner_retries}"
+    )
+    assert rows and rows[0][0] == 1, (
+        "exactly ONE point must exist after the abort + retry: the abort is a "
+        "did-not-land refusal, so re-issuing the bare CREATE cannot duplicate. "
+        f"rows={rows}"
+    )

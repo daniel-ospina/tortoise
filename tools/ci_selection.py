@@ -749,6 +749,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_test_lane_tool_change_selects_core_not_tier1.
              "tools/test_lane.py",
+             # #7435: the docs-lint baseline differ owns
+             # tests/test_docs_lint_baseline.py, which is `core`-registered, but
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool — so a differ-only change
+             # selected NO surface and dropped to tier-1 smoke, and the 58 cases
+             # covering the differ's fail-closed paths never ran on the very PR
+             # that can make the differ fail OPEN. Same #1349/#3332/#3616
+             # silent-drop class as tools/queue_resweep.py above. Pinned by
+             # tests/test_ci_selection.py::test_docs_lint_baseline_tool_change_selects_core_not_tier1.
+             "tools/docs_lint_baseline.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
@@ -805,6 +815,29 @@ def _is_safe_root_file(path: str) -> bool:
     pattern clause was removed along with them.
     """
     return "/" not in path and path in ROOT_NON_PYTHON_FILES
+
+
+# Linter-policy files, by BASENAME at ANY DEPTH (#7435).
+#
+# cli2 reads a `.markdownlint*` config from any directory on the path to a linted
+# file, and a more specific config OVERRIDES the repo one — so a nested
+# `docs/.markdownlint.json` turns a rule off for every doc beneath it. That makes
+# such a file a POLICY change wherever it sits, but the prefix fallback below
+# dropped it (`docs/` is in NON_PYTHON_PREFIXES): a policy-only PR then selected
+# tier-1, where `test_committed_policy_map_matches_the_checkout` never runs, AND
+# the `docs` job's differ steps were skipped for want of a changed `.md` — so the
+# change landed with the snapshot unmoved and moved no ledger.
+#
+# A PREFIX, not the differ's exact basename set: a future `.markdownlint-*` name
+# cannot silently fall outside the rule, which is the drift the hand-maintained
+# duplicate tuples elsewhere in this file exist to warn about.
+_LINTER_POLICY_PREFIXES = (".markdownlint", ".lycheeignore")
+
+
+def _is_linter_policy_path(path: str) -> bool:
+    """Whether a path is a linter-policy file, at any depth, by basename."""
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith(_LINTER_POLICY_PREFIXES) or name == "lychee.toml"
 
 
 # website/ paths that ARE selection-relevant (#3332).
@@ -1166,6 +1199,11 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             return True
         if _selection_relevant(c):
             return True
+        # #7435: a linter-policy file is a CLAIM too (see
+        # `_is_linter_policy_path`), so it is kept BEFORE the
+        # `_is_safe_root_file` fallback below.
+        if _is_linter_policy_path(c):
+            return True
         if _is_safe_root_file(c):
             return False
         return not c.startswith(NON_PYTHON_PREFIXES)
@@ -1191,6 +1229,22 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
     # Shared module -> full
     if any(c.startswith(SHARED_MODULES) for c in changed):
+        return _full_selection(manifest, slow)
+
+    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
+    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
+    # the selection must be the WHOLE matrix — the only selection containing
+    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
+    # a config edit move the snapshot.
+    #
+    # `_keep_changed` above only stops such a path being DROPPED as an unknown
+    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
+    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
+    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
+    # pin — so the policy edit landed with the snapshot unmoved, which is the very
+    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
+    # "this path's blast radius is not its own directory".
+    if any(_is_linter_policy_path(c) for c in changed):
         return _full_selection(manifest, slow)
 
     matched: set[str] = set()

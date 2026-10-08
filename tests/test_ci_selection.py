@@ -18,6 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
@@ -1004,6 +1006,70 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert "test_tmpdir_sweep.py" in r["test_files"], r
     assert "test_tmpdir_hygiene.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
+
+
+def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
+    # #7435 review P1: tools/docs_lint_baseline.py owns
+    # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's
+    # fail-CLOSED behaviour — the unreadable report, the missing `Summary:`, the
+    # count mismatch, the multiset semantics, the generated-file fix target.
+    #
+    # The `core` registration alone is INERT for a differ-only change: `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+    # tool, so `select()` returned NO surface and fell back to the 31-file tier-1
+    # smoke set, which does not contain the guard. The PR that can make the
+    # differ fail OPEN would therefore never run the tests that catch it. Same
+    # #3261/#3332/#3616 silent-drop class as tools/queue_resweep.py above.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails the second assert.
+    r = _sel(["tools/docs_lint_baseline.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_docs_lint_baseline.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
+    # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
+    # config from ANY directory on the path to a linted file, and a more specific
+    # config OVERRIDES the repo one — so `docs/.markdownlint.json` turns a rule off
+    # for every doc beneath it, and `battery/.markdownlint.json` does the same for
+    # `battery/`.
+    #
+    # TWO silent routes out of the gate had to be closed, and the first fix closed
+    # only one. (a) `_keep_changed` DROPPED the path — `docs/` is a
+    # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the basename —
+    # so the PR selected the 31-file tier-1 smoke set. (b) Keeping the path is not
+    # enough: the match loop still CLAIMED it under a surface-owned prefix
+    # (`battery/.markdownlint.json` → ['battery'], `tools/longmem_eval/...` →
+    # ['eval']), and neither of those legs runs
+    # `tests/test_docs_lint_baseline.py` — whose committed-policy pin is the only
+    # thing that makes a config edit move the snapshot. A config-only PR also skips
+    # the `docs` job's differ steps (there is no changed `.md`), so the edit landed
+    # with the snapshot unmoved: exactly the invariant
+    # `docs/ci/docs-lint-baseline.md` promises.
+    #
+    # Mutation check: each half fails on its own. Dropping the
+    # `_is_linter_policy_path` claim in `_keep_changed` makes the `docs/` and
+    # `website/` cases tier-1, and dropping the early `_full_selection` return in
+    # `select()` makes every surface-owned case select its surface instead of ALL.
+    for path in (
+        "docs/.markdownlint.json",                 # dropped by the prefix fallback
+        "website/.markdownlintrc",                 # dropped by the prefix fallback
+        "battery/.markdownlint.json",              # CLAIMED by a surface
+        "battery/.lycheeignore",                   # CLAIMED by a surface
+        "battery/lychee.toml",                     # CLAIMED by a surface
+        "tools/longmem_eval/.markdownlint.json",   # CLAIMED as `eval`
+        ".markdownlint-cli2.jsonc",                # root: already full
+        "lychee.toml",                             # root: already full
+    ):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+    # An ordinary nested doc is still docs-only (tier 1) — not swept into `full`.
+    assert _sel(["docs/notes.md"])["surfaces"] == []
+    assert _sel(["docs/notes.md"])["full"] is False
 
 
 def test_queue_resweep_tool_change_selects_core_not_tier1():
@@ -5485,6 +5551,40 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     test) through this single function is what makes the mutation visible.
     """
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
+
+
+def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
+    """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
+
+    Measured on main 2026-10-07: `ci.yml`'s `changes` gate script reached 21043
+    UTF-8 bytes and GitHub refused to LOAD the workflow, so `CI` ran ZERO jobs on
+    every branch — none of the five required contexts (`docs`, `legal-e2e`,
+    `license-surface`, `pricing-artifact`, `test-isolation`) could appear, and no
+    PR could go green. The cap is on the COMPILED scalar, and a `run:` with NO
+    `${{ }}` is never compiled (`ai-review-gate.yml` loads a 34 KB one), so this
+    pin guards exactly the scalars GitHub compiles. actionlint catches expression
+    SYNTAX but not this length (#6253), which is why the invariant is pinned here
+    — a comment added to a script this size re-arms a silent full-CI outage.
+    """
+    limit = 21000
+    expr = "${{"
+    offenders = []
+    for wf in _workflow_files(REPO / ".github" / "workflows"):
+        doc = yaml.safe_load(wf.read_text(encoding="utf-8")) or {}
+        for job_id, job in (doc.get("jobs") or {}).items():
+            for step in (job or {}).get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str) or expr not in run:
+                    continue
+                size = len(run.encode("utf-8"))
+                if size > limit:
+                    offenders.append((wf.name, job_id, step.get("name", "?"), size))
+    assert not offenders, (
+        "a `run:` containing `${{ }}` reached GitHub's 21000-byte expression cap, "
+        f"so GitHub refuses to LOAD the workflow (zero jobs, no check-runs): {offenders}"
+    )
 
 
 def _scan_changed_set_diffs(workflows: list[Path]) -> tuple[int, list[str], list[str]]:

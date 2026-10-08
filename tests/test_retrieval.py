@@ -52,6 +52,7 @@ from tortoise.retrieval import (
 from tortoise.retry import (
     WriteStageRetriesExhausted,
     call_with_predicate,
+    retryable_aborted_write,
     retryable_transient,
 )
 
@@ -798,6 +799,22 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
+    # #7405 (review P2-2): the replaced-graph / write-lock aborts are NOT in
+    # this transport predicate. They ARE retryable, but only on the SDK write
+    # path (`retryable_aborted_write`): an error retryable at BOTH layers was
+    # multiplied by the eval's outer phase loop wrapping the SDK's inner write
+    # retry. Keeping the replaced-graph / write-lock family out of the phase
+    # predicate makes the layers disjoint for THAT family only — MISCONF is
+    # deliberately in BOTH predicates, so its nesting is bounded, not disjoint.
+    # See test_retryable_aborted_write_excludes_ambiguous_transports.
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
     for code in (401, 429, 500):
@@ -895,6 +912,244 @@ def test_call_with_predicate_retry_loop():
     with pytest.raises(redis_exc.TimeoutError):
         call_with_predicate(_always_transient, predicate=retryable_transient,
                             retries=1, what="t", marker_armed=False)
+
+
+def test_graph_write_retry_reissues_on_the_same_stateless_handle():
+    """#7405 (review P1-2): the retry re-issues on the SAME cached handle.
+
+    Measured contract for this client: ``falkordb``'s ``Graph`` is STATELESS —
+    it holds only ``name`` + ``execute_command`` and re-issues ``GRAPH.QUERY
+    <name>`` on every call — so the replaced-graph abort is a per-query race,
+    NOT a poisoned handle. The reviewer reproduced an abort, then a retry on the
+    same handle/client that succeeded with one write and no duplicate.
+
+    The earlier ``on_retry`` cache-drop (and its ``calls['resolve'] == 2``
+    assertion) was therefore REMOVED: it rebuilt the whole ``FalkorProjection``
+    for nothing, and the assertion held with or without the drop (the retry
+    lambda calls ``_get_proj()`` on every attempt anyway).
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    def _sdk_with(behaviour):
+        """A TortoiseSDK with no __init__ — no DB, no embedder — whose graph
+        handle fails according to `behaviour(call_index)`.
+
+        ``_get_proj`` HONOURS the ``sdk._proj`` cache the way the real method
+        does, and appends whatever it returns to ``handles``. Returning a fixed
+        local object instead would make ``len({id(h) for h in handles}) == 1``
+        a TAUTOLOGY: every element would be the same object by construction, so
+        no production change could falsify it (measured: reintroducing
+        ``self._proj = None`` on the retry path left the old version of this
+        test GREEN).
+        """
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        calls = {"query": 0, "resolve": 0}
+        # Hold the OBJECTS, not their addresses: the mutation this assertion
+        # exists to kill is `self._proj = None`, which drops the last strong
+        # reference, so an id-only list could see the address reused and pass
+        # for the wrong reason (allocator behaviour, not a test property).
+        handles: list[object] = []
+
+        class _G:
+            def query(self, *a, **k):
+                calls["query"] += 1
+                return behaviour(calls["query"])
+
+        def _get_proj():
+            calls["resolve"] += 1
+            if sdk._proj is None:
+                sdk._proj = type("_Proj", (), {"g": _G()})()
+            handles.append(sdk._proj)
+            return sdk._proj
+
+        sdk._proj = None
+        sdk._get_proj = _get_proj
+        sdk._graph_write_retry_count = 0
+        return sdk, calls, handles
+
+    # 1. one abort, then success -> the write is re-issued on the SAME handle
+    sdk, calls, handles = _sdk_with(
+        lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
+    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} attempt(s)"
+    assert len({id(h) for h in handles}) == 1, (
+        "the retry must reuse the same (stateless) handle — no re-resolution")
+    assert sdk._graph_write_retry_count == 1, (
+        "the inner retry must be observable: the eval's ingest_retries folds "
+        "this private counter in (#7405 P1-1)")
+
+    # 2. exhaustion: the ORIGINAL error surfaces (unchanged in TYPE — callers
+    #    bucket on the class, so a wrapper type would silently misbucket), the
+    #    sentinel is not leaked, and the counter still counts
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert calls["query"] == 4, "1 attempt + 3 retries before exhaustion"
+    assert sdk._graph_write_retry_count == 3
+
+    # 3. a NON-retryable error is re-raised unchanged and is not retried at all
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(
+        redis_exc.ResponseError("WRONGTYPE Operation against a key")))
+    with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert calls["query"] == 1, "a deterministic error must never be retried"
+    assert sdk._graph_write_retry_count == 0
+
+
+def test_the_FIRST_write_of_create_point_goes_through_the_retry():
+    """#7405, review P0: ``_advance_ep_version`` is create_point's FIRST graph write.
+
+    Wrapping only the later ``CREATE`` left the retry DEAD CODE in the failure mode
+    it targets: under #7405 *every* write is refused, so the epoch MERGE raises
+    first and the wrapper is never entered. This pins the ORDER of the fix, and
+    (review P1-2) that the re-issue happens on the SAME handle the abort hit.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+    seen: list[str] = []
+    state = {"query": 0, "resolve": 0}
+    # Hold the OBJECTS, not their addresses — see the sibling test above for
+    # why an id-only list is unsound when the mutation frees the reference.
+    handles: list[object] = []
+
+    class _G:
+        def query(self, cypher, *a, **k):
+            seen.append(cypher)
+            state["query"] += 1
+            if state["query"] == 1:
+                raise replaced
+            return type("R", (), {"result_set": [[7]]})()
+
+    def _get_proj():
+        # Same honest cache contract as the sibling test above: a re-resolve
+        # must produce a DIFFERENT object, so
+        # `len({id(h) for h in handles}) == 1` — and the
+        # `state['resolve'] == 1` assertion — can actually fail if production
+        # re-resolves on the retry path.
+        state["resolve"] += 1
+        if sdk._proj is None:
+            sdk._proj = type("_Proj", (), {"g": _G()})()
+        handles.append(sdk._proj)
+        return sdk._proj
+
+    sdk._proj = None
+    sdk._get_proj = _get_proj
+    sdk._graph_write_retry_count = 0
+
+    assert sdk._advance_ep_version() == 7
+    assert state["query"] == 2, "the FIRST write was retried once"
+    assert state["resolve"] == 1, (
+        "one resolve; the retry reuses the same (stateless) handle — no "
+        "cache-drop. If the FIRST write is not wrapped, the abort escapes and "
+        "the wrapper around the later CREATE is unreachable (dead code)")
+    assert len({id(h) for h in handles}) == 1, "the same handle was reused across attempts"
+    assert sdk._graph_write_retry_count == 1
+    assert "EpMeta" in seen[0], "the first write is the epoch MERGE"
+
+
+def test_retryable_aborted_write_excludes_ambiguous_transports():
+    """#7405, review P1: the write path gates on THIS, not on ``retryable_transient``.
+
+    ``create_point`` issues a bare ``CREATE`` with a client-minted id and there is no
+    uniqueness constraint on ``Point.id``, so a retry after a TIMEOUT — where the
+    server may have applied the write and only the reply was lost — can mint two
+    points with one id. Only definitive *did not land* refusals may be retried, so
+    this predicate must be a STRICT SUBSET of the transport one.
+    """
+    # definitively not applied -> safe to re-issue even for a bare CREATE
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    # case-insensitive (the engine's casing is not a contract)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Graph was deleted or replaced while the query was running, aborting")) is True
+    # the SAME "aborted before mutating" family: the write lock is held
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Errors writing to the AOF file: No space left on device")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Redis is configured to save RDB snapshots, but it is "
+        "currently unable to persist to disk")) is True
+
+    # AMBIGUOUS: the write may already be applied. NEVER retried on this path.
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+    assert retryable_aborted_write(redis_exc.ConnectionError("stall")) is False
+    assert retryable_aborted_write(ConnectionResetError("reset")) is False
+    # the asymmetry is the entire safety property — assert both halves together
+    assert retryable_transient(redis_exc.TimeoutError("stall")) is True
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+
+    # unrelated responses stay out
+    assert retryable_aborted_write(redis_exc.ResponseError("WRONGTYPE x")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError("graph is read-only")) is False
+
+
+def test_aborted_write_predicate_is_anchored_on_the_abort_context():
+    """#7405 (review P3): the predicate must not fire on a message that merely
+    CONTAINS an abort-ish phrase.
+
+    It gates a bare, NON-IDEMPOTENT ``CREATE`` (no uniqueness constraint on
+    ``Point.id``), so a false positive is exactly the duplicate-point failure
+    this PR exists to prevent. The unanchored alternation matched any message
+    containing the phrases — measured: three crafted non-abort diagnostics all
+    returned True. Only the MEASURED engine refusals may match.
+    """
+    # the engine's abort refusals, on both code paths, still match
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
+
+    # lookalikes: the phrase appears, but NOT as an abort refusal — retrying
+    # these would re-issue a CREATE that may well have landed.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced appears in this unrelated diagnostic")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "metrics report saw another write is in progress counters")) is False
+
+
+def test_aborted_write_predicate_covers_the_graph_query_write_path():
+    """#7405 (P2): the ``GRAPH.QUERY`` write-path slot refusal is retryable.
+
+    The engine reports a contended slot on two distinct paths and the predicate
+    previously matched only one. The constraint path (_B_) emits
+    ``Write query aborted: another write is in progress``; the ``GRAPH.QUERY``
+    write path (``execute_query_write``) emits
+    ``ERR another write is in progress, retry the query``. That second message
+    is the one ``create_point``'s bare ``CREATE`` and ``_advance_ep_version``'s
+    ``MERGE`` actually receive, so missing it left a contended write raised
+    instead of retried — the write-loss this PR targets. The engine's own
+    concurrency test documents the message as retryable and the message itself
+    instructs a retry; the engine's comment at the raise site records that the
+    slot was NOT claimed, i.e. the same *did not land* semantics.
+    """
+    # the write-path refusal, exactly as the engine emits it (with the ERR
+    # protocol prefix the client surfaces as part of the ResponseError text)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress, retry the query")) is True
+    # casing is not a contract
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Another write is in progress, retry the query")) is True
+
+    # still anchored: the phrase alone is NOT enough — the engine's clause is
+    # ``another write is in progress, retry the query``; a bare status mention
+    # without the retry instruction must not gate a non-idempotent re-issue.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
 
 
 def test_retry_import_identity():
