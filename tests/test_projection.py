@@ -2359,10 +2359,19 @@ def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_pro
     path guards on ``documentKind IS NOT NULL``, but the producer path had no
     guard at all.
 
-    This pins the INVARIANT — live accepts iff replay resolves — rather than
-    either side alone, so re-opening the asymmetry from EITHER end reds it
-    (remove the producer guard -> the refusal assert fails; drop the replay
-    guard -> the ``resolve_structural_target(...) is None`` assert fails).
+    This pins the producer guard against the replay resolver's target contract
+    (label ``Source`` + ``documentKind`` + a usable ``url``): live must refuse
+    the nodes the resolver refuses — rather than pinning either side alone — so
+    re-opening the asymmetry from EITHER end reds it (remove the producer guard
+    -> the refusal assert fails; drop the replay guard -> the
+    ``resolve_structural_target(...) is None`` assert fails).
+
+    It does NOT pin durability, and must not be read as doing so: this guard
+    cannot fix a target that replay never re-materializes at all. Shapes (a) and
+    (b) below are journaled and survive `rebuild_all`; shape (c) — an `entities`
+    item of type 'document' — is built by `_create_entity`, whose Document
+    surface is not yet journaled (`sdk.py` says so; tracked in #2296), so its
+    :Source is gone after a rebuild whatever this guard does.
     """
     from tortoise.projection.edges import resolve_structural_target
 
@@ -2528,6 +2537,9 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         assert b["created"]["connections"] == 1, b
 
         # (c) a document declared as an `entities` item of type 'document'.
+        #     NB its :Source is NOT journaled yet (`_create_entity`'s Document
+        #     surface — #2296), so it does not survive `rebuild_all`; this
+        #     asserts only that the TARGET- KIND guard accepts it.
         c = sdk.ingest({
             "entities": [{"type": "document", "name": "Doc 5206",
                           "documentKind": "report", "ref": "d3"}],

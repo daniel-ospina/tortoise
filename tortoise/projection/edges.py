@@ -1029,7 +1029,10 @@ class _EdgeHandlers:
         # (`resolve_structural_target`) but this live producer path did not, so a
         # producer-created edge to a non-document Source was created live,
         # transferred at supersede, then refused on `rebuild_all` — ending on
-        # NEITHER node. Refusing here is what makes live and replay agree.
+        # NEITHER node. Refusing here makes live and replay agree on the
+        # TARGET KIND; it is not a durability guarantee — a document-bearing
+        # :Source that replay does not re-materialize is dropped regardless,
+        # which is the separate write-surface question tracked in #2296.
         if predicate == 'aboutDocument':
             for t in targets:
                 why = about_document_target_reason(
