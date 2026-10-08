@@ -36,9 +36,9 @@ const { uploadMock, getPublicUrlMock, removeMock, queryChain } = vi.hoisted(() =
   return { uploadMock, getPublicUrlMock, removeMock, queryChain: chain };
 });
 
-vi.mock('@/lib/supabase', () => ({
+vi.mock('@/lib/backend', () => ({
   SUPABASE_URL: 'https://abc123.supabase.co',
-  supabase: {
+  bff: {
     storage: {
       from: vi.fn(() => ({
         upload: uploadMock,

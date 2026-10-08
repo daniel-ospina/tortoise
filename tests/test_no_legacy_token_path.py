@@ -115,17 +115,12 @@ _NETWORK_IO = re.compile(
     r"\b(?:fetch|XMLHttpRequest|axios|sendBeacon)\s*[(.]|\bcredentials\s*:|\bnavigator\.sendBeacon"
 )
 
-# Client-surface migration is tracked in #3559. TWO invariants still fail because the
-# remaining browser surfaces have not migrated; they are xfail — NOT deleted and NOT
-# skipped — so the obligation stays visible and the gate keeps naming the offenders.
-#
-# The other three checks in this file whose surfaces DID migrate carry NO marker:
-# a non-strict xfail cannot fail, so it is not a gate — the moment a regression
-# appears it flips XFAIL and CI stays green. Removing the marker is the only state in
-# which the check can actually redden. Do the same for each remaining marker when its
-# invariant passes; do NOT "flip to strict" — a strict xfail still reports a passing
-# test as XPASS and still cannot gate a regression.
-CLIENT_MIGRATION = "client-surface migration outstanding — see #3559"
+# #3559: the client-surface migration is COMPLETE. Both invariants that used to carry
+# `xfail(strict=False)` markers now carry NONE, so each can actually redden on a
+# regression — a non-strict xfail cannot fail (the moment a regression appears it flips
+# XFAIL and CI stays green), and a strict xfail still reports a passing test as XPASS.
+# Removing the marker is the only state in which a check gates. Do NOT reintroduce a
+# marker here: fix the code, or add the surface to MIGRATED_SURFACES.
 
 
 def _browser_sources():
@@ -180,7 +175,6 @@ def _code(p: Path) -> str:
     return _strip_comments(_read(p), p.suffix)
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_no_legacy_js_readable_token_anywhere(sources):
     """(A) The legacy JS-readable session cookie must be gone from every browser surface.
 
@@ -253,12 +247,12 @@ def test_copy_only_exemptions_perform_no_network_io(sources):
     copy-only file gaining a network call made it fail *as expected* and the suite stayed
     green. A non-strict xfail turns the guard's failure into XFAIL, and a guard that cannot
     fail is not a guard (the exact class this PR exists to close). Keeping this guard in a
-    test that carries no marker means it can redden even while the two remaining #3559
-    invariants are still xfail.
+    test that carries no marker means it can redden independently of the invariants that
+    used to be xfail (all of which are now unmarked too — #3559).
 
     Taking `sources` here also pins the module-level non-vacuity assertion (the
     browser-source scan found >40 files) to a test that cannot be xfailed, so a broken glob
-    can no longer hide behind the two remaining xfail markers either.
+    can no longer hide behind a marker.
     """
     scanned = {str(p.relative_to(REPO)) for p in sources}
     for rel in COPY_ONLY_SOURCES:
@@ -326,7 +320,6 @@ def test_the_proxy_has_a_caller(sources):
     )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_client_data_layer_does_not_import_the_legacy_supabase_client():
     """(B) The blog-admin data layer must not reach for the legacy client.
 

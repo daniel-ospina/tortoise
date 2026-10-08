@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { AUTH_URL } from '@/lib/supabase';
+import { AUTH_URL } from '@/lib/backend';
 import { fetchSession, type SessionInfo } from '@/lib/session';
 
 interface AuthState {

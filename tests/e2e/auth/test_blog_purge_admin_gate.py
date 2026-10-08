@@ -332,3 +332,37 @@ def test_malformed_cookie_does_not_500_on_the_blog_route(stack):
     except urllib.error.HTTPError as e:
         status = e.code
     assert status != 500, f"/blog/api/purge 500s on a malformed cookie: {status}"
+
+
+def test_legacy_cookie_arm_is_gone(stack):
+    """#4178: the legacy COOKIE arm of `getAccessToken` is REMOVED.
+
+    The blog endpoints used to accept a `sb-tortoise-auth-token` cookie directly
+    as a second, non-revocable authorization path — D1 session revocation cannot
+    reach a Supabase access token. The migrated console reaches these endpoints
+    through the `/blog/api/*` Token Handler, which strips the client `cookie` and
+    sets `Authorization: Bearer …`, so the cookie arm has no caller.
+
+    This sends the SAME credential the bearer tests use, in the cookie instead of
+    the header, and asserts refusal. Before the removal it was accepted, and
+    nothing asserted the removal — so it could silently return.
+    """
+    _blog_admin(user_id="user-123")
+    try:
+        session = json.dumps({"access_token": "legacy-token", "refresh_token": "r"})
+        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
+        req.add_header("Cookie", f"sb-tortoise-auth-token={session}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                status, body = r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read().decode()
+    finally:
+        _blog_admin(clear=True)
+
+    assert status == 401, (
+        f"the legacy cookie arm was removed (#4178) — a request carrying only the "
+        f"`sb-tortoise-auth-token` cookie must be refused, got {status} {body}. If "
+        "this passed the admin gate, a non-revocable credential is accepted again."
+    )

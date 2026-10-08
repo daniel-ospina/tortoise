@@ -5,9 +5,7 @@
 // shape, but #4171 moved that gate to the app origin where it resolves the BFF
 // `__Host-session` cookie and checks `is_admin()` with the user's own token — so
 // there is no longer a second copy to keep in sync. Fail-closed: no session / not
-// admin → null/false, never a soft pass. Cookie name sb-tortoise-auth-token
-// matches the app's custom storage key (supabase.ts), still used by the admin
-// console's data layer (SCOPE.md §4 W2, backlog #4178).
+// admin → null/false, never a soft pass.
 //
 // ZERO-DEPENDENCY (plain TS, no imports).
 
@@ -17,23 +15,20 @@ export type AuthEnv = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
 };
 
-/** Extract the access token from Authorization: Bearer or the auth cookie. */
+/**
+ * Extract the access token from `Authorization: Bearer …`.
+ *
+ * #4178 (parent #3501): the legacy `sb-tortoise-auth-token` COOKIE arm was
+ * removed. It was a second, non-revocable authorization path — D1 session
+ * revocation cannot reach a Supabase access token — accepted directly by the
+ * three blog endpoints. The migrated blog-admin console reaches them through
+ * the same-origin `/blog/api/*` Token Handler, which strips the client's
+ * `cookie` and sets `Authorization`, so the Bearer arm is the one that stays.
+ */
 export function getAccessToken(request: Request): string | null {
   const auth = request.headers.get("Authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (m) return m[1].trim();
-  const cookie = request.headers.get("Cookie") ?? "";
-  const cm = /sb-tortoise-auth-token=([^;]+)/.exec(cookie);
-  if (cm) {
-    try {
-      const parsed = JSON.parse(decodeURIComponent(cm[1]));
-      const t = parsed?.access_token;
-      return typeof t === "string" && t ? t : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  return m ? m[1].trim() : null;
 }
 
 /** Validate the session token with Supabase Auth — returns the user id or null. */
@@ -208,8 +203,11 @@ export async function requireAdmin(
   // BFF cookie was sent at all.
   if (presentedBffCookie(request)) return { ok: false, reason: "not_admin" };
 
-  // Legacy path — kept so this is a non-breaking change while the remaining
-  // surfaces migrate. It can be deleted once no caller sends a bearer token.
+  // Bearer path. #4178: this is no longer a "legacy" fallback — it is the
+  // transport the migrated blog-admin console reaches these endpoints through
+  // (the app-origin `/blog/api/*` Token Handler strips the client cookie and
+  // sets `Authorization: Bearer <access token>`). It is used only when no BFF
+  // cookie was presented at all (see the guard above).
   const token = getAccessToken(request);
   if (!token) return { ok: false, reason: "not_admin" };
   const verified = await verifySession(env, token);

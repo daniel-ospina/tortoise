@@ -12,7 +12,7 @@ not 301 because a new branch for a moved surface must stay reclaimable
 ## Dev
 
 ```bash
-cp .env.example .env   # VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+cp .env.example .env   # VITE_SUPABASE_URL only (the anon key is no longer a browser requirement)
 npm install
 npm run dev            # vite dev server → http://localhost:5173/admin/
 npm test               # vitest — markdown roundtrip invariant
@@ -29,13 +29,7 @@ npm run build          # tsc --noEmit && vite build → dist/ (base '/admin/', a
   rejected with 403 by the server gate before any asset is served, so the SPA never
   runs for them. There is no `is_admin()` RPC call in this SPA (the gate does that
   server-side).
-- **Data layer (direct Supabase calls):** a storage adapter keyed on
-  `sb-tortoise-auth-token` (`src/lib/supabase.ts`). This is a **retained legacy
-  credential**, not the session: the cookie is issued by the MCP consent page in
-  `tortoise/oauth.py` and re-written by this module's own `writeCookie` on refresh,
-  is JS-readable and parent-domain, and supabase-js recovers
-  the session from it on init. Migrating these calls onto the BFF is **#4178** —
-  do not add a new caller. No service-role keys client-side.
+- **Data layer (BFF proxy):** `src/lib/backend.ts` builds the supabase-js client with `persistSession: false`, no storage adapter and a `global.fetch` that rewrites every `rest/v1` / `storage/v1` request to the same-origin `/api/sb/*` Token Handler (`website/apps/dashboard/functions/api/sb/[[path]].ts`). The server resolves the `__Host-session`, mints the Supabase access token and attaches it; the browser holds no token. `SUPABASE_URL` stays the real project origin so `getPublicUrl` keeps producing public CDN URLs. This replaced the legacy `src/lib/supabase.ts` adapter that read/wrote the JS-readable `sb-tortoise-auth-token` cookie (#4178). No service-role keys client-side.
 - Data authorization is Supabase RLS: `blog_posts` admin_all policy gates on
   `is_admin()` membership (migration `20260827000001`, issue #1793).
 

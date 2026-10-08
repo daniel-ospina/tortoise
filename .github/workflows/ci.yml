@@ -152,13 +152,11 @@ jobs:
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
                   isfile("product/pricing.json"),
-                  # #3485: the dashboard's node suite loads the shared
-                  # website/assets/supabase-session.js bridge directly
-                  # (supabaseSessionBridge.test.js). Without this entry a PR
-                  # touching ONLY the bridge selects the `website` surface and
-                  # skips dashboard-js-tests, so the behavioural tests for the
-                  # very file under review would never run.
-                  isfile("website/assets/supabase-session.js"),
+                  # #3559: the entry for the shared
+                  # website/assets/supabase-session.js bridge is REMOVED with the
+                  # file and its behavioural test (supabaseSessionBridge.test.js)
+                  # — nothing in the dashboard's node suite loads the bridge any
+                  # more.
                   # #3787: `website/consent.js` is copied into the dashboard's
                   # dist by `scripts/copy-shared-assets.mjs` as part of
                   # `npm run build`, and the shipped-artifact guard in

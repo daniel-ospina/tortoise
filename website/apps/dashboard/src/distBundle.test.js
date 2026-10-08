@@ -693,10 +693,11 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // pin for the #3503 invariant.
   // tests/test_session_bridge_fragment_retention.py::
   // test_one_fragment_consumer_per_page asserts on the SOURCES (`main.jsx`,
-  // `supabase-session.js`, `tortoise/oauth.py`, `public/signup.html`,
-  // `index.html`, `blog-admin/src/lib/supabase.ts`) plus an ABSENCE assertion
-  // that `website/signin.html` does not exist — and never on the built `dist/`
-  // bundle;
+  // `tortoise/oauth.py`, `public/signup.html`, `index.html`) plus an ABSENCE
+  // assertion that `website/signin.html` does not exist — and never on the built
+  // `dist/` bundle. (The shared `supabase-session.js` bridge and
+  // `blog-admin/src/lib/supabase.ts` it also used to name were DELETED in
+  // #3559/#4178.)
   // the #2865 probes above assert shipped *strings*, not the fragment-consumer
   // property. #3775 then untracked `dist/`, so the *committed* bundle #3787 was
   // filed about no longer exists (there is nothing to rebuild or byte-compare) —
