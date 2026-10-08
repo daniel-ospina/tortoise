@@ -15422,12 +15422,18 @@ class TortoiseSDK:
         # one knob TORTOISE_EP_REQUIRE_CALIBRATION).
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
-        if require_calibration:
-            self._ensure_calibrated("compute_confidence")
+        # #7739: the gate runs AFTER the selection (below), against the SAME
+        # selection the run consumes — but still fail-closed BEFORE ep.run().
+        # The no-arg (dirty-roots) branch below keeps the whole-graph scope:
+        # it has no selection to derive and its behaviour is unchanged here.
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+            if require_calibration:
+                self._ensure_calibrated(
+                    "compute_confidence",
+                    scope=lambda: self._ep_run_scope(operator_ids, max_hops))
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
         elif anchors is not None:
@@ -15448,9 +15454,25 @@ class TortoiseSDK:
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {},
                         "diagnostic": "no_factors"}
+            if require_calibration:
+                # #7739: scope = the run's consumed set for the selection just
+                # computed. Anchors the run consumes are already in it (they
+                # are operator inputs / direct-edge factor endpoints); an
+                # isolated anchor reaches no factor, so adding it would only
+                # manufacture a false blocker — the gate matches the run.
+                self._ensure_calibrated(
+                    "compute_confidence",
+                    scope=lambda: self._ep_run_scope(operator_ids, max_hops))
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
         else:
+            # #7739: this path has no computed selection (the run set is the
+            # dirty roots), so the gate keeps its pre-#7739 WHOLE-GRAPH scope.
+            # Unchanged here, and gated before _hydrate_dirty_roots so the
+            # raise fires before the no-dirty-roots early return, exactly as
+            # the pre-#7739 gate did.
+            if require_calibration:
+                self._ensure_calibrated("compute_confidence")
             # ── No-arg (#395 AC8 + delta C): LOCAL EP over the affected
             # subgraph — dirty roots seed a max_hops=None run over the exact
             # affected closure; NO global extract_svbp_factors() scan (AC2 —
@@ -16004,17 +16026,24 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
-            "n.status, n.baseline_source AS bl_source, "
+            "n.status, "
+            # #7739: the legacy ``outdated=true`` flag is terminal without a
+            # status write (invalidate_point), so the gate needs BOTH halves
+            # of the shared #2498 terminal predicate; expose it here rather
+            # than re-querying per Point.
+            "coalesce(n.outdated, false) AS outdated, "
+            "n.baseline_source AS bl_source, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            (pid, content, pk, calibrated, status,
+            (pid, content, pk, calibrated, status, outdated,
              bl_source, ctier, skind, src_url) = row
             item = {"id": pid, "content": content, "pointKind": pk,
                     "calibrated": calibrated, "status": status,
+                    "outdated": outdated,
                     "baseline_source": bl_source}
             # #2199: every calibrated row routes through the single provenance
             # display map so the copy never drifts per surface. Legacy
@@ -16084,7 +16113,41 @@ class TortoiseSDK:
                 seen[pid] = item
         return deduped
 
-    def _ensure_calibrated(self, surface: str) -> None:
+    def _ep_run_scope(self, seed_ids: list[str],
+                      max_hops: int | None) -> set[str]:
+        """Point ids an EP run seeded by ``seed_ids`` will actually consume.
+
+        #7739: the calibration gate must be evaluated against the SAME
+        selection the run consumes — a gate that disagrees with the run is a
+        defect in its own right. This asks the run's OWN ``_affected_claims``
+        and ``_affected_factors`` rather than inventing a second traversal, so
+        the two cannot drift: ``_affected_claims`` admits a claim only when it
+        forms a factor (#5566), and ``_affected_factors`` names every factor
+        INPUT — its operator inputs and BOTH endpoints of an operator-less
+        direct edge (#888 W5). The gate's own evidence-kind / live filters
+        decide what to demand calibration of.
+
+        Deriving this from the SELECTED operators' immediate endpoints alone
+        is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so
+        an anchored ``max_hops=1`` run on A-op1-B-op2-C consumes C while C is
+        not an endpoint of any SELECTED operator. The union here is exactly
+        the run's consumed set, so an uncalibrated point inside it still
+        raises (#7739: the guard is scoped, never weakened).
+        """
+        if not seed_ids:
+            return set()
+        ep = self._get_ep()
+        affected = ep._affected_claims(list(seed_ids), max_hops,
+                                       include_draft=False)
+        scope = set(affected)
+        for (_src, _rel, inputs, *_rest) in ep._affected_factors(
+                affected, include_draft=False):
+            scope.update(inputs)
+        return scope
+
+    def _ensure_calibrated(self, surface: str, *,
+                           scope: set[str]
+                           | Callable[[], set[str]] | None = None) -> None:
         """#1157: shared calibration gate for EP surfaces.
 
         Raises CalibrationError when evidence-kind Points (statement /
@@ -16097,6 +16160,16 @@ class TortoiseSDK:
         Args:
             surface: human-readable caller name for the error message
                 (e.g. "dream", "get_confidence").
+            scope: #7739 — either the set of Point ids the caller's EP run can
+                actually consume (see ``_ep_run_scope``), or a zero-arg
+                callable returning that set. A CALLABLE is evaluated lazily,
+                only when the graph already has at least one uncalibrated
+                evidence point — so a fully calibrated graph (the common
+                case) pays NOTHING for scoping. ``None`` (default) keeps the
+                whole-graph posture for callers without a computed selection
+                (dream, get_confidence, the no-arg compute_confidence path).
+                An EMPTY set is a real scope (nothing reachable → nothing to
+                gate) and is never treated as ``None``.
         """
         from .exceptions import CalibrationError
         summary = self.calibrate_summary()
@@ -16109,7 +16182,23 @@ class TortoiseSDK:
             # calibration of a draft is noise; the gate only guards live
             # evidence. Status NULL = live, mirroring _live_only.
             and s.get("status") != "draft"
+            # #7739: the same rule extends to TERMINAL points — EP's live set
+            # is ``_live_only`` (live.py) = not draft AND NOT terminal, so a
+            # retracted / superseded / outdated / archived point (or the
+            # legacy ``outdated=true`` flag invalidate_point writes without a
+            # status) is one EP will never consume. Demanding its calibration
+            # is the same noise as demanding a draft's. The shared #2498
+            # Python mirror keeps the vocabulary from drifting; status NULL =
+            # live, mirroring _live_only.
+            and not is_terminal_status(s.get("status"),
+                                       s.get("outdated", False))
         ]
+        # #7739: only now, and only if there is something to scope, ask the
+        # caller for the run's consumed set — an uncalibrated point INSIDE it
+        # still raises; an unrelated lane's point stops freezing this caller.
+        if uncalibrated and scope is not None:
+            scope_set = scope() if callable(scope) else scope
+            uncalibrated = [s for s in uncalibrated if s["id"] in scope_set]
         if uncalibrated:
             ids = [s["id"] for s in uncalibrated[:10]]
             msg = (
