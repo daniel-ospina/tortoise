@@ -819,3 +819,116 @@ class TestMCPAnnotationsContract:
         b = tools["tortoise_set_source_tier"].annotations
         assert getattr(a, "destructiveHint", getattr(a, "destructive_hint", False)) is True
         assert getattr(b, "destructiveHint", getattr(b, "destructive_hint", False)) is True
+
+
+#: ONE document. NOTE (measured, and it matters): the write path applies S0a and
+#: MERGEs `:Source` on the url, so a spelling variation collapses to ONE node —
+#: using two spellings here would test NOTHING. The shape that CAN reproduce the
+#: fan-in is a bypassing writer, which `_link_duplicate_source` mints below.
+URL_ONE_DOC = "https://fanin.example/one-document"
+
+#: A genuinely different document: different host, so a different S0a identity.
+URL_OTHER_DOC = "https://other.example/other-document"
+
+
+def _link_duplicate_source(sdk, pid: str, raw_url: str, tier: str = "T4") -> None:
+    """Mint a SECOND `:Source` node for ONE document, and link `pid` to it.
+
+    This is the S0b duplicate-node class the issue names: the write path applies
+    S0a and MERGEs on the url, so it cannot produce this; a writer that BYPASSES
+    `normalize_source_url`/`resolve_source_key` can. The new node is given the
+    SAME `canonicalUrl` as the document's original node — that property is the
+    S0a identity, materialised on the node (`:Source` carries it; it has no
+    `id` property).
+    """
+    g = sdk._get_proj().g
+    canon = g.query(
+        "MATCH (s:Source {url:$url}) RETURN s.canonicalUrl",
+        params={"url": URL_ONE_DOC},
+    ).result_set[0][0]
+    g.query(
+        "MERGE (s:Source {url:$url}) SET s.canonicalUrl=$canon, "
+        "s.credibilityTier=$t, s.sourceDate=$sd, s.ingestedAt=$sd",
+        params={"url": raw_url, "canon": canon, "t": tier, "sd": FRESH},
+    )
+    g.query(
+        "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"pid": pid, "url": raw_url},
+    )
+
+
+def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | None = None):
+    """A point whose ONLY evidence is `urls` (plus an optional S0b duplicate of
+    the first, carrying the same canonicalUrl), all at `tier`, fresh date.
+
+    Returns the point's inherited alpha.
+    """
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    p = sdk.create_point("statement", "fan-in claim", extractedFrom=urls[0])
+    if urls[1:]:
+        sdk._get_proj()._link_source(p["id"], urls[1:])
+    for u in urls:
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier=$t, "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": u, "t": tier, "sd": FRESH},
+        )
+    if extra_duplicate is not None:
+        _link_duplicate_source(sdk, p["id"], extra_duplicate, tier)
+    sdk._apply_source_inheritance(recency_decay=1.0)
+    alpha = inherited_alpha(sdk, p["id"])
+    try:  # noqa: SIM105
+        sdk.close()
+    except Exception:
+        pass
+    return alpha
+
+
+class TestSourceIdentityCollapse:
+    """#5543 — source-fan-in double counting on the `extractedFrom` prior path.
+
+    `aggregate_prior` assumes its `groups` are INDEPENDENT observations, and the
+    `_apply_source_inheritance` call site is the only place that assumption is
+    created. It keyed on the `:Source` NODE, so the model was "how many distinct
+    nodes point at me" — a statement about the database, not about the evidence.
+    Two `:Source` nodes for ONE document each added a term to
+    `log2(N_t+1) * sum(base_pc * factor) / N_t` AND each raised N, so the second
+    channel was invisible to `aggregate_prior`.
+
+    The identity policy was already recorded — `source_identity.py` (S0a): "the
+    registration key is the canonicalised URL" — and the WRITE path applies it.
+    The belief path had simply never called it. These two tests pin BOTH
+    directions: identity collapse must happen, and genuine corroboration must
+    not be collateral damage.
+    """
+
+    def test_one_document_reached_twice_counts_once(self):
+        """TWO `:Source` nodes of ONE document == the one-source prior.
+
+        The duplicate is minted DIRECTLY, because the write path cannot produce
+        it — and that is the point: the guard exists for the writer that BYPASSES
+        S0a, so exercising it through the write path would test nothing (a
+        spelling variation collapses to one node at write time, and the
+        assertion would then hold trivially while proving nothing).
+        """
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        alpha_dup = _one_point_sdk(
+            [URL_ONE_DOC], extra_duplicate="https://mirror.example/one-document"
+        )
+        assert alpha_dup == pytest.approx(alpha_one), (
+            "two :Source nodes carrying the SAME canonicalUrl are ONE document, "
+            "so they must contribute ONE independent source (S0a identity); the "
+            f"second node added no evidence (got {alpha_dup} for two nodes vs "
+            f"{alpha_one} for one)"
+        )
+
+    def test_distinct_documents_still_corroborate(self):
+        """The collapse must not become a blanket 'sources do not add up'."""
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        alpha_two = _one_point_sdk([URL_ONE_DOC, URL_OTHER_DOC])
+        assert alpha_two > alpha_one, (
+            "two genuinely different documents must still corroborate — the "
+            f"identity guard is not a cap on evidence (got {alpha_two} for two "
+            f"documents vs {alpha_one} for one)"
+        )
