@@ -561,6 +561,15 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
         "wrapper, never a bare `python3`, so it carries the guarantee by "
         "construction"
     ),
+    "the watched PATH grammar": (
+        "`_BARE_INVOCATION` matches only `tools/` and `graph-scripts/` — "
+        "`CORPUS_DIRS`, which is the set `_corpus()` defines the guard over. A "
+        "GUARDED entry point living outside those two directories would be "
+        "invisible here. None exists today; note that an UNGUARDED script under "
+        "`docs/runbook/` (e.g. `4107_preference_abstention_diagnostic.py`) is "
+        "NOT a miss: with no `sys.version_info` guard there is no contradiction "
+        "for bare `python3` to create, which is the only thing this seam is for."
+    ),
 }
 
 #: Lines where the bare form is DELIBERATELY correct because the text RECORDS or
