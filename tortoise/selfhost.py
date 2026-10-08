@@ -63,8 +63,8 @@ TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 # rather than waiting for the client's socket timeout. It is measured from the
 # leg's own start, NOT from the request, so it can only be said to precede this
 # outer bound once the pre-leg work is discounted — see the constants below,
-# where that qualification is made precisely. That allowance is the inner deadline this
-# outer bound sits above; see the constants below. ``hosted_api._READY_PROBE_TIMEOUT_S``
+# where that qualification is made precisely.
+# ``hosted_api._READY_PROBE_TIMEOUT_S``
 # was superseded by the hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT``
 # bounds; this constant is the self-host path's own independent backstop.
 #
@@ -223,7 +223,8 @@ def _ready_probe_inner_bound_s() -> float:
 # cannot be cancelled, only abandoned), and the leg runs on its OWN bounded
 # daemon pool, so abandoned legs are bounded in NUMBER rather than in lifetime.
 # What is promised is exactly that: the scarce, REUSED readiness worker is
-# released, and the number of parked legs cannot grow with load. A parked leg
+# released, and the number of parked legs cannot grow WITHOUT BOUND with load
+# (the pool bounds it at width + MAX_BACKLOG and REFUSES past that, fail-closed). A parked leg
 # still exists until its socket gives up — the bound is on the pool, not on the
 # client's socket.
 #
@@ -285,7 +286,7 @@ def _run_bounded(fn, allowance_s: float) -> None:
 
     Its relation to the OUTER bound is not an unconditional ordering: the
     allowance is measured from THIS function's entry, while ``health_ready``
-    builds ``TortoiseSDK(...)`` before it (selfhost.py:893) — that
+    builds ``TortoiseSDK(...)`` before it (selfhost.py:898) — that
     construction is charged to the 6.0s outer budget but NOT to this allowance.
     So with a slow constructor the outer bound can fire first and the answer can
     go out while this leg is still running. What the bound guarantees is the

@@ -1680,7 +1680,7 @@ def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
 
 
 def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
-        selfhost):
+        selfhost, monkeypatch):
     """The fail-closed refusal must not be replaced by a raw-thread fallback.
 
     ``_WorkerBacklogFull`` surfacing as a 503 is the documented fail-closed
@@ -1693,6 +1693,15 @@ def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
     """
     import tortoise.monitoring as mon
 
+    # A DEDICATED pool name, for the same reason the acceptance test uses one:
+    # the daemon registry is process-wide and keyed by NAME, and four earlier
+    # tests in this file leave `time.sleep(30)` legs parked on the shared pool.
+    # Sharing it makes this test's barrier WAIT OUT those parked legs — measured
+    # at ~29.9s against the 30s timeout, a 0.10s margin, so a sleep overshoot on
+    # a loaded runner raises BrokenBarrierError. That is a FALSE RED on a merge
+    # gate, i.e. the exact class this test was de-flaked to remove.
+    monkeypatch.setattr(
+        selfhost, "_DB_LEG_WORKER", "selfhost-ready-probe-db-leg-saturation")
     pool = selfhost._probe_worker(selfhost._DB_LEG_WORKER,
                                   selfhost._DB_LEG_WORKERS)
     assert pool._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
