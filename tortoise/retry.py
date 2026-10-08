@@ -170,12 +170,14 @@ def retryable_aborted_write(
       deletion that lands during the backoff — after this predicate already
       answered — is still refused; see ``TortoiseSDK._graph_write_with_retry``.)
 
-    **What the two arms rest on.** The write-slot and ``MISCONF`` arms rest on
-    engine *source/semantics* (no test pins it — see PR #7615's verification
-    table): the replaced-graph check is ``WriteAbort::GraphUnregistered``, whose
-    registration test runs BEFORE mutation under one continuous GIL hold and the
-    engine's own test says it *"aborted before mutating"*; ``MISCONF`` is a
-    pre-execution command rejection. The two **C-core literals are
+    **What each arm rests on.** The state-independent arms rest on engine
+    source/semantics (no test pins it — see PR #7615's verification table): the
+    write-slot refusal is raised from ``src/graph_core.rs::execute_query_write``
+    *before the slot is claimed*, and ``MISCONF`` is a pre-execution command
+    rejection. The graph-abort family's v6 form rests on
+    ``WriteAbort::GraphUnregistered``, whose registration test runs BEFORE
+    mutation under one continuous GIL hold and whose engine test says it
+    *"aborted before mutating"*. The two **C-core literals are
     measurement-backed, not source-cited**: their abort-before-mutate basis is a
     live one-application measurement (``{1 retry, 1_000_001 nodes}`` on ver
     42004, and the same ``when opened key`` open-time wording), not an engine
@@ -207,6 +209,23 @@ def retryable_aborted_write(
             "graph-existence probe failed; refusing to retry the aborted write "
             "(a silent success is worse than a loud miss)", exc_info=True)
         return False
+
+
+def graph_abort_family(exc: BaseException) -> bool:
+    """True when *exc* is the graph-deleted-or-replaced abort family.
+
+    That family's retry decision depends on the graph's state, so a caller that
+    re-issues the write must consult ``graph_exists`` for it — and ONLY for it.
+    The write-slot / ``MISCONF`` arms are state-independent: they must keep
+    retrying even when the graph key is absent, because their refusal has nothing
+    to do with the graph's presence. (#7685 review round 2: the SDK's
+    re-issue-time probe was applied to every arm, which turned a contended or
+    persistence-refused write into a hard failure whenever the key was missing.)
+    """
+    import redis.exceptions as _re
+
+    return (isinstance(exc, _re.ResponseError)
+            and bool(_GRAPH_ABORT_RE.search(str(exc))))
 
 
 class WriteStageRetriesExhausted(Exception):

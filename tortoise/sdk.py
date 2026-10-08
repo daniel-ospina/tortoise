@@ -4568,12 +4568,9 @@ class TortoiseSDK:
         from .retry import (
             WriteStageRetriesExhausted,
             call_with_predicate,
+            graph_abort_family,
             retryable_aborted_write,
         )
-
-        def _note_retry(_exc: BaseException) -> None:
-            self._graph_write_retry_count = getattr(
-                self, "_graph_write_retry_count", 0) + 1
 
         # Read the projection AT PROBE TIME, not at entry: the caller resolves
         # it through `_get_proj()` before (or, in a lazy caller, on) the first
@@ -4581,37 +4578,47 @@ class TortoiseSDK:
         # answers False (`_graph_exists`), so the graph-abort family fails LOUD.
         attempts = 0
         last_abort: BaseException | None = None
+        state_gated = False
 
         def _probe() -> bool:
             return self._graph_exists(self._proj)
 
         def _issue():
-            """Re-issue, but only after confirming the graph key is still there.
+            """Re-issue, refusing first when a STATE-GATED abort's graph is gone.
 
-            The classification-time probe is stale by the time the retry runs
-            (``call_with_predicate`` sleeps AFTER the predicate), so this is the
-            last point at which a deletion that landed during the backoff can be
-            refused instead of silently auto-creating an empty graph. Re-raising
-            the captured abort keeps the caller's error type unchanged; the
-            predicate then refuses it (the key is absent).
+            For the graph-abort family only: the classification-time probe is
+            stale by the time the retry runs (``call_with_predicate`` sleeps
+            AFTER the predicate), so this is the last point at which a deletion
+            that landed during the backoff can be refused instead of silently
+            auto-creating an empty graph. Re-raising the captured abort keeps the
+            caller's error type unchanged; the predicate then refuses it (the key
+            is absent). The state-independent arms (write-slot / MISCONF) are NOT
+            gated — their refusal has nothing to do with the graph's presence, so
+            they must retry even when the key is missing.
             """
             nonlocal attempts
             attempts += 1
-            if attempts > 1 and last_abort is not None and not _probe():
-                raise last_abort
+            if attempts > 1:
+                if state_gated and last_abort is not None and not _probe():
+                    raise last_abort
+                # Count only a retry that is actually re-issued, so the eval's
+                # `ingest_retries` cannot over-report (review round 2).
+                self._graph_write_retry_count = getattr(
+                    self, "_graph_write_retry_count", 0) + 1
             return fn()
 
         def _predicate(exc: BaseException) -> bool:
-            nonlocal last_abort
+            nonlocal last_abort, state_gated
             keep = retryable_aborted_write(exc, graph_exists=_probe)
             if keep:
                 last_abort = exc
+                state_gated = graph_abort_family(exc)
             return keep
 
         try:
             return call_with_predicate(
                 _issue, predicate=_predicate, retries=3,
-                what=what, base=2.0, cap=8.0, on_retry=_note_retry)
+                what=what, base=2.0, cap=8.0)
         except WriteStageRetriesExhausted as exc:
             # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
             # marker, not for create_point's contract: surface the ORIGINAL error,

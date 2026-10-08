@@ -1431,20 +1431,48 @@ def test_graph_exists_fails_loud_when_the_probe_cannot_answer():
     assert (g.attempts, g.applied) == (1, 0)
 
 
+def test_state_independent_arms_retry_even_when_the_graph_key_is_absent():
+    """#7685 review round 2 — regression: gate the re-issue probe to the family.
+
+    The predicate deliberately never consults graph state for the write-slot /
+    MISCONF arms. Applying the pre-issue probe to them would turn a contended or
+    persistence-refused write into a hard failure whenever the key was missing
+    (measured before this fix: ``query_calls=1``, ``retry_count=3``, the MISCONF
+    error raised, while the graph was merely absent).
+    """
+    for text in ("MISCONF Errors writing to the AOF file: No space left on device",
+                 "ERR another write is in progress, retry the query"):
+        sdk, g = _sdk_for_graph_abort(abort=text, graph_exists=False)
+
+        def _write(_sdk=sdk):
+            return _sdk._proj.g.query("MERGE (m:EpMeta)")
+
+        assert sdk._graph_write_with_retry(_write, what="t") == "ok"
+        assert g.attempts == 2, f"the write must be re-issued: {text!r}"
+        assert g.applied == 1, "exactly one application"
+        assert g.probes == 0, "graph state must not be consulted for this arm"
+        assert sdk._graph_write_retry_count == 1, "one real re-issue"
+
+
 def test_graph_exists_works_through_a_real_projection(tmp_path):
     """#7685 review round 1: the REAL ``_GuardedGraph`` forwarding is pinned.
 
     The other #7685 tests stub ``execute_command``; this one exercises the actual
-    probe on whatever backend the lane provides (docker lane = the live graph,
-    embedded otherwise), so a broken forwarding path cannot leave production
-    silently never retrying. Deterministic — no race, just presence then absence.
+    probe on the backend the lane provides — the live graph when
+    ``TORTOISE_DB_URI`` is set (the docker lane), embedded otherwise — so a
+    broken forwarding path cannot leave production silently never retrying.
+    Deterministic: no race, just presence then absence.
     """
     import contextlib
+    import os
     import uuid
 
     from tortoise.sdk import TortoiseSDK
 
-    sdk = TortoiseSDK(str(tmp_path / "exists7685.db"),
+    uri = os.environ.get("TORTOISE_DB_URI")
+    # An explicit path forces the EMBEDDED branch, so passing None when a URI is
+    # configured is what actually exercises the live lane (review round 2).
+    sdk = TortoiseSDK(None if uri else str(tmp_path / "exists7685.db"),
                       namespace=f"test_7685_exists_{uuid.uuid4().hex[:8]}")
     try:
         proj = sdk._get_proj()
