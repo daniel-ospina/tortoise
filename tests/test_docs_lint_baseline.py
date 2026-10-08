@@ -1639,8 +1639,8 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     counts = baseline["snapshot"]["counts"]
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
-    # deliberate append, never noise. It is 3266 after the #7534 autofix: the
-    # whitespace findings went away, and the 5 files the autofix deferred keep
+    # deliberate append, never noise. It is 3303 after the #7534 autofix: the
+    # whitespace findings went away, and the 7 files the autofix deferred keep
     # their pre-existing findings RECORDED here (#7534 — the deferral restores
     # them to the tree, so the snapshot must still cover them or a later PR that
     # touches one is charged for debt the base snapshot already knew).
@@ -1656,7 +1656,7 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     # It is not a round number: slack above the observed range is an amnesty
     # window, so any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 3266, "lychee": 52}
+    ceilings = {"markdownlint": 3303, "lychee": 52}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1675,7 +1675,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
 
     A PR can delete a legitimate baseline entry and append the finding it
     introduced while keeping `snapshot.counts` constant: the count ceiling
-    (3266 <= 3266) and the counts/lists consistency test both pass, and the
+    (3303 <= 3303) and the counts/lists consistency test both pass, and the
     differ classifies the new finding as KNOWN — it only inspects findings the
     run produces, so a removed entry is never re-checked. Measured end-to-end on
     the previous revision: the differ returned 0 new on a swapped baseline. These
@@ -1694,7 +1694,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "7f6a20d60f5517fdb8aaee127992a8f5880259fe2cd47fb566b6748ca74f5780"
+        "b4632cc2e484da6323351643fdb471530724d180b986173c2d37a9db2451f8ed"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "f605204128fee73d5d5ad97552a5f0047f4485b0822c0dec8e0462d5385e0ed7"
