@@ -835,8 +835,11 @@ fly machine restart <id> -a tortoise-y4mjjq
   deploy gate slow (#3243).
   **Residual — SELFHOST ONLY, do not conflate the two surfaces:** selfhost's
   `/health/ready` still awaits a real DB probe on the request path. Since
-  **#3320** its DB leg carries its own derived allowance that always fires
-  before the outer bound, so the REUSED pool worker is released instead of
+  **#3320** its DB leg carries its own derived allowance that fires well inside
+  the client's 10 s socket read (and, measured from the leg's own start, before
+  the 6.0 s outer bound — but SDK construction happens before the leg and is
+  charged to the outer budget, not to this allowance), so the REUSED pool worker
+  is released instead of
   being parked for the client's read timeout (10 s) — the pre-#3320 failure,
   where the outer bound (6.0 s) lost that race and a parked worker made a later,
   healthy request queue and answer 503, is **closed**. Two things remain true and

@@ -104,10 +104,12 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #: The result is CAPPED at ``outer - margin`` (applied LAST, so the cap wins:
 #: a value above the outer bound is not a bound at all) and otherwise FLOORED at
 #: 2.5s. At the shipped defaults: 6.0 (outer) > 5.5 (inner) > 2.5 (floor).
+# allows ``_ready_probe_inner_bound_s()`` to keep the leg inside the outer
+# bound when the outer bound is sane.
 #: The ordering holds whenever ``outer - margin`` is at or above the floor; if
-#: the outer bound is set BELOW 3.0 — which only the tests do, pinning 0.2 and
-#: 1.2 — the floor cannot be honoured and the bound tightens to just under the
-#: outer bound, which is the direction that keeps the invariant.
+#: the outer bound is set BELOW 3.0 — which only the tests do, pinning 0.3, 0.2
+#: and 1.2 — the floor cannot be honoured and the bound tightens to just under
+#: the outer bound, which is the direction that keeps the invariant.
 #:
 #: The floor is a heuristic, not a guarantee: it sits above the HOST connect
 #: default (2.0s, ``projection._DB_CONNECT_TIMEOUT_DEFAULT``) so an ordinary
@@ -183,8 +185,11 @@ def _ready_probe_inner_bound_s() -> float:
 # /health/ready -> ``_READY_PROBE_WORKER``. Its probe is ``sdk._get_proj()``
 # called DIRECTLY — the engine's real path, deliberately not ``probe_db`` — with
 # its DB leg bounded by ``_run_bounded`` (#3320, below): the leg gets a DERIVED
-# allowance that always fires before the outer bound, so a black-holed DB
+# allowance that fires before the client's socket timeout, so a black-holed DB
 # releases the worker instead of parking it for the client's socket timeout.
+# (It precedes the OUTER bound too, measured from the leg's own start — but see
+# the note on ``_READY_PROBE_TIMEOUT_S``: SDK construction happens BEFORE the
+# leg, is charged to the outer budget, and is not covered by the inner one.)
 # Two things remain true and are NOT fixed by that: the client's own socket
 # thread inside the abandoned leg lives until ITS timeout, and the UNDERLYING
 # connect/read defaults are the FalkorDB client's (2.0s connect on the host lane
@@ -271,8 +276,17 @@ def _run_bounded(fn, allowance_s: float) -> None:
     The readiness pool's worker is the scarce, REUSED resource: while it is
     inside a socket read it cannot serve the next request, so a black-holed DB
     parks the pool and a later healthy request gets a FALSE 503. This gives the
-    DB leg an allowance that fires before the outer ``_READY_PROBE_TIMEOUT_S``,
-    so the worker returns by itself and the pool is released.
+    DB leg an allowance that fires before the CLIENT's socket timeout, so the
+    worker returns by itself and the pool is released.
+
+    Its relation to the OUTER bound is not an unconditional ordering: the
+    allowance is measured from THIS function's entry, while ``health_ready``
+    builds ``TortoiseSDK(...)`` before it (selfhost.py:878-880) — that
+    construction is charged to the 6.0s outer budget but NOT to this allowance.
+    So with a slow constructor the outer bound can fire first and the answer can
+    go out while this leg is still running. What the bound guarantees is the
+    thing that matters and is measured in the tests: the leg ends well inside
+    the client's 10s socket read, so the REUSED worker is always released.
 
     The leg runs on ``monitoring``'s process-wide ``daemon_worker`` pool, NOT on
     a raw thread. That is deliberate and it is the whole reason this is sound:

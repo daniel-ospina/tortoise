@@ -1407,12 +1407,38 @@ def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, mon
     # The FLOOR must never DEFEAT THE CAP. With the outer bound below
     # ``floor + margin``, evaluating the floor last returns the floor — which is
     # ABOVE the outer bound, i.e. not a bound at all, and the worker parks
-    # exactly as it did before #3320. Two tests in this file pin the outer bound
+    # exactly as it did before #3320. Three tests in this file pin the outer bound
     # below 3.0, so this is a reachable state, not a hypothetical one.
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 1.2)
     assert selfhost._ready_probe_inner_bound_s() < 1.2, (
         "the floor defeated the cap: the inner bound is at or above the outer "
         "bound, so the outer wins the race and the pool worker parks again")
+
+
+def test_the_bound_FIRES_at_the_production_allowance(selfhost):
+    """The bound's firing at PRODUCTION scale, which nothing exercised (#3320).
+
+    Every other hang test pins ``_READY_PROBE_TIMEOUT_S`` low (0.2-3.0) for
+    speed, so the allowance under test was never the production one (5.5s). A
+    reviewer made ``_run_bounded`` skip the bound for any ``allowance_s >= 3.0``
+    — i.e. UNBOUNDED at production scale, bounded only in the tests — and the
+    whole file stayed green while the readiness worker was measurably parked
+    again. The allowance is read from the code, never a literal, so this test
+    keeps tracking whatever production actually uses.
+    """
+    allowance = selfhost._ready_probe_inner_bound_s()
+    assert allowance >= 3.0, (
+        f"this test exists to exercise the PRODUCTION allowance, but it is "
+        f"{allowance}s — the test is no longer doing its job")
+
+    began = time.monotonic()
+    with pytest.raises(TimeoutError):
+        selfhost._run_bounded(lambda: time.sleep(30), allowance)
+    elapsed = time.monotonic() - began
+    assert elapsed < allowance + 1.0, (
+        f"_run_bounded returned after {elapsed:.1f}s for an allowance of "
+        f"{allowance:.1f}s — the bound did NOT fire at the production value, so "
+        f"the readiness worker is still parked in the socket read")
 
 
 def test_run_bounded_returns_the_caller_when_the_leg_overruns(selfhost):
@@ -1680,12 +1706,22 @@ def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
             pool.submit(lambda: release.wait(30))
 
         threads_before = len(pool._threads)
+        ran: list = []
         with pytest.raises(Exception) as excinfo:
-            selfhost._run_bounded(lambda: None, 1.0)
+            selfhost._run_bounded(
+                lambda: ran.append(threading.current_thread()), 1.0)
         assert "backlog" in type(excinfo.value).__name__.lower() or (
             "backlog" in str(excinfo.value).lower()), excinfo.value
+        # THE callable must not run. This is the unfakeable half: a raw-thread
+        # fallback runs `fn`, whatever else it does. (The thread-count assert
+        # below is kept only as documentation of intent — `_SingleSlotWorker`
+        # builds `_threads` once in `__init__` and never appends, so its LENGTH
+        # can never change and a fallback was measured to stay green against it.)
+        assert ran == [], (
+            f"a REFUSED leg still ran the callable (on {ran[0]!r}) — the refusal "
+            f"is meant to be fail-closed, not a fallback to unbounded threads")
         assert len(pool._threads) == threads_before, (
-            "a REFUSED leg spawned a thread — the refusal is meant to be "
+            "a REFUSED leg spawned a pool thread — the refusal is meant to be "
             "fail-closed, not a silent fallback to unbounded threads")
     finally:
         release.set()
