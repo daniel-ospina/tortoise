@@ -1487,16 +1487,16 @@ jobs:
     # watchdog, or the runner kills the step before pytest can print its counts
     # — exactly the loss the ORDER invariant exists to prevent.
     # The cap must therefore clear the pre-phase on the path where the watchdog
-    # has to fire. That path is NOT fully bounded, and the clearance rests on an
-    # unstated slack: the ONLY pre-pytest step in this job carrying its own
-    # `timeout-minutes` is `Embedding model REQUIRED` (10m) — checkout, the CPU
-    # install, the drift guard, the FalkorDB provision and the coverage-manifest
-    # `--collect-only` step are all UNBOUNDED. Taking the `test` job's own stated
-    # `~7m setup` constant (see above) as the setup floor, the BOUNDED components
-    # alone already need ~57m — 7 + 10 + the 40m watchdog + the ~10s grace the
-    # job's SIGINT tail is written for — so 60m is the smallest literal that
-    # clears them and still leaves the unbounded collect-only step any room at
-    # all. No gate enforces that:
+    # has to fire. That path is NOT bounded: the ONLY pre-pytest step in this
+    # job carrying its own `timeout-minutes` is `Embedding model REQUIRED` (10m)
+    # — checkout, the CPU install, the drift guard, the FalkorDB provision and
+    # the coverage-manifest `--collect-only` step are all UNBOUNDED. So the sum
+    # is only as firm as its named parts: the `test` job's own stated `~7m
+    # setup` constant (see above), a <=10m embedder, the 40m watchdog and the
+    # ~10s grace the job's SIGINT tail is written for come to ~57m. 60m clears
+    # that, and the 2m it adds over the smallest integer that would (58m) is the
+    # only room the unbounded collect-only step gets. No gate enforces any of
+    # it:
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
     # literals and cannot see the pre-phase at all. The clearance is therefore
     # slack, not proven — which is the opposite of a licence to lower the number.
