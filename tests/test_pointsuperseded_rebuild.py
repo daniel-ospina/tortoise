@@ -1066,11 +1066,21 @@ def test_apply_replay_shares_rebuild_all_selection_on_double_supersede(sup):
     assert corr_apply == corr_all
 
 
-def test_apply_replay_warns_when_a_fold_matches_no_point(sup, caplog):
-    """#3305/#3299: a terminalizer whose target was never created is a
-    dropped fold — the whole-journal apply() arm must SAY SO, like the
-    one-record branch and rebuild_all's sweep already do."""
+def test_apply_replay_refuses_when_a_fold_matches_no_point(sup, caplog):
+    """#7719 (was #3305/#3299: *warns*): a terminalizer whose target was never
+    created is a dropped fold. The whole-journal apply() arm must now RECORD it
+    and fail closed (R8), exactly as rebuild_all's sweep and check_consistency's
+    reference fold already do — a merely loud warning that leaves the run
+    passing is the anti-pattern R8 names.
+
+    FAILS IF: the run passes on this journal (the pre-#7719 disagreement), or
+    the one-record warning the branch also serves is dropped.
+    REACHABLE: a hand-written journal is the only way to reach the shape —
+    every public writer guards its target.
+    """
     import logging
+
+    from tortoise.projection.nonfolded import NonFoldedEventsError
 
     _, events, sdk = sup
     sdk.create_point("statement", "kept", status="live")
@@ -1078,10 +1088,12 @@ def test_apply_replay_warns_when_a_fold_matches_no_point(sup, caplog):
         {"type": "PointSuperseded", "id": "never-created-id",
          "new_id": "also-never-created", "event_id": "ghost-1",
          "ts": "2026-01-02T00:00:00+00:00"})
-    with caplog.at_level(logging.WARNING):
+    with (caplog.at_level(logging.WARNING),
+          pytest.raises(NonFoldedEventsError) as ei):
         _apply_replay(sdk, events)
+    assert "point-superseded-miss" in str(ei.value), str(ei.value)
     assert any("matched no Point" in r.message for r in caplog.records), (
-        "an apply()-based replay silently dropped a terminalizer fold: "
+        "the log line a one-record apply() relies on was dropped: "
         + repr([r.message for r in caplog.records if "fold" in r.message]))
 
 

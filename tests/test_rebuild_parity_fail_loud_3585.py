@@ -1795,3 +1795,187 @@ class TestReferenceFoldEntityLabelSetHasOneHome:
         assert frozenset(
             label for label, _status in _ENTITY_CREATION.values()
         ) == _REFERENCE_FOLD_ENTITY_LABELS
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #7719 — the apply-path terminalizer fold-miss was WARN-ONLY, so
+# `rebuild(log)` / `recover_from_log` / `backup.restore` accepted a journal
+# `rebuild_all` refuses and `check_consistency` reds. The fail-closed set was
+# not one set. The miss is now recorded at the SHARED consumer, through ONE
+# classifier, so every surface reaches one disposition.
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestApplyPathTerminalizerMissIsRecorded:
+    """The shared consumer (`apply_journal_point_restamp`) records the miss."""
+
+    def _seed_missing_target(self, sdk, events, *, kind="PointSuperseded"):
+        sdk.create_point("statement", "kept", status="live")
+        rec = {"type": kind, "id": "never-created-id", "event_id": "ghost-1"}
+        if kind == "PointSuperseded":
+            rec["new_id"] = "also-never-created"
+        else:
+            rec["corrected_by"] = "also-never-created"
+        _raw(events, **rec)
+
+    @pytest.mark.parametrize("kind,const", [
+        ("PointSuperseded", "SHAPE_POINT_SUPERSEDED_MISS"),
+        ("PointInvalidated", "SHAPE_POINT_INVALIDATED_MISS"),
+    ])
+    def test_a_missing_terminalizer_target_is_refused_on_every_engine(
+            self, env, tmp_path, kind, const):
+        """FAILS IF: any replay engine accepts the journal — pre-#7719
+        `rebuild` and `recover_from_log` merely warned while `rebuild_all`
+        raised. REACHABLE: a hand-written journal is the only way to reach the
+        shape (every public writer guards its target)."""
+        import tortoise.projection.nonfolded as nf
+
+        shape = getattr(nf, const)
+        sdk, events = env
+        self._seed_missing_target(sdk, events, kind=kind)
+        # `rebuild_all` and `rebuild(log)` fail closed by RAISING.
+        for engine in ("rebuild_all", "rebuild"):
+            proj = _fresh(tmp_path, f"{kind}-{engine}")
+            try:
+                with pytest.raises(NonFoldedEventsError) as ei:
+                    _drive(engine, tmp_path, events, proj)
+                assert shape in str(ei.value), (engine, str(ei.value))
+            finally:
+                proj.close()
+        # `recover_from_log` REPORTS the refusal instead — it must never claim
+        # success over a journal it could not fully fold (the false PASS
+        # #7719 closes), so it is asserted directly, not through `_drive`
+        # (whose contract is a recovered run).
+        proj = _fresh(tmp_path, f"{kind}-recover")
+        try:
+            res = recover_from_log(str(events), proj)
+        finally:
+            proj.close()
+        assert res["recovered"] is False, res
+        assert "refused" in res.get("reason", ""), res
+
+    def test_check_consistency_refuses_the_same_journal(self, env):
+        """FAILS IF: the reference fold and the graph engines disagree on the
+        same journal — the 'not one set' defect #7719 reports."""
+        sdk, events = env
+        self._seed_missing_target(sdk, events)
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["ok"] is False, r
+
+    def test_a_successor_does_not_make_a_missing_target_exempt(
+            self, env, tmp_path):
+        """FAILS IF: `has_successor` defaults to False at a call site — a
+        target-miss WITH a `new_id` would be mislabelled the EXEMPT
+        `point-superseded-no-new-id`, `refused_events` would filter it, and the
+        run would PASS (a fail-OPEN, worse than the bug being fixed)."""
+        sdk, events = env
+        self._seed_missing_target(sdk, events)
+        proj = _fresh(tmp_path, "has-succ")
+        try:
+            with pytest.raises(NonFoldedEventsError) as ei:
+                _drive("rebuild", tmp_path, events, proj)
+            assert "point-superseded-miss" in str(ei.value), str(ei.value)
+            assert "point-superseded-no-new-id" not in str(ei.value)
+        finally:
+            proj.close()
+
+    def test_the_consumer_requires_the_hard_deleted_context(self):
+        """FAILS IF: the required kwarg gains a default — the fail-OPEN this
+        change closes would silently return on any unmigrated caller."""
+        from tortoise.projection.entities import _EntityHandlers
+
+        with pytest.raises(TypeError):
+            _EntityHandlers.apply_journal_point_restamp(None, {}, 0, {})
+
+
+class TestSharedTerminalizerClassifier:
+    """ONE classifier decides the shape on every surface."""
+
+    def test_every_returned_shape_is_declared(self):
+        """FAILS IF: an arm is re-derived by hand at a call site and drifts
+        from the recorded decision table, or a new terminalizer type slips
+        through as a green pass (the default must be fail-CLOSED)."""
+        import tortoise.projection.nonfolded as nf
+
+        cases = [
+            ("PointSuperseded", dict(has_successor=False),
+             nf.SHAPE_POINT_SUPERSEDED_NO_NEW_ID),
+            ("PointSuperseded", dict(has_successor=True, target_deleted=True),
+             nf.SHAPE_SUPERSEDE_TARGET_DELETED),
+            ("PointSuperseded", dict(has_successor=True),
+             nf.SHAPE_POINT_SUPERSEDED_MISS),
+            ("PointInvalidated", dict(target_deleted=True),
+             nf.SHAPE_SUPERSEDE_TARGET_DELETED),
+            ("PointInvalidated", dict(), nf.SHAPE_POINT_INVALIDATED_MISS),
+            ("PointRetracted", dict(), nf.SHAPE_POINT_RETRACTED_MISS),
+            ("ObjectSuperseded", dict(target_deleted=True),
+             nf.SHAPE_SUPERSEDE_TARGET_DELETED),
+            ("ObjectSuperseded", dict(), nf.SHAPE_OBJECT_SUPERSEDED_MISS),
+            ("SomethingElse", dict(), nf.SHAPE_UNCLASSIFIED_TERMINALIZER),
+        ]
+        for etype, kwargs, expected in cases:
+            got = nf.classify_terminalizer_miss(etype, **kwargs)
+            assert got == expected, (etype, kwargs, got, expected)
+        assert nf.SHAPE_POINT_SUPERSEDED_NO_NEW_ID in nf.EXEMPT_SHAPES
+        assert nf.SHAPE_SUPERSEDE_TARGET_DELETED in nf.EXEMPT_SHAPES
+        assert nf.SHAPE_UNCLASSIFIED_TERMINALIZER not in nf.EXEMPT_SHAPES
+
+    def test_the_gated_map_is_not_the_ordered_reader(self):
+        """FAILS IF: `hard_deleted_pairs` is substituted for the ordered
+        `journal_hard_delete_seqs` boundary (or fed to
+        `_hard_delete_suppresses`). It is anchor-gated BY DESIGN: a delete a
+        later same-kind re-creation superseded never removed the node, so it
+        must NOT exempt a terminalizer."""
+        from tortoise.projection import _hard_deleted_any, hard_deleted_pairs
+
+        events = [
+            {"type": "PointAdded", "point": {"id": "p"},
+             "event_id": "e1"},
+            {"type": "EntityMutated", "op": "delete", "label": "Point",
+             "id": "p", "event_id": "e2"},
+            {"type": "PointAdded", "point": {"id": "p"},
+             "event_id": "e3"},
+        ]
+        gated = hard_deleted_pairs(events)
+        assert ("Point", "p") not in gated, gated
+        assert _hard_deleted_any(gated, "Point", "p") is False
+        # A re-creation anchor is seeded only for a WRITABLE id, so an
+        # unwritable id cannot silently suppress its own delete.
+        unwritable = [
+            {"type": "PointAdded", "point": {"id": ""}, "event_id": "e1"},
+            {"type": "EntityMutated", "op": "delete", "label": "Point",
+             "id": "", "event_id": "e2"},
+        ]
+        assert _hard_deleted_any(
+            hard_deleted_pairs(unwritable), "Point", "") is True
+
+    def test_the_delete_after_a_later_recreate_stands(self):
+        """FAILS IF: the anchor gate is dropped — the very journal the
+        ordered boundary exists for ([create, delete, recreate]) would then be
+        falsely refused on the gated map."""
+        from tortoise.projection import _hard_deleted_any, hard_deleted_pairs
+
+        events = [
+            {"type": "PointAdded", "point": {"id": "p"},
+             "event_id": "e1"},
+            {"type": "EntityMutated", "op": "delete", "label": "Point",
+             "id": "p", "event_id": "e2"},
+            {"type": "PointAdded", "point": {"id": "p"},
+             "event_id": "e3"},
+            {"type": "EntityMutated", "op": "delete", "label": "Point",
+             "id": "p", "event_id": "e4"},
+        ]
+        assert _hard_deleted_any(
+            hard_deleted_pairs(events), "Point", "p") is True
+
+    def test_a_foreign_kind_delete_does_not_exempt_a_point(self):
+        """FAILS IF: the kind scoping is lost, so an Object delete exempts a
+        Point supersede (the exemption is same-kind only)."""
+        from tortoise.projection import _hard_deleted_any, hard_deleted_pairs
+
+        events = [
+            {"type": "EntityMutated", "op": "delete", "label": "Object",
+             "id": "x", "event_id": "e1"},
+        ]
+        gated = hard_deleted_pairs(events)
+        assert _hard_deleted_any(gated, "Object", "x") is True
+        assert _hard_deleted_any(gated, "Point", "x") is False

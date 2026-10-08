@@ -43,15 +43,14 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
     SHAPE_OBJECT_SUPERSEDED_MISS,
     SHAPE_POINT_BELIEF_MISS,
-    SHAPE_POINT_INVALIDATED_MISS,
     SHAPE_POINT_RETRACTED_MISS,
-    SHAPE_POINT_SUPERSEDED_MISS,
     SHAPE_STATE_OP_MISS,
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
     SHAPE_UNKNOWN_OP,
     NonFoldedEventsError as NonFoldedEventsError,
     assert_no_non_folded,
+    classify_terminalizer_miss,
     collect_non_folded,
     record_non_folded,
 )
@@ -4206,6 +4205,22 @@ def journal_object_hard_deleted_ids(events) -> frozenset[str]:
     return frozenset(out)
 
 
+def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
+    """The Object-kind ids a :func:`hard_deleted_pairs` map tags, judged by
+    the SHARED :func:`_hard_deleted_any` predicate.
+
+    ``apply()``'s ``ObjectSuperseded`` refusal gate takes an id SET as
+    ``journal_object_deleted``, so this is the GATED replacement for
+    ``journal_object_hard_deleted_ids``: derived from the anchor-gated pair
+    map, an id whose delete a same-kind re-creation anchor suppressed no
+    longer exempts the supersede — exactly the verdict ``rebuild_all``'s
+    deferred sweep reaches (#7719).
+    """
+    return frozenset(
+        rid for _kind, rid in hard_deleted
+        if _hard_deleted_any(hard_deleted, "Object", rid))
+
+
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_first_materialized: dict[tuple[str, str], int]
                | None = None,
@@ -4816,6 +4831,97 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
             for mid in ev.get("merge_ids") or []:
                 if isinstance(mid, str):
                     _merge_hard_delete(out, mid, seq, _POINTS_MERGED_LABELS)
+    return out
+
+
+def hard_deleted_pairs(events) -> dict[tuple[str | None, str], int]:
+    """A kind-scoped, **anchor-gated MEMBERSHIP** map for
+    :func:`_hard_deleted_any`: ``{(kind_or_None, id): seq}`` of the ids the
+    journal hard-DELETES and does NOT re-create afterwards.
+
+    ``rebuild_all`` builds this shape inline (its pass-1a ``PointsMerged`` tag
+    and its pass-1b ``EntityMutated`` op=delete tag) and asks
+    ``_hard_deleted_any`` whether a deferred terminalizer's target is gone.
+    The apply()-based engines (``rebuild`` / ``recover_from_log`` /
+    ``backup.restore``) and the reference fold need the SAME answer, so the
+    build lives here once and they all read one map.
+
+    It reproduces ``rebuild_all``'s inline build exactly:
+
+    * the re-creation anchors are seeded ONLY from ``PointAdded`` /
+      ``OperatorAdded`` records whose ``point`` is a dict with a WRITABLE id
+      (``_writable_id``) — the same guard pass-1a applies, so an unwritable id
+      seeds nothing and cannot suppress a delete;
+    * ``PointsMerged`` tags ``("Point", merge_id)`` UNCONDITIONALLY (a merge
+      HARD-deletes the Point, and the reference fold's anchor reader counts
+      it);
+    * ``EntityMutated`` with ``op == "delete"`` tags
+      ``(label_or_None, id)`` — ``label_or_None`` is the record's label when it
+      is in ``_CANONICAL_ENTITY_LABELS``, else ``None`` (the id-wide fallback
+      the fold itself uses) — and ONLY when the delete is NOT superseded by a
+      same-kind re-creation anchor: the anchor is the id's last
+      ``PointAdded``/``OperatorAdded`` seq (kind-scoped for a canonical label,
+      id-wide otherwise) and ``seq <= anchor`` means the delete never removed
+      the node (``rebuild_all``'s own ``continue``).
+
+    ⛔ This is NOT the ordered-boundary reader. That is
+    :func:`journal_hard_delete_seqs` (which ``consistency._fold_journal`` uses
+    for its ``del_seq >= seq`` re-creation gate). It is NOT usable for
+    :func:`_hard_delete_suppresses` either: that needs the MAX delete seq for
+    ``(id, label)`` REGARDLESS of any re-creation anchor, which this map —
+    deliberately anchor-gated — does not carry. Its ONLY consumer is
+    :func:`_hard_deleted_any`.
+    """
+    # Pass 1 — the re-creation anchors, over the WHOLE journal (a delete is
+    # judged against the id's LAST creation, including one that follows the
+    # delete). Mirrors rebuild_all's pass-1a seeding loop.
+    last_recreate_seq: dict[tuple[str, str], int] = {}
+    last_recreate_seq_any: dict[str, int] = {}
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        ev = _norm(ev)
+        if ev.get("type") not in ("PointAdded", "OperatorAdded"):
+            continue
+        p = ev.get("point")
+        if not isinstance(p, dict) or not _writable_id(p.get("id")):
+            continue
+        last_recreate_seq[("Point", p["id"])] = seq
+        last_recreate_seq_any[p["id"]] = seq
+    out: dict[tuple[str | None, str], int] = {}
+    # Pass 2 — PointsMerged tags FIRST, unconditionally (rebuild_all's pass-1a).
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        ev = _norm(ev)
+        if ev.get("type") != "PointsMerged":
+            continue
+        for mid in ev.get("merge_ids") or []:
+            if isinstance(mid, str):
+                out[("Point", mid)] = seq
+    # Pass 3 — EntityMutated op=delete tags, anchor-gated
+    # (rebuild_all's pass-1b), so they overwrite a pass-2 tag exactly as
+    # rebuild_all's pass-1b overwrites a pass-1a one.
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        ev = _norm(ev)
+        if ev.get("type") != "EntityMutated" or ev.get("op") != "delete":
+            continue
+        rid = ev.get("id")
+        if not isinstance(rid, str):
+            continue
+        del_label = ev.get("label")
+        if (isinstance(del_label, str)
+                and del_label in _CANONICAL_ENTITY_LABELS):
+            anchor = last_recreate_seq.get((del_label, rid))
+            key: tuple[str | None, str] = (del_label, rid)
+        else:
+            anchor = last_recreate_seq_any.get(rid)
+            key = (None, rid)
+        if anchor is not None and seq <= anchor:
+            continue
+        out[key] = seq
     return out
 
 
@@ -5633,6 +5739,10 @@ class FalkorProjection(
         # supplied by the whole-journal apply()-based engines (`rebuild`,
         # `recover_from_log`) and default to None for the one-record LIVE path
         # (which has no journal to consult and must record nothing).
+        # #7719: `journal_object_deleted` is derived from the ANCHOR-GATED
+        # `hard_deleted_pairs` map (via `_object_hard_deleted_ids` /
+        # `_hard_deleted_any`), so an id whose delete a same-kind re-creation
+        # suppressed no longer exempts the supersede here either.
         #
         # #3585 (P1-1): `journal_first_materialized` is the whole-journal
         # EXISTENCE map (`journal_first_materialization`) and `journal_seq`
@@ -6215,13 +6325,20 @@ class FalkorProjection(
         # sweep can apply the hard-delete staleness rule (#3722 review P2): a
         # link whose endpoint was hard-deleted AFTER it must not resurrect.
         hard_delete_seqs = journal_hard_delete_seqs(events)
+        # #7719: the anchor-gated hard-delete MEMBERSHIP map, hoisted ONCE for
+        # the whole journal (never per record) — the same gated predicate the
+        # deferred terminalizer sweeps use.
+        hard_deleted = hard_deleted_pairs(events)
         entity_link_events: list[tuple[int, dict]] = []
         # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
         # keys + the ids it hard-deletes, so ``apply()`` can refuse a supersede
         # whose target the journal never leaves in place while NOT refusing a
         # forward reference (which ``rebuild_all``'s deferred sweep folds).
         journal_object_surviving = journal_object_surviving_keys(events)
-        journal_object_deleted = journal_object_hard_deleted_ids(events)
+        # #7719: the object-delete set is derived from the GATED map, judged by
+        # the shared ``_hard_deleted_any``: an anchor-suppressed delete does not
+        # exempt the supersede, matching `rebuild_all`'s sweep.
+        journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
         # #3585 (P1-1): the whole-journal EXISTENCE map + this engine's per-record
         # seq — the sibling of the Object pair, so a retract/state-op that
         # precedes its own creation (folded by `rebuild_all`'s hoist) is not
@@ -6252,7 +6369,8 @@ class FalkorProjection(
             # inline branch — which folds EVERY terminalizer, skipping this
             # engine's selection (#325/#3722's raw-vs-normalized class).
             if seq in restamp_plan:
-                edge = self.apply_journal_point_restamp(ev, seq, restamp_plan)
+                edge = self.apply_journal_point_restamp(
+                    ev, seq, restamp_plan, hard_deleted=hard_deleted)
                 if edge is not None:
                     deferred_corrects.append(edge)
                 continue
@@ -7125,7 +7243,12 @@ class FalkorProjection(
         # kind sharing the id was deleted (a genuine burial read as a pass),
         # and it tagged deletes a same-kind re-creation had already superseded
         # live (which never removed the node). Both are recorded below.
-        hard_deleted_seq: dict[tuple[str | None, str], int] = {}
+        hard_deleted_seq: dict[tuple[str | None, str], int] = (
+            hard_deleted_pairs(events))
+        # The map is built ONCE for the whole journal (the same builder the
+        # apply()-based engines and the reference fold use), not accumulated
+        # in the loops below — a single reader is what keeps the five surfaces
+        # on one verdict.
         # (kind, id) pairs hard-deleted since their last creation — a
         # following creation of the SAME kind is a RE-creation (new
         # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
@@ -7151,11 +7274,10 @@ class FalkorProjection(
                     if isinstance(mid, str):
                         pending_deleted.add(("Point", mid))
                         # #3585 re-review: a merge HARD-DELETES the Point, and
-                        # `journal_hard_delete_seqs` (the reference fold's
-                        # anchor source) counts it — so the kind-scoped
-                        # exemption discriminator must see it too, or the two
-                        # classifiers disagree on a later PointSuperseded miss.
-                        hard_deleted_seq[("Point", mid)] = seq
+                        # `hard_deleted_seq` (hoisted from `hard_deleted_pairs`
+                        # above) tags it, so the kind-scoped exemption
+                        # discriminator sees it and the reference fold's anchor
+                        # source agrees on a later PointSuperseded miss.
                 continue
             if t in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
@@ -7569,16 +7691,11 @@ class FalkorProjection(
                         anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
-                if ev.get("op") == "delete" and isinstance(rid, str):
-                    # #3585 review: tag the delete's KIND, and only AFTER the
-                    # anchor gate — a delete that a same-kind re-creation
-                    # already superseded live never removed the node, so it
-                    # must not exempt a later supersede miss.
-                    _del_key = (
-                        _del_label if isinstance(_del_label, str)
-                        and _del_label in _CANONICAL_ENTITY_LABELS else None,
-                        rid)
-                    hard_deleted_seq[_del_key] = seq
+                # #3585 review: the delete's KIND is tagged by
+                # `hard_deleted_pairs` (hoisted above) and only AFTER this
+                # anchor gate — a delete that a same-kind re-creation already
+                # superseded live never removed the node, so it must not exempt
+                # a later supersede miss.
                 if ev.get("op") in _ENTITY_MUTATION_STATE_OPS and isinstance(rid, str):
                     # #3585 (P1-1): a state op whose target the journal
                     # materializes only LATER is a forward reference — the
@@ -7946,11 +8063,10 @@ class FalkorProjection(
                 # #3585 (R8): a supersede whose target the journal HARD-DELETED
                 # is the named exemption (the fold is deferred past the delete);
                 # any other 0-row miss is refused and fails the run.
-                _sup_shape = (
-                    "supersede-target-deleted"
-                    if _hard_deleted_any(
-                        hard_deleted_seq, "Object", ev.get("id"))
-                    else SHAPE_OBJECT_SUPERSEDED_MISS)
+                _sup_shape = classify_terminalizer_miss(
+                    "ObjectSuperseded",
+                    target_deleted=_hard_deleted_any(
+                        hard_deleted_seq, "Object", ev.get("id")))
                 record_non_folded(
                     _sup_shape, event_id=ev.get("event_id"),
                     event_type="ObjectSuperseded", seq=seq,
@@ -8089,10 +8205,10 @@ class FalkorProjection(
                     ev, skip_updated_at=skip_ua, decay=False, edge=edge_ok)
                 if matched == 0:
                     record_non_folded(
-                        "supersede-target-deleted"
-                        if _hard_deleted_any(
-                            hard_deleted_seq, "Point", ev.get("id"))
-                        else SHAPE_POINT_INVALIDATED_MISS,
+                        classify_terminalizer_miss(
+                            "PointInvalidated",
+                            target_deleted=_hard_deleted_any(
+                                hard_deleted_seq, "Point", ev.get("id"))),
                         event_id=ev.get("event_id"),
                         event_type="PointInvalidated", seq=fsq,
                         id=ev.get("id") if isinstance(ev.get("id"), str) else None,
@@ -8136,14 +8252,15 @@ class FalkorProjection(
                     # #3585 (R8): a PointSuperseded with no new_id is the
                     # NAMED exemption (the graph fold treats it as a no-op), as
                     # is a target the journal hard-deleted before the sweep;
-                    # any other 0-row miss is refused and fails the run.
-                    if not ev.get("new_id"):
-                        _ps_shape = "point-superseded-no-new-id"
-                    elif _hard_deleted_any(
-                            hard_deleted_seq, "Point", ev.get("id")):
-                        _ps_shape = "supersede-target-deleted"
-                    else:
-                        _ps_shape = SHAPE_POINT_SUPERSEDED_MISS
+                    # any other 0-row miss is refused and fails the run. The
+                    # `has_successor` argument is REQUIRED at every
+                    # PointSuperseded site — its False default would mislabel a
+                    # target-miss as the EXEMPT `point-superseded-no-new-id`.
+                    _ps_shape = classify_terminalizer_miss(
+                        "PointSuperseded",
+                        has_successor=bool(ev.get("new_id")),
+                        target_deleted=_hard_deleted_any(
+                            hard_deleted_seq, "Point", ev.get("id")))
                     record_non_folded(
                         _ps_shape,
                         event_id=ev.get("event_id"),

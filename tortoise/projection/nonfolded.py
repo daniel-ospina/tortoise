@@ -77,6 +77,17 @@ SHAPE_POINT_INVALIDATED_MISS = "point-invalidated-miss"
 SHAPE_POINT_BELIEF_MISS = "point-belief-miss"
 #: A record type outside the projection's recognized vocabulary.
 SHAPE_UNKNOWN_EVENT_TYPE = "unknown-event-type"
+#: ``PointSuperseded`` carrying NO ``new_id`` — the documented no-op (#3585).
+SHAPE_POINT_SUPERSEDED_NO_NEW_ID = "point-superseded-no-new-id"
+#: A supersede/invalidate whose target the journal hard-deleted — the deferred
+#: sweep's legitimate 0-row match (#3585, #4743).
+SHAPE_SUPERSEDE_TARGET_DELETED = "supersede-target-deleted"
+#: A terminalizer type the classifier does not know. Fail-CLOSED (never
+#: exempt) — a NEW class of terminalizer miss must not slip through as a
+#: green pass. Distinct from :data:`SHAPE_UNKNOWN_EVENT_TYPE`, which
+#: ``_apply_one`` already emits for a different mechanism (an unrecognized
+#: record type), so a report can tell the two apart.
+SHAPE_UNCLASSIFIED_TERMINALIZER = "unclassified-terminalizer"
 
 #: Shapes that are genuinely exempt from the fail-the-run assertion. Each MUST
 #: carry its degraded guarantee in writing — an unnamed exemption is a green
@@ -120,11 +131,11 @@ EXEMPT_SHAPES: dict[str, str] = {
         "idempotent by construction — 'already absent' is the delete's end "
         "state (recorded decision: plan §Task 4 Policy / #4743)"
     ),
-    "point-superseded-no-new-id": (
+    SHAPE_POINT_SUPERSEDED_NO_NEW_ID: (
         "the graph fold treats it as a documented no-op; no state changes on "
         "either side (recorded decision: plan §Task 4 warning policy)"
     ),
-    "supersede-target-deleted": (
+    SHAPE_SUPERSEDE_TARGET_DELETED: (
         "the supersede/invalidate fold is DEFERRED to a trailing sweep, so a "
         "target the journal hard-deleted BEFORE the sweep runs is legitimately "
         "gone — live and replay both end with the node absent. DEGRADED "
@@ -135,6 +146,59 @@ EXEMPT_SHAPES: dict[str, str] = {
         "entity-parity leg still compares a re-created node's status"
     ),
 }
+
+
+def classify_terminalizer_miss(
+    event_type: str,
+    *,
+    has_successor: bool = False,
+    target_deleted: bool = False,
+) -> str:
+    """The failure SHAPE for a Point/Object terminalizer that matched 0 rows.
+
+    The ONE classifier the graph replay engines (``rebuild_all``,
+    ``apply_journal_point_restamp``) and the reference fold
+    (``consistency._fold_journal``) share, so the same journal yields the same
+    disposition on every surface — the identity decision's own closing
+    requirement (``docs/epics/2026-09-10-2835-capability-registry/
+    identity-decision.md`` §"Stage 0 findings").
+
+    ``has_successor`` is consulted ONLY for ``PointSuperseded``, and it is
+    ``bool(ev.get("new_id"))`` — NEVER ``corrected_by``. The two fields belong
+    to different folds (``_fold_point_superseded`` reads ``new_id`` alone;
+    ``_fold_point_invalidated`` reads ``corrected_by`` alone), so reading
+    ``corrected_by`` here would let a supersede with no ``new_id`` escape the
+    records the fold actually makes.
+
+    ``target_deleted`` means the journal hard-deleted the target — the
+    caller's decision, from the anchor-gated ``hard_deleted_pairs`` map (or,
+    in the reference fold, its ordered ``anchors`` boundary as an additional
+    exemption). This module has no journal, so it cannot decide it.
+
+    The default arm is fail-CLOSED: a terminalizer type outside the four
+    named below returns :data:`SHAPE_UNCLASSIFIED_TERMINALIZER`, which is NOT
+    in :data:`EXEMPT_SHAPES`.
+    """
+    if event_type == "PointSuperseded":
+        if not has_successor:
+            return SHAPE_POINT_SUPERSEDED_NO_NEW_ID
+        if target_deleted:
+            return SHAPE_SUPERSEDE_TARGET_DELETED
+        return SHAPE_POINT_SUPERSEDED_MISS
+    if event_type == "PointInvalidated":
+        if target_deleted:
+            return SHAPE_SUPERSEDE_TARGET_DELETED
+        return SHAPE_POINT_INVALIDATED_MISS
+    if event_type == "PointRetracted":
+        # Never exempt: a retraction tombstones the node, so a 0-row match is
+        # a genuine miss whatever the target's hard-delete state.
+        return SHAPE_POINT_RETRACTED_MISS
+    if event_type == "ObjectSuperseded":
+        if target_deleted:
+            return SHAPE_SUPERSEDE_TARGET_DELETED
+        return SHAPE_OBJECT_SUPERSEDED_MISS
+    return SHAPE_UNCLASSIFIED_TERMINALIZER
+
 
 #: The dispositions R8 defines. Both FAIL the run; the label only records how
 #: the fold left the target's state. Only ``refused`` is produced today —
