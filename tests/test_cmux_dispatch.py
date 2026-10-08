@@ -232,6 +232,24 @@ SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND = (
 #: prompt: the digit guard must keep readiness TRUE.
 SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER = SCREEN_IDLE_READY + "Uploading 50%\n"
 
+#: A DEAD pane whose stale footer is followed by a bash/sh prompt whose sigil
+#: ABUTS A DIGIT (`bash-3.2$ `) — the shape a digit-guarded line-end rule misses.
+SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "bash-3.2$ \n"
+)
+
+#: A DEAD pane whose stale footer is followed by a ROOT prompt with a command, so
+#: the sigil abuts `]` and the line does not end in a sigil.
+SCREEN_STALE_FOOTER_ABOVE_ROOT_PROMPT = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "[root@host ~]# ls -la\n"
+)
+
 #: A DEAD pane that still parses as pi's composer (two rules) while showing a bare
 #: shell prompt — the shape where recovery picks `R_RESEND` (the second write site).
 SCREEN_DEAD_SHELL_WITH_COMPOSER = (
@@ -1593,6 +1611,57 @@ class TestDispatcherRecovery(unittest.TestCase):
         screen = SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER
         self.assertFalse(cd.shell_prompt_below_footer(screen))
         self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_stale_footer_above_a_DIGIT_PROMPT_is_not_ready(self):
+        """Round-4 finding: `bash-3.2$ ` / `sh-3.2$ ` abut a digit, so a
+        digit-guarded line-end rule missed them and the brief was executed."""
+        for screen in (
+            SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT,
+            SCREEN_STALE_FOOTER_ABOVE_ROOT_PROMPT,
+        ):
+            with self.subTest(screen=screen.splitlines()[-1]):
+                self.assertTrue(cd.status_bar_present(screen))
+                self.assertFalse(cd.boot_blocked(screen))
+                self.assertTrue(cd.shell_prompt_below_footer(screen))
+                self.assertFalse(cd.screen_ready(screen))
+
+    def test_dispatch_into_a_STALE_footer_above_a_DIGIT_PROMPT_is_REFUSED(self):
+        class DigitPromptCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_DIGIT_PROMPT)
+
+        fake = DigitPromptCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_recovery_RESEND_refuses_when_the_pane_died_BEFORE_the_write(self):
+        """The R_RESEND gate must judge a screen read IMMEDIATELY before the
+        second write, not the recovery read taken before the duplicate-guard
+        grace window (up to a full consume budget): a pane that dies in that
+        window would otherwise be written into."""
+
+        class DiesBeforeResend(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads <= 3:      # gate, baseline, recovery read
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                return cd.CmuxResult(0, SCREEN_DEAD_SHELL_WITH_COMPOSER)
+
+        fake = DiesBeforeResend()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the second write must be gated on a FRESH readiness read",
+        )
 
     def test_recovery_RESEND_refuses_when_the_pane_died_after_the_gate(self):
         """Round-3 finding: the `R_RESEND` recovery writes the brief a SECOND time,

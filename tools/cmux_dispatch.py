@@ -185,12 +185,17 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
 
 #: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
-#: BELOW a stale pi frame — never to detect pi. The sigil must be a STANDALONE
-#: token (`%`, `$`, `#`, `>` at a whitespace/line boundary) or end the line
-#: without being preceded by a digit. Requiring token boundaries is what keeps
-#: pi's own extension-status text out: `#general thread` has no standalone
-#: sigil, and `Uploading 50%` is excluded by the digit guard.
-SHELL_PROMPT_RE = re.compile(r"(?:(?:^|\s)[%$#>](?=\s|$)|(?<!\d)[%$#>]\s*$)")
+#: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
+#: STANDALONE token (`%`, `$`, `#`, `>` at a whitespace/line boundary), or a
+#: line-ending `%` not preceded by a digit, or a `$ # >` followed by whitespace or
+#: end anywhere (which catches `bash-3.2$ `, `[root@host ~]# ls -la`). The digit
+#: guard on line-ending `%` is what keeps a real percentage (`Uploading 50%`,
+#: `Progress 99%`) from being read as a prompt; `#general thread` has no sigil
+#: followed by whitespace, so pi's own status text is not flagged.
+#: RESIDUAL: a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
+#: indistinguishable from a percentage and is not flagged; neither are arrow
+#: prompts (`❯`, `➜`), which this fleet's zsh/bash shells do not emit.
+SHELL_PROMPT_RE = re.compile(r"(?:(?:^|\s)[%$#>](?=\s|$)|(?<!\d)%\s*$|[#$>](?=\s|$))")
 
 #: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
 #: chars with a trailing `…`, so the fingerprint MUST come from the head of the
@@ -357,18 +362,21 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     the case where no marker is present to catch it. That prompt is what makes
     the stale frame EXECUTABLE: bytes sent there run as commands (#7158).
 
-    A prompt is detected by a STANDALONE shell sigil (`% $ # >` as its own token,
-    or ending the line): `host % ls -la`, `% <text>`, `user@host dir %`. pi's own
-    footer and its EXTENSION-STATUS lines carry no standalone sigil
-    (`Loop: <slug> (cycle 2)`, `#general thread`), and the digit guard keeps
-    `Uploading 50%` out. pi pushes status lines BELOW its stats line whenever an
-    extension calls `ctx.ui.setStatus` (verified in the installed renderer:
-    `modes/interactive/components/footer.js`), so "the footer must be the literal
-    last line" would refuse healthy lanes. RESIDUAL: an extension status whose
-    own text ends in a standalone sigil (none shipped in this fleet today) reads
-    as a prompt and is refused — the fail-closed direction. Only lines strictly
-    AFTER the stats line are examined, so the stats line's own trailing `$`/`%`
-    cannot be mistaken for a prompt.
+        A prompt is detected by a shell sigil used as a prompt token — standalone
+        (`host % ls -la`), line-ending (`user@host dir %`), or followed by
+        whitespace/end anywhere (`bash-3.2$ `, `[root@host ~]# ls -la`). pi's own
+        footer and its EXTENSION-STATUS lines carry no such sigil
+        (`Loop: <slug> (cycle 2)`, `#general thread`), and a line-ending `%`
+        preceded by a digit is excluded so `Uploading 50%` stays READY. pi pushes
+        status lines BELOW its stats line whenever an extension calls
+        `ctx.ui.setStatus` (verified in the installed renderer:
+        `modes/interactive/components/footer.js`), so "the footer must be the
+        literal last line" would refuse healthy lanes. RESIDUAL: an extension
+        status whose own text ends in a prompt token (none shipped in this fleet
+        today), or a `%` prompt whose sigil abuts a digit (`~/proj2%`), is
+        misread — the fail-closed direction. Only lines strictly AFTER the stats
+        line are examined, so the stats line's own trailing `$`/`%` cannot be
+        mistaken for a prompt.
     """
     text = screen or ""
     end = _last_status_bar_end(text)
@@ -1323,18 +1331,24 @@ class Dispatcher:
                 self.cmux.send_enter(workspace, surface)
             else:
                 # ⛔ R_RESEND writes the brief a SECOND time, so it must face the
-                # same liveness gate as the first send (#7158): a pane that died
-                # between the gate and here would otherwise get the brief written
-                # into the shell and executed. `screen` is the recovery read
-                # already taken above — no extra cmux call.
-                if not screen_ready(screen):
+                # same liveness gate as the first send (#7158). The `screen` used
+                # by `recovery_action` was read BEFORE the duplicate-guard grace
+                # window (`grace`, up to a full consume budget), so it can be
+                # stale by the time we write; re-read immediately before the
+                # write and re-assert readiness rather than trusting the older
+                # frame.
+                fresh_screen = self.screen(
+                    workspace, surface, lines=RECOVERY_SCREEN_LINES
+                )
+                if not screen_ready(fresh_screen):
                     result.ok = False
                     result.status = "never-became-ready"
                     result.detail = (
-                        f"{tag}{workspace} was not ready on the recovery read "
-                        f"(no live pi footer, or a shell prompt below it) — the "
-                        f"re-send was REFUSED rather than written into a pane "
-                        f"with no live pi. Re-dispatch once the pane is idle."
+                        f"{tag}{workspace} was not ready immediately before the "
+                        f"recovery re-send (no live pi footer, or a shell prompt "
+                        f"below it) — the re-send was REFUSED rather than written "
+                        f"into a pane with no live pi. Re-dispatch once the pane "
+                        f"is idle."
                     )
                     return result
                 self.cmux.send_text(workspace, text, surface)
