@@ -37,12 +37,12 @@ The failure handling is NOT uniform (#4872): the six swallow sites on the
 enforcement DECISION/ACTION path (``window_sum``, ``clean_window_episode_end``,
 ``latest_flag_at``, ``rule_event_between``, ``suspend_org``, ``flag_org``) report
 to the OPERATOR — an ERROR record plus a platform-scoped operator incident,
-because a failed evaluation or a failed suspension is otherwise
-indistinguishable from "the engine decided not to enforce". The remaining
+because a failed evaluation is otherwise indistinguishable from "the engine
+decided not to enforce". The remaining
 telemetry / notification / durability swallows stay debug-only;
 ``DECISION_FAULT_LANES`` declares the boundary and why.
 
-Notification volume (#3631): an R1/R2 flag or suspend alert is emitted ONLY
+Notification volume (#3631): an R1/R2 flag or breach alert is emitted ONLY
 after the corresponding store write persists — a store read/write failure
 REDUCES notification volume, never increases it (the 2026-09-14 storm was a
 swallowed ``flag_org`` write failure that notified on every evaluation, 401
@@ -76,12 +76,19 @@ EVENT_FLAG = "flag"
 EVENT_FLAG_CLEAR = "flag_clear"  # episode end (clean eval or un-suspend)
 EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
+#: #5425 owner ruling (2026-10-08): a PERSISTENT breach raises a human-review
+#: alert. It is deliberately NOT ``EVENT_SUSPEND`` — the engine no longer
+#: suspends, so recording a suspend event (or alerting "auto-suspended") would
+#: record something that did not happen, which is the exact class this ruling
+#: deleted (#4872).
+EVENT_REVIEW = "review_needed"
 EVENT_READ_VELOCITY = "read_velocity"
 EVENT_SIGNUP_VELOCITY = "signup_velocity"
 EVENT_RECOVERY_VELOCITY = "recovery_velocity"
 
-ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY,
-               EVENT_SIGNUP_VELOCITY, EVENT_RECOVERY_VELOCITY)
+ALERT_TYPES = (EVENT_FLAG, EVENT_REVIEW, EVENT_SUSPEND, EVENT_AUTH_IP,
+               EVENT_READ_VELOCITY, EVENT_SIGNUP_VELOCITY,
+               EVENT_RECOVERY_VELOCITY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -241,7 +248,6 @@ DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
     "clean_window_episode_end": ("ABUSE_DECISION_FAULT", "return_none"),
     "latest_flag_at": ("ABUSE_DECISION_FAULT", "reflag"),
     "rule_event_between": ("ABUSE_DECISION_FAULT", "continuity_true"),
-    "suspend_org": ("ABUSE_ENFORCEMENT_FAULT", "return_breach"),
     "flag_org": ("ABUSE_ENFORCEMENT_FAULT", "return_flag"),
 }
 
@@ -691,7 +697,9 @@ def _alert_dict(row: dict) -> dict:
     details = row.get("details") or {}
     messages = {
         EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
-        EVENT_SUSPEND: "Organization auto-suspended due to unusual activity",
+        EVENT_REVIEW: ("Organization persistently over the abuse threshold — "
+                       "review and reach out (rate-limit, do not suspend, #5425)"),
+        EVENT_SUSPEND: "Organization suspended by an operator",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
@@ -822,7 +830,7 @@ class AbuseEngine:
                 # FAILED — a store failure must reduce alert volume, never
                 # increase it, so the claim is left to expire on its own.
                 self._release_notify(org_id, rule, EVENT_FLAG)
-                self._release_notify(org_id, rule, EVENT_SUSPEND)
+                self._release_notify(org_id, rule, EVENT_REVIEW)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
@@ -853,15 +861,21 @@ class AbuseEngine:
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
             return self._flag(org_id, rule, details, now, window_s)
-        try:
-            self.store.suspend_org(org_id, details, now=now)
-        except Exception as e:
-            report_abuse_decision_fault("suspend_org", org_id, rule, e)
-            return "breach"
-        mark_suspended(org_id)
-        if self._claim_notify(org_id, rule, EVENT_SUSPEND, now, window_s):
-            self._notify("abuse_suspended", org_id, details)
-        return "suspend"
+        # #5425 owner ruling (2026-10-08): rate-limit, don't suspend —
+        # "we should just have rate-limits and if they want more they need to
+        # speak with us". A persistent breach now raises an OPERATOR ALERT and
+        # NOTHING ELSE: a human decides (raise the ceiling, or reach out).
+        #
+        # The automatic ``suspend_org`` call is DELETED, not repaired. #4872's
+        # collapsed-failure defect (a failed suspend returning "breach", the
+        # same value as "still staging") only existed while the suspend was
+        # meant to fire; polishing that branch would be polishing something we
+        # have decided not to have. ``store.suspend_org`` itself SURVIVES — a
+        # deliberate, operator-initiated suspension is still available; it is
+        # simply no longer something the engine does to a customer on its own.
+        if self._claim_notify(org_id, rule, EVENT_REVIEW, now, window_s):
+            self._notify("abuse_review_needed", org_id, details)
+        return "breach"
 
     def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
               window_s: int) -> str:
@@ -894,6 +908,17 @@ class AbuseEngine:
         return "flag"
 
     def _notify(self, kind: str, org_id: str, details: dict) -> None:
+        # #5425: the review alert is the operator's ONLY signal that a
+        # PERSISTENT breach needs a human decision — the engine no longer
+        # suspends, so nothing else marks the account. Give it a dashboard row
+        # as well as a chat notification: an escalation that reaches only the
+        # chat channel is invisible to whoever is reading the abuse list.
+        # Best-effort, like every other event-record leg.
+        if kind == "abuse_review_needed":
+            try:
+                self.store.record_event(org_id, EVENT_REVIEW, details=details)
+            except Exception:
+                logger.debug("abuse review event record failed (%s)", org_id)
         try:
             from tortoise.notify import notify_abuse
             notify_abuse(kind,

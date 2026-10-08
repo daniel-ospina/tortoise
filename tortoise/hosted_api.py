@@ -6125,6 +6125,14 @@ def _suspended_detail() -> dict:
             "appeal_url": appeal_url()}
 
 
+#: #5425 owner ruling (2026-10-08): "if they want more they need to speak with
+#: us". The route for a customer who needs a ceiling raised is a CONVERSATION,
+#: so the contact path belongs on every limit surface — appended from ONE
+#: constant rather than restated per message, because N restatements of a
+#: user-facing string is the drift class already fixed once in #1611.
+_LIMIT_CONTACT = " Need more? Contact support@premiselabs.co."
+
+
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
     """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
     (GET only — writes never count as reads, scoping delta 11) + R4 geo
@@ -10633,14 +10641,16 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
             # 409 is the C2 policy/concurrency class, NOT a quota refusal —
             # there is no quota category to carry, so the detail stays prose.
             raise HTTPException(
-                status_code=409, detail="API key limit reached.") from None
+                status_code=409,
+                detail="API key limit reached." + _LIMIT_CONTACT) from None
         # #4614: the 402 arm IS the api_keys quota (the legacy pre-check's race
         # backstop) — the same category `_check_org_limit` answers, so it
         # carries the same structured shape.
         raise HTTPException(
             status_code=402,
             detail=_key_limit_refusal(
-                "API key limit reached (legacy mint — upgrade or revoke)"),
+                "API key limit reached (legacy mint — upgrade or revoke)"
+                + _LIMIT_CONTACT),
         ) from None
 
     kid = minted["id"]
@@ -10847,7 +10857,8 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     except _KeyCapExceeded:
         raise HTTPException(
             status_code=402,
-            detail=_key_limit_refusal("API key limit reached."),
+            detail=_key_limit_refusal(
+                "API key limit reached." + _LIMIT_CONTACT),
         ) from None
 
     kid = minted["id"]
@@ -16306,7 +16317,7 @@ def _provision_graph(org: dict, name: str,
         raise HTTPException(
             status_code=409,
             detail="API key limit reached. Delete a key or upgrade your plan "
-                   "to create more graph keys.",
+                   "to create more graph keys." + _LIMIT_CONTACT,
         ) from None
     except HTTPException:
         raise
@@ -17806,7 +17817,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                    detail="Invites require the Builder or Team tier — upgrade to invite members"
+                                              + _LIMIT_CONTACT)
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -17828,7 +17840,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Member limit reached — upgrade to invite more")
+                                            detail="Member limit reached — upgrade to invite more"
+                                              + _LIMIT_CONTACT)
                 inv = await _cp_offload(
                     lambda: invitation_mint(
                         get_control_plane(), org_id, email, role,
@@ -17887,7 +17900,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                detail="Invites require the Builder or Team tier — upgrade to invite members"
+                                              + _LIMIT_CONTACT)
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -17903,7 +17917,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Member limit reached — upgrade to invite more")
+                                    detail="Member limit reached — upgrade to invite more"
+                                              + _LIMIT_CONTACT)
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -18225,7 +18240,8 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more"
+                                              + _LIMIT_CONTACT)
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -18674,7 +18690,8 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more"
+                                              + _LIMIT_CONTACT)
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -19213,7 +19230,8 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more"
+                                              + _LIMIT_CONTACT)
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user

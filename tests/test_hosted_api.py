@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta, timezone
@@ -10858,3 +10859,38 @@ class TestBoundedMiddlewareStore:
             f"middleware iterated {yielded} keys on the tracked hot path "
             f"(store holds {len(mw._buckets)} keys) — a full reversed() scan "
             "must not pass; only the O(1) tail peek may yield one key")
+
+
+# ── #5425: every over-limit surface offers the HUMAN path ──────────────────
+#
+# Owner ruling (2026-10-08): "we should just have rate-limits and if they want
+# more they need to speak with us". The route for a customer at a ceiling is a
+# conversation — so the contact path must appear wherever a limit refuses them,
+# not only on the self-serve upgrade line. Fenced at the SOURCE because the
+# failure mode is a NEW limit surface added later without it: the promise would
+# silently disappear from exactly the surface a customer hits at the wall
+# (the same drift class the notification-fragment guard was deleted for in
+# agent-infra #1611 — one constant, not N restatements).
+
+
+class TestOverLimitSurfacesOfferTheHumanPath:
+    LIMIT_PHRASES = ("API key limit reached", "Member limit reached",
+                     "Invites require the Builder")
+
+    def _source(self) -> str:
+        import tortoise.hosted_api as ha
+        return pathlib.Path(ha.__file__).read_text(encoding="utf-8")
+
+    def test_every_limit_message_carries_the_contact_path(self):
+        src = self._source()
+        sites = sum(src.count(p) for p in self.LIMIT_PHRASES)
+        # one definition + one append per limit message
+        assert src.count("_LIMIT_CONTACT") == 1 + sites, (
+            f"{sites} limit messages but "
+            f"{src.count('_LIMIT_CONTACT') - 1} carry _LIMIT_CONTACT — a "
+            "customer at this ceiling is not told they can talk to us")
+
+    def test_the_contact_path_names_a_real_route(self):
+        import tortoise.hosted_api as ha
+        assert "support@premiselabs.co" in ha._LIMIT_CONTACT
+        assert ha._LIMIT_CONTACT.startswith(" ")
