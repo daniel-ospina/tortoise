@@ -80,9 +80,9 @@ DESIGN CONTRACT
        a verdict that does not name what it measured cannot be trusted.
 
 Usage
-    python3 tools/queue_resweep.py --repo owner/name             # dry run, all candidates
-    python3 tools/queue_resweep.py --repo owner/name --only 5527
-    python3 tools/queue_resweep.py --repo owner/name --live      # ACTUALLY posts comments
+    uv run python tools/queue_resweep.py --repo owner/name             # dry run, all candidates
+    uv run python tools/queue_resweep.py --repo owner/name --only 5527
+    uv run python tools/queue_resweep.py --repo owner/name --live      # ACTUALLY posts comments
     ... --live --allow-red-base      # post while the base gate is red (all will WAIT)
     ... --live --repost-waiting      # re-request for PRs whose last attempt answered neutral
 

@@ -531,6 +531,13 @@ jobs:
       - name: Check migrations are append-only
         run: bash .github/scripts/check-migration-append-only diff
         env:
+          # #7628: this is the PR's MERGE-BASE, which is NOT what the `docs`
+          # changed set uses any more (that now resolves the base branch TIP).
+          # Whether THIS consumer shares the #7628 defect is unmeasured — its
+          # policy only ever ADDS migrations, so the over-inclusion is narrower —
+          # but two different meanings of "the base" for "the changed set" is the
+          # inconsistency a future reader will trip over. Change it only with its
+          # own measurement, not for symmetry.
           DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #1235: enables the unapplied-rename exception (same-repo PRs);
           # forks don't get secrets → strict block preserved (fail-closed).
@@ -607,9 +614,12 @@ jobs:
         # validates frontmatter keys anyway). This step is checkout-depth
         # independent. Repo-wide, fail-closed. `=======` is deliberately NOT
         # matched:
-        # 7 equals is a valid setext H1 underline (a real false positive at
-        # website/apps/dashboard/node_modules/js-tokens/README.md:238), and a
-        # real conflict block always carries the <</>> markers anyway.
+        # 7 equals is a valid setext H1 underline, AND it is a routine line in the
+        # repo TODAY: a 7+-rune rune line opens/closes pytest's captured-output
+        # sections, so committed logs under docs/ and the longmem tools match it
+        # live. (It was also a false positive at a vendored dependency README
+        # until #3768 untracked that tree.) A real conflict block always carries
+        # the <</>> markers anyway, which is why the rune can be dropped safely.
         run: |
           set +e
           git grep -nE '^(<{7,}|>{7,}|\|{7,})( |$)' -- .
@@ -670,6 +680,51 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Resolve the base branch tip (#7628)
+        id: base_tip
+        # #7628: the base for the changed-set diff must be the base branch's
+        # CURRENT TIP, not `github.event.pull_request.base.sha` (the PR's
+        # merge-base). The checkout above is the MERGE ref (`refs/pull/N/merge`),
+        # which GitHub builds on the base's current tip; so `merge-base...HEAD`
+        # is "everything the base branch landed since the merge-base, PLUS this
+        # PR's own changes", and a PR that is merely behind lints the base
+        # branch's own new `.md` files WHOLE and is failed for findings it did not
+        # author. Measured on #7542: base.sha == merge-base(16bb2ab12, main) ==
+        # be01e05c0, while the evaluated tree sat on 3c1fc8086, whose #7611 added
+        # the offending MD018. Resolving the tip makes the diff exactly this PR's
+        # changes, because `merge-base(TIP, HEAD) == TIP` -- HEAD is the merge
+        # commit.
+        #
+        # A SEPARATE step, not folded into the diff step: that step's body is
+        # EXECUTED offline by tests/test_docs_lint_gate.py, so it must not fetch.
+        if: ${{ !inputs.main_health }}
+        env:
+          # Same #2386 discipline as the diff step below: the value arrives through
+          # the ENVIRONMENT, never as a `${{ }}` interpolation inside the shell.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # Fail closed like the diff step: an empty ref makes the fetch a no-op
+          # and leaves the output empty, which is the silent green this check
+          # exists to prevent (#2386), one input over.
+          if [ -z "${BASE_REF:-}" ]; then
+            echo "::error::pull_request base ref is empty — cannot resolve the base branch tip; failing closed (#7628)"
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          # Assign FIRST, never `echo "sha=$(git rev-parse …)"`. Under `set -e`
+          # an ASSIGNMENT propagates the command substitution's exit status, so a
+          # failed `rev-parse` fails THIS step; as a nested substitution that status
+          # is discarded and the step would publish whatever the substitution
+          # printed and still exit 0. Measured: assignment form aborts with exit 128
+          # (macOS git 2.50.1 and Linux git 2.54.0, inside a repo).
+          # The `-z` test below is defence in depth.
+          SHA="$(git rev-parse "refs/remotes/origin/${BASE_REF}")"
+          if [ -z "${SHA}" ]; then
+            echo "::error::could not resolve refs/remotes/origin/${BASE_REF} (#7628)"
+            exit 1
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
       - name: Get changed markdown files
         id: changed
         # #5215 Task 8 (D13): a scheduled main-health call has no PR base, so
@@ -681,7 +736,13 @@ jobs:
           # #2386: the base SHA is passed through the ENVIRONMENT, not a `${{ }}`
           # interpolation inside the shell, so the run body below is pure bash and
           # is EXECUTED (not text-scanned) by tests/test_docs_lint_gate.py.
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          #
+          # #7628: bound to the base branch's TIP (resolved by the step above),
+          # NOT to `github.event.pull_request.base.sha`. That field is the PR's
+          # MERGE-BASE, and pairing it with the merge-ref checkout made this diff
+          # swallow the base branch's own newly-landed commits. The run body is
+          # unchanged: with the tip, `TIP...HEAD` is exactly this PR's changes.
+          BASE_SHA: ${{ steps.base_tip.outputs.sha }}
         run: |
           # #4449: the list goes to a FILE and is consumed as DATA. A filename
           # is PR-author-controlled, so it must never reach a shell — a path

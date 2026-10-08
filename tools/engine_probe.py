@@ -65,10 +65,10 @@ THE ENGINE VOCABULARY, AND WHY EACH STATE HAS ITS OWN RECOVERY
     silently become a confident wrong answer.
 
 USAGE
-    python3 tools/engine_probe.py            # human summary, exit 0/2/3
-    python3 tools/engine_probe.py --json     # machine-readable verdict
-    python3 tools/engine_probe.py --timeout 2
-    python3 tools/engine_probe.py --no-docker   # skip the engine probe
+    uv run python tools/engine_probe.py            # human summary, exit 0/2/3
+    uv run python tools/engine_probe.py --json     # machine-readable verdict
+    uv run python tools/engine_probe.py --timeout 2
+    uv run python tools/engine_probe.py --no-docker   # skip the engine probe
 
 EXIT CONTRACT
     0  GRAPH_UP (and, when probed, the engine answered)

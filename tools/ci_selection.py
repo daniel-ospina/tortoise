@@ -224,6 +224,15 @@ SHARED_MODULES = (
     # `core` only and a break it induced in an api/eval/ep test would never run
     # on the PR that made it (the #1349/#3332/#3910 under-selection class).
     "tests/_verdict.py",
+    # #7655: the SIGALRM integrity guard (`tests/_signal_hygiene.py`) is imported
+    # at conftest MODULE level and installs the suite-wide autouse fixture that
+    # refuses an in-process `signal.alarm` / `setitimer(ITIMER_REAL)` /
+    # `signal.signal(SIGALRM, …)` while the harness owns the per-test timer.
+    # Same class as `_verdict.py` above: not a `test_*.py` file, so the manifest
+    # never classifies it — without this entry a change to the guard would
+    # select `core` only, and a break it induced in an api/eval/ep test would
+    # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
+    "tests/_signal_hygiene.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -3243,7 +3252,7 @@ def _ci_manifest_module():
     ``ci_manifest`` imports this module back for the manifest helpers, so the
     import is lazy and must not create a second copy under a different name
     (which would split module state under pytest). The RUNNING module is probed
-    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    FIRST: ``uv run python tools/ci_manifest.py`` executes that file as ``__main__``,
     which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
     name-only lookup imported a SECOND copy of the same file.
     """

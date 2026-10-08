@@ -2517,6 +2517,70 @@ from tortoise.live import (  # noqa: E402
 )
 from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
+# #5407 - the RANGE and FULL-TEXT label sets the INDEX path creates, as data, so
+# a test can compare them with the set the vector leg's declared routing
+# (`ENTITY_TYPE_LABELS.values()`) resolves to. Both were inline literals inside
+# `_ensure_indexes` with nothing tying them to that routing. `tests/
+# test_5407_index_label_parity.py` holds them together.
+#
+# NOT covered here, and deliberately not claimed: the VECTOR index. Its labels
+# are still literals (`_ensure_vector_index_api`) and it needs no range or
+# full-text index, so a served label with no vector index passes every
+# assertion below. See #5407 for that remainder.
+
+#: ``Point``'s range indexes are the one ranged set this declaration owns.
+#: Its label is written at the DDL site rather than in a ``(label, props)``
+#: pair, so the label is declared here too — otherwise the coverage assertion
+#: would have to supply the very label it is checking. (Separate DDL sites —
+#: ``Point.lastDreamedAt``, ``Session`` — carry their own labels and are not
+#: part of this declaration.)
+_POINT_RANGE_INDEX_LABEL: str = "Point"
+
+_POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
+    "id",
+    "pointKind",
+    "content_hash",
+)
+
+_RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Subject", ("id", "name")),
+    ("Object", ("id", "name")),
+    ("Event", ("eventId",)),
+    # canonicalUrl (#5012 S0b): the S0a canonical
+    # identity S0b resolves against, so the resolver
+    # is an index seek, not a label scan.
+    ("Source", ("id", "url", "canonicalUrl")),
+)
+
+_FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
+    ("Point", ["content", "search_keys"]),  # R2 (#1541) D3
+    # #244: AgentSession events populate name (not subject) — index both so
+    # session name matches surface through FTS.
+    ("Event", ["subject", "name"]),
+    ("Subject", ["name"]),
+    # #1350 S3: the extractor's entity search (existing items by name) needs
+    # the Object FTS leg — without it S3's entities bucket is dead on the real
+    # backend.
+    ("Object", ["name"]),
+    ("Source", ["_searchText"]),  # #125 Document FTS
+    # (D10: the doc node is a :Source, so the
+    # full-text leg rides the Source label).
+    # #3518: a captured session's :Source carried
+    # NO searchable text field, so
+    # `tortoise_fts_query(entity_type='source')`
+    # never resolved against this label (it
+    # degraded to `index_missing` / an empty run)
+    # and the captured session was unfindable.
+    # `_searchText` is the ONE searchable field
+    # and BOTH Source writers populate it through
+    # `sdk._source_search_text` — the indexer
+    # (`_upsert_source`, title) and the capture
+    # path (`_materialize_session_source`,
+    # title-else-summary). `summary`/`topics` are
+    # deliberately NOT indexed: a second
+    # vocabulary the FTS surface does not read.
+)
+
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
 # `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
 # text is the only signal that separates "full" from "corrupt", so it is
@@ -9394,10 +9458,11 @@ class FalkorProjection(
         # see the boolean-index policy in the docstring and the #3154 purge
         # below. The epic-903 staleness ordering rides on the plain
         # lastDreamedAt index.
-        point_props = ("id", "pointKind", "content_hash")
-        for prop in point_props:
+        for prop in _POINT_RANGE_INDEX_PROPS:
             try:
-                self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
+                self.g.query(
+                    f"CREATE INDEX FOR (n:{_POINT_RANGE_INDEX_LABEL}) "
+                    f"ON (n.{prop})")
             except Exception as e:
                 msg = str(e).lower()
                 if "already indexed" in msg or "already exists" in msg:
@@ -9512,13 +9577,7 @@ class FalkorProjection(
         # upserts. Deliberately NO status/op_type/kind-field indexes — a
         # measured 3.15x write slowdown on Point upserts with status/op_type
         # outweighs the batch-read benefit (see issue #522).
-        for label, props in (("Subject", ("id", "name")),
-                             ("Object", ("id", "name")),
-                             ("Event", ("eventId",)),
-                             # canonicalUrl (#5012 S0b): the S0a canonical
-                             # identity S0b resolves against, so the resolver
-                             # is an index seek, not a label scan.
-                             ("Source", ("id", "url", "canonicalUrl"))):
+        for label, props in _RANGE_INDEX_LABEL_PROPS:
             for prop in props:
                 try:
                     self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
@@ -9568,34 +9627,7 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, fields in [("Point", ["content", "search_keys"]),  # R2 (#1541) D3
-                                  # #244: AgentSession events populate name
-                                  # (not subject) — index both so session name
-                                  # matches surface through FTS.
-                                  ("Event", ["subject", "name"]),
-                                  ("Subject", ["name"]),
-                                  ("Object", ["name"]),  # #1350 S3: the
-                                  # extractor's entity search (existing items
-                                  # by name) needs the Object FTS leg —
-                                  # without it S3's entities bucket is dead
-                                  # on the real backend.
-                                  ("Source", ["_searchText"])]:  # #125 Document FTS
-                                  # (D10: the doc node is a :Source, so the
-                                  # full-text leg rides the Source label).
-                                  # #3518: a captured session's :Source carried
-                                  # NO searchable text field, so
-                                  # `tortoise_fts_query(entity_type='source')`
-                                  # never resolved against this label (it
-                                  # degraded to `index_missing` / an empty run)
-                                  # and the captured session was unfindable.
-                                  # `_searchText` is the ONE searchable field
-                                  # and BOTH Source writers populate it through
-                                  # `sdk._source_search_text` — the indexer
-                                  # (`_upsert_source`, title) and the capture
-                                  # path (`_materialize_session_source`,
-                                  # title-else-summary). `summary`/`topics` are
-                                  # deliberately NOT indexed: a second
-                                  # vocabulary the FTS surface does not read.
+            for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:
                 try:
                     # #H05: the creation FORM is version-dependent -- the
                     # historical multi-field procedure is rejected by FalkorDB
@@ -10241,11 +10273,81 @@ class FalkorProjection(
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
                 return 0
             prop = _ENTITY_ID_PROP[label]
+            if label == "Source":
+                # #3998: this arm replays a caller-supplied property map onto a
+                # `:Source` — so it is a WRITE PATH, and the declaration has to
+                # gate it exactly as `_upsert_source` and `_update_entity` are
+                # gated. Without this, replay re-materialises arbitrary
+                # undeclared keys (i.e. a raw payload recorded by an earlier
+                # head) on every rebuild, which is the one place the "index, not
+                # a copy" guarantee cannot be retired by fixing the live writer:
+                # the bytes are already in the journal on any deployment that
+                # ran one. Denied keys are DROPPED and WARNED, never silently.
+                from .entities import (
+                    _SOURCE_SERVER_MANAGED_PROPS,  # local: #2662 cycle
+                    filter_source_props,
+                )
+
+                state, _denied = filter_source_props(state)
+                # The SERVER-MANAGED keys are dropped too (#3998 review round 5).
+                # A `SourceCreated` record is the sole owner of the absent-raw
+                # state; there is no legitimate `EntityMutated` producer of it
+                # (the live route refuses it). Replaying one let a journal line
+                # written by an earlier head — e.g. the `rawState=None` CLEAR that
+                # round 3's open guard journalled — resurrect a permanently
+                # deleted raw on every rebuild. That is the silent loss this
+                # issue exists to prevent, on the one path whose comment already
+                # says a live-writer fix cannot retire the bytes.
+                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here. (This NOTE
+                # used to continue "although `entities._SOURCE_IDENTITY_PROPS`'
+                # docstring says it is" — #5196 removed that claim from the
+                # docstring, so the NOTE was citing text that no longer exists. It
+                # is corrected rather than left pointing at a vanished claim.)
+                # Making
+                # the code match that comment would change what an
+                # `EntityMutated` replay does with `url`/`canonicalUrl`/
+                # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
+                # never_title` (a main-side pin) is exactly about the url replay
+                # key — so the change is deferred until it can be run against the
+                # docker lane rather than guessed at.
+                _sm = sorted(k for k in state if k in _SOURCE_SERVER_MANAGED_PROPS)
+                if _sm:
+                    for k in _sm:
+                        state.pop(k)
+                    _denied = sorted(_denied + _sm)
+                if _denied:
+                    logger.warning(
+                        "rebuild: EntityMutated for :Source %r carried %d "
+                        "undeclared property name(s) %s — DROPPED, not replayed "
+                        "(#3998: the graph indexes the raw, it is not the raw "
+                        "store; event_id=%s)",
+                        rid, len(_denied), _denied, ev.get("event_id"))
+                if not state:
+                    # Nothing declared to apply. Still a MATCH, so the survivor
+                    # count reflects the record — but do not run an empty SET.
+                    # #4649: the identity is an OR-SET here too. A url-only
+                    # :Source carries no `id`, so an `id`-only probe would
+                    # report a false fold-miss for a record that DID match —
+                    # and #3998's filter arm is reachable by exactly that shape.
+                    matched = 0
+                    for match_prop in (prop, *secondary_entity_id_props(label)):
+                        r = self.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                            "RETURN count(n)",
+                            params={"id": rid},
+                        )
+                        matched = (r.result_set[0][0] or 0) if r.result_set else 0
+                        if matched:
+                            break
+                    if not matched:
+                        _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+                    return matched or 0
+            # #4649: OR-SET — primary key first, the label's secondary key on a
+            # miss (a url-only :Source has no `id`). Without the fallback the
+            # record folds to a MISS and `rebuild_all` reverts the write the
+            # live producer performed. #3998's :Source filter above feeds this
+            # SAME loop — the two fixes are orthogonal, not alternatives.
             matched = 0
-            # #4649: OR-SET — primary key first, the label's secondary key only
-            # on a miss (a url-only :Source has no `id`). Without the fallback
-            # the record folds to a MISS and `rebuild_all` reverts the write
-            # the live producer performed.
             for match_prop in (prop, *secondary_entity_id_props(label)):
                 r = self.g.query(
                     f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $s "

@@ -21,10 +21,10 @@ no client, or one whose socket dir is gone. This is deliberately NOT a bare
 invariant and would be satisfied by a machine running many healthy lanes.
 
 Usage:
-    python3 tools/embedded_orphans.py                 # human line, exit 1 if over budget
-    python3 tools/embedded_orphans.py --json
-    python3 tools/embedded_orphans.py --max-orphans 5
-    python3 tools/embedded_orphans.py --deep
+    uv run python tools/embedded_orphans.py                 # human line, exit 1 if over budget
+    uv run python tools/embedded_orphans.py --json
+    uv run python tools/embedded_orphans.py --max-orphans 5
+    uv run python tools/embedded_orphans.py --deep
 
 Exit codes: 0 = at or under the budget, 1 = over budget, 2 = census failed.
 """

@@ -80,14 +80,14 @@ REQUIRED ACCESS (operator)
 
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
-  python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase enumerate
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase enumerate
   # 2) review the manifest JSON + printed counts
   # 3) dry-run the delete (prints SQL/counts, writes nothing)
-  python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all
   # 4) execute (users then control-plane rows; teams last)
-  python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all --execute
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all --execute
   # 5) drop FalkorDB graphs (separate store; needs FALKORDB_CLOUD_URI)
-  FALKORDB_CLOUD_URI=... python3 graph-scripts/2146_falkordb_graph_cleanup.py \
+  FALKORDB_CLOUD_URI=... uv run python graph-scripts/2146_falkordb_graph_cleanup.py \
       --manifest 2146-e2e-live-orphans.manifest.json --execute
   # 6) verify (expect 0 rows) — see runbook docs/runbook/2146-e2e-live-orphan-cleanup.md
 """

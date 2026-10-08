@@ -394,6 +394,31 @@ test('#2912: the step-2 lede asks what each branch actually does', () => {
     'the ROLE arm must precede the CAP arm — a demoted user with a stale capNotice must not get the capped-owner copy')
   assert.ok(cappedBuild < ownerBuild,
     'the cap arm must precede the owner build-fork line')
+  // #2940: the cap arm must be reachable from the wizard's OWN cap signal, not
+  // `capNotice` alone. The 402 mint handler sets `wizardDurableCapped` and never
+  // sets `capNotice`, so keying this arm on `capNotice` alone skipped it on the
+  // reachable build-fork cap path — the owner build-fork line below then
+  // rendered "Create an API key…" directly above the body's `role="alert"`
+  // reporting that the cap was reached, and the paste disclosure the 402
+  // handler opens had its remedy copy (the `Free a key slot…` arm) unreachable.
+  // #2940 — the full rationale is on the cap arm's comment in main.jsx. The arm
+  // must be key-guarded in BOTH halves (neither signal is cleared by a
+  // successful paste), must suppress rather than fall through to the chooser
+  // line, and is only safe because the build-fork key arm claims that state
+  // FIRST.
+  assert.match(lede, /if \(\(capNotice \|\| wizardDurableCapped\) && !harnessKey\) \{/,
+    "the cap arm must fire on the wizard's own cap signal too — and must be key-guarded in both halves, or the header contradicts the body both before a key exists and after it is pasted")
+  assert.match(lede, /if \(capNotice && harnessKey\) return null/,
+    'the capped lede must be suppressed once a key is in hand, not replaced by the chooser line')
+  // the suppression is only safe AFTER the build-fork key arm: the build-fork
+  // body renders no cap notice, so hoisting it would blank that lede.
+  assert.ok(hasKeyBuild < lede.indexOf('if (capNotice && harnessKey) return null'),
+    'the suppression must sit after the build-fork key arm, or the build-fork body — which carries no cap notice — loses its lede')
+  // and the signal must be raised INSIDE the mint handler, or the arm is dead
+  // code: deleting the writer left the whole suite green.
+  assert.match(slice('async function wizardMintDurableKey(', '\n  async function ', 'mint handler'),
+    /if \(e\?\.status === 402\) \{\s*setWizardDurableCapped\(true\)/,
+    'the mint 402 must raise the cap signal this lede reads — the arm is dead without its writer (#2940)')
   assert.doesNotMatch(lede, /Connect Tortoise to your Organization\./,
     'the string #2912 reported as vague must not come back')
 })
@@ -1657,13 +1682,17 @@ test('#4353: the wizard mint 402 copy offers revoke, never regenerate', () => {
   // (wizardKeyAffordance → wizardNoKeyAffordance → the paste disclosure), so
   // this pin is about the copy staying unchanged, not about that row being
   // unreachable. Named by symbol: a line citation here stales on the next edit.
+  // #5425: the arms now render through withLimitContact(...), so the route to
+  // support@premiselabs.co cannot be dropped from either one without failing
+  // here. Matched as a CALL, not a bare literal — a literal would mean the
+  // human route is gone.
   assert.match(cap402,
-    /\? 'You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'/,
-    'the build-fork arm is unchanged (it names only affordances its branch renders)')
+    /\? withLimitContact\('You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'\)/,
+    'the build-fork arm is unchanged (it names only affordances its branch renders) and carries the #5425 contact route')
   // non-build-fork arm: the achievable remedy.
   assert.match(cap402,
-    /: 'You\\'ve reached your plan\\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above\.'/,
-    'the non-build-fork arm names revoke (which frees a slot) and the paste escape')
+    /: withLimitContact\('You\\'ve reached your plan\\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above\.'\)/,
+    'the non-build-fork arm names revoke (which frees a slot) and the paste escape, and carries the #5425 contact route')
 })
 
 test('#4353: the connect step’s existing-key note is DERIVED, not an inline literal', () => {

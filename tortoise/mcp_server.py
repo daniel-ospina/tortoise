@@ -1284,6 +1284,17 @@ ERR_INVALID = -32003
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
     "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5196 round 3: the index-merge run token is written to the node by
+    # `_upsert_source`'s `run_clause`, so it is DECLARED — but it is
+    # server-minted and must stay caller-unsettable. Declaring it without
+    # refusing it here made it writable through `tortoise_update_entity`
+    # (measured: accepted, journalled, and surviving `rebuild_all`).
+    "__runId",
+    # #5196 round 5: the PARAMETER spelling of the same token. The MCP tool
+    # splats caller `props` into `create_source(**props)`, where this key binds
+    # the parameter that writes `s.__runId` — closing only the property name left
+    # this door open (measured: a forged token landed on a node).
+    "_merge_run_id",
     # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
     # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
     # `embedding` ITSELF is deliberately NOT here — `create_point` has a
@@ -1291,6 +1302,15 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
+    # #3998 (D30): the absent-raw state is server-managed — minted only by
+    # `_upsert_source`'s fixed clauses and validated by `validate_raw_state`.
+    # The SDK rejects these on a `:Source` through the generic entity route
+    # (`sdk._update_entity`); this is the fail-closed boundary in front of it,
+    # so the rejection happens before the write is attempted. Without it a
+    # tenant could `rawState=None` to CLEAR a recorded absence — silently
+    # resurrecting a raw the record says is gone — or persist an unvalidated
+    # `rawState='banana'`.
+    "rawState", "rawStateAt", "raw_state",
     # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
     # are server-derived (read from the :Source on the live path and carried in
     # the Point's journaled snapshot). A tenant setting either would forge
@@ -2317,9 +2337,19 @@ def main():
     # after it below.) Idempotent.
     from tortoise.embedded_lifecycle import (
         close_embedded_clients,
+        embedded_clients_snapshot,
         install_embedded_signal_cleanup,
     )
     install_embedded_signal_cleanup()
+    # #7728: this entrypoint owns only the embedded servers IT opens. Snapshot
+    # the process's live embedded clients BEFORE `_get_sdk()` below opens
+    # this server's, so the normal-return teardown closes ours and leaves a
+    # co-tenant's running (e.g. the session-scoped `shared_proj` fixture in an
+    # in-process pytest run, whose later tests would otherwise connect to a
+    # socket dir we just rmtree'd). The terminating-signal path still closes
+    # everything — there the process is dying, so every child must go. In a
+    # real stdio process the snapshot is empty, so this is a no-op there.
+    _clients_before_main = embedded_clients_snapshot()
     # #2204: announce dev mode (no auth) at the actual serve start, NOT at
     # module import — incidental importers (hosted_api, doctor, tests) must
     # stay quiet. Stdio is the only path that cannot carry auth headers, so
@@ -2360,10 +2390,11 @@ def main():
     finally:
         # #2203: deterministic teardown when the stdio session ends (client
         # disconnect / stdin EOF / abnormal session end) — close every
-        # embedded server this process opened NOW instead of relying on
+        # embedded server THIS main() opened NOW instead of relying on
         # atexit ordering; a no-op when nothing was opened (docker-URI
-        # mode), idempotent (already-closed clients skip).
-        close_embedded_clients()
+        # mode), idempotent (already-closed clients skip). #7728: scoped by
+        # the pre-`_get_sdk()` snapshot so a co-tenant's server survives.
+        close_embedded_clients(exclude=_clients_before_main)
 
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────

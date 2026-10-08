@@ -159,6 +159,14 @@ class Snapshot:
     # is honest — a backfill/import producer has no lane, and the server stores
     # absence, never a fabricated lane.
     capture_lane: str | None = None
+    # #3516 §B / #3515 piece 12: the client's OWN capture instant (unix seconds)
+    # and the clock it came from. The floor compares THIS against the install
+    # time — never the server's ``capturedAt``, which is the ingest transaction
+    # time and so can only ever pass. ``..._source`` values: 'cli_observed'
+    # (stamped at hook fire), 'file_mtime' (the store-sync fallback) or
+    # 'unknown' (an admitted backfill gap, which can never count as a pass).
+    client_captured_at: float | None = None
+    client_captured_at_source: str | None = None
 
 
 @dataclass
@@ -702,6 +710,77 @@ def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
     return metas, discards
 
 
+# #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
+# here as well as at the server (`hosted_api._SESSION_CAPTURED_AT_SOURCE_VALUES`)
+# because the spool is the leg that can lose the user's conversation: a source
+# the server refuses is a 422, and a 422 is classified PERMANENT, so the drain
+# would unlink the entry's turn log — the only copy. Normalising here makes that
+# refusal unreachable from either spool leg.
+CLIENT_CAPTURED_AT_SOURCES = frozenset({"cli_observed", "file_mtime", "unknown"})
+
+
+def _finite_instant(value: object) -> float | None:
+    """A usable client capture instant, or `None`.
+
+    `bool` is refused first: it is an `int` subclass, and `True` is not a clock.
+    Non-finite values are refused because they do NOT round-trip: `json.dumps`
+    emits the non-standard tokens `NaN`/`Infinity`, and the TypeScript leg reads
+    meta with a raw `JSON.parse`, which throws on them — so a `NaN` written here
+    makes the OTHER leg class this entry `corrupt_entry` and delete its turn log.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        # `float(10**400)` RAISES, and a 400-digit JSON integer is a legal
+        # request body. The isinstance check above cannot see it, and
+        # `classify_failure` already names this exact trap in this codebase.
+        # Returning it would abort the write; `None` is the honest answer.
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _stamp_pair(prior: dict | None, snapshot: Snapshot) -> tuple[float | None, str | None]:
+    """Resolve the client stamp as a PAIR: the instant with ITS OWN clock.
+
+    The instant and its source are resolved together, never independently. A
+    source names the clock that PRODUCED the instant, so pairing a stored
+    instant with a later writer's source relabels a real observation with a
+    clock that did not make it — and because `unknown` DISABLES the floor while
+    an absent source PASSES it, that relabelling flips a verifiable session to
+    unverifiable (#3516 §B review: reproduced PASSED -> DISABLED).
+
+    Precedence is first-writer-wins on the INSTANT (matching the lane's monotone
+    rule and the server's `coalesce`), and the source is taken from the SAME
+    writer. Falsiness is not absence: `0.0` is the epoch, which
+    `install_at_unix` deliberately returns as a real value, so it must survive.
+    """
+    for instant, source in (
+        ((prior or {}).get("client_captured_at"),
+         (prior or {}).get("client_captured_at_source")),
+        (snapshot.client_captured_at, snapshot.client_captured_at_source),
+    ):
+        at = _finite_instant(instant)
+        if at is None:
+            continue
+        if source is None:
+            # piece 12 row 1: the Pi recorder always has a clock and claims NO
+            # source, and an absent source PASSES the floor. Absent stays
+            # absent — never filled in from the other writer.
+            return at, None
+        if not isinstance(source, str):
+            # A non-string source (a corrupt or hand-crafted meta) would RAISE on
+            # the membership test below, and the TS twin's `Set.has` accepts any
+            # value — so crashing here is also a leg divergence. Normalise it.
+            return at, "unknown"
+        # An unrecognised token becomes `unknown`, which DISABLES the floor:
+        # dropping it instead would leave the source absent, PASSING a session
+        # whose clock we demonstrably cannot name.
+        return at, (source if source in CLIENT_CAPTURED_AT_SOURCES else "unknown")
+    return None, None
+
+
 def write_spool_entry(
     root: Path,
     snapshot: Snapshot,
@@ -742,11 +821,24 @@ def write_spool_entry(
     # early-return here and the entry would stay lane-less forever, so a
     # genuinely live hook would read as "not confirmed" (#3516 §B review F6).
     lane_upgrade = bool(snapshot.capture_lane) and not (prior or {}).get("capture_lane")
+    # #3516 §B: the SAME rule for the client stamp, and for the same reason —
+    # the stamp is metadata, not content, so a hook re-snapshot of
+    # byte-identical turns would otherwise early-return and the entry would stay
+    # timeless forever. A stamp the floor cannot see is a floor that cannot run.
+    # #3516 §B: judged against the SAME authority the pair resolution uses. A
+    # value the guards refuse must not count as "newly stamped": it would bypass
+    # the dedup early-return AND skip the filing-marker carry, re-POSTing an
+    # already-filed, byte-identical entry — without writing any stamp at all.
+    # The TS leg already uses its `finiteInstant` here; this is the mirror.
+    stamp_upgrade = (
+        _finite_instant(snapshot.client_captured_at) is not None
+        and _finite_instant((prior or {}).get("client_captured_at")) is None)
     if (
         prior
         and len(stored) == len(snapshot.turns)
         and prior.get("content_digest") == new_digest
         and not lane_upgrade
+        and not stamp_upgrade
     ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
@@ -805,6 +897,15 @@ def write_spool_entry(
     _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
     if _lane:
         meta["capture_lane"] = _lane
+    # #3516 §B / #3515 piece 12: the stamp and its clock resolve as a PAIR, so a
+    # later writer can never relabel an earlier writer's instant with its own
+    # clock. The lane's rule is mirrored: the prior value wins, so a snapshot can
+    # only FILL IN an absent stamp, never replace a stored one.
+    _cap_at, _cap_src = _stamp_pair(prior, snapshot)
+    if _cap_at is not None:
+        meta["client_captured_at"] = _cap_at
+    if _cap_src:
+        meta["client_captured_at_source"] = _cap_src
     if snapshot.model:
         meta["model"] = snapshot.model
     # A re-snapshot whose content is byte-identical to what was already filed
@@ -817,11 +918,23 @@ def write_spool_entry(
     # so the marker itself never claims a lane it did not deliver, and note the
     # mechanism lives in the skip clause, not here. (#3516 §B review)
     if (prior and prior.get("content_digest") == new_digest
-            and prior.get("filed_key") and not lane_upgrade):
+            and prior.get("filed_key") and not lane_upgrade
+            and not stamp_upgrade):
         meta["filed_key"] = prior["filed_key"]
         prior_lane_delivered = prior.get("filed_lane")
         if prior_lane_delivered:
             meta["filed_lane"] = prior_lane_delivered
+        # #3516 §B: the STAMP the 2xx actually carried survives the same way the
+        # lane does, and for the same reason. `filed_key` is CONTENT-derived and
+        # the stamp is METADATA, so a rewrite that dropped the stamp (a torn
+        # turn log, a turn-count shift) would leave `_flush_one`'s skip clause
+        # seeing `filed_stamp != client_captured_at` and re-POST a
+        # byte-identical, ALREADY-FILED entry — the upload-amplification class
+        # #4714 guards against. The TS leg already carries it; this is the
+        # mirror.
+        prior_stamp_delivered = prior.get("filed_stamp")
+        if prior_stamp_delivered is not None:
+            meta["filed_stamp"] = prior_stamp_delivered
         meta["filed_at"] = prior.get("filed_at")
 
     meta_text = json.dumps(meta, ensure_ascii=False, indent=2) + "\n"
@@ -1158,7 +1271,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         })
         return
     if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
-            and meta.get("filed_lane") == meta.get("capture_lane")):
+            and meta.get("filed_lane") == meta.get("capture_lane")
+            # Compared against the SAME normalisation the payload uses: the wire
+            # carries `_finite_instant(...)`, so comparing the RAW disk value here
+            # can never match for a value the guards refuse — and since the drain
+            # never rewrites the meta, such an entry would re-POST its full
+            # transcript on EVERY drain, forever (#4714 amplification).
+            and meta.get("filed_stamp") == _finite_instant(meta.get("client_captured_at"))):
         # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
         # content was delivered — not that the LANE was. An entry filed
         # lane-less and then upgraded must be re-posted, or the lane is
@@ -1205,10 +1324,41 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # has no lane and must POST without the key rather than inventing one.
     if meta.get("capture_lane"):
         payload["capture_lane"] = meta["capture_lane"]
+    # #3516 §B / #3515 piece 12: forward the client stamp ONLY when the entry
+    # carries one (set-only-when-present, like the lane above). A pre-#3516
+    # entry must POST without the keys rather than inventing an instant — a
+    # fabricated floor input would make the floor pass on nothing.
+    # Normalise at the DRAIN, the last line before the wire: a meta already
+    # carrying a corrupt or hand-edited token (no shipped writer can now produce
+    # one) must not reach the server, because the server's refusal is a 422, a
+    # 422 is PERMANENT, and the drain then unlinks the entry's turn log — the
+    # only copy. Cheap here, unrecoverable there.
+    _drain_at = _finite_instant(meta.get("client_captured_at"))
+    if _drain_at is not None:
+        payload["client_captured_at"] = _drain_at
+        _drain_src = meta.get("client_captured_at_source")
+        # `is not None`, NOT truthiness — the same predicate the TS leg uses, and
+        # the same one `_stamp_pair` uses when it WRITES. A truthy guard here
+        # dropped `""`/`0`/`False` that the writer had already normalised to
+        # `unknown`, so the two legs produced OPPOSITE verdicts for the same
+        # on-disk entry: Python omitted the key (an absent source PASSES) while TS
+        # posted `unknown` (which DISABLES).
+        if _drain_src is not None:
+            payload["client_captured_at_source"] = (
+                _drain_src
+                if isinstance(_drain_src, str)
+                and _drain_src in CLIENT_CAPTURED_AT_SOURCES
+                else "unknown")
     if meta.get("model"):
         payload["model"] = meta["model"]
     # The lane actually put on the wire — part of the CAS identity below.
     posted_lane = payload.get("capture_lane")
+    # #3516 §B: the client stamp is part of the posted identity for the SAME
+    # reason the lane is — it is metadata, not content — so an entry whose stamp
+    # appears (or is replaced) while a POST is in flight must not be cancelled
+    # by the CAS and stranded. `posted_stamp` is the value the 2xx actually
+    # carried; `None` means the wire carried no stamp at all.
+    posted_stamp = payload.get("client_captured_at")
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
@@ -1257,7 +1407,11 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         fresh = read_spool_meta(root, sid)
         if (fresh is not None
                 and content_digest(fresh_turns) == posted_digest
-                and fresh.get("capture_lane") == posted_lane):
+                and fresh.get("capture_lane") == posted_lane
+                # Normalised on BOTH sides of the CAS, for the same reason as the
+                # skip clause above: `posted_stamp` is what the WIRE carried
+                # (normalised), so the raw disk value can never equal it.
+                and _finite_instant(fresh.get("client_captured_at")) == posted_stamp):
             fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
             # OMIT the key for a lane-less filing rather than writing `null`: the
             # TS leg's `readSpoolEntry` is a raw `JSON.parse`, so it would see
@@ -1268,6 +1422,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 fresh["filed_lane"] = posted_lane
             else:
                 fresh.pop("filed_lane", None)
+            # #3516 §B: record the stamp the 2xx actually carried, and OMIT the
+            # key (rather than writing `null`) when the wire carried none — the
+            # same cross-leg rule as `filed_lane` above, because the TS leg's
+            # `readSpoolEntry` is a raw `JSON.parse` whose strict `===` would
+            # otherwise see `null` where its own writer leaves `undefined` and
+            # re-POST a Python-filed entry.
+            if posted_stamp is not None:
+                fresh["filed_stamp"] = posted_stamp
+            else:
+                fresh.pop("filed_stamp", None)
             fresh["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0

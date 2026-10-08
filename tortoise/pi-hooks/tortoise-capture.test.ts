@@ -287,6 +287,273 @@ test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () 
   );
 });
 
+test("buildCapturePayload forwards the ENTRY's client stamp, and omits it when absent", () => {
+  // #3516 §B / #3515 piece 12: the stamp is the store-proven floor's INPUT.
+  // Two opposite bugs, both fatal to falsifiability: inventing an instant on a
+  // pre-#3516 entry makes the floor pass on nothing, and dropping one the entry
+  // carries makes the floor read DISABLED for a session that WAS stamped.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  const withStamp = buildCapturePayload({
+    ...base,
+    clientCapturedAt: 1234.5,
+    clientCapturedAtSource: "file_mtime",
+  });
+  assert.equal(withStamp.client_captured_at, 1234.5);
+  assert.equal(withStamp.client_captured_at_source, "file_mtime");
+  assert.ok(
+    !("client_captured_at" in buildCapturePayload(base)),
+    "a stamp-less entry was given an instant on the wire",
+  );
+  // A source must never ride the wire WITHOUT its instant — that is a
+  // provenance recorded for a timestamp that does not exist.
+  assert.ok(
+    !("client_captured_at_source" in
+      buildCapturePayload({ ...base, clientCapturedAtSource: "cli_observed" })),
+    "a source rode the wire without its instant",
+  );
+});
+
+test("the spooled stamp survives a drain, and a LATE stamp is re-delivered", async () => {
+  // #3516 §B. The stamp is METADATA, not content — exactly like the lane — so
+  // the filing marker must account for it. Otherwise a stamp that appears
+  // after a filing is stranded on the spool forever and the floor reads
+  // DISABLED for precisely the session the floor exists for. This mirrors
+  // `fix(capture): the drain CAS must include the lane`, the same defect the
+  // LANE field forced on this codebase.
+  const spool = tmpSpool();
+  const server = recordingServer();
+
+  // (1) filed with a lane but NO stamp.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-stamp", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(
+    !("client_captured_at" in (server.sessions.get("sess-stamp") ?? {})),
+    "a stamp-less entry was given an instant",
+  );
+
+  // (2) a byte-identical re-snapshot that DOES carry a stamp.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-stamp", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+    clientCapturedAt: 1234.5,
+    clientCapturedAtSource: "cli_observed",
+  });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(
+    server.posts(),
+    2,
+    "the stamped entry was SKIPPED — the stamp is stranded on the spool",
+  );
+  assert.equal(server.sessions.get("sess-stamp")?.client_captured_at, 1234.5);
+  assert.equal(
+    server.sessions.get("sess-stamp")?.client_captured_at_source,
+    "cli_observed",
+  );
+
+  // (3) and now the marker covers the stamp: a third flush is a no-op.
+  const third = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 3 });
+  assert.equal(third.attempted, 0, "the stamped entry re-posted forever");
+  assert.equal(server.posts(), 2);
+});
+
+test("the spool never relabels an instant with another writer's clock", () => {
+  // #3516 §B: the instant and its source are ONE pair. A source names the clock
+  // that PRODUCED the instant, so resolving them independently lets a later
+  // writer hang its own clock on an earlier writer's reading. The victim is a
+  // real observation: an absent source PASSES the floor, an explicit 'unknown'
+  // DISABLES it — so the relabelling makes a verifiable session unverifiable.
+  const spool = tmpSpool();
+  const sid = "sess-pair";
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+    clientCapturedAt: 1000,
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]),
+    captureLane: "store_sync",
+    clientCapturedAt: 2000,
+    clientCapturedAtSource: "unknown",
+  });
+
+  const meta = readSpoolEntry(spool, sid);
+  assert.equal(meta?.client_captured_at, 1000, "the hook's instant was replaced");
+  assert.equal(
+    meta?.client_captured_at_source,
+    undefined,
+    "the backfill's clock was attached to the hook's instant",
+  );
+});
+
+test("an unrecognised clock is normalised to 'unknown', never forwarded", () => {
+  // A source the server refuses is a 422, a 422 is classified PERMANENT, and the
+  // drain then unlinks the entry's turn log — the only copy. Normalising at the
+  // writer makes that refusal unreachable from this leg.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-badclock", [{ role: "user", content: "hi" }]),
+    clientCapturedAt: 1000,
+    clientCapturedAtSource: "wall_clock",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-badclock")?.client_captured_at_source,
+    "unknown",
+    "an unrecognised clock was forwarded to the server",
+  );
+});
+
+test("a non-finite instant is never written into the shared spool", () => {
+  // The two legs share one directory. `JSON.stringify` turns NaN/Infinity into
+  // `null`, so this leg must refuse them at the source rather than emit a `null`
+  // instant the Python leg would read as an absent stamp.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-nonfinite", [{ role: "user", content: "hi" }]),
+    clientCapturedAt: Number.NaN,
+    clientCapturedAtSource: "cli_observed",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-nonfinite")?.client_captured_at,
+    undefined,
+    "a NaN was stored as a clock reading",
+  );
+});
+
+test("buildCapturePayload normalises a bad clock instead of forwarding it", () => {
+  // The drain forwards whatever is on disk, and the two legs SHARE the spool
+  // directory — so a meta the other leg (or a hand-edit) left with an
+  // unrecognised token would otherwise be posted verbatim, and the server's 422
+  // is classified PERMANENT, so `discardEntry` unlinks the only copy.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  assert.equal(
+    buildCapturePayload({
+      ...base,
+      clientCapturedAt: 1000,
+      clientCapturedAtSource: "wall_clock",
+    }).client_captured_at_source,
+    "unknown",
+    "an unrecognised clock was forwarded to the server",
+  );
+  // A non-finite instant must not be posted as an instant either — `JSON.stringify`
+  // would emit `null`, which the Python leg reads as an ABSENT stamp.
+  assert.ok(
+    !("client_captured_at" in buildCapturePayload({ ...base, clientCapturedAt: Number.NaN })),
+    "a NaN reached the wire",
+  );
+});
+
+test("a refused instant does not repost an already-filed entry", async () => {
+  // #3516 §B: `stampUpgrade` is judged against `finiteInstant`, the SAME
+  // authority the pair resolution uses. Judging it against a raw `!== undefined`
+  // makes a REFUSED value look like a new stamp: the dedup is bypassed AND the
+  // filing marker is dropped, so an already-filed, byte-identical entry is
+  // re-POSTed while no stamp is written at all.
+  const spool = tmpSpool();
+  const sid = "sess-refused-upgrade";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(
+    readSpoolEntry(spool, sid)?.filed_key,
+    "the first filing did not stamp a marker — the test cannot prove anything",
+  );
+
+  const res = writeSpoolEntry(spool, {
+    ...snapshot(sid, turns),
+    clientCapturedAt: Number.NaN,
+  });
+  assert.equal(res.written, false, "a refused instant was treated as a stamp upgrade");
+  assert.ok(
+    readSpoolEntry(spool, sid)?.filed_key,
+    "a refused instant dropped the filing marker",
+  );
+
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(server.posts(), 1, "an already-filed entry was re-POSTed");
+});
+
+test("a refused STORED instant does not repost forever (skip + CAS normalise)", async () => {
+  // A meta on disk carrying a value the guards refuse, while the payload posts the
+  // NORMALISED one. Comparing the raw disk value against the normalised posted one
+  // can never match — and the drain never rewrites the meta, so the entry would
+  // re-POST its whole transcript on EVERY drain, forever (#4714). The two legs
+  // share this directory, so a foreign or hand-edited meta is exactly the input
+  // that reaches it. Python is fixed the same way
+  // (`test_a_refused_stored_instant_does_not_repost_forever`).
+  const spool = tmpSpool();
+  const sid = "sess-refused-stored";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, { ...snapshot(sid, turns), clientCapturedAt: 1700000010 });
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+
+  // Corrupt the STORED instant the way a foreign or hand-edited meta could.
+  const dir = join(spool, "entries");
+  const file = readdirSync(dir).find((f) => f.endsWith(".meta.json"));
+  assert.ok(file, "no meta file was written — the test cannot prove anything");
+  writeFileSync(
+    join(dir, file as string),
+    JSON.stringify({ ...readSpoolEntry(spool, sid), client_captured_at: "1700000000.5" }),
+    "utf-8",
+  );
+
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  const settled = server.posts();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 3 });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 4 });
+  assert.equal(
+    server.posts(),
+    settled,
+    "a refused stored instant re-POSTed on every drain — it is never marked filed",
+  );
+});
+
+test("a falsy stored source becomes 'unknown', matching the Python drain", () => {
+  // The writer normalises `""`/`0`/`false` to `unknown`; a truthy guard at the
+  // DRAIN would drop them instead, and an absent source PASSES the floor while
+  // `unknown` DISABLES it — so the same on-disk entry would give opposite verdicts
+  // depending on which leg drained it.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  for (const falsy of ["", 0, false]) {
+    assert.equal(
+      buildCapturePayload({
+        ...base,
+        clientCapturedAt: 1000,
+        clientCapturedAtSource: falsy as never,
+      }).client_captured_at_source,
+      "unknown",
+      `${JSON.stringify(falsy)}: a falsy source was dropped instead of normalised`,
+    );
+  }
+});
+
 test("sourceName is a basename only (never a full path)", () => {
   assert.equal(sourceName("/Users/x/.pi/agent/sessions/--p--/s.jsonl"), "s");
   assert.equal(sourceName(undefined), "pi");
@@ -598,6 +865,21 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   // this assertion, deleting `captureLane: "hook"` from `spoolSnapshot` leaves
   // the whole suite green while a WORKING hook files as not-live.
   assert.equal(spooled.capture_lane, "hook", "the hook's spool entry lost its lane");
+  // #3516 §B / piece 12 row 1: the in-process recorder stamps its OWN clock and
+  // claims NO source. Without these two assertions, deleting
+  // `clientCapturedAt: Date.now() / 1000` from `spoolSnapshot` leaves the whole
+  // suite green while every Pi session files TIMELESS — and the floor then reads
+  // DISABLED for exactly the sessions it exists for.
+  assert.ok(
+    typeof spooled.client_captured_at === "number" &&
+      Number.isFinite(spooled.client_captured_at),
+    "the hook's spool entry lost its client capture instant",
+  );
+  assert.equal(
+    spooled.client_captured_at_source,
+    undefined,
+    "the recorder must claim NO clock source — its instant is its own (piece 12 row 1)",
+  );
   assert.deepEqual(readSpoolTurns(spool, "sess-A"), SPOOL_TURNS);
 
   // Session B (a later Pi run) starts: the replay opportunity.
@@ -612,6 +894,15 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   assert.equal(filed[0].body.session_id, "sess-A");
   assert.equal(filed[0].body.harness, "pi");
   assert.deepEqual(filed[0].body.conversation, SPOOL_TURNS);
+  // The stamp must survive to the WIRE, not merely to the spool's meta file.
+  assert.ok(
+    typeof filed[0].body.client_captured_at === "number",
+    "the recorder's instant never reached the wire — the floor sees DISABLED",
+  );
+  assert.ok(
+    !("client_captured_at_source" in filed[0].body),
+    "the recorder has no clock to name — it must post NO source",
+  );
 });
 
 // ── (2) Replaying a spooled session twice produces ONE session ─────────────

@@ -22,13 +22,23 @@ from fastapi.testclient import TestClient
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, _membership_row
 from tortoise.hosted_api import app, get_current_user
+from tortoise.quota import with_limit_contact
 
 _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
 # #2789: the blocked payload is STRUCTURED now (the old bare "Create another
 # team requires a paid plan" string is gone). The dashboard renders the
 # three-option dialog from `code` — never from the message text.
+#
+# #5425: the message now carries the customer contact route, so this pin is the
+# SENTENCE PREFIX plus the shared suffix rather than the bare sentence. It was a
+# shape restatement, not a client contract — the line above is exactly why: no
+# client reads it. Keeping the prefix asserted still catches the payload losing
+# its wording, and the suffix assertion catches the route disappearing.
 _CAP_CODE = "one_free_org_limit"
-_CAP_MSG = "You can only have one free organization"
+# Built through the SEAM, not by hand: the seam terminates the sentence (this
+# base has no final stop), so a hand-concatenation here would pin a string the
+# server never sends.
+_CAP_MSG = with_limit_contact("You can only have one free organization")
 
 
 def _assert_capped(detail, *, org_id: str | None = None) -> None:

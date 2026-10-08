@@ -43,7 +43,7 @@ What the stage excludes, and why:
 
 | Excluded | Why |
 |---|---|
-| `apps/` | Dashboard + blog-admin sources, including a committed `node_modules` tree. The dashboard deploys separately to `tortoise-dashboard` (`app.premiselabs.co`). |
+| `apps/` | Dashboard + blog-admin sources. The dashboard deploys separately to `tortoise-dashboard` (`app.premiselabs.co`). (#3768: its `node_modules` tree used to be committed and was publicly served; it is now neither tracked nor deployed.) |
 | `migrations/` | The auth session DDL — internal. |
 | `*.md` | Internal docs (`README.md` — this file, `website_architecture.md`, the re-auth plan). |
 | `node_modules/` | Dependency tree (belt-and-braces; `/apps/` already prunes it). |

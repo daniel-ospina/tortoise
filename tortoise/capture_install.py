@@ -163,6 +163,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -274,6 +275,173 @@ LEGACY_PI_DIRNAME = "tortoise-capture"
 #: Where the legacy entry is moved when disabled — dot-prefixed, so Pi's
 #: loader skips it (``entry.name.startsWith(".")``) while its files live on.
 PI_DISABLED_DIRNAME = ".tortoise-capture.disabled"
+
+# ── #3516 §B / #3515 piece 12 — the client-timestamp floor ───────────────
+# The store-proven check pairs with a FLOOR: the matched record's
+# CLIENT-recorded instant must be strictly after the install, less a skew
+# tolerance. The client value is the floor's input, NOT the server's
+# ``capturedAt``: the server stamps the INGEST transaction time, so draining
+# the pre-existing spool after an install would give every stale row
+# ``capturedAt = now > install`` and the floor could only ever pass — it would
+# exclude nothing it is about.
+#
+# The tolerance is ±5 minutes because the two sides are genuinely DIFFERENT
+# CLOCKS (client vs server), and a client clock behind by MORE than the
+# tolerance is rejected WITH A RECORDED REASON — never silently accepted.
+FLOOR_SKEW_TOLERANCE_S = 300.0
+
+#: The only ``client_captured_at_source`` value that can never count as a
+#: floor pass. The backfill/import lane admits a record with no client
+#: timestamp by DISABLING the floor for that turn — an honest gap, not a
+#: silent pass (piece 12).
+FLOOR_SOURCE_UNKNOWN = "unknown"
+
+#: Verdicts. ``DISABLED`` is deliberately NOT a pass: a floor a run cannot
+#: evaluate must never read as a floor that passed, which is the whole
+#: falsifiability property the ``..._source`` sibling exists to preserve.
+VERDICT_PASSED = "passed"
+VERDICT_FAILED = "failed"
+VERDICT_DISABLED = "disabled"
+
+
+def install_at_unix(value) -> float | None:
+    """Coerce an ``install_probe_{harness}`` state value to unix seconds.
+
+    The probe endpoint records ``datetime.now(UTC).isoformat()`` — an ISO-8601
+    **STRING** — so a caller wiring the floor to the recorded artifact must
+    convert first. This is that conversion, named rather than left implicit,
+    because passing the ISO string straight in as ``install_at`` raises
+    ``TypeError: unsupported operand type(s) for -: 'str' and 'float'``.
+
+    An absent or unparseable value returns ``None``, which the floor reports as
+    DISABLED — never as a FAILURE, and never as a pass. A value that is present
+    but is not a reading must therefore also return ``None``, which is why a
+    non-finite number and a NAIVE datetime are both refused below.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        # `bool` first: it is an `int` subclass, so `True` would coerce to the
+        # epoch-adjacent instant `1.0` — a clock reading that is not one.
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            # `float(10**400)` raises, and this function's contract is "present
+            # but not a reading -> None", so raising would break it.
+            return None
+        # `json`/pydantic both admit `inf`/`nan`. Returning them would let the
+        # floor compare them — a verdict computed from a non-reading. Absent is
+        # the honest answer.
+        return number if math.isfinite(number) else None
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # A NAIVE datetime is read as LOCAL time by `.timestamp()`, shifting the
+        # floor by this box's UTC offset — measured 5 h here, two orders of
+        # magnitude past the 300 s tolerance, so it silently flips the verdict.
+        # The probe always writes an aware value (`datetime.now(UTC).isoformat()`).
+        if parsed.tzinfo is None:
+            return None
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def client_capture_floor_verdict(
+    client_captured_at: float | None,
+    client_captured_at_source: str | None,
+    install_at: float | None,
+    *,
+    tolerance: float = FLOOR_SKEW_TOLERANCE_S,
+) -> tuple[str, str]:
+    """The store-proven timestamp floor (#3516 §B, #3515 piece 12).
+
+    Returns ``(verdict, reason)`` with verdict in
+    {``VERDICT_PASSED``, ``VERDICT_FAILED``, ``VERDICT_DISABLED``}. The reason
+    is always a real string so a rejection can never be silent.
+
+    ``client_captured_at`` is unix seconds. ``install_at`` is ALSO unix
+    seconds — NOT the raw ``install_probe_{harness}`` state value, which is an
+    ISO-8601 string; pass that through :func:`install_at_unix` first. A
+    ``client_captured_at_source`` of ``None`` is deliberately NOT disabled: it
+    is the in-process recorder's shape (piece 12's row 1 — "none, the recorder
+    always has a clock"), and only the explicit ``'unknown'`` marks an admitted
+    backfill gap that must not count as a pass.
+    """
+    if client_captured_at is None:
+        return VERDICT_DISABLED, (
+            "no client_captured_at recorded — the floor cannot be evaluated")
+    # A non-finite client instant is not a reading either: `inf` would PASS every
+    # finite floor and `nan` would fail every one, both on a value that is not a
+    # clock. The writers refuse these; a direct caller must not slip past — and
+    # must not crash either, because `math.isfinite(10**400)` RAISES and a string
+    # raises TypeError. A `bool` is an `int` subclass, so `isfinite` accepts it and
+    # `True` would be compared as the instant `1.0` — the same trap the boundary
+    # validator refuses.
+    try:
+        _client_is_finite = (
+            not isinstance(client_captured_at, bool)
+            and math.isfinite(client_captured_at))
+    except (OverflowError, TypeError):
+        _client_is_finite = False
+    if not _client_is_finite:
+        return VERDICT_DISABLED, (
+            f"client_captured_at {client_captured_at!r} is not a finite instant — "
+            "the floor cannot be evaluated")
+    if client_captured_at_source == FLOOR_SOURCE_UNKNOWN:
+        return VERDICT_DISABLED, (
+            "client_captured_at_source is 'unknown' — an admitted backfill gap, "
+            "which can never be counted as a floor pass")
+    if install_at is None:
+        return VERDICT_DISABLED, (
+            "no install probe recorded for this harness — the floor cannot be "
+            "evaluated")
+    # A recorded-but-UNUSABLE probe is not an ABSENT one. The reason string is the
+    # only signal a refused capture carries, so misattributing the cause here (the
+    # round-5 review caught it) would send a reader looking for a missing probe
+    # when the probe exists and is malformed.
+    if isinstance(install_at, bool):
+        return VERDICT_DISABLED, (
+            f"install_at is a {type(install_at).__name__}, not a unix timestamp "
+            "— the recorded probe value is unusable, so the floor cannot be "
+            "evaluated")
+    # A non-finite install time is not an observation either: `inf` makes the
+    # floor unreachable and `nan` makes every comparison false.
+    try:
+        _install_is_finite = math.isfinite(install_at)
+    except (OverflowError, TypeError):
+        _install_is_finite = False
+    if not _install_is_finite:
+        return VERDICT_DISABLED, (
+            f"install_at {install_at!r} is not a finite instant — the floor "
+            "cannot be evaluated")
+    # An install time at or before the epoch is not an observation: it is the
+    # ABSENT encoding, and it would yield `floor = -tolerance`, which every client
+    # clock passes — a floor-pass on the absence of a floor.
+    #
+    # Deliberately NOT extended to `install_at - tolerance <= 0`: a small but
+    # POSITIVE install time means the capture genuinely happened after the
+    # install, and PASS is the correct answer for that input — the floor's job is
+    # to reject a capture that PREDATES the install, not to validate the probe.
+    # Extending it would also destroy `tolerance=inf`, the only way to express
+    # "the floor is deleted" (see `test_floor_mutation_control`).
+    if install_at <= 0:
+        return VERDICT_DISABLED, (
+            f"install_at {install_at:.3f} is at or before the epoch — not a "
+            "recorded install time, so the floor cannot be evaluated")
+    floor = install_at - tolerance
+    if client_captured_at > floor:
+        return VERDICT_PASSED, (
+            f"client_captured_at {client_captured_at:.3f} > install "
+            f"{install_at:.3f} − tolerance {tolerance:.0f}")
+    behind = floor - client_captured_at
+    return VERDICT_FAILED, (
+        f"client clock is {behind:.1f}s behind the install floor "
+        f"(client_captured_at {client_captured_at:.3f} <= install "
+        f"{install_at:.3f} − tolerance {tolerance:.0f}) — rejected")
 
 
 @dataclass(frozen=True)

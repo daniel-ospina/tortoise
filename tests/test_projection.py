@@ -2346,6 +2346,208 @@ def test_5026_b2_derivable_set_unchanged():
     assert STRUCTURAL_REL_LABELS["extractedFrom"] == "Source"
 
 
+def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_proj):
+    """#5206: the LIVE producer path and the REPLAY resolver must agree on what
+    an ``aboutDocument`` target may be — in BOTH directions.
+
+    Measured before this fix, end to end: ``sdk.create_edge('aboutDocument',
+    point, <provenance Source>)`` returned ``created=True``, supersede reported
+    ``edges_transferred=1``, and ``rebuild_all`` then dropped the edge — leaving
+    it on NEITHER the old nor the successor node, so the live state could not be
+    reproduced from the journal. The replay branch's own comment justified the
+    refusal as *"exactly as live refuses it"*, and live did not: the auto-detect
+    path guards on ``documentKind IS NOT NULL``, but the producer path had no
+    guard at all.
+
+    This pins the producer guard against the contract the replay path applies
+    when it resolves an `aboutDocument` descriptor — the resolver's
+    `documentKind`/`url` match, and `stub_key`'s non-empty-key rule — so
+    re-opening the asymmetry from EITHER end reds it (remove the producer guard
+    -> the refusal assert fails; drop the replay guard -> the
+    ``resolve_structural_target(...) is None`` assert fails).
+
+    Durability is out of scope here and deliberately not asserted; the
+    write-surface question is tracked in #2296.
+    """
+    from tortoise.projection.edges import resolve_structural_target
+
+    proj = live_proj
+    # A provenance :Source — no documentKind, so not an aboutDocument target.
+    # NB: `create_edge` resolves its TARGET by id/eventId only (not url), while
+    # the replay resolver keys aboutDocument on the target's `url` — the same
+    # node is addressed two ways, which is exactly why the two must apply the
+    # same target contract.
+    proj.g.query(
+        "MERGE (s:Source {id:'5206-prov', url:'https://x/5206-prov', "
+        "sourceKind:'github'})")
+    proj.g.query("MERGE (p:Point {id:'5206-p', pointKind:'statement'})")
+
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/5206-prov", "aboutDocument") is None, \
+        "replay resolved a provenance Source as an aboutDocument target"
+
+    with pytest.raises(ValueError) as ei:
+        proj.create_edge("5206-p", "5206-prov", "aboutDocument")
+    msg = str(ei.value)
+    # The refusal must be actionable: name the guard and the relation to use.
+    assert "documentKind" in msg and "aboutSource" in msg, msg
+
+    # The legitimate case still works — the guard is about the target's KIND,
+    # not a refusal of the relation.
+    proj.g.query(
+        "MERGE (s:Source {id:'5206-doc', url:'https://x/5206-doc', "
+        "documentKind:'report'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/5206-doc", "aboutDocument") is not None
+    assert proj.create_edge(
+        "5206-p", "5206-doc", "aboutDocument") is True
+
+    # A non-:Source target is refused on the same guard, and the refusal must
+    # NOT diagnose a missing documentKind on a label that cannot carry one.
+    proj.g.query("MERGE (o:Object {id:'5206-obj'})")
+    with pytest.raises(ValueError) as ei2:
+        proj.create_edge("5206-p", "5206-obj", "aboutDocument")
+    msg2 = str(ei2.value)
+    assert "not a document-bearing :Source" in msg2, msg2
+    assert "without documentKind" not in msg2, msg2
+
+
+def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
+    """#5206: the `aboutDocument` target contract — a `:Source` carrying
+    `documentKind` — must hold on the live producer, and a violation reached
+    through `sdk.ingest` must arrive as the ingest contract's OWN error.
+
+    The producer (`create_edge`) accepted ANY resolved target while the replay
+    resolver refused a non-document one, so an edge built live was transferred
+    at supersede and then dropped by `rebuild_all` — ending on NEITHER node.
+    The write leg now refuses it. That refusal is a projection primitive's
+    `ValueError`, which is not what `ingest` promises its callers, so the
+    ingest leg converts it to `Phase2Error` (with the bundle's batch_id).
+
+    A duplicate of this predicate in the ingest Phase-1 validator is the
+    tempting-but-wrong place to enforce it — that leg does not own endpoint
+    semantics — so the legitimate document shapes it would have refused are
+    pinned below.
+
+    NOT asserted here: bundle atomicity. Phase 2 has already written the
+    bundle's points and sources when the connection write fails — this call
+    site's pre-existing behaviour (the `endpoints not found` branch does the
+    same), and the reason the error must at least be contract-shaped.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.exceptions import Phase2Error
+    from tortoise.projection.edges import resolve_structural_target
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_5206_ingest_")
+    sdk = TortoiseSDK(db_path=os.path.join(d, "tortoise.db"),
+                      event_log_path=os.path.join(d, "events.jsonl"))
+    try:
+        # ── 1. The write leg refuses, and replay agrees with it. ──
+        g = sdk._get_proj().g
+        g.query("MERGE (s:Source {id:'5206-prov', "
+                "url:'https://x/5206-prov', sourceKind:'github'})")
+        g.query("MERGE (p:Point {id:'5206-p', pointKind:'statement'})")
+        assert resolve_structural_target(
+            g, "Source", "https://x/5206-prov", "aboutDocument") is None, \
+            "replay resolved a provenance Source as an aboutDocument target"
+        with pytest.raises(ValueError) as ei:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-prov")
+        assert "aboutSource" in str(ei.value), ei.value
+
+        # ...and so is a document-bearing :Source with no `url`: replay
+        # addresses the target by url (`MATCH (s:Source {url:$url})`), so live
+        # would otherwise accept an edge that `rebuild_all` drops.
+        g.query("MERGE (s:Source {id:'5206-doc-nourl', "
+                "documentKind:'report'})")
+        with pytest.raises(ValueError) as ei_nourl:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-nourl")
+        assert "url" in str(ei_nourl.value), ei_nourl.value
+
+        # ...and an EMPTY url is no more an identity than a missing one:
+        # `stub_key` emits no descriptor for it, so it is un-replayable too.
+        g.query("MERGE (s:Source {id:'5206-doc-emptyurl', url:'', "
+                "documentKind:'report'})")
+        with pytest.raises(ValueError) as ei_eurl:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-emptyurl")
+        assert "url" in str(ei_eurl.value), ei_eurl.value
+
+        # ── 2. Through ingest, that refusal is a Phase2Error. ──
+        with pytest.raises(Phase2Error) as ei2:
+            sdk.ingest({
+                "points": [{"kind": "statement", "content": "claim A",
+                            "ref": "pa"}],
+                "sources": [{"url": "https://x/5206-prov-ingest",
+                             "sourceKind": "github", "ref": "src1"}],
+                "connections": [{"from": "pa", "to": "src1",
+                                 "relation": "aboutDocument"}],
+            })
+        msg = str(ei2.value)
+        assert "aboutDocument" in msg and "aboutSource" in msg, msg
+
+        # ── 2b. The conversion is NARROW to `aboutDocument`. `create_edge`
+        # raises ValueError for other invalid requests too, and those must
+        # still surface as the primitive's own error. Phase2Error subclasses
+        # ValueError, so the type is checked exactly rather than by isinstance.
+        with pytest.raises(ValueError) as ei_own:
+            sdk.ingest({
+                "points": [{"kind": "statement", "content": "own A",
+                            "ref": "oa"},
+                           {"kind": "statement", "content": "own B",
+                            "ref": "ob"}],
+                "connections": [{"from": "oa", "to": "ob",
+                                 "relation": "ownedBy"},
+                                {"from": "ob", "to": "oa",
+                                 "relation": "ownedBy"}],
+            })
+        assert not isinstance(ei_own.value, Phase2Error), type(ei_own.value)
+        assert "Circular ownership" in str(ei_own.value), ei_own.value
+
+        # ── 3. Every legitimate document shape must still ingest. ──
+        # (a) the CANONICAL document: a `sources` item with sourceKind=
+        #     'document' + documentKind (tests/fixtures/
+        #     document_source_gold.jsonl, case `doc-with-genre`).
+        a = sdk.ingest({
+            "sources": [{"url": "https://x/5206-doc-a",
+                         "sourceKind": "document", "documentKind": "brief",
+                         "ref": "d1"}],
+            "points": [{"kind": "statement", "content": "claim B",
+                        "ref": "pb"}],
+            "connections": [{"from": "pb", "to": "d1",
+                             "relation": "aboutDocument"}],
+        })
+        assert a["created"]["connections"] == 1, a
+
+        # (b) the same, with the genre in nested `props` — an explicitly
+        #     supported ingest shape (`_coerce_props` flattens it at write time).
+        b = sdk.ingest({
+            "sources": [{"url": "https://x/5206-doc-b",
+                         "sourceKind": "document",
+                         "props": {"documentKind": "brief"}, "ref": "d2"}],
+            "points": [{"kind": "statement", "content": "claim C",
+                        "ref": "pc"}],
+            "connections": [{"from": "pc", "to": "d2",
+                             "relation": "aboutDocument"}],
+        })
+        assert b["created"]["connections"] == 1, b
+
+        # (c) a document declared as an `entities` item of type 'document'.
+        #     This asserts only that the target-kind guard accepts it — its
+        #     durability is #2296's question, not this test's.
+        c = sdk.ingest({
+            "entities": [{"type": "document", "name": "Doc 5206",
+                          "documentKind": "report", "ref": "d3"}],
+            "points": [{"kind": "statement", "content": "claim D",
+                        "ref": "pd"}],
+            "connections": [{"from": "pd", "to": "d3",
+                             "relation": "aboutDocument"}],
+        })
+        assert c["created"]["connections"] == 1, c
+    finally:
+        sdk.close()
+
+
 def test_5026_b6_retired_fields_cannot_reenter(live_proj):
     """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
     reappear — neither via the fixed clause NOR the open passthrough. A
@@ -2383,10 +2585,12 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     SURVIVED `rebuild_all`. The two declared B6 tests cover
     `_upsert_document` and `_upsert_source`, and neither can see this route.
 
-    The denial has to be TARGET-AWARE: `objectKind` is the canonical Object
-    kind (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
-    `_sanitize_props` reject would break unrelated labels. It fires only on a
-    document `:Source` — the same predicate the `documents` meter uses.
+    The denial is TARGET-AWARE: `objectKind` is the canonical Object kind
+    (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
+    `_sanitize_props` reject would break unrelated labels. It fires on ANY
+    `:Source` — ruling B on #3998, which dropped the `documentKind IS NOT NULL`
+    predicate and overturned #5026's pinned precondition that a non-document
+    `:Source` may carry these keys.
     """
     sdk = sdk_factory()
     doc = sdk.create_document("B6ThirdDoor", "report")
@@ -2397,7 +2601,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
                      ("docStatus", "captured"),
                      ("objectKind", "document"),
                      ("object_kind", "document")):
-        with pytest.raises(ValueError, match="retired document field"):
+        with pytest.raises(ValueError, match="retired field"):
             sdk.update_entity(did, **{key: val})
     rows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
@@ -2415,7 +2619,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
     tid = tdoc["id"]
     assert tdoc["documentKind"] == "transcript"
-    with pytest.raises(ValueError, match="retired document field"):
+    with pytest.raises(ValueError, match="retired field"):
         sdk.update_entity(tid, content="SECRET BODY")
     trows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
@@ -2434,24 +2638,30 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
 def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
     """B6, the FOURTH DOOR (review round 3): the retired fields must be
     SCRUBBED when a node is PROMOTED to a document, not merely refused on
-    write. A non-document `:Source` may legitimately carry `content` or
-    `objectKind` — the target-aware `update_entity` guard above allows exactly
-    that — and a later document creator MERGEs onto that SAME node by `url`.
-    Without the scrub at the document MERGE, the inherited value survived both
-    live and on replay.
+    write. A PRE-RULING `:Source` can carry `content` or `objectKind` — the
+    write paths no longer produce one (ruling B on #3998 refuses them on EVERY
+    `:Source`, which is why the setup below seeds by Cypher) — and a later
+    document creator MERGEs onto that SAME node by `url`. Without the scrub at
+    the document MERGE, the inherited value survived both live and on replay.
 
     This is the complement of the third-door test: that one proves the write
-    is refused on a document, this one proves a value written while the node
-    was NOT a document does not become a retired field when it becomes one.
+    is refused, this one proves a value inherited by a node from before the
+    refusal does not become a retired field when the node becomes a document.
     """
     sdk = sdk_factory()
     sdk.create_source("doc/promo.md", "document")
-    sdk.update_entity("doc/promo.md", content="SECRET", objectKind="X")
     proj = sdk._get_proj()
+    # The inherited value is seeded with raw Cypher — the shape a pre-ruling
+    # deployment (or any direct graph writer) left behind. Ruling B on #3998
+    # makes `update_entity` refuse `content`/`objectKind` on EVERY `:Source`,
+    # so the old API setup can no longer produce this node.
+    proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) "
+        "SET s.content='SECRET', s.objectKind='X'")
     assert proj.g.query(
         "MATCH (s:Source {url:'doc/promo.md'}) RETURN s.content"
     ).result_set[0][0] == "SECRET", \
-        "precondition: writable while the node is not a document"
+        "precondition: a pre-ruling node carries the retired field"
     proj.apply({"type": "DocumentCreated", "id": "doc/promo.md",
                 "title": "Promo", "document_kind": "report"})
     rows = proj.g.query(

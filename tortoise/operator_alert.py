@@ -62,9 +62,11 @@ UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 #: so a single kind would let the first lane to fault own the incident for its
 #: whole life. ``ABUSE_DECISION_FAULT`` is the evaluation path (``window_sum``,
 #: ``clean_window_episode_end``, ``latest_flag_at``, ``rule_event_between``);
-#: ``ABUSE_ENFORCEMENT_FAULT`` is the enforcement ACTION (``suspend_org``,
-#: ``flag_org``). Keeping them apart means a transient evaluation-read blip can
-#: never mask a failed suspension — the defect #4872 is about.
+#: ``ABUSE_ENFORCEMENT_FAULT`` is the enforcement ACTION — after #5425 the only
+#: one is ``flag_org``; the ``suspend_org`` lane was deleted along with the
+#: automatic suspension it guarded. Keeping them apart means a transient
+#: evaluation-read blip can never mask a failed enforcement WRITE — the defect
+#: #4872 is about.
 #:
 #: Deliberately not superstrings of ``UNMETERED_INCREMENT`` / ``COHORT_*``: a
 #: dropped metering increment, an unenforceable spend cap, and an abuse

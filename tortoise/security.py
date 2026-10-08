@@ -151,11 +151,10 @@ def validate_entity_type(entity_type: str) -> str:
 #   * ``operator`` → ``:Point`` (#172). Operators are Points with
 #     ``is_operator=true``, consistent with ``run_structural_query``.
 #
-# ⚠️ KNOWN DIVERGENCE (#5407): ``run_fts_query`` (search_engine.py:755) does
-# NOT apply the ``operator → Point`` exception — it emits ``Operator`` for
-# ``entity_type="operator"``. That leg keeps its own derivation until #5407
-# migrates all three query legs onto this mapping; DO NOT "unify" it here,
-# because doing so changes FTS behaviour under this issue's scope.
+# #5407: ``run_fts_query`` does NOT route through this mapping — it has its own
+# operator branch (``MATCH (n:Point) WHERE n.is_operator = true``) and emits the
+# same ``Point`` label, so there is no label divergence for ``operator`` today.
+# Migrating all three query legs onto this mapping is #5407's scope.
 ENTITY_TYPE_LABELS: dict[str, str] = {
     "point": "Point",
     "event": "Event",
@@ -181,9 +180,12 @@ def entity_label(entity_type: str) -> str:
       unhashable input, silently changing the failure mode).
 
     ``entity_type`` is deliberately NOT validated here:
-    ``validate_entity_type`` is the enforcement point (and is currently inert —
-    see #5404); this function is a *translation*, so it must keep working for
-    the legacy inputs the runners accept today.
+    ``validate_entity_type`` is the enforcement point, called at the ENTRY of
+    each module-level runner (``run_fts_query``/``run_vector_query``/
+    ``run_structural_query``, #5404). This function is a *translation*, so it
+    keeps the historical derivation — including the unknown-``str`` fallback —
+    for a direct caller, but no public graph entry point can reach that
+    fallback with an unvalidated value.
     """
     if isinstance(entity_type, str):
         label = ENTITY_TYPE_LABELS.get(entity_type)

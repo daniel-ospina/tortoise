@@ -117,11 +117,11 @@ position-based guess.
 
 USAGE
 -----
-    python3 tools/cmux_dispatch.py send --workspace workspace:12 \
+    uv run python tools/cmux_dispatch.py send --workspace workspace:12 \
         --label B4 --file /path/to/brief.txt
-    python3 tools/cmux_dispatch.py wait-ready --workspace workspace:12
-    python3 tools/cmux_dispatch.py verify --workspace workspace:12 --text "pointer"
-    python3 tools/cmux_dispatch.py state --workspace workspace:12
+    uv run python tools/cmux_dispatch.py wait-ready --workspace workspace:12
+    uv run python tools/cmux_dispatch.py verify --workspace workspace:12 --text "pointer"
+    uv run python tools/cmux_dispatch.py state --workspace workspace:12
 
 EXIT CODES
 ----------

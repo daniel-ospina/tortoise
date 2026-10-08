@@ -8,13 +8,13 @@ after Phase 2 removes n.context.
 
 Usage:
   TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
-    python3 graph-scripts/context_removal_audit.py
+    uv run python graph-scripts/context_removal_audit.py
 
   # Dry-run (print what would be written):
-  python3 graph-scripts/context_removal_audit.py --dry-run
+  uv run python graph-scripts/context_removal_audit.py --dry-run
 
   # Custom output path:
-  python3 graph-scripts/context_removal_audit.py --output /tmp/audit.json
+  uv run python graph-scripts/context_removal_audit.py --output /tmp/audit.json
 """
 from __future__ import annotations
 

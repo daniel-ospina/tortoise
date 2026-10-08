@@ -85,10 +85,10 @@ a contradiction).
 
 Usage::
 
-    python3 tools/edge_census.py census --uri docker://:falkordb@localhost:6379/mygraph
-    python3 tools/edge_census.py census --uri ... --org org_abc123 --accept-schema-writes
-    python3 tools/edge_census.py probe --n 5000
-    python3 tools/edge_census.py probe --json > receipt.json
+    uv run python tools/edge_census.py census --uri docker://:falkordb@localhost:6379/mygraph
+    uv run python tools/edge_census.py census --uri ... --org org_abc123 --accept-schema-writes
+    uv run python tools/edge_census.py probe --n 5000
+    uv run python tools/edge_census.py probe --json > receipt.json
 
 Needs a running docker for ``probe`` only. ``--json`` is available on both.
 """

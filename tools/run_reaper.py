@@ -78,10 +78,10 @@ run continues. ``--apply`` is the only arming flag; **dry-run is the default**
 
 Usage
 -----
-    python3 tools/run_reaper.py --repo owner/name                 # dry-run
-    python3 tools/run_reaper.py --repo owner/name --run 36803221199
-    python3 tools/run_reaper.py --repo owner/name --workflow python-ci.yml --json
-    python3 tools/run_reaper.py --repo owner/name --apply         # cancel wedges
+    uv run python tools/run_reaper.py --repo owner/name                 # dry-run
+    uv run python tools/run_reaper.py --repo owner/name --run 36803221199
+    uv run python tools/run_reaper.py --repo owner/name --workflow python-ci.yml --json
+    uv run python tools/run_reaper.py --repo owner/name --apply         # cancel wedges
 """
 from __future__ import annotations
 
