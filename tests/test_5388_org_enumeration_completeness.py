@@ -223,18 +223,165 @@ class TestWindowShiftRace:
                 self.total = total
 
             def query_with_total(self, table, **kw):
-                last = None
-                for col, op, val in (kw.get("filters") or []):
-                    if col == "id" and op == "gt":
-                        last = val
-                page = [r for r in self.page
-                        if last is None or r["id"] > last]
-                return page, self.total
+                # Deliberately IGNORES the cursor: re-serves the same full page
+                # on every call. Round 3 found that honouring the cursor made
+                # this test VACUOUS — page 2 came back empty, so the
+                # distinct-id count was never exercised and swapping it for a
+                # raw row count left every test green. A server that re-serves
+                # rows it already sent is exactly the case the distinct count
+                # exists for.
+                return self.page, self.total
 
         # 2*MAX claimed, but only MAX distinct rows will ever be served.
         cp = RepeatingCP(MAX * 2)
         assert _run(monkeypatch, cp, require_complete=True) is None, (
             "a total that no amount of walking satisfies must fail closed"
+        )
+
+
+class TestEndOfWalkSignals:
+    """Round 3: the walk must stop only on an EMPTY page.
+
+    Two weaker signals were each a fail-OPEN in the destructive caller
+    (`_refresh_cost_allocation` prunes every org absent from the enumeration),
+    and each is pinned below by the exact shape that defeats it.
+    """
+
+    class _Server:
+        """Pages by keyset over a mutable fleet, with configurable pathologies.
+
+        `cap`         — per-request row cap (may be BELOW the requested limit)
+        ``stated``      — 'fleet' = total on page 1 only, as PostgREST does;
+                          'remaining' = a (cursor-filtered) total on every page
+        ``insert_after``— rows (id, name) that appear once page 1 is served
+
+        ``order`` IS honoured: the client asks for ``order="id"`` and a fake
+        that returns insertion order instead is not a faithful double — keyset
+        paging's whole soundness rests on the cursor being the SORT key, and an
+        unsorted double silently hid a real break (round 3: page 2 came back
+        with the un-served originals first, so an early break looked harmless).
+        """
+
+        def __init__(self, ids, *, cap=None, stated="fleet",
+                     insert_after=None):
+            self.rows = [{"id": i, "name": None} for i in ids]
+            self.cap = cap
+            self.stated = stated
+            self.insert_after = list(insert_after or [])
+            self.calls = 0
+
+        def query_with_total(self, table, **kw):
+            self.calls += 1
+            if self.calls == 2:
+                # The race: these arrive AFTER page 1's count was taken and
+                # AFTER page 1 was served. Inserting them on the SAME call as
+                # the count would make the total include them and hide the bug
+                # (a fixture defect of the same class as #5543's tier=None).
+                self.rows.extend({"id": i, "name": None}
+                                  for i in self.insert_after)
+            last = None
+            for col, op, val in (kw.get("filters") or []):
+                if col == "id" and op == "gt":
+                    last = val
+            view = [r for r in self.rows if last is None or r["id"] > last]
+            order = kw.get("order")
+            if order:
+                view.sort(key=lambda r: r.get(order) or "")
+            limit = kw.get("limit")
+            bounds = [b for b in (limit, self.cap) if b is not None]
+            size = min(bounds) if bounds else None
+            page = view[:size] if size is not None else view
+            if self.stated is None:
+                return page, None
+            if self.stated == "fleet":
+                # PostgREST emits `*/` (no total) unless count=exact was asked.
+                return page, (len(self.rows) if kw.get("count_exact") else None)
+            # "remaining": a re-stated count of the cursor-filtered view.
+            return page, len(view)
+
+    def test_a_stale_total_cannot_end_the_walk(self, monkeypatch):
+        """A page-1 count is a SNAPSHOT; `seen` grows with later inserts.
+
+        Enough inserts sorting after the cursor push the distinct count past
+        the stale total, and if that ends the walk the unserved originals are
+        pruned.
+        """
+        n = MAX + 500
+        ids = [f"o{i:06d}" for i in range(n)]
+        # Insert ids that sort strictly between o000999 and o001000 (any suffix
+        # keeps it there: the discriminating char is index 3), and are DISTINCT
+        # — a repeated insert id inflates the row count without advancing the
+        # distinct set, which would make the assertion below unfalsifiable.
+        inserts = [f"o000999{i:04d}" for i in range(1000)]
+        cp = self._Server(ids, cap=MAX, insert_after=inserts)
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None, "a fleet that IS reachable must not fail closed"
+        served = {r["org_id"] for r in got}
+        missing = [i for i in ids if i not in served]
+        assert not missing, (
+            f"every ORIGINAL org must be served, missing {len(missing)} "
+            f"(stale page-1 total ended the walk at {cp.calls} page(s))"
+        )
+
+    def test_a_short_page_without_a_total_is_not_the_end(self, monkeypatch):
+        """#5388's own headline deployment: per-request cap BELOW our limit.
+
+        No stated total, so a short page is the only local signal — and it is
+        the WRONG one. At most one extra request is paid for a small fleet.
+        """
+        n = 1500
+        ids = [f"o{i:06d}" for i in range(n)]
+        cp = self._Server(ids, cap=500, stated=None)
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None
+        assert {r["org_id"] for r in got} == set(ids), (
+            f"a capped server with no total must be walked to exhaustion, "
+            f"got {len(got)} of {n} in {cp.calls} page(s)"
+        )
+
+    def test_a_later_page_total_cannot_replace_the_fleet_total(
+            self, monkeypatch):
+        """A cursor-filtered total counts the REMAINING rows, not the fleet.
+
+        Accepting it satisfies `seen >= total` almost immediately and stops
+        the walk with rows unfetched while reporting COMPLETE.
+        """
+        n = 1500
+        ids = [f"o{i:06d}" for i in range(n)]
+        cp = self._Server(ids, cap=500, stated="remaining")
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None
+        assert {r["org_id"] for r in got} == set(ids), (
+            f"a later page's total must never replace the fleet count, got "
+            f"{len(got)} of {n} in {cp.calls} page(s)"
+        )
+
+    def test_a_later_page_total_cannot_mask_a_shortfall(self, monkeypatch):
+        """The fleet count is a CONSISTENCY CHECK, not just a label.
+
+        When the server states a fleet total larger than it will ever serve,
+        `complete` must fail closed. Letting a later page's (smaller, cursor-
+        filtered) count replace it makes the check compare against a number the
+        walk trivially satisfies, so a real shortfall is reported COMPLETE and
+        the destructive caller prunes the orgs that were never served. This is
+        the case the sticky first total exists for; without this test that
+        guard could be deleted with the suite still green (a mutation found
+        exactly that).
+        """
+        n = 900
+        ids = [f"o{i:06d}" for i in range(n)]
+
+        class LyingCP(self._Server):
+            def query_with_total(self, table, **kw):
+                page, _ = super().query_with_total(table, **kw)
+                # Fleet claims 1500; only 900 exist and the tail states the
+                # shrinking remainder (500 -> 400 -> 0).
+                return page, (1500 if self.calls == 1 else len(page))
+
+        cp = LyingCP(ids, cap=500, stated="remaining")
+        assert _run(monkeypatch, cp, require_complete=True) is None, (
+            "a fleet total the walk can never satisfy must fail closed, not be "
+            "overwritten by a later page's smaller remainder"
         )
 
 

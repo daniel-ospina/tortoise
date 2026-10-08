@@ -1047,7 +1047,7 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             rows: list[dict] = []
             seen_ids: set[str] = set()
             total: int | None = None
-            short_page = True
+            exhausted = False
             last_id: str | None = None
             for _page in range(_ORG_ENUMERATION_MAX_PAGES):
                 page_filters: list[tuple[str, str, object]] = [
@@ -1077,39 +1077,46 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 seen_ids.update(r["id"] for r in page)
                 if page:
                     last_id = page[-1]["id"]
-                if page_total is not None:
+                if page_total is not None and total is None:
+                    # Sticky FIRST total only. The fleet count is the one asked
+                    # for under the fleet-wide filter (``count_exact`` on page
+                    # 1). A later page is cursor-filtered too, so its
+                    # ``Content-Range`` total counts the REMAINING rows —
+                    # accepting it would let the count be satisfied almost
+                    # immediately and stop the walk mid-fleet.
                     total = page_total
-                short_page = len(page) < _ORG_ENUMERATION_MAX_ROWS
-                if total is not None and len(seen_ids) >= total:
-                    break  # the server's count is satisfied
                 if not page:
-                    break  # nothing left to walk
-                if short_page and total is None:
-                    # ONLY a short page with NO stated total means "that was all".
-                    # When the server DID state a total, a short page is a
-                    # per-request cap being applied -- exactly the deployment
-                    # whose `max_rows` is lower than our requested limit -- and
-                    # stopping here would enumerate only the first page of a
-                    # larger fleet. That is the case #5388 exists to fix, so
-                    # keep walking until the stated total is met.
+                    # THE sound end-of-walk signal: the server returned no more
+                    # rows for this filter. Nothing weaker works — a short page
+                    # is a per-request cap, and a satisfied total is a SNAPSHOT
+                    # that concurrent inserts can pass while originals are still
+                    # unserved.
+                    exhausted = True
                     break
 
             parsed = [{"org_id": r["id"], "name": r.get("name")}
                       for r in rows]
-            # Completeness: the server's count when it stated one, else the only
-            # remaining signal (a short page). Counted over DISTINCT ids — a
-            # duplicated row is not progress, and letting one satisfy the total
-            # is how a shifted window would certify an incomplete fleet. A
-            # page-cap exit leaves this False, because exhausting a local bound
-            # is not the same as finishing.
-            complete = (len(seen_ids) >= total if total is not None else short_page)
+            # Completeness. The walk above stops only on an EMPTY page (or the
+            # page cap, which leaves ``exhausted`` False); only THEN is it asked
+            # whether the fleet is complete:
+            #   * with a server total -> count DISTINCT ids against it (a
+            #     duplicated row is not progress, and letting one satisfy the
+            #     total is how a shifted window certifies an incomplete fleet);
+            #   * with NO total -> the empty page IS the signal.
+            # Two shapes were REMOVED here and must not come back (#5388 rounds
+            # 1 and 3): a short page as end-of-data (wrong whenever a server's
+            # per-request cap is below our ``limit`` — the exact deployment this
+            # issue names, and a fail-OPEN that pruned real orgs), and a
+            # satisfied total as a STOP condition (wrong because the total is a
+            # page-1 snapshot while ``seen_ids`` grows with concurrent inserts).
+            complete = (len(seen_ids) >= total if total is not None else exhausted)
             if not complete:
                 _logger.warning(
                     "org enumeration is INCOMPLETE: %d row(s) walked, server "
-                    "total=%s, short_page=%s — require_complete=%s (fail-closed "
+                    "total=%s, exhausted=%s — require_complete=%s (fail-closed "
                     "for the cost metric: an incomplete fleet must never prune "
                     "orgs)",
-                    len(rows), total, short_page, require_complete)
+                    len(rows), total, exhausted, require_complete)
                 if require_complete:
                     return None
             return parsed

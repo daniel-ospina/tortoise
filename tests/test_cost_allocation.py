@@ -1172,13 +1172,25 @@ def test_short_supabase_org_enumeration_is_returned(monkeypatch):
     from tortoise import supabase_control as sc
 
     class _FakeCP:
+        """Serves one org, then an EMPTY page — i.e. the walk reaches the end.
+
+        A double that re-serves the same page forever is not "a short
+        enumeration" any more: since #5388 the walk stops only on an empty
+        page, so an unending server correctly walks to the page cap and is
+        reported INCOMPLETE (fail-closed). Modelling exhaustion is what makes
+        this test exercise the complete path.
+        """
+
+        def __init__(self):
+            self._served = 0
+
         def query(self, _table, **_kw):
             return [{"id": "org_a", "name": "A"}]
 
         def query_with_total(self, _table, **kw):
-            # #5388: a short page with no stated total IS complete — we walked
-            # to the end. Reporting `len(rows)` as the total would assert the
-            # same thing for the wrong reason.
+            self._served += 1
+            if self._served > 1:
+                return [], None
             return self.query(_table, **kw), None
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
