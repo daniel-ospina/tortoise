@@ -144,10 +144,11 @@ new failure, not a snapshot edit. The ceiling is ENFORCED (a pinned count in
 ``tests/test_docs_lint_baseline.py``), because the snapshot sits in a PR's own
 diff and nothing else stops a change from appending the very findings it
 introduces. **#7534 owns the burn-down** — see its comment for the population
-gap: this snapshot covers ALL tracked markdown, while #7534 was scoped by a
-``docs/``-subtree measurement, so it empties only when the non-``docs/`` remainder
-is drained too. When the snapshot is empty this program and its baseline file are
-deleted.
+gap: this snapshot covers all tracked markdown EXCEPT vendored
+``website/apps/dashboard/node_modules`` trees (excluded from the lint population —
+see ``VENDORED_MARKDOWN``), while #7534 was scoped by a ``docs/``-subtree
+measurement, so it empties only when the non-``docs/`` remainder is drained too.
+When the snapshot is empty this program and its baseline file are deleted.
 
 GENERATED FILES
 
@@ -1142,11 +1143,12 @@ def run_update(args: argparse.Namespace) -> int:
                 "codebase must be removed from this file (run `update`), and the entry "
                 "count must never grow — a genuinely new entry is a new failure, not a "
                 "snapshot edit. #7534 owns the burn-down, but NOTE ITS POPULATION: this "
-                "snapshot covers ALL tracked markdown, while #7534 was scoped by a "
-                "`docs/`-subtree measurement, and the non-`docs/` remainder includes "
-                "tracked `website/apps/dashboard/node_modules` files that a vendored "
-                "re-install rewrites, so they cannot be fixed by hand-editing the .md. "
-                "See the measured breakdown in the comment on #7534."
+                "snapshot covers all tracked markdown EXCEPT vendored "
+                "`website/apps/dashboard/node_modules` trees, which are excluded from "
+                "the lint POPULATION (`_population`, the cli2 `ignores`, and the `docs` "
+                "job's changed-set diffs) because a vendored re-install rewrites them, "
+                "so a finding there cannot be fixed by hand and an entry for one is "
+                "unreproducible. See the measured breakdown in the comment on #7534."
             ),
             "regenerate": "uv run python tools/docs_lint_baseline.py update",
         },

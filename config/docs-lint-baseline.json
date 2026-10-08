@@ -7,7 +7,7 @@
   "note": "SNAPSHOT, NOT AN AMNESTY (#7435). This file records the findings that already existed when it was taken, so the REQUIRED `docs` check fails a change only on findings that are NOT here. It repairs nothing. Read 'end_state' before editing it.",
   "end_state": {
     "issue": 7534,
-    "rule": "This file is a CEILING, never a floor. Every finding removed from the codebase must be removed from this file (run `update`), and the entry count must never grow \u2014 a genuinely new entry is a new failure, not a snapshot edit. #7534 owns the burn-down, but NOTE ITS POPULATION: this snapshot covers ALL tracked markdown, while #7534 was scoped by a `docs/`-subtree measurement, and the non-`docs/` remainder includes tracked `website/apps/dashboard/node_modules` files that a vendored re-install rewrites, so they cannot be fixed by hand-editing the .md. See the measured breakdown in the comment on #7534.",
+    "rule": "This file is a CEILING, never a floor. Every finding removed from the codebase must be removed from this file (run `update`), and the entry count must never grow \u2014 a genuinely new entry is a new failure, not a snapshot edit. #7534 owns the burn-down, but NOTE ITS POPULATION: this snapshot covers all tracked markdown EXCEPT vendored `website/apps/dashboard/node_modules` trees, which are excluded from the lint POPULATION (`_population`, the cli2 `ignores`, and the `docs` job's changed-set diffs) because a vendored re-install rewrites them, so a finding there cannot be fixed by hand and an entry for one is unreproducible. See the measured breakdown in the comment on #7534.",
     "regenerate": "uv run python tools/docs_lint_baseline.py update"
   },
   "snapshot": {

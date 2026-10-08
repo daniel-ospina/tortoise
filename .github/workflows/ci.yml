@@ -793,6 +793,7 @@ jobs:
           # (measured): without this flag the guard was blind and the suppression
           # silent.
           if ! git diff --find-renames -U0 --text "${BASE_SHA}...HEAD" -- '*.md' \
+              ':(exclude)**/node_modules/**' \
               > "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
@@ -934,6 +935,7 @@ jobs:
           # added file; and `--text` keeps a NUL-bearing `.md` from reading as a
           # binary diff with no `+` lines to grep.
           if ! git diff --find-renames -U0 --text HEAD^ HEAD -- '*.md' \
+              ':(exclude)**/node_modules/**' \
               > "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1

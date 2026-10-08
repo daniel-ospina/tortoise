@@ -871,7 +871,16 @@ def test_vendored_markdown_is_excluded_from_the_population_everywhere():
         "Get changed markdown files",
         "Get changed markdown files (main health)",
     ):
-        assert ":(exclude)**/node_modules/**" in _by_name(name)["run"], name
+        run = _by_name(name)["run"]
+        assert ":(exclude)**/node_modules/**" in run, name
+        # BOTH `'*.md'` diffs in the step carry it: the population diff that
+        # decides what is linted AND the suppression-directive guard. A
+        # vendored-only change must not red the check for files excluded from
+        # linting — a suppression there hides nothing.
+        assert run.count(":(exclude)**/node_modules/**") >= 2, (
+            f"{name}: the suppression-directive diff must use the same "
+            "vendored-excluded population as the lint diff"
+        )
 
 
 @pytest.mark.parametrize(
