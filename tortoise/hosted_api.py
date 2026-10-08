@@ -1349,15 +1349,27 @@ def _reconcile_metering_periods() -> None:
         if not is_supabase_enabled():
             return
         # ``representation=True``: the function RETURNS TABLE (org_id, reason),
-        # and the default ``return=minimal`` suppresses that body (#3665), which
-        # would leave us unable to say whether anything was repaired.
-        repaired = get_control_plane().rpc(
+        # and the default ``return=minimal`` suppresses that body (#3665).
+        #
+        # ⚠️ WHAT THAT BODY *IS*: ``metering_repair_period_bounds`` derives the
+        # two missing bounds with plain ``UPDATE``s and then emits a row ONLY
+        # from its final branch — the orgs whose anchor is unusable AND not
+        # derivable (``…repair.sql:174`` is the function's ONLY ``RETURN NEXT``,
+        # and it ``RAISE WARNING``s that the org's increments are dropped and
+        # the cohort cap is unenforceable). So ``unusable`` below is the set the
+        # repair COULD NOT fix, NOT the set it fixed — the repaired count is not
+        # observable from this return value at all. Reading this body as
+        # "repaired" inverts the meaning precisely when the news is worst, and
+        # goes silent on the case worth confirming; that is the #4872-shaped
+        # defect, so the polarity is pinned by a test that fails if it flips.
+        unusable = get_control_plane().rpc(
             "metering_repair_period_bounds", {}, representation=True)
-        count = len(repaired) if isinstance(repaired, list) else 0
-        if count:
-            _logger.info(
-                "metering period reconciliation repaired %s org anchor(s): %s",
-                count, repaired)
+        if isinstance(unusable, list) and unusable:
+            _logger.warning(
+                "metering period reconciliation could NOT derive a usable "
+                "period anchor for %s org(s) — their increments are dropped "
+                "and the cohort cap is unenforceable until an authoritative "
+                "write supplies one: %s", len(unusable), unusable)
     except Exception as exc:  # a reconciliation sweep must never crash the loop
         _logger.warning("metering period reconciliation failed: %s", exc)
 

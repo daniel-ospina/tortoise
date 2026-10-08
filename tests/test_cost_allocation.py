@@ -1216,8 +1216,11 @@ _BOOT_SWEEPS = (
     ("account", "_purge_deleted_accounts", "boot deleted-account purge sweep"),
     ("oauth", "_sweep_oauth_retention", "boot oauth retention sweep"),
     # #4241: the period-anchor repair. Declared HERE so the parametrization
-    # below covers it too — an unguarded call site for it would otherwise let
-    # its raise abandon every sweep after it.
+    # below covers it too. It is LAST in this tuple, so an unguarded raise here
+    # would not abandon a sweep after it — it is caught because the raise
+    # propagates out of `asyncio.run(...)` and because the caplog label
+    # assertion must still see its step run. Earlier entries carry the
+    # abandon-the-rest rationale; this one carries "every step is guarded".
     ("metering", "_reconcile_metering_periods",
      "boot metering period reconciliation sweep"),
 )

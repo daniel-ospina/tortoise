@@ -21,6 +21,14 @@ import contextlib
 
 from tortoise import hosted_api as ha
 
+# The function's ONLY ``RETURN NEXT`` emits an unusable-anchor reason
+# (``supabase/migrations/20260919000001_metering_period_end_repair.sql:174``).
+# A fabricated "we repaired this" row would assert against a shape the function
+# cannot produce — and it is the same misreading the polarity pin below guards.
+_UNUSABLE_REASON = (
+    "subscription present but neither current_period_start nor "
+    "current_period_end is stored")
+
 
 class _FakeCP:
     """Minimal control plane that records RPC calls."""
@@ -61,7 +69,7 @@ def test_caller_is_a_noop_when_supabase_is_disabled(monkeypatch):
 
 def test_caller_invokes_the_repair_rpc(monkeypatch):
     """The production call site must reach the repair function, by name."""
-    cp = _FakeCP(rows=[{"org_id": "o1", "reason": "derived_start"}])
+    cp = _FakeCP(rows=[{"org_id": "o1", "reason": _UNUSABLE_REASON}])
     _patch(monkeypatch, cp)
 
     ha._reconcile_metering_periods()
@@ -71,9 +79,41 @@ def test_caller_invokes_the_repair_rpc(monkeypatch):
     # The function takes NO arguments; the body must be empty rather than a
     # guessed parameter, and `representation=True` is required because the
     # function RETURNS TABLE and the default `return=minimal` suppresses it
-    # (#3665), which would hide whether anything was repaired.
+    # (#3665). NOTE what the retrieved body is: the orgs the repair FAILED to
+    # fix — see the polarity pin below.
     assert cp.calls[0][1] == {}
     assert cp.representation is True
+
+
+def test_an_unusable_anchor_is_reported_as_unrepaired_not_repaired(
+        monkeypatch, caplog):
+    """The returned rows are the orgs the repair could NOT fix.
+
+    ``metering_repair_period_bounds`` derives the two missing bounds with plain
+    ``UPDATE``s and emits a row ONLY from its final branch — the orgs whose
+    anchor is unusable AND not derivable. ``…repair.sql:174`` is the function's
+    ONLY ``RETURN NEXT``, and it ``RAISE WARNING``s that the org's increments
+    are dropped and the cohort cap is unenforceable.
+
+    So the body is the set the repair FAILED on. Reporting it as "repaired"
+    inverts the meaning exactly when the news is worst — an operator reads
+    "repaired 3 anchors" while three orgs sit unmeterable. This pins the
+    polarity so it cannot silently invert again.
+    """
+    cp = _FakeCP(rows=[{"org_id": "org-unusable", "reason": _UNUSABLE_REASON}])
+    _patch(monkeypatch, cp)
+
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        ha._reconcile_metering_periods()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("org-unusable" in m for m in messages), (
+        "an org whose anchor could not be derived was not reported at all")
+    assert any("could NOT derive" in m for m in messages), (
+        "the unrepairable set must be reported as NOT derived")
+    assert not any("repaired" in m for m in messages), (
+        "the returned rows are the orgs the repair FAILED on — describing "
+        "them as `repaired` reports the opposite of the truth")
 
 
 def test_a_reconciliation_failure_is_reported_loudly(monkeypatch, caplog):
