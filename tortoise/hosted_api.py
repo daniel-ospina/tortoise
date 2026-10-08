@@ -7077,11 +7077,13 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     an exception from the helper itself (e.g. the strict-mode
     ``UnregisteredTelemetryKey``) still propagates.
 
-    ``pool`` (#3669, #3773) selects the worker pool: ``"auth"`` (default),
-    ``"telemetry"`` for best-effort work, ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane, or ``"graph"`` for the
+    ``pool`` (#3669, #3773, #7678) selects the worker pool: ``"auth"``
+    (default), ``"telemetry"`` for best-effort work, ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the
     DATA-PLANE graph helpers (kept off auth capacity; see
-    ``_graph_offload``, which passes its own ``unavailable`` factory).
+    ``_graph_offload``, which passes its own ``unavailable`` factory), or
+    ``"org"`` (#7678) for the org-create lane's sequential gate reads and
+    provision write.
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -15870,9 +15872,13 @@ async def _count_active_free_memberships(user_id: str) -> int:
     return rows[0][0] if rows else 0
 
 
-async def _owned_free_org_ids(user_id: str) -> list[str]:
+async def _owned_free_org_ids(user_id: str, pool: str = "auth") -> list[str]:
     """#2789: the OWNERSHIP-based entitlement twin of
     `_count_active_free_memberships`.
+
+    ``pool`` (#7678) selects the control-plane pool for the Supabase read. The
+    create-org lane passes ``"org"`` so its gate read does not queue behind
+    authentication work; every other caller keeps the default ``"auth"``.
 
     #1877 asked "does this person already have an org without a paid plan?" and
     answered it with MEMBERSHIP, which counts a user who merely accepted an
@@ -15901,7 +15907,7 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
         import asyncio as _asyncio
         ids = await _cp_offload(
             lambda: _sb_ids(get_control_plane(), user_id),
-            op="owned_free_org_ids")
+            op="owned_free_org_ids", pool=pool)
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return ids
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -15995,6 +16001,17 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
     # the whole point, and it is the one outcome a read fault cannot fake.
     try:
         _deletion_cp = get_control_plane()
+        # #7678: DELIBERATELY left on the loop's default executor, not moved to
+        # the new ``org`` control-plane pool. This read is the #4029 P2-6 gate
+        # that must refuse a delete-pending user's org create, and its contract
+        # is FAIL-OPEN on a read fault only. A bounded pool introduces a NEW
+        # trigger for that fail-open — a pool refusal (backlog full) or a
+        # bound miss would have to be treated as "no row", disabling a
+        # security gate on a purely local scheduling condition (the default
+        # executor's queue is unbounded, so it can only WAIT, never refuse).
+        # Keeping it here preserves the gate's exact pre-#7678 semantics while
+        # the queueing-behind-auth cost this issue targets is removed from the
+        # other, gate-only ``_cp_offload`` reads and the provision write.
         _pending = await asyncio.to_thread(
             account_deletion_row, _deletion_cp, user["user_id"])
         if _pending is not None:
@@ -16023,7 +16040,8 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
         return await _create_org_registry_lane(sdk, name, user)
 
 
-def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
+def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
+                               prior_org_ids: list[str] | None = None) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
 
@@ -16040,6 +16058,12 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     and a plain CREATE would leave a second, conflicting TeamMeta node. The
     TeamMeta-exists probe is the cheapest form of that guard and costs one
     read on the fresh path (which never has TeamMeta anyway).
+
+    ``prior_org_ids`` (#7678): the caller may pass the creator's active
+    memberships it ALREADY read (off-loop, on the org pool) so this helper
+    does not issue the same control-plane read a second time on the request.
+    ``None`` keeps the legacy behaviour — read it here — for the checkout
+    replay lane, which has no caller-side read to reuse.
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
@@ -16066,8 +16090,9 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     _seen = graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
     if _seen and _seen[0][0]:
         return graph_name  # already initialised — a retry must not duplicate
-    from tortoise.supabase_control import active_membership_org_ids
-    prior_org_ids = active_membership_org_ids(cp, user_id)
+    if prior_org_ids is None:
+        from tortoise.supabase_control import active_membership_org_ids
+        prior_org_ids = active_membership_org_ids(cp, user_id)
     prior_fork = None
     if prior_org_ids:
         try:
@@ -16096,10 +16121,19 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     from datetime import timedelta as _td
 
     from tortoise.supabase_control import (
+        active_membership_org_ids,
         membership_count_since,
         org_by_name,
         provision_org,
     )
+
+    # #7678: every control-plane call on this lane rides the DEDICATED org
+    # pool, not the shared ``auth`` pool. The lane issues several SEQUENTIAL
+    # reads plus the provision write; on ``auth`` each one queues behind
+    # concurrent authentication resolutions, so the request's wall clock is
+    # the sum of those waits and a ~9.5 s pass crosses the 10 s transport
+    # bound under load (#4816). This is a pool-isolation change only — no
+    # bound and no exemption is touched (#3834 clear).
 
     # Per-user org-creation rate limit (abuse posture) — the Supabase
     # twin of the registry owner-membership count (#743(b) semantics:
@@ -16108,14 +16142,15 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     recent = await _cp_offload(
         lambda: membership_count_since(
             cp, cutoff=since, user_id=user["user_id"], role="owner"),
-        op="membership_count_since")
+        op="membership_count_since", pool="org")
     if recent >= 3:
         raise HTTPException(status_code=429,
                             detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry org_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-    _dup_org = await _cp_offload(lambda: org_by_name(cp, name), op="org_by_name")
+    _dup_org = await _cp_offload(lambda: org_by_name(cp, name),
+                                 op="org_by_name", pool="org")
     if _dup_org:
         raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
@@ -16125,7 +16160,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
     # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
     # dashboard renders the three-option dialog from `code`.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"])
+    _free_org_ids = await _owned_free_org_ids(user["user_id"], pool="org")
     if _free_org_ids:
         raise HTTPException(
             status_code=402,
@@ -16139,15 +16174,33 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # the cap with zero usable keys. Mirror create_onboarding_org's #1716
     # fix: the org stays keyless until a session-key mint (POST
     # /v1/session/key writes the api_keys row itself).
+    # #7678: the creator's active memberships are read ONCE here, off-loop on
+    # the org pool, and passed to BOTH the eager graph init and the provision
+    # write. Previously the eager init read them inline (on the event loop) and
+    # ``_ensure_onboarding_node_after_provision`` re-read them after the RPC —
+    # two round-trips for the same value within one locked request. The RPC
+    # inserts exactly one new active owner membership for ``org_id``, so the
+    # post-RPC read (filtered ``!= org_id``) equals this list absent a
+    # concurrent membership mutation: ``_org_create_lock`` serialises the
+    # create-org and invite-accept lanes, but not the account-deletion cascade
+    # or owner-initiated member removal. Only the derived fork/compact choice
+    # could differ; the provision itself is unaffected.
+    prior_org_ids = await _cp_offload(
+        lambda: active_membership_org_ids(cp, user["user_id"]),
+        op="active_membership_org_ids", pool="org")
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
-    graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"])
+    graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],
+                                            prior_org_ids=prior_org_ids)
     try:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
         # mirroring create_onboarding_org's #1716 keyless provision.
+        # #7678: ``prior_org_ids`` is a keyword-only argument of provision_org
+        # (never part of the RPC body) so the post-RPC onboarding init reuses
+        # the list read above instead of issuing a duplicate read.
         await _cp_offload(
-            lambda: provision_org(cp, **{
+            lambda: provision_org(cp, prior_org_ids=prior_org_ids, **{
                 "p_user_id": user["user_id"],
                 "p_identity": None,
                 "p_org_id": org_id,
@@ -16159,7 +16212,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
                 "p_graph_name": graph_name,
                 "p_tier": "free",
             }),
-            op="provision_org")
+            op="provision_org", pool="org")
     except HTTPException:
         raise
     except Exception as e:
