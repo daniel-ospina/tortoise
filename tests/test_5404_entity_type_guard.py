@@ -23,10 +23,8 @@ import pytest
 from tortoise import search_engine
 from tortoise.security import VALID_ENTITY_TYPES
 
-# A label-shaped payload. ``)`` closes the node pattern, so everything after it
-# becomes a new clause (``//`` comments out the remainder) — the one payload
-# measured to reach query structure on this path. Note ``capitalize()`` only
-# touches the first character, so the value survives into the label text.
+# A caller-controlled value shaped like a Cypher label: not in the vocabulary,
+# so the guard must reject it before it can reach generated Cypher.
 INJECTION = "point) DETACH DELETE n //"
 
 # The capitalized/whitespace forms the guard rejects BY DESIGN — the same
