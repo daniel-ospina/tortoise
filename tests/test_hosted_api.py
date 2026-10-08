@@ -10903,11 +10903,28 @@ class TestOverLimitSurfacesOfferTheHumanPath:
     Compliance is the SEAM (``with_limit_contact(...)``), not a mention of a
     constant: the seam also terminates the sentence, and 15 of 22 hand-written
     concatenations got that wrong.
+
+    BOUNDARY (round 4, P2 — a claim, not a hope). This guard reads PYTHON
+    source in ``MODULES``. It CANNOT see a ceiling rendered in the dashboard,
+    which was a real gap: ``website/apps/dashboard/src/{keyAllowance,nodeUsage,
+    main.jsx}`` build their own limit copy and DISCARD the server's ``detail``,
+    so every assertion here passed while a customer hitting a cap in the UI
+    was never told. That side is now covered by
+    ``website/apps/dashboard/src/limitContact.test.js`` — a name that says what
+    it is, because the omission here was silent for two rounds.
     """
 
 
     REFUSAL_ERRORS = ("QuotaExceededError", "QuotaCheckError", "InvitationError",
                       "ControlPlaneError")
+    #: Refusal classes declared in MODULES itself. A raise site naming one of
+    #: these is in the universe even when the class is not literally in
+    #: REFUSAL_ERRORS — round 4 found ``CohortCostCapExceeded``
+    #: (:mod:`tortoise.cohort_cost`), a ``QuotaExceededError`` SUBCLASS, raising
+    #: a customer-facing limit message that a name-only rule could not see. The
+    #: relation is derived by walking the bases, and this tuple is asserted
+    #: non-vacuous below so a rename cannot silently empty it.
+    REFUSAL_SUBCLASSES = ("CohortCostCapExceeded",)
     MODULES = ("tortoise/hosted_api.py", "tortoise/quota.py",
                "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
                "tortoise/sdk.py", "tortoise/__main__.py")
@@ -10930,16 +10947,54 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         "Need more? Contact support@premiselabs.co.",
     )
 
+    def _refusal_class_names(self, trees):
+        """Every class name in MODULES that IS or SUBCLASSES a refusal error.
+
+        Round 4: a raise site naming a refusal SUBCLASS was invisible to a rule
+        that compared against :attr:`REFUSAL_ERRORS` by name (``in``, not
+        ``issubclass``). Walk the declared bases across every module so
+        ``class CohortCostCapExceeded(QuotaExceededError)`` counts.
+        """
+        bases, all_names = {}, set()
+        for tree in trees.values():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    all_names.add(node.name)
+                    bases[node.name] = {
+                        b.id if isinstance(b, ast.Name) else
+                        (b.attr if isinstance(b, ast.Attribute) else "")
+                        for b in node.bases}
+        names = set(self.REFUSAL_ERRORS)
+        changed = True
+        while changed:          # transitive: a subclass of a subclass counts
+            changed = False
+            for cls, bs in bases.items():
+                if cls not in names and bs & names:
+                    names.add(cls)
+                    changed = True
+        # A name in REFUSAL_SUBCLASSES that is NOT declared anywhere is a
+        # pinned expectation going stale — surface it, never skip it.
+        for pinned in self.REFUSAL_SUBCLASSES:
+            if pinned not in all_names:
+                names.add(pinned)
+        return names
+
     def _refusal_messages(self):
         """Yield (module, line, construct, text, compliant) per refusal."""
         root = pathlib.Path(__file__).resolve().parent.parent
+        trees = {}
+        for rel in self.MODULES:
+            path = root / rel
+            if path.exists():
+                trees[rel] = ast.parse(path.read_text(encoding="utf-8"))
+        refusal_classes = self._refusal_class_names(trees)
         for rel in self.MODULES:
             path = root / rel
             if not path.exists():       # a module move must not silently skip
                 yield rel, 0, "MISSING MODULE", rel, False
                 continue
             src = path.read_text(encoding="utf-8")
-            for node in ast.walk(ast.parse(src)):
+            for node in ast.walk(trees[rel]):
                 pairs = []
                 if isinstance(node, ast.Call):
                     fn = node.func
@@ -10955,7 +11010,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                 elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
                     fn = node.exc.func
                     name = fn.id if isinstance(fn, ast.Name) else ""
-                    if name in self.REFUSAL_ERRORS:
+                    if name in refusal_classes:
                         pairs = [(f"raise {name}", a) for a in node.exc.args[:1]]
                 for construct, val in pairs:
                     text = "".join(
@@ -10994,6 +11049,11 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         assert "raise InvitationError" in constructs, (
             "the raise-site form is not being seen — the member-limit refusal "
             "(the canonical 'more seats' case) would slip through")
+        assert "raise CohortCostCapExceeded" in constructs, (
+            "the raise-site rule is matching class NAMES only — a refusal "
+            "SUBCLASS (CohortCostCapExceeded is a QuotaExceededError) raising "
+            "a customer-facing limit message is then invisible, which is "
+            "exactly the round-4 finding")
 
     def test_the_punctuation_join_is_a_seam_not_a_hand_append(self):
         """Every append goes through the seam, and the seam is TERMINAL.

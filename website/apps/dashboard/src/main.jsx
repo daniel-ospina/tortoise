@@ -4,6 +4,7 @@ import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
+import { withLimitContact } from './limitContact.js'
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
@@ -5510,7 +5511,8 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #4639: carry the STRUCTURED status so the banner's nudge gate
           // reads the 402 rather than guessing from the copy.
-          setError({ message: 'Graph limit reached for this tier — upgrade to add more graphs.', status: res.status })
+          setError({ message: withLimitContact(
+            'Graph limit reached for this tier — upgrade to add more graphs.'), status: res.status })
           return
         }
         if (res.status === 409) {

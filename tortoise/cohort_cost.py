@@ -104,7 +104,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from tortoise.quota import QuotaCheckError, QuotaExceededError
+from tortoise.quota import QuotaCheckError, QuotaExceededError, with_limit_contact
 
 _logger = logging.getLogger("tortoise.cohort_cost")
 
@@ -465,11 +465,16 @@ def enforce_cohort_cost_cap(org: dict | None, *,
         # when to retry); the figures go to the internal sinks only — the
         # AlertStore incident and the server-side log.
         raise CohortCostCapExceeded(
-            f"Cohort LLM spend cap reached for this billing period. This "
-            f"request started no extraction and wrote no capture data — "
-            f"re-POST the same session after {period.end_iso} "
-            f"and it will extract normally. Contact us if "
-            f"you need the cap raised.",
+            # #5425: the hand-written "Contact us" this used to carry named no
+            # route. Route it through the shared seam so the customer gets the
+            # same reachable address every other ceiling offers — and so the
+            # derived guard can see it (a subclass raise site was invisible to
+            # a rule that matched CLASS NAMES only).
+            with_limit_contact(
+                f"Cohort LLM spend cap reached for this billing period. This "
+                f"request started no extraction and wrote no capture data — "
+                f"re-POST the same session after {period.end_iso} "
+                f"and it will extract normally."),
             detail={
                 "cohort_since": resolved.since,
                 "cohort_size": len(ids),

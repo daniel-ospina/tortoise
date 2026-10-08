@@ -33,6 +33,8 @@
 // `rows` is the RAW GET /v1/team/keys payload (bootstrap rows included — the
 // server still lists them), and `created_via` rides that payload in both
 // lanes, so the display filters bootstrap exactly as the gate does.
+import { withLimitContact } from './limitContact.js'
+
 export function usedKeySlots(rows, now = Date.now()) {
   return (rows || []).filter((k) => {
     // Server parity: the count treats a row as revoked when `revoked_at IS
@@ -129,7 +131,8 @@ export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
   // #4335: the "or upgrade" tail is only truthful when an upgrade path exists
   // (a configured higher tier, or one temporarily unavailable). Callers pass
   // hasUpgrade=false for the top tier / a deployment selling no higher tier.
-  return `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+  return withLimitContact(
+    `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
 }
 
 // #2229/#4355: rotate-path cap notice.
@@ -149,9 +152,11 @@ export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
 export function rotateCapNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {
-    return `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+    return withLimitContact(
+      `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
   }
-  return `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+  return withLimitContact(
+    `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
 }
 
 // #4353/#4355: the connect step's existing-key note. #4353 made this

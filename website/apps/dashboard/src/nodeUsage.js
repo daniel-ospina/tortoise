@@ -20,6 +20,8 @@
 
 // The nudge threshold (issue #4331): at/above 80% we tell the user, at 100% the
 // write path is refusing.
+import { withLimitContact } from './limitContact.js'
+
 export const NODE_NUDGE_PCT = 80
 
 // { used, max, pct, level } — or null when either server number is
@@ -51,7 +53,9 @@ export function nodeUsage(team) {
 // blocked condition rather than "0 / 0 nodes used (100%)".
 export function nodeUsageText(u) {
   if (!u) return null
-  if (u.max === 0) return 'Node limit reached — no node allowance on this plan'
+  if (u.max === 0) {
+    return withLimitContact('Node limit reached — no node allowance on this plan')
+  }
   return `${u.used.toLocaleString()} / ${u.max.toLocaleString()} nodes used (${u.pct}%)`
 }
 
