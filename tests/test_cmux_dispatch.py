@@ -250,6 +250,22 @@ SCREEN_STALE_FOOTER_ABOVE_ROOT_PROMPT = (
     "[root@host ~]# ls -la\n"
 )
 
+#: A DEAD pane whose prompt is followed by OUTPUT that itself matches the stats
+#: shape. Anchoring the scan on the last status bar alone hides the prompt above
+#: it; the tail window catches it (#7158 round 5).
+SCREEN_STALE_FOOTER_THEN_STATUS_LIKE_OUTPUT = (
+    SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT + "42.0%/700k (auto)\n"
+)
+
+#: A DEAD pane whose footer row is NOT newline-terminated and the shell prompt is
+#: appended to it (a crash mid-line). Same-line prompt (#7158 round 5).
+SCREEN_STALE_FOOTER_AND_PROMPT_SAME_LINE = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high"
+    " danielospina@Daniels-MacBook-Pro 7158 % "
+)
+
 #: A DEAD pane that still parses as pi's composer (two rules) while showing a bare
 #: shell prompt — the shape where recovery picks `R_RESEND` (the second write site).
 SCREEN_DEAD_SHELL_WITH_COMPOSER = (
@@ -1174,18 +1190,25 @@ class TestDispatcherRecovery(unittest.TestCase):
 
     def test_prompt_eats_text_then_full_message_is_re_sent(self):
         # Send lands while the prompt is up AND the pre-send gate was skipped
-        # (simulated by the prompt appearing only after the gate's first look).
+        # (simulated by the prompt appearing only after the gate AND the pre-send
+        # baseline read — the pre-send read now re-asserts readiness, #7158).
         fake = FakeCmux(boot_block=True, boot_polls=1)
         fake.prompt_eats_prefix = 0
         dispatcher = _dispatcher(fake)
-        # Force the gate to return before the prompt is visible.
+        # Force the readiness gate and the baseline read to see a ready pane.
         original = dispatcher.screen
+        lies = [2]
 
-        def screen_after_first_call(ws, surface=None):
-            dispatcher.screen = original  # only lie once
-            return SCREEN_IDLE_READY
+        def screen_before_prompt(ws, surface=None, lines=None):
+            if lies[0] > 0:
+                lies[0] -= 1
+                return SCREEN_IDLE_READY
+            dispatcher.screen = original
+            if lines is None:
+                return original(ws, surface)
+            return original(ws, surface, lines=lines)
 
-        dispatcher.screen = screen_after_first_call
+        dispatcher.screen = screen_before_prompt
         result = dispatcher.send_message("workspace:99", PROBE, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(fake.submitted[-1], PROBE)
@@ -1635,6 +1658,47 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "never-became-ready")
         self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_a_status_shaped_line_below_the_prompt_does_not_hide_it(self):
+        """Round-5 finding: anchoring the scan on the last `%/k` match lets shell
+        output that looks like the stats line hide the prompt ABOVE it."""
+        screen = SCREEN_STALE_FOOTER_THEN_STATUS_LIKE_OUTPUT
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
+    def test_a_same_line_footer_and_shell_prompt_is_not_ready(self):
+        """A footer row that is not newline-terminated (crash mid-line) with the
+        prompt appended must still be refused."""
+        screen = SCREEN_STALE_FOOTER_AND_PROMPT_SAME_LINE
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.boot_blocked(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
+    def test_initial_send_reasserts_readiness_on_the_pre_send_read(self):
+        """Round-5 finding (TOCTOU): the gate can be ready and the pane can die
+        before the baseline read, one read-screen later. The brief must not be
+        written on the stale `ready`."""
+
+        class DiesAfterGate(FakeCmux):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads <= 1:      # the readiness gate's read
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+        fake = DiesAfterGate()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log, [], "the pre-send read must gate the first write"
+        )
 
     def test_recovery_RESEND_refuses_when_the_pane_died_BEFORE_the_write(self):
         """The R_RESEND gate must judge a screen read IMMEDIATELY before the
