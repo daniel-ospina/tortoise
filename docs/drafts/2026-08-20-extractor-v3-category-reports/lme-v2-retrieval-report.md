@@ -19,6 +19,7 @@ Method: report diffing + full-checkpoint error-text analysis + empirical retriev
 **The v2 full run is not a valid v2 measurement.** The extractor wrote **zero points in 444 of 496 questions (89.5%)** because the direct-DeepSeek extractor key returned **HTTP 402 Payment Required** on ~21,329 S1 calls (`S1 chunk failed: HTTPError: 402 … api.deepseek.com/v1/chat/completions`; 21,957 "no embed list produced" errors). The graph that retrieval measured contained **raw verbatim transcripts only** (one per session, ~48 sessions/question) — no v2-extracted points, no turn points, no evidence-marked points (**495/496 questions had 0 evidence points**).
 
 Consequences:
+
 - **`evidence_recall@5 = 0.0` is vacuous**, not a retrieval failure — there were no evidence points to retrieve (the metric reports 0.0 both for "evidence exists but never surfaces" and "no evidence exists"; only 1/496 questions had an evidence point, and its own run was broken: session_recall@5 = 0.0).
 - **The session-recall drop (80.6% → 75.4%) measures raw-transcript-only retrieval**, i.e. condition (B) below — not v2 graph retrieval. The one question with an evidence point also had sr@5 = 0.0; the questions with the biggest drops (baseline 1.00 → v2 0.00, n=15+) all carry 40–186 ingest errors.
 
@@ -75,12 +76,14 @@ Baseline on the same corpus: the verbatim evidence *turn* also failed the full-q
 ## 2. Where we do well / where not
 
 **Well:**
+
 - **Verbatim session recall.** The raw-transcript leg reliably surfaces the *answer session* even when extraction is completely dead (session recall still 0.75 with 0 points written; probe B sr@5 = 1.0). The #1369 design decision to retain raw transcripts is validated.
 - **Graceful degradation.** Circuit breakers, 500 ms caps, per-question error isolation, checkpoint/resume, snapshot TF-IDF fallback — the run completed 496/500 questions through a provider outage without crashing.
 - **Attribution machinery exists.** Evidence marking + session/turn/evidence recall split is the right frame — it's just not *exercised* or *gated*.
 - **Idempotent, content-addressed writes.** No duplicate points even across 40–60 sessions per question; operator/evidence OR-in collision handling is sound.
 
 **Not well:**
+
 1. **Run integrity gates.** A 21k-error, 0-point run was published as a v2 result. No abort/flag on `evidence_points == 0` or error-rate threshold.
 2. **Evidence-retrieval ceiling (genuine).** Evidence-marked points are paraphrased; the sparse leg (FTS AND-match in this FalkorDBLite build; TF-IDF cosine in others) punishes paraphrase. Vector leg absent in the eval (no embedder) — the one leg that would rescue semantic paraphrase — and Tortoise never created an FTS index itself; availability is engine-dependent and inconsistent per graph.
 3. **Structural leg is inert in the eval.** `run_structural_query` with `kind=None` returns `[]`; IMPL/NAND operator structure contributes nothing to retrieval. The eval's "graph retrieval" is text-over-points, not graph retrieval.
@@ -105,6 +108,7 @@ Common thread: **all three are dense-first (embeddings), sparse as BM25/Lucene c
 ## 4. Proposed improvements (steps 2 + 3, ranked)
 
 **P0 — measurement integrity (fix the run, not the retriever):**
+
 1. **Gate v2 runs on extraction health**: abort/flag when `evidence_points == 0` or ingest-error rate > threshold (e.g. >20% of sessions); persist per-question `match_source`, evidence_point_count, and points-written in the outcome so 0.0 vs 0/5 is never ambiguous.
 2. **Record the leg mix per question** (fts/vector/structural/tfidf + pool size + scores) in the report methodology — the current report cannot even say which stack a number came from.
 3. **Re-run the v2 full-run with a working extractor key** before drawing any v2 conclusion. (The earlier 4–5-question v2 runs with working extraction showed evidence_recall@5 = 0.25–0.2 and sr@5 0.75–0.8 — evidence points *do* surface when they exist, confirming the 0.0 is a run artifact.)

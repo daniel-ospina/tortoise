@@ -39,6 +39,7 @@ The capture surface (`POST /v1/sessions`, LLM two-stage extraction → episodic 
 | **Cursor** | ⚠️ MCP available; no documented hook surface | ⚠️ community: `state.vscdb` SQLite (workspaceStorage/globalStorage) AND/OR `~/.cursor/projects/<slug>/agent-transcripts/*/*.jsonl` | **T2 (post-hoc, needs spike)** | see left; **no official doc found** | Low–Medium (community only) |
 
 **The design implication:** capture is a **three-tier system, not one mechanism**:
+
 - **Tier 1 (automatic, zero model involvement):** Pi extensions (`session_shutdown`), Claude Code hooks (`SessionEnd`/`Stop` http hooks).
 - **Tier 2 (post-hoc extraction):** Codex JSONL, Cursor JSONL/SQLite (spike needed), Claude Desktop local files.
 - **Tier 3 (prompt-instructed):** Claude Web — the workflows prompt instructs the agent to file via MCP/`POST /v1/sessions` at conversation end. Works on every harness; the fallback and the "minimum honest promise".
@@ -46,6 +47,7 @@ The capture surface (`POST /v1/sessions`, LLM two-stage extraction → episodic 
 ### 2.2 Pi has a capture extension implemented (the "already built" piece) — with a caveat
 
 Verified on this machine (`~/.pi/agent/extensions/`):
+
 - **`reflect-hook.ts`** — fires on `session_shutdown` (quit only), appends the session to `~/.tortoise/session-events/<date>.jsonl` **synchronously before** the network call (quit-teardown can't lose data), then `POST {apiUrl}/v1/sessions` to hosted Tortoise when `TORTOISE_API_KEY` is set. Logs success **only** on 2xx (#94 honest-reporting mandate). Config: env vars or `~/.pi/agent/tortoise-config.json`.
 - **`tortoise-capture/`** — `agent_end` → markdown to `~/.tortoise/docs/` + ingest (FalkorDB local or hosted POST); idempotency contract: turn points keyed `{session_id}_t{i}` with MERGE, claims dedup by content-hash.
 

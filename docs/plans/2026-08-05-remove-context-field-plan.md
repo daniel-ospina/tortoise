@@ -52,7 +52,6 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 > The consolidated, ontology-aligned task list is in **§10.4**.
 > This section is preserved for revision history only.
 
-
 ### Phase 1 — Build (Release N)
 
 #### Task 1.1: Build `references` edge creation + idempotent backfill
@@ -60,11 +59,13 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** Make the `references` edge (Source→entity) a first-class write-time edge, completing the provenance DAG so `context` is unnecessary for source tracking.
 
 **Acceptance:**
+
 - `_link_source` (projection/edges.py) creates BOTH `extractedFrom` (Point→Source) AND `references` (Source→entity) edges at write time
 - Idempotent backfill script populates `references` for all existing Points that have `extractedFrom` but no `references`
 - `get_provenance_chain` (sdk.py:2569) query succeeds against real graph data
 
 **Files:**
+
 - **Modify:** `tortoise/projection/edges.py` — `_link_source` adds `MERGE (s)-[:references]->(entity)` after source creation; accept optional `entity_ref` param
 - **Modify:** `tortoise/sdk.py` — `get_provenance_chain` (line 2569) query validated (already queries `references` edge); `create_point` passes source entity info through
 - **Create:** `graph-scripts/backfill_references.py` — idempotent script: `MATCH (p:Point)-[:extractedFrom]->(s:Source) WHERE NOT (s)-[:references]->() MERGE ...`
@@ -77,12 +78,14 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** Replace `list_domains()` (GROUP BY context) with three surfaces that together cover all discovery use cases: what pointKinds exist in the graph, what Sources data came from, and what the pack registry declares.
 
 **Acceptance:**
+
 - `sdk.list_pointkinds()` → `[{pointKind, count}, ...]` ordered by count DESC
 - `sdk.list_sources()` → `[{sourceKind, url, title, point_count}, ...]` ordered by point_count DESC
 - `sdk.summarize_structure()` re-keyed to `n.pointKind` instead of `n.context`
 - Phase 1: old `list_domains()` still works but emits deprecation warning
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py` — add `list_pointkinds()` (MATCH (n:Point) RETURN n.pointKind, count), `list_sources()` (MATCH (n:Point)-[:extractedFrom]->(s:Source) RETURN s group by sourceKind), re-key `summarize_structure()` from context→pointKind
 - **Modify:** `tortoise/taxonomy.py` — add `list_domains` deprecation warning (Phase 1 compat shim); Phase 2 deletes it
 - **Test:** `tests/test_discovery_surfaces.py`
@@ -94,6 +97,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** Replace `context`-scoped EP with BFS anchor expansion — "give me the confidence of everything connected to these anchors within N hops."
 
 **Acceptance:**
+
 - `compute_confidence(anchors: list[str], max_hops: int = 2, rel_filter: str = "IMPL|NAND", direction: str = "outgoing")` works
 - Direction semantics: IMPL directional per #86 (incoming = what affects anchor, outgoing = what anchor affects), NAND symmetric
 - BFS collects operator IDs along matched edges; feeds EP engine
@@ -101,6 +105,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 - Phase 1: old `context` param still accepted → routes to anchors-based (mapped from context → matching point IDs); emits deprecation warning
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py` — `compute_confidence` signature change; add `_bfs_anchor_expansion()` helper; old `context` branch (lines 1081–1087) replaced with anchors-based
 - **Modify:** `tortoise/sdk.py` — `_apply_source_inheritance` (line 1124) and `calibrate_summary` (line 1158) accept optional `point_ids` filter alongside deprecated `context`
 - **Test:** `tests/test_ep_selector.py` — includes parity test: anchors-based vs old context-based on the restored `licensing-decision-compare` subgraph must produce same results (0.906 / 0.8875 / 0.794)
@@ -112,11 +117,13 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** When `query()` / `paginated_query()` / `tortoise_fts_query()` return 0 results, instead of silence, suggest nearby kind names via Levenshtein distance against `pack_registry.list_all_kinds()` and `list_pointkinds()`.
 
 **Acceptance:**
+
 - Silent-empty query responses include `suggestions: ["Did you mean 'statement'?", ...]` when close matches exist
 - Performance: Levenshtein only runs on empty result sets; bounded to registered kind names (~100-200)
 - No suggestions when query had no kind filter
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py` — `query()`, `paginated_query()`, `tortoise_fts_query()` → after result set check, compute suggestions if empty
 - **Create:** `tortoise/query_suggestions.py` — `suggest_kind(needle: str, candidates: list[str], threshold: float = 0.3) -> list[str]`
 - **Test:** `tests/test_query_suggestions.py`
@@ -128,11 +135,13 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** `kind_filter` currently maps to `n.context` (line 1461). After context deletion, it maps to `n.pointKind` — its correct semantics.
 
 **Acceptance:**
+
 - `suggest_entry_points(query, kind_filter="statement")` filters by `n.pointKind = "statement"`, not `n.context`
 - Phase 1: if `kind_filter` matches a known pointKind → filter by pointKind; if matches a known legacy domain name → emit deprecation warning, route to discovery surfaces
 - Phase 2: only pointKind filtering
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py` — `suggest_entry_points` (line 1448): change `kind_filter` filter from `n.context` to `n.pointKind`; add deprecation shim
 - **Test:** `tests/test_suggest_entry_points.py` — update existing tests
 
@@ -143,6 +152,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** Accept `context` everywhere it's passed, but DON'T write it to the graph. Warn + redirect to the correct mechanism.
 
 **Acceptance:**
+
 - SDK `create_point(context="x")` → warning "context is deprecated; use extractedFrom for provenance, pack registry for namespacing"; `context` NOT written to node
 - SDK `create_operator(context="x")` → same warning; `context` NOT written
 - MCP server 7 tools with `context` param → wrap in `_safe()`, param still accepted, warning emitted
@@ -153,6 +163,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 - `diary_write` / `diary_read` → move `diary_{agent_name}` namespace to `wing` property; `context` param deprecated
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py` — `create_point` (strip `context` from props before `CREATE`, emit warning), `create_operator` (line 504-506 removed, warning if context passed), `file_decision` (remove context from create_point calls, accept+ignore with warning), `diary_write`/`diary_read` (use `wing` instead of `context`)
 - **Modify:** `tortoise/mcp_server.py` — wrap all 7 context-bearing tools: `tortoise_create_point` (148), `tortoise_query` (182), `tortoise_paginated_query` (234), `tortoise_search` (311), `tortoise_compute_confidence` (358), `tortoise_calibrate` (384), `tortoise_create_operator` (397)
 - **Modify:** `tortoise/hosted_api.py` — `CreatePointRequest.context` (445) → accepted but not stored; `list_points` (541) context filter → route to `list_sources()` + emit deprecation
@@ -167,11 +178,13 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** Old `PointAdded`/`OperatorAdded` events in `.jsonl` logs carry `context` in their payload. On rebuild/replay, the projection must discard it so replayed events don't re-introduce `context` to the graph.
 
 **Acceptance:**
+
 - `_rebuild_pass1` (projection/__init__.py) strips `context` from `SET n.context=$context` in the MERGE query
 - `_apply_one` (module-level fold) pops `context` from old events
 - `_revise_point` no longer sets `n.context`
 
 **Files:**
+
 - **Modify:** `tortoise/projection/__init__.py` — `_apply_one`: pop `context` from `PointAdded`/`OperatorAdded` events; `_revise_point`: remove `n.context = coalesce($x, n.context)`; `_rebuild_pass1`: remove `n.context=$context` from SET clause; `_rebuild_pass2`: no changes needed
 - **Test:** `tests/test_projection.py` — verify old events with `context` are replayed without `context` in graph
 
@@ -184,11 +197,13 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** One-shot migration that removes the `context` property from all 4,546 Point nodes in the graph.
 
 **Acceptance:**
+
 - `MATCH (n:Point) WHERE n.context IS NOT NULL REMOVE n.context` succeeds
 - Post-migration: `MATCH (n:Point) WHERE n.context IS NOT NULL RETURN count(n)` → 0
 - Script is idempotent (safe to run again)
 
 **Files:**
+
 - **Create:** `graph-scripts/remove_context_migration.py`
 - **Test:** `tests/test_remove_context_migration.py` — verify graph count before/after
 
@@ -199,10 +214,12 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** All `context`-accepting methods in `sdk.py` drop the parameter entirely (Phase 2 hard removal).
 
 **Acceptance:**
+
 - No method in `sdk.py` accepts `context` parameter
 - Old callers that pass `context=` get `TypeError: unexpected keyword argument`
 
 **Files:**
+
 - **Modify:** `tortoise/sdk.py`:
   - `query()` (601) — remove `context` param and filter clause; add `kind_filter` from query_suggestions integration
   - `paginated_query()` (636) — same
@@ -222,6 +239,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 **Intent:** All 7 MCP tools drop their `context` parameter.
 
 **Files:**
+
 - **Modify:** `tortoise/mcp_server.py` — remove `context` param from:
   - `tortoise_create_point` (148)
   - `tortoise_query` (182)
@@ -238,6 +256,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.4: Remove `context` from hosted API
 
 **Files:**
+
 - **Modify:** `tortoise/hosted_api.py` — remove `context` from `CreatePointRequest` (445), `PointResponse` (471), `list_points` (541) context filter; remove 22 lines of context handling
 - **Test:** `tests/test_hosted_api.py`
 
@@ -246,6 +265,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.5: Remove `context` from taxonomy.py
 
 **Files:**
+
 - **Modify:** `tortoise/taxonomy.py` — delete `list_domains()` (GROUP BY context); `list_topics()` (840) — remove `context` from return dict and neighbor queries
 - **Modify:** `tortoise/sdk.py` — delete `list_domains()` wrapper (834); update `list_topics()` (840) to not return `context`
 
@@ -254,6 +274,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.6: Remove `context` from search_engine.py
 
 **Files:**
+
 - **Modify:** `tortoise/search_engine.py`:
   - `SearchResult` dataclass (49) — remove `context` field
   - `classify_query()` (81) — remove `context` param
@@ -268,6 +289,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.7: Remove `context` from weights.py (dead code)
 
 **Files:**
+
 - **Modify:** `tortoise/weights.py` — delete `context_multipliers` dict (lines 41-47) and the `w *= context_multipliers[context]` block
 
 ---
@@ -275,6 +297,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.8: Remove `context` from grounding.py
 
 **Files:**
+
 - **Modify:** `tortoise/projection/grounding.py` — line 59: replace `WHERE n.context IN ['resolution-event','resolution-vector']` with pointKind-based filter; `a[idx[pid]] = 1.0` seeded on `n.pointKind IN ['resolution-event', 'resolution-vector']`
 - **Test:** `tests/test_grounding.py`
 
@@ -283,6 +306,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.9: Fix `analyze.py` injection + remove `context`
 
 **Files:**
+
 - **Modify:** `tortoise/analyze.py` — line 320-321: remove `STARTS WITH` string interpolation; replace with parameterized kind filter or anchored subgraph selector
 - **Test:** `tests/test_analyze_scoped.py`
 
@@ -291,6 +315,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.10: Remove `context` from session_continuity.py
 
 **Files:**
+
 - **Modify:** `tortoise/session_continuity.py` — line 20: `self.sdk.query(context=self.session_id)` → use pointKind filter or diary_read; line 42: remove `context=self.session_id` from create_point
 
 ---
@@ -298,6 +323,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.11: Remove `context` from projection edges
 
 **Files:**
+
 - **Modify:** `tortoise/projection/edges.py` — line 32: `s.context='orphan-stub'` → remove context from stub node creation
 
 ---
@@ -305,6 +331,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.12: Update skills
 
 **Files:**
+
 - **Modify:** `skills/how-to-use-tortoise/SKILL.md` — remove all `context` usage from examples; replace with `extractedFrom`, pack namespace, anchors-based EP
 - **Modify:** `skills/tortoise-file-finding/SKILL.md` — same
 
@@ -313,6 +340,7 @@ Phase 2: **Remove**. All `context` params become hard errors or are deleted.
 #### Task 2.13: Update tests globally
 
 **Files:**
+
 - **Modify:** ~30 test files referencing `context` — update to use replacement mechanisms
 - **Create:** `tests/test_context_removal.py` — meta-test: `grep -r "context" tortoise/` must return 0 hits in production code (excluding comments/docs referencing historical context)
 
@@ -433,6 +461,7 @@ The solution-verify gate found 1 P0 + 8 P1s. All fixed below — these are MANDA
 **Original flaw:** anchors = 3 options, hops=2-3, direction="incoming"/"both" does NOT reproduce old context-based extraction semantics (`MATCH (op)-[r:IMPL|NAND]->(c {context:$ctx})` = operators targeting ANY context point). Also used unregistered kind "decision".
 
 **Correct design:**
+
 ```python
 def test_ep_parity_licensing_decision():
     # Old semantics: every operator targeting ANY non-operator point in the context
@@ -451,6 +480,7 @@ def test_ep_parity_licensing_decision():
     # Ranking preserved: AGPLv3-dual 0.906 > BSL-ep 0.8875 > SSPL 0.794
     assert sorted((c["mean"] for c in result_new["confidences"].values()), reverse=True)[0] > 0.85
 ```
+
 **Rationale:** identical operator sets ⇒ EP convergence differs by < 0.001 (25-particle SVBP, same inputs). The 0.05 tolerance in the earlier draft was wrong (it masked operator-set divergence). If operator sets differ, NO tolerance helps — investigate the BFS, don't widen tolerance. Fallback plan: if `max_hops=1 incoming` from all anchors misses operators (e.g., finding↔finding truth edges at distance 2 from any anchor), add `direction="both"` for the operator→operator leg only, and document the delta.
 
 ### 8.2 FIXED (P1): projection/entities.py — the actual write path
@@ -510,7 +540,6 @@ Specify: SDK functions accepting deprecated `context` return a top-level `deprec
 | Search start_nodes reuse | If tortoise_search already supported anchor traversal (it doesn't) |
 | SubgraphSelector class | If #85 dreaming needed the same traversal NOW (extract later) |
 
-
 ### 8.13 FIXED (P1, cycle-3): api.py Phase 2 removal + resolution-event trigger
 
 - **Task 2.16 (new):** remove `context` from `tortoise/api.py` signatures: `_point` (:57), `add_point` (:110), `add_operator` (:121), `revise_point` (:175).
@@ -526,7 +555,6 @@ Specify: SDK functions accepting deprecated `context` return a top-level `deprec
 
 - Add to the §8.1 parity test: assert no operator→operator edges exist in the subgraph (or document operator-count delta if they do). Currently 0 such edges globally — guards against future meta-operators silently breaking the 1-hop parity.
 
-
 ---
 
 ## 9. Parallel Review Gate — Controller Fixes (2026-08-05, cycle 4)
@@ -538,6 +566,7 @@ Four parallel reviewers found the deepest issues yet. ALL fixes mandatory. The s
 **The flaw:** P1 stops WRITING context, but P1's deprecation shims still READ context (`compute_confidence(context=X)` maps context→anchors via `MATCH (n {context:$ctx})`; `query(context=X)` filters `n.context`). New points created in P1 have no context → shims find zero anchors → EP returns empty confidences, queries return empty for new data. Skills that create-then-query (tortoise-file-finding, decision-comparison) silently break.
 
 **The fix (ordering change in P1):**
+
 1. **Skills migrate FIRST** (Task 1.6 reordered before stop-writes): update how-to-use-tortoise + tortoise-file-finding to the new patterns (no context in create, use extractedFrom + anchors) BEFORE any stop-write lands
 2. **Deprecation shim maintains in-session mapping:** when `create_point(context=X)` is called in P1, record `context → [point_ids]` in an in-memory session map (per SDK instance); `query(context=X)`/`compute_confidence(context=X)` first check the session map, then fall back to graph `MATCH n.context`. This preserves create-then-query semantics within a session even though context isn't persisted.
 3. **Session-scoped map is dropped at Phase 2** (no persistence — P1-only compat).
@@ -556,6 +585,7 @@ Gate counting (sdk.py:807-828, `tortoise-wf-gate0..4` hardcoded contexts) breaks
 ### 9.4 (P0): references edge needs its own API
 
 `_link_source(point_id, source_ref, source_kind)` can't create Source→entity references (no entity knowledge at that call site). Split:
+
 - `_link_source` stays extractedFrom-only
 - NEW `link_source_to_entity(source_url, entity_name, entity_label)` — called by connectors/extractors that know the entity
 - Backfill re-scoped: operates on extractedFrom + about* edges (Source → Point → about* → entity), NOT context values
@@ -572,6 +602,7 @@ Build a synthetic epistemic subgraph in the isolated test graph (conftest graph)
 ### 9.7 (P1): migration safety — snapshot + cross-subgraph parity + rollback
 
 Before `REMOVE n.context`:
+
 1. FalkorDB BGSAVE snapshot (or Cloud backup) — documented restore procedure in script header
 2. Pre-migration scan: for a random sample of 50 context subgraphs (not just licensing), compute EP old-vs-new, report any operator-set delta >0. Block migration on unexplained deltas.
 3. Write `data/migrations/2026-08_context_removal_audit.json` = {context_value: [point_ids]} BEFORE removal (information-preserving sidecar — Agent 2 P2-2)
@@ -616,7 +647,6 @@ P1 known limitation: context-scoped queries return pre-P1 but not post-P1 points
 
 Option (b) per Agent 3: Phase 1 uses `direction="both"` for all BFS (direction-agnostic, works pre-#86); Phase 2 tightens to directional semantics after #86 lands. Decouples P1 from #86. The parity test uses direction="both" + max_hops=1 from all non-operator anchors (direction-agnostic equivalence).
 
-
 ---
 
 ## 10. Ontology v3.0 Ratification Alignment + Re-Review Integration (2026-08-05, cycle 5)
@@ -626,12 +656,14 @@ Option (b) per Agent 3: Phase 1 uses `direction="both"` for all BFS (direction-a
 ### 10.1 (P0) Fix all ontology doc references — proposal file is DELETED
 
 The plan references `docs/ONTOLOGY_v3.0_proposal.md` in multiple places (§7 prerequisites, 9.13, 9.14). **That file no longer exists on main** (merged into `docs/ONTOLOGY.md` at 31a1dd6, then rewritten at 0f9e6a2).
+
 - ALL references to `docs/ONTOLOGY_v3.0_proposal.md` → `docs/ONTOLOGY.md` (canonical, ratified)
 - §9.13 (add §5 heading) is **OBSOLETE**: `references` is already spec'd in canonical v3.0 §3.2-3.3 (`extractedFrom` Point→Source; `references` Source→Entity; layered provenance `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)`). Replace 9.13 with: "Task 1.1's references implementation is gated by the RATIFIED spec at docs/ONTOLOGY.md §3.2-3.3 — no proposal edit needed."
 
 ### 10.2 (P0) `context` IS in the ratified v3.0 — deletion requires an ontology AMENDMENT
 
 Canonical `docs/ONTOLOGY.md` §4.1 Point metadata still lists: `| context | string | — | Namespace context |`. The plan deletes this field.
+
 - **NEW TASK 0.0 (prerequisite, before Phase 1):** amend ratified v3.0 — remove the `context` row from `docs/ONTOLOGY.md` §4.1, add a migration note ("context removed in #49 — provenance via extractedFrom/references, namespace via pack pointKinds, EP scoping via anchors"). This is a RATIFIED-doc amendment (v3.0 → v3.0.1 or v4.0-note), human-approved per the ontology governance gate.
 - The amendment and the code deletion must reference the same issue (#49) to keep them linked.
 
@@ -644,10 +676,12 @@ Canonical v3.0 §3.2-3.3: `references: Source → Entity` where Entity = **Docum
 The re-review confirmed: §3 (executable task list) was never updated with ~80% of §8/§9 fixes. A fresh agent following §3 alone misses 12+ work areas. **This section authorizes a full §3 rewrite.** The consolidated Phase 1 task list (supersedes §3):
 
 **Phase 0 (prerequisites):**
+
 - 0.0: v3.0 amendment (10.2) — remove context from §4.1, human-approved
 - 0.1: Verify #86 state (directionality); P1 uses direction="both" if not merged (9.17)
 
 **Phase 1 (build + migrate + stop-writes), ORDERED:**
+
 - 1.0: **Skills migrate FIRST** (9.1): how-to-use-tortoise + tortoise-file-finding to new patterns (extractedFrom, pack pointKinds, anchors-based EP) — MUST precede 1.5
 - 1.1: references edge — RATIFIED spec (10.1): `link_source_to_entity(source_url, entity_name, entity_label)` NEW API (9.4); backfill via extractedFrom+about* only (9.4); Entity range Document|Event|Object (10.3)
 - 1.2: enumeration surfaces — list_pointkinds()/list_sources()/list_namespaces() (sdk) + re-key summarize_structure to pointKind **IN P1** (9.3) + MCP wrappers tortoise_list_pointkinds/tortoise_list_sources (9.2) + CLI tortoise list-kinds/list-sources (9.12)
@@ -657,6 +691,7 @@ The re-review confirmed: §3 (executable task list) was never updated with ~80% 
 - 1.6: projection version gate + entities.py MERGE fix (8.2, 9.1)
 
 **Phase 2 (remove + migrate), ORDERED:**
+
 - 2.0: **Pre-migration safety** (9.7): BGSAVE snapshot, 50-subgraph parity sample (exclude P1-created subgraphs — Agent2 P2-2), audit sidecar data/migrations/2026-08_context_removal_audit.json
 - 2.1: REMOVE n.context migration (TORTOISE_PHASE2=1 + grep/AST preflight 9.11)
 - 2.2-2.16: read-path removal (SDK/MCP/hosted/taxonomy/search/weights/grounding/analyze/audit/session_continuity/CLI/client/graph-scripts/api.py) — per §8.3-8.6, 8.13, 8.14 + docs/ sweep (Agent2 P2-2)
@@ -680,7 +715,6 @@ MCP tools are per-call (no SDK instance persistence across calls in a stateless 
 
 MCP compute_confidence default `direction="both"` in P1 (matching 9.17); change to `"incoming"` in P2 after #86. State the P1→P2 default change explicitly.
 
-
 ---
 
 ## 11. Final Gate Amendments (2026-08-05, cycle 6)
@@ -688,6 +722,7 @@ MCP compute_confidence default `direction="both"` in P1 (matching 9.17); change 
 ### 11.1 (P0) Task 0.0 governance — ontology amendment approval mechanism
 
 The v3.0 amendment (remove `context` from docs/ONTOLOGY.md §4.1) is **ontology-governance work, separate from #49's code deletion**:
+
 - **File a SEPARATE issue** under epistemic-team ownership: "Amend ratified v3.0 §4.1: remove context field (per #49)" — linked as a #49 blocker
 - **Approval:** human PR review with explicit ontology-approval (the canonical ontology governance gate: "any edit requires explicit human approval — PR with proposed diff, review from organisation-design-team")
 - **Commits:** the ONTOLOGY.md amendment commit is SEPARATE from code-deletion commits, so it's reviewed independently
@@ -709,4 +744,3 @@ Add to Phase 1 tests: `test_session_map_roundtrip.py` — (1) create point with 
 
 - §1 "analyze.py:320" → "analyze.py:321" (off-by-one)
 - §8.11 "memory_scope.py:11" — file doesn't exist on new main; remove reference (docstring reference was in the OLD projection.py; moot)
-

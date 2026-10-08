@@ -4018,10 +4018,40 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the organization! Your membership is active.')
+              // #5254: the accept body carries the INVITED org (`{org_id, role}`
+              // — hosted_api.accept_invite). Without selecting it here, the
+              // mount's #1912 / Round-8 first-healthy pin owns orgIdRef, so a
+              // user who is ALREADY a member of another org lands on that org
+              // — NOT the one the invite link just added them to, while the
+              // account-menu accept path (acceptPendingInvite) switched
+              // correctly. Read the org and mirror that path (`await
+              // loadTeams()` then `switchTeam(org_id)`, same order).
+              let invitedOrgId = ''
+              try {
+                const accepted = await inviteRes.json()
+                invitedOrgId = (accepted && accepted.org_id) || ''
+              } catch { /* unreadable body — fall back to the first-healthy pin */ }
               // #2538: propagate the accepted invite to wizard state so
               // loadTeams fires and the welcomeHasOrg chain triggers the
               // dashboard route guard (invited users skip onboarding).
-              await loadTeams().catch(() => {})
+              const acceptedTeams = await loadTeams().catch(() => null)
+              // Prefer the invited org only when it is PRESENT and NOT
+              // SUSPENDED — the #1912 rule is not weakened (a suspended
+              // membership never becomes the default). Skipped when the pin
+              // already landed on it (the single-membership invitee, which
+              // worked before this fix): switching then would only repeat the
+              // mount's own loads. When the roster read itself fails
+              // (`loadTeams` returns null — a transient fault, or a Round-12
+              // sign-out) the invited org cannot be checked at all, so nothing
+              // is selected and the mount's own pin stands: the fail-safe
+              // direction, since a switch to an unverifiable org could select
+              // a suspended one.
+              const invited = Array.isArray(acceptedTeams)
+                ? acceptedTeams.find((t) => t.org_id === invitedOrgId)
+                : null
+              if (invited && !invited.suspended_at && invitedOrgId !== orgIdRef.current) {
+                switchTeam(invitedOrgId)
+              }
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
@@ -7540,11 +7570,35 @@ function claimIntentInFlight() {
                           ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
-                      if (capNotice) {
+                      // #2940: keyed on `capNotice` ALONE this arm was skipped on
+                      // the reachable build-fork cap path — the 402 mint handler
+                      // sets the wizard's own `wizardDurableCapped` (see the
+                      // `doneCanMintFresh` gate) and never sets `capNotice` — so
+                      // the lede below rendered "Create an API key and call the
+                      // Tortoise SDK from your app." directly above the body's
+                      // role="alert" reporting that the plan's key limit was
+                      // reached.
+                      // `!harnessKey` guards BOTH halves, because neither signal
+                      // is cleared by a successful paste — `capNotice` is raised
+                      // by the Keys-tab create/rotate 402 as well, and
+                      // `wizardDurableCapped` by this step's own mint 402 — so an
+                      // unguarded arm told a user who had just pasted a key to
+                      // paste one. A key in hand ends the cap arm.
+                      // The role arm above has already run, so a member never
+                      // reaches this branch.
+                      if ((capNotice || wizardDurableCapped) && !harnessKey) {
                         return <p className="welcome-lede">{isBuildFork
                           ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
+                      // #2940 (review P2): with a key in hand AND `capNotice` set
+                      // (Keys-tab 402, re-entered through the header Setup
+                      // button) the body renders the cap notice and the paste row
+                      // and no chooser at all, so falling through would put
+                      // wizardStepSub's "Pick which harness to connect." over a
+                      // body that offers no pick. Suppress the lede; the body's
+                      // own cap notice carries the state.
+                      if (capNotice && harnessKey) return null
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
                     return <p className="welcome-lede">{headSub}</p>

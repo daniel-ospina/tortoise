@@ -13,6 +13,7 @@ updated: 2026-09-11
 
 > **SUPERSEDED (2026-09-10, #2710):** two acceptance criteria below are no
 > longer the shipped behaviour and must NOT be reinstated:
+>
 > 1. **Task 2** — "Clicking a pill opens the key modal ONLY if no key exists
 >    yet". The pills are now pure display-mode toggles; clicking one never
 >    opens/touches the shared key-create modal.
@@ -67,6 +68,7 @@ updated: 2026-09-11
 | Build fork curl | ✅ Done | already in branch — verify only (Task 6) |
 
 **Existing state used (no new state except `wizardKeyMode`):**
+
 - `wizardHarness` (line 984, defaults to `'claude'`)
 - `wizardDurableKey` (line 2201)
 - `wizardDurablePaste` (line 2218)
@@ -94,6 +96,7 @@ Skipped — no integration boundaries. The only external interaction is the exis
 **Acceptance:** After clicking "Copy & done", `wizardDurableKey` holds the plaintext key. The wizard renders prompt cards with the key embedded (if Key included) or shown separately (if Key separate).
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (the "Copy & done" button onClick, in the key modal `keyModalStage === 'done'` branch)
 
 **Step 1: Add `setWizardDurableKey(newKey)` before the nulls**
@@ -119,6 +122,7 @@ Skipped — no integration boundaries. The only external interaction is the exis
 **Acceptance:** User sees a row of harness tabs (`HARNESS_ORDER` minus `chatgpt`). Selecting a tab shows key pills (agent-driven harnesses) or manual config (Desktop, Web). Clicking a pill opens the key modal ONLY if no key exists yet (if a key already exists, clicking a pill just toggles the display mode without re-opening the modal).
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (the self-fork `wizardStep === 2 && !isBuildFork` block)
 - Modify: `website/apps/dashboard/src/index.css` (`.key-pills`, `.pill`, `harness-tabs` styles)
 
@@ -133,6 +137,7 @@ Add near other wizard state declarations (~line 2220).
 **Step 2: Add CSS**
 
 In `website/apps/dashboard/src/index.css`:
+
 ```css
 .key-pills { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
 .key-pills button { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border,#1e293b); border-radius: 8px; background: var(--surface,#0d1a2d); cursor: pointer; text-align: left; display: flex; flex-direction: column; }
@@ -226,6 +231,7 @@ The live self-fork block (currently ~55 lines of universal command + "I already 
 **Acceptance:** `<WizardPromptCard text="..." />` renders a clickable card with top-right copy icon and bottom COPY button. Shows "Copied ✓" for ~1.6s after copy. A `wizardPromptText(harness, step, key, mode)` function returns the correct prompt string per harness.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (new component + helper function — `WizardPromptCard` defined at TOP LEVEL outside `App`, since it uses only props + local state and references no closure variables)
 
 **Step 1: Create `WizardPromptCard` component**
@@ -304,6 +310,7 @@ function wizardPromptText(harness, step, key, mode) {
 **Acceptance:** Each harness tab shows correct content. No broken prompt cards with empty keys (guarded by `harnessKey ?`). Key-display row appears in 'separate' mode for agent-driven harnesses. Auto-open useEffect fires when reaching step 2 without a key (with complete deps array).
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (the harness-specific content below tabs + pills)
 
 **Step 1: Common guards and helpers (data-driven, DRY)**
@@ -435,6 +442,7 @@ React.useEffect(() => {
 **Acceptance:** When `!isOwnerAdmin || capNotice`, the entire harness-tabs + pills + prompt cards block is replaced by a paste input (with placeholder "Paste an API key (tt_…)") and a "Use this key" button. Paste validation rejects: non-`tt_` prefixes, bootstrap keys, expiring keys, revoked/disabled keys, AND **unknown keys** (prefix matches no row in the org — never embed on unknown, per sessionKey.js).
 
 **Files:**
+
 - Create: paste escape JSX in the self-fork block (the `: (` else branch in Task 2 Step 4's ternary)
 - Modify: `website/apps/dashboard/src/main.jsx` — clean up `wizardShowPaste`/`step3PasteAutofocus` references
 
@@ -503,6 +511,7 @@ React.useEffect(() => {
 **Step 2: Clean up `wizardShowPaste` and `step3PasteAutofocus`**
 
 Audit EVERY reference to `wizardShowPaste` / `setWizardShowPaste` outside the replaced block:
+
 - ~line 1187 (comment)
 - ~line 1194 (`step3PasteAutofocus` declaration)
 - ~line 1200 (comment)
@@ -520,11 +529,13 @@ Remove the disclosure toggle JSX (the "I already have a key — paste it instead
 **Acceptance:** Build fork renders key (shown once) + curl command + "I've set it up — Continue →" button + SDK docs link + Back/Skip nav. The `wizardMintDurableKey` call is unchanged (no modal — silent mint). Build passes with zero errors.
 
 **Files:**
+
 - Verify: `website/apps/dashboard/src/main.jsx` (the `isBuildFork` branch)
 
 **Step 1: Verify build fork is untouched**
 
 The build fork block should still show:
+
 - No `harnessKey` → "Create an API key for {org}" button (calls `wizardMintDurableKey`, no modal) + "Manage API keys →" link
 - Has `harnessKey` → key shown once + curl command + "I've set it up — Continue →" + SDK docs link
 - No pills, no prompt cards, no harness tabs
@@ -546,6 +557,7 @@ Build must pass with zero errors.
 **Acceptance:** `vite build` passes. No console errors. No orphaned CSS classes.
 
 **Files:**
+
 - Test: build
 
 **Step 1: Build**
@@ -561,6 +573,7 @@ Run a quick grep for CSS class names that might be unused. The old `.snippet` us
 **Step 3: Manual smoke test**
 
 Open the built dashboard, run through: sign in → wizard → fork=self → connect step. Verify:
+
 1. Harness tabs appear (6 tabs, no ChatGPT)
 2. Clicking Pi shows pills + "Create an API key to see the setup prompt" (no broken prompt)
 3. Clicking "Key included" opens modal → create → prompt appears with key embedded

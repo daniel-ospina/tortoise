@@ -46,9 +46,11 @@ both FAIL under CI when `node` is absent or below the default-on floor (22.18) (
 source-level pins above still ran); every lane that executes this file provisions Node 22.
 
 **Files:**
+
 - Modify: `tests/test_pi_capture_hooks.py`
 
 **Steps (TDD):**
+
 1. Add `import json` to the file's import block. Pass **no**
    `NODE_TS_FLAG`: the behavioural-suite invocation stays `[node, "--test", str(EXTENSION_TEST)]` and the
    floor moves to the default-on boundary (`_node_supports_ts`, Node ≥ 22.18 — see the Node TypeScript
@@ -56,6 +58,7 @@ source-level pins above still ran); every lane that executes this file provision
 2. Add the probe SOURCE as a module constant (`_PROBE_SOURCE` as shipped) plus a
    `_run_installed_probe(tmp_home, installed, node)` that writes it into the temp HOME and runs it.
    No parameter carries a path — paths travel by ENV:
+
    ```js
    import { pathToFileURL } from "node:url";
    const mod = await import(pathToFileURL(process.env.PROBE_SEAM).href);
@@ -84,6 +87,7 @@ source-level pins above still ran); every lane that executes this file provision
    await new Promise((r) => setImmediate(r));
    console.log("PROBE_JSON:" + JSON.stringify({ handlers: Object.keys(handlers), calls }));
    ```
+
    The `{type:"message", message:{…}}` entry shape matches `PI_ENTRIES` (a bare `{type:"user"}` yields
    zero turns and a confusing `0 !== 1`). `session_shutdown` fires synchronously; the `setImmediate`
    awaits its `.then`.
@@ -124,9 +128,11 @@ scope — the text it scans and how it joins wrapped comment lines — is define
 `tests/test_session_verify.py`, which is the source of truth; it is deliberately not restated here.
 
 **Files:**
+
 - Modify: `tortoise/session_verify.py` (`UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE` comment, the module-docstring sentence)
 - Modify: `tests/test_session_verify.py` (`test_pi_is_honestly_unverifiable`)
 **Steps (TDD):**
+
 1. **Red:** in `test_pi_is_honestly_unverifiable`, bind
    `detail = report["links"]["installed"]["detail"]` (keeping the existing `"extension" in detail`)
    and add the new assertions — including the extension of the pin to the module-side Pi ruling. The
@@ -153,9 +159,11 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
 (d) who runs it, (e) the `#3713`/`#4661`/`#4710`/`#4680` pointers, (f) that `#3971` has merged.
 
 **Files:**
+
 - Modify: `tortoise/pi-hooks/README.md`
 
 **Steps:** add the section:
+
 - **Executable:** `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`
   (the extension's full hermetic suite, which fires the real handlers); `tests/test_pi_capture_hooks.py`
   (source pins + the installed-artifact fired check + its anti-vacuity mutation test). `tests/test_pi_capture_hooks.py` is
@@ -184,6 +192,7 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
 
 **Intent:** Satisfy issue outcome (2)'s "stated in objective 1's done-state" clause.
 **Acceptance:**
+
 - `docs/plans/2026-08-25-1714-memory-capture-onboarding.md`: **append** a dated
   `## #4620 amendment (2026-09-22)` section (do **not** rewrite the reviewed text), and **append** a
   one-line pointer *immediately after* the table containing `:43` and *after* item 4 at `:316`,
@@ -201,6 +210,7 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   objective names is retrievable from `#1714` itself.
 
 **Files:**
+
 - Modify: `docs/plans/2026-08-25-1714-memory-capture-onboarding.md`
 - Artifact: body edit + comment on `#1714`
 
@@ -229,4 +239,3 @@ was under-defined) is incorporated above, so no finding is carried open; the exi
 capped, not clean, because the loop ran past its bound (`plan-review` §Exit & Signature).
 
 <!-- plan-review: cycles=4, status=capped, verdict=incorporation-over-cap, version=2.3.0 -->
-

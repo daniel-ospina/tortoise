@@ -14,6 +14,7 @@ Nexus Analytics raised $8M Series A 14 months ago. They build analytics dashboar
 The reference graph has 5 domains, each with points and cross-domain operators:
 
 #### Domain A: Product Analytics (8 points)
+
 - A1: MRR $142K, growing 4% MoM (was 12% MoM at Series A)
 - A2: NPS dropped from 62 to 41 in 6 months
 - A3: Feature adoption: 23% use the new AI insights module (launched 4 months ago, cost $400K to build)
@@ -24,6 +25,7 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 - A8: Platform uptime: 99.2% (below 99.9% SLA for 3 enterprise pipeline deals)
 
 #### Domain B: Market & Competition (8 points)
+
 - B1: Enterprise analytics market growing 28% YoY ($14B TAM)
 - B2: Mid-market analytics growing 9% YoY ($3.2B TAM)
 - B3: 3 new competitors launched in mid-market in last 6 months (2 with free tiers)
@@ -34,6 +36,7 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 - B8: OpenAI launched analytics API — could commoditize mid-market dashboards within 12 months
 
 #### Domain C: Financials (6 points)
+
 - C1: Cash: $4.2M remaining (14 months runway at current burn)
 - C2: Burn rate: $300K/month (was $220K at Series A — headcount grew 40% to 32 people)
 - C3: Customer acquisition cost (CAC): $8,400 (was $3,200 at Series A — paid channels saturating)
@@ -42,6 +45,7 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 - C6: Mid-market pipeline: 34 deals worth $18K ACV average (3 weeks avg sales cycle)
 
 #### Domain D: Team & Organization (5 points)
+
 - D1: CTO considering departure — frustrated with product direction, wants to build platform, not features
 - D2: Sales team: 4 mid-market AEs (quota attainment 62%), 0 enterprise AEs
 - D3: Engineering: 14 engineers, no one with enterprise security/compliance experience
@@ -49,6 +53,7 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 - D5: Customer success team: 3 people, handling 180 accounts (60:1 ratio, industry best practice 40:1)
 
 #### Domain E: Investors & Board (4 points)
+
 - E1: Lead investor (VentureCo) pushing for enterprise pivot — "mid-market is a feature, not a company"
 - E2: 2 of 5 board members want to replace CEO if MRR doesn't hit $200K in 6 months
 - E3: Term sheet from StrategicCo: $5M extension at flat valuation IF enterprise pivot + CTO stays
@@ -57,12 +62,14 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 ### Operators (12)
 
 **Within-domain tensions:**
+
 - O1: NAND(A1, A2) — MRR growing but NPS dropping. Growth from existing expansion, not happy new users.
 - O2: NAND(A3, A4) — $400K AI feature has 23% adoption. Cost exceeds revenue generated.
 - O3: NAND(B1, B2) — Enterprise market growing 3x faster than mid-market. Where the wind is blowing.
 - O4: NAND(C5, C6) — $480K ACV vs $18K ACV. You need 27 mid-market deals to equal 1 enterprise deal.
 
 **Cross-domain tensions:**
+
 - O5: NAND(A5, C5, D2) — 3 customers want enterprise features, 8 deals in enterprise pipeline, but 0 enterprise AEs. Demand exists, distribution doesn't.
 - O6: NAND(C1, C2, D4) — 14 months runway but CEO has no enterprise experience. Pivot means hiring expensive enterprise team, increasing burn.
 - O7: NAND(B3, B4, B5) — Competition from below (free tiers), at our level ($20M-funded), and above (Tableau SMB). Squeezed from 3 directions.
@@ -75,6 +82,7 @@ The reference graph has 5 domains, each with points and cross-domain operators:
 ### Reference Graph Conclusion
 
 **PIVOT to enterprise** — but with a specific path:
+
 1. Use $5M extension to hire 2 enterprise AEs + 1 security engineer
 2. Keep mid-market running (covers burn) while enterprise pipeline matures
 3. CTO stays by framing enterprise as "platform, not features" (SSO, audit logs, APIs = platform work)
@@ -103,6 +111,7 @@ Each document is a "report" from a different stakeholder/function. None state th
 | D10 | Strategic Options Memo | CEO (personal, not shared) | 5pp | All | Cross-domain synthesis (most operators HINTED at but not stated) |
 
 ### Noise Generation Rules
+
 - Each document starts with an executive summary (padding)
 - Include contextual background (why this report was commissioned)
 - Add irrelevant but realistic details (team names, meeting dates, tool names)
@@ -113,6 +122,7 @@ Each document is a "report" from a different stakeholder/function. None state th
 ## 3. Experimental Protocol
 
 ### Batch Structure
+
 Documents delivered in 4 batches of 2-3 docs each:
 
 | Batch | Documents | Approx Pages |
@@ -125,6 +135,7 @@ Documents delivered in 4 batches of 2-3 docs each:
 ### Prompts
 
 **Control — Batch 1:**
+
 ```
 You are an independent strategic advisor to Nexus Analytics. You will receive
 documents in batches. After each batch, give your honest assessment.
@@ -137,6 +148,7 @@ Should they consider pivoting? Explain your reasoning.
 ```
 
 **Control — Batches 2-3:**
+
 ```
 --- BATCH N/4 ---
 [DOCUMENTS]
@@ -147,6 +159,7 @@ Consider these new documents. Has your assessment changed?
 ```
 
 **Control — Batch 4:**
+
 ```
 --- BATCH 4/4 ---
 [DOCUMENT D10]
@@ -159,6 +172,7 @@ mid-market product-led growth? Provide your reasoning and confidence (0-100%).
 ```
 
 **Tortoise — Batch 1:**
+
 ```
 You are an independent strategic advisor to Nexus Analytics. You have access to
 a knowledge graph tool where you can file key claims and tensions.
@@ -179,6 +193,7 @@ Use the graph to answer: what does the evidence in these documents suggest so fa
 ```
 
 **Tortoise — Batches 2-3:**
+
 ```
 --- BATCH N/4 ---
 [DOCUMENTS]
@@ -191,6 +206,7 @@ graph suggest?
 ```
 
 **Tortoise — Batch 4:**
+
 ```
 --- BATCH 4/4 ---
 [DOCUMENT D10]

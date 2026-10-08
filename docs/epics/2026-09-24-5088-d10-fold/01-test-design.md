@@ -39,12 +39,14 @@ aboutObjects: "epic #5088, integration surface map, D10 fold"
 ## Step 3 — The integration checklist, applied
 
 **Contract & data shape**
+
 - [ ] The `:Source` property set is **explicit** (`_SOURCE_HANDLED`) and tested as an equality, not a sample — a field added to the writer but not the allowlist is dropped **silently**.
 - [ ] `url` present on every `:Source` written — **a row with no `url` cannot be the identity** and must be an explicit, tested refusal rather than an empty key.
 - [ ] Empty vs null: `documentKind` absent vs `''` vs `'transcript'` — each must land on a decided side of the count predicate.
 - [ ] Boundary: the quota **at** the cap, at cap−1, and at cap+1 — the predicate change must not move the number that gates `/v1/index/docs`.
 
 **Failure modes (per surface, enumerated)**
+
 - [ ] #2 **silent mis-point** — the highest-severity mode in the epic. Needs a test that asserts the **resolved node**, not that the query returned.
 - [ ] #3 **silent property drop** — assert the persisted property set, not the return value.
 - [ ] #4 **replay divergence** — replay a captured journal and **diff the graph node-by-node, edge-by-edge**.
@@ -53,6 +55,7 @@ aboutObjects: "epic #5088, integration surface map, D10 fold"
 - [ ] #10 **duplicate identity** — two concurrent writes on one `url` yield one node.
 
 **Data integrity**
+
 - [ ] **Idempotency** — a re-index of unchanged content must report *unchanged*, not *updated* (`test_idempotent_rerun`). ⚠️ Lane D's plan found the document→corpus collapse **breaks this**: the `#205 Source→Document` edge becomes a self-loop, is dropped, and the index-completeness gate then reports every unit *incomplete* forever.
 - [ ] **Atomicity** — the label+key move and the quota re-point land together.
 - [ ] **Ordering** — **#5026 before #5025** (both edit the same resolver). This is enforced by sequence, not by the tests.

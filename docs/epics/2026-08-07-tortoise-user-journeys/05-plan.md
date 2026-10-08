@@ -184,6 +184,7 @@ Supabase signup (OAuth/email)
 **Automation points:** trigger, hook, edge function, internal endpoints — all automated.
 **Manual triggers:** none in normal flow. Operator debug path: direct edge-function POST with `{user_id, email}` payload (exists).
 **Failure modes:**
+
 | Failure | Detection | Fallback |
 |---|---|---|
 | Hook not wired on remote | E2E walk shows no membership row | Fix Supabase dashboard config (A1) |
@@ -333,6 +334,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │  [Open Dashboard →]  [Lost your key? → J-2]  │
 └───────────────────────────────────────────────┘
 ```
+
 **States:** loading (polling) · error (no session) · pending>30s · first-visit reveal · returning (no re-reveal).
 
 ## P-2: Dashboard (app.premiselabs.co) — authenticated shell + team/graph switcher (J-3/J-4, UX-D1)
@@ -356,6 +358,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │  └────────┘ └────────┘ └────────┘ └────────┘            │
 └──────────────────────────────────────────────────────┘
 ```
+
 **States:** no session → API-key login card · **loading (team/graph resolution spinner)** · **session expired mid-use → notice + redirect to sign-in** · authenticated (team+graph context) · zero-teams → "Create your first team" · tier cap hit → inline soft-block + upgrade CTA. **(zero-graphs state removed — default graph guaranteed; switcher always shows ≥1)**
 
 **Create-team dialog (W-2c companion):** name input + tier display (Free default) + submit; name-collision → idempotency (retry-safe).
@@ -382,6 +385,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │  └──────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────┘
 ```
+
 **States:** monthly/annual swap (JS) · annual default · self-hosted section (BSL framing) · CTA → /signup.
 
 ## P-4: Key recovery (dashboard, J-2)
@@ -398,6 +402,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │ New key (shown once): tt_xxx  [📋 Copy]        │
 └────────────────────────────────────────────────┘
 ```
+
 **States:** session-authed (can mint without key) · rate-limited (abuse posture) · only-key revoke warn.
 
 ## P-5: Members + Invites (Team tier, J-4 step 4 / W-2b)
@@ -422,6 +427,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │   pricing; invite path deferred to billing)     │
 └────────────────────────────────────────────────┘
 ```
+
 **States:** Team tier (invites on) · Free/Solo/Pro (invites disabled) · pending invite (awaiting accept) · expired token → resend.
 
 ## P-6: Signup states (signup.html — #527 fix surface)
@@ -445,6 +451,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │   [Sign in instead]                            │
 └────────────────────────────────────────────────┘
 ```
+
 **States:** form · confirmation-branch (resend) · OAuth failure · duplicate email.
 
 ## Prototype review note
@@ -507,6 +514,7 @@ REVOKE SELECT (api_key) ON public.org_memberships FROM authenticated;
 ```
 
 **RLS (owner-row read + invitee + service role):**
+
 - `authenticated` SELECT: `USING (user_id = auth.uid())` — **excludes the `api_key` column** (only the reveal RPC reads it).
 - `authenticated` SELECT (invitee): `USING (status='invited' AND invited_email = auth.jwt() ->> 'email')` — SELECT only; post-signup email match. ⚠ GitHub-OAuth JWT may lack the `email` claim → invite resolution gap (flag; fallback = invite link token or manual support).
 - `service_role`: ALL.
@@ -521,6 +529,7 @@ REVOKE SELECT (api_key) ON public.org_memberships FROM authenticated;
 **Current:** welcome.html:423-450 client-SELECTs plaintext `api_key` via RLS; nothing nulls it; `.single()` 406s for users with >1 membership.
 
 **Target (SECURITY DEFINER RPC — atomic reveal + null):**
+
 ```sql
 CREATE OR REPLACE FUNCTION public.reveal_api_key(p_user_id uuid, p_org_id text)
 RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
@@ -539,6 +548,7 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION public.reveal_api_key TO authenticated;
 ```
+
 - welcome.html calls `reveal_api_key(user_id, org_id)` (no `.single()`, no client SELECT of `api_key`).
 - The key remains **team-scoped (owner row only)**; `APIKey` node (hash) is the source of truth for auth.
 
@@ -547,17 +557,21 @@ GRANT EXECUTE ON FUNCTION public.reveal_api_key TO authenticated;
 **Current Team node (hosted_api.py:320):** `max_users:1, max_teams:1, max_graphs:1` hardcoded.
 
 **Target Team node:**
+
 ```
 (:Team { id, name, tier: 'free'|'solo'|'pro'|'team',
          max_users, max_graphs,               ← from pricing.json (canonical, decision 1d), set at create; NO max_teams field (user-level capability)
          ops_allowance, graph_size_cap,      ← NEW (billing-epic constants now; enforcement later)
          created_at, backup_enabled: false })
 ```
+
 **New Graph node (team↔graph 1:N):**
+
 ```
 (:Graph { id, org_id, name, kind: 'default'|'custom', created_at, point_count })
 (:Graph)-[:BELONGS_TO]->(:Team)
 ```
+
 Existing `org_{org_id}` namespace = the team's **default graph** (graph.id='default'). **Custom-graph namespaces are RESERVED but NOT minted in v1** (decision E2E-11 — all writes resolve the default graph until a custom-graph consumer exists); E5 returns `graph_name` as an identifier string only. `max_graphs` enforced by counting `(:Graph {org_id})`.
 
 **Backfill (P2-6):** (a) set `tier='free'` + limits on existing Team nodes; (b) create `(:Graph {id:'default', org_id})` per existing team AND make `/v1/team`/points endpoints resolve the default graph for back-compat (no break); (c) `point_count` is denormalized — document count-query as the source or a maintenance path.
@@ -567,6 +581,7 @@ Existing `org_{org_id}` namespace = the team's **default graph** (graph.id='defa
 ```
 (:APIKey { id, org_id, key_hash, key_prefix, created_by, created_at, revoked_at })
 ```
+
 Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallback — make tier-driven). `points`/`sessions` limits: keep flat fallbacks (1000/1000) in v1 OR fold into `ops_allowance` — **decision: keep points/sessions flat in v1; ops_allowance (write ops) is the billing metric, decided in billing epic** (P2-7).
 
 ## 4.4 Integrity constraints
@@ -715,6 +730,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 ## 6.2 NEW endpoints (contract-first)
 
 ### E1: POST /v1/session/key — session-scoped key mint (PRIMARY dashboard auth)
+
 ```
 Auth: Supabase JWT (JWKS-verified) → user_id
 Body: { org_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose defaults 'bootstrap'; org_id optional — resolution rule below
@@ -722,32 +738,39 @@ Body: { org_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose defaults
      # bootstrap → expires_at 24h; recovery → expires_at null (persistent, revocable)
 403: no membership · 402: max_api_keys cap (recovery mint — **unless user has no usable key → auto-revoke oldest orphaned, per E2E-3**) · 429: rate limit
 ```
+
 **Resolution rule (P2-8):** single membership → that team; multiple → `400 "org_id required"`; zero → `403` with detail pointing to E2 (create team).
 **Key lifecycle (P1 — three fixes):**
+
 - **`purpose` param (P1):** `bootstrap` mints the 24h ephemeral session key (dashboard auth); **`recovery` mints a PERSISTENT revocable key (no 24h expiry)** — otherwise the #518 recovery deliverable mints a self-destructing key. Recovery keys count against tier `max_api_keys` (Free 2/Solo 5/Pro 10/Team 20+); bootstrap keys are **EXEMPT** from the cap (counted separately, swept when expired) — else a Free user's 2nd dashboard tab hits 402 and the J-1/J-3 flagship flow breaks.
 - **Reuse-before-mint (P1):** E1 reuses an existing unexpired bootstrap key for (user, team) from sessionStorage before minting — no mint-per-load.
 - `APIKey` node gains `expires_at` + `created_via:'bootstrap'|'recovery'|'dashboard'|'provision'`; `get_current_org` rejects expired keys. SignOut: client-side discard + 24h server backstop. Expired bootstrap keys swept by the reconciliation job. **Orphaned unrevealed provision keys: reconciliation sweep expires/revoles `created_via='provision'` keys not revealed within N hours.**
 **Purpose:** dashboard primary auth (decision 2), key recovery (J-2), powers E6/E2 context.
 
 ### E2: POST /v1/organizations — team creation (W-2c, J-4 zero-teams)
+
 ```
 Auth: Supabase JWT (JWKS-verified) → user_id
 Body: { name: string (1..64, [a-zA-Z0-9 _-]) }
 201: { org_id, graph_name: "org_{org_id}" (default graph, graph.id='default'), tier: 'free' }
 409: name collision · **429: team-creation rate-limit (abuse posture — not a tier block)**
 ```
+
 **Purpose:** create-first-team empty state; tier defaults Free (upgrades = billing epic).
 
 ### E3: POST /v1/invites — invite to team (W-2b, J-4 step 4, Team tier)
+
 ```
 Auth: Supabase JWT → team membership (owner/admin)
 Body: { org_id, email, role: 'admin'|'member' }
 201: { invite_id, status: 'invited', token, expires_at }
 403: not owner/admin · 402: max_users reached · 409: active invite exists
 ```
+
 **Implementation (P1-3):** wraps SDK `invitation_create` (uuid4 plaintext token, `token_hash` + `expires_at` stored on Invitation node — **NOT a JWT-signed scheme**; align E4 language). The FastAPI handler returns the plaintext `token`; the **client** renders the emailed link (server email-send is out of v1 scope — invite link copied/shown in dashboard + copy-to-clipboard; email delivery deferred to a future email issue). **Token-only resolution in v1 (decision 1e); email-match retained defensively as SELECT-only RLS, NOT a resolution fallback (manual support for email gap).**
 
 ### E4: POST /v1/invites/accept — accept invite
+
 ```
 Auth: Supabase JWT (post-signup user)
 Body: { token }                      # plaintext uuid4 token from E3 (token-only accept in v1 — decision 1e)
@@ -756,33 +779,41 @@ Body: { token }                      # plaintext uuid4 token from E3 (token-only
 **Email-match fallback DROPPED for v1 (decision 1e):** GitHub-OAuth email gap documented as a known limitation with manual support path (mirrors deferred invite email delivery).
 **Token single-use (P2):** accept CONSUMES the token (Invitation node `consumed_at` set / deleted); second accept of the same token by a different user → 409.
 ```
+
 **Purpose:** invitee → active member. Routes through SDK `membership_create` (max_users gate, tier-driven).
 
 ### E5: POST /v1/graphs — create graph in team (W-4, J-4 step 2)
+
 ```
 Auth: Supabase JWT → team membership
 Body: { org_id, name }
 201: { graph_id, graph_name: "org_{tid}_{gid}", kind: 'custom' }
 403: no membership in team · 404: unknown team · 409: graph name collision in team · 402: max_graphs reached
 ```
+
 **Purpose:** team↔graph 1:N; Free/Solo caps enforced here.
 
 ### E6: GET /v1/organizations — list my memberships (J-3/J-4 team switcher)
+
 ```
 Auth: Supabase JWT
 200: [{ org_id, org_name, tier, role, graph_count, default_graph_id }]   # excludes org_id='' placeholder rows (4.1 step 6)
 ```
+
 **Purpose:** populates team switcher; drives per-team billing display.
 
 ### E7: GET /v1/graphs?org_id= — list graphs in team (P2-7, J-4 switcher)
+
 ```
 Auth: Supabase JWT → team membership
 200: [{ graph_id, name, kind: 'default'|'custom', point_count }]
 403: no membership · 404: unknown team
 ```
+
 **Purpose:** populates the graph dropdown (names + ids).
 
 ### E8: Member management (P1-1 — P-5 surface)
+
 | Endpoint | Method | Purpose | Errors |
 |---|---|---|---|
 | /v1/organizations/{org_id}/members | GET | list members | 403 non-member · 404 |
@@ -803,6 +834,7 @@ Auth: Supabase JWT → team membership
 422 Validation Error             # FastAPI validation
 429 Too Many Requests            # rate limit (bootstrap mint, invite resend)
 ```
+
 **Versioning:** URL versioning `/v1/` (existing). No breaking changes to current contracts — new endpoints additive; `/v1/team/keys` POST auth unchanged.
 
 ## 6.4 Event schema (funnel analytics — wire hooks, impl #528)
@@ -833,6 +865,7 @@ Auth: Supabase JWT → team membership
            expires_at,          ← NEW — session keys (E1)
            created_via })        ← NEW — 'bootstrap' | 'recovery' | 'dashboard' | 'provision' (E1 purpose → created_via; 'bootstrap'=24h ephemeral, 'recovery'=persistent revocable)
 ```
+
 `get_current_org`: reject when `revoked_at IS NOT NULL` **OR** (`expires_at` IS NOT NULL AND `expires_at < now`).
 
 ---
@@ -842,6 +875,7 @@ Auth: Supabase JWT → team membership
 Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) · **Assertions** (observable outcomes) · **Negative cases**. Mapped to the 14 high-level E2E from scope.
 
 ## E2E-1: Hosted signup (email/password) → provision → key revealed once
+
 - **Setup:** remote Supabase with email confirmation **OFF** (assert the actual setting in setup — flipped toggle fails loudly, not confusingly), fresh browser profile, no account for test-email
 - **STALE 2026-08-10 (#801):** prod confirmations are ON (SMTP-era, #832) — the OFF variant is retired for hosted prod. The mocked welcome suite (`tests/e2e/test_welcome_page.py`) + the live no-429 smoke own this journey (see `docs/plans/2026-08-10-801-signup-rate-plan.md`); a live OFF run would require toggling prod auth config (rejected, Approach B).
 - **Steps:** 1) land on /signup 2) fill email+password 3) Create account 4) land on /welcome.html 5) read key, refresh page
@@ -851,12 +885,14 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Negative (security, reveal RPC — NEW):** authenticated user B (member of another team) calls `reveal_api_key(user_id=A, org_id=T)` → returns NULL AND does NOT null A's key · non-owner row member calling RPC → NULL · authenticated SELECT on `org_memberships` cannot read `api_key` column (RLS exclusion) · DB-level `api_key IS NULL` after reveal
 
 ## E2E-2: Hosted signup (OAuth) → provision → key revealed once
+
 - **Setup:** controlled test GitHub account **with a public verified email + email scope granted on the OAuth app** (pin the fallback: if the account lacks a verified email, skip with flag OR assert via the manual-support/key-delivery path); OAuth app configured
 - **Steps:** 1) /signup 2) Continue with GitHub 3) authorize 4) return to /welcome.html
 - **Assertions:** provider-verified email (no confirmation) · membership row role=owner · key revealed once · same hardening as E2E-1
 - **Negative:** OAuth cancel → signup error state · OAuth failure → error + retry · **missing email claim → documented manual-support/key-delivery path, not a silent fail (no email-match in v1 — decision 1e)**
 
 ## E2E-3: Key recovery via rotation (no chicken-and-egg)
+
 - **Setup:** provisioned user, Supabase session, NO remembered tt_ key
 - **Steps:** 1) dashboard (session-authed) 2) Lost your key? Generate a new one → `POST /v1/session/key` (E1) 3) copy new key 4) revoke old via /v1/team/keys/{id}
 - **Assertions:** new key minted without pre-existing key · shown once · authenticates against /v1/team · **revoked old key fails auth immediately (401) — pin this, no "or grace" ambiguity** · E1 mint at `max_api_keys` cap → 402 (NEW)
@@ -866,24 +902,28 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Bootstrap-key active backstop (P2):** max active bootstrap keys per (user, team) = 3 (swept by reconciliation) — asserted via fixture
 
 ## E2E-4: Cross-subdomain session — signup on tortoise → authed on app
-- **Setup:** **creates its own session (explicitly depends on the E2E-1 signup flow OR fixture-authenticates the browser via the Supabase auth API)**; parent-domain cookie Domain=.premiselabs.co; **both subdomains must resolve in the test environment (hosts mapping / cookie Domain config)** 
+
+- **Setup:** **creates its own session (explicitly depends on the E2E-1 signup flow OR fixture-authenticates the browser via the Supabase auth API)**; parent-domain cookie Domain=.premiselabs.co; **both subdomains must resolve in the test environment (hosts mapping / cookie Domain config)**
 - **Steps:** navigate to app.premiselabs.co
 - **Assertions:** dashboard reads cookie → authenticated view (no key paste) · team switcher populated (E6) · signOut clears cookie everywhere
 - **Negative:** no cookie (old session) → API-key login fallback · session expired → redirect to sign-in
 
 ## E2E-5: Dashboard API-key login coexists with session auth
+
 - **Setup:** user signed out (no session); valid `tt_` key from `provision_test_user` fixture (added to fixture reuse list)
 - **Steps:** open app.premiselabs.co → paste valid tt_ key → Connect
 - **Assertions:** API-key mode shows Overview/Keys/Sessions · both modes present same data
 - **Negative:** invalid key → "Invalid API key" error (verified live today)
 
 ## E2E-6: Dashboard empty-state onboarding → first memory rendered
+
 - **Setup:** team provisioned with **demo seeding DISABLED** (`provision_test_user(demo_seed=False)` — NEW fixture param; normal provisioning demo-seeds, so the empty state is otherwise unreachable). Assert BOTH variants: seeded (E2E-1's demo-points assertion) and empty (this test) to cover the J-1 edge.
 - **Steps:** open Overview → see empty state → "Connect your agent" (primary) → run quickstart → create first point
 - **Assertions:** empty state = ONE primary action (connect-agent) + secondary (create point) · point appears RENDERED in dashboard list (not just toast) · API 200 (regression #292 guard)
 - **Negative:** point creation 500 (regression) → surfaced error, no silent fail
 
 ## E2E-7: Funnel analytics — signup → first API call tracked
+
 - **Setup:** **GATED: skip/defer until #528 lands** (PostHog instrumentation is out-of-epic; the epic wires event hooks only). Pre-requisite merge: #528.
 - **Steps:** complete signup, provision, dashboard open, first API call
 - **Assertions:** events `user_signed_up`, `tenant_provisioned(status)`, `dashboard_opened`, `first_api_call` in PostHog joined on user UUID · TTFV computable · never-confirmed accounts excluded from funnel
@@ -891,6 +931,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Flake control:** poll PostHog event queries with timeout (async ingestion); assert event hooks fire at the emitter level as the deterministic part
 
 ## E2E-8: Email confirmation branch (if remote setting ON)
+
 - **Setup:** **flip remote Supabase email-confirmation ON for the run, restore OFF after** (driven from test config; assert the actual setting in setup so E2E-1 fails loudly if the toggle wasn't restored); OR run against a second Supabase project. **E2E-1 (OFF) and E2E-8 (ON) are mutually exclusive on the same project — never both green without the toggle+restore step.**
 - **STATUS 2026-08-10 (#801):** prod setting is ON — E2E-8 is the live reality; the live smoke asserts its entry state (check-your-inbox, no 429) per-push, with Admin-API user cleanup. The toggle+restore mechanism is retired (would downgrade prod's confirmed-email posture mid-run).
 - **Steps:** signup email/password → check-your-inbox state → click confirmation link → return
@@ -898,12 +939,14 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Negative:** never-confirmed account → `tenant_cleaned_up` after expiry · resend rate-limited (429)
 
 ## E2E-9: Self-hosted flow — land → install → first memory (no hosted account)
+
 - **Setup:** fresh machine, no tortoise. **GATED: full daemon assertions (health/MCP/onboard) require parallel epic #338's self-host daemon — v1 asserts smoke-level (docs/GitHub route reachable without hosted account + BSL license line); full daemon assertions land post-#338.**
 - **Steps:** landing → "Self-hosting docs →" → GitHub/docs → `docker compose up` OR pip install → `tortoise onboard`
 - **Assertions (v1, smoke-level):** self-host route reachable without hosted account · BSL license line visible. **Deferred to post-#338 (daemon-dependent):** daemon /health 200 · MCP connect (`claude mcp add tortoise http://localhost:8000/mcp`) · first local point
 - **Negative:** daemon down → tortoise_unavailable graceful
 
 ## E2E-10: User↔team decoupling — one user, two teams in parallel
+
 - **Setup:** Alice owns Solo team; client's Team team invites her
 - **Steps:** accept invite → switch teams in switcher → use key from team A against team B
 - **Assertions:** E6 lists both teams · team switcher works · **key from team A fails against team B (401)** · per-team billing display correct · E1 resolves org_id required (400) on ambiguity
@@ -912,6 +955,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Billing display:** assert the tier/labels shown per team (per-team billing semantics visible); actual payment collection is out-of-scope (billing epic) — do NOT assert charges
 
 ## E2E-11: Team↔graph 1:N — multiple graphs with tier limits
+
 - **Setup:** Pro team; Free team; Solo team
 - **Steps:** create graphs in each; attempt over-cap
 - **Assertions:** Pro creates N graphs (E5) · Free blocked at 1 (402 soft-block + upgrade CTA) · Solo blocked at 2 (loss-leader cap) · graph switcher lists all (E7)
@@ -919,18 +963,21 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Negative:** graph name collision (409) · no membership (403) · unknown team (404)
 
 ## E2E-12: Team-tier collaboration — invites + RBAC
+
 - **Setup:** Team-tier team (Alice owner); **Bob + Carol accounts created via `provision_test_user` (invitee without account → signup-first then accept, per W-2b)**; tester captures the plaintext invite `token` from the E3 response (email delivery out of v1 scope — link copied/shown in dashboard)
 - **Steps:** invite Bob (member), Carol (admin) → Bob/Carol accept (E4 with token) → test RBAC
 - **Assertions:** members listed (E8 GET) · Bob cannot create/revoke keys or manage members (403) · Carol can manage members · owner cannot be removed/demoted (409) · Free/Solo/Pro cannot invite (invites hidden)
 - **Negative:** expired invite token (400) · max_users reached at accept (402) · duplicate invite (409) · **same token accepted by a SECOND different user → rejected (409 — token single-use, decision)** · GitHub-OAuth email-gap → token-only accept with documented manual-support path (no email-match fallback in v1)
 
 ## E2E-13: Pricing structure documented and enforced
+
 - **Setup:** product/pricing.json committed (canonical — decision 1d; pricing.md generated from it); provision path live. **Tier injection:** no user-facing tier path exists in v1 (provision defaults Free; upgrades = billing epic) — the `provision_test_user(tier)` fixture (ADDED to reuse list for E2E-13) writes the Team node's tier + limits directly (FalkorDB registry write or test-only internal endpoint).
 - **Steps:** create team on each tier path (fixture); query /v1/team
 - **Assertions:** tier-driven limits (max_graphs/max_users) match **pricing.json** (canonical — decision 1d) · /v1/team returns tier + limits (no max_teams — user-level) · enforcement matches the JSON (E2/E5 402 paths)
 - **Negative:** legacy team without tier → defaults Free
 
 ## E2E-14: Pricing page renders hosted tiers + self-hosted section
+
 - **Setup:** pricing page live on tortoise.premiselabs.co
 - **Steps:** scroll to pricing; toggle monthly/annual; read self-hosted section
 - **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default, from pricing.json display.annual_discount_pct) · **"$5 per additional 10k write ops" visible (pricing.json display.overage_line)** · **segmented positioning renders — "Use Tortoise" AND "Build with Tortoise" (pricing.json display.segments)** · **integrations "unlimited" visible on all cards (pricing.json display.integrations_line)** · self-hosted section: BSL 1.1 + $5M AUG + MPL-2.0-in-4yrs (pricing.json display.license_self_hosted) + "migrate to cloud anytime" CTA · hosted CTA primary
@@ -967,6 +1014,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 | 7. Detailed E2E | E2E-1..14 | Scope E2E-1..14, interfaces (E1..E8) |
 
 **Consistency invariants verified:**
+
 - Key recovery routes through **E1 (POST /v1/session/key, purpose='recovery' — persistent)** everywhere (J-2, W-2, E2E-3, 6.1 auth-transition rule) — no stale `/v1/team/keys`-via-session references, no 24h expiry on recovery keys (fixed P1-4).
 - `reveal_api_key` RPC has the **auth.uid() guard** in data model (4.1b) AND negative tests in E2E-1.
 - Demo-seed 404 bug flagged in W-1, architecture decision 7, AND E2E-1 setup (prerequisite fix).
@@ -1002,6 +1050,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ### Deploy order + rollback (R15)
 
 **Order (each step independently verifiable, run 0003 in ONE transaction during low traffic):**
+
 1. **Migration 0003** (rename → columns → unique → REVOKE api_key → trigger re-create → reveal RPC) — one transaction; migration smoke test first.
 2. **Edge fn** (org_memberships + role='owner' + demo URL fix) — deploy + verify a test signup.
 3. **welcome.html** (org_memberships poll + reveal RPC call) — deploy.
@@ -1036,12 +1085,14 @@ The plan is internally consistent, risks identified with mitigations, and ready 
 # IMPLEMENTATION COMPLETE — 2026-08-08
 
 ## Deployed to production
+
 - Migration 0003 (M:N decoupling, reveal RPC, column security) — applied
 - Edge function tenant-provision — deployed
 - Static pages (signup/welcome/signin JS fix + pricing) — deployed to tortoise-landing-v2
 - Dashboard (session auth + onboarding) — deployed to tortoise-dashboard
 
 ## Merged (all 11 child issues)
+
 | Issue | PR | What |
 |---|---|---|
 | D1 #568 | #615 | Decoupling + migration + JWKS endpoints |
@@ -1057,6 +1108,7 @@ The plan is internally consistent, risks identified with mitigations, and ready 
 | D11 #578 | #641 | E2E suite (74 tests) |
 
 ## Also shipped
+
 - Dispatch-infra fix (agent-infra PR #130 — skill_declaration + 660s kill)
 - product/pricing.json + pricing.md (canonical tiers → features → competitive)
 - product/competition/honcho.md (new profile)

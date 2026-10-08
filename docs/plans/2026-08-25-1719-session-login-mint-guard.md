@@ -85,6 +85,7 @@ The principled merge is **Approach A (shape-gate at the mint boundary)** as the 
 **Intent:** Confirm or refute the 22P02 hypothesis with production evidence before/while shipping the fix (the fix is safe regardless — a non-UUID `created_by` can never be a valid mint target — but the log names the exact PostgREST error and any co-failing shape).
 **Acceptance:** Either the prod log shows `22P02` (or an equivalent PostgREST 400) on the mint-path `org_memberships` query, or the hypothesis is refuted with a named alternative; findings recorded on issue #1719.
 **Files:**
+
 - Modify: none (ops/diagnostic only)
 - Test: n/a
 
@@ -95,6 +96,7 @@ Run: `fly logs -a tortoise-y4mjjq | grep -B2 -A40 "unhandled exception: POST /v1
 Run: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.premiselabs.co/v1/session/login -H 'Content-Type: application/json' -d '{"api_key":"<real tt_ key>"}'` — from a fresh egress (or after clearing the session bucket) → expect 500 pre-fix / 200 post-fix.
 
 **Step 3: Falsification matrix.**
+
 - If 500 persists after FalkorDB restore → RC1 confirmed (predicted).
 - If junk tt_ key → 401 while real key → 500 → api_keys healthy, mint-path confirmed (already observed).
 - If the traceback names a non-22P02 failure (e.g. PGRST002 schema-cache, column grant gap) → record it; the Task 4 503 map keeps the endpoint honest while that root cause is repaired per the issue's remediation track.
@@ -114,11 +116,13 @@ Run: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.premiselabs.
 **Intent:** Prevent the mint-path query from ever receiving a non-UUID `user_id` literal — the 22P02 class — so the endpoint's existing shape-decision tree becomes reachable and legacy keys get their correct honest 403.
 **Acceptance:** `mint_target_user_for_key(cp, creator, team)` returns None *without querying* for any non-UUID creator ("api", "anon-*", "reg-*", NULL, junk); queries normally for UUID-shaped creators (active member → the UUID; non-member → None). `test_session_login_helpers.py` mint tests pass with realistic UUIDs; existing endpoint 403 tests (`test_api_created_by_key_403_*`, `test_identity_key_on_anon_team_403_*`, `test_identity_key_on_claimed_team_403_*`, `test_null_created_by_key_403_*`) still return 403 with the correct error_code (no 500).
 **Files:**
+
 - Modify: `tortoise/supabase_control.py:662-678` (mint_target_user_for_key), module-level `_is_uuid` helper
 - Modify: `tortoise/hosted_api.py:2745-2748` (reuse `_is_uuid` — single source of truth, no regex drift)
 - Test: `tests/test_session_login_helpers.py:19-52`, `tests/test_session_login.py`
 
 **Step 1: Write the failing unit tests** (test_session_login_helpers.py — migrate `_cp_with_members` fixtures to real UUID constants):
+
 - `test_mint_target_returns_active_member_uuid` → seeds `user_id=<uuid>` membership, asserts the UUID is returned.
 - `test_mint_target_returns_none_without_query_for_non_uuid` → `mint_target_user_for_key(cp, "api"/"anon-abc"/"reg-xyz", "t1")` is None **and** `cp.query_count == 0` (guard short-circuits before any query).
 - Keep/adapt: NULL → None; UUID non-member → None (query ran); UUID that left the team → None.
@@ -142,12 +146,14 @@ Run: `... uv run pytest tests/test_session_login_helpers.py tests/test_session_l
 **Acceptance:** `FakeControlPlane.query("org_memberships", filters=[("user_id","eq","api")])` raises RuntimeError by default; valid UUID filters behave normally; stored-row inspection is NOT type-checked (only filter values); full docker-lane suite green after migrating non-UUID test constants.
 **STATUS: DONE (2026-08-27)** — `uuid_fidelity` default-on check at top of `query()` (GET+PATCH+DELETE), `UUID_FILTER_COLUMNS` registry, `_assert_uuid_fidelity` mirroring PostgREST 22P02. Migrated non-UUID user_id fixtures across 13 test files (auth_flip, claim_endpoints, dashboard_login [truncated f"user-{hex8}" pattern], export_delete, import_endpoint, agent_signup_idempotency, agent_signup, email_signup, hosted_api, invites_email_http, invites_http, oauth_mcp, pack_state, session_key_http, supabase_control, writer_inventory, abuse_integration). 919 tests green across all 24 fake-importing files; residual full-suite hangs are the pre-existing embedded-store flake class (isolated passes confirmed on main).
 **Files:**
+
 - Modify: `tests/fake_control_plane.py` (query() filter validation + `_UUID_FILTER_COLUMNS` registry)
 - Modify: `tests/test_supabase_control.py` (`TestSessionHelpers` non-UUID constants → real UUIDs)
 - Modify: `tests/test_claim_endpoints.py` (`_jwt` default + affected assertions → real UUIDs)
 - Test: new fidelity tests in `tests/test_supabase_control.py` or `tests/test_fake_control_plane.py`
 
 **Step 1: Write the failing fidelity tests:**
+
 - `test_non_uuid_user_id_eq_filter_raises` → `fake.query("org_memberships", filters=[("user_id", "eq", "api")])` raises RuntimeError matching `HTTP 400` (PostgREST 22P02 surface).
 - `test_uuid_user_id_eq_filter_ok` → UUID filter returns rows.
 - `test_user_id_is_null_filter_ok` → `("user_id","is",None)` unaffected (is.null has no cast).
@@ -165,10 +171,12 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 **Intent:** Degrade honestly when the mint-path control-plane reads fail for reasons other than shape (outage, schema-cache, column grants) — 503 `control_plane_unavailable`, never a raw 500 → client "Invalid API key." (RC1-b blast radius: the claim funnel, the anon-key escape hatch, shares the unwrapped reads).
 **Acceptance:** `/v1/session/login` mint-path RuntimeError → 503 `{"detail": {"error_code": "control_plane_unavailable", "message": "Sign-in is temporarily unavailable — try again in a moment."}}`; `/v1/claim`, `/v1/claim/email`, `/v1/claim/status` outage → 503 with the SAME copy string; resolution failures inside `_get_current_team_supabase` are UNCHANGED (documented fail-closed "Auth error", out of scope — noted as follow-up); all existing 200/401/403/409/429 tests stay green.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` session_login mint section (~2739-2805) + claim_team (~7138), claim_email (~7211), claim_status (~7286-7290)
 - Test: `tests/test_session_login.py`, `tests/test_claim_endpoints.py`
 
 **Step 1: Write the failing endpoint tests:**
+
 - `test_mint_path_control_plane_outage_503` → monkeypatch `sc.membership_for_user_org` (and/or seed a raising control plane for the mint leg only) → 503 with `error_code == "control_plane_unavailable"` (never the global-handler 500 body).
 - `test_claim_status_outage_503_or_fail_closed` → claim_status's `is_anon_org` raises → 503 (never 500; never `{"claimable": true}`).
 - Keep pinned: `test_invalid_key_401` (resolve path — unaffected), all 403 shape tests.
@@ -183,10 +191,12 @@ Wrap the mint-path sequence in session_login (`mint_target_user_for_key`, `is_an
 **Intent:** A legitimate user must not be locked out of login for ~1h by the server's own fault, and 429s must not mask an ongoing incident (the repro egress was 429-locked during diagnosis). Preserve brute-force protection: 401 invalid-key attempts still charge.
 **Acceptance:** Session-login bucket charges on 200/401/403 (server decisions — 403s still cost control-plane reads per attempt and ANON_TEAM_NO_OWNER is a claimability oracle; charging caps leaked-key enumeration at 5/hr); 5xx outcomes (503 mint-path, 502 GoTrue, etc.) do not consume budget; 6th valid attempt in an hour still 429 (`test_rate_limited_429` stays green); junk-key 401s and 403s still consume (5×-401→429 and 5×-403→429 tests); non-`tt_` junk strings (prefix-gate 401, pre-bucket) charge under the wrapped design too — single code path, no double-charge. **Client-path note (second-model P2):** an anon-key owner who retries 5× hits 429 before seeing the ANON_TEAM_NO_OWNER claim-navigation signal — the claim funnel is on `/v1/claim` (separate bucket), so claiming is NOT blocked; the client surfaces the first 403's claim copy (signup.html ANON_TEAM_NO_OWNER branch redirects to `?claim=1` immediately on the FIRST attempt), so the 429 only appears if the user ignores the claim redirect. Accepted + documented; do not exempt ANON_TEAM_NO_OWNER from charging (it still costs control-plane reads).
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` `_check_ip_bucket_rate_limit` (~1938, add `defer_charge` param) + session_login (~2716-2722, charge at resolution / on 401)
 - Test: `tests/test_session_login.py`
 
 **Step 1: Write failing tests:**
+
 - `test_503_does_not_consume_bucket` → force mint-path 503, then a valid-key login succeeds despite a prior 503 (bucket not charged).
 - `test_invalid_key_401_consumes_bucket` → 5 junk 401s → 6th attempt 429.
 - Existing `test_rate_limited_429` must still pass (5 valid 200s → 429 on 6th).
@@ -201,6 +211,7 @@ In `_check_ip_bucket_rate_limit`, add `defer_charge: bool = False` — when True
 **Intent:** The modal must never tell a user "Invalid API key." for a server-side failure (that actively misdirected the reporter). 5xx is "temporarily unavailable" — matching the existing 502/503 copy. **UX-review P2-1/P2-2 scope (dashboard claim card + bootstrap):** the dashboard (app.premiselabs.co) is the destination of the whole journey; its claim-card error handler renders dict-detail bodies as raw JSON (`JSON.stringify(b.detail)`) and its bootstrap/mint catch shows raw server strings. Same 5xx honesty applies there — see Step 3.
 **Acceptance:** Any 500 response from /v1/session/login renders the unavailable copy; 401 (and other 4xx without a recognized error_code) still render "Invalid API key."; the dashboard claim card renders `b.detail.message` (not raw JSON) for 503; dashboard bootstrap/mint 5xx renders the unavailable copy. **Copy-string unification (UX-review P3-1):** ONE string everywhere — "Sign-in is temporarily unavailable — try again in a moment." (Task 4 acceptance + Task 6 + signup.html:1211 must match).
 **Files:**
+
 - Modify: `website/signup.html:1210-1218` (the 502/503 branch) + `:1242` (default)
 
 **Step 1: Edit the copy branch.** Change the existing `if (resp.status === 502 || resp.status === 503)` to `if (resp.status >= 500)` so the 500 case (pre-fix clients / residual unmapped server faults) reuses "Sign-in is temporarily unavailable — try again in a moment." The default branch (4xx, unknown error_code) keeps "Invalid API key.".
@@ -216,6 +227,7 @@ In `_check_ip_bucket_rate_limit`, add `defer_charge: bool = False` — when True
 **Intent:** Deploys must not silently ship over a dead graph plane (deploy-hosted succeeded 3× today while the instance was NXDOMAIN). Post-deploy gate asserts the app's DB health, mirroring publish-selfhost.yml:70-84, with an explicit bypass for incident-fix deploys.
 **Acceptance:** After `flyctl deploy` succeeds, the workflow polls `https://api.premiselabs.co/health` for `db.ok == true` (and `/health/ready` 200 last — it ANDs both planes): fail fast ONLY on app-unreachable (curl error); keep polling `db.ok=false` for ≥3 min (cold-start DB connection exceeds 60s per #338; DNS propagation after a restart runs ~2 min per #1381) before failing the workflow; the `skip-db-health-gate: true` (workflow_dispatch input) bypass (with a `::warning::` log) remains available for incident-fix deploys. **Self-block hazard (Devil's-Advocate P1-1):** `db.ok=false` is the CURRENT prod state (RC3), so the default gate path would fail this fix's own deploy unless the bypass is set — during an incident, "one forgotten checkbox → login still 500s, unbounded" is the most probable failure mode. Mitigation: for THIS deploy (and incident-fix deploys generally), default the bypass input to `true` (with the `::warning::`) OR make the gate warn-only while `skip-db-health-gate` semantics are proven — do not rely on operator memory in incident mode. A fix deploy during a DB incident remains possible via the documented bypass.
 **Files:**
+
 - Modify: `.github/workflows/deploy-hosted.yml` (post-deploy step)
 
 **Step 1: Add the gate step** after the deploy retry loop: curl `https://api.premiselabs.co/health` on a poll loop (per Step 2's window shape — fail fast only on app-unreachable; poll `db.ok=false` for ≥3 min; then assert `/health/ready` 200 last), parse `db.ok` (python/jq), assert true; on persistent failure `::error::` + exit 1 (copy the publish-selfhost pattern's loop shape).
@@ -229,6 +241,7 @@ In `_check_ip_bucket_rate_limit`, add `defer_charge: bool = False` — when True
 **Intent:** Everything above ships through the mandatory gates.
 **Acceptance:** Docker-lane full suite green; `commit-workflow` skill invoked (pre-flight, PR, code-review gate, auto-merge).
 **Files:**
+
 - Test: `tests/` (docker lane: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/ -v`)
 
 **Step 1:** Run the full docker lane; fix any residual breakages (see Task 3 triage note).
@@ -240,6 +253,7 @@ In `_check_ip_bucket_rate_limit`, add `defer_charge: bool = False` — when True
 **Intent:** Restore the graph plane (the separate stacked incident) and prove the O/I end-to-end on prod.
 **Acceptance:** `/health` → `status: ok`, `db.ok: true` (5+ consecutive polls); `/health/ready` → 200; real-key `POST /v1/session/login` from a fresh IP → 200 session JSON; `/auth` Playwright: API-key login lands on app.premiselabs.co; welcome-e2e-monitor green 5+ runs.
 **Files:**
+
 - Test: live smoke (curl + browser)
 
 **Step 1: Owner console action (blocking, per #1381 resolution).** Log into FalkorDB Cloud console → does instance `r-6jissuruar…` still exist? Restart if stopped (the #1381 resolution: restart → DNS propagated ~2 min) / re-provision if deleted/expired.
@@ -247,6 +261,7 @@ In `_check_ip_bucket_rate_limit`, add `defer_charge: bool = False` — when True
 **Step 2: If the URI changed,** update the `FALKORDB_CLOUD_URI` GitHub secret → redeploy via deploy-hosted (with `skip-db-health-gate` if deploying before the restart lands — then re-run the gate).
 
 **Step 3: Live verification.**
+
 - `curl https://api.premiselabs.co/health` → `db.ok: true` (poll 5×).
 - `curl -X POST https://api.premiselabs.co/v1/session/login -d '{"api_key":"<dashboard-minted tt_ key>"}'` from a fresh egress → 200 with `access_token` + `expires_at` (UUID-created_by class).
 - **FULL-JOURNEY bullet (Devil's-Advocate cycle-2 P1 — the reporter's key class):** fresh anon key (`anon-*` created_by) → `POST /v1/session/login` → 403 ANON_TEAM_NO_OWNER with claim copy → `/v1/claim` 200 (live `claim_membership` RPC smoke) → session-authenticated key mint → `POST /v1/session/login` 200 → dashboard reachable. The issue closes only when THIS chain completes for a fresh anon key, not just the 403.

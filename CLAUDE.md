@@ -5,6 +5,7 @@
 ## Project Identity
 
 Premise Labs is the company behind **Tortoise** — a Python graph engine backed by FalkorDB that powers agent memory (semantic, epistemic, episodic, procedural). This repo (`daniel-ospina/tortoise`) contains:
+
 - **`tortoise/`** — Python SDK, MCP server, EP belief propagation engine
 - **`apps/graph-viz/`** — React ontology visualization frontend
 - **`docs/`** — Architecture, ontology, legal, product strategy
@@ -26,16 +27,19 @@ Premise Labs is the company behind **Tortoise** — a Python graph engine backed
 Decide autonomously — never ask. Announce, then act.
 
 **Use a sub-agent (Agent tool) when:**
+
 - Output would be verbose and only the summary matters (logs, exploration, research)
 - Task is self-contained and has a clear return value
 - 2+ independent tasks can run in parallel (no shared state)
 
 **Stay in main conversation when:**
+
 - Task needs iterative back-and-forth
 - Multiple phases share significant context (plan → implement → test)
 - Change is quick and targeted
 
 **Suggest a new conversation when:**
+
 - The task is large and unrelated to current work
 - Context has already compacted and quality is degrading
 - A clean slate would meaningfully improve the outcome

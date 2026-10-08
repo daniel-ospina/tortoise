@@ -5,9 +5,11 @@ Ready-to-use integrations that connect popular tools to the Tortoise epistemic g
 ## Available Integrations
 
 ### Meetings
+
 - **[Minutes](meetings/minutes/)** — Open-source local meeting recorder with speaker diarization. Transcribes on-device, writes structured markdown, exposes 37 MCP tools.
 
 ### CRM
+
 - **[Twenty CRM](crm/twenty/)** — Self-hosted open-source CRM. Bridge script pushes meeting notes to contacts and meeting data to Tortoise.
 
 ## Architecture

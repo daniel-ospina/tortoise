@@ -179,7 +179,6 @@ TDD per step. All paths relative to the worktree root. The design behind each ta
 5. Run the read-only audit (decision (h)) and post the command + output + three limits on #2814; post the `OVERRIDES:` marker on #318 (**§4 row 12** — the decision record is the marker's only home; earlier drafts cited a non-existent "decision ledger").
 6. Commit.
 
-
 ## Appendix — design of record (§1-§13)
 
 ## 1. Constraints (owner instruction + design of record)
@@ -278,10 +277,11 @@ What this plan *does* enforce is the bounded case that the classes it names cann
 **⚠️ Rollout and ordering — a new refusal that did not exist before, stated rather than discovered (plan-review P2).** Decision (d) reasons only about a **pending** v2 sidecar, where refusal is the intended fail-closed outcome. It does **not** hold for the **retired** payload, whose whole contract is that it is harmless: `_clear_prewipe_snapshot` first rewrites `{version: <current>, completed: True, <all sections empty>}` and only then unlinks, explicitly so a crash or a failed unlink leaves an artifact that "merges nothing" (`:592-600`, pinned by `tests/test_projection.py:3610-3620`). That pin holds only for a loader whose readable set contains the written version: after the bump, an **older** binary raises on `version != 1` at `:441` **before** the entry-less check at `:534`, so a retired v2 sidecar whose unlink failed turns every `rebuild_all` **and** embedded auto-recovery in that directory into a hard refusal. Consequences, all stated in the runbook (Task 7): (i) deploy the new binary everywhere before any `rebuild_all` writes a v2 sidecar; (ii) on rollback the remedy is to **upgrade**, never to delete a **pending** sidecar (deleting it destroys the only copy of the pre-wipe config) — the "delete the rescue file" remedy in §8 applies to the **retired, entry-less** case only; (iii) the retired-payload case is recorded as a **named residual** (§8), not solved here, because retiring under a version the *previous* release accepts would contradict the version bump's purpose (the bump is what makes the fresh-payload case refuse) — and a partial retirement version would be a second addressable state with no test.
 
 **(e) Precedence — MUST be per-section, because `_merge_entry`'s rule does not hold for config.**
+
 1. *Sidecar union (pre-wipe)*: **for `config_snapshot` the merge is PER-KEY on `_config_key(entry)` — a colliding key keeps the LEFTOVER entry verbatim (no field-merge), and a fresh-only key is appended.** Two directions, one rule:
    - *Collision* — the leftover wins **wholesale**. `_merge_entry`'s "absences fill, presence wins" is justified by replay gaps (a partial replay recreates a node with properties ABSENT), and its discriminator is *presence*. That discriminator **fails for config**: no journal fold writes these labels (§(g)), and the one thing that does re-create them is the **self-healing read path** — `ensure_tenant_packs` `MERGE`s starter `:PackInstall` nodes with *present* defaults (`status='active'`, `source='starter'`, catalog `version`, fresh `installed_at`; `pack_state.py:290-293`). So on the crash-mid-replay path — where `recover_from_log` refuses (`db_count > 0`, `consistency.py:106-108`), the sidecar is kept, and an intervening `get_tenant_packs`/`packs_list` read self-heals the starter set — a fresh-wins merge **overwrites the leftover's real values with self-healed defaults**: `PackInstall{dev, version 0.9.0, status 'removed', source 'custom'}` becomes `{version 0.3.0, status 'active', source 'starter', installed_at: now}`. That is #2814's exact harm recurring *after* this fix (reproduced on `main` with a starter-heal probe).
    - *Fresh-only key* — **appended, never dropped.** A section-granular "take the leftover verbatim" rule would be wrong: config provisioned into the graph *after* an interrupted wipe but *before* the retry (`upsert_tenant_manifest` → `:PackManifest` + `:PackInstall{source:'custom'}`) has no leftover counterpart, so dropping it hands it to the **retry's own wipe** (`:3197`) and it is never restored — silent unrecoverable loss, the very harm class this issue removes. A fresh-only key cannot overwrite anything, so appending it costs nothing. (The cycle-1 wording claimed post-wipe writes "survive untouched" — only a write between the retry's wipe and its restore does; the fresh-only leg is what protects the rest.)
-   
+
    `_config_key(entry) = (label, identity_value)` (§(a)) is the key, so the two legs cannot collide across labels. Config **never** routes through `_merge_entry`. Pinned in **both** directions by one test: `test_leftover_config_wins_over_self_healed_defaults` asserts a colliding key keeps the leftover's values **and** a fresh-only key survives the retry; the loss direction is separately pinned by `test_fresh_only_config_key_survives_pending_leftover`. **Named residual from the collision leg (not silently absorbed):** within the interrupted-rebuild window, an operator edit to an *existing* config key is reverted to the leftover (resurrection of a deliberately deleted `:PackManifest`, the pending-sidecar half of §8 class 3). The retired-sidecar half is already safe (`_clear_prewipe_snapshot` writes an entry-less payload → merge is a no-op). The window, its direction, and the remedy (delete the rescue file) are recorded in §8 and pinned by `test_pending_sidecar_restores_leftover_config_over_a_post_wipe_delete`.
 2. *Post-replay restore*: **snapshot-wins** by construction (`MERGE … SET n += $props` after replay), which is the store-authoritative rule `docs/durability-posture.md` states and is identical to how `:Batch`/`:Session` already behave. Today's collision count is **zero** (`CalibrationRecorded` is in `_NO_PROJECTION_FOLD`; no fold writes these labels). Named caveat, filed not silent: if #2792 ever makes `:Pipeline` journal-authoritative, rule 2 must be reopened.
 
@@ -504,6 +504,7 @@ Cycle-4 findings (both P3, both fixed): (1) `uv run python tools/sdk_rename_tabl
 | 8 | Devil's Advocate | **P3** — §3(b) calls `pack_state.py:345` a writer; it is `_read_installs` (a reader) | **FIXED** — corrected, and the reader's `MATCH` is now bound to the constant too (§3(b) + Step 2), since that statement is what the registry's capture query mirrors |
 
 ### Issue-scoping Phase-7 cycle 2 — 5 findings (1 P1, 2 P2, 2 P3), all dispositioned
+
 | # | Reviewer | Finding | Disposition |
 |---|---|---|---|
 | 1 | Codebase & Docs | **P2** — Step 9b missed a **fourth** home for an embedded-lane stem: the hand-maintained `expected` frozenset literal in `tests/test_markers.py::test_no_redirect_stems_registry_exact`. The cited `test_ci_selection` mirror is *derived* from the live sets, so it cannot catch a one-sided add | **FIXED** — Step 9b now names three homes and states why the derived mirror cannot cover the literal; `tests/test_markers.py` added to §6 step 10. Verified: `rg TEST_NO_REDIRECT_STEMS tests/*.py` → the literal is at `test_markers.py:487`; `_public_methods()` (`tools/sdk_rename_table.py:631`) really does filter `_`-prefixed names, confirming the cycle-1 fix |
@@ -511,7 +512,6 @@ Cycle-4 findings (both P3, both fixed): (1) `uv run python tools/sdk_rename_tabl
 | 3 | Devil's Advocate | **P1** — the cycle-1 fix was **section**-granular, so a **fresh-only** config key (no leftover counterpart) was captured, dropped by the union, and then destroyed by the *retry's own* wipe and never restored — silent unrecoverable loss, and §3(e)/§8 claimed that direction was impossible | **FIXED** — decision (e) rule 1 is now a **per-key union on `_config_key`**: colliding key → leftover verbatim (the cycle-1 protection, kept), fresh-only key → **appended**. The false "post-wipe writes survive untouched" sentence was removed and §8's residual narrowed to *colliding keys only*. New test `test_fresh_only_config_key_survives_pending_leftover`; the existing test now asserts both directions in one run |
 | 4 | Codebase & Docs | **P3** — decision (d) attributed the version stamp to `_write_prewipe_snapshot`, which just `json.dumps`es the caller's dict; the stamp lives in the callers (`:3112`, `:603`) | **FIXED** — attribution corrected; the corrected mechanism is also *why* the ~11 round-trip tests need no edits |
 | 5 | Codebase & Docs | **P3** — the cycle-1 summary header mis-tallied the severities (said 3 P1/2 P2/3 P3; the rows carry 4 P1/2 P2/2 P3) | **FIXED** |
-
 
 ### Issue-scoping Phase-7 cycle 3 — gate exit at the cap: 4 findings (0 P0, 0 P1, 0 P2, 3 P3, 1 P4), all incorporated
 
@@ -523,7 +523,6 @@ Cycle-4 findings (both P3, both fixed): (1) `uv run python tools/sdk_rename_tabl
 | 4 | Devil's Advocate | **P3** — §7's Indicator 1 row lacked the "enrolled classes" narrowing that Indicator 2 carries, while §8 says an unenrolled class is still destroyed silently | **FIXED** — Indicator 1 now carries the same clause; §8's residual names **both** indicators |
 
 **Gate exit — stated exactly, not rounded up to "clean".** The standard-tier cap (3 cycles) was reached with **no unresolved P0/P1 in any cycle**; cycle 3's findings were all P3/P4 and were incorporated. Because the cap forbids a fourth cycle, the final artifact was **not re-reviewed after those P3 incorporations** — so this gate closes as a **cap exit with the cycle-3 nits resolved**, not as a literal `NO ISSUES FOUND`. The residue is the un-re-reviewed P3 text edits themselves (documentation only; no design element changed). The next gate — `writing-plans` → `plan-review`/PLAN-VERIFY — re-reviews this same document in full with fresh reviewers, which is where those edits get their independent check.
-
 
 ## 12. Wiring check (Phase 6)
 
@@ -552,6 +551,7 @@ Every touch point, resolved against the code. **A wiring gap was found and is re
 | `#2296` (general write-surface/enrolment invariant) | process invariant | Recorded as an **unowned/dormant residual** (§7, §8, and this lane's residual comment on #2814) — not silently absorbed | ⚠️ → #2296 |
 
 ## 9. Integration Docs
+
 **None** — no new third-party dependency and no new external API surface. The change reuses the in-repo sidecar machinery (stdlib `json`/`os`/`stat`/`tempfile`/`datetime`; the already-pinned FalkorDB driver for `MERGE`/`MATCH`). The version bump is an **in-repo** serialization gate with a backward-compatible read set. The `_EXPORT_SKIP_*` sets are consumed read-only and are not modified.
 
 ## 10. Runtime prerequisites

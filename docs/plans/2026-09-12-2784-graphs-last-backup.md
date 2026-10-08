@@ -70,11 +70,13 @@
 ### Journey Test Map
 
 #### Journey: Owner checks whether their graphs are actually being backed up
+
 1. **Step:** Open `#/graphs` → **Acceptance:** each row shows a `Last backup` cell; a graph with a backup shows a relative time → **Test:** `graphBackups.test.js` (`graphBackupCellState` ok state), dist-sync tripwire case
 2. **Step:** Look at a brand-new graph → **Acceptance:** `None recorded`, not "never", no health claim → **Test:** `graphs.test.js` none state, `graphsBackupColumnTripwire.test.js`
 3. **Step:** Backups endpoint is down → **Acceptance:** every row reads `—` with an unavailability tooltip; no row claims "none" → **Test:** `graphs.test.js` unavailable state, tripwire (no "None recorded" on the non-ok branch)
 
 #### Failure Modes
+
 - Default row on a self-host (registry) deployment → **Expected:** still shows its real last backup (kind-based join) → **Test:** `graphs.test.js` registry-lane default case
 - Switch teams → **Expected:** no stale previous-team timestamp on the default row → **Test:** the unit kind-join + sentinel cases, plus the tripwire's assertion that the retained array lives inside `backupInfo` (whose `setBackupInfo(null)` wipe clears it)
 - Forget the `dist/` rebuild → **Expected:** the dist-sync tripwire case fails → **Test:** `graphsBackupColumnTripwire.test.js`
@@ -90,6 +92,7 @@
 **Intent:** Put every decision the new column makes into the pure, unit-testable module whose stated contract is exactly that, so no attribution logic lives in JSX.
 **Acceptance:** `graphBackupSummary` groups by bucket key with newest *parseable* timestamp winning; `graphBackupCellState` returns the five states with `loading`/`unavailable` taking precedence over any empty-state claim; `graphBackupBucketKey` resolves the default row by `kind`.
 **Files:**
+
 - Modify: `website/apps/dashboard/src/graphs.js` (append; add the `formatRelativeTime` import)
 - Test: `website/apps/dashboard/src/graphs.test.js` (append)
 
@@ -262,6 +265,7 @@ Expected: PASS (all prior + new tests).
 **Intent:** Render the derived state as a sixth column without disturbing the existing column-index contract.
 **Acceptance:** the Graphs table has 6 `<th>` (all `scope="col"`), four `colSpan="6"` empty-state rows, a wrapper div, and a `Last backup` cell fed the row object (not a pre-computed id).
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (import block `:30-48`, `loadBackups` `:5216`, a `useMemo` before the first early return `:5734`, table `:8021-8093`, a module-scope `GraphBackupCell`)
 - Modify: `website/apps/dashboard/src/index.css` (after `:410`)
 
@@ -321,10 +325,13 @@ function GraphBackupCell({ g, summary, status }) {
                 <th><span className="sr-only">Actions</span></th>
               </tr></thead>
 ```
+
 (or keep the one-line form) … `colSpan="6"` ×4 … then
+
 ```jsx
                     <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} />
 ```
+
 and close `</table>` with a matching `</div>`.
 
 **Step 6: CSS** — after `.keys-table-wrap table { min-width: 620px; }`:
@@ -353,6 +360,7 @@ Mutation hooks in `createGraph`/`deleteGraphRow`/`restoreTrashRow` are deliberat
 **Intent:** The only pre-existing guard for this surface was vacuous (#3245). Add a source-scan tripwire in the `keyExpiryTripwire.test.js` style whose assertions can actually fail.
 **Acceptance:** removing the column, dropping a `colSpan`, wiring the cell to a pre-computed id, or adding a "None recorded" claim on the non-ok branch each fail a test.
 **Files:**
+
 - Create: `website/apps/dashboard/src/graphsBackupColumnTripwire.test.js`
 
 Cases: (1) the graphs `<thead>` slice contains exactly six `<th>` including `Last backup`, anchored on the graphs table marker — not a bare global regex; (2) zero `colSpan="5"` remain and exactly four `colSpan="6"` exist; (3) the cell receives `g` (row object) and `graphBackupCellState` is what `GraphBackupCell` calls; (4) `GraphBackupCell` declares its own `setInterval(…30_000)` and App declares no additional one; (5) `index.css` contains the `.graphs-table-wrap` scroller + `min-width`; (6) all six graphs `<th>` carry `scope="col"`.
@@ -364,6 +372,7 @@ Run: `cd website/apps/dashboard && node --test src/graphsBackupColumnTripwire.te
 **Intent:** CI never builds; `dashboard_e2e` runs against the committed `dist/`, and `ci.yml:193-201` documents the blind spot. Something must fail when the rebuild is forgotten.
 **Acceptance:** `npm run build` rewrites `website/apps/dashboard/dist/**`; a test fails until it does.
 **Files:**
+
 - Modify: `website/apps/dashboard/dist/**` (build output)
 - Test: `website/apps/dashboard/src/graphsBackupColumnTripwire.test.js` (final case)
 

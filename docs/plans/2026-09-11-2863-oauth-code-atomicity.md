@@ -104,6 +104,7 @@ client is a `TestClient` with `raise_server_exceptions=False` (the repo `api_cli
 to `True`, which would propagate the injected exception instead of yielding the response).
 
 **Files:**
+
 - Modify: `tests/fake_control_plane.py` (`query`, ~line 571; add `fail_query`/`_take_fault`)
 - Create: `tests/test_oauth_token_fault.py`
 
@@ -385,6 +386,7 @@ expiry-guarded, returning `False` on any raise/empty; `_rollback_minted(..., cap
 the emitted PostgREST encoding is pinned by a real-seam test.
 
 **Files:**
+
 - Modify: `tortoise/oauth.py` — top-of-module `import logging` (never inline after a class body: ruff `E402`/`I001`), `logger = logging.getLogger("tortoise.oauth")`, `OAuthError` docstring (`:71-84` → status may also be 500/503), new classes after it, helpers near `_consume_code` (`~:506`)
 - Test: `tests/test_oauth_token_fault.py`, `tests/test_supabase_control.py`
 

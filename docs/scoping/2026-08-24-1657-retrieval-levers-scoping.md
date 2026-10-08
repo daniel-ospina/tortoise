@@ -16,6 +16,7 @@ The issue frames the problem as "research 4 levers; decide which warrant an impl
 - **Framing D (reject-the-framing):** "is the embedder the wrong bottleneck again?" — the #1349 research showed LongMemEval leader Hindsight (91.4%) uses commodity embeddings; AutoMem: 54/65 residual errors had gold in top-5 → the bottleneck at high recall is the *reader*, not retrieval. But at our recall level (0.786 turn_recall@10) retrieval is still the binding constraint — reader-side saturation is not reached (AutoMem's 97% R@5 is far above us).
 
 ### Assumptions mapped
+
 | Assumption | Status |
 |---|---|
 | The 300ms E2E budget excludes any per-query LLM call (HyDE/paraphrase generation in the hot path) | [validated] — #317 research: CE +210ms/top-10 CPU; the eval reader/judge are out-of-loop by design |
@@ -26,10 +27,12 @@ The issue frames the problem as "research 4 levers; decide which warrant an impl
 | The vector leg is "stronger post-swap" than pre-swap on the hybrid arm | [validated] — hybrid 0.786/0.598 > pre-swap baseline; vector arm 0.7294/0.5649 |
 
 ### Boundary & stakeholders
+
 - **Out of scope:** #317 reranking (CE/GPU-serving), embedder dimension upgrade (nomic 768 / Qwen3 1024 — #265 coordination), extractor changes, reader/judge changes, production behavior change (all levers default-off until decided).
 - **Affected but unmentioned:** `sdk.tortoise_fts_query` API consumers (MCP server, SDK users) — any fusion signature change must be additive/default-off; the `fallback_snapshot` cache (L4 uses it — write-invalidation correctness matters); `mini_beir` (OOD transfer check per lever).
 
 ### Problem-diverge verdict
+
 Framing **C** (root-cause: fusion dilution + lexical brittleness) is the confirmed problem, with **B**'s interaction-aware measurement protocol. The issue's 4-lever list survives but is re-ordered by evidence: **L3 (fusion-fix) and L4 (TF-IDF leg) address root causes; L1 and L2 are refinements** (L2's real delta is extending temporal intent to KU, not the query-side injection).
 
 ---
@@ -66,14 +69,17 @@ Framing **C** (root-cause: fusion dilution + lexical brittleness) is the confirm
 ## Phase 4 — solution-diverge: distinct approaches
 
 **Approach 1 — "Weighted RRF with knobs" (fusion-first, minimal surface):** add `leg_weights` (+ optional per-leg k) to `rrf_fusion`, thread via `tortoise_fts_query`/`hybrid_search` as env/CLI knobs (default None = equal weights, byte-identical). Measure a k×weight grid on the HNSW surface. L4 = fold TF-IDF hits into the FTS leg's list pre-fusion (blend), avoiding a 4th degradation-chain leg.
+
 - *Risks:* weight overfit on one surface (OpenSearch drift caveat — mitigate: keep weights config, re-measure per release); FTS-blend muddles leg attribution in `match_source`.
 - *Best fit if:* the weight sweep shows a monotonic preference and we want the smallest production footprint.
 
 **Approach 2 — "Always-on 4th TF-IDF leg + weighted RRF" (recall-first, competitor-faithful):** TF-IDF becomes a real 4th strategy in `degradation_chain` (snapshot-backed), fused by weighted RRF; `match_source` gains a `tfidf` leg bucket (already a legal value). L1/L2 as query-transforms. This is the mem0/graphiti shape (dense-first + always-on sparse).
+
 - *Risks:* 4th leg dilutes vector further unless weights are swept jointly (interaction — controlled by the joint design); snapshot staleness; slight pool/footprint growth.
 - *Best fit if:* probe-C-style paraphrase misses are confirmed on the real surface and recall (not ordering) is the binding metric.
 
 **Approach 3 — "Score-aware fusion" (abandon rank-only):** replace/augment RRF with min-max normalized cosine + weighted sum (OpenSearch normalization-processor pattern). Preserves the vector leg's score magnitude (Redis critique: RRF can't distinguish 0.99 vs 0.51 at rank 1).
+
 - *Risks:* the exact fragility RRF exists to avoid (score-distribution drift between legs; FTS scores unbounded → normalization coupling); larger behavior change to the core; contradicts the established RRF baseline.
 - *Best fit if:* the weight sweep shows equal-weight RRF cannot express the desired vector dominance — i.e., evidence the *mechanism* (rank-only) is the problem, not the *weights*.
 
@@ -86,6 +92,7 @@ Framing **C** (root-cause: fusion dilution + lexical brittleness) is the confirm
 **Chosen: Approach 2 with Approach 1's knob discipline** — always-on snapshot TF-IDF 4th leg (or FTS-blend where attribution matters) + weighted RRF with config knobs, all default-off, measured jointly. Rationale: (a) it addresses both root causes (fusion dilution + lexical brittleness) with the only in-repo-measured mechanisms; (b) every competitor (mem0, graphiti) runs dense-first + always-on sparse — the pattern is externally validated; (c) the R5/R6 knob pattern already proves the byte-identical default-off contract in this exact codebase.
 
 **Implementation shape (deferred to writing-plans, this scope decides WHAT and MEASURES):**
+
 - `rrf_fusion(..., leg_weights=None, per_leg_k=None)` — additive, default None = byte-identical.
 - 4th leg: snapshot-backed TF-IDF in `degradation_chain` (or pre-fusion FTS-blend fallback — decision point, see open questions).
 - Query-transforms (L1 search_keys PRF; L2 temporal-intent extension) as a pre-encode hook in `tortoise_fts_query`, default-off.

@@ -34,6 +34,7 @@ Five tightly-coupled standard tasks on the blog surface, implemented as one bran
 ## 1861 — Generate SEO (new Function + editor action)
 
 ### `website/functions/blog/api/generate-seo.ts` (new, zero-dep)
+
 - **Route:** `POST /blog/api/generate-seo` — admin-gated via ported `verifySession` + `isAdmin` (copy from `functions/admin/[[path]].ts` — they're module-private; same-origin SPA calls need no CORS). **Key the rate limit on the verified user id**, not IP (verifier P2-5); in-memory counter, best-effort per-isolate (posts.ts caveat). 30/min per user.
 - **Body:** `{ title, body, tags? }` — body never echoed in response (injection surface stays server-side).
 - **Provider:** OpenRouter `POST https://openrouter.ai/api/v1/chat/completions`: primary `deepseek/deepseek-v4-flash` (`response_format: {type:"json_object"}`, temp 0.3, max_tokens 400) → fallback `anthropic/claude-haiku-4.5` on non-2xx/parse-fail.
@@ -44,6 +45,7 @@ Five tightly-coupled standard tasks on the blog surface, implemented as one bran
 - **HSTS + OPTIONS:** all responses carry `HSTS` from `_lib.ts`; add `onRequestOptions` → `Allow: POST, OPTIONS` (verifier P2-4).
 
 ### Editor (`PostEditor.tsx`) — fields ARE the review surface (owner decision; verifier P2-3 deviation note)
+
 - **Deviation note (Indicator 2 out of scope):** publish-time auto-generate/block is intentionally dropped per owner decision 2026-08-28 — fields ARE the review surface; generation is a one-click action, all fields editable, normal publish.
 - **"Generate SEO" button** in the SEO card: reads title from form + **body via `editorRef.current` → `editorToMarkdown(editorRef.current)`** (body is NOT in `PostFormData` — verifier P2-6) + tags → calls `/blog/api/generate-seo` with user's access token → fills slug (new posts only, `slugTouched` guard — don't overwrite typed slug), excerpt, tags, meta_title, meta_description. All editable afterward.
 - Loading state + cost surfaced (`~$0.001`); error → toast, never blocks save.
@@ -64,6 +66,7 @@ Five tightly-coupled standard tasks on the blog surface, implemented as one bran
 ## 1863 — Generate cover (new Function + editor action)
 
 ### `website/functions/blog/api/generate-cover.ts` (new, zero-dep)
+
 - **Route:** `POST /blog/api/generate-cover` — admin-gated (same port). Rate cap 20/day per user id (verifier P2-5).
 - **Body:** `{ title, tags?, mode: "founder" | "abstract" }` — **abstract toggle included per owner decision 2026-08-28 (verifier P1-3)**: abstract = dark-slate/cyan brand tokens, NO reference images; founder = reference-image identity anchor. Default `founder`. NO body markdown (injection risk).
 - **Provider:** OpenRouter image generation — **verify endpoint shape against live docs at build time** (verifier P2-1: current docs use `POST /api/v1/images` with `modalities` or `input_references` for reference images, not inline `image_url` blocks): `google/gemini-3.1-flash-image-preview` primary → `black-forest-labs/flux.2-klein-4b` fallback (verifier P2-2 — `flux-2-klein` is not a valid slug). 16:9 (`aspect_ratio: "16:9"`) for OG.
@@ -76,9 +79,11 @@ Five tightly-coupled standard tasks on the blog surface, implemented as one bran
 - **E2E:** cover set → public article og:image 200; no cover → ASSETS fallback 200 (verifier P1-4).
 
 ## Deploy config
+
 - New Pages Function secrets (documented in epic README + deploy-pages.yml comment): `CF_API_TOKEN`, `CF_ZONE_ID` (1865), `OPENROUTER_API_KEY` (1861/1863), **`BLOG_E2E_AGENT_KEY` wired into the `verify-blog` step env** (verifier P2-3). No client-side keys (key exposure P0 avoided).
 
 ## Verification
+
 - `npx esbuild` clean on all new/modified functions; `tsc --noEmit` where runnable
 - Unit: cloudflare-purge helper (mock fetch), `enforceConstraints` fixture corpus (≥10 posts), meta-contract ↔ editor-literal cross-check, image QC
 - E2E: existing suite green + new lifecycle/generate/og-image tests (RUN_BLOG_E2E=1, gated agent key)

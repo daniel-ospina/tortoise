@@ -24,6 +24,7 @@
 | Ingest alias hook | `ingest.py` / `sdk.py::_flatten_search_keys_prop` | **`search_keys` written per point at ingest** (v2/v3 extractor aliases); indexed via `content ∪ search_keys`; E3 #1535 annotates hits with `search_keys` for a *future query-expansion consumer* — **nothing consumes it at query time yet** |
 
 **Relevant committed evidence:**
+
 - `tests/eval/retrieval/baseline/baseline-embedded-2026-08-17.json` (synthetic topic-centroid vectors, embedded surface): vector nDCG@10 = **0.8546**; **fused = 0.835 < vector — paired delta −1.95 nDCG pts, 90% CI [−3.25, −0.83]**; FTS nDCG@10 = 0.382. Fusing FTS+structural *diluted* the near-ceiling vector leg.
 - `docs/research/2026-08-17-1349-embedder-selection/evidence/bge-small.json` (real bge-small, HNSW, **vector arm only**): turn_recall@10 = 0.7294, nDCG@10 = 0.5649, session_recall@10 = 0.9207, retrieval p50 = 2.42ms / p95 = 28.9ms.
 - Hybrid baseline (issue): 0.786 / 0.598 → on the real surface hybrid > vector-only on both metrics (+0.057 turn_recall, +0.033 nDCG). The vector leg is *under-weighted but still additive* — the lever is to lift the hybrid above both, not to drop legs.
@@ -34,17 +35,21 @@
 ## Lever 1 — Key-expansion (synonyms/paraphrases before embedding)
 
 ### Current mechanism
+
 Query is embedded as-is (`EmbeddingModel.encode([query])` in `sdk.tortoise_fts_query` / `_encode_query_vec`). The only lexical tolerance in the pipeline is `build_or_query`'s OR-union on the FTS leg — it unions *query tokens*, it does not add *new tokens*. `search_keys` (extractor-written aliases) are indexed into points but never used to expand the query.
 
 ### Hypothesis
+
 Vocabulary-mismatched queries (LongMemEval IE category: "favorite" vs stored "go-to") miss the dense leg's neighborhood because the query embedding is computed over one phrasing. Expanding the query with (a) entity/alias terms harvested from the *retrieved pool* (pseudo-relevance feedback on `search_keys`), or (b) 1–3 paraphrase embeddings, widens the candidate pool. Per the EACL-2024 finding, expansion helps *weaker* retrievers (bge-small is a 33M-param bi-encoder — weak relative to rerankers), so the direction is favorable here.
 
 ### Expected cost/benefit
+
 - **Cost (production, 300ms budget):** FTS-side expansion = string op, ~0ms. Dense-side: 1 extra embed ≈ 1–3ms CPU (bge-small ~1.7–2× MiniLM per encode); 3–5 paraphrase embeds ≈ 5–15ms. **LLM-based expansion (HyDE/paraphrase generation) is NOT budget-compatible in the hot path** — needs a local model or deferred/offline variant. Budget-compatible subset: rule-based search_keys PRF + static synonym map.
 - **Benefit (expected):** recall lever, mostly on the *sparse* leg. SemEval-2026 Task 8 (multi-turn conversational retrieval): HyDE on BM25 +26.7% nDCG@10 vs dense +4.0% — "dense retrievers already capture much of the semantic information that HyDE provides". The dense leg's synonymy gap is already partially bridged by bge-small's training. **Realistic ceiling: turn_recall@10 +1–3 pts on IE-ish vocabulary-mismatch questions; nDCG mostly flat.**
 - **Pitfall (ACL 2025 findings):** HyDE-style gains on benchmarks correlate with *knowledge leakage* (the generator reproduces gold evidence from pretraining). LongMemEval-S conversations are synthetic per-user — leakage risk is low but the reported HyDE deltas are inflated vs. real-world niche content. Also: "keyword simplification hurts (−11–28%)" — a naive synonym-map that *replaces* tokens regresses; expansion must be *additive* and preserve the original query.
 
 ### External precedent
+
 - **mem0 v3**: no LLM query expansion in search. Preprocess = `lemmatize_for_bm25(query)` + `extract_entities(query)` (spaCy, optional). Entities are matched against a dedicated entity store (boosts memories sharing query entities) — i.e., *entity-level* key expansion, not paraphrase generation. `ENTITY_BOOST_WEIGHT` additive. (mem0 docs; mem0ai/mem0#4805)
 - **Zep/graphiti**: no query expansion either — 4 scopes × (BM25 + vector + BFS), RRF fusion; query is used as-is. The graph (node/edge) scopes play the "expansion" role (entities reached by traversal). (getzep/graphiti search.py; DeepWiki)
 - **LangMem (LangChain)**: server-side OpenAI embeddings; no published query-expansion pass in retrieval.
@@ -58,19 +63,24 @@ Vocabulary-mismatched queries (LongMemEval IE category: "favorite" vs stored "go
 ## Lever 2 — Time-aware query expansion (query-side temporal injection)
 
 ### Current mechanism
+
 R5 #1544 already ships the *retrieval-side* temporal stack: TR questions get (a) `recency_boost=0.5` multiplier inside RRF (`recency_field=createdAt/startedAt` → `_recency_factors` rank-percentile), (b) `detect_time_constraint` (interval/recency/ordering) → hard window filter `_apply_time_window` with a never-starve fallback, (c) events in the pool, (d) time-ascending context rendering. This is gated on `question_type == "temporal-reasoning"` only. **The query-side variant — injecting the question date ("Current Date: …" / "as of {date}") into the query string before embedding — does not exist.** `question_date` is already available per question and prepended only to the *reader context* header.
 
 ### Hypothesis
+
 Two sub-gaps:
+
 1. **Temporal intent outside the TR category.** Knowledge Updates (72 Q in LongMemEval-S: "has the user changed their mind about X?") has no recency handling — retrieval must prefer the *latest* version, and the graph already has CORRECTS/superseded_by/valid_from-to for the reader to discount, but retrieval ordering is blind to it. mem0/AutoMem/temporal-rag all treat temporal intent as *query-detectable* independent of a question-type label.
 2. **Query-side date anchoring.** mem0's `reference_date` and the official LongMemEval gen.py `Current Date:` header exist because "as of {date}" changes the correct answer; bge-small embeddings of the bare question cannot express "which version was current on X".
 
 ### Expected cost/benefit
+
 - **Cost:** near-zero. String injection before embed (~0ms) + a rule-based temporal-intent classifier (already exists as `detect_time_constraint` — extend its trigger set, no new deps). One extra embed at most.
 - **Benefit (expected):** bounded. TR category already handled (sr@5 = 0.786 baseline; the R5 knobs shipped and are measured). The measurable delta is KU-category recency + date-anchored TR intervals. External precedent: mem0's temporal score is *additive and semantic-dominated* ("nudges ranking without filtering candidates out" — exactly the R5 fallback posture); temporal-rag's adaptive `temporal_weight` ("current"→0.70, baseline→0.20) and AutoMem's `RECALL_RECENCY_BIAS=auto` (temporal queries only, default off) both say: **apply recency only when the query expresses temporal intent**. The "invert recency for 'three months ago'" rule (Jatin Bansal; mem0/Letta temporal-intent flags) is the failure mode to avoid — an explicit-date query must NOT get the fresh-biased weight.
 - **Risk:** the R5 machinery already proved the never-starve fallback; the query-side variant inherits it. Risk is low; so is the ceiling.
 
 ### External precedent
+
 - **mem0 v3**: Temporal Reasoning = separate write-time metadata pass (event/state/plan/preference/relationship/absence, precision, ongoing/completed) scored at read time against the query's temporal intent — *no extra LLM call at search*; `reference_date` param. Additive score; semantic dominates.
 - **AutoMem**: `SEARCH_WEIGHT_RECENCY=0.10` age decay (always on) + `RECALL_RECENCY_BIAS=auto` relative re-rank (only when query expresses temporal intent); `RECALL_RELEVANCE_GATE` damps off-topic-but-important memories — a within-pool relevance floor so recency/importance cannot ride an irrelevant memory to the top.
 - **temporal-rag (emmimal)**: validity filter hard-removes EXPIRED; EVENT relevance gate = raw cosine floor so freshness cannot override relevance; adaptive temporal_weight by query phrasing; ~15–30ms for a 20-doc temporal rerank (well inside the 300ms budget).
@@ -84,12 +94,15 @@ Two sub-gaps:
 ## Lever 3 — Fusion-fix (RRF weights/order)
 
 ### Current mechanism
+
 `rrf_fusion` sums `1/(k+rank)` with **k=60 and equal weight across FTS/vector/structural**. The eval's `hybrid_search` merges per-entity calls by RRF score. The only knobs are k and the R5 recency multiplier. There is no per-leg weight, no per-leg k, no conditional leg gating.
 
 ### Hypothesis
+
 The strongest leg (vector, post-swap) is under-weighted: a point that ranks #1 in vector but rank ~15 in FTS gets `1/61 + 1/75 ≈ 0.0297`, while a point ranked ~8 in both legs gets `2/68 ≈ 0.0294` — consensus beats a single strong signal. In-repo evidence: on the synthetic-centroid surface, fused (0.835) < vector-only (0.8546), paired delta **−1.95 nDCG pts [−3.25, −0.83]** — equal-weight fusion *cost* ~2 points vs the best leg. On the real bge-small HNSW surface, hybrid (0.786/0.598) > vector-only (0.7294/0.5649) — so legs are still additive, but the mechanism (dilution of the strongest leg) is the same; a weight sweep should lift the hybrid above both.
 
 ### Expected cost/benefit
+
 - **Cost:** ~0ms — pure post-fusion arithmetic. The only architecture surface is `rrf_fusion`'s signature (add `leg_weights: dict[str,float] | None`, default None = byte-identical) + one knob thread-through in `tortoise_fts_query` / `hybrid_search` (mirror the R5 recency_boost pattern).
 - **Benefit (expected):** the **highest evidence-to-cost ratio of the four levers**. The paired delta on the embedded surface is already measured (−1.95 pts at equal weights → the weight sweep is the fix direction). Expected: recover a meaningful share of the dilution gap; nDCG@10 is the metric that moves most (ordering), turn_recall@10 moves less (pool membership changes only at leg-boundary ranks).
 - **Pitfalls (external):**
@@ -99,6 +112,7 @@ The strongest leg (vector, post-swap) is under-weighted: a point that ranks #1 i
   - k is "not critical" (Cormack: near-optimal 40–80; the paper says k=60 "was not altered during validation") — a k×weight joint sweep is cheap and should be in the plan.
 
 ### External precedent
+
 - **Cormack et al. 2009 (SIGIR)**: k=60 fixed in pilot, "choice was not critical"; RRF "almost invariably improved on the best of the combined results"; beat Condorcet/CombMNZ/learned LTR baselines.
 - **Weighted RRF variants in production**: MongoDB `$rankFusion` exposes per-retriever `weights`; Weaviate `alpha` interpolates dense/sparse; OpenSearch `normalization-processor` has per-retriever `weights: [0.3, 0.7]` (its docs: reach for it "when you have judged data showing one retriever should dominate"). The Neural Base hybrid course: `RRF_final = w1·Σ1/(k+r_bm25) + w2·Σ1/(k+r_vec)`, tuned per corpus ("for semantic-heavy domains, increase w2").
 - **Vendors' default posture**: Elasticsearch/OpenSearch/MongoDB ship equal-weight RRF as the zero-tuning default; learned weights are "where teams graduate later" once they have behavioral data (Redis) — Tortoise's LongMemEval surface *is* that labeled data.
@@ -110,17 +124,21 @@ The strongest leg (vector, post-swap) is under-weighted: a point that ranks #1 i
 ## Lever 4 — TF-IDF hard-tier lexical+semantic hybrid
 
 ### Current mechanism
+
 TF-IDF exists only as the **last-resort fallback** when *all three* FalkorDB strategies fail (`sdk.tortoise_fts_query` → `fallback_tfidf` over `self.query()` payload or the #1375 `fallback_snapshot` cache). It never contributes to the pool when FTS/vector/structural succeed. Its indexed text is `content ∪ search_keys` (`index_text`), the sparse-leg parity surface.
 
 ### Hypothesis
+
 The FTS leg (RediSearch scoring over `build_or_query`) and the TF-IDF cosine leg (over the snapshot) are *different lexical signals*: OR-union token matching vs cosine over TF-IDF vectors. Probe C showed the TF-IDF path surfacing a paraphrased evidence point at rank 1 where FTS zeroed it (pre-R2 strict-AND; R2's OR-union closes part of the gap but not the synonym-substitution gap — "go-to" vs "favorite" share no tokens, so OR-union cannot help). Making TF-IDF a **regular 4th RRF leg** (via the cached snapshot, not the 350ms re-fit) keeps lexical signal in the pool even when the embedder is healthy — the mem0/graphiti pattern of "dense-first + always-on sparse complement". It also directly hardens the *degraded-embedder path* (the issue's "degraded path uses TF-IDF" framing) by making the hybrid robust before degradation is reached.
 
 ### Expected cost/benefit
+
 - **Cost:** snapshot search = single in-memory cosine pass over the lean corpus (~ms for the eval's per-question graphs; the snapshot build is cached per graph/key #1375). Threading a 4th leg into `degradation_chain` + `rrf_fusion` (or, cheaper, folding TF-IDF hits into the FTS leg's list pre-fusion) = small. **Caution:** the snapshot must stay digest-keyed / invalidated on write (existing `snapshot_key` machinery) or the leg serves stale points.
 - **Benefit (expected):** recall lift for paraphrase-heavy queries; robustness. The probe C evidence is the strongest in-repo signal. External: mem0 fuses `semantic + BM25 + entity` additively and reports keyword as the *primary* signal for factual/exact queries ("What meetings did I attend last week?") — the dense leg alone is not the answer for entity/exact lookups; graphiti runs BM25 + vector + BFS per scope. All three competitors are "dense-first, sparse always-on".
 - **Pitfall:** adding a 4th equal-weight leg further dilutes the vector leg — **this lever interacts with fusion-fix (L3)**. The plan must run them as a joint sweep (TF-IDF on/off × weight grid), not independently, or the dilution from L4 could mask the L3 gain.
 
 ### External precedent
+
 - **mem0 v3**: normalized BM25 (`midpoint/steepness` sigmoid normalization), lemmatized, over-fetch `max(limit*4, 60)`, additive score `(semantic + bm25 + entity)/max_possible`. BM25 = primary signal for factual/exact queries.
 - **Zep/graphiti**: BM25 fulltext (Lucene, OR-tolerant "OR + sanitize" per the v2 report's competitor scan) + vector + BFS per scope, RRF-fused; episodes (raw chunks) are a first-class scope, not a fallback.
 - **Letta**: pure dense + metadata/tag/date filters — the counter-example validating that a strong dense leg can stand alone; the v2 report's verdict was "the dense leg is the default backbone everyone else builds on", with sparse as complement, not replacement.
@@ -142,6 +160,7 @@ The FTS leg (RediSearch scoring over `build_or_query`) and the TF-IDF cosine leg
 **Sequencing vs #317:** all four levers are budget-compatible and orthogonal to #317's CE reranker. #317 remains gated on GPU/API-served inference. The R6 rerank stage (already default-off in the eval) stays the measurement surface for when serving exists. Recommended order: **L3 → L4 → L1 → L2** (evidence-to-cost descending), with L3×L4 run jointly to control the dilution interaction.
 
 **Source confidence summary:**
+
 - High: L3 (in-repo paired deltas + Cormack + vendor docs — 3 categories)
 - Medium-high: L4 (probe C + mem0/graphiti/v2-report — 2 categories)
 - Medium: L1 (probe C + SemEval/EACL/ACL — external deltas benchmark-inflated, leakage caveat) ⚠️ emerging

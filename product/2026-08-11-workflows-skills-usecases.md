@@ -31,6 +31,7 @@ Each mode sets tuned defaults for the underlying params (`confidence_gate`, `ran
 `recency`, `surface`). Any param can be overridden per-call.
 
 ### The three intents
+
 - **UC1 — STATE (primary):** what is true & high-confidence right now. Not superseded, not
   deprecated; mostly objects + the most important arguments + important NANDs/mitigations.
   Ranking: multiplicative confidence gate (option b chosen) —
@@ -64,9 +65,11 @@ SDK/tools/MCP first, but preserve the skills — both the light "how to" and the
 Keep **light / medium / high** thoroughness variations.
 
 ### how-to-use-tortoise (light)
+
 Existing skill. Preserve light/medium/high variations for thoroughness.
 
 ### tortoise-decide (the core "show what this can do that's valuable")
+
 1. Refine decision definition with the user.
 2. Research options and criteria.
 3. Check with user: list of criteria (for value) + options (for completeness).
@@ -80,6 +83,7 @@ Existing skill. Preserve light/medium/high variations for thoroughness.
    incompatible / mutually exclusive with those two).
 
 ### research-domain (part of tortoise-decide)
+
 Research new data (references the modular research skill: Perplexity calls, scientific-paper
 search, etc.) to go broad on a subject → connect data to itself + pre-existing data (mine) →
 analyze what needs more research (graph **UC2**: find weak spots) → launch research again → mine
@@ -87,10 +91,12 @@ the new research → **repeat UC2 + research + mine**. By the end of cycle 3, pr
 analysis.
 
 ### analyse-for-contradictions
+
 Analyze a plan / issue / design / strategy against the graph to spot contradictions with
 previous decisions and with high-confidence points.
 
 ## 4. Priorities
+
 1. **SDK / MCP tools / agent-tools consolidation + recall epic (#898)** — FIRST.
 2. Workflow tooling (index, mine, connect, ingest, EP-subgraph, dreaming).
 3. Skills: how-to (light/medium/high), tortoise-decide, research-domain, analyse-for-contradictions.

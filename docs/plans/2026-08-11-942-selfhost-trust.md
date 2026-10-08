@@ -27,6 +27,7 @@ Skipped — plan touches zero third-party dependencies. `falkordb/falkordb-serve
 | Docs (README/quickstart/website/runbook) | docs | ci.yml docs job (markdownlint + link check on PR) | canonical image `falkordb/falkordb-server:latest` + canonical host URI `docker://:falkordb@localhost:6379/tortoise` everywhere |
 
 ### Tech Stack
+
 Python 3.12, pytest, GitHub Actions (service containers), docker compose, FalkorDB (falkordb/falkordb-server).
 
 ---
@@ -36,6 +37,7 @@ Python 3.12, pytest, GitHub Actions (service containers), docker compose, Falkor
 **Intent:** The issue's O/I/T indicator 1 — onboarding must lead with `docker compose up -d` (durable) and document embedded as single-agent eval only, so self-hosters land on the multi-writer path by default.
 **Acceptance:** README quickstart, docs/quickstart-selfhosted.md, website/self-hosted.html, and docs/infra-runbook.md §4.5 all present `docker compose up -d` as the first/recommended self-hosted path; every embedded mention carries the single-writer eval boundary; decision blocks present; no doc still calls embedded "default" or "recommended"; canonical image + host URI consistent; self-hosted.html Python version is 3.12 and "multi-node" claim removed.
 **Files:**
+
 - Modify: `README.md`, `docs/quickstart-selfhosted.md`, `website/self-hosted.html`, `docs/infra-runbook.md`, `.env.example`, `docker-compose.yml`, `tests/test_selfhost.py` (stale comment)
 
 **Step 1: README quickstart — add the durable compose path as Option 1**
@@ -53,6 +55,7 @@ In `README.md` §Quickstart → §1 Install → "Self-hosted (run it yourself)" 
   Durable multi-writer: the compose sidecar is the supported team/production
   path. For a single-agent eval without Docker, see the pip path below —
   embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
+
 ```
 
 Keep the existing pip lines as "Self-hosted — single-agent eval (no Docker)" with an eval-only note.
@@ -80,6 +83,7 @@ Change the `TORTOISE_DB_PATH` row description to: "Embedded FalkorDBLite eval pa
 
 **Step 4: website/self-hosted.html — compose-first + decision table**
 Keep `id="install-code"` on the compose pre in §1 (the copy button `copyText('install-code')` depends on it); give the pip alternative its own pre WITHOUT a duplicate id.
+
 - §1 Install: replace "No Docker needed for the embedded mode" with compose as step 1 (`git clone … && docker compose up -d`), pip install as the no-Docker alternative; fix "Python 3.11+" → "Python 3.12+".
 - New §2 "Run the daemon (Docker, recommended)": `docker compose up -d` → daemon at `http://localhost:8000/mcp`; renumber subsequent sections by TITLE (Onboard → §3, Start the MCP server → §4, Role memory → §5, Which path → §6).
 - §4 (the old §3 "Start the MCP server (stdio)" — now the connect section): lead with the daemon URL for the compose path (`claude mcp add tortoise http://localhost:8000/mcp`); keep stdio as the no-Docker path.
@@ -100,6 +104,7 @@ Add to the `falkordb` service (after `image:`):
 Update the header comment's usage block to mention `docker://:falkordb@localhost:6379/tortoise` for host-side clients.
 
 **Step 7: .env.example + README premise-labs note + runbook — purge the dead 16379/passwordless URI**
+
 - `.env.example`: replace `TORTOISE_DB_URI=docker://:@localhost:16379/tortoise` (and the comment claiming compose maps host 16379 → container 6379, which was already false) with the canonical `docker://:falkordb@localhost:6379/tortoise` and a correct comment (compose publishes 127.0.0.1:6379 after Task 1 Step 6; sidecar runs with `--requirepass falkordb`).
 - `README.md` §Repository layout (premise-labs note): the sentence "this repo uses `:16379` consistently" is now false — reword to "this repo's canonical host URI is `docker://:falkordb@localhost:6379/tortoise` (compose publishes 127.0.0.1:6379)".
 - `docs/infra-runbook.md` §4.5: rewrite the "defaulting to the local container `docker://:@localhost:16379/tortoise`" line to the canonical URI.
@@ -118,6 +123,7 @@ Update the header comment's usage block to mention `docker://:falkordb@localhost
 Run: `grep -rn "Embedded (default)\|recommended to start\|multi-node\|16379\|passwordless URI is\|docker://localhost:6379\|docker://:@localhost:6379" README.md docs/quickstart-selfhosted.md docs/infra-runbook.md website/self-hosted.html .env.example` — expect no hits. (Byte-identical to the CI guard pattern in Task 4 Step 1 — local and CI must not diverge. `website/docs.html` + `graph-scripts/setup.py` are EXCLUDED by design: hosted sample / legacy installer.)
 
 **Step 10: README default-column + compose cross-ref accuracy**
+
 - README env table `TORTOISE_DB_PATH` row: default column says `/data/tortoise.db` (the Docker-image value) — the canonical default is `~/.tortoise/tortoise.db` (config.py resolve_db_path); fix the column while editing the row.
 - docker-compose.yml header comment cross-references "the embedded-FalkorDBLite single `docker run` (see README quickstart)" — the README has no such path; reword to reference docs/quickstart-selfhosted.md Option C. ALSO update the header's durability framing to the post-#915 boundary: embedded is "durable for ONE process since #915; concurrent writers lose data — single-writer eval only" (drop the now-imprecise "not durable / AOF-off" phrasing; #101 stays as historical context).
 
@@ -126,6 +132,7 @@ Run: `grep -rn "Embedded (default)\|recommended to start\|multi-node\|16379\|pas
 **Intent:** Issue O/I/T indicator 3 — embedded mode surfaces a loud, explicit single-writer warning at every runtime entrypoint, and `--auth tenant` on embedded is marked eval-only (WARN decision, documented in scope cycle 2).
 **Acceptance:** `serve --http` (any auth) on embedded prints a loud stderr banner; `selfhost.py` prints it on embedded startup; the stdio entrypoint (`tortoise serve` / `python -m tortoise.mcp_server`) prints it; `tortoise key create` warns at key-mint time; `tortoise init` embedded success line carries a one-line eval note; tests prove all five (plus the URI-branch negative); existing tests stay green.
 **Files:**
+
 - Create: `tortoise/_embedded.py` (zero-import leaf — the ONLY home of EMBEDDED_EVAL_BANNER)
 - Modify: `tortoise/__main__.py` (`_cmd_serve_http` embedded branch, `_cmd_key_create`, `_cmd_init`), `tortoise/selfhost.py`, `tortoise/mcp_server.py` (stdio `main()` + `from tortoise.config import is_db_uri`)
 - Test: `tests/test_cli_serve.py`, `tests/test_selfhost.py`, `tests/test_mcp_server.py` (PINNED — stdio banner), `tests/test_cli_context.py` (init note)
@@ -177,6 +184,7 @@ Find the embedded success print in `_cmd_init` (line ~500, "Embedded mode initia
 
 **Step 5b: banner in the stdio path (tortoise/mcp_server.py main())**
 The stdio entrypoint (`python -m tortoise.mcp_server` / `tortoise serve` default / `tortoise-serve` console script → deployment.serve → mcp_server.main()) is where embedded eval users actually land (two MCP clients sharing one embedded DB = concurrent writers = data loss — the documented redislite limitation). In `tortoise/mcp_server.py` `main()` (~line 1177):
+
 - Condition: `not is_db_uri(uri)` — NOT "URI unset": `_get_sdk` treats a bare-path `TORTOISE_DB_URI` as embedded (backward-compat, mcp_server.py:310-313), and that path must also warn. `is_db_uri` is NOT currently imported in mcp_server.py — add `from tortoise.config import is_db_uri` (cycle-safe: config imports only logging/os/pathlib).
 - Placement: AFTER the `sys.exit(1)` config-error guard (neither URI nor DB_PATH nor TORTOISE_ALLOW_EMBEDDED → exit before any banner), immediately before `mcp.run(transport="stdio")`. Single-fire verified: `tortoise serve` stdio dispatches straight to mcp_server.main() (no own banner) — the banner fires exactly once.
 
@@ -252,6 +260,7 @@ Run: `python -m pytest tests/test_cli_serve.py tests/test_selfhost.py tests/test
 **Intent:** Issue O/I/T indicator 2 + target 2 — the TRUE cross-worker path of the concurrency suite, runnable against a real sidecar in CI, non-vacuous by construction.
 **Acceptance:** Two new tests: `test_seq_is_monotonic_under_concurrency_live_falkor` (8 threads on ONE shared live graph; union of seqs contiguous 1..max; URI backend asserted) and `test_concurrent_writers_live_falkor_no_lost_writes` (5 subprocess writers on one live graph; all keys + count present). Both `pytest.skip` visibly when `TORTOISE_DB_URI` unset. Both use test-prefixed graph names that pass `_assert_test_graph`. Embedded/local suites unaffected (skip).
 **Files:**
+
 - Modify: `tests/test_event_store.py`, `tests/test_embedded_concurrency.py`
 
 **Step 1: shared skip helper (tests/conftest.py)**
@@ -367,6 +376,7 @@ Run: `python -m pytest tests/test_event_store.py tests/test_embedded_concurrency
 **Intent:** Issue O/I/T indicator 2 + target 2 — a CI job proves concurrent-writer atomicity on the real falkordb server, so the durable story is verified, not asserted.
 **Acceptance:** New job in `.github/workflows/python-ci.yml`; runs ONLY the two live node IDs against a `falkordb/falkordb-server:latest` service container (requirepass falkordb, redis-cli healthcheck); job-scoped `TORTOISE_DB_URI`; skip-fail guard matching both pytest output formats (job fails if either live test SKIPPED); docs-consistency grep step; watchdog summary pattern; `timeout-minutes` cap. Other jobs unchanged (URI stays unset → live tests skip there).
 **Files:**
+
 - Modify: `.github/workflows/python-ci.yml`
 
 **Step 1: add the job** (with the skip-fail guard matching pytest's ACTUAL output formats — verified empirically on pytest 8.x: the `-v` progress line is `nodeid SKIPPED (reason)` (name BEFORE the word), and the `-rs` summary is `SKIPPED [N] tests/file.py:line: reason` (file:line, no nodeid). The guard greps BOTH formats and also asserts exactly 2 skip-summary lines never appear):
@@ -497,6 +507,7 @@ The workflow-level `env:` block must stay free of `TORTOISE_DB_URI`; the docs-co
 **Intent:** Red-green evidence, docs consistency, and the user-facing changelog note.
 **Acceptance:** All affected suites green locally; banner emitted (verified by the new tests); CHANGELOG entry added; git state clean and ready for commit-workflow.
 **Files:**
+
 - Modify: `CHANGELOG.md`
 
 **Step 1: run the affected suites**
@@ -522,6 +533,7 @@ Add under the current Unreleased section:
 `python -m pytest tests/test_selfhost.py tests/test_cli_serve.py -q --timeout=300` green; `git status` shows only the planned files.
 
 ## Failure Modes
+
 - Live tests skip in CI (env leak/removal) → the `-rs` skip-fail guard greps BOTH pytest output formats (`nodeid SKIPPED` in -v progress; `SKIPPED [N] tests/file.py` in -rs summary) and turns the job red; the skip helper is env-based by design (CI sets it, everything else skips).
 - Banner breaks a stdout/stderr assertion → all banner output is stderr-only; the plan pins the known assertion surfaces (loopback-no-network-warning; key tests; stdio MCP handshake tests assert stdout).
 - `_assert_test_graph` blocks the reset → graph names are test-prefixed (`test_live_seq_tortoise`, `test_live_mw_tortoise`).
@@ -551,9 +563,11 @@ Add under the current Unreleased section:
 5. **P2 FIXES — key-create test gets explicit env isolation (delenv URI + tmp DB path); troubleshooting entry drops the false "embedded suite port" clause (redislite binds unix sockets); `--durations=15` added to the job; CHANGELOG entry covers the stdio entrypoint; Task 5 suite includes tests/test_mcp_server.py; blast-radius note for remaining graph-scripts (legacy 16379, env-overridable, scoped out).**
 
 ## Cycle log
+
 - plan-verify cycle 2: Verifier A: P0=0, P1=3 (guard scope, negative-test ordering, stdio test gap), P2=5, P3=2, P4=1. Verifier B: P0=0, P1=3 (same three, independently), P2=2 (stdio predicate, setup.py), P3=2, P4=1. Controller: all fixed, no ignores. Re-dispatching both verifiers (cycle 3).
 
 ## PLAN REVISION — cycle 4 (controller response to plan-verify cycle-3 P0/P1s)
+
 1. **P1 FIX (process) — body/log desync**: the cycle-3 edit call was all-or-nothing (one edit failed → whole call aborted), so the log claimed fixes the BODY lacked. Task 2 Steps 1-5c and T1 Steps 7/9/10 + T4 install/guard steps rewritten in the body to match the log. Verifier A's catch; verified by re-grep.
 2. **P1 FIX — key-create banner reuses the shared constant** (single text source; the "SINGLE-WRITER" assertion can no longer drift from Step 3's message).
 3. **P1 FIX — CI job installs `'.[test,embeddings]'`** (sentence-transformers lives in the embeddings extra; the pre-cache step and create_point's embedding path need it; matches sibling jobs).
@@ -562,9 +576,11 @@ Add under the current Unreleased section:
 6. **P3 FIXES — init-note test added (test_cli_context.py); stdio banner test file pinned (tests/test_mcp_server.py); guard step gets `if: always()`; guard comment documents exclusions.**
 
 ## Cycle log
+
 - plan-verify cycle 3: Verifier A: P0=0, P1=4 (body/log desync ×3 + key-create case mismatch), P2=1, P4=1. Verifier B: P0=0, P1=2 (install extras; key-create case mismatch), P2=4 (setup.py flip contradiction — resolved by non-flip decision; docs.html hosted sample — resolved by exclusion; stale durability wording — fixed; guard scope comment — fixed), P3=3. Controller: all fixed or explicitly decided. Re-dispatching both verifiers (cycle 4).
 
 ## PLAN REVISION — cycle 5 (controller response to plan-verify cycle-4 P0/P1s)
+
 1. **P1 FIX — stdio test `fake_run` binding**: instance-attribute functions are never bound; `def fake_run(self, **kw)` TypeErrors on the call (empirically proven by verifier). Now `def fake_run(**kw)` (method-shaped rejection noted in a comment).
 2. **P1 FIX — quickstart Option B uses `-e REDIS_ARGS="--requirepass falkordb --appendonly yes"`** — the falkordb image entrypoint ignores command-line args (the repo's own compose header documents this lesson); a bare `--requirepass` run arg would silently start a PASSWORDLESS sidecar and the canonical URI would fail auth — the exact trust-killer #942 exists to prevent.
 3. **P2 FIX — guard pattern extended** with `docker://localhost:6379|docker://:@localhost:6379` (passwordless canonical-port forms in the harness JS configs) in BOTH the CI guard and T1 Step 9 (byte-identical).
@@ -573,9 +589,11 @@ Add under the current Unreleased section:
 6. **P4 FIX — selfhost.py:31 → :32 line ref.**
 
 ## Cycle log
+
 - plan-verify cycle 4: Verifier A: P0=0, P1=1 (fake_run TypeError), P2=1 (Task 5 suite/count), P4=1. Verifier B: P0=0, P1=1 (Option B REDIS_ARGS), P2=2 (Task 5 count; guard pattern gap), P3=2, P4=0. Controller: all fixed. Re-dispatching both verifiers (cycle 5).
 
 ## PLAN REVISION — cycle 6 (controller response to plan-verify cycle-5 P0/P1s)
+
 1. **P1 FIX — selfhost.py `import sys`**: the file imports NO sys today; the snippet's `file=sys.stderr` would NameError at import in embedded mode (daemon crash in the exact mode it warns about; 7 `_client_for_env` tests + subprocess smoke red). The edit now mandates adding `import sys`.
 2. **P1 FIX — quickstart §5 connect leads with the daemon URL** for compose users (`claude mcp add tortoise http://localhost:8000/mcp` / `.mcp.json` http block); stdio demoted to the no-Docker eval path labeled single-writer. The flip was previously half-done (install leads with compose, connect led to a SECOND embedded stdio server).
 3. **P2 FIX — init-note test**: tmp TORTOISE_DB_PATH (no home-dir pollution) + `no_index=True` (no repo auto-index subprocess); noted there is no positive embedded-init precedent in test_cli_context.py.
@@ -586,4 +604,5 @@ Add under the current Unreleased section:
 8. **P3/P4 — stdio test resets `mcp_mod.sdk/_sdk`; mcp_server line ref :310-313; dead `lock` var dropped from the live seq sample.**
 
 ## Cycle log
+
 - plan-verify cycle 5: Verifier A: P0=0, P1=0, P2=0, P3=1, P4=3. Verifier B: P0=0, P1=2 (selfhost import sys; §5 connect flip half-done), P2=5, P3=1, P4=1. Controller: all fixed. Re-dispatching both verifiers (cycle 6).

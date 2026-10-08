@@ -21,6 +21,7 @@ Edge cases covered per journey: J1 — empty/blank conversation (never ok=True f
 ## 2. Workflows
 
 **Write path (capture → extract → consolidate → index):**
+
 1. Capture (fail-closed): turn points land; `_extract_session_v2` consults `out["errors"]`; errors surface on the contract; `extraction_mode` truthful (P1).
 2. Extract (two-tier, date-anchored): S1 date-anchored digest → S2 classifies EDUs → Tier A state-value points (verbatim value, `quote`, `when`, `search_keys`, `source_turn_id` — speaker derived from the turn's role) / Tier B narrative points (compressed); S4 merges-not-replaces (E4).
 3. Consolidate (E5+E7, on the shared graph): S3 real-backend search (entity-resolved) → 4-way decision (ADD/UPDATE/DELETE soft/NOOP link) → supersession records in payload + `client_commit_id`; CORRECTS edges materialized; validity windows set (E6 later).
@@ -91,6 +92,7 @@ session ─▶ CAPTURE (fail-closed, P1)         question ─▶ QUERY PARSE
 > **Findings date:** 2026-08-20. Sources: Hindsight (arXiv 2512.12818 + vectorize docs), EverMemOS (Synix source-level analysis), redhat-ai-americas memory-hub survey. Also appended to the epic brief's Raw Notes.
 
 **Who uses typed-fact classification — and is the Tier-A marker optimal?**
+
 - **Hindsight (benchmark leader: 91.4% LongMemEval) uses exactly this pattern:** every extracted fact is classified at extraction into world / experience / opinion / observation; retrieval is type-aware (a `types` filter narrows which networks are searched); a background **consolidation layer folds facts into observations** (deduplicated, evidence-grounded beliefs with quotes + proof counts, refined-not-overwritten) — structurally very close to our Tier A/B split + E7 consolidation + EP-confidence. It also grounds every fact on TWO temporal axes (occurrence time + mention time), validating our `when` vs `createdAt` split.
 - **EverMemOS goes further (7 memory types, per-type extractors/stores/retrieval) but pays infra complexity** (4 backends, no cross-system transactions — a consistency hazard).
 - **The adversarial counterpoint (redhat memory-hub survey):** "type classification earns its keep at extraction, not retrieval" — tags don't change how the retrieval pipeline processes a memory (semantic search already surfaces what's relevant), and "if the type genuinely matters it belongs in the memory text itself". Its corollary is exactly our design: Tier-A's value is (a) extraction-selection guidance (the value-filter carve-out: don't strip "27:12") and (b) the verbatim value lives IN the text (via `quote` + verbatim retention).
@@ -103,6 +105,7 @@ Research check: justified skip — brief Tech Stack Research (ontology paragraph
 ## 5. Architecture
 
 Components (boundaries from the surface map):
+
 1. **Extractor** (`extractor_v2.py`) — S1–S5 + consolidation; `_complete` gains retry/backoff + bounded `max_tokens` + 4xx fatal (M3); `session_date` kwarg (E1).
 2. **Retrieval** (`search_engine.py` + eval retrieve) — 4 legs + RRF + date weight + rerank/diversity; FTS OR-tolerant fix (R2); vector leg enabled (R3); structural `kind` wired (R4); events in pool (R5).
 3. **Reader** (`tools/longmem_eval/reader.py`) — pinned model+prompt (M5); fragments A1/A2; decoration UX-2.
@@ -137,6 +140,7 @@ Error responses defined per surface (map #18/#26): LLM 402 → fatal-class abort
 ## 7. Detailed E2E Test Cases
 
 The 11 high-level E2Es from scope, fleshed to runnable form (setup + assertions). Full detail in **05-detailed-e2e.md** (per-test Layer/Setup/Given-When-Then/Assertions/Owned-negatives, negative-case ownership table, fixtures + preconditions); each maps to surfaces + test layers:
+
 - E2E-1 real stack (surfaces 7–11): real FalkorDB + FTS + embedder + structural kind; per-leg contribution visible in the recorded leg-mix, never null (precondition: M7/R3 per-leg recording — the engine emits `rrf`/`tfidf` today); dedup cap asserted.
 - E2E-2 run integrity (19/20/22): integrity.valid=true, report real, leg-mix persisted.
 - E2E-3 evidence non-vacuous (19): evidence_points > 0 for >95%, N/A-not-0.0.
@@ -183,6 +187,7 @@ landing in the same wave):
 **Cross-substep consistency checkpoints:** Journeys↔E2E (J1–J5 ↔ E2E-1..11 all covered); Data Model↔E5/E7 (no new kinds — verified); Architecture↔Surface map (28 surfaces each own a component or explicit deferral); Interfaces↔UX decisions (reader context format implements UX 1–3); E2E↔scope (11 high-level tests all detailed).
 
 **Risks & mitigations:**
+
 | Risk | Mitigation |
 |---|---|
 | V3 bet doesn't pay on a valid run (parity vs raw) | Success criteria per-category (A9); union design evidence; run protocol isolates (pilot → fixes → 500) |

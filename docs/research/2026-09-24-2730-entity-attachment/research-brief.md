@@ -44,6 +44,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, entity-attachment, #3584 opaque id, 
 > **Given that an entity's identity is an opaque id (`#3584`), what must S3 RESOLVE decide, what context must constrain its candidates, and what should a resolved mention be attached to?**
 
 **5-Whys, applied to "why does this matter now":**
+
 1. Why research attachment? → because 62.3 % of our Objects are bare definite descriptions (§3).
 2. Why are they? → because resolution is name-keyed and context-blind, and the narrative is dropped at the resolution seam.
 3. Why is context dropped? → because the resolution prompt receives only `id | name | kind` (§3, E4).
@@ -51,10 +52,12 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, entity-attachment, #3584 opaque id, 
 5. Why not just scope the identity key? → **because `#3584` already decided identity is not the name — and the code has not implemented it** (§3, E2). Scoping the name-key re-litigates a settled decision.
 
 **How Might We (two alternative framings):**
+
 - **HMW bind a mention to an *id* rather than to a *string*?** → moves the problem from identity-minting to entity-linking (`mention → candidate → decision`), which is the field's shape (X2/X3).
 - **HMW make the *candidate set* correct, rather than make the *decision* smarter?** → candidate recall is the dominant silent failure: if the right entity never enters the candidate table, no adjudicator can pick it (X1). This is the framing the predecessor brief already reached and it survives every decision since.
 
 **Assumption map:**
+
 | assumption | status |
 |---|---|
 | identity is the `name` | **`[invalidated]` by #3584** — the decision, though **not the code** (§3 E1/E2) |
@@ -153,48 +156,56 @@ And the `the <X>` class is **mostly non-referential mentions promoted to nodes**
 > Confidence tiers per the research skill §5a. Sources are independent categories (academic / vendor doc / production engineering).
 
 ### X1 — Blocking is *the* mechanism that bounds ER; candidate recall is the metric that fails first **[HIGH — 3+ independent]**
+
 ER surveys and practice papers converge: blocking assigns entities to signatures and compares only within blocks, and the correct measure of a blocking scheme is **pair completeness** (recall) first, then pair quality and reduction ratio. Practitioner post-mortems name **weak blocking, pair explosion, and transitive-closure compounding of matcher errors** as the canonical production failures.
 *Sources:* Papadakis et al., *A Survey of Blocking and Filtering Techniques for ER* (arXiv 1905.06167); *Comparative Analysis of Approximate Blocking Techniques* (PVLDB 9); *Entity Resolution in Practice: Lessons from a Self-Serve Pipeline* (arXiv 2607.26298); *Benchmarking Filtering Techniques for ER* (arXiv 2202.12521).
 
 **⇒ For us:** the candidate set is the first thing to fix and the first thing to measure. `search_graph` (E5) is our blocking step today; it has **no scope filter and a bounded `[:40]` render + ~15×3 FTS budget** (predecessor E5), so its recall is unknown and unmeasured.
 
 ### X2 — Production architectures split candidate retrieval from LLM judgment, and the LLM picks from a *supplied list* **[HIGH — 3+ independent]**
+
 Elastic's production ER architecture separates **candidate retrieval** from **LLM judgment**, uses a small candidate set plus **constrained output** and explanations; the *SELECT* prompt family (choose the match from candidates) is a studied, mainstream pattern.
 *Sources:* Elastic Search Labs, *Entity resolution & Elasticsearch: Solving challenges in production*; AvengER — *Ensembling and Fine-Tuning LLMs for SELECT Prompts in ER*; *Match, Compare, or Select? An Investigation of LLMs for Entity Matching* (arXiv 2405.16884).
 
 **⇒ For us:** `_resolution_prompt` (E4) **already is a SELECT prompt** — it supplies a candidate table and asks for `resolves_to`. The gap is not the pattern; it is (a) the candidate set's recall and (b) the absence of the context the model needs to choose.
 
 ### X3 — False merges and false splits are *asymmetric*, and the conservative direction is fewer merges **[HIGH — 4 independent practitioner/analysis sources]**
+
 A false merge is **invisible and hard to undo** (it propagates a wrong identity downstream); a false split is **visible and cheap to repair**. Guidance converges on setting match thresholds **conservatively** and prioritising merge precision.
 *Sources:* logiciel.io *False merges vs false splits*; Eriksson *Entity Resolution* pattern library; Refonte *Govern ER Record Confidence Thresholds*; ReliableContext *ER Evaluation Beyond Pairwise F1*.
 
 **⇒ For us:** this is the field's statement of the same rule `#1370` already carries — *"no subject > wrong subject"* — and it is why `_find_existing_entity`'s `ambiguous → None` (E5) is the right default and must not be "fixed" into a guess.
 
 ### X4 — LLM confidence in ER is usable but not trustworthy at the margin; grounded evidence beats self-reported confidence **[MEDIUM — 2 independent categories]**
+
 Calibration work on LLM-based entity matching finds slight overconfidence (ECE ≈ 0.004–0.055); threshold sweeps put the best precision/recall balance at **0.85–0.90**, with a *review queue* for the middle band. The practical recommendation is to require a **grounded evidence clause** (verbatim quote + candidate id), not self-reported confidence.
 *Sources:* arXiv 2509.19557 (confidence calibration in LLM ER); EMNLP-2025 findings — *Entity Profile Generation & Reasoning*; Zingg *Entity Resolution at Scale Part 4*.
 
 **⇒ For us:** the Jev `Choice` should be gated on **a returned candidate id + the narrative quote that justifies it**, exactly as the predecessor brief's tier (d) says. Self-reported probability alone must not authorise an auto-link in the mid band.
 
 ### X5 — Category/uniform placeholders reset per document; only per-entity-unique pseudonyms are stable **[MEDIUM — 2 independent categories]**
+
 The pseudonymization literature names three strategies — uniform, category-specific, and unique-per-entity — and **only the last is stable across documents**; the first two reset. Regulatory guidance distinguishes pseudonymisation (reversible, keyed) from anonymisation.
 *Sources:* *Pseudonymization Strategies on Sensitive Classification Tasks* (PrivateNLP 2024); *Automated Anonymization of Parole Hearing Transcripts* (NLLP 2024); ICO / Irish DPC guidance.
 
 **⇒ For us:** `"Produto 1"` is a **category/uniform placeholder**, so resolving it globally is **provably wrong**; the correct policy is **resolve within scope, quarantine across scope**, promoted only by an explicit declared mapping (Envelope `entityAliases`). This survives every decision since 2026-09-09.
 
 ### X6 — Typed / constrained-output decision models are a distinct pattern from free-text prompting **[MEDIUM — 2 independent categories]**
+
 Classification-as-decision with **calibrated probabilities + explicit thresholds** is a standard shape; constrained output forces a value from a supplied set and removes a class of malformed/off-vocabulary emission.
 *Sources:* scikit-learn *Tuning the Decision Threshold for Class Prediction*; TypeSafe-AI/Jev-alternatives survey (DataCamp); cost-sensitive classification literature (arXiv 2207.09196).
 
 **⇒ For us:** Jev is this pattern. It **cannot invent a name** — the answer is a choice over the supplied candidate set, which is exactly the SELECT surface (X2). It removes a parsing failure class; it does **not** add a guarantee our closed vocabulary lacks. Its value is cost, latency, and typed routing — not accuracy.
 
 ### X7 — ⚠️ ADVERSARIAL: naive LLM adjudication degrades as the candidate set grows, and without fine-tuning/domain prompting **[MEDIUM — 2 independent categories]**
+
 Candidate-selection accuracy falls as the candidate list grows; few-shot and domain-specific prompts materially outperform zero-shot; **fine-tuning** improves effectiveness further.
 *Sources:* arXiv 2405.16884 (*Match, Compare, or Select?*); CEUR Vol-3931 paper 4 (*Entity Matching with 7B LLMs*); Pergamos/UoA (*ER with Small-Scale LLMs*).
 
 **⇒ For us — this is the strongest argument *against* a naive "just add context to the prompt" fix.** A SELECT prompt is only as good as **the candidate list it is handed**. Supplying the narrative to a model choosing from a global, unranked top-40 will not fix same-name conflation; it will add a plausible-sounding wrong answer. **The scoped, high-recall candidate set is the load-bearing half — the adjudicator is the tail.**
 
 ### X8 — The field's biggest open KG-RAG project has exactly our defect and no shipped fix **[MEDIUM — 2 independent categories]**
+
 Microsoft GraphRAG matches entities by **exact name and type only**; maintainers state that *"earlier experiments with name-variant resolution were not satisfactory"*.
 *Sources:* GraphRAG default dataflow docs; microsoft/graphrag issue #1837; discussion #778.
 
@@ -229,6 +240,7 @@ Each candidate practice below was tested against the recorded decisions **before
 Ordered by load-bearing weight (not by cost):
 
 ### 6.1 Identity — implement `#3584` before designing on top of it *(structural; highest weight)* **[HIGH]**
+
 An entity's identity is the **opaque id minted at creation**; `name` is a mutable natural key in a lookup index; a rename is a journaled mutation on the stable id. **S3 then resolves *to an id*, not to a name.**
 
 **Why this is first:** every other tier's correctness depends on it. Today `MERGE (o:Object {name})` + `sha256(label:name)` (E1/E2) means the candidate table identifies entities **by the very string that conflates two of them**. Adding context to a prompt cannot fix an identity key built from the ambiguous field.
@@ -236,24 +248,29 @@ An entity's identity is the **opaque id minted at creation**; `name` is a mutabl
 **Evidence-honest caveat:** this is a **recorded decision whose code has not landed**. #2730's own comment record already marks C2 `SUPERSEDED` and routes the residual here — so the route is not a reopen; it is **implementation**, and this brief's job is to say nothing else should be built first without it.
 
 ### 6.2 Candidate generation — scope, kind, and *measure recall@k first* *(the dominant silent failure)* **[HIGH]**
+
 - **Scope the candidate set** to the source/portfolio envelope where one is asserted (D10 makes the source the abstraction the entity layer is over; §6.4).
 - **Keep the kind filter** (`_find_existing_entity`, E5) and its `ambiguous → None` default — do not "fix" it into a guess (X3).
 - **Widen the candidate budget** beyond the current `[:40]` render + ~15×3 FTS (predecessor E5), and **measure candidate recall@k FIRST** — the right entity may never enter the table today, and no adjudicator can recover from that (X1, X7).
 - **Narrative and slot context are already upstream** (E7) — forward the verbatim quote and the slot role into the resolution prompt (E4's gap), which is a prompt/contract change, not new extraction.
 
 ### 6.3 Adjudication — a Jev `Choice` SELECT over the candidate set, gated on grounded evidence **[MEDIUM]** ⚠️ emerging
+
 - Keep the pattern that already exists (`_resolution_prompt` is a SELECT prompt; X2).
 - **Split bundled questions** — Jev's own doctrine is atomic questions; *"is it new"* and *"is it well-named"* are two questions, not one.
 - **Gate the auto-link on a returned candidate id + the narrative quote**, not on self-reported probability (X4).
 - Because it cannot invent a name, Jev's failure mode is **"picks the wrong candidate"**, not "hallucinates an entity" — which is why §6.2's recall is where the risk lives.
 
 ### 6.4 Envelope — carry the entity *scope*, not just the meeting id **[MEDIUM]** ⚠️ emerging
+
 The predecessor brief's list stands, and D10 gives it a cleaner home: `scope`/portfolio, `participants[{name, role, aliases[], initials}]`, `meeting_id`, `documentRole`, `startedAt`, `sourceUrl`, `language`, `graph`, plus (high-value) `entityAliases: {surfaceForm → canonicalRef}` and a per-block `scopeOverride`. **The scope must be *asserted*, not inferred from a filename** (predecessor Q2; #2826 C3 recommendation: asserted = authoritative, inferred = hypothesis). **Q2 is still an open engineering question and the recommendation is unchanged.**
 
 ### 6.5 Placeholders — resolve within scope, quarantine across scope **[MEDIUM]** ⚠️ emerging
+
 Materialise a scope-local proxy (`isPlaceholder: true`), never auto-link it cross-scope, promote via a declared `entityAliases` mapping or a review verdict (X5). **The externally-corroborated fact is decisive: only unique-per-entity placeholders are stable across documents; category/uniform ones (`"Produto 1"`) reset.**
 
 ### 6.6 The ambiguous tail — an entity-keyed review queue, post-ingest, non-blocking **[HIGH]**
+
 Today `tortoise_list_dedup_candidates` / `approve_merge` are **Point**-keyed (predecessor E8). The queue must be **entity**-keyed, evidence-carrying, agent-drained, never auto-resolved (`#2349` policy 3, `#2696` §2). **Writes stay fail-closed meanwhile** (`#1370`).
 
 ---

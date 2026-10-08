@@ -634,6 +634,7 @@ ONE line, non-blocking:
 > "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Captured sessions."
 
 Contract notes:
+
 - **Two layers (#3615).** *Server recording policy* is per-organization,
   default-ON (ToS-covered) with a quiet 409 off-switch (#1927) — unchanged.
   *Client transmission authorization* is per-host and requires the EXPLICIT

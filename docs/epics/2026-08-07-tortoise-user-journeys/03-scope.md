@@ -102,6 +102,7 @@ created: 2026-08-07
 ## 3. High-Level E2E Test Cases
 
 ### E2E-1: Hosted signup (email/password) → provision → key revealed once
+
 **Given:** A new visitor on tortoise.premiselabs.co/signup
 **When:** They sign up with email/password (email confirmation OFF, as verified on the remote project)
 **Then:** A Supabase user + `user_teams` row + FalkorDB team + demo graph are provisioned
@@ -109,12 +110,14 @@ created: 2026-08-07
 **And:** Refreshing welcome does NOT re-reveal the key
 
 ### E2E-2: Hosted signup (OAuth) → provision → key revealed once
+
 **Given:** A new visitor on tortoise.premiselabs.co/signup
 **When:** They sign up via GitHub OAuth
 **Then:** Provisioning completes (provider-verified email, no confirmation needed)
 **And:** The welcome page reveals the `tt_` key once with the same hardening as E2E-1
 
 ### E2E-3: Key recovery via rotation (no chicken-and-egg)
+
 **Given:** A provisioned user with a Supabase session and NO remembered `tt_` key
 **When:** They open the dashboard and click "Generate a new key"
 **Then:** A new `tt_` key is minted and shown once without requiring an existing valid key
@@ -122,41 +125,48 @@ created: 2026-08-07
 **And:** The new key authenticates against /v1/team and /v1/team/keys
 
 ### E2E-4: Cross-subdomain session — signup on tortoise → authed on app
+
 **Given:** A user with an active Supabase session from signup on tortoise.premiselabs.co
 **When:** They navigate to app.premiselabs.co
 **Then:** The dashboard reads the shared parent-domain session cookie and shows the authenticated view (no key paste)
 **And:** Signing out on the dashboard clears the session everywhere
 
 ### E2E-5: Dashboard API-key login coexists with session auth
+
 **Given:** A user with NO Supabase session (or signed out)
 **When:** They open app.premiselabs.co and paste a valid `tt_` key
 **Then:** The dashboard authenticates in API-key mode and shows the same Overview/Keys/Sessions tabs
 
 ### E2E-6: Dashboard empty-state onboarding → first memory rendered
+
 **Given:** A freshly provisioned team with an empty graph (or demo graph)
 **When:** The user opens the dashboard overview
 **Then:** The empty state shows ONE primary action (**"Connect your agent"** — the aha-moment per UX-D3) with the MCP/quickstart snippet, and a secondary "create your first point" action
 **And:** Executing the primary or secondary action creates a Point that appears rendered in the dashboard (list/graph), not just a success toast
 
 ### E2E-7: Funnel analytics — signup → first API call tracked
+
 **Given:** Analytics instrumentation deployed (PostHog web + server)
 **When:** A user completes signup, provisioning, dashboard open, and a first API call
 **Then:** Events `user_signed_up`, `tenant_provisioned`, `dashboard_opened`, `first_api_call` appear in PostHog, joined on the user UUID
 **And:** TTFV (signup → first_api_call delta) is computable
 
 ### E2E-8: Email confirmation branch (if remote setting is ON)
+
 **Given:** Remote Supabase has email confirmation enabled
 **When:** A user signs up with email/password
 **Then:** signup shows a "check your inbox" state with resend
 **And:** Returning via the confirmation link completes the exchange and lands on welcome with the provisioned key
 
 ### E2E-9: Self-hosted flow — land → install → first memory (no hosted account)
+
 **Given:** A developer lands on tortoise.premiselabs.co
 **When:** They choose the self-hosted path
 **Then:** They reach the GitHub/docs route, install, and run `tortoise onboard` to first local memory
 **And:** The self-hosted route is reachable from the landing without creating a hosted account
 
 ### E2E-10: User↔team decoupling — one user, two teams in parallel
+
 **Given:** A provisioned user (Alice) with a Solo team she owns
 **When:** She is added as a member of a second team (a client's Team-tier team) via invite
 **Then:** Alice's session resolves BOTH teams; she can switch between them in the dashboard
@@ -164,6 +174,7 @@ created: 2026-08-07
 **And:** API keys are scoped per team — a key created under team A does not authenticate against team B
 
 ### E2E-11: Team↔graph 1:N — multiple graphs per team with tier limits
+
 **Given:** A Pro-tier team with unlimited graphs
 **When:** The owner creates graph #1 and graph #2 in the same team
 **Then:** Both graphs exist and are addressable within the team
@@ -171,6 +182,7 @@ created: 2026-08-07
 **And:** A Solo-tier team is blocked at 2 graphs (loss-leader cap) with an upgrade prompt
 
 ### E2E-12: Team-tier collaboration — invites + RBAC
+
 **Given:** A Team-tier team owned by Alice
 **When:** Alice invites Bob (member role) and Carol (admin role)
 **Then:** Bob and Carol appear as members with their roles; the invitation flow completes
@@ -178,12 +190,14 @@ created: 2026-08-07
 **And:** A Free/Solo/Pro-tier team cannot invite members (single-user per the pricing model)
 
 ### E2E-13: Pricing structure documented and enforced
+
 **Given:** `product/pricing.md` committed
 **When:** The provision path creates a team
 **Then:** The team's tier-driven limits (max_graphs/max_users) come from the pricing doc's table (no max_teams — user-level capability)
 **And:** `/v1/team` returns the tier + limits, and limit enforcement matches the doc
 
 ### E2E-14: Pricing page renders hosted tiers + self-hosted section
+
 **Given:** The pricing page live on tortoise.premiselabs.co
 **When:** A visitor scrolls to pricing
 **Then:** Hosted cards render (Free/Solo/Pro/Team) with monthly/annual toggle and ✓/✕ feature rows, "$5 per additional 10k write ops" visible

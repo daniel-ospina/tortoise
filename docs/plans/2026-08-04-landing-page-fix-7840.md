@@ -43,11 +43,13 @@ The Tortoise landing page (`premise-labs/index.html` → `premiselabs.co`) and p
 #### A. Hero tagline (L271)
 
 **Current:**
+
 ```html
 <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
 ```
 
 **Replace with:**
+
 ```html
 <h2><span>Tortoise</span> — your coding agent remembers every decision across sessions.</h2>
 ```
@@ -57,11 +59,13 @@ The Tortoise landing page (`premise-labs/index.html` → `premiselabs.co`) and p
 #### B. CTA subtitle — soften "5 minutes" claim (L278)
 
 **Current:**
+
 ```html
 <p class="cta-subtle">No credit card. 5,000 Points free. 5 minutes to your first graph.</p>
 ```
 
 **Replace with:**
+
 ```html
 <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
 ```
@@ -71,11 +75,13 @@ The Tortoise landing page (`premise-labs/index.html` → `premiselabs.co`) and p
 #### C. Remove Turnstile (L279, L289)
 
 **Remove L279:**
+
 ```html
 <div class="cf-turnstile" data-sitekey="TURNSTILE_SITE_KEY_PLACEHOLDER" style="margin-bottom: 1.25rem;"></div>
 ```
 
 **Remove L289:**
+
 ```html
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 ```
@@ -85,6 +91,7 @@ The Tortoise landing page (`premise-labs/index.html` → `premiselabs.co`) and p
 #### D. Restructure CTA beat: MCP snippet first, CLI second
 
 **Remove lines L280-L282 (old CLI snippet):**
+
 ```html
 <div class="cli-snippet">
   <code>$ tortoise init --api-key &lt;key&gt;</code>
@@ -124,12 +131,14 @@ $ tortoise create-point "Hello world"</code></pre>
 ```
 
 **Rationale for MCP-first ordering:**
+
 - MCP is the primary integration path for coding agents (the core ICP)
 - The JSON is identical across all agents — only the config file path differs
 - Single static block avoids tab complexity; the one-line note educates on config file location
 - CLI becomes secondary: useful for scripting/CI but not the primary onboarding path
 
 **Rationale for adding `pip install` line to CLI snippet:**
+
 - The landing page's CLI snippet previously lacked the install line entirely (it jumped straight to `tortoise init`)
 - Adding it here means the snippet is self-contained and actually runnable
 - Uses the correct GitHub URL (not the non-existent `tortoise-client`)
@@ -137,6 +146,7 @@ $ tortoise create-point "Hello world"</code></pre>
 #### E. Duplicate CSS merge (L122-L143 + L194-L212)
 
 **Current first block (L122-L143):**
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -163,6 +173,7 @@ $ tortoise create-point "Hello world"</code></pre>
 ```
 
 **Current second block (L194-L212) — CSS cascade gives this final say:**
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -188,6 +199,7 @@ $ tortoise create-point "Hello world"</code></pre>
 **Merge: Replace first block with merged version, remove second block entirely.**
 
 First block replacement (L122-L143):
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -300,11 +312,13 @@ Add to the `<style>` block (after the `.cli-snippet` block, before the `.selfhos
 #### A. Fix `pip install` in HTML snippet (L318)
 
 **Current:**
+
 ```html
 <span class="cmd">pip install tortoise-client</span>
 ```
 
 **Replace with:**
+
 ```html
 <span class="cmd">pip install git+https://github.com/daniel-ospina/tortoise.git</span>
 ```
@@ -312,12 +326,14 @@ Add to the `<style>` block (after the `.cli-snippet` block, before the `.selfhos
 #### B. Fix `pip install` in JavaScript `copySnippet()` (L446)
 
 **Current:**
+
 ```js
 const snippet = `# Install Tortoise
 pip install tortoise-client
 ```
 
 **Replace with:**
+
 ```js
 const snippet = `# Install Tortoise
 pip install git+https://github.com/daniel-ospina/tortoise.git
@@ -358,11 +374,13 @@ Insert a new card between the API key card and the Quickstart card. After the AP
 #### D. Update `showSuccess()` to populate MCP snippet key
 
 **Current `showSuccess()`:**
+
 ```js
 document.getElementById("snippet-key").textContent = data.api_key;
 ```
 
 **Add after that line:**
+
 ```js
 document.getElementById("mcp-snippet-key").textContent = data.api_key;
 ```
@@ -433,6 +451,7 @@ function copyMcpConfig() {
 ```
 
 And the button gets `id="btn-copy-mcp"`:
+
 ```html
 <button class="btn-copy" id="btn-copy-mcp" onclick="copyMcpConfig()" style="width:100%;margin-bottom:0.75rem;">
   <span>Copy MCP config</span>
@@ -455,6 +474,7 @@ Already covered in 3.2.B above.
 | Proposed | `Tortoise — your coding agent remembers every decision across sessions.` |
 
 **Why this works:**
+
 - "Your coding agent" → specificity (not generic AI memory), speaks to developer ICP
 - "Remembers every decision" → observable behavior, concrete value
 - "Across sessions" → the key differentiator vs. in-session context windows
@@ -469,6 +489,7 @@ Already covered in 3.2.B above.
 | Proposed | `5,000 Points free. No credit card. Start building in minutes.` |
 
 **Why this works:**
+
 - Lead with value (5,000 Points) not friction mitigation (no credit card)
 - "Start building in minutes" is truthful — signup flow completion <2 min
 - Removes specific time claim that can't be validated across all user environments
@@ -495,6 +516,7 @@ Unchanged: `Start free →` linking to `/signup`. Per epic #7711, this is the ho
 ```
 
 **Config file destinations:**
+
 - Claude Code: `.mcp.json` (project root)
 - Cursor: `.cursor/mcp.json` (project root)
 - Pi: via pi config / MCP extension
@@ -631,6 +653,7 @@ echo "All checks complete."
 For `copySnippet()`: The HTML `<pre>` block (L317-L324) and the JS `copySnippet()` function (L443-L452) construct the same text — both use `pip install` + `tortoise init --api-key <key>` + `tortoise create-point`. After the fix, both must use the GitHub URL.
 
 Verify by:
+
 1. Open welcome.html in browser
 2. Click "Copy quickstart"
 3. Paste into text editor — verify the `pip install` line is the GitHub URL
@@ -710,6 +733,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 **What it was:** Restructure the CTA beat so the MCP snippet is the primary element with tabs for Claude Code / Pi / Cursor / CLI. Each tab shows the correct config file path and the identical JSON.
 
 **Why rejected:**
+
 - The JSON body is **identical** across all four agents — only the config file path differs. Tabs imply meaningful variation where there is none. This is a documentation problem, not a UI problem.
 - Implementing tabs inside the GSAP-managed fixed overlay adds DOM complexity and risk (z-index interactions, mobile overflow, JS for tab switching inside a beat that's already JS-managed).
 - A one-line comment listing config paths achieves the same educational goal with zero JS.
@@ -721,6 +745,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 **What it was:** Extract shared CSS, MCP snippet, and CLI snippet into partial files. Python `build.py` assembles index.html and welcome.html from templates. Prevents drift between pages.
 
 **Why rejected:**
+
 - Overkill for 2 pages sharing ~20 lines of content. The build script + template infrastructure would be ~50+ lines of Python against a 20-line drift problem.
 - Adds a build step to what is currently "edit HTML, deploy." This is regression in developer experience for the 95% case where only one page changes.
 - CI/CD for the landing page is out of scope for this issue — adding a build step before CI/CD exists means manual `python build.py && wrangler pages deploy` instead of just `wrangler pages deploy`.
@@ -733,6 +758,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 **What it was:** Remove the CLI snippet from the landing page entirely. The CTA would be MCP-only. CLI installation lives on the self-hosting docs (GitHub README).
 
 **Why rejected:**
+
 - Some developers want to try Tortoise from the CLI before wiring it into their agent. The CLI is a lower-friction first touch.
 - Removing the CLI snippet entirely would make the landing page feel "MCP-or-nothing," which alienates non-agent use cases (scripting, data pipelines) that are valid future ICPs.
 
@@ -755,6 +781,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 ## Appendix A: Full list of index.html CSS changes (for review)
 
 ### Before (L122-L143):
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -781,6 +808,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 ```
 
 ### After (L122-L143):
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -808,6 +836,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 ```
 
 ### Removed (was L194-L212):
+
 ```css
     #beat-cta .cta-start {
       display: inline-block;
@@ -835,6 +864,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 ## Appendix B: Full list of welcome.html changes (for review)
 
 See Section 3.2 for all changes. Summary:
+
 - L318: `tortoise-client` → `git+https://github.com/daniel-ospina/tortoise.git`
 - L446: `tortoise-client` → `git+https://github.com/daniel-ospina/tortoise.git`
 - New card inserted after API key card (after L315): MCP config with copy button

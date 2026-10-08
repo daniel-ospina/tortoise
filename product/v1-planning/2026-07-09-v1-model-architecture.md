@@ -71,6 +71,7 @@ GitHub sources (issues, PRs, external repo READMEs) need a parallel ingestion pa
 **Content hash:** Store `sha(github_url + updated_at)` as the dedup key. Re-ingestion is a delta check: if the hash matches, skip.
 
 **Locator format:**
+
 ```
 github:daniel-ospina/eldato#5808           # issue
 github:daniel-ospina/eldato#5854           # PR

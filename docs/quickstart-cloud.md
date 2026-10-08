@@ -250,7 +250,6 @@ tortoise create-point "The decision was approved" --kind statement   # individua
 
 For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
 
-
 ## 6.5 Expansion packs (optional)
 
 Tortoise ships five starter packs by default (`dev`, `marketing`,

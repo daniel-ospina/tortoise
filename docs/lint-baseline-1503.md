@@ -87,6 +87,7 @@ The real root cause is **the baseline never held**:
   code against the full rule surface).
 
 **Refresh (2026-08-25, ruff 0.16.4):**
+
 - 473 violations → **230 safe-fixed** by `ruff check . --fix` (UP017/UP037/
   F401/I001/...; `--fix` mode's own count reports 248 lines changed because
   UP037 annotation-unquoting is only diagnosed when fixing)
@@ -95,6 +96,7 @@ The real root cause is **the baseline never held**:
 - Result: `ruff check .` == 0 errors; re-running `--add-noqa` adds 0 (idempotent)
 
 **Pin (durability):**
+
 - ci.yml `lint-command`: `pip install ruff==0.16.4 && ruff check .` — the
   explicit-version install overrides the agent-infra job's unpinned
   `pip install ruff`

@@ -24,16 +24,19 @@ created: 2026-08-07
 ### Pattern Research
 
 **Bucket 1 — Canonical approaches (the known-good foundation):**
+
 - **Self-hosted `tortoise onboard`** (`__main__.py:_cmd_onboard`): 5-step chain (init → index → demo → doctor) with banners, idempotency, and auto-detection. Maps cleanly to hosted: Connect → Index → Demo → Verify.
 - **MCP config paste:** Industry-standard pattern — `claude mcp add` / `codex mcp add` / `.mcp.json`. The current `welcome.html` already presents MCP config copy-paste. No guided flow beyond this exists in any MCP server in the wild.
 - **SessionStart hooks:** `tortoise/claude-hooks/session-start.sh` + `CLAUDE.tortoise.md` — proven pattern for injecting memory digests at session start. The onboarding prompt can follow the same markdown-block deployment pattern.
 
 **Bucket 2 — Competitor variance (how others solve it differently):**
+
 - **Agent Memory (agent-memory.dev):** Install → start server → connect agent → verify status. Simpler (no epistemic graph) but the linear "connect then verify" pattern is proven.
 - **Mem0:** Embedding-based; no guided setup. Different paradigm — not comparable.
 - **Claude Code native memory:** File-based `.claude/` memory. No guided onboarding — users discover it or don't.
 
 **Bucket 3 — Pitfalls (what the research brief flagged):**
+
 - **A1/A2 (LOW confidence):** Users may not paste both the MCP config AND the onboarding prompt. The one-artifact design must make this failure-visible — if only the config is pasted, the welcome page should make the prompt impossible to miss.
 - **A3 (OVERRIDDEN):** The traction gate (≥5 signups/week) is removed by owner directive. Phase 2 builds immediately.
 - **A10 (LOW confidence):** One artifact across Pi, Claude Code, Codex, and Cursor may require harness-specific variants. Pi extensions can bundle both; Cursor can use `.cursor/rules/` + `.mcp.json`; Claude Code and Codex require CLI + chat separation. The plan acknowledges this and provides a fallback: the welcome page presents both the config and the prompt as a single block with clear instructions per harness.
@@ -61,17 +64,20 @@ created: 2026-08-07
 Maps the 8 E2E cases from `02-scope.md` to specific test scenarios and the tasks that implement them.
 
 #### Journey: New user signs up and receives API key (E2E-1)
+
 1. **Step:** User completes signup (email/OAuth) → **Acceptance:** Supabase session created, redirect to `/welcome` → **Test:** `test_e2e_signup_to_key` (Playwright)
 2. **Step:** Welcome page polls `user_teams` for API key → **Acceptance:** Key displayed with `tt_` prefix within 10s → **Test:** `test_welcome_polling_success` (Playwright)
 3. **Step:** User copies API key → **Acceptance:** Click copies to clipboard → **Test:** `test_copy_api_key` (Playwright + clipboard permission)
 4. **Step:** User sees the one-artifact block → **Acceptance:** MCP config + onboarding prompt visible, per-harness instructions → **Test:** `test_one_artifact_displayed` (Playwright)
 
 #### Journey: Paste one-artifact → agent connects (E2E-2)
+
 1. **Step:** User copies one-artifact block → **Acceptance:** Clipboard contains both MCP config and prompt → **Test:** `test_one_artifact_clipboard` (Playwright + clipboard)
 2. **Step:** User pastes into agent → **Acceptance:** Agent connects to MCP server, lists tools → **Test:** Manual smoke test (Claude Code, Codex, Cursor) — not automatable
 3. **Step:** Agent begins onboarding prompt → **Acceptance:** Agent asks first yes/no question → **Test:** Manual smoke test
 
 #### Journey: Yes/no flow → GitHub connected (E2E-3)
+
 1. **Step:** User answers "yes" to GitHub connect → **Acceptance:** Agent calls `tortoise_onboarding_github_connect`, displays auth_url → **Test:** `test_github_oauth_flow` (manual OAuth) / `test_github_connect_state` (integration with mock GitHub)
 2. **Step:** User opens auth_url in browser, authorizes, confirms in chat → **Acceptance:** Agent **awaits authorization**: polls `tortoise_onboarding_github_status` every 5s until `connected: true` (3-min timeout) — does NOT proceed to Q2 before connection (P0-B) → **Test:** `test_github_status_poll_until_connected` (integration)
 3. **Step:** Authorization succeeds → **Acceptance:** `github_connected: true` in onboarding state, repos listed → **Test:** `test_github_connect_state` (integration with mock GitHub)
@@ -79,32 +85,38 @@ Maps the 8 E2E cases from `02-scope.md` to specific test scenarios and the tasks
 5. **Step:** Indexing attempted before OAuth completes → **Acceptance:** Clear 409 error ("GitHub not connected — complete OAuth first") → **Test:** `test_index_before_oauth_returns_error` (integration)
 
 #### Journey: Indexing → first memory written (E2E-4)
+
 1. **Step:** User answers "yes" to indexing → **Acceptance:** Background indexing starts, job ID returned → **Test:** `test_indexing_job_created` (integration)
 2. **Step:** Indexing completes → **Acceptance:** At least one Point created from GitHub content → **Test:** `test_indexing_produces_points` (integration with mock GitHub API)
 3. **Step:** Agent queries for indexed content → **Acceptance:** `tortoise_query(kind="observation")` returns results → **Test:** `test_indexed_content_queryable` (integration)
 
 #### Journey: Demo graph created (E2E-5)
+
 1. **Step:** User answers "yes" to demo graph → **Acceptance:** Agent calls `tortoise_onboarding_demo_create` (verify mode — respects the `_demo_sentinel`; backfills only if missing, NEVER deletes-and-overwrites) → **Test:** `test_demo_graph_verification` (unit)
 2. **Step:** Agent calls `tortoise_summarize_structure()` → **Acceptance:** Returns N points, M operators (≥ 5 points, ≥ 3 operators incl. supports/contradicts/mitigates) → **Test:** `test_demo_structure_summary` (unit) + `test_demo_has_operators`
 3. **Step:** Agent explains demo graph content → **Acceptance:** Agent describes graph structure naturally → **Test:** Manual smoke test
 
 #### Journey: Session recording enabled (E2E-6)
+
 1. **Step:** User answers "yes" to session recording → **Acceptance:** `session_recording: true` in onboarding state → **Test:** `test_session_recording_toggle` (unit)
 2. **Step:** Agent confirms → **Acceptance:** Agent shows confirmation with the scoped wording ("Tortoise will remember this agent's sessions") + per-harness capture note → **Test:** Manual smoke test
 3. **Step:** Conversation ends with recording on → **Acceptance:** Agent files the conversation end via `POST /v1/sessions` (the capture contract — P1-4) → **Test:** `test_session_capture_filed` (integration)
 
 #### Journey: Onboarding complete → memory digest (E2E-7)
+
 1. **Step:** All questions answered → **Acceptance:** Agent calls `tortoise_context` (MCP tool wrapping `GET /v1/context`) → **Test:** `test_context_after_onboarding` (integration)
 2. **Step:** Memory digest displayed → **Acceptance:** Digest shows what Tortoise remembers, elapsed < 5 min → **Test:** `test_onboarding_complete_digest` (integration)
 3. **Step:** No memories exist yet → **Acceptance:** Agent auto-creates the welcome Point (first-memory fallback, P1-14) so the digest is never empty → **Test:** `test_first_memory_fallback` (integration)
 4. **Step:** Funnel event `onboarding_complete` tracked → **Acceptance:** Server-side single producer — fires when `tortoise_onboarding_complete` sets `completed_at`; event carries elapsed time → **Test:** `test_onboarding_complete_analytics` (unit) + `test_onboarding_complete_fired_once`
 
 #### Journey: User says "no" to everything (E2E-8)
+
 1. **Step:** User answers "no" to all 5 yes/no questions → **Acceptance:** Agent records EVERY answer via `tortoise_onboarding_answer` (no answers are never silently dropped), verifies connection via `tortoise_health` → **Test:** `test_all_no_minimal_setup` (integration)
 2. **Step:** Agent shows minimal success → **Acceptance:** "Tortoise is connected. You can create your first memory..." (welcome Point auto-created as first memory) → **Test:** Manual smoke test
 3. **Step:** Onboarding state records all skipped → **Acceptance:** All steps `false`/`skipped` with `q1..q5: "no"` recorded, all **HTTP-visible** tools still accessible (64 tools on the streamable-http surface; 4 privilege-bound tools remain excluded) → **Test:** `test_skipped_state_all_accessible` (integration)
 
 #### Failure Modes
+
 - **GitHub OAuth fails (user denies, network error, or poll timeout)** → **Expected behavior:** Agent reports failure after the 3-min `tortoise_onboarding_github_status` poll times out (or immediately on user denial), records `github_connected: false, github_error: "reason"` via `tortoise_onboarding_answer`, and continues with remaining questions. → **Test:** `test_github_oauth_failure_graceful` + `test_github_oauth_timeout_graceful` (integration with error/slow mock)
 - **Indexing times out (large repo)** → **Expected behavior:** Agent reports "Indexing started in background — you'll see results in your next session." Onboarding continues. → **Test:** `test_indexing_timeout_graceful` (integration with slow mock)
 - **API key not provisioned yet (welcome page timeout)** → **Expected behavior:** Welcome page shows "Taking longer than expected — refresh or contact support." Not a dead end. → **Test:** `test_provisioning_timeout_message` (Playwright)
@@ -125,11 +137,13 @@ Maps the 8 E2E cases from `02-scope.md` to specific test scenarios and the tasks
 **Intent:** Design the paste-able artifact that triggers the onboarding flow, accounting for the fact that MCP config and agent prompt are pasted on different surfaces (CLI vs chat) in most harnesses. The world needs a single artifact even if it's technically two blocks — the UX collapses them.
 **Acceptance:** A design document (`04-one-artifact-design.md`) that specifies: (a) the exact content of the one-artifact block (MCP config + onboarding prompt), (b) per-harness paste instructions (Claude Code, Codex, Cursor, Pi), (c) a fallback for harnesses where single-paste isn't achievable, (d) how the welcome page presents and copies it, (e) a prototype HTML snippet showing the artifact block on the welcome page.
 **Files:**
+
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/04-one-artifact-design.md`
 
 **Step 1: Draft the MCP config block for each harness**
 
 Write the exact MCP config the user needs for each of the 4 supported harnesses. Pull existing configs from:
+
 - Current `welcome.html` MCP config block (stdio transport with env var)
 - #236 MCP Streamable HTTP — the artifact should use Streamable HTTP (`url` + `headers`) not stdio, since hosted users don't need the Python package
 - Claude Code: `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp --header "Authorization: Bearer tt_YOUR_KEY"`
@@ -146,6 +160,7 @@ Write the exact MCP config the user needs for each of the 4 supported harnesses.
 Write the exact markdown prompt the user copies alongside the MCP config. The prompt must be self-contained — when pasted into ANY agent, it must trigger the yes/no flow without additional user instruction.
 
 The prompt should:
+
 - Begin with: "You are now connected to Tortoise — an epistemic memory graph for agents. I want to set up my memory. Ask me these questions one at a time..."
 - Probe the connection FIRST: call `tortoise_health`; if it fails, stop and report "Can't connect to Tortoise — check your API key" (P1-16)
 - List the 5 yes/no questions (Q1–Q5) + Q1a free-text org prompt, with what each "yes" executes (Q5 = "coming soon" teaser, no tool)
@@ -157,6 +172,7 @@ The prompt should:
 **Step 3: Design the combined artifact presentation**
 
 Design how the welcome page presents both blocks as a single "copy this" action:
+
 - Option A: "Copy onboarding setup" button that copies BOTH (config + prompt) to clipboard with a separator
 - Option B: Two separate "Copy" buttons, prominently stacked, with numbered steps
 - Recommendation: Option B (numbered steps) is more reliable since harnesses have different paste surfaces
@@ -164,6 +180,7 @@ Design how the welcome page presents both blocks as a single "copy this" action:
 **Step 4: Write per-harness paste instructions**
 
 For each harness, write the exact steps:
+
 - Claude Code: Step 1: Run this CLI command. Step 2: Paste this prompt in chat.
 - Codex: Step 1: Run this CLI command. Step 2: Paste this prompt.
 - Cursor: Step 1: Add this to `.cursor/mcp.json`. Step 2: Add this to `.cursor/rules/tortoise-onboarding.md`.
@@ -180,6 +197,7 @@ Save to `docs/epics/2026-08-07-hosted-onboarding-235/04-one-artifact-design.md`.
 **Intent:** Finalize the question set — 5 yes/no (Q1–Q5) + 1 free-text org prompt (Q1a) + final Verification step (Q6) — define exactly what each "yes" executes (API calls, state changes), and what each "no" skips. This is the contract between the agent prompt and the backend. (Q5 team is a "coming soon" teaser with no tool/endpoint; Q6 is the Verification step, renamed from "Show me!" per plan-review.)
 **Acceptance:** A design doc (`05-question-set.md`) that specifies: (a) each question's exact wording, (b) the execution path for "yes" (which MCP tool/endpoint, with expected inputs), (c) the skip path for "no" (what state is recorded), (d) question order and dependencies (e.g., "Index?" only appears if "Connect GitHub?" was "yes"), (e) the final verification step for all paths.
 **Files:**
+
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/05-question-set.md`
 
 **Step 1: Finalize question wording and order**
@@ -228,6 +246,7 @@ For each question, define the exact tool/endpoint call and expected state change
 **Step 4: Design the verification step (Q6 — "Verification")**
 
 Regardless of answers, Q6 always runs:
+
 1. Agent calls `tortoise_health` to confirm connection
 2. Agent calls `tortoise_context` (MCP tool wrapping `GET /v1/context`) to get memory digest
 3. Agent presents digest: "Here's what Tortoise remembers: [digest]"
@@ -245,6 +264,7 @@ Regardless of answers, Q6 always runs:
 **Intent:** Design the updated welcome page (`website/welcome.html`) that presents the one-artifact, shows onboarding progress, and guides the user through the paste flow. The current page shows API key + MCP config + quickstart — it needs the onboarding artifact and clearer flow.
 **Acceptance:** A design doc (`06-welcome-page-design.md`) with: (a) wireframe/sketch of the updated welcome page layout, (b) the three states (loading → ready → post-onboarding), (c) content for all sections, (d) how the one-artifact is presented and copied, (e) what changes from the current `welcome.html`.
 **Files:**
+
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/06-welcome-page-design.md`
 
 **Step 1: Map current welcome.html states**
@@ -254,6 +274,7 @@ The current page has three states: loading (spinner, "Provisioning your Tortoise
 **Step 2: Design the updated "Ready" state**
 
 The ready state should add:
+
 1. The API key card (keep existing — it works)
 2. The one-artifact section replacing the current "MCP config" + "Quickstart" sections:
    - "Copy to your agent" block with BOTH the MCP config and onboarding prompt
@@ -265,22 +286,26 @@ The ready state should add:
 **Step 3: Design the "Post-Onboarding" state (new)**
 
 After the user completes onboarding (detected via polling or redirect), the welcome page shows:
+
 - ✅ "Tortoise is set up!" with checkmark for each completed step
 - Memory digest summary ("Your graph has N points, M operators")
 - Link to dashboard
 - "What's next?" — links to docs, API reference, MCP tools list
 
 **Detection mechanism (plan-review P1):** the browser cannot hold the API key persistently, so define an explicit read path:
+
 - The page polls a **client-safe progress endpoint** — `GET /v1/onboarding/state/progress` (new; returns only `{steps_completed, completed_at, github_connected, ...}` — no tokens, no raw state internals) using the `tt_` key the page already holds in memory for its display lifetime, at a **5s polling cadence** (back off to 15s after 2 min; stop at the existing 30s provisioning timeout only for key display, not for state polling).
 - The Q6 digest flow must give the user a **return path to /welcome**: the prompt's final message includes "Return to your welcome page (or refresh it) to see your setup summary" and the digest block includes a link to `{BASE_APP_URL}/welcome`.
 - **Intermediate UI state for the OAuth callback:** the GitHub callback redirects to `{BASE_APP_URL}/welcome?github=connected`. The page must show an intermediate "GitHub authorization received — updating your setup…" state while the agent's status poll catches up, then render the checkmark. A `?github=connected` query that arrives with no matching state yet must not flash an error.
 
 **Step 3b: Mobile/accessibility note (plan-review P2)**
+
 - API keys are long strings: wrap them with `overflow-wrap: anywhere` so they never overflow on narrow viewports; keep copy buttons ≥ 44×44px tap targets; harness tabs must be keyboard-accessible (arrow-key navigation + visible focus).
 
 **Step 4: Design per-harness presentation**
 
 Each harness gets its own section/tab:
+
 - Claude Code: CLI command block + prompt text block + numbered steps
 - Codex: CLI command block + prompt text block + numbered steps
 - Cursor: JSON file snippet + `.cursor/rules/` file snippet + steps
@@ -295,6 +320,7 @@ Each harness gets its own section/tab:
 **Intent:** Write the actual markdown block that the user copies and pastes into their agent. This is the prompt that drives the yes/no flow. It must be robust enough to survive agent hallucination and work across Claude Code, Codex, Cursor, and Pi.
 **Acceptance:** A deployable markdown file (`tortoise/onboarding/AGENT_ONBOARDING.md`) that: (a) is self-contained (works when pasted alone), (b) lists the 5 yes/no questions + 1 free-text org prompt (Q1a) + final Verification step, each with its tool call(s), (c) handles errors gracefully (including a first-step `tortoise_health` probe), (d) includes per-answer recording (`tortoise_onboarding_answer`) and the completion signal (`tortoise_onboarding_complete`), (e) passes the Phase 1 validation gate (1–2 real harness sessions before freezing), (f) is tested manually against Claude Code and at least one other harness.
 **Files:**
+
 - Create: `tortoise/onboarding/AGENT_ONBOARDING.md`
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/07-agent-prompt-design.md` (design rationale doc)
 
@@ -361,6 +387,7 @@ Document: why markdown prompt vs MCP tool vs skill file, how the prompt handles 
 **Step 3: Manual test plan + Phase 1 validation gate (plan-review P2)**
 
 Test against at minimum:
+
 1. Paste into Claude Code (with MCP already configured) — does the agent follow the script?
 2. Paste into Codex or Cursor — same verification
 3. Test the "all no" path — does the agent skip correctly?
@@ -376,6 +403,7 @@ Test against at minimum:
 **Intent:** Document every new API endpoint and MCP tool needed for the onboarding flow. This becomes the spec for Phase 2 build tasks. The analysis covers: endpoint signature, inputs/outputs, auth requirements, error conditions, and idempotency guarantees.
 **Acceptance:** A design doc (`08-api-gap-analysis.md`) listing all new endpoints/tools with complete signatures, including: (a) what already exists (reuse vs build), (b) what needs building, (c) migration/change notes for `welcome.html`.
 **Files:**
+
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/08-api-gap-analysis.md`
 
 **Step 1: Inventory existing endpoints that support onboarding**
@@ -433,6 +461,7 @@ Test against at minimum:
 **Step 4: Document what changes in welcome.html**
 
 The current page calls `POST /internal/provision` via Supabase edge function. For self-service:
+
 - Replace or supplement the Supabase edge function → `POST /v1/register` called directly or via new edge function
 - The polling logic (`waitForProvisioning`) stays but now polls a public endpoint
 - Add the one-artifact section (designed in Task 1)
@@ -446,6 +475,7 @@ The current page calls `POST /internal/provision` via Supabase edge function. Fo
 **Intent:** Define the analytics events, properties, and funnel stages for the onboarding flow. This schema drives implementation in Phase 2 and ongoing measurement.
 **Acceptance:** A design doc (`09-analytics-schema.md`) with: (a) event taxonomy (all events, when they fire, what properties they carry), (b) funnel stages and expected conversion rates, (c) implementation notes (where to instrument, what analytics backend to use).
 **Files:**
+
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/09-analytics-schema.md`
 
 **Step 1: Define event taxonomy**
@@ -495,12 +525,14 @@ signup_completed (100%)
 **Intent:** Let users get API keys without operator intervention. Currently only `POST /internal/provision` exists (operator-only, requires `FASTAPI_INTERNAL_KEY`), and Supabase's `after_user_created` auth hook ALREADY triggers tenant-provision → `/internal/provision` (creates Team + APIKey + seeds the demo graph). This task adds a public registration endpoint that does NOT double-provision.
 **Acceptance:** `POST /v1/register` accepts email+password, creates a Supabase user, and returns the key produced by the existing webhook provisioning path (or a "pending" state while that runs). The existing `welcome.html` polling flow continues to work. Re-registering the same email returns 409 (no key re-exposure). Per-IP and per-email rate limiting protects the endpoint.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` — add `POST /v1/register` endpoint
 - Modify: `website/welcome.html` — optionally update to use new endpoint directly
 - Create: `tests/test_hosted_register.py` — integration tests
 - Create: `supabase/functions/register/` — Supabase edge function (optional, alternative to direct API call)
 
 **Step 0: Analyze the existing provisioning path (before writing any code)**
+
 1. Read `supabase/functions/tenant-provision/index.ts` — the `after_user_created` auth hook calls `/internal/provision`, writes the plaintext key to `user_teams`, and seeds the demo graph.
 2. Confirm the demo-seed call uses the WRONG path: the edge function posts to `/v1/internal/demo` but the FastAPI route is `/internal/demo` — add a task step to verify and fix that path (either the edge function URL or an alias route).
 3. Conclusion: `/v1/register` must NOT call `/internal/provision` itself. Single-provisioning is the rule.
@@ -527,6 +559,7 @@ def test_register_rate_limited():
 **Step 2: Implement `/v1/register` in hosted_api.py**
 
 The endpoint must:
+
 1. Validate email format + password strength
 2. **Rate limit per-IP and per-email** (e.g., 10/hour) — abuse protection; return 429 with Retry-After. Note in the plan: without this, the public endpoint is an open signup/email-bombing surface.
 3. Call Supabase Admin API to create user (`supabase.auth.admin.createUser`) — **only if `after_user_created` does not already fire for admin-created users** (verify; if it does, createUser alone triggers provisioning)
@@ -539,6 +572,7 @@ The endpoint must:
 **Step 3: Update welcome.html if needed**
 
 The current page polls `user_teams` table via Supabase JS client. If we add a direct signup path (email+password on welcome page), add:
+
 - Signup form on index.html or a new signup flow
 - Or keep existing Supabase Auth + edge function flow (less work, already working)
 
@@ -553,6 +587,7 @@ Decision: Keep the existing Supabase Auth flow for signup. Add `/v1/register` as
 **Intent:** Let users connect GitHub to Tortoise via OAuth (not PAT). The agent prompt triggers OAuth; the user authorizes in browser; Tortoise gets read-only access to issues/PRs.
 **Acceptance:** A GitHub OAuth app is registered. `POST /v1/onboarding/github/connect` returns an auth URL. `GET /v1/onboarding/github/callback` exchanges the code for a token, stores it, and records `github_connected: true`. The flow works from both the agent prompt (returns URL for user to click) and the welcome page.
 **Files:**
+
 - Create: GitHub OAuth app registration (manual — document in plan)
 - Modify: `tortoise/hosted_api.py` — add connect + callback endpoints
 - Create: `tests/test_github_connect.py`
@@ -561,6 +596,7 @@ Decision: Keep the existing Supabase Auth flow for signup. Add `/v1/register` as
 **Step 1: Register GitHub OAuth App**
 
 Manual step (document in `docs/epics/2026-08-07-hosted-onboarding-235/`):
+
 1. Go to GitHub Settings → Developer settings → OAuth Apps → New
 2. Name: "Tortoise"
 3. Homepage URL: `https://premiselabs.co`
@@ -592,6 +628,7 @@ async def github_connect(body: GitHubConnectRequest, team: dict = Depends(get_cu
 ```
 
 **Async completion contract (plan-review P0-B / P1-8):**
+
 - `connect` returns `{auth_url, state}` immediately — it does NOT block on the browser.
 - The agent displays the URL, asks the user to authorize and confirm in chat, then polls `tortoise_onboarding_github_status` (every 5s, timeout 3 min).
 - The callback (Step 3) completes the flow asynchronously; the status poll observes `github_connected: true`.
@@ -613,6 +650,7 @@ async def github_callback(code: str, state: str):
 ```
 
 **Token security + revocation (plan-review P1-8):**
+
 - Store the GitHub access token **encrypted at rest** (existing connector-secrets encryption pattern — see #324 connector secrets encryption) on the Team node in the registry graph, NOT in onboarding state properties.
 - Revocation path: a `POST /v1/onboarding/github/disconnect` endpoint (or `PATCH /v1/onboarding/state` with `github_connected: false`) that deletes the encrypted token and records the revoke; document manual revocation via GitHub settings too.
 - The token is only used by the indexer job (Task 9); the status endpoint returns `connected: bool` + repo count — never the token.
@@ -636,6 +674,7 @@ def tortoise_onboarding_github_connect(org: str, redirect_uri: str | None = None
 **Intent:** When a user says "yes" to indexing, start a background job that fetches issues/PRs from their GitHub repos and creates Points in their tenant graph. The indexing runs asynchronously; the agent gets a job ID for polling.
 **Acceptance:** `POST /v1/index/github` accepts an org name, returns a job ID. A background task (asyncio) fetches issues/PRs via GitHub API, creates Points. `GET /v1/index/github/{job_id}` returns status and progress. Idempotent: re-indexing the same org updates Points, doesn't duplicate.
 **Files:**
+
 - Create: `tortoise/indexer/github_indexer.py` — indexing logic
 - Modify: `tortoise/hosted_api.py` — add index endpoints + background task runner
 - Create: `tests/test_github_indexer.py` — with mock GitHub API
@@ -644,6 +683,7 @@ def tortoise_onboarding_github_connect(org: str, redirect_uri: str | None = None
 **Step 1: Audit `_cmd_index_github` FIRST (plan-review P1-17)**
 
 `tortoise/__main__.py:_cmd_index_github` already implements the core pattern: idempotent shallow clone + `.md` walk with **content-hash dedup** (keyed via `idempotency.document_key`) so re-running the same repo skips already-indexed files. Reuse that logic rather than writing a new fetcher:
+
 - Extract/reuse the clone + walk + dedup path; the hosted version swaps the clone source for the GitHub API (issues/PRs as JSON → same content-hash dedup).
 - The v1 endpoint indexes **issues + PRs** (not just `.md` docs): issue → `kind="observation"`, PR → `kind="decision"`, with `source: "github", org, repo, issue_number` metadata.
 - Indexing called before OAuth completes returns 409 (see Task 8 — integration test `test_index_before_oauth_returns_error`).
@@ -668,6 +708,7 @@ def test_indexed_issues_become_points():
 ```
 
 **Named rate-limit tests (mock GitHub — plan-review P1-17):**
+
 - `test_429_backoff_retries`: mocked 429 responses → indexer backs off exponentially and eventually succeeds
 - `test_etag_conditional_fetch`: `ETag`/`If-None-Match` sent; unchanged resources return 304 and consume no rate limit
 - `test_500_issue_cap`: an org with >500 issues indexes at most 500 (configurable limit) without error
@@ -695,6 +736,7 @@ class GitHubIndexer:
 **Step 3: Implement async job system**
 
 Use asyncio background tasks (no Celery/RQ — keep it simple for v1):
+
 ```python
 # In hosted_api.py
 _INDEX_JOBS: dict[str, dict] = {}  # job_id → {status, progress, result}
@@ -710,6 +752,7 @@ async def start_indexing(body: GitHubIndexRequest, team: dict = Depends(get_curr
 **Step 4: Add rate limit handling**
 
 GitHub API rate limit is 5000/hr. Implement:
+
 - Conditional requests (ETag/If-None-Match) to avoid consuming rate limit on unchanged resources
 - Exponential backoff on 429 responses
 - Max 500 issues/PRs per indexing run (configurable)
@@ -723,17 +766,20 @@ GitHub API rate limit is 5000/hr. Implement:
 **Intent:** The tenant-provision Supabase edge function ALREADY auto-seeds a demo graph at signup by calling the FastAPI demo endpoint; `/internal/demo` (hosted_api.py) is sentinel-idempotent — it writes `_demo_sentinel` LAST and skips when the sentinel exists. This task therefore does NOT build a create-from-scratch public endpoint; it (a) verifies/fixes the seeding path, (b) provides the agent-side "show me / verify" step (Q4), and (c) makes the demo graph's Operator nodes explicit.
 **Acceptance:** Demo seeding is verified working end-to-end (signup → `/internal/demo` → sentinel set). Q4=yes verifies and walks the user through the existing seeded graph (`tortoise_summarize_structure`). The demo graph includes at least 5 Points and 3 Operators (supports / contradicts / mitigates). Re-running NEVER deletes-and-overwrites an already-seeded graph (sentinel respected).
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` — (a) fix/alias the demo route path, (b) add Operator-node creation if missing from the seed, (c) add verify-mode behavior
 - Modify: `supabase/functions/tenant-provision/index.ts` — **fix the demo URL path**: it posts to `/v1/internal/demo`, but the FastAPI route is `/internal/demo` (no `/v1`) — align one way (preferred: add a `/v1/internal/demo` alias route so the edge function keeps working, or fix the edge function URL)
 - Create: `tests/test_demo_graph.py`
 - Modify: `tortoise/tool_registry.py` — add `tortoise_onboarding_demo_create` tool (verify mode)
 
 **Step 1: Verify the existing seeding path**
+
 1. Read `supabase/functions/tenant-provision/index.ts` — confirm it calls the demo endpoint with the wrong path (`/v1/internal/demo` vs route `/internal/demo`).
 2. Fix the mismatch (alias route or edge-function URL change) so signup-time seeding actually lands.
 3. Confirm sentinel behavior: re-running `/internal/demo` returns `{status: "already_seeded"}` and does not duplicate points.
 
 **Step 1b: Design the demo graph narrative (kept from original plan — verify it matches the seed)**
+
 - Point 1 (decision): "Use FalkorDB for graph storage"
 - Point 2 (evidence): "FalkorDB benchmarks show 10x faster graph queries than vanilla Redis"
 - Point 3 (evidence): "Existing team has Redis expertise — FalkorDB reuses Redis protocol"
@@ -768,6 +814,7 @@ Backfill rule: if `seeded: false` and the user says yes to Q4, call `/internal/d
 Wraps the verify/backfill flow; returns graph stats so the agent can describe what was created/seeded.
 
 **Step 4: Write tests, commit**
+
 - `test_demo_sentinel_idempotent`: second call → `already_seeded`, point count unchanged
 - `test_demo_has_operators`: ≥ 3 Operator nodes with correct relationship types
 - `test_demo_status_unseeded`: missing sentinel → `seeded: false`
@@ -780,6 +827,7 @@ Wraps the verify/backfill flow; returns graph stats so the agent can describe wh
 **Intent:** Track what onboarding steps a user has completed so the agent prompt and welcome page can show progress. Store state as **properties on the Team node in the registry graph** (NOT Supabase — hosted_api.py has zero Supabase connectivity; `get_current_org` reads Team/APIKey from the FalkorDB registry graph, so state must live there too).
 **Acceptance:** `GET /v1/onboarding/state` returns current onboarding state for the team. `PATCH /v1/onboarding/state` updates individual keys with **per-key last-write-wins** semantics. State is a flat JSON object: `{github_connected, github_indexed, session_recording, demo_verified, team_interested, q1..q5, q1a, completed_at}`. A default state exists for teams that have never called the endpoint. The MCP tools update state automatically.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` — add state endpoints (registry-graph backed)
 - Modify: `tortoise/tool_registry.py` — add `tortoise_onboarding_state`, `tortoise_onboarding_answer`, `tortoise_onboarding_complete` tools
 - Create: `tests/test_onboarding_state.py`
@@ -811,6 +859,7 @@ async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depe
 ```
 
 **Step 3: Integrate state updates into other endpoints (auto-integrations — plan-review P1-11)**
+
 - `POST /v1/onboarding/github/callback` → auto-sets `github_connected: true` (and `github_error: null`)
 - `POST /v1/index/github` completion → auto-sets `github_indexed: true`
 - Q4 verify (demo) → auto-sets `demo_verified: true`
@@ -820,6 +869,7 @@ async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depe
 - `tortoise_onboarding_complete` → auto-sets `completed_at: <iso>` (server-side `onboarding_complete` event fires here — see Task 14)
 
 **Step 4: Write tests, commit**
+
 - `test_default_state_returned`, `test_patch_updates_key`, `test_concurrent_patch_different_keys`, `test_complete_sets_completed_at`, `test_no_answer_recorded`
 
 ---
@@ -829,6 +879,7 @@ async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depe
 **Intent:** Update `website/welcome.html` to include the one-artifact block, per-harness instructions, and a visual onboarding flow. Replace the current "MCP config" + "Quickstart" sections with the unified onboarding artifact.
 **Acceptance:** The updated welcome page shows: (a) API key card (kept), (b) the one-artifact block with per-harness tabs and a single "Copy onboarding setup" button that copies BOTH blocks with the **real API key substituted** (never the `tt_YOUR_KEY` placeholder), (c) a numbered flow diagram (1→2→3→4), (d) post-onboarding state showing completion checkmarks, driven by polling the client-safe `GET /v1/onboarding/state/progress` endpoint (5s cadence). No JavaScript framework dependency — keep the current vanilla HTML/CSS/JS pattern.
 **Files:**
+
 - Modify: `website/welcome.html` — add one-artifact section, harness tabs, post-onboarding state
 
 **Step 1: Rebuild the "Ready" state layout**
@@ -890,6 +941,7 @@ When the user returns to the welcome page after completing onboarding (detected 
 **Step 3: Implement harness tabs**
 
 Use CSS-only tabs (no JS framework). Each tab shows:
+
 - The exact MCP config for that harness (Streamable HTTP format)
 - The onboarding prompt (same for all harnesses, or slightly adapted)
 - Harness-specific steps
@@ -907,6 +959,7 @@ Fire `artifact_copied` on copy button clicks (include harness + section info —
 **Intent:** Deploy the onboarding prompt so it's accessible from the welcome page and can be updated independently of the welcome page code. The prompt is a markdown file served as static content or stored as a snippet.
 **Acceptance:** The onboarding prompt is served at a stable URL (e.g., `https://premiselabs.co/onboarding-prompt.md` or embedded in the hosted API at `GET /v1/onboarding/prompt`). The welcome page links to it. The prompt content matches what was designed in Task 4. Updating the prompt does not require redeploying the API.
 **Files:**
+
 - Create: `website/onboarding-prompt.md` — the canonical prompt file
 - Modify: `website/welcome.html` — reference the prompt from the artifact section
 - Modify: `tortoise/hosted_api.py` — optional: serve prompt via API
@@ -928,6 +981,7 @@ The "Copy prompt" button in the one-artifact section should fetch and display th
 **Step 3b: Per-harness session-capture contract (plan-review P1-4)**
 
 The Q3 "record sessions" promise must map to a real mechanism per harness. Define in the prompt's deployment docs:
+
 - **Capture contract:** when `session_recording=true`, the onboarding prompt instructs the agent to file each conversation end via `POST /v1/sessions` (the hosted-appropriate capture path — reuses the existing session-capture surface).
 - **Scope the wording:** the user-facing question says "Tortoise will remember this agent's sessions" — with a per-harness note that capture coverage depends on the harness (Pi extensions and Claude hooks capture automatically; CLI harnesses file via the session endpoint when the prompt is active).
 - The canonical prompt file must carry these per-harness notes so the Q3 answer is not a false promise (aligns E2E-6 acceptance).
@@ -935,6 +989,7 @@ The Q3 "record sessions" promise must map to a real mechanism per harness. Defin
 **Step 4: Update CLAUDE.tortoise.md**
 
 Add a section pointing new users to the onboarding flow:
+
 ```markdown
 ## First-time setup
 If this is your first session with Tortoise, paste the onboarding prompt:
@@ -952,6 +1007,7 @@ Paste the prompt into a fresh Claude Code session. Verify the agent follows the 
 **Intent:** Implement the analytics events designed in Task 6. Track the onboarding funnel from signup → complete. Use a lightweight approach for v1 (no external analytics dependency).
 **Acceptance:** All events from the analytics schema fire at the correct moments. Events are stored in the existing `audit_events` table (via `TORTOISE_AUDIT_DSN` + `AuditLogger`, `operation` = event name, `properties` JSONB — plan-review P1-10) with the client sink `POST /v1/analytics/events` for browser-side events. A simple dashboard query shows funnel conversion rates. No PII in event payloads.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` — add analytics event emission on key endpoints
 - Modify: `website/welcome.html` — add client-side analytics events
 - Create: `tests/test_analytics_events.py` — verify events fire
@@ -971,6 +1027,7 @@ Analytics events are written as `operation = event_name` rows with `properties` 
 **Step 2: Instrument hosted API**
 
 Add a helper `_track_event(org_id, event_name, properties)` built on the existing `AuditLogger` (`_async_audit` pattern). Call it at:
+
 - `tortoise_onboarding_complete` / state `completed_at` set → `onboarding_complete` (**server-side ONLY — single producer**; see Step 3 — the client never fires this event)
 - `POST /v1/team/keys` (key displayed) → `key_provisioned`
 - `POST /v1/onboarding/github/callback` → `github_connected`
@@ -983,12 +1040,14 @@ Add a helper `_track_event(org_id, event_name, properties)` built on the existin
 **Step 3: Instrument welcome.html**
 
 Add client-side event tracking (sent to the rate-limited `/v1/analytics/events` sink):
+
 - **`signup_completed` fires from the welcome page after successful Supabase auth** — the real signup path is Supabase Auth, not `/v1/register`; the client emission is the single source for this event
 - Copy button clicks → `artifact_copied` (section: `both`)
 - Page load (ready state) → `welcome_page_viewed`
 - Post-onboarding state detected → `welcome_post_onboarding_viewed` (NOT `onboarding_complete` — that event is server-side only when `completed_at` is set, so the funnel has exactly one producer and no double-counting)
 
 **Step 4: Write tests, commit**
+
 - `test_onboarding_complete_fired_once` (server-side single producer)
 - `test_analytics_events_pii_scrubbed`
 - `test_analytics_sink_rate_limited`
@@ -1001,11 +1060,13 @@ Add client-side event tracking (sent to the rate-limited `/v1/analytics/events` 
 **Intent:** Register all new onboarding MCP tools in the **canonical tool registry** so they're available to the agent when it connects. The current MCP architecture is registry-driven (depends on **#454 canonical tool registry** — the branch base; `tortoise/tool_registry.py` exists at 678f694 with 58 `ToolDefinition` entries, 4 HTTP-excluded, registered programmatically via `FastMCPAdapter`). New tools are ONE `ToolDefinition` entry in `tortoise/tool_registry.py` + a handler function in `tortoise/mcp_server.py` — both MCP and REST surfaces derive from the registry automatically.
 
 **Architecture rules (plan-review P1-1 — corrections to the earlier draft):**
+
 - Hosted tools run **IN-PROCESS** against the team-scoped SDK (`_get_org_sdk()` — team resolved from the `TeamResolutionMiddleware` ContextVar, transport mode checked). There is **NO HTTP round-trip** from a tool back into the hosted API: no `make_request`, and NO passing `Authorization: Bearer tt_...` headers inside tool handlers — that would create a self-referential HTTP loop (the MCP server IS the hosted API process; the token is already resolved by middleware before the tool runs).
 - Endpoints that are genuinely REST-facing (OAuth callback, status polling, analytics sink) stay in `hosted_api.py`; the tools call the same in-process logic directly.
 
 **Acceptance:** 10 new MCP tools are registered and discoverable: `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`, `tortoise_onboarding_github_index`, `tortoise_onboarding_demo_create`, `tortoise_onboarding_session_recording`, `tortoise_onboarding_state`, `tortoise_onboarding_answer`, `tortoise_onboarding_complete`, `tortoise_onboarding_health`, `tortoise_context`. Each has a docstring, typed inputs, and error handling. Tool-count totals: **58 existing registry entries (54 HTTP-visible — `tortoise_ingest_corpus`, `tortoise_team_create`, `tortoise_index_sessions`, `tortoise_backfill_v25` are HTTP-excluded) + 10 new = 68 registry entries / 64 HTTP-visible**. No `tortoise_onboarding_create_team` (Q5 is a teaser; `tortoise_team_create` exists and stays HTTP-excluded for the privilege boundary).
 **Files:**
+
 - Modify: `tortoise/tool_registry.py` — add 10 `ToolDefinition` entries
 - Modify: `tortoise/mcp_server.py` — add handler functions for the new entries
 - Modify: `tortoise/hosted_api.py` — add the REST side where the definition declares a `RestSpec` (state endpoints, github status, analytics sink)
@@ -1065,6 +1126,7 @@ In the hosted deployment the request is already authenticated by `TeamResolution
 ```bash
 python -m tortoise.mcp_server --self-test
 ```
+
 Verify all 10 new tools appear in the tool list (**total 68 registry entries; 64 HTTP-visible** on the streamable-http surface — the HTTP tool filter hides the 4 excluded tools). Pre-deploy gate uses the same counts (see Verification Plan).
 
 **Step 4: Commit**
@@ -1076,6 +1138,7 @@ Verify all 10 new tools appear in the tool list (**total 68 registry entries; 64
 **Intent:** Verify the complete flow from welcome page → copy artifact → agent connection works end-to-end. This is a manual-assisted test since agent interactions can't be fully automated.
 **Acceptance:** A test script or documented test run that: (a) loads the welcome page and verifies the one-artifact is displayed, (b) verifies the copy button works, (c) manually pastes the artifact into a real agent session and verifies the agent connects, (d) verifies at least one yes/no question works.
 **Files:**
+
 - Create: `tests/e2e/test_welcome_page.py` — Playwright test for welcome page
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/10-e2e-test-results.md` — manual test results doc
 
@@ -1130,6 +1193,7 @@ def test_post_onboarding_state(page):
 **Step 2: Manual smoke test protocol**
 
 Document the manual test steps (URLs from the constants block):
+
 1. Sign up at premiselabs.co
 2. Verify welcome page loads with key and artifact
 3. Click "Copy onboarding setup" (single copy — config + prompt with real key)
@@ -1168,6 +1232,7 @@ After plan-review approves this plan, the `epic-decompose` skill should create t
 | **#7727 / #7730 / #7711** (legacy numbers referenced in the spec) | These are stale identifiers from an earlier issue-tracking system; no live GitHub issues exist under these numbers | **Superseded by this epic** — drop from any spec references; the current canonical links are #235 (epic), #311, #314 |
 
 **Decomposition rationale:**
+
 - Issues #1–3 are design-forward; they can run in parallel once the research brief is absorbed
 - Issues #4–6 are build-forward; they depend on design tasks completing
 - Issue #7 (analytics) can run parallel to #4–6
@@ -1206,6 +1271,7 @@ After plan-review approves this plan, the `epic-decompose` skill should create t
 ### Owner Acceptance Gate
 
 Before labeling as `complete`:
+
 1. Owner (danielospina) walks through the full flow: signup → paste → yes/no → memory digest
 2. Time-to-first-memory is measured and compared to the < 5 min target
 3. At least one harness (Claude Code or Pi) completes the flow end-to-end
@@ -1217,6 +1283,7 @@ Before labeling as `complete`:
 > ⛔ **OVERRIDE (2026-08-08):** Phase 2 is **NOT gated** on user signal. All build tasks (Tasks 7–16) are **IN SCOPE** and ship as part of this epic. The owner explicitly stated: "planning is more expensive than implementing; design decisions made here should not be re-litigated later."
 
 Phase 1 design artifacts (Tasks 1–6) inform but do not gate Phase 2. Build tasks can begin as soon as the relevant design artifact is complete. **Partial order (plan-review P2 — replaces "Tasks 7–15 can start in parallel"):**
+
 1. **First wave (foundations):** Task 7 (`/v1/register` + provisioning-path analysis) and Task 11 (onboarding state store — registry-graph) first — every other build task reads or writes state.
 2. **Second wave (GitHub + demo):** Task 8 (OAuth, depends on state store for the state mapping) and Task 9 (indexing, depends on OAuth) and Task 10 (demo path fix, independent).
 3. **Third wave (surfaces):** Task 15 (MCP tools — after their endpoints/state exist) and Task 14 (analytics — after the sink endpoint + state store exist).
@@ -1229,10 +1296,12 @@ Phase 1 design artifacts (Tasks 1–6) inform but do not gate Phase 2. Build tas
 > Changelog of the plan-review convergence pass applied to this plan (2 P0, 16 P1, 14 P2). Severity tags reference the review verdict. The same changes are reflected in `02-scope.md` where a stated decision changed (Q5 teaser, demo behavior, E2E wording).
 
 **P0 fixes**
+
 - **P0-A — Completion-signal producer:** the funnel's terminal event now has a producer. Task 4's prompt calls `tortoise_onboarding_answer(q_id, answer)` after EACH question and `tortoise_onboarding_complete` after the digest; Task 11 Step 3 auto-integrates per-question answers + `completed_at`; Task 14 fires `onboarding_complete` server-side (single producer) when `completed_at` is set. Target metric (>60% completion) is now measurable.
 - **P0-B — GitHub OAuth resumption:** Task 4's prompt adds an "await authorization" step after Q1=yes — display auth_url, user authorizes + confirms, agent polls `tortoise_onboarding_github_status` (5s, 3-min timeout; timeout records `github_connected: false, github_error: "oauth not completed"`). E2E-3 journey map includes the poll; integration test `test_index_before_oauth_returns_error` covers indexing-before-OAuth.
 
 **P1 fixes**
+
 1. **Task 15 registry rewrite:** tools are `ToolDefinition` entries in `tortoise/tool_registry.py` (58 entries, 4 `http_policy=False` → 54 HTTP-visible), registered via `FastMCPAdapter`; hosted tools run IN-PROCESS via `_get_org_sdk()` — no `make_request`, no Bearer headers inside handlers. Declared the #454 dependency (registry at 678f694). All tool counts corrected (56→58 registry / 54 HTTP-visible; +10 new = 68 registry / 64 HTTP-visible; pre-deploy gate and E2E-8 updated; E2E-8 now says "all HTTP-visible tools").
 2. **Task 11 state store:** onboarding state is properties on the Team node in the registry graph (hosted_api has zero Supabase connectivity); the "FalkorDB OR Supabase" OR in the Integration Surface Map (row 8) resolved to registry-graph-only; per-key last-write-wins PATCH semantics + default-state and concurrent-PATCH tests added.
 3. **Task 10 / Q4 demo reconciliation:** kept signup-time seeding (tenant-provision edge function → `/internal/demo`, sentinel-idempotent); Q4 is now "show me / verify the demo graph" (no delete-and-overwrite); Operator-node creation made explicit (≥3 operators: supports/contradicts/mitigates); added a task step to fix the edge function's `/v1/internal/demo` → `/internal/demo` path mismatch.
@@ -1253,6 +1322,7 @@ Phase 1 design artifacts (Tasks 1–6) inform but do not gate Phase 2. Build tas
 18. **Task 16 URLs:** `premise-app.fly.dev` (does not exist) → `tortoise-y4mjjq.fly.dev` (fly.toml); environment URLs centralized in one constants block (base app URL, api.premiselabs.co, MCP URL, OAuth callback redirect) used by all Playwright tests.
 
 **P2 fixes (applied)**
+
 - Tool counts corrected everywhere (56→58 registry / 54 HTTP-visible; 63→65-68 family replaced by explicit totals; HTTP-visible language added).
 - URLs centralized (P1-18) + note added that `website/` may be renamed to `website/` by implementation time (PR #206) — path variable note at Task 1.
 - "Tasks 7–15 can start in parallel" prose replaced with an explicit 4-wave partial order (state store + register first; GitHub/demo next; MCP tools + analytics after their endpoints; frontend + E2E last).

@@ -81,6 +81,7 @@ iterate k = 1, 2, 3, …:
 ```
 
 **Discipline (from window-1):**
+
 - ONE parameter change per iteration — isolates cause/effect (the loop
   converged in 3 iterations on window-1 because each change was atomic).
 - The owner's review is the ORACLE (ground truth); the system never argues.

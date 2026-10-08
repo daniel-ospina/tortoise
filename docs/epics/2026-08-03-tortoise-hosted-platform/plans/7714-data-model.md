@@ -29,6 +29,7 @@
 | S5 | tortoise/auth.py | Auth | unit (unchanged) | hash_api_key reuse verified |
 
 **Bug Pattern Flags:**
+
 - FalkorDB has no UNIQUE constraints — idempotency keys for team_create
 - Postgres connection failure must not fail registry operations — JSONL fallback
 - Migration is idempotent but best-effort — idempotency via name-based dedup
@@ -37,11 +38,13 @@
 ### Verification Plan
 
 **Test layers:**
+
 - unit: all registry CRUD via FalkorDBLite (no Postgres needed for CI green)
 - integration: Postgres audit via `@pytest.mark.postgres` (skipped when `TEST_AUDIT_DB_URI` unset)
 - pgTAP: audit_events immutability trigger (deferred to #7738 — test design issue)
 
 **E2E scenarios exercised:**
+
 - E2E-4-D (tenant isolation — registry portion)
 - E2E-7-D (security baseline — key storage)
 - E2E-8-D (multi-team membership)
@@ -55,19 +58,23 @@
 **Intent:** Add dependencies, error types, and env vars before any logic changes.
 **Acceptance:** `psycopg2-binary` in pyproject.toml, `ControlPlaneError` + `AuditLogError` importable, `.env.example` updated.
 **Files:**
+
 - Modify: `pyproject.toml`
 - Modify: `tortoise/exceptions.py`
 - Modify: `.env.example`
 
 **Step 1:** Add `psycopg2-binary` as optional dependency:
+
 ```toml
 [project.optional-dependencies]
 postgres = ["psycopg2-binary>=2.9"]
 ```
+
 Users install with `pip install tortoise[postgres]` for Postgres audit support.
 In `audit_events.py`, lazy import: `try: import psycopg2; except ImportError: psycopg2 = None`.
 When psycopg2 is unavailable, audit operates in JSONL-only mode (the fallback).
 **Step 2:** Add `ControlPlaneError` and `AuditLogError` to `tortoise/exceptions.py`:
+
 ```python
 class ControlPlaneError(ValueError):
     """Registry operation failed — duplicate, not found, invalid role, etc."""
@@ -76,11 +83,14 @@ class ControlPlaneError(ValueError):
 class AuditLogError(RuntimeError):
     """Fatal audit log failure — Postgres unreachable and fallback exhausted."""
 ```
+
 **Step 3:** Add `TORTOISE_AUDIT_DSN` to `.env.example`:
+
 ```
 # Postgres connection for audit_events (optional — falls back to JSONL if unset)
 # TORTOISE_AUDIT_DSN=postgresql://user:pass@localhost:5432/tortoise_audit
 ```
+
 **Step 4:** Run `pip install -e .` to verify psycopg2-binary installs cleanly.
 
 ---
@@ -90,10 +100,12 @@ class AuditLogError(RuntimeError):
 **Intent:** Create `tortoise/audit_events.py` with three-tier persistence: Postgres → JSONL fallback → replay. Postgres is optional (lazy import, no hard dependency).
 **Acceptance:** `AuditLogger.append()` works when Postgres is up; writes to JSONL when down; replays on reconnect.
 **Files:**
+
 - Create: `tortoise/audit_events.py`
 - Test: `tests/test_audit_events.py`
 
 **Step 1:** Create `tortoise/audit_events.py` with `AuditLogger` class:
+
 ```python
 class AuditLogger:
     def __init__(self, dsn: str | None = None):
@@ -121,9 +133,11 @@ class AuditLogger:
     def close(self) -> None:
         # Close Postgres connection if open
 ```
+
 **Step 2:** Implement `_ensure_schema()` — `CREATE TABLE IF NOT EXISTS audit_events (...)`
 **Step 3:** Implement `_connect()` with exponential backoff reconnection
 **Step 4:** Write `tests/test_audit_events.py`:
+
 - `test_append_writes_to_postgres` (mark: postgres)
 - `test_append_falls_back_to_jsonl_when_postgres_down` (unit, mock psycopg2)
 - `test_replay_on_reconnect` (integration, mark: postgres)
@@ -137,10 +151,12 @@ class AuditLogger:
 **Intent:** Add `_get_registry()` to `TortoiseSDK` for accessing the `control_plane` graph.
 **Acceptance:** `_get_registry()` returns a cached FalkorDB Graph handle; uses existing db connection.
 **Files:**
+
 - Modify: `tortoise/sdk.py`
 
 **Step 1:** Add `_registry_g` attribute to `TortoiseSDK.__init__` (default `None`)
 **Step 2:** Implement `_get_registry()`:
+
 ```python
 def _get_registry(self):
     if self._registry_g is None:
@@ -148,7 +164,9 @@ def _get_registry(self):
         self._registry_g = proj.db.select_graph("control_plane")
     return self._registry_g
 ```
+
 **Step 3:** Add `_ensure_registry_indexes()` — per-label indexes on control_plane graph:
+
 ```python
 def _ensure_registry_indexes(self):
     g = self._get_registry()
@@ -168,7 +186,9 @@ def _ensure_registry_indexes(self):
             # Log warning for unexpected errors; "index already exists" is safe
             _logger.debug("Index may already exist: %s.%s", label, prop)
 ```
+
 **Step 4:** Extend `__init__` and `close()`:
+
 ```python
 # In __init__ (alongside self._registry_g = None):
 self._registry_g = None
@@ -189,10 +209,12 @@ def close(self):
 **Intent:** Refactor `team_create()` to write to the `control_plane` graph. Add team_get, team_list, team_update, team_delete, and a one-shot migration.
 **Acceptance:** `team_create()` writes to control_plane graph; returns same shape; migration is idempotent.
 **Files:**
+
 - Modify: `tortoise/sdk.py` (refactor `team_create`, add 5 new methods)
 - Test: `tests/test_control_plane.py`
 
 **Step 1: Refactor `team_create()`**
+
 - Remove direct Team node creation in tortoise graph (current lines 1263-1286)
 - Instead: write `:Team` node to control_plane graph via `_get_registry()`
 - Add `idempotency_key` param — if provided, check for existing Team with matching `idempotency_key` property before creating
@@ -207,6 +229,7 @@ def close(self):
 **Step 4: Add `team_update(org_id, **fields)`** — `MATCH (t:Team {id:$id}) SET t += $fields`; validates allowed fields (name, tier, stripe_customer_id, subscription_id, backup_enabled, max_users, max_teams, max_graphs)
 
 **Step 5: Add `team_delete(org_id)`** — requires `confirmation` kwarg matching team name. Cascading cleanup:
+
 1. MATCH/DELETE all Membership nodes with BELONGS_TO edge to Team
 2. MATCH/DELETE all APIKey nodes with BELONGS_TO edge to Team
 3. MATCH/DELETE all Invitation nodes with FOR_TEAM edge to Team
@@ -216,6 +239,7 @@ def close(self):
 Raises `ControlPlaneError` if confirmation doesn't match team name.
 
 **Step 6: Add `migrate_teams_to_registry()`**
+
 ```python
 def migrate_teams_to_registry(self) -> dict:
     """Idempotent one-shot: move Team nodes from tortoise graph to control_plane."""
@@ -251,6 +275,7 @@ def migrate_teams_to_registry(self) -> dict:
 ```
 
 **Step 7: Write tests in `tests/test_control_plane.py`** (FalkorDBLite only — no Postgres needed):
+
 - `test_team_create_writes_to_registry_graph`
 - `test_team_create_is_idempotent_with_key`
 - `test_team_create_rejects_duplicate_name`
@@ -268,10 +293,12 @@ def migrate_teams_to_registry(self) -> dict:
 **Intent:** Add Membership nodes with BELONGS_TO edges and role validation.
 **Acceptance:** Create/list/update/delete memberships; role enum enforced; max_users checked.
 **Files:**
+
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
 **Step 1: Add `membership_create(org_id, user_id, role)`**
+
 - Validate `role ∈ {owner, admin}` → raise `ControlPlaneError` if not
 - Validate `org_id` exists in registry → raise `ControlPlaneError` if not
 - Check `max_users` constraint on team (COUNT memberships for team vs team.max_users)
@@ -284,6 +311,7 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 3: Add `membership_list(org_id)`** → list of memberships for team
 
 **Step 4: Add `membership_update_role(membership_id, new_role)`**
+
 - Validate `new_role ∈ {owner, admin}`
 - `MATCH (m:Membership {id:$id}) SET m.role = $role`
 - Audit
@@ -291,6 +319,7 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 5: Add `membership_delete(membership_id)`** — `DETACH DELETE` the node + its BELONGS_TO edge. Audit. Idempotent: returns False if not found.
 
 **Step 6: Write tests:**
+
 - `test_membership_create_with_valid_role`
 - `test_membership_create_rejects_invalid_role`
 - `test_membership_create_rejects_missing_team`
@@ -305,10 +334,12 @@ def migrate_teams_to_registry(self) -> dict:
 **Intent:** Store hashed API keys in the control_plane graph. Plaintext returned once.
 **Acceptance:** Keys stored as SHA-256 hash; plaintext shown once; revoke sets revoked_at; verify looks up hash.
 **Files:**
+
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
 **Step 1: Add `apikey_create(org_id, created_by)`**
+
 - Generate: `api_key = f"tt_{uuid.uuid4().hex}"`
 - Hash: `key_hash = hash_api_key(api_key)`
 - Prefix: `key_prefix = api_key[:10]` (e.g., `tt_a1b2c3d4`)
@@ -320,17 +351,20 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 2: Add `apikey_list(org_id)`** → list of `{id, key_prefix, created_by, created_at, last_used_at, revoked_at}` — no plaintext, no hash
 
 **Step 3: Add `apikey_revoke(key_id)`**
+
 - `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` — soft delete for audit trail
 - Audit
 - Idempotent: if already revoked, returns `{revoked: True, already: True}`
 
 **Step 4: Add `apikey_verify(key_plaintext)`**
+
 - Hash input: `key_hash = hash_api_key(key_plaintext)`
 - `MATCH (k:APIKey {key_hash:$kh}) WHERE k.revoked_at IS NULL RETURN k.org_id, k.id`
 - Returns `{org_id, key_id}` or None
 - (Consumed by API auth middleware — separate issue)
 
 **Step 5: Write tests:**
+
 - `test_apikey_create_stores_hash_not_plaintext`
 - `test_apikey_create_returns_plaintext_once`
 - `test_apikey_list_excludes_plaintext`
@@ -345,10 +379,12 @@ def migrate_teams_to_registry(self) -> dict:
 **Intent:** Store hashed invitation tokens with 7-day expiry. Token lookup for email acceptance flow.
 **Acceptance:** Tokens hashed; accept checks expiry; cleanup method for expired; single-use enforced.
 **Files:**
+
 - Modify: `tortoise/sdk.py`
 - Test: `tests/test_control_plane.py`
 
 **Step 1: Add `invitation_create(org_id, email, role, created_by)`**
+
 - Generate: `token = str(uuid.uuid4())`
 - Hash: `token_hash = hash_api_key(token)`
 - `expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()`
@@ -361,12 +397,14 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 2: Add `invitation_list(org_id)`** → list of `{id, email, role, created_at, expires_at, accepted_at}` — no token hashes
 
 **Step 3: Add `invitation_get_by_token(token_plaintext)`**
+
 - Hash: `token_hash = hash_api_key(token_plaintext)`
 - `MATCH (i:Invitation {token_hash:$th}) RETURN i`
 - Returns invite dict or None
 - (For email link acceptance flow)
 
 **Step 4: Add `invitation_accept(invitation_id, user_id)`**
+
 - Check `expires_at > now()` → reject expired with `ControlPlaneError("Invitation expired")`
 - Check `accepted_at IS NULL` → reject if already accepted
 - `SET i.accepted_at = $now`
@@ -377,10 +415,12 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 5: Add `invitation_revoke(invitation_id)`** — soft-delete (SET status = 'revoked'). Audit.
 
 **Step 6: Add `cleanup_expired_invitations()`**
+
 - `MATCH (i:Invitation) WHERE i.expires_at < $now AND i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'expired') SET i.status = 'expired'`
 - Returns count of cleaned invitations
 
 **Step 7: Write tests:**
+
 - `test_invitation_create_rejects_duplicate_pending`
 - `test_invitation_accept_rejects_expired`
 - `test_invitation_accept_creates_membership`
@@ -395,9 +435,11 @@ def migrate_teams_to_registry(self) -> dict:
 **Intent:** Expose registry CRUD methods as MCP tools with correct safety hints.
 **Acceptance:** Read-only tools have `readOnlyHint=true`; destructive tools have `destructiveHint=true` and require human confirmation.
 **Files:**
+
 - Modify: `tortoise/mcp_server.py`
 
 **Step 1: Add read-only tools** (readOnlyHint=true):
+
 - `tortoise_team_list` → `_safe(sdk.team_list)`
 - `tortoise_team_get(org_id)` → `_safe(sdk.team_get, org_id)`
 - `tortoise_membership_list(org_id)` → `_safe(sdk.membership_list, org_id)`
@@ -407,6 +449,7 @@ def migrate_teams_to_registry(self) -> dict:
 **Step 2: Modify existing tool** `tortoise_team_create` (already at line 506): update docstring to note `idempotency_key` param and control_plane storage. The wrapper `_safe(sdk.team_create, name)` transparently picks up the refactored SDK method.
 
 **Step 3: Add new mutation tools** (destructiveHint=true via `annotations=ToolAnnotations(destructiveHint=True)`):
+
 - `tortoise_apikey_create(org_id, created_by)` → `_safe(sdk.apikey_create, org_id, created_by)`
 - `tortoise_apikey_revoke(key_id)` → `_safe(sdk.apikey_revoke, key_id)`
 - `tortoise_invitation_create(org_id, email, role, created_by)` → `_safe(sdk.invitation_create, org_id, email, role, created_by)`
@@ -421,11 +464,13 @@ def migrate_teams_to_registry(self) -> dict:
 **Intent:** Wire AuditLogger into SDK lifecycle. Update existing tests. Verify backward compatibility.
 **Acceptance:** `team_create()` returns same shape. Existing tests pass. New tests pass. CI green.
 **Files:**
+
 - Modify: `tortoise/sdk.py` (lifecycle wiring)
 - Modify: `tests/test_sdk.py` (if needed)
 - Run: `python -m pytest tests/ -v -m "not postgres"`
 
 **Step 1:** Wire AuditLogger into SDK:
+
 ```python
 # In TortoiseSDK.__init__:
 self._audit_logger = AuditLogger()
@@ -435,16 +480,19 @@ self._audit_logger.append(org_id=..., actor_user_id=..., operation=...)
 ```
 
 **Step 2:** Run existing tests to verify backward compatibility:
+
 ```bash
 python -m pytest tests/test_sdk.py tests/test_auth.py -v
 ```
 
 **Step 3:** Run full CI-simulating test suite:
+
 ```bash
 python -m pytest tests/ -v -m "not postgres"
 ```
 
 **Step 4:** If `TEST_AUDIT_DB_URI` is available, run Postgres integration tests:
+
 ```bash
 python -m pytest tests/ -v -m "postgres"
 ```

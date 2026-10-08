@@ -10,18 +10,23 @@
 ## Pre-Plan Research
 
 ### Agent Boundary Patterns
+
 Three-tier boundary system (Always/Never/Ask) is the industry standard for agent specs (Addy Osmani, 2025). Our "boundary: MUST NOT" maps to the "Never" tier. "Always" and "Ask" tiers deferred to Phase 2 when agent autonomy increases.
 
 ### Coordinator State Machine Patterns
+
 Hybrid detection (graph cycle + timeout) is the production pattern. Our approach mirrors this: stuck detection = timeout-based, deadlock breaker = graph-based "all stuck" detection. Industry standard: `lock_timeout` at 2-3× average execution time, escalation via log + notification.
 
 ### Slack Single-Bot Multi-Agent Identity
+
 `username` field in `chat.postMessage` API provides dynamic identity per message. Phase 1: single Slack app with one bot token, routing all agents internally. Each agent role gets a distinct `username` override — non-spoofable, 1 app slot used.
 
 ### Health Endpoint Patterns
+
 Distinct `/health/live` (process liveness) and `/health/ready` (dependency check) prevent false crash detection. Bridge `/status` endpoint should follow this pattern. SIGTERM handling: keep returning healthy during graceful shutdown to avoid false positives.
 
 ### GitHub Projects v2 API
+
 Two-step mutation: `addProjectV2ItemById` → `updateProjectV2ItemFieldValue`. Custom fields must be pre-created in UI. Field IDs obtained via query. This is the mechanism for Kanban auto-population.
 
 ---
@@ -58,6 +63,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Crash override rule:** Crash detection overrides all other states. If an agent crashes, all its in-flight issues are marked unassigned, pending stuck-detection timers are cancelled, and the coordinator's reassignment logic takes precedence over stuck-detection escalation.
 
 **Component separation:** Bridge responsibilities are split into:
+
 - **SlackRouter:** @mention routing, channel posting, message attribution
 - **HealthMonitor:** Agent process health polling, writes `/status`, sole writer of session state
 - **Coordinator:** Reads GitHub + `/status`, triggers escalations, does NOT spawn agents — it posts Slack messages; agents spawn independently when their Slack-event trigger fires on coordinator messages
@@ -80,6 +86,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Human opens `#team-app` Slack channel in the morning.
 **Path:**
+
 1. Human sees thread from last night: Strategist posted "📋 Proposed initiative: Expand to `domain:product`"
 2. PM agent spawned (triggered by @mention from coordinator) → scoped → created 3 child issues → @mentioned Product Implementer
 3. Product Implementer spawned → executed issue #456 → opened PR → @mentioned human for review
@@ -91,6 +98,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Human has full visibility of all agent decisions and work progress.
 
 **Edge cases:**
+
 - Human is AFK for 8h → coordinator's cron cycle runs, stuck detection fires after 4h of no activity
 - Human returns → full thread history available, no state lost
 - Multiple humans in channel → all see same messages
@@ -99,6 +107,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Product Implementer started issue #789 but got blocked (dependency not merged).
 **Path:**
+
 1. Implementer posts "⏸️ Blocked: waiting for PR #123 to merge" → state transitions to `blocked`
 2. No activity on #789 for STUCK_DETECTION_SECONDS (4h)
 3. Coordinator's cron cycle detects #789 has no activity >4h, state = `blocked` (not `paused`) → pings
@@ -109,6 +118,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 8. Implementer resumes work
 
 **Crash override (precedence over stuck detection):** If the implementer crashes mid-blocked-state:
+
 - HealthMonitor detects crash → marks state `crashed` in /status
 - All pending stuck-detection timers for this agent's issues are cancelled
 - Coordinator's next cycle detects `crashed` → reassigns #789 to next idle implementer (see UJ-3)
@@ -118,6 +128,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Human intervened after automated escalation, work resumed.
 
 **Edge cases:**
+
 - Issue is in `paused` state → coordinator excludes from stuck detection entirely
 - Multiple stuck issues → coordinator posts one message listing all
 - Coordinator crash mid-escalation → restart resets ping counter (cold restart, O11), but stuck detection re-detects within STUCK_DETECTION_SECONDS
@@ -127,6 +138,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** PM agent finishes scoping → creates 3 child issues → needs Product Implementer.
 **Path:**
+
 1. PM posts in `#team-app` thread: "@implementer Please implement #456, #457, #458 — scoped and ready"
 2. SlackRouter detects `@implementer` mention → routes to Implementer agent trigger
 3. Implementer spawns (if `idle`) or queues (if `working`/`blocked`)
@@ -139,6 +151,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Agent received work via @mention trigger, executed, or crash → reassigned.
 
 **Edge cases:**
+
 - Agent is `working`/`blocked` → new @mention queued, picked up after current issue completes
 - Agent is `idle` → immediate spawn
 - All implementers crashed AND no idle of same domain → coordinator escalates to human: "All [domain] implementers crashed, #456-#458 unassigned" (no dead-letter to Strategist — single Strategist handles initiative generation, not task reassignment)
@@ -147,6 +160,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Team has no active work. Coordinator detects empty queue.
 **Path:**
+
 1. Coordinator posts: "@strategist: No active work — generate initiatives."
 2. Strategist's Slack-event trigger fires → spawns → researches market → files 2 epics tagged `domain:product` and `domain:growth`
 3. Coordinator's next cycle detects new epics → posts: "📋 New initiative: `domain:product` — @pm scope this"
@@ -161,6 +175,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Full chain from empty queue to deliverable. No human intervention needed.
 
 **Edge cases:**
+
 - Strategist generates low-quality initiative → PM's scoping review gate catches it
 - All issues are stuck but not deadlocked → coordinator does NOT trigger Strategist
 - ALL issues stuck >DEADLOCK_SECONDS, no human posted since @channel → strategist fired anyway (deadlock breaker)
@@ -169,6 +184,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Human wants team status at a glance. Opens GitHub Projects.
 **Path:**
+
 1. Human navigates to `github.com/eldato-io/eldato/projects` → selects `#team-app` board
 2. Board: To Do / In Progress / Review / Done
 3. Cards = GitHub issues, auto-populated on issue events
@@ -179,6 +195,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** At-a-glance status without reading Slack threads.
 
 **Edge cases:**
+
 - Issue not yet on board → < 30s lag on GitHub workflow trigger
 - Custom field missing → shows "No Role" / "No Domain"
 - Empty board → agents have no work (Strategist should fire next cycle)
@@ -187,6 +204,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Human reviews Kanban, sees initiative with 3 stuck issues, all blocked >1 week. Decides the initiative is no longer worth pursuing.
 **Path:**
+
 1. Human posts in `#team-app`: "@coordinator kill initiative 'Expand to new categories' — not worth pursuing"
 2. Coordinator detects @mention → queries GitHub for all issues under that initiative (epic + child issues)
 3. Coordinator closes all related issues with comment: "💀 Killed by human: initiative no longer pursued"
@@ -198,6 +216,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Human proactively terminated stale work, agents cleaned up, Kanban updated.
 
 **Edge cases:**
+
 - No matching initiative found → coordinator posts: "No initiative matching [name] found — check spelling?"
 - Initiative partially completed (some child issues merged) → coordinator only closes OPEN issues, merged ones stay
 
@@ -205,6 +224,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 
 **Entry:** Strategist generated a new initiative. Human wants to gate it before agents start scoping.
 **Path (approve):**
+
 1. Strategist posts: "📋 Proposed initiative: [name] — awaiting human approval" (initiative: `status: pending` in initiative_registry — no agent in `paused`; Strategist completed and is `idle`)
 2. Human reads the initiative in thread → reacts with ✅ or comments "Approved, proceed"
 3. Coordinator cron cycle detects approval (emoji reaction or "Approved" keyword in thread) → posts: "@pm scope [initiative]" AND "@strategist Initiative [name] approved — file the epic"
@@ -212,6 +232,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 5. PM fires on @mention → begins scoping
 
 **Path (reject):**
+
 1. Strategist posts proposal
 2. Human comments: "Rejected — [reason]"
 3. Coordinator cycle detects rejection ("Rejected" keyword) → posts: "❌ Initiative rejected: [reason]" AND "@strategist Initiative [name] rejected — closing"
@@ -220,6 +241,7 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 **Exit:** Human gates initiative before agent hours are spent on it.
 
 **Edge cases:**
+
 - Human doesn't respond for 24h → coordinator pings human directly (not @channel): "Awaiting approval on [initiative]"
 - 72h no response → @channel escalation
 - 168h (1 week) no response → auto-close as stale with notice
@@ -289,6 +311,7 @@ All coordinator state is persisted in a single JSON file (`coordinator-state.jso
 ### Activity Detection Efficiency
 
 Instead of 3×N API calls per cycle (where N = number of tracked issues), the coordinator uses:
+
 1. **GitHub bulk query:** GET `/repos/{owner}/{repo}/issues?state=open&labels=in_progress&since={last_cycle_start}&sort=updated&direction=asc` — returns all issues updated since last cycle. Issues NOT in response have no GitHub activity.
 2. **Slack batch query:** `conversations.history` with `oldest` filter for the team channel, scanning for agent-authored messages since last cycle. One API call per team, not per issue.
 3. **Clock alignment:** All times compared against coordinator's monotonic clock with STUCK_DETECTION_FUDGE_SECONDS (+30s) to absorb NTP drift.
@@ -300,6 +323,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Execution:** Continuous daemon, CRON_INTERVAL_SECONDS (default 300s) between cycles.
 
 **Flow:**
+
 1. Acquire file lock (`.coordinator.lock`) via `flock` — abort if lock held (another instance running)
 2. Write heartbeat file at cycle START
 3. Load coordinator-state.json from disk
@@ -318,6 +342,7 @@ Target: <5 API calls per cycle regardless of issue count.
 13. Sleep CRON_INTERVAL_SECONDS, repeat
 
 **Failure modes:**
+
 - GitHub API down → log warning, skip cycle, retain state
 - Bridge /status down → skip stuck detection and crash recovery entirely (agents continue autonomously; coordinator waits)
 - State file corrupted → delete, start fresh (acceptable: max one-cycle duplicate ping)
@@ -328,6 +353,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** Coordinator detects issue with now - last_activity_at > STUCK_DETECTION_SECONDS, agent state ≠ `paused` or `crashed`
 
 **Flow:**
+
 1. Read issue's `ping_stage` from coordinator-state.json
 2. If ping_stage = 0: post "⚠️ Stuck: #{issue} — @{agent} status?" → set ping_stage = 1, last_pinged_at = now
 3. If ping_stage = 1 AND now - last_pinged_at > STUCK_DETECTION_SECONDS: post 2nd ping → ping_stage = 2
@@ -343,6 +369,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** HealthMonitor detects agent process death (3 consecutive health check failures → state `crashed`)
 
 **Flow:**
+
 1. HealthMonitor writes `state: "crashed"` to `/status` for that agent_role
 2. Coordinator's next cycle detects `crashed` in /status
 3. Remove all tracking entries for this agent's issues from coordinator-state.json
@@ -364,6 +391,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** Coordinator detects no open issues with activity within STUCK_DETECTION_SECONDS (or deadlock breaker condition)
 
 **Flow:**
+
 1. Coordinator posts: "@strategist No active work — generate initiatives."
 2. Strategist's mention trigger fires → spawns Pi session
 3. Strategist researches market → **files epics on GitHub FIRST** (before coordinator dispatch), generates issues with domain labels
@@ -385,6 +413,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** Any message in team Slack channel containing `@agent_role`
 
 **Flow:**
+
 1. SlackRouter detects `@agent_role` mention in message text
 2. Look up agent config from subjects YAML: `trigger_on: mention`, `skills[]`, `boundary[]`, `domains[]`
 3. Query bridge `/status` for agent state:
@@ -408,6 +437,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** GitHub issue event (opened, assigned, labeled, closed) or PR event (opened, merged)
 
 **Flow:**
+
 1. GitHub webhook or workflow triggers on issue/PR event
 2. Query Projects v2 GraphQL API:
    - `addProjectV2ItemById` → add issue to team board
@@ -428,6 +458,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Trigger:** Strategist posts initiative proposal → coordinator adds to `initiative_registry` in state file
 
 **Flow:**
+
 1. Strategist posts: "📋 Proposed initiative: [name] (#{n}) — awaiting human approval"
 2. Coordinator's next cycle detects new epic, adds to `initiative_registry` with `status: pending, proposed_at: now`
 3. If human gate is ACTIVE (configurable per team):
@@ -453,6 +484,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Important:** Initiatives are referenced by GitHub issue number, not by name. Command format: `@coordinator kill initiative #123` or `@coordinator kill #123`.
 
 **Flow:**
+
 1. Coordinator detects @mention + "kill" keyword, extracts issue number
 2. Query GitHub for the epic issue (#{n}) → extract all child issues via tasklist/sub-issue API
 3. For each open issue:
@@ -474,7 +506,7 @@ Target: <5 API calls per cycle regardless of issue count.
 ### 4.1 Subjects YAML Schema (Agent Roles)
 
 > **Schema drift note:** The canonical subjects registry (`operations/subjects/_schema.md`) defines the field contract. This plan extends it with coordinator-specific fields (`trigger_on`, `cron_interval_seconds`, `heartbeat_interval_seconds`, `slack_bot_id`, `github_login`, `skills`). These are additive — existing fields (`held_by`, `loop_type`, `delegation`, `status`, `reports_to`, `domains`, `boundary`, `diagnostic`, `belief`, `interactive`) conform to canonical. `loop_type: continuous` is canonical (see `_schema.md` §2 — `completion|cron|trigger|continuous`).
-> 
+>
 > **Team registration note:** The `epistemic-team` is not yet registered in ONTOLOGY.md §1.1. Agent infrastructure is owned by Organisation Design Team per §1.4. **Resolution:** #6210 (Slack Bridge) includes creating `docs/teams/epistemic-team/` directory structure. Team registration will be filed as a dependency pre-check before Phase 3 agent deployment.
 
 ### Role Template Model
@@ -482,6 +514,7 @@ Target: <5 API calls per cycle regardless of issue count.
 **Roles are templates, not named agents.** One CMO template → instantiated per team: `epistemic-team-cmo`, `eldato-app-team-cmo`, `dmer-team-cmo`. All share the same skills, boundary, and role definition. Only team-specific config differs (Slack channel, GitHub project, human members).
 
 **Registry:**
+
 - `operations/subjects/templates/cmo.yaml` — canonical CMO definition (skills, boundary, domains, belief, interactive)
 - `operations/subjects/epistemic-team.yaml` — team instance: references CMO template, overrides team-specific fields
 
@@ -654,6 +687,7 @@ roles:
 ```
 
 **Field reference:**
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | role | string | Yes | Unique agent identifier within team |
@@ -711,6 +745,7 @@ roles:
 **File:** `coordinator-state.json` (adjacent to coordinator process)
 
 Schema defined in §3 Workflows. Key constraints:
+
 - Coordinator is sole writer (atomic: temp file → rename)
 - First-run: initialize empty schema
 - Corrupted: delete, start fresh
@@ -726,6 +761,7 @@ Schema defined in §3 Workflows. Key constraints:
 | Domain | Single select | product, growth |
 
 **Auto-population via workflow:**
+
 - Role: derived from agent_role → Role mapping (subjects YAML `role` field or domain)
 - Domain: derived from issue label `domain:product` or `domain:growth`
 
@@ -809,13 +845,16 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ### 5.2 Component Descriptions
 
 #### Slack Bridge (Extended)
+
 **Location:** `operations/slack-bridge/src/`
 **Current state:** Exists for manual-slack usage. Needs 3 additions:
+
 1. **Agent identity:** Single Slack app with one bot token. Each role gets a distinct `username` override — visually separate, non-spoofable.
 2. **@mention routing (SlackRouter):** Detect @agent mentions → query /status for agent_state → spawn or enqueue
 3. **Channel-level posting:** Ensure agents post in `#team-{slug}` channels (channel-map.ts already has channel routing)
 
 **New component — SlackRouter:** Embedded in inbound.ts. On inbound message:
+
 - Parse @mention target agent_role
 - GET bridge `/status` to read target's agent_state
 - If idle → spawn Pi session with subject template
@@ -825,6 +864,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 - If /status unreachable → enqueue (safe path: delayed > duplicate spawn)
 
 #### Coordinator Daemon
+
 **Location:** New — `operations/coordinators/{team-slug}/`
 **Runtime:** Continuous daemon, single instance per team, flock-locked. TypeScript (Node.ts) — consistent with existing Slack Bridge runtime. Invoked via systemd/launchd.
 **Cycle interval:** 300s (configurable per team YAML)
@@ -834,6 +874,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Memory:** coordinator-state.json loaded at cycle start, written at cycle end
 
 **Cycle phases (WF-1):**
+
 1. Acquire flock → read state file → query /status
 2. Activity detection (Slack + GitHub, per-service degradation)
 3. Stuck detection (issues > STUCK_DETECTION_SECONDS with no activity)
@@ -844,6 +885,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 8. Write state → release flock
 
 #### HealthMonitor
+
 **Location:** New — runs alongside coordinator OR as separate process
 **Function:** Watches agent PIDs, writes health_state to /status
 **Writes to /status:** `health_state` (healthy/crashed), `pid`, `health_check_failures`
@@ -851,6 +893,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Sole writer of `health_state`** — no Agent Pi session writes to this field
 
 #### Bridge /status Endpoint
+
 **Location:** New — alongside Slack Bridge
 **Function:** Single source of truth for agent runtime state
 **Serves:** Coordinator (reads all states), SlackRouter (reads dispatch target)
@@ -858,6 +901,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Auth:** Phase 1 trusts localhost-only (same process boundary as Slack Bridge). Phase 2: Unix socket permissions or shared localhost secret per OWASP API7:2023.
 
 #### Specialist Agents
+
 **Runtime:** One-shot Pi sessions (spawned by @mention trigger; TypeScript via Slack Bridge, Node.ts runtime — consistent with existing stack)
 **Template:** subjects YAML per role (skills[], boundary[], domains[])
 **Lifecycle:** spawn → read issue context → execute skills → write agent_state → exit
@@ -954,6 +998,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 → `503 Service Unavailable`: state unwritable
 
 **POST body schema:**
+
 ```json
 {
   "agent_role": "implementer-product",          // required: who this update is for
@@ -966,6 +1011,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
   "health_check_failures": 0                    // HealthMonitor ONLY
 }
 ```
+
 **Partial updates:** Only send fields that changed. Unlisted fields preserved. Authorized writers per field table:
 
 | Field | Writer |
@@ -987,6 +1033,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Extension 1 — Agent identity:** Single Slack app with one bot token, routing all agents internally via SlackRouter. Each agent role gets a distinct `username` override in `chat.postMessage` — visually distinct, non-spoofable, 1 app slot.
 
 **Extension 2 — @mention routing (SlackRouter):**
+
 - Parse `@<agent_role>` from inbound message text
 - GET `/status` → read target `agent_state` + `health_state`
 - `health_state == crashed` → post "⚠️ @agent_role is down"
@@ -1001,6 +1048,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Endpoint:** `POST /coordinator/enqueue`  
 **Auth:** Localhost-only (Phase 1)  
 **Body:**
+
 ```json
 {
   "agent_role": "pm",           // required: subjects YAML role slug
@@ -1008,6 +1056,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
   "from": "coordinator"         // required: source identifier (coordinator|slackrouter)
 }
 ```
+
 **Responses:**  
 → `202 Accepted`: enqueued for next coordinator cycle  
 → `400 Bad Request`: unknown `agent_role`  
@@ -1035,10 +1084,12 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 → `503 Service Gateway Timeout`: GraphQL mutation failed (retry in next cycle)
 
 **Effect:** GraphQL mutations to populate Projects v2:
+
 - `addProjectV2ItemById` → add issue to project board
 - `updateProjectV2ItemFieldValue` → set Role and Domain custom fields
 
 **Role derivation chain:**
+
 1. GitHub webhook provides `assignee.login` (GitHub username)
 2. subjects YAML: match `github_login` → get `role` slug
 3. Role slug → display name via mapping table
@@ -1060,6 +1111,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 
 **Invocation:** `pi -p -s <subjects_yaml_path> --role <role_slug> --issue <number>`  
 **Session lifecycle:**
+
 1. Read subjects YAML → load skills[], boundary[], domains[]
 2. POST `/status`: `{"agent_state": "working"}`
 3. Execute skills in order (e.g., issue-scoping → writing-plans → commit-workflow)
@@ -1075,6 +1127,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Detection mechanism:** Coordinator-cycle-driven — scans `conversations.replies` for emoji reactions on initiative proposal messages. No separate webhook endpoint (avoids Slack Events API subscription complexity for Phase 1).
 
 **Approval flow:**
+
 1. Strategist posts initiative → coordinator adds to `initiative_registry` with `status: pending`
 2. Coordinator's next cycle scans initiative message for emoji reactions:
    - ✅ present → `status: approved` → dispatches
@@ -1083,6 +1136,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 3. Human gates are checked EVERY cycle (not just once) — stale detection runs until resolution
 
 **Kill command (`@coordinator kill initiative #123`):**
+
 - Validates sender is human (check Slack user ID — agents cannot kill): rejects with "❌ Kill rejected — only humans can kill initiatives"
 - Issue not found → "❌ Issue #123 not found — check number?"
 - Already closed → "❌ #123 is already closed"
@@ -1109,6 +1163,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 **Loading:** Read at startup + reload on SIGHUP (Unix signal for config reload; allows live config updates without daemon restart).
 
 **Validation:**
+
 - File missing → log FATAL, exit 1 (no recovery)
 - YAML parse error → log FATAL with error, exit 1
 - `github_project_id` missing → log FATAL, exit 1 (Kanban depends)
@@ -1119,6 +1174,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ### 6.10 Agent Spawn Error States
 
 **Errors on spawn (`pi -p -s <yaml> --role <slug> --issue <n>`):**
+
 - subjects YAML not found → log error, exit 1
 - role_slug not found in YAML → log error, post "⚠️ Unknown role: `<slug>`" to Slack, exit 1
 - /status unreachable → retry 3× (1s backoff), then post warning and proceed (optimistic spawn: better to work than wait)
@@ -1432,6 +1488,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ```
 
 **Boundary clarifications:**
+
 - **#6210 vs #6211:** #6210 delivers Slack Bridge foundations (single app with per-role username override, channel routing) and SlackRouter stub. #6211 delivers /status. After #6211 completes, SlackRouter queries GET /status for spawn-vs-enqueue decisions.
 - **#6213 vs #6223:** #6213 delivers coordinator cycle loop with empty `message_queue` in state schema (stub phase). #6223 fills the stub with dequeue + overflow logic.
 
@@ -1440,6 +1497,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ### MECE Verification
 
 #### Mutually Exclusive
+
 | Issue Pair | Overlap Risk | Verdict |
 |-----------|-------------|---------|
 | #6210 ↔ #6211 | Both modify Slack Bridge; separate concerns (routing vs state) | ✅ ME |
@@ -1451,6 +1509,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | #6221 ↔ #6214 | Gate vs escalation; different triggers (human approval vs stuck detection) | ✅ ME |
 
 #### Collectively Exhaustive
+
 | Scope Item | Covered By | Status |
 |-----------|-----------|--------|
 | S1: Slack communication primitives | #6210 | ✅ |
@@ -1466,20 +1525,21 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | E2E Test Coverage | #6224 | ✅ |
 
 ### MECE Verdict
+
 **MECE CLEAN** — 15 issues, no overlaps, all 10 scope items covered + integration testing. Boundary clarifications added for #6210/#6211 and #6213/#6223.
 
 ### Wiring Check
+
 - **Scope coverage:** 10/10 scope items have ≥1 issue ✅
 - **Plan traceability:** 15/15 issues trace to plan sections ✅
 - **Dependency acyclicity:** ✅
 - **Parallelism:** 7 groups across 4 phases
 
 ### Dependency Soundness
+
 - Graph is **acyclic** ✅
 - Phase 1: #6210 + #6222 in parallel → #6211 → #6212 + #6213 in parallel
 - Phase 2: 4 coordinator sub-issues in parallel (after #6213)
 - Phase 3: 5 specialist agents in parallel (after #6212; SlackRouter from #6210 needed for spawn)
 - Phase 4: Integration tests after all components
 - **Constraints verified:** Strategist depends on Specialist FW only (not coordinator); downstream agents don't depend on Strategist; SlackRouter stub precedes /status
-
-

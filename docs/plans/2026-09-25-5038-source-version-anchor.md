@@ -27,6 +27,7 @@ Complexity: complex (Tier: Complex). See §7.
 The requirement is already canonical — `docs/ONTOLOGY.md` §4.6 (landed, PR #5022): *"Every **Point** derived from a source records **`sourceVersion`** — the `contentHash` of the version it was read from — on its `extractedFrom` link."* The code does not write it: `git grep -n sourceVersion -- '*.py'` on `origin/main @ acbe80f85` → **0 matches** (the #5199 branch anchors `references`, not `extractedFrom`).
 
 ### C1 — the edge is a replay-derived projection, re-created bare
+
 `extractedFrom` ∈ `DERIVABLE_STRUCTURAL_RELS` (`tortoise/projection/edges.py:31-34`), ∈ `STRUCTURAL_REL_LABELS` (`edges.py:39-46`), ∈ `SUPERSEDE_STRUCTURAL_RELS` (`tortoise/sdk.py:153-156`). `rebuild_all` wipes the graph (`projection/__init__.py:3996`). Three sites create/transfer the edge, all bare (`MERGE …`, no `SET`):
 
 | # | site | evidence | judgment |
@@ -38,9 +39,11 @@ The requirement is already canonical — `docs/ONTOLOGY.md` §4.6 (landed, PR #5
 ⚠️ An earlier draft of this plan called sites 2–3 defects unconditionally. That overstates: whether a transfer should carry a version is exactly O1 (§8), and under the ontology's own words it may be correct to carry none.
 
 ### C2 — the version is not available at link time on the dominant capture path
+
 Stubs mint `contentHash=''` (`edges.py:118-124`); connector Sources `''` (`entities.py:2222-2232`); the capture path links Points (`sdk.py:5059` → `sdk.py:3492`, inside `_extract_session_v2`, invoked `sdk.py:4145`) **before** `_materialize_session_source` sets the real `sha256(transcript)` (`sdk.py:4343` → `sdk.py:5454`). So on the majority writer no version exists when the edge is made — the honest value there is ABSENT (owner decision O6).
 
 ### C3 — honesty requires a third state, and it is NEW wording
+
 The honest recorded value is ABSENT, never `''` (which compares equal to a source's `''` and reads as a false *current*; #5199's `_anchor_on_create` guard, branch `edges.py:249-254`). `ONTOLOGY.md:712` states the read per link and **binary** ("current only when **every** link is"); a link with no recorded version is neither → **`unknown` is an addition to §4.6**, and naming it is owner-gated (O5). The read can *express* unknown without the wording change; the wording names it for readers. `:Source.version` must not be a fallback anchor: `_upsert_source` sets `s.version=1` ON CREATE (`entities.py:2432`) and `s.version+1` ON MATCH (`2451-2453`), but `_mint_source_stub` never sets it (`edges.py:116-133`) → `NULL+1` stays NULL. Naming: `tortoise_stale` already exists with **time-since-update** semantics (`tool_registry.py:822-827`, `sdk.py:10277-10283`) — a currency read must not nest under it.
 
 **Root-cause verdict.** The requirement is root-cause; the issue's literal edge-only mechanism is symptom-level. **#5024 does not substitute** — #5024 closes the SOURCE-side journal gap; this issue's gap is the per-Point read-version record. #5024 is a child of **#5048**; **#5089** is the durability epic whose contract (`derived = replay(journal)`) the mechanism must satisfy.
@@ -82,22 +85,26 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 ## 4. Task breakdown
 
 ### Task 1: Record the read version on the create path  *(decision-free — ships first)*
+
 **Intent:** give the create path a durable, replayable per-link read version.
 **Acceptance:** a Point created against a Source with a non-empty `contentHash` carries the version on its `extractedFrom` edge **and** it survives `rebuild_all`; a Point whose Source has `''`/no hash carries **no** property; a caller-supplied version is rejected on every tenant surface; live == replay.
 **Files:** Modify `tortoise/projection/entities.py` (explicit SET clause + `_POINT_HANDLED`/`_META_KEYS`/`_POINT_LIST_PROPS` declarations), `tortoise/projection/edges.py` (`_link_source` NULL-guarded SET reading the passed value — **never** `s.contentHash` at replay), `tortoise/sdk.py` (`_sanitize_props` + bundle validator reject), `tortoise/consistency.py` (`_NEVER_A_NODE_PROP`/`_EXCLUSION_REASONS` entry, #5004 precedent), `tortoise/commit_schema.py` (`extra="forbid"` field if the bundle is touched), `config/ci-surfaces.yml` (register the new test — hand-curated, `tools/ci_selection.py:1489`).
 **Test:** new `tests/test_source_version_extractedfrom_5038.py` (precedent: `tests/test_provenance_extractedfrom_3263.py`).
 
 ### Task 2: Transfer semantics  *(O1 RESOLVED = record nothing → no work; retained as the record of the not-taken path)*
+
 **Intent:** under O1 = this plan's **A/B/C** the transfer would carry or re-derive a version; **the owner chose record nothing (= this plan's D), so the transfer is left alone.** This section is kept so a later lane can see what the alternatives would have cost — do not implement it without a new owner ruling.
 **Acceptance (not-taken path, for reference):** for a chain A→B→C, live and post-rebuild agree on the successor's `sourceVersion`; the anchor exists at the successor and NOT at old; if a version is carried, the identical guard is applied at **both** `sdk.py:6364-6367` and `projection/__init__.py:5602-5605`, and `structural_seen` includes the captured value.
 **Files (not-taken path):** Modify `tortoise/sdk.py` (emission SELECT/descriptor/live transfer), `tortoise/projection/__init__.py` (consumer + dedupe key), the `DirectEdgeRepoint` schema. Test: extend `tests/test_pointsuperseded_rebuild.py`.
 
 ### Task 3: Currency read (tri-state)  *(O3 FULLY resolved — placement by Policy B, enforcement by the owner 2026-09-26; see §8)*
+
 **Intent:** deliver issue deliverable 3. **O3 is resolved by the Policy B ruling:** the check is a **read** comparing the version recorded on the extraction link with the source's current `contentHash`, with **no stored `status`** field, reported on the **existing** read surfaces — so **no new tool and no new SDK method** (the #4282 tool/method rule is satisfied).
 **Acceptance:** per Point/per link `current`/`stale`/`unknown`, **`unknown` when either side is `NULL`/`''`**; never nested under `tortoise_stale`; and the **decided enforcement form** (owner, 2026-09-26T11:17:30Z, `#5038` comment `5845802608`): **when a newer fact exists, the out-of-date fact is NOT returned as an answer — it is disclosed as an FYI carrying its source** (*"We should not return an out-of-date fact when we have a newer one"* … *"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). Reporting stays on the **existing** result row (no new tool, no new SDK method) and no `status` field is stored. This is a **deliberate departure** from the field's flag-alongside practice — see the `OVERRIDES:` line in §8 O3. The **write-time** notice the owner also asked for is **`lane:c1-capture`'s**, not this task's.
 **Files:** Create `tools/source_currency.py` as the shared derivation helper (the read path consumes it; it is not a separate user-facing surface). Test: unit + integration.
 
 ### Task 4: Close the loop on the residuals  — ✅ DONE on the residuals it OWNS (2026-09-25); ⚠️ O5 remains outstanding by design
+
 **Intent:** make the deferred decisions and gaps visible where the next lane reads.
 **Status:** O1/O3 posted on **#5038** (the artifact the owner reads) ✔ · the re-inference-engine issue **filed as #5422** (acceptance A2's home) ✔ · the `#5024` dependency recorded in the §9.6 status pointer and in #5422 ✔ · the 2489 step-4 departure **moot under O1 = D** (O2 was only live if a version were carried) — recorded as moot rather than left implied ✔ · ⚠️ **O5 is NOT posted and is NOT closed**: it is an **owner-gated** ontology-wording change (§8 O5 — *this work ships no ontology text*), so this task is done on the three residuals it owns and **explicitly not** on the acceptance line's O5 clause. Closing it would require the owner to add the third state to `ONTOLOGY.md` §4.6; until then it stays outstanding (see R8).
 **Acceptance:** O1/O3/O5 posted on **#5038**; a re-inference-engine issue filed (acceptance A2's home); the 2489 step-4 departure surfaced; the #5024 dependency recorded. **⚠️ Read the O5 clause as NOT met:** the task deliberately does not satisfy it, because the ontology wording is the owner's (O5). The remaining clauses are met.
@@ -106,12 +113,15 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 ---
 
 ## 5. Testing strategy
+
 Integration + round-trip (the epic's own row 9, `docs/epics/2026-09-24-5088-d10-fold/01-test-design.md:34`; lane registry `config/ci-surfaces.yml`): (a) live==replay round-trip with an explicit hash; (b) **supersede chain A→B→C** — live and replay agree (single-hop is insufficient); (c) pass-2b zero-incident; (d) unknown-absent (`''` yields no property and reads `unknown`); (e) `ingest` twice across a version change → identical `batch_id`, no duplicates; (f) caller-supplied `sourceVersions` rejected on `ingest` **and** `create_point(**props)`; (g) equality: the key never lands as a stray node property; (h) live==replay for the **current** operand (known gap until #5024 lands). Also: `tests/test_consistency_divergence_5011.py` (the live-vs-replay gate) and the closed-key-set tests (`tests/test_ingest_conformance.py:38-41`, `tests/test_ingest_bundle.py:752`).
 
 ## 6. Verification plan
+
 Docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`), the parity suites (`test_pointsuperseded_rebuild.py`, round-trip parity, supersede edges), then `tools/surface_manifest.py check` for surface drift.
 
 ## 7. Complexity
+
 | Domain | Rating | Rationale |
 |---|---|---|
 | Ontology | high | the third state is new wording; Design A is a §4.6 reopen |
@@ -134,11 +144,14 @@ Docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_m
 - **O9 — how mechanical validity reconciles with EP confidence. ✅ RESOLVED (research complete; no owner decision required) — raised BY THE OWNER** (2026-09-26T11:17:30Z, comment `5845802608`). His words: *"confidence is derived logically through logical relationships and evidence backing"* (epistemics) versus *"in traditional knowledge graphs, validity is derived mechanically assuming sources are the source of truth"* — *"So not sure how we reconcile the two here"*, with the stated risk of ending up with *"2 parallel mechanisms"*. *Why it matters:* if a fact's currency is decided by a source-hash comparison while its belief is decided by EP, the two can disagree — a source-fresh fact with weak evidence and a source-stale fact with strong evidence — and nothing yet says which wins or whether one silently overrides the other. ✅ **RESEARCHED (2026-09-26) — the answer is the gate, and the composition already ships.** **Finding:** the two cannot become parallel mechanisms, because confidence and validity are *already* combined by one explicit rule — `has_ep = measured AND NOT terminal` (`search_engine.py:2002`; computed `:1739`/`:1754`; `_alive_flag`, `live.py:139`) — and `terminal` is not a belief factor at all but a **participation gate**: `ep.py:1081` `participates = not is_terminal and (status != "draft" or include_draft)`, with terminal inputs *"DEAD for EP and NEVER participate"*. **Evidence quality already reaches EP** through `sdk.py::_apply_source_inheritance` → `_compute_source_prior` → the point's **Beta prior** (`ep_alpha`/`ep_beta` ≈ `log2(N+1) · decay · Σ pc_base(tier)`) — **not** an operator weight (`weights.py::compute_operator_weight` has no source-tier or decay input; an earlier version of this note said otherwise and was corrected). **Recommendation — no owner decision required, it contradicts nothing recorded:** (1) currency is a **gate** composed into the existing `AND` — `measured AND NOT terminal AND NOT (stale ∧ a-newer-fact-exists)` — **not** an EP factor; (2) evidence quality keeps flowing via the Beta prior, unchanged; (3) on the disagreement case (newer **unsourced** fact vs older **sourced** fact) **disclose, never silently adjudicate** — which is the owner's own ruling; (4) do **not** lower an unsourced fact's confidence as compensation — **label** its provenance in the result instead, because re-scoring belief from a validity fact is exactly the entanglement that produces the *"2 parallel mechanisms"* the owner named. *Evidence:* direct code verification + TMS (validity as a relabeling/justification layer; ATMS for multi-context) + AAAI *Marrying Uncertainty and Time in Knowledge Graphs* (probabilistic facts under hard constraints). Issue comments `5845980017` (finding) and `5845994202` (verifier correction).
 
 ## 9. Outcome of this scoping pass
+
 Two halves with different readiness:
+
 - **The create-path anchor (Task 1) is SAFE and self-contained** and is filed as one scoped child issue: it threads the value through the point's own journaled snapshot (X3's `extractedFrom`-style transit) so live == replay, with no transfer edit and no owner reopen.
 - **The transfer semantics (Task 2) is NOT self-contained** — it forces a §4.6 reopen (O1) and touches the live transfer, the descriptor, and the dedupe key. **No implementation is dispatched for it**; it waits on O1, and O3/O5 gate the read/model wording.
 
 ## 10. Residuals (documented, not chased)
+
 | # | severity | residual |
 |---|---|---|
 | R1 | P0 | O1: the transfer semantics is a §4.6 **reopen**, owner-only. |

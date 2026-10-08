@@ -36,6 +36,7 @@ card opening the wizard (no raw-curl dead end). Completed users never see
 it.
 
 **Backend additions (this work):**
+
 - `POST /v1/objects` — wraps `sdk.create_object` (idempotent by name).
 - `about_object` on `POST /v1/points` — wires the ID-based
   `(p)-[:aboutObject]->(o)` edge (never a bare prop; never the

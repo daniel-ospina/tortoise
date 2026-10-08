@@ -40,6 +40,7 @@ workflows in `product/2026-08-11-workflows-skills-usecases.md`. Principles:
 ## Cross-cutting design decisions
 
 ### Reification (ontology v3.5 §8)
+
 - `operator_action(action=mitigate|annotate)` is the mitigation substrate. Operator iff mitigation
   (or Point↔Point support/contradict). Structural edges stay plain.
 - `create_edge` creates typed structural edges (performs/produces/uses, memberOf/ownedBy, about*),
@@ -48,33 +49,39 @@ workflows in `product/2026-08-11-workflows-skills-usecases.md`. Principles:
   message init) — tracked as EP follow-up.
 
 ### Node lifecycle (not point lifecycle)
+
 - All nodes (Points + entities) carry the lifecycle (`draft/live/retracted/superseded/outdated/archived`).
 - Points additionally carry EP confidence (the Point-specific epistemic dimension).
 - `supersede` / `retract` / `update` / `delete` are node-lifecycle ops (apply to Points AND entities).
 
 ### Write nudges (nudge, don't enforce)
+
 - Write actions create the node and return `{node, nudges:[{candidate, suggested_relation}]}`.
 - Nudges suggest IMPL/NAND/mitigate connections to related candidates. Not enforced — the agent
   acts on them via `operator_action`/`create_edge` if it wants. Drives connectivity without forcing it.
 
 ### `update` / `delete` unify point + entity
+
 - One `update(id, props)`: detects node type; if a Point applies point-lifecycle semantics
   (draft→live promote, version increment for Point:Object, status validation), else plain update.
 - One `delete(id)` (destructive, human-confirm), point or entity.
 
 ### `dream` is NOT a tool
+
 - Dreaming (whole-graph/expanding EP to keep the graph fresh) is **maintenance, not an agent action**.
 - Runs as a scheduled/internal operation: hosted = server-side schedule; enterprise self-hosted =
   customer-configured. Removed from the MCP surface. `compute_confidence(scope=subgraph)` stays
   (agent-triggered, targeted EP after connecting).
 
 ### `compute_confidence` naming
+
 - The EP-running tool is `compute_confidence` (intuitive), not `ep` (internal). `set_point_baseline`
   folds in as `compute_confidence(set_baseline=...)`.
 
 ## Old tool → new surface mapping
 
 **Folded into the 19:**
+
 | Old | New |
 |---|---|
 | search, query, paginated_query, query_points_by_tag, entity_profile, traverse, list_topics, suggest_entry_points, search_sessions, session_context, get_session, get_events, get_point, get_entity, get_operator | `recall(mode)` + `get(id)` |

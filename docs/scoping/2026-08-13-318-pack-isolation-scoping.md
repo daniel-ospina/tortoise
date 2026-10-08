@@ -104,10 +104,13 @@ GTM confirms starter packs are a default set for all tenants.
 ## Verification Gates
 
 ### problem-verify: 1 cycle, PASS (0 P0, 0 P1; P2×4 incorporated) | 0 issues remain
+
 ### solution-verify: 1 cycle, PASS (0 P0, 0 P1; P2×2 + P3×5 incorporated) | 0 issues remain
+
 ### coherence (Phase 5.6): [QWEN-GATE] substitute reviewer used (qwen3.8-max blocked 401) — 1 cycle, P1×2 FIXED, no re-run (per constraint: fix once, document)
 
 **coherence — Cycle 1 (substitute reviewer):**
+
 - Findings: P0=0, P1=2, P2=2, P3=2, P4=2
 - [QWEN-GATE] P1-1 (self-heal masks eager-path defects; never-activated semantics ambiguous): FIXED —
   AC1 now asserts direct-graph PackInstall nodes post-provision pre-GET; test-only
@@ -123,6 +126,7 @@ GTM confirms starter packs are a default set for all tenants.
   pure env-derived / MCP-as-HTTP-client).
 
 **solution-verify — Cycle 1:**
+
 - Verifier A: P0=0, P1=0, P2=2, P3=3, P4=1
 - Verifier B: P0=0, P1=0, P2=0, P3=2, P4=3
 - Controller action: gate PASSES on P2+ only. Incorporated: P2-A1 concurrency model (MERGE atomicity
@@ -135,6 +139,7 @@ GTM confirms starter packs are a default set for all tenants.
   re-dispatch (no P0/P1).
 
 **problem-verify — Cycle 1:**
+
 - Verifier A: P0=0, P1=0, P2=2, P3=4, P4=1
 - Verifier B: P0=0, P1=0, P2=2, P3=4, P4=2
 - Controller action: gate PASSES on P2+ only. Incorporated: P2-A1 revised-O/I/T block (done above);
@@ -238,6 +243,7 @@ Ontology=low, UX=low, Library-deps=none-new.
 ## Rejected Alternatives (solution diamond)
 
 **Problem-diamond rejects (recorded for traceability):**
+
 - **F1 per-tenant packs_dir copies** — drift (Kong parity / Spree no-per-tenant-installation), global
   singleton consumers wouldn't reach per-tenant dirs anyway, storage duplication. *Would be better for:*
   a paid silo compliance tier (FedRAMP/HIPAA residency) requiring physical vocabulary isolation.
@@ -248,6 +254,7 @@ Ontology=low, UX=low, Library-deps=none-new.
   custom-pack authoring path; near-term user-visible value is limited (nothing breaks today).
 
 **Boundary/lifecycle decisions (from problem-verify):**
+
 - Pack install-state lives in the tenant graph (`graph_name=org_{id}`). Graph deletion wipes
   install-state — acceptable: tenant deletion implies pack-state deletion. Re-provisioning with the same
   org_id re-activates via the idempotent path. Recorded as an explicit decision, not a gap.
@@ -300,6 +307,7 @@ future extensibility — NOT on diff size:
    RLS-misconfiguration class bugs (no RLS surface).
 
 **Rejected alternatives (with when-they-WOULD-be-better):**
+
 - **B (Supabase table + RLS)** — would be better when: the dashboard (Supabase-hosted) must read pack
   state directly, or cross-tenant pack analytics/billing queries are needed, or pack state must survive
   graph deletion. Not now: dual-mode fragmentation, RLS surface = new attack surface for marginal gain.
@@ -316,6 +324,7 @@ future extensibility — NOT on diff size:
 `pack_summaries()` dict for catalog joins. No behavior change.
 
 **2. New `tortoise/pack_state.py`** (thin, imports SDK + pack_registry):
+
 - Constants: `PACK_INSTALL_LABEL = "PackInstall"`, default starter set from
   `TORTOISE_STARTER_PACKS` env (default `dev,marketing,product-strategy,project-management`).
 - `ensure_tenant_packs(sdk, starter=None) -> list[dict]` — idempotent: `MERGE (p:PackInstall
@@ -335,6 +344,7 @@ future extensibility — NOT on diff size:
 
 **3. Provisioning hooks** (`tortoise/hosted_api.py`): call `ensure_tenant_packs` after graph creation
 at the three provisioning sites — **enumerated with mode mapping (coherence P2 fix):**
+
 1. Registry-mode `/internal/provision` (~line 640) — serves `TORTOISE_CONTROL_PLANE=registry`
    (selfhost).
 2. Self-service key provisioning (~line 1660) — Supabase mode (calls `provision_team` RPC then
@@ -346,6 +356,7 @@ covered (reconciles with the Integration Docs finding: activation hook lives in 
 Best-effort (Backlex: failure never blocks signup).
 
 **4. Introspection surface (single ensure-then-read core for BOTH surfaces — REST/MCP symmetry):**
+
 - **Scoping model (PINNED): auth-only — no tenant_id selector parameter.** Team identity comes
   EXCLUSIVELY from auth (`get_current_org` REST dependency / `_current_org_id` MCP contextvar).
   Consequence: cross-tenant access is **structurally impossible** (no request can name another
@@ -394,6 +405,7 @@ constraints exist. Plan includes a one-line CI-safe verification that graph writ
 against an ontology whitelist that would reject the new label.
 
 **Risks/limits of Approach A (explicit — consciously accepted):**
+
 - **Graph-lifecycle coupling:** install-state dies with the tenant graph. Accepted: deletion of a
   tenant graph discards pack install-state; the introspection self-heal reinstalls the starter set
   on next access (recorded decision, not an accident).
@@ -409,6 +421,7 @@ against an ontology whitelist that would reject the new label.
   records exist outside tenant graphs (isolation invariant stated as a property, not an accident).
 
 **Rejected implementation variants (coherence devil's-advocate, recorded):**
+
 - **Postgres installs table** — rejected for graph co-location (state lives beside the data it
   governs) + zero new deps; acknowledged cost: no transactional backfill and install-state dies on
   graph outage (the 503-on-outage surface is the price of the in-graph choice).
@@ -419,6 +432,7 @@ against an ontology whitelist that would reject the new label.
   HTTP-in-HTTP indirection.
 
 **Testing strategy:**
+
 - `tests/test_pack_state.py` — idempotency (run ensure twice → identical state, no dupes); activation
   writes correct nodes; get_tenant_packs returns starter set + metadata; empty graph self-heals;
   unknown/removed pack from starter list doesn't orphan installs (removal = no-op, upgrade-in-place);
@@ -441,6 +455,7 @@ against an ontology whitelist that would reject the new label.
 **Runtime prerequisites:** none new — existing FalkorDB/FalkorDBLite, Supabase (optional), stdlib.
 
 **Acceptance criteria:**
+
 - **AC1 (provisioning automated):** new tenant via ANY provisioning path ends with the starter pack set
   active in its graph — asserted by DIRECT `(:PackInstall)` graph query immediately post-provision
   (pre-GET, self-heal disabled via test flag) so the eager path is proven independent of the surface.
@@ -490,6 +505,7 @@ Full per-gate cycle logs are in the **Verification Gates** section above (proble
 ## Finalize
 
 **Extra issues filed during scoping (do-not-absorb):**
+
 - **#1154** — tech-debt: process-global pack registry singletons (`domain_loader._registry`, `sdk._get_kind_expander`) are a latent cross-tenant leak when custom-pack authoring lands. Trigger: the custom-pack authoring slice. Proposed approach: per-tenant registry cache keyed by `org_id` via the existing `mcp_auth` ContextVar seam; `asyncio.to_thread`-only execution. Related: #318.
 
 **Parallel-work checkpoint (skill-mandated `parallel_work_check`):** SKIPPED — infra tooling not present in this environment; noted per streamlined-run constraint.

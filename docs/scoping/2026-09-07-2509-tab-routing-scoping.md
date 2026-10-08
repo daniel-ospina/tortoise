@@ -1,7 +1,9 @@
 <!-- issue-scoping: v5.1 double diamond + verify -->
 ## Confirmed Problem
+
 Dashboard tabs use React state only (`const [tab, setTab] = React.useState('overview')` at main.jsx:1232),
 making them invisible to browser navigation. Users cannot:
+
 - Deep-link to a specific tab (no sharable URLs like `/keys`)
 - Use browser back/forward to navigate between tabs
 - Refresh the page without losing their tab position
@@ -17,6 +19,7 @@ accepted scope boundary for this issue.
 ## Verification Gates
 
 ### problem-verify: 2 verifiers, controller fixes applied, re-dispatching
+
 ### solution-verify: pending
 
 ## Plan
@@ -26,6 +29,7 @@ accepted scope boundary for this issue.
 **Chosen:** Approach A — lightweight hash-based routing without a router library.
 
 Tab internal names → URL fragment mapping (verbatim):
+
 - `overview` → `#/overview`
 - `keys` → `#/keys`
 - `graphs` → `#/graphs`
@@ -35,6 +39,7 @@ Tab internal names → URL fragment mapping (verbatim):
 - `profile` → `#/profile`
 
 **Mechanism:**
+
 1. **Read tab from URL on mount:** Use the module-scope `landingHash` (captured at
    line 687, BEFORE supabase.js mutates the hash) to read the initial tab. If it starts
    with `#/` and the remainder matches a known tab (`overview`, `keys`, `graphs`,
@@ -51,6 +56,7 @@ Tab internal names → URL fragment mapping (verbatim):
    are handled separately by existing code.
 
 **pushState vs replaceState:**
+
 - `pushState` for user-initiated tab switches (each tab click creates a history entry)
 - `replaceState` for the initial tab read from URL (no extra history entry on load)
 
@@ -59,6 +65,7 @@ hash-writing effect on the initial render. This prevents React 18 strict mode's
 double-effect from creating duplicate history entries on mount.
 
 **Existing replaceState calls audit:**
+
 - Welcome→dashboard transitions (`replaceState({}, '', '/')` at lines 2467, 5473, 5728, 5943):
   These happen after `setTab()` has already been called. The URL reset must include the
   current tab hash. Update to `replaceState({}, '', '/#' + tab)`.
@@ -83,7 +90,8 @@ double-effect from creating duplicate history entries on mount.
 **Programmatic tab navigation (OAuth → profile):** Handled automatically by the
 `useEffect`-based approach — any `setTab()` call triggers the hash sync.
 
-**Known limitation:** 
+**Known limitation:**
+
 - Intra-tab sub-state (selected session, graph detail, etc.) is NOT restored on
   back/forward navigation — only the tab itself is restored. This is per the accepted
   scope boundary.
@@ -91,10 +99,13 @@ double-effect from creating duplicate history entries on mount.
   The `useRef` guard prevents duplicate history entries in both development and production
 
 ## Clarifications
+
 None required — no clarifying questions needed for this well-understood task.
 
 ## External Research (Phase 1.5 artifact)
+
 ### Axis Research
+>
 > **Trigger assessment:** axes all low (UX=low — same tabs, same behavior, URLs added
 > underneath; Ontology=low — no data model changes; Architecture=low — pure client-side
 > pattern, no architecture changes); no third-party deps; well-understood pattern (hash-based
@@ -103,9 +114,11 @@ None required — no clarifying questions needed for this well-understood task.
 > activation rule.
 
 ### Integration Docs
+
 N/A — no new dependencies or integrations.
 
 ## Rejected Alternatives
+
 - **Approach B (path routing):** `/overview`, `/keys` as real paths. Requires Cloudflare Pages
   SPA fallback config. Riskier — breaks existing auth gate assumption that the app lives
   at `/`. The Cloudflare Pages `_redirects` file shows no SPA fallback rule. Significant
@@ -114,6 +127,7 @@ N/A — no new dependencies or integrations.
   No deep-linkability, no browser back/forward, no bookmark support. Doesn't meet O/I/T.
 
 ## Wiring Check
+
 | Touch Point | Type | Covered By | Status |
 |-------------|------|------------|--------|
 | `const [tab, setTab] = React.useState('overview')` (line 1232) | State init | Use hash in initializer | ✅ |
@@ -132,12 +146,14 @@ N/A — no new dependencies or integrations.
 | `oauthErrorParams()`/`oauthErrorHash()` | OAuth check | Read `landingHash` from scope, unaffected | ✅ |
 
 ## Review Cycle Log
+
 Scope verify cycle 1 completed. Controller found Verifier B's P0 (OAuth hash conflict)
 overblown — tab hashes use `#/key` syntax vs OAuth's `key=value`; no actual conflict.
 Controller accepted P1 items (replaceState audit, push vs replace spec, welcome→dashboard
 transition, tab naming convention) as valid gaps and folded them into this document.
 
 ## Complexity
+
 | Domain | Rating |
 |--------|--------|
 | Complexity | standard |

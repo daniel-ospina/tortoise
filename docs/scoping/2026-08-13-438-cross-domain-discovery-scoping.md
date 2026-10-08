@@ -20,6 +20,7 @@ ownedBy: epistemic-team
 > Tortoise has **no production path that converts cross-lens candidate pairs into VERIFIED IMPL/NAND operators with MEASURED precision at BOUNDED per-cycle cost** — across both (a) multi-source ingest and (b) **separately ingested** streams — while preserving (1) the candidates-never-write/never-decide-semantics contract (`cross_lens.py`), (2) the draft/live EP-safe lifecycle (mining W-3/W-4, #785), and (3) the incremental batch-local cost property (cost ∝ new data, NOT O(n²) over total graph size).
 
 **Why this is the problem (evidence):**
+
 - Candidate generation LANDED (#650): `find_cross_lens_matches` produces similarity-gated candidates above the calibrated 0.40 threshold. The operator-deciders wired today are (a) the deterministic **cue-word gate** (`_cue_gate_pairs`, extractor.py:177 — fires only on similarity-gated *candidates*) and (b) the **LLM relation stage** (`_RelationStage` invoked from `LLMExtractor.run` conversation mode, extractor.py:927-940 via `ConversationMiner._make_extractor` mining.py:230-233 — explicit-assertion-only, whole-transcript, **never receives candidates**, precision unmeasured). **Neither can produce an operator for the motivating cross-vocab pair**: it scores 0.29 — BELOW the 0.40 candidate threshold, so it never becomes a candidate (`find_cross_lens_matches` returns [] for it; tests/test_cross_lens.py asserts candidate-absent non-event), and even if surfaced it carries no cue words. The blocker is the similarity floor + the absence of a candidate-consuming verified-relation mechanism, NOT the cue-gate alone.
 - **The LLM relation verifier is the documented #6306 remainder** (docs/plans/2026-08-08-399-embedding-matching.md: D5, D6, `### #6306 Integration Point` §702-719; `_last_candidates` recorded on MockExtractor as the documented integration point). The nearest existing machinery is `_RelationStage` itself — the verifier is a candidate-consuming mode/extension of that stage, not a new abstraction (Phase 3 note).
 - **Cross-stream discovery is NOT landed**: `mining.py` has no `multi_source=True` threading and no relation-stage invocation (verified by grep); #784/#1071 landed *content* dedup (alreadyDecided), not *relation* discovery; #785 landed EP-safe promote. The re-scoped target "IMPL/NAND edges between separately ingested research streams" is unmet.
@@ -108,6 +109,7 @@ ownedBy: epistemic-team
 > **Framing/AQ mapping (per-framing provenance):** Architecture findings → support Framing B cost-bound + AQ5 (PKGC bounded verification); pitfalls → refute naive threshold-only shortcut (armature judge, clinical-NLP). Precision findings → answer AQ3 (KGLLM methodology + gold-incompleteness caveat + annotator-noise). Ontology findings → support AQ1 boundary (small op set preserved) + the 2-op gate is an advantage. Hallucination findings → scope the verifier prompt (AQ1/root-cause (c)). Integration Docs → Wiring items (token-usage GAP, draft-write GAP, review-queue fit).
 
 **Architecture (high) — two-stage candidate→verify is the established pattern; verifier must test the evidence it weighs; defer corrections to a bounded post-extraction pass.**
+
 - canonical: Evaluation-filtering model collaboration — small model generates candidate entity pairs; LLM scrutinizes and assigns relations only for those candidates; filtering step is indispensable for precision (Ding et al., LREC 2024, aclanthology.org/2024.lrec-main.778). Mirrors Tortoise's cross_lens→verifier split.
 - canonical: Progressive KG Completion (PKGC) — verifier ψ authenticates a **bounded candidate set (nc) per iteration**; top-k with root-filter batches keeps mining cost feasible (arxiv 2404.09897). Supports bounded per-cycle verification cost.
 - canonical: Judge pattern — LLM-as-judge evaluates worker output; escalation judge reads **only the flagged subset** ("do not pass noise to the judge"); ⚠️ **uncalibrated confidence** pitfall: prose reads authoritative at 55% or 95% (armature docs/JUDGE-PATTERN.md).
@@ -116,16 +118,19 @@ ownedBy: epistemic-team
 - cost: DeepSeek V4 Flash = very low-cost option in Jul-2026 pricing comparisons (morphllm.com/llm-api; benchlm.ai/llm-pricing) — matches repo's default model class.
 
 **Ontology (medium) — keep the relation set minimal; verify against ontology constraints after extraction.**
+
 - canonical: "Prompt Me One More Time" — two-step extraction (candidates → refinement) + **ontology-constraint verification** (Wikidata property constraints) filters hallucinated triplets; outperforms fine-tuned extraction on non-synthetic data (TextGraphs 2024, aclanthology.org/2024.textgraphs-1.5.pdf).
 - pitfalls: HCRE — LLMs do **not consistently surpass SLMs** on cross-document relation extraction when the predefined relation set is large; prediction-then-verification helps (arxiv 2604.07937). → Tortoise's 2-op (IMPL/NAND) gate keeps the decision space minimal — an advantage to preserve; do NOT expand the op vocabulary in this issue.
 - Tortoise analog: IMPL/NAND between two draft points is structurally valid; semantic validity (does A actually support/refute B?) is the verifier's job. No new stored kinds needed.
 
 **Precision measurement (target-mandated) — methodology exists; gold standards are incomplete; F1 is a lower bound.**
+
 - canonical: Schema-constrained KG-extraction evaluation framework — canonical-name/alias matching, Hungarian-algorithm triple alignment (predicted vs gold), per-document micro-averaged P/R/F1, structured error categories (KGLLM workshop, LREC 2026, lrec-conf.org/proceedings/lrec2026/workshops/kgllm/).
 - pitfalls: **Gold standards are incomplete** — KGLLM manual analysis: 61.5% of model-predicted triples were textually valid but absent from the DocRED gold (gold projected from Wikidata; manual wiring will similarly under-annotate vs text) → automatic F1 = **lower bound** on actual quality; false positives vs gold may be gold's false negatives.
 - ⚠️ emerging (2 sources, different categories): human annotation itself is noisy — KnowledgeNet annotator analysis: 32% of annotator "mistakes" were actually correct (aclanthology.org/D19-1069.pdf); automatic annotator agreement with human ~high (Bronzi et al., ACL 2012). → Build the Tortoise human-gold eval set with 2 independent reviewers + adjudication, not a single annotator.
 
 **Hallucination control (pitfalls) — verification/correction stages reduce hallucinations; prompt must stay evidence-scoped.**
+
 - canonical: KG-integrated verification reduces LLM hallucination (survey: "Can Knowledge Graphs Reduce Hallucinations in LLMs?" arxiv 2311.07914; KG-retrofitting, AAAI 2026 ojs.aaai.org 29770). ⚠️ single-source survey claims — treated as directional, not quantitative.
 - Tortoise-specific: the verifier prompt carries the explicit-assertion-only legacy (`_RELATIONS_SYS`, extractor.py:454) BUT scoped to candidates — per 399 plan: "the prompt gains the verified-candidates context". The verifier decides IMPL/NAND **only for candidate pairs**, never invents new pairs.
 
@@ -155,12 +160,14 @@ ownedBy: epistemic-team
 ## Phase 2.5 — problem-verify GATE
 
 ### problem-verify — Cycle 1
+
 - Verifier A: P0=0, P1=0, P2=4, P3=4, P4=1 (P2s: LLM relation stage exists in mining conversation path — evidence overstated; idempotency gap; HITL framing not diverged; research per-framing provenance)
 - Verifier B: P0=0, P1=2, P2=3, P3=3, P4=1 (P1-1: 0.40 threshold — not cue-gate — blocks motivating pair; P1-2: live-endpoint tension; P2s: AQ1 draft-write caveat, no numeric precision bar, branch provenance)
 - Controller action: Fixed P1-1 (mechanism correction + Open Decision #1), Fixed P1-2 (edge case + Open Decision #2), Fixed P2s (evidence attribution, idempotency test/dep, precision bar OD#3, HITL framings e/f, provenance mapping, branch note, AQ1 caveat, test count).
 - Re-dispatching...
 
 ### problem-verify — Cycle 2 (re-dispatch)
+
 - Verifier A: P0=0, P1=0, P2=0, P3=0, P4=2 (P4-1 idempotency dep cross-ref dangling; P4-2 W-2/W-4 vs W-3/W-4 reference — cosmetic)
 - Verifier B: P0=0, P1=0, P2=0, P3=1, P4=2 (P3-1: OD resolution ordering vs close-check must be pinned in plan — slice 0 ordering; P4-2/P4-3 decimal drift)
 - Controller action: Incorporated P3-1 (plan slice 0 = resolve OD#1/OD#3 → close-check → implement), noted P4s. Gate PASSES — clean at P0/P1.
@@ -184,6 +191,7 @@ ownedBy: epistemic-team
 | `tests/test_extractor.py`, `tests/test_mining.py`, `tests/test_de2e1_entity_extraction.py` | — | Pipeline tests | Extend for verifier integration + cross-stream E2E |
 
 ### Partial implementations found
+
 - `_RelationStage` (extractor.py:735) — the LLM relation model EXISTS but is explicit-assertion-only, runs per single-document extraction, never receives candidates. **The verifier is a mode/extension of this stage, not a new abstraction.**
 - `_last_candidates` (extractor.py:200-215) — recorded but no consumer (documented #6306 integration point).
 - `MockExtractor.multi_source` (extractor.py:184-247) — full candidate→cue-gate pipeline exists as the M0 template the verifier replaces.
@@ -191,6 +199,7 @@ ownedBy: epistemic-team
 - Review-queue infra (#1071) — `list_dedup_candidates`/`approve_merge` reusable for verifier candidates.
 
 ### Recommended tests (to be detailed in plan)
+
 1. Verifier unit (`verify_relations` MockModel mode): candidate pair {support}→IMPL, {refute}→NAND, {none}→no operator, {low-confidence}→review queue; justification + confidence in output; explicit `none` ≠ absence.
 2. Verifier never writes outside draft lifecycle; EP never sees draft operators (reuse **DE2E-4** harness `tests/test_ep_draft_filter.py`).
 3. **Idempotency (within-run):** cue-gate + verifier both fire on the same candidate pair → exactly ONE operator. **Idempotency (cross-run):** re-run fold/re-mine with previously-folded points → NO duplicate operators (graph-level pair-exists check).
@@ -201,6 +210,7 @@ ownedBy: epistemic-team
 8. Cost telemetry: per-cycle token/$$ budget assertion (numeric cap per OD#5); empty-cycle zero-token (test 5); degraded-mode candidates routed (review queue) or flagged in prompt.
 
 ### Dependencies
+
 - `sentence-transformers` (existing), LLM provider (existing), pytest (existing). No new third-party deps identified.
 - ⚠️ Hard dependency: **draft-only operator write path** — CONFIRM-AND-ROUTE, not introduction: `EventAPI.add_operator` already writes `status:"draft"` and EP factors exclude drafts (`include_draft=False`); Slice 1(a) verifies verifier writes default to draft and promotion remains reviewer-gated (`promote_point`, #785, on the integration branch).
 - ⚠️ Hard dependency: **token-usage surface** for cost telemetry (WIRING item) — normalized across providers (DeepSeek `usage.prompt_tokens/completion_tokens` vs Gemini OpenAI-compat `usageMetadata`; OllamaModel has NO usage surface — wrapper/protocol extension must handle per-provider parsing + cost conversion).
@@ -219,6 +229,7 @@ ownedBy: epistemic-team
 ### Solution-Diverge: Distinct Approaches
 
 **Approach 1 — In-process pipeline stage: verifier as `_RelationStage` candidate-verification mode + multi-document fold (the #6306 contract path).**
+
 - *Description:* Extend the existing `_RelationStage` (extractor.py:735) with a candidate-verification mode that consumes `_last_candidates` (or re-runs `find_cross_lens_matches` over a folded batch). One batched LLM call per cycle over candidate pairs; returns `{src, dst, op_type, confidence, direction}`. Writes via the draft operator path. Precision telemetry + per-cycle token budget. Cross-stream: `mine_corpus` multi-document fold (per-document lens key = source/file), reusing the SAME verifier.
 - *Architecture:* no new module — a mode + a fold + telemetry. Reuses `Model.complete` protocol, `find_cross_lens_matches`, `_RelationStage`, review-queue infra.
 - *Files touched:* tortoise/extractor.py, tortoise/mining.py, tortoise/models.py (token usage), tortoise/sdk.py (review-queue fit), tests.
@@ -227,6 +238,7 @@ ownedBy: epistemic-team
 - *Best fit if:* the goal is the #6306 contract path with incremental cost and minimal new abstraction.
 
 **Approach 2 — Standalone verifier service/module + pull/cron discovery (CORRECTED after solution-verify).**
+
 - *Description:* NEW `tortoise/verifier.py` with a public `verify_candidates()` API + a scheduled/query-time discovery pass over NEW vs EXISTING stored points (pull or cron budget).
 - *Architecture:* decoupled module; discovery pass queries stored Points.
 - *Files:* tortoise/verifier.py (new), mcp_server.py / sdk.py, vector-index infra (existing — see correction).
@@ -235,6 +247,7 @@ ownedBy: epistemic-team
 - *Best fit if:* users must discover connections over the EXISTING graph on demand (pull), or streams are ingested rarely and discovery is expected at schedule time (cron).
 
 **Approach 3 — Verifier annotates only; operators via human-gated review queue.**
+
 - *Description:* The verifier produces *annotated candidates* ({src, dst, op_type, confidence, justification}); operators written ONLY via reviewer-approved promote (reuse `promote_point`/list-candidates pattern, #785). Zero EP risk. Precision measured initially as human-acceptance rate.
 - *Files:* extractor.py (verifier mode), sdk.py (queue data-model extension), mining.py.
 - *Risks:* per-cycle HUMAN cost unbounded as volume grows — conflicts with "turns unverified candidates into operators at scale" indicator; dilutes "automated" headline.
@@ -250,6 +263,7 @@ ownedBy: epistemic-team
 *Rationale (quality over convenience):* Approach 1 is the *better outcome* — it satisfies the re-scoped indicators: (1) verifier turns candidates into operators at scale (batched LLM verification with bounded per-cycle budget), (2) cross-stream discovery, (3) cost ∝ new data. It honors the documented #6306 contract (`_last_candidates` consumer), reuses in-repo machinery (zero new deps), and the fold makes cross-stream use the SAME verified-relation mechanism. ⚠️ **Post-verify correction:** the fold alone CANNOT deliver indicator (2) for separately ingested streams at indicator (3)'s cost — a fold over accumulated corpus is O(corpus²)/cycle, while a fold over new files only yields zero cross-lens candidates (same-lens exclusion). The hybrid adds a bounded new-vs-old pass over the EXISTING ANN index (O(|new| × k) hosted / O(|new| × corpus) embedded): fresh-corpus fold for first-cycle recall + index pull for subsequent streams. This is the honest composition that satisfies BOTH indicators.
 
 **Rejected alternatives (corrected):**
+
 - **Approach 2 as a SERVICE** (standalone module + cron): *when it would have been better:* if the product requires on-demand/query-time discovery over the full existing graph, or ingest-time cost must be zero. Rejected because: the service surface (new module, cron ops, MCP/CLI exposure) duplicates `_RelationStage`; embedded mode's brute-force new-vs-old pass degrades to O(new × corpus). The vector-index infra premise was WRONG (index exists) — corrected; the index-based new-vs-old mechanism is absorbed into Approach 1's Slice 4.
 - **Approach 3** as PRIMARY: *when it would have been better:* if EP-risk tolerance were zero or the precision bar unattainable — kept as the below-threshold output path, not the primary, because per-cycle human cost is unbounded and the re-scoped indicator says "at scale".
 - **Deterministic-only improvement** (framing e): *when it would have been better:* if freemium cost dominated and cue-gate recall sufficed; cue-gate remains the zero-cost first pass.
@@ -276,6 +290,7 @@ ownedBy: epistemic-team
 **Testing strategy:** unit (MockModel `verify_relations` semantics, idempotency, failure fallback, empty-candidate zero-token) → integration (extractor/mining pipeline with draft lifecycle — EP-draft harness is **DE2E-4** (`tests/test_ep_draft_filter.py`), not DE2E-8) → E2E (TWO-cycle ingest: 2 separately ingested streams → verified edges at bounded cost; incremental cost assertions) → precision eval (Slice 3) → cost budget assertions (Slice 6).
 
 **Acceptance criteria (verifiable):**
+
 - AC1: 2+ separately ingested research streams connected with verified IMPL/NAND edges (E2E = genuine two-cycle ingest; **fixture includes a sub-threshold/floor-less pair per OD#1 resolution so the acceptance criterion tests the problem's own motivating 0.29 case** — [QWEN-GATE] P2-3).
 - AC2: Verifier precision measured vs manual wiring on eval set sampled from the production candidate distribution (P/R/F1 report; measured precision is a LOWER BOUND — gold may under-annotate; auto-write gate at OD#3 bar via CI-lower-bound, Slice 3).
 - AC3: Per-cycle cost bounded and documented (numeric cap per OD#5, token/$$ budget assertion, Slice 6).
@@ -291,11 +306,13 @@ ownedBy: epistemic-team
 ## Phase 5.5 — solution-verify GATE
 
 ### solution-verify — Cycle 1
+
 - Verifier A: P0=0, P1=1, P2=1, P3=3, P4=3 (P1: Slice 4 fold has no old-stream-points mechanism within the cost bound — fold over accumulated corpus = O(corpus²); fold over new files only = same-lens exclusion → zero candidates; P2: cross-cycle idempotency once fold includes previously-folded points; P3s: gold-incompleteness not surfaced at Slice 3 gate, degraded-candidates unrouted, queue payload lacks point contents, verifier failure fallback unpinned, MockExtractor-only `_last_candidates`)
 - Verifier B: P0=0, P1=2, P2=4, P3=5, P4=1 (P1-1 [borders P0]: fold's incremental-cost claim false for separately-ingested case — indicators 2 & 3 mutually exclusive under A1 as specified; P1-2: **vector index ALREADY EXISTS in-repo** (HNSW Point.embedding, projection/__init__.py:969, sdk.py:4482-4528) — A2's rejection premise factually false; hybrid fold+ANN-pull is the better outcome; P1-3: failure policy + cross-run idempotency unpinned; P2s: eval-set sampling distribution, freemium gate/cost cap, review-queue under-specified, prompt input evidence; P3s: EP-draft exclusion IS operative today (AQ1 overstated), DE2E-4 not DE2E-8, scorer instrument mismatch, Integration Docs rows missing, lens unknown-collapse, token-usage provider variance)
 - Controller action: Fixed P1-1 (Slice 4 rewritten as TWO-part mechanism: fresh-corpus fold + incremental new-vs-old via existing ANN index), Fixed P1-2 (corrected Assumptions row + A2 rejection + hybrid incorporated into Approach 1), Fixed P1-3 (failure policy pinned: 1 retry + backoff → skip+queue; per-batch atomicity; graph-level pair-exists cross-run idempotency), Fixed P2s (eval sampling from production distribution + CI-lower-bound; OD#5 freemium gate + ≤200 cap; Slice 5 queue spec with contents + Variant-C deferral; prompt contract with evidence input + justification), Fixed P3s (AQ1 corrected — EP-draft exclusion operative; DE2E-4 harness; exact-pair scorer; Integration Docs rows added; lens-assignment pin; token-usage provider normalization). Re-dispatching...
 
 ### solution-verify — Cycle 2 (re-dispatch)
+
 - Verifier A: P0=0, P1=0, P2=3, P3=3, P4=2 (P2s: ANN-pull score semantics mode-dependent — rank pseudo-scores vs 1/(1+d), never cosine; 4(b) floor/top-k gating unspecified — floor-less top-k would naturally admit the sub-threshold motivating pair, partially resolving OD#1; prompt-contract "explicit-assertion-only SCOPED" ambiguity re-installs root cause #5; P3s: circuit-breaker degradation unpinned, lens resolution for retrieved old points, AC4 assertion tension in embedded, DE2E-N1 citation drift, run_vector_query vs degradation_chain ambiguity)
 - Verifier B: P0=0, P1=0, P2=3, P3=2, P4=1 (P2s: AC4 assertion contradicts its own embedded carve-out — brute-force IS a full scan; ANN-pull parallel candidate path with drifted score semantics + no 0.40 gate pre-empts OD#1; two-cycle E2E lacks cross-stream + path provenance assertions; P3s: search_engine.py missing from affected-files; ≤200-cap truncation order unpinned)
 - Controller action: Fixed P2s (batch-local cosine recompute for uniform verifier evidence; floor policy folded into OD#1 incl. top-k-admits-0.29 note; prompt semantics pin — judges candidate pairs, may conclude implied relations; AC4 mode-conditional; E2E assertions (a) cross-stream + (b) path provenance; search_engine.py read-only row; truncation order top-similarity default; citation fixes). Gate PASSES — clean at P0/P1, P2+ incorporated.
@@ -308,6 +325,7 @@ ownedBy: epistemic-team
 `[QWEN-GATE] substitute reviewer used` — qwen3.8-max BLOCKED (401). ONE fresh-context substitute reviewer dispatched via `task` with the skill's coherence prompt.
 
 ### Coherence review result
+
 - No P0. `[QWEN-GATE] P1-1`: gold-standard reviewer provenance — Slice 3 substituted "fresh-context agent reviewers + human adjudicator" for the problem diamond's "2 independent human reviewers" (KnowledgeNet annotator-noise evidence); agent reviewers may correlate with the verifier (same DeepSeek family) → systematically inflated measured precision. **FIXED**: reviewer independence pinned at Slice 3 (different provider OR human stratified sample OR correlation risk recorded in AC2).
 - `[QWEN-GATE] P1-2`: eval-set sampling circular — "production candidate distribution" doesn't exist at Slice 3 (ANN pull lands Slice 4). **FIXED**: sampling protocol pinned at Slice 0, with the warm-up acceptance gate accepted as the primary calibration mechanism (dissolves circularity).
 - `[QWEN-GATE] P2-3`: AC1 can pass without solving the motivating 0.29 pair. **FIXED**: AC1 fixture includes sub-threshold/floor-less pair per OD#1.
@@ -318,14 +336,17 @@ ownedBy: epistemic-team
 ## Review Cycle Log
 
 ### problem-verify — 2 cycles, clean
+
 - Cycle 1: Verifier A P0=0/P1=0/P2=4/P3=4; Verifier B P0=0/P1=2/P2=3/P3=3 → controller fixed P1-1 (threshold-vs-cue-gate mechanism + OD#1), P1-2 (live-endpoint tension + OD#2), 7 P2s, 4 P3s → re-dispatch.
 - Cycle 2: A P0=0/P1=0/P2=0/P3=0/P4=2; B P0=0/P1=0/P2=0/P3=1/P4=2 → incorporated P3-1 (OD-resolution ordering vs close-check) → **PASS** (no P0/P1).
 
 ### solution-verify — 2 cycles, clean
+
 - Cycle 1: A P0=0/P1=1/P2=1/P3=3/P4=3; B P0=0/P1=2(P1-1 border P0)/P2=4/P3=5/P4=1 → controller fixed P1s (Slice 4 fold-vs-cost contradiction → two-part mechanism; index-exists correction; failure policy + cross-run idempotency), 5 P2s, 5 P3s → re-dispatch.
 - Cycle 2: A P0=0/P1=0/P2=3/P3=3/P4=2; B P0=0/P1=0/P2=3/P3=2/P4=1 → incorporated 6 P2s (score-semantics + floor policy pins, mode-aware AC4, E2E path assertions, search_engine.py row, truncation order, prompt-semantics pin) → **PASS** (no P0/P1).
 
 ### Coherence — 1 cycle (substitute reviewer), fixed once
+
 - `[QWEN-GATE] P1-1` reviewer independence, `[QWEN-GATE] P1-2` sampling circularity, `[QWEN-GATE] P2-5` CI semantics → FIXED at Slice 0/3/OD#3; P2-3 AC1 fixture → FIXED; P2-4 warm-up gate → ACCEPTED. No re-dispatch (fix-once per task constraints; all fixes are Slice-0 human-gate pins).
 
 ## Phase 6 — Wiring Check

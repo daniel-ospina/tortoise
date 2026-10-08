@@ -42,14 +42,23 @@ aboutObjects: tortoise
 **Personas:** P1 = backend dev evaluating agent memory in Claude Code; P2 = OpenAI-stack dev in Codex; P3 = IDE-first dev in Cursor; P4 = pi power-user. All: technical, key in hand post-signup, churn risk = setup friction.
 
 ### J1 — Claude Code (chat-paste variant)
+
 Entry: welcome page, key displayed. Steps: (1) Claude tab → copy CLI one-liner → run in terminal (action 1); (2) copy variant prompt → paste into Claude Code chat (action 2); (3) agent runs Q0–Q6 flow; (4) first Point created. Exit: memory digest shown. Edge cases: flow doesn't start after paste → fallback line "Start Tortoise onboarding" (documented in variant header); invalid key → `tortoise_health` fails → prompt's Step-0 error path; project-scope `.mcp.json` alternative requires one-time approval (documented); persistent alternative = `CLAUDE.md` block (documented in header; Claude Code auto-loads CLAUDE.md, not AGENTS.md).
+
 ### J2 — Codex (chat-paste variant)
+
 Steps: (1) Codex tab → copy block (export + `codex mcp add`) → run (action 1, env export counted within it); (2) copy variant prompt → paste (action 2); (3) flow; (4) first Point. Edge cases: user skips export → Codex connects with no bearer → health fails → variant header names the exact fix (`export TORTOISE_API_KEY=…`); flow doesn't start after paste → fallback line "Start Tortoise onboarding" (in variant header); persistent alternatives = `~/.codex/config.toml` snippet + `AGENTS.md` block (both documented in header; Codex auto-reads AGENTS.md).
+
 ### J3 — Cursor (file-pair variant, structural trigger)
+
 Steps: (1) Cursor tab → copy `.cursor/mcp.json` (with `${env:TORTOISE_API_KEY}` + export instruction, literal-key alternative shown) → save file (action 1); (2) copy `.mdc` rule content → save `.cursor/rules/tortoise-onboarding.mdc` (action 2); (3) open any chat — rule auto-injected, agent connects + starts flow WITHOUT chat paste; (4) first Point. Edge: `.md` instead of `.mdc` → ignored by Cursor — warning line in instructions; `${env:}` unset → connect error, fix documented.
+
 ### J4 — Pi (file-pair variant, structural trigger)
+
 Steps: (1) Pi tab → copy `.mcp.json` entry (`${TORTOISE_API_KEY}`) → save to project root, or MERGE into the `mcpServers` object of an existing `~/.pi/agent/.mcp.json` (never literal-append — instructions say "if a `.mcp.json` exists, merge — do not append") (action 1); (2) copy AGENTS.md block → append to project AGENTS.md (action 2); (3) next pi session auto-loads both; flow starts; (4) first Point. Edge: mcp-client extension absent → header points at agent-infra bootstrap; key unset → health fails with guidance.
+
 ### J5 — Returning user (all harnesses)
+
 Onboarding already complete → `tortoise_onboarding_*` tools retired from tools/list (#888). Variant prompt's Q-actions fail gracefully → prompt's error-recovery paths skip ahead; connection + memory still verified by Q6. No journey breakage.
 
 **Gate self-check:** journeys cover all in-scope items 1–4 (+6 via welcome steps, +9 via exit states); edge cases per journey included. Page states (loading/error/key-already-shown) unchanged per Substep 3; Block B fetch failure falls back to the canonical prompt URL (Substep 5) — covered in W2's beacon failure mode.
@@ -133,6 +142,7 @@ Boundaries: staging script is the ONLY place canonical+headers combine (single c
 ## Substep 6 — Interfaces
 
 **Static URLs (GET, public):**
+
 | URL | 200 body | 404 |
 |---|---|---|
 | `/onboarding/claude-code.md` | claude header + `\n\n---\n\n` + canonical body | pre-deploy/missing |
@@ -144,6 +154,7 @@ Boundaries: staging script is the ONLY place canonical+headers combine (single c
 **PATCH /v1/onboarding/state** — extended request per Substep 4; response unchanged (`{onboarding, email}`); error behavior: auth as today (401 without Bearer); harness/section never error (ignore-and-continue).
 
 **Variant header contract (tested):**
+
 1. Markdown; starts with `# Tortoise Onboarding — <Harness> setup`.
 2. Contains a `## How to use` section with exactly 2 numbered delivery steps.
 3. Does NOT contain `## Questions` (question flow lives only in canonical body).
@@ -177,6 +188,7 @@ Negative cases covered: T6 (invalid enum), T7 (auth regression), T1-drift assert
 ## Substep 8 — Coherence Review + Risks
 
 **Risks & mitigations:**
+
 | Risk | L×I | Mitigation |
 |------|-----|-----------|
 | Harness CLI syntax churn (claude/codex flags change) | M×M | Exact commands live in ONE JS map + ref tests (T3); sources cited in research brief §7; capstone re-verifies post-deploy |

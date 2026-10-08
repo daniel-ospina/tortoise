@@ -482,7 +482,7 @@ jobs:
     # wall time drops to ~max(half) ≈ 22-25 min. Watchdog 45m (raised to 55m when R3 corpus growth pushed legs past 45m)
     # (2026-08-14): on HF-unreachable/loaded runners the half + redislite
     # teardown exceeded 30m (1223 passed then watchdog kill) — 55m fits
-    # under test-slow's 75m critical path.
+    # under test-slow's 60m outer cap.
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
@@ -1406,7 +1406,7 @@ jobs:
     # of pytest time vs ~38m serial — main-push wall-clock drops to
     # ~max(leg) ≈ 23-24m incl. setup (~40-50% cut). Separate runners = zero
     # hermeticity risk (slow files share no state across processes).
-    # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
+    # Each leg keeps the 40m watchdog + 5-min heartbeat + guaranteed-summary
     # tail (#798/#964); the drift-guard step pins the union of both legs to
     # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
     # (Task 9 Step 5: the slow carve-out files — the members of
@@ -1432,19 +1432,23 @@ jobs:
           #      hand-maintained artifact. The old a/b lists were balanced when
           #      written (#4711) and were never rechecked.
           #
-          # #6137 re-cut the two rows. They are the LPT legs of
-          # `slow_files - carve_out` on the committed `durations` map — 30 and
-          # 31 files at 13.817 / 13.813 min, re-derivable with
+          # #5285 re-cut the two rows TWICE: once when its fail-loud suite
+          # entered `slow_files`, and again when that suite's weight was
+          # corrected from 709.0 to 45.0 (709 came from a load-contaminated
+          # measurement — see its `durations` note). They are the LPT legs of
+          # `slow_files - carve_out` on the committed `durations` map — 31 and
+          # 31 files at 14.192 / 14.188 min; each row is a partition of the set,
+          # re-derivable with
           # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
           # (The first cut packed 43 files / 16.21m; eight dual-registered
           # files returned to the fast pool — a second surface's diff would
-          # otherwise run them on NEITHER leg — so the legs were re-cut to
+          # otherwise run them on NEITHER leg — so #6137 re-cut them to
           # 13.82m. See config/ci-surfaces.yml's `slow_files` exclusions.)
           # The in-step watchdog below is sized from the heavier leg
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than 13.8.
+          # committed weight was 2.84 min rather than the 14.19 min it is now.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1454,27 +1458,34 @@ jobs:
           # legs is #6137's design decision and is not pre-empted here.
           - half: a
             files: >-
-              eval/retrieval/test_gate_1349 eval/retrieval/test_run
-              eval/why_suite/test_why_suite_benchmark test_about_edges test_battery_setup
-              test_billing test_ci_selection test_cli_context test_consistency_divergence_5011
-              test_control_plane test_dream test_embedded_evidence test_ep_selector
-              test_epic903_fixtures test_epic903_scheduler test_event_provenance
-              test_graphcopy_boolean_index_3154 test_hosted_volunteer_context
-              test_import_endpoint test_index_cli test_index_directory test_indexes test_ingest
-              test_monitoring test_oauth_mcp test_pack_shipping_wheel test_platform_seams
-              test_search_engine_gaps test_source_inheritance_own
-              test_unjournaled_mutation_class
+              eval/harness/test_harness_benchmark eval/retrieval/test_run
+              test_about_edges test_battery_r1_seed test_battery_setup
+              test_ci_selection test_client_surface
+              test_consistency_divergence_5011 test_control_plane test_dream
+              test_embedded_evidence test_ep_selector test_ep_sources
+              test_epic903_fixtures test_epic903_scheduler
+              test_epic903_warmstart test_graph_diagnostics
+              test_graphcopy_boolean_index_3154
+              test_hosted_volunteer_context test_import_endpoint test_indexes
+              test_ingest test_ingest_v2_consolidation test_ingest_validation
+              test_platform_seams test_projection test_sdk_group3
+              test_skip_guard test_source_inheritance_own
+              test_unjournaled_mutation_class test_write_verb
           - half: b
             files: >-
-              eval/harness/test_harness_benchmark eval/write_path/test_write_path_runner
-              test_abuse_integration test_backfill_sources test_battery_r1_seed
-              test_capture_session test_client_surface test_commit_endpoint test_dr_endpoints
-              test_enumeration_surfaces test_ep_sources test_epic903_modes
-              test_epic903_warmstart test_extractor_v2 test_graph_diagnostics test_hosted_api
-              test_ingest_bundle test_ingest_mode test_ingest_v2_consolidation
-              test_ingest_validation test_markers test_mcp_http test_mcp_route_challenge
-              test_operator_idempotency_4971 test_projection test_relationships_bounded test_sdk
-              test_sdk_group3 test_skip_guard test_surface_manifest test_write_verb
+              eval/retrieval/test_gate_1349
+              eval/why_suite/test_why_suite_benchmark
+              eval/write_path/test_write_path_runner test_abuse_integration
+              test_backfill_sources test_billing test_capture_session
+              test_cli_context test_commit_endpoint test_dr_endpoints
+              test_enumeration_surfaces test_epic903_modes
+              test_event_provenance test_extractor_v2 test_hosted_api
+              test_index_cli test_index_directory test_ingest_bundle
+              test_ingest_mode test_markers test_mcp_http
+              test_mcp_route_challenge test_monitoring test_oauth_mcp
+              test_operator_idempotency_4971 test_pack_shipping_wheel
+              test_rebuild_parity_fail_loud_3585 test_relationships_bounded
+              test_sdk test_search_engine_gaps test_surface_manifest
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
@@ -1482,11 +1493,34 @@ jobs:
     # into these legs, taking their committed `durations` weight from 2.84m to
     # 16.21m (13.82m after the eight dual-registered files returned to the
     # fast pool), so
-    # the #3239 literal budget no longer clears the work: the watchdog goes to
-    # 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x). The cap
-    # still clears the watchdog, so a hung leg prints its counts before the
-    # runner cancels the step.
-    timeout-minutes: 40
+    # the #3239 literal budget no longer cleared the work: #6137 raised the
+    # watchdog to 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x).
+    # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
+    # BOTH rows by LPT off the committed map — balanced at 14.192m / 14.188m, so
+    # the watchdog holds at 40m (2.82x the heavier leg) against a 28.38m floor.
+    #
+    # #798 is an ORDER constraint, not just a magnitude: the in-step watchdog is
+    # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
+    # measured from job start. So the cap must clear setup + pre-phase + the
+    # watchdog, or the runner kills the step before pytest can print its counts
+    # — exactly the loss the ORDER invariant exists to prevent.
+    # The cap must therefore clear the pre-phase on the path where the watchdog
+    # has to fire. That path is NOT bounded: the ONLY pre-pytest step in this
+    # job carrying its own `timeout-minutes` is `Embedding model REQUIRED` (10m)
+    # — checkout, the CPU install, the drift guard, the FalkorDB provision and
+    # the coverage-manifest `--collect-only` step are all UNBOUNDED. So the sum
+    # is only as firm as its named parts: the `test` job's own stated `~7m
+    # setup` constant (see above), a <=10m embedder, the 40m watchdog and the
+    # ~10s grace the job's SIGINT tail is written for come to ~57m. 60m clears
+    # that, and the 2m it adds over the smallest integer that would (58m) is the
+    # only room the unbounded collect-only step gets. No gate enforces any of
+    # it:
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
+    # literals and cannot see the pre-phase at all. The clearance is therefore
+    # slack, not proven — which is the opposite of a licence to lower the number.
+    # 45m — the value this PR first used — and 40m on main both left 5m for
+    # setup alone, so the watchdog could never fire.
+    timeout-minutes: 60
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
     # families: 6379 passworded + 16379 passwordless legacy).
@@ -1559,8 +1593,8 @@ jobs:
         # continue-on-error was deliberately REMOVED — see the fast job's note.
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
-        # no error raised) that would otherwise stall the step for the full 90-min
-        # job cap; a timeout now FAILS the step, which is the honest outcome.
+        # no error raised) that would otherwise stall the step for this job's
+        # full 60m cap; a timeout now FAILS the step, which is the honest outcome.
         env:
           # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
           # cap so the dump lands before the runner's kill; above the `--attempts N
@@ -1626,7 +1660,7 @@ jobs:
           echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
-        # pytest step (off the 75m watchdog), using each leg's committed
+        # pytest step (off the 40m watchdog), using each leg's committed
         # the matrix.files expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
@@ -1656,8 +1690,10 @@ jobs:
           # Same defect class as the fast matrix's manifest step (see above): the
           # collect must see what the run sees, or the expected set silently omits
           # nodeids the run then executes. NO file in `slow_files` gates on the DB
-          # URI today — 34 files, 26 across the legs, and each collects the same
-          # count with and without the URI — so this changes nothing now. It keeps
+          # URI today — all 70 collect the identical 4495 nodeids with and
+          # without it (62 of the 70 are across the two legs; measured 2026-10-08
+          # with this step's own `skip-guard.py --emit-manifest`) — so this
+          # changes nothing now. It keeps
           # the step's stated contract true if one is relocated here, which is
           # exactly how the fast job's hole appeared.
           # Deliberately NOT on the carve-out job, which is URI-unset by design.
@@ -1722,15 +1758,17 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. #6137 moved 43 files in, so the
-          # heavier leg now carries 13.82m and this literal is 35m, i.e. 2.53x
-          # the 2.0x minimum the headroom floor requires (27.6m); it was 10m
+          # shards derive their budget from. The heavier leg carries 14.192m
+          # (#5285 re-cut both rows when the fail-loud suite entered
+          # `slow_files`, then again when its weight was corrected) and this
+          # literal is 40m, i.e. 2.82x the 2.0x minimum
+          # the headroom floor requires (28.38m); it was 10m
           # when the legs' committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
-          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1762,7 +1800,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 35m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc

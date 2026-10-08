@@ -13,6 +13,7 @@ created: 2026-09-24
 
 > **Issue:** #1370 · **Status:** scoped · **Owner decisions (locked 2026-08-17/18):**
 > #1353 scoping **D10** (`docs/scoping/2026-08-17-1353-relationships-decoration-scoping.md`)
+>
 > + the three #1370 design comments. **Related:** #4934 (independently-filed root),
 > #1418/#1466 (slot emission + schema — landed), #1417 (aboutEvent untangle — landed),
 > #1353/#1376 (read-side ≤1-hop subject — landed).
@@ -284,6 +285,7 @@ Revisions applied to the chosen solution (the plan doc carries the locked v2 for
 - **P3 — event slot.** The binder contract states `event` is explicitly not bound (test added).
 
 ### solution-verify — Cycle 1
+
 - Verifier: P0=1 (about_entities un-gated producer), P1=4, P2=4, P3=3
 - Controller: **Fixed** P0 + all P1s + the actionable P2/P3s (revised above); the D4 real-LLM
   calibration is recorded as an explicit partial (policy-only) and the #4934 backfill as out of scope.
@@ -292,6 +294,7 @@ Revisions applied to the chosen solution (the plan doc carries the locked v2 for
   which is this lane's next gate.
 
 ### duplication & architecture review (advisory) — Cycle 1
+
 - `ISSUES` — 2 duplication (P1: hosted raw `about_entities` MERGE bypasses `link_entity`;
   subject vocabulary declared in 4 disagreeing places) + 3 architecture (P0: un-gated producer;
   P1: `SubjectBindingRefused` replay warning; P1: unscoped `live==rebuild`).

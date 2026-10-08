@@ -12,6 +12,7 @@ defeat. Verifier gates are unbounded by threat surface; standard review cycles a
 but `rebuild_all()` erases the props **silently** (no warning, no error).
 
 Reproduced (`/tmp/repro3689.py`, docker lane):
+
 ```
 LIVE: [0.4, 0.3, 0.2, 0.1]
 journal: PointAdded, PointAdded, OperatorAdded, PointRevised{annotator_* present}
@@ -116,11 +117,13 @@ Line references are symbol-anchored approximations against the worktree base `76
 ancestor of the `origin/main` tip `3be34cdd1` at review time).
 
 `sdk.py`
+
 - `annotate_operator` (~6149, emit at ~6172): keep the positional graph payload; add `id=id` + the
   four `annotator_*` extras to `_emit_event`.
 - `_emit_event` itself is unchanged (its `point is None and id is None` contract is correct).
 
 `projection/__init__.py`
+
 - Module constant `_ANNOTATOR_PROPS` (single source of truth for the four keys).
 - `_apply_one` (~1142): new `OperatorAnnotated` branch; fold `_ANNOTATOR_PROPS` on the `PointRevised`
   branch.
@@ -139,6 +142,7 @@ ancestor of the `origin/main` tip `3be34cdd1` at review time).
   branches, so `OperatorAnnotated` must NOT enter these sets.
 
 `config/ci-surfaces.yml`
+
 - Register `test_operator_annotator_rebuild.py` under the `core` surface — the same surface as
   `test_entity_delete_rebuild.py`, the other #3299-family rebuild-durability suite.
 
@@ -152,6 +156,7 @@ That is the pre-existing open-set gap #2795 owns, not this fix (the annotator pr
 ## Test plan (red → green, mutation-sensitive)
 
 New file `tests/test_operator_annotator_rebuild.py`:
+
 - **core**: `annotate_operator` → snapshot → `rebuild_all` → all four dims equal their live values.
 - **journal write path**: the JSONL contains an `OperatorAnnotated` record carrying the dims (reds
   pre-fix).

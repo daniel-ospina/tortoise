@@ -55,6 +55,7 @@ carve_shards: 3
 
 surfaces:
   api:
+  - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
   # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
@@ -164,6 +165,12 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #7678: the org-create lane's dedicated control-plane pool + the single
+  # membership read. Same dual registration as the offload guard above and for
+  # the same reason: the files it guards are tortoise/hosted_api.py,
+  # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
+  # `api` surface.
+  - test_org_create_pool_7678.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -869,6 +876,7 @@ surfaces:
   # hand count. Same surface as its siblings test_merge_throughput.py /
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
+  - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
   # here. main has since registered it in `core` (see the `test_pack_cli.py`
@@ -1094,6 +1102,7 @@ surfaces:
   - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
@@ -1139,6 +1148,7 @@ surfaces:
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -2360,6 +2370,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
+- test_rebuild_parity_fail_loud_3585.py  # #3585: 66 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -2448,8 +2459,8 @@ slow_files:
 # The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
 # job's own drift-guard step fails closed if the union stops matching this list.
-# Both legs are budgeted from that weight (a 35m watchdog under a 40m cap for
-# 13.82m legs), pinned by
+# Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
+# 14.192m / 14.188m legs), pinned by
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
@@ -2543,6 +2554,11 @@ carve_out:
 # collect it and SKIP every case via the marker hook, a permanently green and
 # permanently unexecuted gate on main (the #4047 shape).
 - test_vecf32_overwrite_seams_4524.py
+# #4521: the module is module-level `embedded_only` — without this registration
+# a full URI-set selection would collect it and SKIP the case via the marker
+# hook, a permanently green and permanently unexecuted gate on main (the #4047
+# shape).
+- test_4521_revise_point_embedding.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
@@ -3404,6 +3420,7 @@ durations:
   test_render.py: 0.2
   test_rebuild_recreate_content_parity.py: 2.5
   test_rebuild_graph_only_derived_parity.py: 2.2
+  test_rebuild_parity_fail_loud_3585.py: 45.0  # #3585: 66 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency; cycle-3 adds a second name-only supersede, a rename-materialized forward reference, a forward-reference-by-name guard, an incarnation-reuse case, an early-ambiguity-then-zero-carrier refusal, and two backup.restore fail-loud cases; cycle-4 pins the single trailing supersede sweep and the name-MERGE id collapse; cycle-5 gives the state-op arm the same name-MERGE parity and makes `_object_target` linear; cycle-6 keys the carrier index on the graph's MERGE key — never the display `name or title` fallback — and mirrors a falsy `state["name"]` rename, removing the two false refusals that guard introduced; cycle-7 models the ids whose creation makes NO graph node (a state op on them is a 0-row miss) and PRESERVES a merge key through an unusable-name re-creation, closing the fail-OPEN class cycle-6 opened). STILL IN `slow_files`, but NOT for the reason the original note gave — that reason was a measurement artifact. The previous lane committed a 520.0 PLACEHOLDER (explicitly labelled not a measurement) and then 709.0, the upper of two readings taken 2026-10-07 while THIS HOST was at a 1-minute load average of ~97 (the fleet's own overload); on a healthy docker lane the file runs in ~36s (measured here 2026-10-08, when the file collected 47 tests: 47 passed in 35.62s; five further independent runs land in 35.6-48.0s, and 109s only with HF online). 709 was therefore ~15-20x the real cost, and the real cost is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives from 900/2.5 — so the #6133 invariant does NOT exclude this file at its real cost. (It DID exclude it at the 520.0 and 709.0 weights this map committed, and at the 469.2s reading that note recorded — 469.2 was measured, never committed — because that test reads the COMMITTED map and never a runtime measurement. So the two notes disagree about the file's COST, not about what the invariant does.) The placement in `slow_files` is retained deliberately rather than reverted in the same diff: it costs ~36s on a 14.19m leg that runs on every full push anyway, and the LOADED cost is the uncertain quantity a fast shard's 15m watchdog would have to absorb. 45.0 is committed as the weight: it sits at the top of the range of healthy readings this note cites (35.6-48.0s; 45.0 is 3s under the slowest of them), which keeps the `test_slow_leg_bounds_clear_the_committed_work` bound close to honest. It is deliberately NOT inflated past the slowest reading — a weight chosen to make a sentence true is the same error this note exists to correct. Revisit the placement with `tools/ci_timing.py --refresh-durations`, whose CI measurement settles it.
   test_restore_container_recovery.py: 0.1
   test_sdk_adapter_cap.py: 0.1
   test_sentry.py: 0.1

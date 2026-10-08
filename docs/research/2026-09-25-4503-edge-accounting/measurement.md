@@ -38,6 +38,7 @@ naming the branch here is not a convenience — it is the only tree that *can* h
 the ancestry gate only vacuously (the named SHA *was* `origin/main`). Every locator in §1 was re-read
 against `a2a08beaa` on **2026-09-26** and is unchanged. Three things make that sound, and none is an
 assumption:
+
 - The branch tree contains the declared base (`228f416e9` — see the Base line above) —
   `git merge-base --is-ancestor 228f416e9 HEAD` succeeds. (`a2a08beaa`, cited here in an earlier
   revision, is the SUPERSEDED pre-rebase base, not the declared one — the command was right, the

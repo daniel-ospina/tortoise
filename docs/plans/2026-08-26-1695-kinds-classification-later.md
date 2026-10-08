@@ -51,6 +51,7 @@
 ### Pre-Registered Experiment Gates (decision rules — fixed before any run)
 
 **D0-1 · A′ label-order diagnostic** (kind-list-only shuffle hook `TORTOISE_LABEL_ORDER=shuffle`, deterministic seed; ~50 sessions; PAIRED fresh canonical re-run — never crash-era checkpoints; S2-rerun-only, arms share S1/S3/S5 artifacts; bit-level agreement metric):
+
 - **Bias confirmed** (per-bit kind agreement < 95% OR distribution shift ≥ 5pp — the expected outcome per the 87.9% prior): primacy justification validated → A/B win criterion is **accuracy-directional** (flag-on ≥ control within CI) with cost as cap/report.
 - **Agreement ≥ 95% + shift < 5pp**: primacy justification dropped (NOT the direction) → A/B win criterion is **cost/parity against the accuracy-floor** (kind floor holds AND cost ≤ 1.1× compact). The classify-later direction survives on cost + label-space-scaling grounds.
 - Owner may override either branch (rationale recorded). Label-order **randomization ships regardless**, in all render modes (per-call seeded shuffle — cheap insurance + removes the A/B's own in-arm order confound).
@@ -62,12 +63,14 @@
 **D0-4 · Clean pilot baseline**: reference = **fresh-only 0.867** (the 0.74 is a two-population crash-resume blend 0.55+0.867 — NEVER diffed); resume-quality gate (reject checkpoints with fts.count=0 / session@20=0); 50-Q re-validation is a **safety/sanity gate, not the decision gate** — the decision rests on the bit-level eval + A/B.
 
 **A/B (200-item 3-arm; verbose / compact-with-chains / flag-on; optional 4th arm compact+label-randomization) — accuracy-primary composite (PASS requires ALL):**
+
 1. Kind-floor vs **BOTH** verbose and compact: reject if Δ < −8pt (two-sided CI, family-wise corrected); Δ∈[−8,−3] proceed with warning; ≤3pt no-meaningful-degradation.
 2. **Emission-recall gate (BLOCK)**: bit-set overlap vs control ≥ 0.95 per stratum (pack stratum oversampled) — the vocab may anchor emit-vs-drop decisions; this is the gate that sees bits that were never emitted.
 3. Retrieval regression: evidence@20 ≥ baseline, session@20 ≥ 0.90 (fresh population).
 4. **Parse-census equality (BLOCK)**: computed on the **class intersection** of both arms' censuses (flag-only classes `classify_error`/`embedding_error` governed by their own thresholds); no >2× ratio in any common class between arms.
 5. Sentinel rate ≤ 5% of bits (else block); classify-error rate ≤ its own threshold.
 6. **Cost ≤ 1.1× compact** (CAP, not a savings requirement); ≥10% savings reported as secondary; the 80% claim's base is explicitly the full-vocab verbose render; final cost read at 500-Q (deferred confirmation, not a separate gate).
+
 - All arms: production direct wire (non-reasoning `deepseek-chat` via `_direct_wire_id` — NOT the literal reasoning id); label order randomized per call; isolated DBs per arm; no checkpoint reuse; arms interleaved round-robin; real backend; fingerprint/run_key includes the flag; pre-registered win threshold (expected direction + CI-based rule, M8 discipline).
 
 **Win path**: A/B win (composite) → integrate classify-later behind flag → **50-Q re-validation** (step-3 semantics — re-run of the pilot set, NOT post-500 step-7; protocol amendment recorded; fresh checkpoint; PAIRED flag-off control arm on the same sessions; expected-direction pre-stated) → **500-Q V3 baseline with flag-on** → **default-on only after 500-Q passes** (or owner waiver recorded). **Loss branch**: compact-with-chains + chain enforcement + measurement foundation ship; re-validation + 500-Q proceed on that config; owner may re-open classify-later with the A/B evidence.
@@ -79,6 +82,7 @@
 **Intent:** Make pack-chain semantics deterministic and guaranteed (the prompt's "re-map" becomes enforced) as an independent, fixture-gated change that ships before — and is exercised in every arm of — the A/B.
 **Acceptance:** `tortoise/chain_enforcer.py` rewires reverse-chain-order `about_entities` pairs via operators injection ONLY when the nearest valid chain position is unambiguous; warns-and-keeps (never invents, never drops) otherwise; `validate_chains` (:1977) stays as the warn-only backstop; golden fixtures pass; flag-off behavior unchanged.
 **Files:**
+
 - Create: `tortoise/chain_enforcer.py`
 - Modify: `tortoise/extractor_v2.py` (call site between resolve_entities and execute_embed, ~:2851-2866 region; result-surface plumbing)
 - Test: `tests/test_chain_enforcer.py` (new; migrates `TestChains` scenarios from `tests/test_extractor_v2.py:923-1000` — delete there, update cites; lane-agnostic — verify `validate_chains`/`execute_embed` are pure: confirmed no embeddings/LLM/DB calls)
@@ -97,6 +101,7 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 **Intent:** Build the instruments that gate every decision (D0-1…D0-4) BEFORE any classify-later code.
 **Acceptance:** `tools/kind_eval.py` runs the bit-level eval (≥2,000 bits/arm, calibrate/holdout split, nearMiss tie-breaker-only, pack-stratum minimum audited via `tools/longmem_eval/dataset_audit.py`); the A′ shuffle hook exists behind `TORTOISE_LABEL_ORDER=shuffle`; the D0-2 probe script exists; `data/kinds_gold.jsonl` committed with provenance; `data/kind_index/` gitignored.
 **Files:**
+
 - Create: `tools/kind_eval.py`, `data/kinds_gold.jsonl` (or `tests/fixtures/` mini-gold), `data/kind_index/.gitkeep` + `.gitignore` entry
 - Modify: `tortoise/extractor_v2.py` (`_render_master` shuffle hook — seeded kind-list shuffle in the `_group()` closures; hint blocks user-personal-state/granularity/carve-out EXCLUDED from shuffle)
 - Test: `tests/test_kind_eval_set.py`, render/shuffle tests in `tests/test_extractor_v2.py`
@@ -112,6 +117,7 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 **Intent:** The content-addressed, persisted kind-embedding index (bge-small) covering the FULL candidate set (core §5 objects + subjects + points + events + pack kindDefs with description/synonyms/examples/nearMisses) so the classifier can assign core AND pack kinds.
 **Acceptance:** `KindIndex` builds from `compile_kind_index_spec()` (new `value_extractor` accessor reading `PackManifest.kind_defs` :152/:355 — `compile_value_brief` :48-50 drops synonyms/examples, so the accessor is new), persists/loads `data/kind_index/<sha256(manifest-hash+core-version+embedder-id)>.npz`, recomputes on hash change; lazy import of the encoder (no torch at module level); `EmbeddingModel.get() → None` handled by caller.
 **Files:**
+
 - Create: `tortoise/kind_index.py`
 - Modify: `tortoise/value_extractor.py` (`compile_kind_index_spec`)
 - Test: `tests/test_kind_index.py` or fold into `tests/test_kind_classifier.py` (stub-encoder lane)
@@ -125,6 +131,7 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 **Intent:** The classify-later layer: kNN top-5 over the index → margin gate → nearMiss-aware rerank (tie-breaker-only) → batched LLM adjudication of the low-margin tail (25–50, object-wrapped), with all four error paths fail-open and census-counted.
 **Acceptance:** `classify_items(items) -> {assignments, stats, warnings}`; SIM_FLOOR/MARGIN/λ calibrated on D0-3 calibrate split and frozen; LLM tail ON by default; unclassified→best-core-kind terminal + census; candidate restriction per type (entities → object+subject kinds, events → event kinds, points → point kinds+statement); namespaced output forms accepted by `master_kind_forms`; `--eval` CLI; encoder injectable (explicit seam).
 **Files:**
+
 - Create: `tortoise/kind_classifier.py`
 - Test: `tests/test_kind_classifier.py` (stub-encoder core logic + 2–3 real-model smoke tests)
 
@@ -137,6 +144,7 @@ Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' u
 **Intent:** Wire classify-later into `extract_session_v2` behind `TORTOISE_CLASSIFY_LATER` (call-time toggle at the single choke point) with the verified stage order, core-only renders, and the kind-preservation/freeze machinery.
 **Acceptance:** Stage order S1 → S2 → classify(S2) → S3 → S4 → E4+re-stamp → classify(union, kind-missing only) → slot re-key → resolve_entities → post-resolution re-key → chain_enforcer → execute_embed; flag-off byte-identical (canonical_json + fixed session_id); `_render_master_core_only` byte-pinned (golden fixture); `_select_pack_kinds` fallback inverted under flag-on; S4 re-emit clause; unclassified sentinel; all classify failures wired into `error_census` (`classify_error`/`embedding_error` + `_classify_error` mapping).
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (injection param, toggle, `_apply_classify_later`, `_render_master_core_only`, OUTPUT_CONTRACT sentinel, S2/S4_TMPL clauses, dead-block removal :344-386)
 - Test: `tests/test_extractor_v2.py` (new `TestClassifyStage`; extend `TestS4Merge` :1635-1757, `TestE4Orchestrator` :1726-1790)
 
@@ -151,6 +159,7 @@ Run: docker lane `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_te
 **Intent:** Make the 3-arm A/B (verbose / compact-with-chains / flag-on; optional 4th arm compact+randomization) executable in `tools/longmem_eval` with the anti-confound discipline (isolated DBs, no checkpoint reuse, interleaved arms, flag in fingerprint/run_key, production direct wire, label-order randomization in all arms).
 **Acceptance:** `--classify-later` arm; fingerprint/run_key extended; per-arm report block (cost census, parse census, kind metrics, emission-recall, sentinel rate, flip lists); all gates pre-registered and computed.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py`, `tools/longmem_eval/ingest_v2.py` (live :789; :362 shadow noted dead per #1744)
 - Test: `tests/longmem_eval/test_classify_later_arm.py` (lane-agnostic, `eval:` surface, precedent `test_vector_arm.py`)
 
@@ -163,6 +172,7 @@ Run: docker lane `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_te
 **Intent:** Execute the pre-registered sequence with the documented gates and owner sign-offs.
 **Acceptance:** D0-1 A′ + D0-2 probe + D0-3 eval set + D0-4 clean baseline all recorded; A/B run completes with the accuracy-primary composite evaluated; win/loss branch followed; re-validation + 500-Q executed per the win path.
 **Steps (run-level):**
+
 1. Owner sign-offs (see Coordination): gate-semantics amendment (comparison point = A/B control on fresh checkpoint, not the step-1 pilot number), A′ outcome→action mapping, step-3-vs-step-7 protocol amendment, win criterion, funding top-up (~$30–38; full-sequence DS balance target ~$55–60), wall-clock budget (post-reboot ~12× pace; measured 29 min/q fallback stated).
 2. Run D0-1 (A′), D0-2 (probe), D0-3 (eval set calibration), D0-4 (clean baseline — depends-on #1746 landing).
 3. Run the A/B (serialized after #1746; prefer #1745-first per coordination); evaluate the composite; record the decision.

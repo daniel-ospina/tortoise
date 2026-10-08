@@ -45,11 +45,13 @@ aboutObjects: Point, Operator, Mitigation, Source
 | 4 | `test_ep_nary_falsification.py` `_RecordingEP` | State | Read | Unit (hermetic) | `_clear_caches` deletes `_node_cache` post-run (#330) | post-run cache read → AttributeError (pre-existing fail) |
 
 ### Bug Pattern Flags
+
 - **Silent function skips / stale state:** `compute_confidence()` does NOT expose `recompute_interval` — tests must call `_apply_source_inheritance(recompute_interval=0)` directly or use fresh SDK per state (existing convention).
 - **Conditional guards:** inheritance gate (3600s) + eligibility where-clause (baseline_source IS NULL OR 'inherited') — tests must pin both paths.
 - **N+1 queries:** 1000-source real-path test = 1000 `_link_source` calls — acceptable (2 queries each, embedded); 1M sources NOT feasible real-path → formula-level only.
 
 ### Verification Plan (test-routing)
+
 - Domain: code. Complexity: complex. UX_RATING: low (no UI → ux-verification skipped).
 - Layers: unit (T1 pure-math theorem tests) + integration (T2a/T2b embedded real-path). No e2e, no pgTAP (no SQL business logic), no external services.
 - Verification: `python -m pytest tests/test_ep_sources.py tests/test_ep_nary_falsification.py tests/test_source_inheritance_own.py -q` (3-file scope, embedded) + full-suite spot check for no-new-failures.
@@ -59,6 +61,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 **Intent:** The #330 cache lifecycle change broke a falsification-suite positive control (test reads `ep._node_cache` after `run()` clears it). Fix is test-side and additive — the EP engine itself is untouched (parallel agent's domain).
 **Acceptance:** `python -m pytest tests/test_ep_nary_falsification.py -q` → all pass. No production code changed.
 **Files:**
+
 - Modify: `tests/test_ep_nary_falsification.py:234-260` (`_RecordingEP`), `:333`
 
 **Step 1: Add snapshot override to `_RecordingEP`**
@@ -89,7 +92,9 @@ In `test_run_converges_with_gentle_factor` (l.333), change:
 ```python
     a, b = ep._node_cache["a"]
 ```
+
 to:
+
 ```python
     a, b = ep._final_node_cache["a"]
 ```
@@ -111,6 +116,7 @@ git commit -m "fix(tests): snapshot EP node cache before _clear_caches in _Recor
 **Intent:** Establish the embedded real-path harness and preserve the correct formula helpers while removing the Docker-only + fictional-model machinery.
 **Acceptance:** File imports cleanly; `TIER_MAP`, `TIER_PC`, `log_aggregate_pc`, `beta_mean` preserved; no `set_point_baseline`, no `log_aggregate_prior_mixed`, no Docker `fresh_sdk`. This rewrite SUPERSEDES the "regression: #341 prior suite | must stay green unmodified" row in docs/plans/2026-08-07-source-credibility.md l.59 — prior-level invariants are re-asserted at T1 (test_aggregate_prior_matches_formula) + T2a (Situation 2 exact TIER_MAP alphas, Situation 3 exact cumulative), and the file moves from Docker-only to embedded, matching post-merge-validation.yml's embedded runner (no workflow pins the old Docker fresh_sdk — grep-verified). calibrate_summary (sdk.py:2021) is audit-only guidance, NOT the inheritance path — monotonicity is asserted on ep_alpha directly, so no calibrate_summary call is needed (issue body's "run calibrate_summary" is a mental-model correction, documented in the proof writeup).
 **Files:**
+
 - Rewrite: `tests/test_ep_sources.py`
 
 **Step 1: Write new harness (replaces old fresh_sdk/set_source_evidence)**
@@ -265,6 +271,7 @@ git commit -m "test(341): rewrite harness — embedded real-path + preserved for
 **Intent:** Prove the exact prior-level monotonicity law in closed form — the issue's "mathematical proof" at the level where it's provable.
 **Acceptance:** All T1 tests pass with DELTA=1e-6 (no EP, no flake).
 **Files:**
+
 - Modify: `tests/test_ep_sources.py` (append `TestLogAggregationMath` → `TestT1Theorem`)
 
 **Step 1: Write T1 tests**
@@ -371,6 +378,7 @@ git commit -m "test(341): T1 theorem — exact prior-level monotonicity + anti-S
 **Intent:** Prove monotonicity through the REAL graph path (Source → extractedFrom → inheritance), deterministic and EP-free.
 **Acceptance:** All T2a tests pass; `ep_alpha` asserted to rel=1e-9; no `compute_confidence()` calls in T2a tests EXCEPT the documented strict-xfail `test_revert_is_idempotent_through_ep_path` (deliberate exception that exercises the EP path to expose the stale-`_evidence` bug).
 **Files:**
+
 - Modify: `tests/test_ep_sources.py` (append situation test classes)
 
 **Step 1: Write T2a tests**
@@ -576,6 +584,7 @@ git commit -m "test(341): T2a real-path prior ordering — situations 1-7 monoto
 **Intent:** Prove directional correctness through the real EP path (loopy belief propagation, bidirectional messages) — the issue's scenarios A/B/C + situation 10.
 **Acceptance:** Directional assertions only (loose margins); `random.seed()` pinned; all pass deterministically.
 **Files:**
+
 - Modify: `tests/test_ep_sources.py` (append topology test classes)
 
 **Step 1: Write T2b tests**
@@ -747,6 +756,7 @@ git commit -m "test(341): T2b EP directional audit — topologies A/B/C + S10 + 
 **Intent:** Situations 8-9 involve the EP NAND factor whose real behavior (phi_nand = agreement potential) contradicts the issue's mental model. Document, don't encode. Deliver the mathematical proof + audit artifact.
 **Acceptance:** Audit doc written; bug issue filed with repro; no test asserts NAND direction; gold-anchor assertion (no-source vs gold) covered.
 **Files:**
+
 - Modify: `tests/test_ep_sources.py` (audit section)
 - Create: `docs/plans/2026-08-08-ep-source-validation-proof.md`
 
@@ -793,6 +803,7 @@ class TestSituation9_Mitigation_Audit:
 **Step 2: Write the proof writeup**
 
 Create `docs/plans/2026-08-08-ep-source-validation-proof.md` with:
+
 - T1 theorem statement + derivation (log2 increasing, nonneg terms, per-source concavity)
 - Scoping statement (uniform weight, decay=1.0; assessment-factor mean can decrease pc — intended, doc S5/S6)
 - Spec corrections (log-flatten, 10 T4 ≈ 1 T2, NAND→beta fictional, mitigation ≠ pc×0.5)
@@ -866,6 +877,7 @@ echo "<!-- plan-review: cycles=N, status=clean, version=2.2.0 -->" >> docs/plans
 ```
 
 ## Acceptance Criteria (from issue O/I/T)
+
 1. Test suite passes for all scenarios (A/B/C + situations 1-10, corrected where the issue's literal claims were numerically wrong).
 2. Confidence is monotonic: more sources (uniform weight) = higher confidence — proven at prior level (exact) and verified directionally at EP level. 0 edge cases where adding a source reduces the inherited prior under uniform weight.
 3. Log-scale targets validated: 1M T4 < 2 T0; 10 T4 > 1 T4; per-source marginal decreases.
@@ -873,9 +885,11 @@ echo "<!-- plan-review: cycles=N, status=clean, version=2.2.0 -->" >> docs/plans
 5. Pre-existing `test_run_converges_with_gentle_factor` regression fixed (test-side).
 
 ## Runtime Prerequisites
+
 - Python 3.11+ (worktree venv has 3.12), embedded falkordblite, pytest. `uv pip install -e .` done.
 
 ## Risks & Mitigations
+
 | Risk | Mitigation |
 |---|---|
 | EP nondeterminism | random.seed(42) fixture; directional-only assertions; loose margins |

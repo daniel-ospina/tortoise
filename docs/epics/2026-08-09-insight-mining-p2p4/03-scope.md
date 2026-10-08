@@ -22,6 +22,7 @@ aboutObjects: tortoise
 ### In Scope
 
 **Phase 2 — Entity extraction & cross-session dedup**
+
 - Entity extraction stage in the conversation-mining pipeline: extract entities (issues, PRs, tools, concepts, domain objects) from session transcripts/documents, mapped to `objectKind` vocabulary (Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other).
 - Cross-session entity resolution (short-circuit chain): exact (normalized string) → fuzzy (edit distance, pre-filtered by mention detection) → semantic (embedding cosine with thresholds). v1 = fuzzy+semantic; perfect resolution is v2 non-goal.
 - Object writes: `create_object` MERGE by deterministic canonical id (sha256 of canonical name — mirrors production `_connect_issue_objects` pattern); no auto-created duplicate Objects.
@@ -30,11 +31,13 @@ aboutObjects: tortoise
 - **Drift fix:** replace `INSTANTIATES` Event→Object wiring with `aboutObject` in `_connect_issue_objects` (sdk.py:4340) + `session_indexer.py:555`; update `ranking.py` session graph_boost query (lines 172, 245) to the new edge; sync `security.py:84` whitelist.
 
 **Phase 4 — Cross-ontology integration**
+
 - about*/structural wiring on extracted content: **`produces`/`uses` are Event→Object for artifacts and tools per §3.5** (e.g., session Event `uses` Object for the tool/artifact); **decision/claim Points are wired `(Event)-[:produces]->(:Point)` per the canonical #531 pattern** (the decision Event produces the decision Point); Point→Event `aboutEvent` where a Point describes a session occurrence.
 - EP propagation on extracted Points **gated**: extracted Points created `status: draft`; no auto-promotion to `live` on extraction wiring (SDK #131 default change or explicit flag); EP excludes draft Points (`ep.py` change); no auto-mitigation (NAND/IMPL) wiring from extraction until review.
 - Temporal belief tracking: extracted Points carry `validFrom` = real session date (read from session frontmatter, not ingest time); NAND operators link contradictory cross-session decisions; belief-over-time query ("decided X on D1, contradicted on D2"); reuse `supersede_point`/CORRECTS for explicit replacement.
 
 **Cross-cutting**
+
 - Calibration milestone issue (Gate B carrier): 50-session labeled sample → ≥70% extraction precision, dedup threshold calibration, EP grounding before/after snapshot (≤2% mean absolute, full live Point set).
 - Child issues created **blocked on Gates A+B** (`Depends on: #320 + calibration`).
 
@@ -69,6 +72,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 ## 3. High-Level E2E Test Cases
 
 ### E2E-1: Session → Entity Objects with provenance
+
 **Given:** a mined session transcript containing references to "port 16379", "FalkorDB", and issue "tortoise#123"
 **When:** the Phase-2 entity extraction runs on the session
 **Then:** an Object node exists for each referenced entity with `objectKind` matching its class (tool/workitem/other)
@@ -77,6 +81,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **And:** no stub `Subject` node is created for any extracted entity (legacy auto-detect bypassed)
 
 ### E2E-2: Cross-session entity dedup (same entity, two sessions)
+
 **Given:** session A mentions "port migration" and session B (different day) mentions "port 16379 change" referring to the same effort
 **When:** both sessions run through Phase-2 resolution
 **Then:** exactly ONE Object node exists for the entity (no duplicate)
@@ -84,12 +89,14 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **And:** the merge is auditable via a deterministic artifact — a `dedupe` event in the event log OR a `canonical_id`/`resolved_from` property on the surviving Object (assert the artifact's existence)
 
 ### E2E-3: Content dedup — "we already decided this"
+
 **Given:** a new session restates a decision already extracted from a prior session ("change default port to 16379")
 **When:** Phase-2 content dedup runs on the new session's decision Points
 **Then:** the duplicate decision Point is NOT auto-created as a new live Point
 **And:** the candidate is surfaced as a dedup hit (review state), linking to the prior decision Point
 
 ### E2E-4: Extracted Points are EP-safe (draft, no pollution)
+
 **Given:** Phase-2 extraction creates Points for a batch of sessions
 **When:** the extraction batch completes
 **Then:** every extraction-created Point has `status: draft`
@@ -97,6 +104,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **And:** EP propagation excludes draft Points — snapshot mean grounding of all `live` Points changes ≤2% (mean absolute) vs the pre-batch snapshot
 
 ### E2E-5: Event→Object procedural wiring (produces/uses) + INSTANTIATES drift removal
+
 **Given:** a session where a decision "port 16379" was reached and a config file `redis.conf` was edited; and an issue/PR-referencing session goes through the full ingest path (`ingest_corpus` / MCP `tortoise_index_sessions`)
 **When:** Phase-4 structural wiring runs on the mined session AND the full session ingest path runs for the issue/PR-bearing session
 **Then:** the decision Event `produces` the decision Point
@@ -106,6 +114,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **And:** the predicate whitelist (security.py) no longer permits `INSTANTIATES` writes
 
 ### E2E-6: Temporal belief tracking across sessions
+
 **Given:** session D1 states "use port 16379" and session D2 (later) states "revert to 16380, 16379 was wrong"
 **When:** both sessions are mined and Phase-4 temporal wiring runs
 **Then:** the D1 and D2 decision Points are linked by NAND (contradiction)
@@ -114,6 +123,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **And (replacement branch):** when D2 explicitly supersedes D1 ("replace the old decision"), a `CORRECTS` edge + `outdated: true` on D1 is created via `supersede_point` instead of (or in addition to) NAND
 
 ### E2E-7: Gate gating — child work cannot start before gates
+
 **Given:** #320 is not STABLE or the calibration milestone has not passed
 **When:** any Phase-2/4 child issue is processed by issue-workflow
 **Then:** the child issue's dependency chain (Depends on #320 + calibration) blocks execution

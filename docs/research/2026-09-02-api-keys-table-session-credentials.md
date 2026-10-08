@@ -71,6 +71,7 @@ created: 2026-09-02
 ## External findings
 
 **Conventional API-key UX (multiple independent sources):**
+
 - Stripe Developers → API keys: create / reveal / expire / **rotate**; secret keys shown **once**; lost keys cannot be retrieved. The page is a lifecycle surface for user-managed credentials.
 - GitHub: personal access tokens / fine-grained tokens — user-created, labeled, scoped, revocable.
 - General auth guidance (dev.to, Tyk, LoginRadius, Momento, security.stackexchange): **sessions/tokens for browser; API keys for machines**; keys are long-lived, shown once, stored hashed; "using the wrong credential type creates security gaps"; API keys are *less* secure than scoped tokens and should not be the browser credential.
@@ -104,6 +105,7 @@ No browser session exists there. Keep `/v1/session/key` + bootstrap purpose. Any
 ## Recommendation
 
 Two workstreams:
+
 - **#2166 — Keys-table UX (UI model, ships first, no deps):** table shows only durable keys; session creds auto-cleared/hidden or in a separate informational section; plain labels; revoked behind a filter.
 - **#2167 — Browser auth model:** drop the hosted dashboard's login-time bootstrap mint (browser = session JWT only); sequence after #1997/#1998 land; keep the endpoint + recovery + selfhost lane.
 
@@ -131,11 +133,14 @@ Two workstreams:
 ## Raw Notes
 
 - **2026-09-03T23:20:43** [precedent] ## Axis Research — #2167 scoping (2026-09-04, dedup + justified-skip)
+
 > Architecture (standard): Deduplicated — covered by this brief's External findings (session-vs-key separation, browser-auth convention, no-SaaS-mixes-session-creds-into-key-table, keys=create/reveal/rotate) + Recommendation (two workstreams). Codebase-first precedent scan (3+): in-repo migration precedents #1511 session-first, #1828 dual-auth reads, #2002-W6 sessions-detail dual-auth, #2166 durable-only table — the 'endpoint stays, dashboard caller removed' pattern is how prior issues shipped (server untouched). No novel pattern requiring external import.
 > Security (standard): Deduplicated — covered by this brief's External findings (API keys less secure than scoped tokens, wrong-credential-type gaps, shown-once + hashed storage) + issue fail-safe (endpoint stays for external consumers). In-repo security precedent: #1148 dashboard-login gate session-authed by design; ungated dual-auth reads run least-privilege dormancy gates; reconcile sweep revokes expired bootstraps. Residual risk = key-over-session header shadow on dual-auth endpoints — internal, code-verified, no external fact needed.
 > UX (low): No fire (connect-step copy owned by #2211; #2167 copy deltas = removal of dead mint-failure copy).
 > Justified-skip basis: both medium+ axes covered at sufficient granularity by prior-brief sections cited; no third-party deps; no novel pattern. External research not demonstrated — skipped per activation rule.
+
 - **2026-09-03T23:26:53** [precedent] ## Errata — 2026-09-04 (post-#2167-scoping verification)
+
 1. Producer-table correction: the dashboard has FOUR bootstrap-mint callers, not one (login mount L2679, switchTeam L3486 + L3505 401-re-mint, revokeKey re-mint L4103). The 'dashboard caller: mintSessionKey in main.jsx' line is incomplete.
 2. 'GET /v1/sessions/{id} (fetchSessionDetail) is dead code' is WRONG as of #2002-W6 — it is a LIVE Settings transcript view (onViewSession L5569) and session-authed client-side (main.jsx L4236) against a dual-auth endpoint (hosted_api.py L6960). Indicator 3 of #2167 is satisfied at baseline.
 3. loadBackups (/backups, main.jsx L3761) is team-scoped by the KEY header, not ?org_id= — auth-dual but team-scoping-single. In the #2167 zero-key default state it must pin ?org_id= in session mode (multi-membership correctness).

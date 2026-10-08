@@ -47,6 +47,7 @@ to reopen Policy B in its own home (#5038) with the evidence and argue it.
 | Zep Graphiti exposes temporal fields on results, but whether superseded edges are filtered by default is undocumented | ⚠️ **single-source** — verify when a new source is available | Zep docs/blog only |
 
 **The decisive measurements.**
+
 - *"Revoked but Still Authoritative"* (2609.08258): **"no system enforces revocation by default: the
   revoked fact is returned wherever the revocation label is visible to the retrieval layer, outranks its
   replacement, and leads agents to the unsafe action."** Five agent-memory systems measured.

@@ -50,21 +50,25 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 **Acceptance:** All Cypher queries use `$param` dicts. CORS restricted to `["http://localhost:5173"]`. Server binds to `127.0.0.1`. Health endpoint returns `ontology_status` without topology. Pydantic models have `max_length` constraints.
 
 **Files:**
+
 - Modify: `apps/graph-viz/server/main.py` (entire file)
 - Modify: `apps/graph-viz/server/requirements.txt` (remove playwright if present)
 
 **Step 1: Rewrite app setup — CORS + Pydantic + config**
+
 - Change `allow_origins=["*"]` → `allow_origins=["http://localhost:5173"]`
 - Add `from pydantic import field_validator` and `from typing import Optional`
 - Extract `VALID_OBJECT_KINDS`, `CONTEXT_DEFAULT`, `NODE_CAP_ALL_CONTEXT`, `ARGUMENT_EDGE_CAP` constants
 - Change `uvicorn.run(app, host="0.0.0.0", port=8000)` → `host="127.0.0.1"`
 
 **Step 2: Harden health endpoint**
+
 - Remove `host`, `port`, `available_graphs` from response (topology leak)
 - Add `ontology_status` field (tries `MATCH (n:Point:Object ...) RETURN count(n)`)
 - Keep only: `status`, `ontology_status`, `falkordb_connected`
 
 **Step 3: Convert all existing Cypher queries to parameterized**
+
 - `_query_graph()`: Replace `f"... WHERE n.id IN [{ids_str}]"` with UNWIND pattern using `$ids` param
 - `get_neighborhood()`: Same UNWIND conversion
 - `/api/search`: Replace `%s` with `$q` param
@@ -75,10 +79,12 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 - `_build_cache()`: Already safe (no user input), keep as-is
 
 **Step 4: Add Pydantic field validation**
+
 - Add `field_validator` for `content` (max_length=500) on `PointCreate`
 - Add `field_validator` for `type` on `EdgeCreate` (max_length=50)
 
 **Step 5: Check requirements.txt**
+
 - Remove `playwright` if present
 - Verify `pydantic>=2.0` and `falkordb>=1.0` are listed
 
@@ -91,9 +97,11 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 **Acceptance:** 7 endpoints return documented shapes. 409 Conflict on version mismatch and cascade delete guard. Edge cap at 50 for arguments.
 
 **Files:**
+
 - Modify: `apps/graph-viz/server/main.py` (append endpoints)
 
 **Step 1: Add helper functions**
+
 - `_get_graph()` — return FalkorDB connection (adapt to existing DB_HOST/PORT/PASSWORD from startup)
 - `_new_id()` — UUID-based ID generation
 - `_now_iso()` — UTC ISO timestamp
@@ -101,40 +109,48 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 - `_result_to_dicts()` — convert result set to list of dicts
 
 **Step 2: Add Pydantic models**
+
 - `CreateObjectRequest(name, objectKind, context, parentId, content)` with field_validator for objectKind enum
 - `UpdateObjectRequest(name, content)` — optional fields
 
 **Step 3: Add GET /api/ontology-tree?context=&root_only=**
+
 - Fetch all `:Point:Object` nodes (cap at 200 for context="all")
 - Fetch `hasPart` edges
 - Assemble tree server-side (cycle guard, build_subtree recursion)
 - Return `{tree, total_nodes, context, filtered_from}`
 
 **Step 4: Add GET /api/ontology-object/{id}/descendants**
+
 - Traverse `hasPart*` from target node
 - Return `{node, descendants[], total_descendants}`
 
 **Step 5: Add POST /api/ontology-object (status_code=201)**
+
 - Create dual-label `:Point:Object` node
 - Optional `parentId` → creates `hasPart` edge
 - Return created node with version
 
 **Step 6: Add PUT /api/ontology-object/{id} (If-Match concurrency)**
+
 - Require `If-Match` header with version
 - 409 on version mismatch
 - Update name/content, bump version
 
 **Step 7: Add DELETE /api/ontology-object/{id}?force= (If-Match + cascade guard)**
+
 - Require `If-Match` header
 - 409 if has children and force≠true
 - Cascade delete with `hasPart*0..` when force=true
 
 **Step 8: Add GET /api/object-arguments?id=**
+
 - Fetch IMPL edges (supports) and NAND edges (contradicts)
 - Include mitigations array per edge
 - Cap at 50 total
 
 **Step 9: Add ontology_status to /api/health**
+
 - Verify `:Point:Object` query works
 - Set `ontology_status: "ok"` on success
 
@@ -147,32 +163,39 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 **Acceptance:** Health endpoint returns `ontology_status: "ok"`. Tree endpoint returns valid JSON tree. Object CRUD operations work. Arguments endpoint returns capped supports/contradicts.
 
 **Files:**
+
 - Test: `apps/graph-viz/server/main.py` (start server + curl tests)
 
 **Step 1: Start server**
+
 ```bash
 cd apps/graph-viz/server && python main.py &
 sleep 2
 ```
 
 **Step 2: Smoke test health**
+
 ```bash
 curl -s http://127.0.0.1:8000/api/health | python -m json.tool
 ```
+
 Expected: `{"status": "ok", "ontology_status": "...", "falkordb_connected": true}`
 
 **Step 3: Smoke test tree**
+
 ```bash
 curl -s "http://127.0.0.1:8000/api/ontology-tree?context=product-strategy" | python -c "import sys,json; d=json.load(sys.stdin); print(f'tree nodes: {d.get(\"total_nodes\",0)}')"
 ```
 
 **Step 4: Smoke test object-arguments**
+
 ```bash
 # First get a node ID from tree, then:
 curl -s "http://127.0.0.1:8000/api/object-arguments?id=<some-id>" | python -c "import sys,json; d=json.load(sys.stdin); print(f'supports: {len(d.get(\"supports\",[]))}, contradicts: {len(d.get(\"contradicts\",[]))}')"
 ```
 
 **Step 5: Kill server**
+
 ```bash
 kill %1
 ```
@@ -186,11 +209,13 @@ kill %1
 **Acceptance:** Code review passes with NO ISSUES FOUND. Commit follows commit-workflow skill (pre-flight checks, PR, review gate, auto-merge).
 
 **Step 1: Run code-review**
+
 - Dispatch parallel reviewers via `code-review` skill
 - Fix issues in review loop
 - Exit when clean
 
 **Step 2: Commit via commit-workflow**
+
 - Read `commit-workflow/SKILL.md` before committing
 - Stage `apps/graph-viz/server/main.py` and `requirements.txt`
 - Create PR, pass review gate, auto-merge

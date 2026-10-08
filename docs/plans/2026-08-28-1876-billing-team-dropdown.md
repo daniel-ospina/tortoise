@@ -16,6 +16,7 @@
 > **Findings date:** 2026-08-28
 
 > Gate skipped: plan touches zero third-party dependencies (React 19 / supabase-js already in-repo; no new libraries). Prior UX research consumed from the #1876 scoping `### Axis Research`:
+>
 > - **Per-tenant billing sections must state the tenant explicitly** [canonical]: Vercel's team dashboard shows the team in the section header with a switcher reachable from the same surface; billing/usage pages must make the tenant explicit because the data is tenant-scoped (per-team Stripe customers here). An in-section context selector for a per-tenant section is the established pattern.
 > - **Two GLOBAL dropdowns are the anti-pattern** [pitfalls]: designpixil "contextual navigation in the global navigation space is the mistake"; LogRocket: global nav orients, app-level nav does work. This is an in-section selector, not a second global switcher — consistent with the #1874 single-global-switcher decision.
 > - **Rejected**: URL-driven team context (`?team=X`) deferred — router-less shell; `switchTeam` state suffices; revisit when deep-linking becomes a requirement (VibeWeek URL pattern is a future nicety).
@@ -29,11 +30,13 @@
 ### Journey Test Map
 
 **Journey: "Which team is this billing for?"**
+
 1. Click Billing → **Acceptance:** heading reads "Billing — {current team}" → **Test:** `test_billing_team_context`
 2. (Multi-team) Switch team in the dropdown → **Acceptance:** heading + plan data update, tab stays Billing → **Test:** `test_billing_team_context`
 3. (Single-team) Open Billing → **Acceptance:** team name shown, no empty selector → **Test:** `test_billing_team_context` (single-team branch)
 
 ### Failure Modes
+
 - **Switch mid-render** → expected: `switchTeam` resets team-scoped state + re-fetches (existing behavior, verified in #1874 e2e); `setTab('billing')` keeps the tab → covered by the e2e switch assertion.
 - **teams not loaded** (`currentOrgId` null) → expected: select renders only when `teams.length > 1`; heading falls back to `currentOrgName || 'this team'` → covered by the single-team branch.
 - **Narrow viewport** → expected: the row already has `flexWrap: wrap`; the select is compact → covered by the existing narrow-viewport test (no overflow).
@@ -66,9 +69,11 @@ Research-backed; no new decisions requiring fresh research (the pattern is settl
 **Acceptance:** `test_billing_team_context` fails until Task 2.
 
 **Files:**
+
 - Modify: `tests/e2e/test_dashboard_identity.py`
 
 **Step 1:** Add the tests using the existing harness (`_seed`/`_wire` with the two-team `teams` param + `team_reads` pin from #1874):
+
 ```python
 def test_billing_team_context(page: Page):
     """#1876: Billing names its team; multi-team can switch in-tab AND the
@@ -108,6 +113,7 @@ def test_billing_team_context_single_team(page: Page):
     expect(page.get_by_role("heading", name="Billing — E2E")).to_be_visible()
     expect(page.get_by_label("Billing team")).to_have_count(0)
 ```
+
 (The `_wire` /v1/team handler must pass through extra team fields — extend the handler to `{**t, "anon": False}` so billing fields reach the card.)
 
 **Step 2:** Run to confirm RED:
@@ -120,11 +126,13 @@ Expected: FAIL (no "Billing — Alpha" heading).
 **Acceptance:** Heading "Billing — {team}"; select renders for multi-team, hidden for single-team; switch re-hydrates + stays on Billing; full suite green.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (billing header ~4406–4412)
 - Modify: `website/apps/dashboard/src/index.css`
 - Test: `tests/e2e/test_dashboard_identity.py`
 
 **Step 1:** Replace the Billing header row:
+
 ```jsx
             <div className="row">
               <h2>Billing — {currentOrgName || 'this team'}</h2>
@@ -151,6 +159,7 @@ Expected: FAIL (no "Billing — Alpha" heading).
 ```
 
 **Step 2:** CSS (`index.css`):
+
 ```css
 .billing-team-select {
   background: var(--surface, #0f172a); color: var(--text, #e2e8f0);

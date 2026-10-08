@@ -19,6 +19,7 @@ aboutObjects:
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
 > **Residuals (review-gate round 1):**
+>
 > - Custom-graph self-service/graph-bound RESTORE surface deferred → #2339
 >   (archives restorable via the pipeline + drill scratch; /backups/restore
 >   stays default-surface).
@@ -34,6 +35,7 @@ aboutObjects:
 > `feat/2313-per-graph-backups`; VGATE-passed per task; final full-diff VGATE
 > passed — embedded 219 + docker 215 across the affected suites). Task 8
 > (PR + review gates) in progress.
+>
 # #2313 Implementation Plan — Per-Graph Backup Coverage
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
@@ -46,6 +48,7 @@ aboutObjects:
 **Pattern Research:** Skipped (plan touches zero third-party deps — in-repo storage adapters + tested graphs seam only; scoping doc axis research covers external patterns).
 
 ### Integration Surface Map (from scoping doc, test-design #2094)
+
 | Surface | Change | Tests |
 |---|---|---|
 | Team→graphs enumeration (both lanes) | new seam `enumerate_org_graphs` | test_backup_sweep.py (registry dialect + supabase fake) |
@@ -64,6 +67,7 @@ aboutObjects:
 **Intent:** Give the sweep a deterministic per-team graph list — the substrate every later task consumes.
 **Acceptance:** `enumerate_org_graphs(source, org_id)` returns `[{graph_id, kind, namespace}]` in both dialects: supabase via `graph_metadata` (already default-first, custom active only, default graph_id literal "default"); registry via `graph_list` with `status != 'deleted'` filter and kind-default node mapped to graph_id literal `"default"`. Unit-tested against fakes; zero behavior change elsewhere.
 **Files:**
+
 - Modify: `tortoise/backup_sweep.py` (add seam next to `enumerate_eligible_orgs`)
 - Test: `tests/test_backup_sweep.py`
 
@@ -78,6 +82,7 @@ aboutObjects:
 **Intent:** Graph identity becomes part of the artifact; prune/list can scope per graph; legacy flat objects remain readable.
 **Acceptance:** `create_backup(..., graph_id=...)` writes keys `backups/{org_id}/{graph}/{ts}_{rnd}/…` + manifest gains `graph_id` (default `None`/absent for team-era callers = legacy flat shape preserved); `_validate_graph_id` added; `list_backups(storage, org_id, graph_id=None)` filters by graph when given and reads legacy flat objects (bucketed by manifest graph_name) otherwise unchanged; `prune_backups` accepts `graph_id` (prefix-scoped retention) while team-level calls keep byte-identical behavior. All existing tests stay green (extended, not rewritten).
 **Files:**
+
 - Modify: `tortoise/hosted_backup.py`
 - Test: `tests/test_hosted_backup.py`, `tests/test_backup.py`
 
@@ -93,6 +98,7 @@ aboutObjects:
 **Intent:** The nightly/hourly run actually backs up every active graph and fires per-graph data-loss signals.
 **Acceptance:** `run_backup_sweep` iterates per eligible team, then per graph (via Task 1 seam): size guard → per-graph prior state (`ops/teams/{tid}/graphs/{gid}/state.json`; legacy team-level state read as the default graph's prior) → per-label counts → dump → P0 guard (manifest graph_name == namespace) → empty/>50%/per-label drift incidents keyed (org_id, graph_id) → per-graph state write → per-graph prune. One graph's failure never aborts its team's others; deleted/quarantined graphs excluded. Team-level ops state + result shape unchanged for existing consumers.
 **Files:**
+
 - Modify: `tortoise/backup_sweep.py` (per-team loop → per-graph inner loop)
 - Test: `tests/test_backup_sweep.py`
 
@@ -106,6 +112,7 @@ aboutObjects:
 **Intent:** The operator-facing "backups OK" signal is true only when every active graph is fresh — the exact silent-failure mode #2313 exists to kill.
 **Acceptance:** `backup_watcher.py` parses the graph-segment key shape (and still reads legacy flat objects); per-graph staleness drives incidents (a stale CUSTOM graph with a fresh default raises STALE keyed to the graph); team state derivation handles per-graph state files.
 **Files:**
+
 - Modify: `tortoise/backup_watcher.py`
 - Test: `tests/test_backup_watcher.py`
 
@@ -116,6 +123,7 @@ aboutObjects:
 **Intent:** Restores target the right graph, cannot resurrect deleted graphs via backup, and ops tooling can scope per graph.
 **Acceptance:** Restore of a graph-keyed backup resolves its graph via the key segment (legacy via manifest graph_name + graphs-seam reverse lookup) and loads into that graph's namespace; restoring a graph whose registry row/node is `status='deleted'` is refused (tombstone guard, fail-closed, mirrors cross-graph guard shape); graph-bound keys remain rejected from the team-default restore surface (unchanged); re-baseline endpoint accepts optional `graph_id`; drill accepts optional graph. ACL-user rebuild/verification on full-platform restore is a RESEARCH task inside this issue (DR-runbook note + verification finding), not a code change.
 **Files:**
+
 - Modify: `tortoise/hosted_backup.py` (restore), `tortoise/hosted_api.py` (backups_restore / re-baseline / drill)
 - Test: `tests/test_hosted_backup.py`, `tests/test_hosted_api.py` (drill/re-baseline)
 - Research note: `docs/ops/registry-backup-dr.md` (ACL rebuild verification task)
@@ -127,6 +135,7 @@ aboutObjects:
 **Intent:** The R2 layout, retention model, and residual notes reflect per-graph reality; R13 audit input documented.
 **Acceptance:** `docs/ops/registry-backup-dr.md` R2 layout § shows the graph segment + legacy note; registry-graph-schema.md retention note; runbook §5 residual flipped; cost model (N graphs × bounded retention) noted for R13.
 **Files:**
+
 - Modify: `docs/ops/registry-backup-dr.md`, `docs/registry-graph-schema.md`, `docs/ops/multi-graph-migration-runbook.md`
 **Steps:** Edit docs; register nothing new (docs/00_index.md already routes these files); commit.
 
@@ -135,6 +144,7 @@ aboutObjects:
 **Intent:** Prove the whole loop on live FalkorDB: N active graphs → N artifacts; delete → excluded; per-graph restore swap; tombstone restore refused.
 **Acceptance:** `tests/test_backup_e2e.py`-pattern scenario added/run on the docker lane; if the docker lane is unavailable in this environment, the scenario is committed and marked for the CI lane.
 **Files:**
+
 - Create: `tests/test_backup_multigraph_e2e.py`
 **Steps:** Scenario per scoping checklist; run or defer-to-CI with a note. Commit.
 

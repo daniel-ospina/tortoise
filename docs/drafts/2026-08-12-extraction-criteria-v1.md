@@ -27,6 +27,7 @@ inputs: ONTOLOGY.md v3.6, merged pack manifests (#986/#988), spec-classification
 | **nothing** | no item | Boilerplate, dispatch/instruction text, tool dumps, headers, paths, HTTP codes | **RESEARCH:** explicit rejection WITH a reason — never silent |
 
 **AUDIT fixes applied:**
+
 - event class → **Event NODE** (issue #1013) — the pre-audit criteria carried the legacy `pointKind: event` into the payload; reverted.
 - claim class kinds restricted to {statement, observation, hypothesis} (ONTOLOGY §5) — `requirement` removed from the claim-kind list (it is a dev pointKind, entity-side).
 - decision kinds = DECISION_POINT_KINDS (pack_registry's canonical set).

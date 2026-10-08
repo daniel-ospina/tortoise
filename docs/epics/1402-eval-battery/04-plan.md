@@ -146,6 +146,7 @@ battery/                     # new top-level package (alongside tools/longmem_ev
 ```
 
 **Component boundaries:**
+
 - **Arms are sealed adapters.** Each arm implements `ArmAdapter.retrieve(context) -> memories` + `ArmAdapter.record(context, item)`; the harness never reaches into an arm's internals. Isolation contract: per-arm namespace (Tortoise per-arm context; vendor per-project keys). Cross-arm contamination is a run-level error (S4 race-flag; detection test E2E-3.6).
 - **Judges are gated, never raw.** All LLM-judge scoring flows through `judge/gate.py`; a rubric with no valid validation record blocks scoring (S6 conditional-guard flag). Validation records persist to run artifacts (E2E-5.1).
 - **Trajectories are the source of truth for longitudinal metrics.** L2/L3/D2 metrics compute from `run_artifact.json` trajectory fields only — no re-inference at report time (determinism, S7).
@@ -294,6 +295,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 ## 8. Coherence Review + Risk Analysis
 
 **Cross-substep consistency checks:**
+
 - Journeys J1–J7 ↔ Workflows W1–W7 (explicit J↔W map, §1) ↔ sections 4–6 (each workflow's surfaces resolve to interface contracts) ✓
 - E2E detailed (25 scenarios) ↔ scope high-level E2E-1…7 via the parent→child map above (full coverage, no orphans) ✓
 - AC coverage: all 14 metric families (R1–R5, L1–L6, D2–D4) + the D1 verdict-rule AC mapped to ≥1 detailed E2E (R1: 1.1/1.2; R2: 1.1; R3: 1.1/1.3; R4: 1.1; R5: 1.1; L1: 2.2; L2: 2.1; L3: 2.3; L4: 2.4; L5: 2.5; L6: 2.6; D1: 3.1/3.2; D2: 3.3; D3: 3.4; D4: 3.5) ✓

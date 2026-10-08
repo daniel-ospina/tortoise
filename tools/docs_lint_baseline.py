@@ -116,7 +116,7 @@ data, not chosen for convenience.
     change fails whenever it produces MORE occurrences of a key than the
     snapshot recorded. This is safe because a file's markdownlint findings are a
     property of the file ALONE: every file is linted independently, so the count
-    is identical whether the run covers one file or all 838. Fixing one of them
+    is identical whether the run covers one file or all 772. Fixing one of them
     is never a new finding.
 
   * **lychee is a SET of ``(path, target)`` keys.** A link's occurrence count is
@@ -144,10 +144,11 @@ new failure, not a snapshot edit. The ceiling is ENFORCED (a pinned count in
 ``tests/test_docs_lint_baseline.py``), because the snapshot sits in a PR's own
 diff and nothing else stops a change from appending the very findings it
 introduces. **#7534 owns the burn-down** — see its comment for the population
-gap: this snapshot covers ALL tracked markdown, while #7534 was scoped by a
-``docs/``-subtree measurement, so it empties only when the non-``docs/`` remainder
-is drained too. When the snapshot is empty this program and its baseline file are
-deleted.
+gap: this snapshot covers all tracked markdown EXCEPT vendored
+``website/apps/dashboard/node_modules`` trees (excluded from the lint population —
+see ``VENDORED_MARKDOWN``), while #7534 was scoped by a ``docs/``-subtree
+measurement, so it empties only when the non-``docs/`` remainder is drained too.
+When the snapshot is empty this program and its baseline file are deleted.
 
 GENERATED FILES
 
@@ -178,7 +179,7 @@ import tempfile
 import tomllib
 from collections import Counter
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 # Pinned to match `.github/workflows/ci.yml` — the snapshot must be produced by
@@ -283,6 +284,17 @@ _NO_LYCHEE_SECTION = hashlib.sha256(b"<no lychee section>").hexdigest()
 
 BASELINE_SCHEMA = 1
 DEFAULT_BASELINE = "config/docs-lint-baseline.json"
+
+# Vendored markdown is NOT OURS: a vendored re-install REWRITES it, so a finding
+# there cannot be fixed by hand-editing the `.md` (the snapshot's own `end_state`
+# note records this), and a baselined entry for one is unreproducible the moment
+# the dependency is bumped. The tree is therefore removed from the lint
+# POPULATION — a population fix, never a per-finding suppression — and the SAME
+# glob is applied by `.markdownlint-cli2.jsonc` `ignores` and by the `docs` job's
+# changed-set diffs, so the generator, the job and the differ describe one
+# population. Measured #7534: 1,422 of the 11,238 baseline findings lived in 41
+# tracked files under `website/apps/dashboard/node_modules`.
+VENDORED_MARKDOWN = ("node_modules",)
 
 # `:<line>` and `:<line>:<column>` are both emitted (cli2 omits the column when
 # it is 1). `.+?` is non-greedy so a path containing a colon still anchors on the
@@ -995,6 +1007,14 @@ def _population(repo_root: Path, files_from: Path | None) -> list[str]:
         if proc.returncode != 0:
             raise FailClosed(f"git ls-files failed: {proc.stderr.decode(errors='replace')}")
         listed = [p for p in proc.stdout.decode().split("\0") if p]
+    # Drop vendored trees BEFORE `normalize_path`: see `VENDORED_MARKDOWN`. The
+    # filter is applied on BOTH branches so a `--files-from` caller (tests, a
+    # future CI caller) gets the same population as the default `git ls-files`.
+    listed = [
+        p
+        for p in listed
+        if not any(part in VENDORED_MARKDOWN for part in PurePosixPath(p).parts)
+    ]
     # Returned BARE (repo-relative, no `./`). The `./` prefix a linter needs is
     # added at the invocation site (`_run_markdownlint` / `_run_lychee`), because
     # a filename is data and one starting with `-` must never be read as an
@@ -1123,11 +1143,12 @@ def run_update(args: argparse.Namespace) -> int:
                 "codebase must be removed from this file (run `update`), and the entry "
                 "count must never grow — a genuinely new entry is a new failure, not a "
                 "snapshot edit. #7534 owns the burn-down, but NOTE ITS POPULATION: this "
-                "snapshot covers ALL tracked markdown, while #7534 was scoped by a "
-                "`docs/`-subtree measurement, and the non-`docs/` remainder includes "
-                "tracked `website/apps/dashboard/node_modules` files that a vendored "
-                "re-install rewrites, so they cannot be fixed by hand-editing the .md. "
-                "See the measured breakdown in the comment on #7534."
+                "snapshot covers all tracked markdown EXCEPT vendored "
+                "`website/apps/dashboard/node_modules` trees, which are excluded from "
+                "the lint POPULATION (`_population`, the cli2 `ignores`, and the `docs` "
+                "job's changed-set diffs) because a vendored re-install rewrites them, "
+                "so a finding there cannot be fixed by hand and an entry for one is "
+                "unreproducible. See the measured breakdown in the comment on #7534."
             ),
             "regenerate": "uv run python tools/docs_lint_baseline.py update",
         },
@@ -1136,7 +1157,7 @@ def run_update(args: argparse.Namespace) -> int:
             "generated_at_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "markdownlint": MARKDOWNLINT_VERSION,
             "lychee": f"lychee {LYCHEE_PIN}",
-            "population": f"git ls-files '*.md' — {len(files)} files",
+            "population": f"git ls-files '*.md' (minus vendored) — {len(files)} files",
             "counts": {"markdownlint": len(markdownlint), "lychee": len(lychee)},
             "variance": (
                 "markdownlint findings are deterministic and occurrence-counted. The "
@@ -1144,8 +1165,9 @@ def run_update(args: argparse.Namespace) -> int:
                 "between RUNS for reasons no author controls (rate limits, transient "
                 "network, TLS, run population), so it is a SET of `(path, target)` "
                 "keys, not a count — its pinned ceiling in "
-                "tests/test_docs_lint_baseline.py has headroom while the markdownlint "
-                "one is exact. Regenerate with `update`; never hand-edit."
+                "tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size "
+                "(a re-baseline above it must raise that row out loud) while the "
+                "markdownlint one is exact. Regenerate with `update`; never hand-edit."
             ),
         },
         "markdownlint": markdownlint,

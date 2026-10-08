@@ -31,6 +31,7 @@ The system under test is the epistemic layer in three compositions, each with it
 | **Whole system under hostile input** | Noise, loops, Sybil, flapping | Adversarial tests (§5) |
 
 **Method rules (non-negotiable):**
+
 1. Every test is **deterministic**: fixed seed, fixed graph builder, fixed operator order where EP shuffles factors (pin `random.seed` inside the harness, or run EP with a frozen factor order).
 2. Every assertion is **a confidence delta with a threshold**, not a vibe. Mean/delta thresholds are given below; they were calibrated against the real engine on 2026-08-09 (see §1) and must be re-locked in a calibration run on the target implementation before v1 sign-off.
 3. **Hermetic where possible, Docker where necessary.** The hermetic pattern from `test_ep_nary_falsification.py` (stub `proj.g`, pre-populate `_node_cache`/`_msg_cache`, drive `_update_factor`/`run` directly) covers the factor arithmetic. SDK-level tests (`test_sdk_ep.py` pattern, temp `db_path`) cover end-to-end belief. Docker-gated tests (E019) must ALSO have a hermetic twin so the no-Docker CI suite still exercises the semantics.
@@ -72,6 +73,7 @@ All numbers measured by running the real code (`.venv/bin/python`, embedded Falk
 Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas are measured between EP runs before/after the action on the *same* graph. Thresholds marked **[cal]** are calibrated to the target semantics (§1) and must be re-locked in the calibration run.
 
 ### P1 — Support transmission and attenuation (IMPL)
+
 - **Setup:** A(T0, α=10,β=1) `IMPL→` B(uniform); chain variant adds B `IMPL→` C.
 - **Assertions:**
   1. `mean(B) − 0.5 ≥ 0.15` (measured: 0.714). **[cal]**
@@ -81,6 +83,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Worked numbers:** A(0.909)→B: B=0.714 (measured). Chain: B=0.715, C=0.679.
 
 ### P2 — Directed-attack asymmetry (NAND)
+
 - **Setup:** A(T0) `NAND→` B(T2, 0.750), operator `direction="unidirectional"`.
 - **Assertions:**
   1. `mean(B)_after − mean(B)_before ≤ −0.10` **[cal]** (target drops under attack; measured today: −0.344 with the candidate potential, +0.09 with the current one — this test fails today).
@@ -92,6 +95,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 > **Note on the potential (spec contract, not an implementation prescription):** the layer must implement a *position-aware* attack potential, e.g. `φ_attack(ca, cb) = exp(−w·ca·cb)` — the attacker's belief *forbids* the target's belief; a disbelieved attacker (ca→0) exerts no force (φ→1). The current symmetric `phi_nand` is a **P0 blocker** (§1 root cause). Mutual contradiction is the same potential with bidirectional messaging. `svbp.py` stays archived; Beta posteriors under the attack potential remain unimodal, so EP's Beta projection is adequate and the old NAND-induced-bimodality rationale is superseded.
 
 ### P3 — Rebut vs undercut (edge-targeting NAND)
+
 - **Setup:** A(T0) `IMPL→` B. Two attack modes: (a) **rebut** — claim C(T0) `NAND→` B ("B is false"); (b) **undercut** — claim C(T0) `NAND→` the *operator* A⇒B ("this inference is invalid"), which removes/strips A→B support without asserting ¬B.
 - **Assertions:**
   1. Both modes reduce B: `mean(B)_rebut < mean(B)_undercut < mean(B)_before` **[cal]** (rebut hits the claim directly and is stronger than removing support).
@@ -100,11 +104,13 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Worked numbers:** B prior 0.714 (from P1). Rebut → B < 0.5 **[cal]**; undercut → B returns toward its no-support prior ≈ 0.5–0.55, A stays 0.909. If undercut and rebut produce the *same* posterior, the distinction is not implemented — fail.
 
 ### P4 — Support attenuation = premise conf × edge weight
+
 - **Setup:** premise P at confidence c ∈ {0.6, 0.75, 0.91} (via baselines), `IMPL→` Q, weight w ∈ {0.5, 1.0, 2.0} on the operator.
 - **Assertions:** for fixed w, `mean(Q)` is monotone increasing in c; for fixed c, monotone increasing in w; and `mean(Q) < mean(P) + 0.02` for w=1.0 (a target never exceeds a support-only premise). **[cal]**
 - This pins "premise confidence × edge weight" as an ordered, damped transfer — the scalar ledger (§4 R3) must reproduce exactly these numbers as `prior + signed_message`.
 
 ### P5 — REPHRASE evidence pooling (dedup without deletion)
+
 - **Setup:** claim X with baseline (5,1) (T1); claim R ("rephrase of X") with baseline (5,1); `REPHRASE` link R→X.
 - **Assertions:**
   1. Pooling, no double-count: `effective_n(X)_with_R < effective_n(X)_independent_duplicate`, where the independent-duplicate control is X with a *second, separately-attributed* T1 source. REPHRASE must pool evidence like the same source appearing twice (log-cap, `aggregate_prior` semantics), not like two independent sources.
@@ -113,6 +119,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Status:** REPHRASE is not implemented; this test defines its contract. The log-cap math to reuse is `aggregate_prior` (§1 anti-Sybil row).
 
 ### P6 — Invalidation + supersession composition (bi-temporal)
+
 - **Setup:** E(T0) `IMPL→` A; A `IMPL→` B. Action: `supersede_point(A, A')`. **Scoped per #2421:** belief-preservation (assertions 1–2) is asserted for **Case 1 — restatement** only (the successor restates A — same claim, better source/wording — so every connection still applies and edges transfer). Case 2 — substantive correction (the successor exists *because* a refutation landed) is **out of scope for assertions 1–2** (they explicitly do NOT hold) and is asserted by the **P6.3 ghost gate** (which holds for both cases) plus a **dedicated Case-2 assertion TODO below** — the P6 fixture contains no NAND, so non-re-attachment of a motivating refutation is NOT exercised here; it needs its own fixture (E `NAND→` A; correct A→A'; assert the NAND does not appear incident to A' and mean(A') reflects the structural recompute).
 - **Assertions (structure, extending `test_supersede_edges.py`):**
   1. *(restatement only)* `mean(A') ≈ mean(A)` before supersession ± 0.02 **[cal]** (A' inherits A's belief: transferred edges + same evidence). For a substantive correction this assertion does NOT hold — the successor's belief is the structural recomputation with the motivating refutation gone.
@@ -122,6 +129,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Bi-temporal assertion:** the graph must answer "was A believed at t1?" from history — either a timestamped belief snapshot or a replayed event log — and `belief(A, t1) − belief(A, now)` must be consistent with the invalidation event. If the layer ships no history, this test is **explicitly deferred** and R4 is marked not-shippable; do not fake it with current-state reads.
 
 ### P7 — Anti-Sybil tier dominance
+
 - **Setup:** claim X supported by N sources of tier T: (a) 1×T0; (b) 10×T4; (c) 1000×T4; (d) 1×T3.
 - **Assertions (prior level, `aggregate_prior` — already proven in `test_ep_sources.py`; keep as regression):**
   1. `mean(1×T0) > mean(10×T4)` (0.909 > 0.574, measured).
@@ -130,6 +138,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
   4. **EP level:** through a chain (sources `IMPL→` X), the same ordering must survive EP propagation: `mean(X|1×T0) > mean(X|10×T4)` **[cal]**. If EP flattens the prior ordering, the layer is Sybil-vulnerable.
 
 ### P8 — Loop convergence (no oscillation, bounded fixed point)
+
 - **Setup (three graphs):** (i) odd NAND triangle A→B→C→A; (ii) mutual IMPL ring P0→P1→P2→P3→P0; (iii) two claims with mutual NAND + mutual IMPL (mixed frustration).
 - **Assertions:**
   1. `converged=True` within `max_iter` (default 50) on all three; measured: 2–3 iterations today.
@@ -137,6 +146,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
   3. Honest non-convergence: if a graph cannot converge (e.g., an odd NAND triangle under strict attack semantics may legitimately need a contested/UNDEC label instead), the run must return `(max_iter, False)` and the *query layer* must surface "undecided" — never a confident number. `test_ep_nary_falsification.py` already covers the honest-reporting path; extend to the triangle.
 
 ### P9 — Contested-claim surfacing
+
 - **Setup:** claim X with balanced contradiction: X(T2, 0.750) attacked by C1(T0) `NAND→` X, and supported by E1(T0) `IMPL→` X.
 - **Assertions:**
   1. `variance(X) > 0.04` (the `get_contested_claims` threshold, `ep.py:435`).
@@ -146,6 +156,7 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Status:** threshold machinery exists; with the current NAND it can never fire on genuine contradictions (measured var 0.006 on mutual NAND). Blocked by P2's potential fix.
 
 ### P10 — No-false-cascade (E019 as a property)
+
 - **Setup:** A and B both `IMPL→` shared conclusion C1; B `IMPL→` independent C2. A is invalidated by NAND.
 - **Assertions (extend `test_ep_directional.py`, keep the exact gates):**
   1. `a_drop > 0.03`, `c1_drop > 0.001` (the invalidated argument and its conclusion move).
@@ -180,17 +191,20 @@ These measure the *input* — whether the pipeline built an epistemic graph that
 End-to-end, through the public surface. Each scenario = setup → action → query → expected result with exact numbers. These are the *user-visible* acceptance tests.
 
 ### R1 — "Is claim X still believed after new evidence?"
+
 - **Setup:** X(T2) supported by E(T0) `IMPL→` X → `mean(X) = 0.83` **[cal]**.
 - **Action:** new evidence C(T0) `NAND→` X arrives (one write).
 - **Query:** `get_confidence(X)`.
 - **Accept:** `mean(X) ≤ 0.5` **[cal]**; `variance(X) > 0.04` (contested); the result carries the ledger lines for both E and C (§R3). If the answer is still > 0.6, the layer has not incorporated the new evidence — fail.
 
 ### R2 — "What contradicts my decision?"
+
 - **Setup:** decision D(T1); two attackers C1, C2 `NAND→` D.
 - **Query:** `traverse(D, "NAND", direction="incoming")`.
 - **Accept:** returns exactly {C1, C2} with each attacker's confidence and tier; sorted by message strength (the strongest attacker first); ledger shows both negative lines. Zero NAND edges found for an undecided claim is a graph-quality failure (G1).
 
 ### R3 — "Why does the graph believe X?" — ledger-vs-EP consistency
+
 - **Setup:** any claim with ≥ 3 incoming edges (mix of IMPL/NAND), after EP.
 - **Query:** ledger explanation = prior line + one line per incoming operator: `signed Δ(α,β)` and `Δmean` per edge.
 - **Accept (the core fidelity test):**
@@ -199,26 +213,31 @@ End-to-end, through the public surface. Each scenario = setup → action → que
   3. **Faithfulness spot-check (human/LLM):** for 10 sampled claims, a reviewer reconstructs the dominant line's source (which premise/attacker moved the needle) from the ledger alone; ≥ 8/10 correct. This is the "explainability spot-check" from `docs/tortoise-product-success-eval.md` made quantitative.
 
 ### R4 — "Was X believed before the retraction?" (bi-temporal)
+
 - **Setup:** X believed 0.85 at t1; retracted (invalidation) at t2.
 - **Query:** `belief(X, t1)`.
 - **Accept:** returns ≈ 0.85, not current-state. If no history layer ships in v1, R4 is **explicitly deferred** and the roadmap says so (do not substitute current-state reads). See P6 bi-temporal assertion.
 
 ### R5 — "What changed after the new session?"
+
 - **Setup:** session dump ingested into an existing graph; EP run.
 - **Query:** diff of pre/post confidences.
 - **Accept:** exactly the claims in the session's 2-hop neighborhood moved (E019 isolation: unrelated |Δ| < 0.01, G7); newly-contested claims are listed with their variance; the diff report total affected ≤ session claims × neighborhood factor (bounded propagation, `_affected_claims` max_hops=2).
 
 ### R6 — "Should I trust this source?" (anti-Sybil at the endpoint)
+
 - **Setup:** X supported by (a) 10 independent T4 sources vs (b) 1 T0 source.
 - **Query:** `get_confidence(X)` both cases.
 - **Accept:** `mean(X | 1×T0) > mean(X | 10×T4)` (0.909 vs 0.574 at prior level; ordering must survive EP — P7). A UI that shows "10 sources agree!" must show the tier-weighted number, not a raw count.
 
 ### R7 — "Why is this claim contested?"
+
 - **Setup:** X with balanced E(T0) IMPL and C(T0) NAND (P9 graph).
 - **Query:** `get_contested_claims(0.04)` then ledger(X).
 - **Accept:** X surfaced with variance > 0.04; ledger shows the two opposing camps with their strengths (|Δmean| per camp); the explanation text states the stalemate ("supported by E @ 0.91, attacked by C @ 0.91") rather than a decisive number. Contested state must be *epistemic*, not evasive: the mean may be near 0.5 but the variance flag is the signal.
 
 ### R8 — "Undercut my inference" (edge-targeting at the endpoint)
+
 - **Setup:** A(T0) `IMPL→` B(T2), C(T0) `NAND→` the operator (undercut, P3).
 - **Query:** confidence of A, B, and the operator's status.
 - **Accept:** B drops to its no-support posterior (≈ prior, 0.5–0.55) **[cal]**; A unchanged (|Δ| < 0.02); the operator is marked invalid/withdrawn so future queries don't propagate through it; B's ledger shows "support line withdrawn (undercut by C)" instead of a negative attack line. Distinguishes rebut (B attacked) from undercut (A→B attacked) in the ledger text.
@@ -247,23 +266,27 @@ Hostile inputs a real deployment will see. These run on the same corpus + target
 **Rule for all comparisons: same corpus, same scenarios, same thresholds, same seed.** Report per-scenario pass rates and the *delta*. The evaluation harness is a matrix runner (pattern: `tests/e018_harness.py` factorial runner) with one axis = layer under test.
 
 ### B0 — No graph (raw transcript recall)
+
 - **Alternative:** retrieval over raw session transcripts, "last statement wins" belief, no propagation.
 - **Metric:** **contested-resolution accuracy** — given a contradiction pair, does the answer expose BOTH claims + the conflict? Raw transcripts answer whichever statement is retrieved most recently (or by lexical match), silently; the graph answers with both claims, confidences, and a contested flag.
 - **Honest test:** 20 contradiction pairs from real sessions; a blind grader scores whether the answer surfaces the conflict (recall) and states the current winner (accuracy). Accept: graph ≥ 0.85 on both; transcript baseline typically ≤ 0.5 (measure, don't assume).
 - **Measurable advantage:** the graph's contested flag (variance > 0.04) is a *new signal* raw recall cannot produce. Advantage = contested-surfacing rate on the 20 pairs (graph ≥ 0.9, transcript = 0 by construction).
 
 ### B1 — Flat claim store (no propagation)
+
 - **Alternative:** same extraction, static extractor confidence stored on each claim, zero IMPL/NAND propagation (edges exist but EP never runs).
 - **Metric:** **responsiveness** — mutate a premise's baseline (evidence arrives/retracts); does the *conclusion's* confidence move? Flat store: no (0% responsive by construction). EP: conclusion moves ≥ 0.05 (P1). Accept: EP responsive on ≥ 90% of scenarios; flat store 0%.
 - **Second metric:** **cascade isolation** — when a premise is invalidated, unrelated conclusions: flat store trivially passes (nothing moves); EP must pass too (P10 gates). This proves propagation is *cheap enough to be safe*: the honest test is "propagation must deliver responsiveness WITHOUT sacrificing isolation", not "propagation is better because more things move".
 - **Measurable advantage:** Δ responsiveness (EP − flat) ≥ 0.90 across the scenario battery, at equal or better isolation (E019 gates green).
 
 ### B2 — Symmetric-attack (current EP, `phi_nand` as-is)
+
 - **Alternative:** the engine today (symmetric agreement-NAND, §1).
 - **Metric:** **directional suppression** — the P2 assertion battery (target drops, attacker untouched, dense attack collapses, reinstatement possible).
 - **Honest test:** B2 *fails* P2/P5/A5 by construction (measured: inversion +0.09 on T4 target, dense attack +0.924). The epistemic layer's v1 must pass them. The comparison is not "we beat the old EP" — it is "the old EP demonstrably cannot express directed contradiction, and here is the quantitative gap (measured deltas §1)". This makes the baseline comparison *falsifiable*: if a reviewer re-runs B2 and finds symmetric NAND now passes P2, the claim "symmetric is inert" is dead — check the code, not the doc.
 
 ### Efficiency guard (not a baseline, a constraint)
+
 - EP iterations ≤ 50 (default cap), embedded dream latency ≤ 500ms on the dirty subgraph (`dream.py` budget), affected-subgraph growth bounded by `_affected_claims(max_hops=2)` — propagation value must not cost responsiveness.
 
 ---
@@ -273,6 +296,7 @@ Hostile inputs a real deployment will see. These run on the same corpus + target
 All thresholds **[cal]** re-locked in the calibration run on the target implementation; numbers below are the spec defaults measured/derived on 2026-08-09.
 
 ### Reasoning correctness (the decisive ones)
+
 | # | Criterion | Number |
 |---|---|---|
 | AC1 | IMPL support transmission | premise 0.91 → direct conclusion ≥ 0.65 (measured 0.714) |
@@ -289,6 +313,7 @@ All thresholds **[cal]** re-locked in the calibration run on the target implemen
 | AC12 | Baseline deltas | responsiveness ≥ 0.90 over flat store at equal isolation; contested-surfacing advantage ≥ 0.9 over raw recall |
 
 ### Reasoning-endpoint acceptance (user-visible)
+
 | # | Scenario | Accept |
 |---|---|---|
 | AC13 | R1 new-evidence query | mean(X) ≤ 0.5, variance > 0.04, ledger shows both lines |
@@ -299,6 +324,7 @@ All thresholds **[cal]** re-locked in the calibration run on the target implemen
 | AC18 | R8 undercut | B → no-support posterior; A unchanged; operator invalidated |
 
 ### Quality-of-life gates (regression, run every CI)
+
 - E019 suite green with FalkorDB; hermetic twins green without it.
 - G8 pollution invariants hold (NAND:IMPL ratio, isolation rate, mean variance).
 - `dream_all` converged on corpus + real-session weekly job; latency within 500ms embedded budget.

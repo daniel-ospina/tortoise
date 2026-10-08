@@ -157,10 +157,17 @@ not resurrect the deleted link. On `rebuild_all` the
 sweep runs AFTER pass 2, so a `:Session` source recreated from a
 `contains_session` turn link exists before the fold.
 
-**No down-version guarantee for new folded record types.** An older binary
-rebuilding a journal written by a newer one warns `unrecognized event type 'X'
-— skipped` for a new type it does not know, and silently drops unknown
-`PointRevised` extras. The rebuild path has no pre-wipe allowlist analogous to
+**No down-version guarantee for new folded record types.** A binary that
+predates #3585, rebuilding a journal written by a newer one, warns that the
+record type is unrecognized and skips it, and silently drops unknown
+`PointRevised` extras. A binary carrying #3585 or later instead fails the
+replay loudly (R8) on the graph-backed rebuild/recover engines: the type is
+recorded as a non-folded event and the run refuses rather than returning an
+incomplete graph. The three documented `EXEMPT_SHAPES` are the only non-folded
+records that are recorded WITHOUT refusing the run. The in-memory index alone
+opens no run boundary and warns
+without refusing. The
+rebuild path has no pre-wipe allowlist analogous to
 `_assert_episodic_points_recreatable`; forward-only evolution of the JSONL
 record vocabulary is a known limitation, not a supported downgrade path.
 

@@ -22,9 +22,11 @@ aboutObjects:
 **Why:** before extending backups to per-graph coverage (#2313), verify we are not reinventing the wheel across the entire durability posture (snapshot/dump choice, cadence/RPO, retention, monitoring, restore drills, security/immutability, key management, geo-durability, erasure/trash).
 
 ## Reframed question
+
 "Does our backup code match a checklist" → "Is the durability/DR/erasure posture of a multi-tenant memory service industry-standard across axes — dump strategy, RPO/RTO, retention, monitoring, restore testing, security/immutability, key management, geo-durability, and deletion/erasure — and where are we off-pattern or inventing our own wheel?"
 
 ## What we have internally (verified on current main)
+
 - **Hosted backup** = per-team **hourly-scheduled logical dumps** (graph nodes/edges re-encoded, AES-256-GCM encrypted) → Cloudflare R2; restore = download → sha256-vs-manifest verify → decrypt → load into temp graph → swap, with cross-team/cross-graph guards + empty-over-live guard. **Cadence contract: hourly driver cron (#596 plan AC1) → RPO ≤1h typical / ≤2h worst** — the 90-min STALE threshold + 24h hourly retention buckets presuppose sub-2h freshness. `retention_hourly=24` is a retention HORIZON, not an RPO. Achieved cadence can silently degrade under the 30-min driver timeout + serialized per-team locks — **measure actual per-team freshness** (watcher exists; no SLA reporting). Logical dump chosen **deliberately** because production is managed FalkorDB Cloud where BGSAVE-copy of the RDB is unavailable (hosted_backup.py:1-8).
 - **Selfhost durability is layered:** AOF on-box (`--appendonly yes`; automatic RDB BGSAVE deliberately disabled `--save ""` — fork/OOM risk, #1786) + **daily** operator/scripted RDB copies with the script's own contract: **RPO ≤24h typical / ≤48h worst under load** (exit-3 defer, daily-backup.sh #101/#209). Hourly logical dumps are the HOSTED-lane mechanism; nothing in-repo wires the sweep driver to a selfhost deploy.
 - **Retention:** per-team ~7 daily + 4 weekly + 24h hourly buckets; prune job.
@@ -52,6 +54,7 @@ aboutObjects:
 | **Oversized graphs** | >100k nodes → SIZE_GUARD_ABORT incident, **no backup for the largest graphs** | Guard must not silently orphan the biggest/valuable graphs | ⚠️ Acceptable only as a **documented, monitored** limit (it is monitored); consider chunked/segmented dumps or per-graph guard tuning later. **Medium** |
 
 ## Gaps mapped to actions (no wheel reinvention required anywhere)
+
 1. **#2313 (filed, scoped):** per-graph coverage — Option A matches canonical per-tenant practice. Reframe the failure as **custom graphs with effectively infinite RPO**, not "widened to 24h". No new invention. (Scoping doc docs/scoping-2313-per-graph-backups.md cadence wording was corrected to hourly in the same changeset.)
 2. **ACL-user rebuild on full-platform restore** — verify + add to DR runbook/drill (restore completeness).
 3. **Scheduled restore drill** (e.g., monthly automated drill + restore-time measurement) — on top of the existing drill endpoint.
@@ -64,10 +67,12 @@ aboutObjects:
 10. **Dead-knob cleanup:** `BACKUP_SKIP_FRESH_MIN` parsed but never consumed (backup_config.py:61) — wire it into the sweep or delete it.
 
 ## Sources (confidence tiers)
+
 - **High (≥3 independent or vendor/practitioner convergence):** per-tenant logical backup pattern (AWS SaaS blog, Grasp multi-tenant DR, multi-tenant-saas.com, dzone); absence-based monitoring + drift + scheduled restore tests (datashelter, lastping, oneuptime, accompio, scality); encryption/3-2-1/immutability + drills (database.tools, tencent cloud, cleverence, cloudvara, sqlflash); erasure incl. backups + grace period + resurrection controls (nocodelisted, bodlelaw, complysafe, oktopeak, avanoo); Redis/FalkorDB snapshot+AOF guidance (Redis docs/blog, oneuptime, FalkorDB docs).
 - **Medium (single-vendor capability claims, vendor-authoritative-for-own-product):** R2 bucket locks (Cloudflare docs) — the immutability PRACTICE is High (multi-source), the R2 capability itself is single-vendor; FalkorDB managed-snapshot/PITR availability (FalkorDB enterprise restore API — verify with our host).
 - **Medium (2 sources):** KMS rotation standard (implied across database.tools/cleverence "key management"); FalkorDB managed-snapshot availability (FalkorDB enterprise restore API — single vendor source, ⚠️ verify with our host); geo-redundancy norms (3-2-1 sources above).
 - **⚠️ single-source/hypothesis:** ACL-user rebuild gap (internal code walk — no external source; flagged for internal verification, not asserted as fact).
 
 ## Recommendation
+
 Do NOT redesign anything. The architecture is already on the canonical multi-tenant pattern — arguably stronger than average (hourly cadence, absence-based monitoring with monitor-the-monitor, drift guards). #2313 extends per-tenant coverage to its intended granularity. The material hardening deltas are the follow-ups above (ACL-rebuild verification, scheduled drills, KMS/rotation, R2 immutability decision, geo decision, cadence-label truthfulness), all small and additive. Everything erasure-related in #2304 already matches practice. Proceed with #2313 Option A; fold the deltas into that issue's scope or adjacent issues after owner pick.
