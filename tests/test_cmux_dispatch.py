@@ -210,6 +210,17 @@ SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT = """\
 danielospina@Daniels-MacBook-Pro 7158-stale-footer % 
 """
 
+#: A LIVE pi pane whose footer carries an EXTENSION-STATUS line below the stats
+#: line. pi pushes that line whenever any extension calls `ctx.ui.setStatus`
+#: (loop-enforcer sets `Loop: <slug> (cycle N)`; slack-bridge sets a channel
+#: thread) — both are loaded in every fleet pane. The stats line is therefore NOT
+#: the literal last line, and readiness must still say YES: this is pi's own
+#: output, not a shell prompt. Shape taken from the installed renderer's
+#: `FooterComponent.render` (lines = [pwdLine, statsLine, ...statuses]).
+SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER = SCREEN_IDLE_READY + (
+    "Loop: 7158-heartbeat-dead-lane (cycle 2)\n"
+)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1501,8 +1512,39 @@ class TestDispatcherRecovery(unittest.TestCase):
         stale = SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT
         self.assertTrue(cd.status_bar_present(stale), "the stale bar IS present")
         self.assertFalse(cd.boot_blocked(stale), "no boot marker catches it")
-        self.assertFalse(cd.footer_is_last(stale))
+        self.assertTrue(
+            cd.shell_prompt_below_footer(stale),
+            "the shell prompt BELOW the stale footer is what makes it executable",
+        )
         self.assertFalse(cd.screen_ready(stale))
+
+    def test_a_LIVE_pi_with_an_EXTENSION_STATUS_below_the_footer_is_READY(self):
+        """pi renders an extension-status line BELOW its stats line whenever an
+        extension calls `ctx.ui.setStatus` (loop-enforcer, slack-bridge — loaded
+        in every fleet pane). That is pi's own output, not a shell prompt, so
+        readiness must NOT require the stats line to be the literal last line."""
+        screen = SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.boot_blocked(screen))
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen), "a live pi must stay dispatchable")
+
+    def test_trailing_blank_lines_after_the_footer_are_READY(self):
+        """`cmux read-screen` pads the capture; blank lines are not a prompt."""
+        self.assertTrue(cd.screen_ready(SCREEN_IDLE_READY + "\n\n   \n"))
+
+    def test_dispatch_into_a_LIVE_pi_with_an_extension_status_is_NOT_refused(self):
+        """The end-to-end guard for the shape above: a healthy lane mid-loop must
+        still receive its brief."""
+
+        class ExtensionStatusCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER)
+
+        fake = ExtensionStatusCmux()
+        result = self._send(fake, ready_timeout=0.0, consume_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(fake.submitted, [PROBE])
 
     def test_a_pane_with_a_STALE_footer_above_a_shell_prompt_is_REFUSED(self):
         """The no-footer refusal alone does not cover the stale-footer shape: the

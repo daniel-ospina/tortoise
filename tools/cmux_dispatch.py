@@ -118,17 +118,17 @@ position-based guess.
 NO FOOTER, NO SEND (#7158)
 --------------------------
 Readiness is a POSITIVE signal about the LIVE pane, not the absence of a known
-failure: pi's footer (status bar) must be the LAST thing drawn before the tool
-writes. Two dead-pane shapes otherwise pass a "is a bar present anywhere" test
-— one with no footer at all, and one whose previous pi session left its footer
-in the scrollback above a freshly printed shell prompt — and in both the bytes
-go to a bare login shell, which EXECUTES them. The earlier revision treated the
-no-footer shape as a slow boot and sent anyway ("confirmation will decide"); but
-confirmation runs AFTER the bytes are written, so it cannot un-execute a command.
-The gate now fails CLOSED — footer-present-and-last within the readiness budget,
-on the initial attempt AND on the dismiss-and-resend recovery. A genuinely slow
-boot is raised via `--ready-timeout`; a refusal is recoverable, an executed brief
-is not.
+failure: pi's footer (status bar) must be drawn and no shell prompt may appear
+BELOW it before the tool writes. Two dead-pane shapes otherwise pass a "is a bar
+present anywhere" test — one with no footer at all, and one whose previous pi
+session left its footer in the scrollback above a freshly printed shell prompt —
+and in both the bytes go to a bare login shell, which EXECUTES them. The earlier
+revision treated the no-footer shape as a slow boot and sent anyway
+("confirmation will decide"); but confirmation runs AFTER the bytes are written,
+so it cannot un-execute a command. The gate now fails CLOSED — a footer drawn
+with no shell prompt below it, on the initial attempt AND on the dismiss-and-
+resend recovery. A genuinely slow boot is raised via `--ready-timeout`; a refusal
+is recoverable, an executed brief is not.
 
 USAGE
 -----
@@ -182,6 +182,11 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 #: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
 #: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
 #: NO `↑`/`↓` counters — do not key readiness off those.
+#: A login-shell prompt sigil at the END of a line. Used ONLY to detect that a
+#: pane has returned to a shell BELOW a stale pi frame — never to detect pi.
+SHELL_PROMPT_RE = re.compile(r"[%$#>]\s*$")
+
+#: pi's footer (status bar) token. Matches the `NN.N%/NNNk` context/token cell.
 READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
 
 #: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
@@ -339,34 +344,51 @@ def boot_blocked(screen: str | None) -> bool:
     return _last_status_bar_end(screen) < marker_at
 
 
-def footer_is_last(screen: str | None) -> bool:
-    """True when pi's footer (status bar) is on the LAST non-empty line.
+def shell_prompt_below_footer(screen: str | None) -> bool:
+    """True when a shell prompt is drawn BELOW the last pi footer.
 
     A status bar ANYWHERE is not evidence that the CURRENT process owns stdin.
     pi renders inline, so a pane whose pi exited retains the dead session's
     footer in the scrollback while the shell prints its prompt BELOW it — the
     same ordering trap `boot_blocked` documents for the boot-block marker, in
-    the case where no marker is present to catch it. Requiring the footer to be
-    the last thing drawn makes readiness a statement about the live pane rather
-    than a leftover frame (#7158).
+    the case where no marker is present to catch it. That prompt is what makes
+    the stale frame EXECUTABLE: bytes sent there run as commands (#7158).
 
-    Trailing BLANK lines are ignored: `cmux read-screen` pads the capture, and
-    the footer is the last line WITH CONTENT when it came from the live TUI.
+    A prompt line ends in a shell sigil (`% $ # >`); pi's own footer and its
+    EXTENSION-STATUS lines do not (`Loop: <slug> (cycle 2)`, `#general thread`) —
+    pi pushes those below its stats line whenever an extension calls
+    `ctx.ui.setStatus` (verified in the installed renderer:
+    `modes/interactive/components/footer.js`), so "the footer must be the literal
+    last line" would refuse healthy lanes. Only lines strictly AFTER the stats
+    line are examined, so the stats line's own trailing `$`/`%` cannot be
+    mistaken for a prompt.
     """
-    for line in reversed((screen or "").splitlines()):
-        if line.strip():
-            return bool(READY_RE.search(line))
-    return False
+    text = screen or ""
+    end = _last_status_bar_end(text)
+    if end < 0:
+        return False
+    after = text[end:]
+    newline = after.find("\n")
+    if newline < 0:
+        return False
+    return any(
+        line.strip() and SHELL_PROMPT_RE.search(line)
+        for line in after[newline + 1:].splitlines()
+    )
 
 
 def screen_ready(screen: str | None) -> bool:
     """True when pi's LIVE TUI owns stdin.
 
-    Three ordered requirements: a footer is present, it is the LAST non-empty
-    line (so a stale footer left above a shell prompt is NOT ready, #7158), and
-    no boot-block marker follows it.
+    Three requirements: a footer is present, no boot-block marker follows it, and
+    no shell prompt is drawn below it — a stale footer above a live shell prompt
+    is an executable pane, not a ready one (#7158).
     """
-    return footer_is_last(screen) and not boot_blocked(screen)
+    return (
+        status_bar_present(screen)
+        and not boot_blocked(screen)
+        and not shell_prompt_below_footer(screen)
+    )
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
