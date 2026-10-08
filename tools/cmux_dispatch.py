@@ -115,6 +115,19 @@ those bytes are what the prompt consumes. Readiness is an asymmetry — the prom
 marker AND the absence of pi's status bar (see `boot_blocked`) — never a
 position-based guess.
 
+NO FOOTER, NO SEND (#7158)
+--------------------------
+Readiness is a POSITIVE signal, not the absence of a known failure: a pane must
+present pi's footer (status bar) before the tool writes into it. The earlier
+revision treated "readable, no boot marker, but no footer either" as a slow boot
+and sent anyway ("confirmation will decide") — but confirmation runs AFTER the
+bytes are written, and `cmux send` into a bare login shell EXECUTES the text as a
+command. A dead lane's pane is exactly that state, so the fail-open turned a
+heartbeat misclassification into executed bytes. The gate now fails CLOSED: no
+footer within the readiness budget means no send, on the initial attempt AND on
+the dismiss-and-resend recovery. A genuinely slow boot is raised via
+`--ready-timeout`; a refusal is recoverable, an executed brief is not.
+
 USAGE
 -----
     uv run python tools/cmux_dispatch.py send --workspace workspace:12 \
@@ -1063,9 +1076,23 @@ class Dispatcher:
                 fingerprint=fp,
             )
         if not ready:
-            self.log(
-                f"{tag}no ready signal after {ready_timeout:g}s — sending anyway "
-                f"(confirmation will decide)"
+            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but never
+            # presented pi's footer, so there is no evidence a pi owns stdin —
+            # it may be a bare login shell (a dead lane), which EXECUTES the
+            # bytes as a command. The old fail-open ("sending anyway —
+            # confirmation will decide") wrote the brief first and observed
+            # afterwards; confirmation cannot undo an executed command. Refuse.
+            # A genuinely slow boot is a caller concern (--ready-timeout); a
+            # refusal is recoverable, a brief typed into a shell is not.
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace} showed no pi footer (status bar) within "
+                f"{ready_timeout:g}s — refusing to send into a pane with no "
+                f"live pi: the bytes would be typed into a bare shell and "
+                f"EXECUTED. Confirm the lane has a live pi (or raise "
+                f"--ready-timeout for a slow boot), then re-dispatch.",
+                fingerprint=fp,
             )
 
         # --- pre-send baseline (novelty for the pending-turn check) --------- #
@@ -1212,10 +1239,21 @@ class Dispatcher:
                     )
                     return result
                 if not recovery_ready:
-                    self.log(
-                        f"{tag}recovery: no ready signal — re-sending anyway "
-                        f"(confirmation will decide)"
+                    # ⛔ SAME FAIL-CLOSED RULE AS THE INITIAL GATE (#7158): the
+                    # pane became readable after the dismissal but never drew
+                    # pi's footer, so there is still no evidence a pi owns
+                    # stdin. Re-sending would write the brief into whatever is
+                    # there. Refuse rather than fall back to the old
+                    # "re-sending anyway (confirmation will decide)".
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was dismissed but never presented "
+                        f"pi's footer within {RECOVERY_READY_TIMEOUT:g}s — the "
+                        f"re-send was REFUSED rather than written into a pane "
+                        f"with no live pi. Re-dispatch once the pane is idle."
                     )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
             else:

@@ -190,6 +190,15 @@ Press any key to continue...
 
 
 
+#: A BARE LOGIN SHELL pane. Readable, but it never draws pi's footer (status bar)
+#: and carries no boot-block marker — the exact state a DEAD lane's pane is in, and
+#: the state #7158 wrote a dispatch brief into (a shell EXECUTES the bytes).
+SCREEN_BARE_SHELL = """\
+Last login: Wed Oct  8 20:58:11 on ttys004
+danielospina@Daniels-MacBook-Pro 7158-bare-shell % 
+"""
+
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers
@@ -1029,6 +1038,14 @@ class FakeCmux:
         return cd.CmuxResult(0, "OK")
 
 
+class BareShellCmux(FakeCmux):
+    """A pane that is a BARE LOGIN SHELL: readable, but it never draws pi's footer
+    and carries no boot-block marker. The #7158 target."""
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+
+
 class FakeClock:
     """A clock whose `sleep` advances it, so bounded-wait loops terminate in
     `timeout / poll` iterations instead of spinning forever."""
@@ -1450,6 +1467,53 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = _dispatcher(FakeCmux()).send_message("workspace:99", "   ")
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "empty-message")
+
+    def test_a_readable_pane_with_no_pi_footer_is_REFUSED_not_sent_into(self):
+        """#7158: a readable pane with NO pi footer and no boot marker is a bare
+        login shell (a dead lane), not a slow boot. The old fail-open logged
+        "sending anyway (confirmation will decide)" and wrote the brief into the
+        shell, which EXECUTES it as a command; confirmation runs after the bytes
+        and cannot undo that."""
+        fake = BareShellCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(fake.sent_log, [], "no bytes may reach a bare shell")
+
+    def test_recovery_refuses_to_re_send_into_a_pane_that_never_drew_the_footer(self):
+        """#7158 on the RECOVERY path: after a boot-block dismissal the pane
+        became readable but never drew pi's footer (the pi died), so the
+        dismiss-and-resend recovery must REFUSE rather than write the brief a
+        second time into whatever is there."""
+
+        class DiesAfterDismiss(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.phase = "ready"
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                if self.phase == "ready":
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                if self.phase == "blocked":
+                    self.phase = "shell"
+                    return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
+                return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+
+            def send_text(self, workspace, text, surface=None):
+                if text != "\\n":
+                    self.phase = "blocked"
+                return super().send_text(workspace, text, surface)
+
+        fake = DiesAfterDismiss()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the brief must not be re-sent into a pane with no live pi",
+        )
 
 
 # --------------------------------------------------------------------------- #
