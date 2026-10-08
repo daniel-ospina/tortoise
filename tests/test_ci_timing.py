@@ -2482,3 +2482,49 @@ def test_cli_returns_2_for_an_unreadable_manifest(tmp_path, content: str, label:
     assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
     assert proc.stderr.startswith("2:")
+
+
+@pytest.mark.parametrize("content,label", [
+    ("surfaces: []\n", "surfaces-is-a-list"),
+    ("surfaces:\n", "surfaces-is-null"),
+    ("durations:\n  x.py: 1.0\n", "surfaces-absent"),
+])
+def test_cli_returns_2_when_the_surfaces_block_is_not_a_mapping(tmp_path, content: str, label: str) -> None:
+    """The shape guard must reach the block every consumer indexes (#6092
+    review round 6).
+
+    A `surfaces:` that is a list, a scalar or ABSENT passed the document-level
+    check and then escaped as `AttributeError: 'list' object has no attribute
+    'items'` or `KeyError: 'surfaces'` from `ci_selection`, on both entry
+    points.
+    """
+    assert label
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--paid-vs-selected", "--run-id", "1",
+         "--changed-files", "a.py", "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("label", ["directory", "missing"])
+def test_cli_returns_2_when_the_manifest_path_cannot_be_read(tmp_path, label: str) -> None:
+    """A path that EXISTS but cannot be read was the sixth escape (#6092
+    review round 6): `exists()` guards only absence, so a directory or a
+    permission error reached the boundary as a traceback on both entry points.
+    """
+    target = tmp_path / label
+    if label == "directory":
+        target.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--refresh-durations", "--dry-run",
+         "--manifest", str(target), "--logs-dir", str(tmp_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr

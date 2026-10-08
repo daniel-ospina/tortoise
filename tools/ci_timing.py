@@ -922,6 +922,18 @@ def _manifest_of(manifest_text: str) -> dict:
         raise DurationsBridgeError(
             f"the manifest is not a YAML mapping (got {type(parsed).__name__})"
         )
+    # The shape guard must reach the block every consumer indexes, not stop at
+    # the document. `surfaces` is iterated as a mapping by the duration checks
+    # and by `ci_selection.fast_pool`, so a list, a scalar or an ABSENT
+    # `surfaces` still escaped with an AttributeError or KeyError AFTER passing
+    # the document-level check (#6092 review round 6). Refuse it here, where it
+    # is still this class.
+    surfaces = parsed.get("surfaces")
+    if not isinstance(surfaces, dict):
+        raise DurationsBridgeError(
+            f"the manifest's `surfaces:` block is not a YAML mapping "
+            f"(got {type(surfaces).__name__}) — every consumer indexes it as one"
+        )
     return cs._normalize_surfaces(parsed)
 
 
@@ -1063,8 +1075,17 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         print(f"2: manifest not found: {manifest_path}", file=sys.stderr)
         return 2
     try:
+        manifest_text = manifest_path.read_text()
+    except OSError as exc:
+        # The `exists()` guard above only covers ABSENCE: a directory, a
+        # permission error or an unreadable volume still reached the process
+        # boundary as a traceback while this function's docstring promises the
+        # documented refusal (#6092 review round 6).
+        print(f"2: manifest not readable: {exc}", file=sys.stderr)
+        return 2
+    try:
         new_text, stats = render_refreshed_manifest(
-            manifest_path.read_text(), weights, captured_at)
+            manifest_text, weights, captured_at)
         # The readback runs AFTER the renderer returns, so it needs the same
         # mapping as the render itself: `_manifest_of` raises
         # DurationsBridgeError for a document it cannot parse back, and
@@ -1243,10 +1264,12 @@ def paid_vs_selected_cli(args) -> int:
     # character-by-character and raise on a None one.
     try:
         manifest = _manifest_of(Path(args.manifest).read_text())
-    except DurationsBridgeError as exc:
-        # `_manifest_of` refuses a document it cannot read as a YAML mapping;
-        # this entry point must report that as the documented exit 2 rather
-        # than dying with a traceback (#6092 review round 5).
+    except (DurationsBridgeError, OSError) as exc:
+        # `_manifest_of` refuses a document it cannot read as a YAML mapping,
+        # and the read itself can fail with an OSError (a directory, a
+        # permission error, an absent path). This entry point must report both
+        # as the documented exit 2 rather than dying with a traceback (#6092
+        # reviews rounds 5-6).
         print(f"2: {exc}", file=sys.stderr)
         return 2
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
@@ -1269,9 +1292,17 @@ def paid_vs_selected_cli(args) -> int:
         full_pool |= set(manifest.get("push_extra") or [])
         full_pool |= (set(manifest.get("slow_files") or [])
                       - ci_selection.carve_out_files(manifest))
-    run = fetch_run(args.repo, args.run_id)
+    try:
+        run = fetch_run(args.repo, args.run_id)
+        jobs = fetch_jobs(args.repo, args.run_id)
+    except subprocess.CalledProcessError as exc:
+        # The default artifact path downgrades the identical fetch failure to a
+        # warning, so the two entry points disagreed about whether it is fatal;
+        # this one died with a traceback (#6092 review round 6).
+        print(f"2: gh api failed for run {args.run_id}: {exc}", file=sys.stderr)
+        return 2
     result = paid_vs_selected(
-        fetch_jobs(args.repo, args.run_id), selection,
+        jobs, selection,
         durations_map(manifest), run.get("created_at"), full_pool=full_pool)
     result["event"] = args.event
     result["full"] = bool(selection.get("full"))
@@ -1412,4 +1443,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # ONE place owns this module's exit-code contract (#6092 review round 6).
+    # Translating the refusal at each individual call site invited a fresh
+    # escape per review round — a path that exists but cannot be read, a
+    # manifest whose `surfaces:` is not a mapping, an unguarded gh fetch —
+    # because the contract lived wherever someone remembered to wrap it. The
+    # refusal class is defined at the process boundary instead, so no path can
+    # reach the user as a traceback with rc=1 while the docstring promises the
+    # documented `2 UNKNOWN`.
+    try:
+        sys.exit(main())
+    except DurationsBridgeError as exc:
+        print(f"2: {exc}", file=sys.stderr)
+        sys.exit(2)
