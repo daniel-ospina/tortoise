@@ -11608,6 +11608,14 @@ class SessionRequest(BaseModel):
         if v is not None:
             try:
                 number = float(v)
+            except OverflowError:
+                # `float(10**400)` raises, and a 400-digit JSON integer is a
+                # legal body. A ValueError here is a legible 422; letting the
+                # OverflowError escape makes FastAPI answer 500 for an input the
+                # contract says is a client error.
+                raise ValueError(
+                    "client_captured_at is not representable as a unix "
+                    "timestamp") from None
             except (TypeError, ValueError):
                 # Not numeric at all: leave it to pydantic to report.
                 return v

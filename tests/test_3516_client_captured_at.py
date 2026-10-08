@@ -622,3 +622,225 @@ def test_boundary_refuses_a_bool_instant():
     with pytest.raises(ValidationError):
         SessionRequest(conversation=[{"role": "user", "content": "x"}],
                        client_captured_at=True)
+
+
+# ── the pair must hold at the SINK too, not only in the spool ─────────────
+
+
+def test_the_server_keeps_the_pair_when_two_writers_disagree():
+    """The spool is only ONE path in; `POST /v1/sessions` is where every writer
+    converges, so the pair has to hold there as well.
+
+    Reproduced defect: a first write storing an instant with NO source (the Pi
+    recorder's shape), then a second carrying its OWN instant plus 'unknown',
+    left the FIRST instant labelled with the SECOND writer's clock — flipping
+    the floor from PASSED to DISABLED for the same instant.
+
+    MUTATION THAT REDS THIS: coalesce the two fields independently.
+    """
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    sid = "3516-server-pair"
+    turns = [{"role": "user", "content": "hi"}]
+    _write_session_and_turns(sdk._get_proj(), sdk, sid, turns,
+                             now="2026-10-08T00:00:00Z", harness="pi",
+                             client_captured_at=INSTALL + 10.0)
+    _write_session_and_turns(sdk._get_proj(), sdk, sid, turns,
+                             now="2026-10-08T00:00:01Z", harness="pi",
+                             client_captured_at=INSTALL + 20.0,
+                             client_captured_at_source="unknown")
+
+    assert _stamp(sdk, sid, "client_captured_at") == pytest.approx(INSTALL + 10.0)
+    assert _stamp(sdk, sid, "client_captured_at_source") is None, (
+        "the second writer's clock was hung on the first writer's instant")
+    verdict, reason = client_capture_floor_verdict(
+        _stamp(sdk, sid, "client_captured_at"),
+        _stamp(sdk, sid, "client_captured_at_source"), INSTALL)
+    assert verdict == VERDICT_PASSED, f"{verdict} / {reason}"
+
+
+def test_the_journal_fold_keeps_the_pair_when_events_disagree():
+    """The replay path carries the same rule: a replayed event must not hang its
+    own clock on an earlier event's instant.
+
+    Built from REAL carriers (two writes, each self-consistent) so the test
+    exercises the fold's own resolution rather than a hand-built event.
+
+    MUTATION THAT REDS THIS: coalesce the two fields independently in
+    `_fold_session_recorded`.
+    """
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    sid = "3516-fold-pair"
+    turns = [{"role": "user", "content": "hi"}]
+    emitted: list[dict] = []
+    _write_session_and_turns(proj, sdk, sid, turns, now="2026-10-08T00:00:00Z",
+                             harness="pi", client_captured_at=INSTALL + 10.0,
+                             on_session_merged=emitted.append)
+    _write_session_and_turns(proj, sdk, sid, turns, now="2026-10-08T00:00:01Z",
+                             harness="pi", client_captured_at=INSTALL + 20.0,
+                             client_captured_at_source="unknown",
+                             on_session_merged=emitted.append)
+    assert emitted, "the writer emitted no journal carrier at all"
+
+    # Simulate a journal-only REPLAY: wipe the live node, then fold the journal.
+    proj.g.query("MATCH (s:Session {id:$sid}) DELETE s", params={"sid": sid})
+    for ev in emitted:
+        proj._fold_session_recorded({"type": "SessionRecorded", **ev})
+
+    assert _stamp(sdk, sid, "client_captured_at") == pytest.approx(INSTALL + 10.0)
+    assert _stamp(sdk, sid, "client_captured_at_source") is None, (
+        "a replayed event's clock was hung on an earlier event's instant")
+
+
+# ── values that make the coercions RAISE instead of refusing ──────────────
+
+
+def test_a_huge_integer_instant_is_refused_not_raised(tmp_path):
+    """`float(10**400)` raises OverflowError, and a 400-digit JSON integer is a
+    legal request body. Refusing it must not become a 500 at the boundary, must
+    not abort a spool write, and must not break `install_at_unix`'s contract.
+
+    MUTATION THAT REDS THIS: drop any of the three `OverflowError` guards.
+    """
+    from tortoise.capture_install import install_at_unix
+    from tortoise.capture_spool import Snapshot, read_spool_meta, write_spool_entry
+    from tortoise.hosted_api import SessionRequest
+
+    huge = 10 ** 400
+    with pytest.raises(ValidationError):
+        SessionRequest(conversation=[{"role": "user", "content": "x"}],
+                       client_captured_at=huge)
+    assert install_at_unix(huge) is None
+
+    root = tmp_path / "spool"
+    write_spool_entry(root, Snapshot(
+        session_id="3516-huge", turns=[{"role": "user", "content": "hi"}],
+        source="t", machine_id="m", harness="pi", client_captured_at=huge))
+    assert read_spool_meta(root, "3516-huge").get("client_captured_at") is None
+
+
+def test_an_unhashable_source_is_normalised_not_crashed(tmp_path):
+    """A non-string source (a corrupt or hand-edited meta) would RAISE on the
+    membership test, aborting the capture; the TS twin's `Set.has` accepts any
+    value, so crashing here is also a leg divergence.
+
+    MUTATION THAT REDS THIS: `source in CLIENT_CAPTURED_AT_SOURCES` unguarded.
+    """
+    from tortoise.capture_spool import Snapshot, read_spool_meta, write_spool_entry
+
+    root = tmp_path / "spool"
+    for sid, source in (("3516-list", ["wall_clock"]), ("3516-dict", {"a": 1})):
+        write_spool_entry(root, Snapshot(
+            session_id=sid, turns=[{"role": "user", "content": "hi"}],
+            source="t", machine_id="m", harness="pi",
+            client_captured_at=INSTALL + 10.0,
+            client_captured_at_source=source))
+        assert read_spool_meta(root, sid)["client_captured_at_source"] == "unknown"
+
+
+def test_the_drain_normalises_a_corrupt_stored_source(tmp_path):
+    """The last line before the wire. A meta carrying an unrecognised token must
+    not reach the server: the refusal is a 422, a 422 is PERMANENT, and the drain
+    then unlinks the entry's turn log.
+
+    MUTATION THAT REDS THIS: forward `meta[\"client_captured_at_source\"]`
+    verbatim at the drain.
+    """
+    import json as _json
+
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "3516-drain-corrupt"
+    turns = [{"role": "user", "content": "hi"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="cli_observed"))
+
+    # Corrupt the stored token, the way a foreign or older writer could.
+    path = spool._meta_path(root, sid)
+    raw = _json.loads(path.read_text())
+    raw["client_captured_at_source"] = "wall_clock"
+    path.write_text(_json.dumps(raw), encoding="utf-8")
+
+    posted: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (posted.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted and posted[0]["client_captured_at_source"] == "unknown"
+    assert spool.read_spool_turns(root, sid) == turns, (
+        "the drain deleted the user's transcript")
+
+
+def test_a_refused_instant_does_not_repost_an_already_filed_entry(tmp_path):
+    """A value the guards REFUSE must not count as 'newly stamped'. It would
+    bypass the dedup early-return AND skip the filing-marker carry, so an
+    already-filed, byte-identical entry is re-POSTed — while no stamp is written
+    at all. The TS leg already judges this with its `finiteInstant`.
+
+    MUTATION THAT REDS THIS: `snapshot.client_captured_at is not None`.
+    """
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "3516-refused-upgrade"
+    turns = [{"role": "user", "content": "hi"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+
+    posts: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (posts.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posts and spool.read_spool_meta(root, sid).get("filed_key"), (
+        "the first filing did not stamp a marker — the test cannot prove anything")
+
+    res = spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        client_captured_at=float("nan")))
+    assert res["written"] is False, (
+        "a refused instant was treated as a stamp upgrade")
+    assert spool.read_spool_meta(root, sid).get("filed_key"), (
+        "a refused instant dropped the filing marker")
+
+    second: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (second.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert not second, "an already-filed entry was re-POSTed"
+
+
+def test_floor_refuses_a_non_finite_client_instant():
+    """`inf` would PASS every finite floor and `nan` would fail every one, both
+    on a value that is not a clock. The writers refuse these; a direct caller of
+    the floor must not slip past.
+
+    MUTATION THAT REDS THIS: drop the `math.isfinite(client_captured_at)` guard.
+    """
+    for value in (float("inf"), float("-inf"), float("nan")):
+        verdict, reason = client_capture_floor_verdict(
+            value, "cli_observed", INSTALL)
+        assert verdict == VERDICT_DISABLED, f"{value}: {verdict} / {reason}"
+
+
+def test_floor_keeps_the_pass_for_a_small_positive_install_time():
+    """Deliberately NOT a defect, and pinned so it is not "fixed" later: a small
+    but POSITIVE install time means the capture genuinely happened after the
+    install, so PASS is the correct answer. The guard is on the ABSENT encoding
+    (epoch or earlier), not on the floor's sign — extending it would also destroy
+    `tolerance=inf`, the only way to express "the floor is deleted"
+    (`test_floor_mutation_control`)."""
+    verdict, reason = client_capture_floor_verdict(
+        0.0, "cli_observed", FLOOR_SKEW_TOLERANCE_S / 2)
+    assert verdict == VERDICT_PASSED, reason

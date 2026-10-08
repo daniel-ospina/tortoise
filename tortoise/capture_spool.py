@@ -730,7 +730,14 @@ def _finite_instant(value: object) -> float | None:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        # `float(10**400)` RAISES, and a 400-digit JSON integer is a legal
+        # request body. The isinstance check above cannot see it, and
+        # `classify_failure` already names this exact trap in this codebase.
+        # Returning it would abort the write; `None` is the honest answer.
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -762,6 +769,11 @@ def _stamp_pair(prior: dict | None, snapshot: Snapshot) -> tuple[float | None, s
             # source, and an absent source PASSES the floor. Absent stays
             # absent — never filled in from the other writer.
             return at, None
+        if not isinstance(source, str):
+            # A non-string source (a corrupt or hand-crafted meta) would RAISE on
+            # the membership test below, and the TS twin's `Set.has` accepts any
+            # value — so crashing here is also a leg divergence. Normalise it.
+            return at, "unknown"
         # An unrecognised token becomes `unknown`, which DISABLES the floor:
         # dropping it instead would leave the source absent, PASSING a session
         # whose clock we demonstrably cannot name.
@@ -813,9 +825,14 @@ def write_spool_entry(
     # the stamp is metadata, not content, so a hook re-snapshot of
     # byte-identical turns would otherwise early-return and the entry would stay
     # timeless forever. A stamp the floor cannot see is a floor that cannot run.
+    # #3516 §B: judged against the SAME authority the pair resolution uses. A
+    # value the guards refuse must not count as "newly stamped": it would bypass
+    # the dedup early-return AND skip the filing-marker carry, re-POSTing an
+    # already-filed, byte-identical entry — without writing any stamp at all.
+    # The TS leg already uses its `finiteInstant` here; this is the mirror.
     stamp_upgrade = (
-        snapshot.client_captured_at is not None
-        and (prior or {}).get("client_captured_at") is None)
+        _finite_instant(snapshot.client_captured_at) is not None
+        and _finite_instant((prior or {}).get("client_captured_at")) is None)
     if (
         prior
         and len(stored) == len(snapshot.turns)
@@ -1306,10 +1323,21 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # carries one (set-only-when-present, like the lane above). A pre-#3516
     # entry must POST without the keys rather than inventing an instant — a
     # fabricated floor input would make the floor pass on nothing.
-    if meta.get("client_captured_at") is not None:
-        payload["client_captured_at"] = meta["client_captured_at"]
-        if meta.get("client_captured_at_source"):
-            payload["client_captured_at_source"] = meta["client_captured_at_source"]
+    # Normalise at the DRAIN, the last line before the wire: a meta already
+    # carrying a corrupt or hand-edited token (no shipped writer can now produce
+    # one) must not reach the server, because the server's refusal is a 422, a
+    # 422 is PERMANENT, and the drain then unlinks the entry's turn log — the
+    # only copy. Cheap here, unrecoverable there.
+    _drain_at = _finite_instant(meta.get("client_captured_at"))
+    if _drain_at is not None:
+        payload["client_captured_at"] = _drain_at
+        _drain_src = meta.get("client_captured_at_source")
+        if _drain_src:
+            payload["client_captured_at_source"] = (
+                _drain_src
+                if isinstance(_drain_src, str)
+                and _drain_src in CLIENT_CAPTURED_AT_SOURCES
+                else "unknown")
     if meta.get("model"):
         payload["model"] = meta["model"]
     # The lane actually put on the wire — part of the CAS identity below.

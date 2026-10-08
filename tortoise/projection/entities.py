@@ -1514,15 +1514,22 @@ class _EntityHandlers:
         # the two legs would disagree about the same session.
         _cap_at = ev.get("client_captured_at")
         if _cap_at is not None and _annotator_value_ok(_cap_at):
+            # #3516 §B: the instant and its clock are ONE PAIR, and the SOURCE
+            # clause is appended FIRST. See `sdk._write_session_and_turns`: SET
+            # items evaluate left to right, so `s.client_captured_at IS NULL`
+            # still reads the PRE-update value and the source is adopted exactly
+            # when the instant is. Appending them independently would let a
+            # replayed event hang a later event's clock on an earlier event's
+            # instant, which flips the floor from PASSED to DISABLED.
+            _cap_src = ev.get("client_captured_at_source")
+            if _cap_src is not None and _annotator_value_ok(_cap_src):
+                sets.append(
+                    "s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL "
+                    "THEN $v_client_captured_at_source ELSE s.client_captured_at_source END")
+                params["v_client_captured_at_source"] = _cap_src
             sets.append(
                 "s.client_captured_at=coalesce(s.client_captured_at, $v_client_captured_at)")
             params["v_client_captured_at"] = _cap_at
-        _cap_src = ev.get("client_captured_at_source")
-        if _cap_src is not None and _annotator_value_ok(_cap_src):
-            sets.append(
-                "s.client_captured_at_source=coalesce(s.client_captured_at_source, "
-                "$v_client_captured_at_source)")
-            params["v_client_captured_at_source"] = _cap_src
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):

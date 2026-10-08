@@ -325,11 +325,15 @@ def install_at_unix(value) -> float | None:
         # epoch-adjacent instant `1.0` — a clock reading that is not one.
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            # `float(10**400)` raises, and this function's contract is "present
+            # but not a reading -> None", so raising would break it.
+            return None
         # `json`/pydantic both admit `inf`/`nan`. Returning them would let the
-        # floor compare them (`nan` FAILS, `inf` PASSES, `-inf` PASSES on a
-        # negative floor) — a verdict computed from a non-reading. Absent is the
-        # honest answer.
+        # floor compare them — a verdict computed from a non-reading. Absent is
+        # the honest answer.
         return number if math.isfinite(number) else None
     try:
         from datetime import datetime
@@ -370,6 +374,13 @@ def client_capture_floor_verdict(
     if client_captured_at is None:
         return VERDICT_DISABLED, (
             "no client_captured_at recorded — the floor cannot be evaluated")
+    # A non-finite client instant is not a reading either: `inf` would PASS every
+    # finite floor and `nan` would fail every one, both on a value that is not a
+    # clock. The writers refuse these; a direct caller must not slip past.
+    if not math.isfinite(client_captured_at):
+        return VERDICT_DISABLED, (
+            f"client_captured_at {client_captured_at!r} is not a finite instant — "
+            "the floor cannot be evaluated")
     if client_captured_at_source == FLOOR_SOURCE_UNKNOWN:
         return VERDICT_DISABLED, (
             "client_captured_at_source is 'unknown' — an admitted backfill gap, "
@@ -378,9 +389,16 @@ def client_capture_floor_verdict(
         return VERDICT_DISABLED, (
             "no install probe recorded for this harness — the floor cannot be "
             "evaluated")
-    # An install time at or before the epoch is not an observation. It would
-    # otherwise yield `floor = -tolerance`, which EVERY client clock passes — a
-    # floor-pass on the absence of a floor.
+    # An install time at or before the epoch is not an observation: it is the
+    # ABSENT encoding, and it would yield `floor = -tolerance`, which every client
+    # clock passes — a floor-pass on the absence of a floor.
+    #
+    # Deliberately NOT extended to `install_at - tolerance <= 0`: a small but
+    # POSITIVE install time means the capture genuinely happened after the
+    # install, and PASS is the correct answer for that input — the floor's job is
+    # to reject a capture that PREDATES the install, not to validate the probe.
+    # Extending it would also destroy `tolerance=inf`, the only way to express
+    # "the floor is deleted" (see `test_floor_mutation_control`).
     if install_at <= 0:
         return VERDICT_DISABLED, (
             f"install_at {install_at:.3f} is at or before the epoch — not a "

@@ -2240,18 +2240,34 @@ def _write_session_and_turns(
     # floor would then compare an mtime against an install instant it was never
     # about. Absent never erases a stored value.
     if client_captured_at is not None:
+        # #3516 §B / #3515 piece 12: the instant and the clock it came from are
+        # ONE PAIR, written together. A source NAMES the clock that PRODUCED the
+        # instant, so coalescing the two INDEPENDENTLY (as this did) keeps an
+        # earlier writer's instant and hangs a later writer's clock on it — and
+        # because an absent source PASSES the floor while an explicit 'unknown'
+        # DISABLES it, the client-observed session then reads unverifiable
+        # (reproduced: PASSED -> DISABLED). This is the SINK every writer
+        # converges on, so the pair has to hold here, not only in the spool.
+        #
+        # ORDER IS LOAD-BEARING: the SOURCE clause is appended BEFORE the INSTANT
+        # clause. Cypher evaluates `SET` items left to right against the state the
+        # preceding items produced, so `s.client_captured_at IS NULL` still reads
+        # the PRE-update value — which is what adopts the source exactly when the
+        # instant is adopted, and never otherwise.
+        if client_captured_at_source:
+            merge_sets.append(
+                "s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL "
+                "THEN $cosrc ELSE s.client_captured_at_source END")
+            merge_params["cosrc"] = client_captured_at_source
         merge_sets.append(
             "s.client_captured_at=coalesce(s.client_captured_at, $cout)")
         merge_params["cout"] = client_captured_at
         session_record["client_captured_at"] = client_captured_at
-    # The source rides WITH the value, never alone: a source with no instant
-    # would let a later reader claim a provenance for a timestamp it does not
-    # have (piece 12 — 'unknown' must be excludable from a pass).
-    if client_captured_at is not None and client_captured_at_source:
-        merge_sets.append(
-            "s.client_captured_at_source=coalesce(s.client_captured_at_source, $cosrc)")
-        merge_params["cosrc"] = client_captured_at_source
-        session_record["client_captured_at_source"] = client_captured_at_source
+        # The source rides WITH the value, never alone: a source with no instant
+        # would let a later reader claim a provenance for a timestamp it does not
+        # have (piece 12 — 'unknown' must be excludable from a pass).
+        if client_captured_at_source:
+            session_record["client_captured_at_source"] = client_captured_at_source
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
