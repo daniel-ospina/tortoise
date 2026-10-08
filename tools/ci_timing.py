@@ -23,9 +23,10 @@ Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYA
 (the manifest-side checks load the refreshed text through `yaml.safe_load`) —
 `ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
 does — outside that pin the import is unguarded, so a missing/broken PyYAML
-surfaces as an `ImportError` traceback with exit 1, which is a DEPENDENCY
-failure, not the exit-1 manifest-gate meaning below. Deterministic output
-(sorted, stable JSON) so the refresh job's no-diff check works.
+surfaces as rc=2 (UNKNOWN), with `ImportError` named on stderr; the process
+boundary is total, so it is no longer distinguishable by exit code from any
+other UNKNOWN failure — the exception type is what identifies it. Deterministic
+output (sorted, stable JSON) so the refresh job's no-diff check works.
 """
 from __future__ import annotations
 
@@ -982,8 +983,9 @@ def _manifest_of(manifest_text: str) -> dict:
     # Same reasoning one level down: the leg lists are `set()`-ed and iterated by
     # the full-selection branch and by `ci_selection`, so a scalar or an explicit
     # null there raised a bare TypeError inside the selection code (#6092 review
-    # round 8). Absent/null is allowed — those keys are optional; a wrong TYPE is
-    # not.
+    # round 8). Absent is allowed — those keys are optional; an explicit null or a
+    # wrong type is refused, because both arrive downstream as `set(None)` /
+    # `set(5)`.
     for key in ("slow_files", "carve_out", "tier1", "push_extra"):
         if key in parsed and not isinstance(parsed[key], list):
             value = parsed[key]
@@ -1200,6 +1202,12 @@ def load_history(json_path: Path) -> list[dict]:
     row missing `counts` as a KeyError from the renderer (#6092 review round 8).
     A history seed is a nice-to-have: an unusable one degrades to no history
     rather than failing the measurement.
+
+    "Unusable" covers VALUES, not just shape (#6092 review round 9): a row whose
+    `counts` lacks a key, whose `steps_max_job_ms` is not a number, or whose
+    `failed_tests` is not a list of strings is dropped here, because it would
+    otherwise fail the measurement downstream — the very outcome the sentence
+    above rules out.
     """
     if not json_path.exists():
         return []
@@ -1215,9 +1223,13 @@ def load_history(json_path: Path) -> list[dict]:
     history = data.get("history")
     if not isinstance(history, list):
         return []
-    return [row for row in history if isinstance(row, dict)
+    return [row for row in history
+            if isinstance(row, dict)
             and isinstance(row.get("counts"), dict)
-            and all(k in row["counts"] for k in COUNT_KEYS)]
+            and all(isinstance(row["counts"].get(k), int) for k in COUNT_KEYS)
+            and isinstance(row.get("steps_max_job_ms", 0), (int, float))
+            and isinstance(row.get("failed_tests", []), list)
+            and all(isinstance(n, str) for n in row.get("failed_tests", []))]
 
 
 def candidate_flakes(history: list[dict]) -> list[dict]:
@@ -1330,10 +1342,11 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     for row in history:
         c = row["counts"]
         # `.get` with a default, not indexing: these rows are read back from
-        # this tool's OWN committed artifact, which can be hand-edited or
-        # mangled by a merge, and an old sample written before a column existed
-        # had no `steps_max_job_ms` at all — so the renderer raised KeyError on
-        # its own history (#6092 review round 8).
+        # this tool's OWN committed artifact, which is committed to the repo and
+        # can therefore be hand-edited or mangled by a merge. Defence only —
+        # `steps_max_job_ms` and the history table landed in the same commit
+        # (75dc43f09), so no tool-written sample has ever lacked the key (#6092
+        # review round 9).
         lines.append(f"| {row.get('sample_time') or '-'} | {row.get('run_id') or '-'} "
                      f"| {row.get('conclusion') or '-'} "
                      f"| {c['passed']} | {c['failed']} | {c['error']} | {c['skipped']} "

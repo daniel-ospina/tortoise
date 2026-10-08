@@ -2628,6 +2628,12 @@ def test_cli_never_tracebacks_on_a_hostile_api_body(tmp_path, body: str, label: 
 @pytest.mark.parametrize("content", [
     "[]", "null", '{"history": null}', '{"history": "x"}',
     '{"history": [{}]}', '{"history": [{"counts": 1}]}',
+    # Wrong-VALUE rows, not just wrong-shape documents (#6092 review round 9):
+    # these passed the shape filter and then failed the measurement, which is
+    # exactly what this test forbids.
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "steps_max_job_ms": "x"}]}',
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "failed_tests": 5}]}',
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "failed_tests": [[1]]}]}',
 ])
 def test_a_corrupt_history_artifact_degrades_instead_of_failing(tmp_path, content: str) -> None:
     """The tool re-reads its OWN committed artifact as the history seed
