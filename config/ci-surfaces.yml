@@ -721,6 +721,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
   # the writer path #4028 left open, so residue regenerated after each purge.
@@ -1631,6 +1632,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_determinism_tie_order_3019.py
   # #4999: the vector leg's trace must report WHICH path it took (index vs
   # brute-force scan). Pins the unpatterned engine module
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
@@ -2953,6 +2955,16 @@ durations:
   test_wipe_server.py: 5.1
   test_boot_regressions.py: 4.2
   test_de2e1_entity_extraction.py: 2.1
+  # #3019: measured 2026-10-05 LOCALLY under the embedded carve-out config
+  # (`TORTOISE_TEST_CARVE_OUT=1`) — 7.10s for the file (a second run 8.31s; one
+  # embedding fixture is 5.16s of the setup). The
+  # row also changes the fast-pool durations coverage (#3400): a file with no
+  # durations row packs at the flat default, so whether removing this row keeps
+  # the pool above `DURATION_COVERAGE_MIN` must be measured at that head rather
+  # than assumed. Refresh from the first post-merge CI run that measures it. No
+  # pool size or percentage is restated here on purpose — see the same rule on
+  # the `#3400` rows above.
+  test_determinism_tie_order_3019.py: 7.1
   test_epic903_staleness.py: 2.6
   test_epic903_observability.py: 3.1
   test_lme_m6_evidence.py: 2.4

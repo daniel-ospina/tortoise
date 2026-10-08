@@ -104,13 +104,22 @@ start() {
   # from a killed attempt can — never inherit its port.
   docker rm -f "$name" >/dev/null 2>&1 || true
 
-  # -p 0:6379 asks Docker for ANY free host port (the collision fix).
+  # -p 127.0.0.1:0:6379 is the collision fix AND the loopback bind (#7637):
+  #   * `0` host port → Docker assigns ANY free port (the #6673 collision fix),
+  #   * `127.0.0.1` host IP → the publish is LOOPBACK ONLY.
+  # A bare `-p 0:6379` assigns the port but leaves the host address unset, and
+  # Docker resolves that to 0.0.0.0 — putting an unauthenticated, password-less
+  # (legacy service) test DB on the LAN of every lane/developer machine, where
+  # it accumulates silently (measured 2026-10-07: two such containers live).
+  # Every consumer of this action dials localhost (the exported
+  # TORTOISE_TEST_DOCKER_PORT/_LEGACY_PORT are read by `tests/_live_utils.py`
+  # with host `localhost`), so restricting the bind costs the CI path nothing.
   # --rm  removes the container when it STOPS (a normal exit, a crash, or a
   #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
   #       can leave a RUNNING container, attributable by $LABEL.
   if ! docker run -d --rm --name "$name" --label "$LABEL" \
       -e REDIS_ARGS="$redis_args" \
-      -p 0:6379 \
+      -p 127.0.0.1:0:6379 \
       "$IMAGE" >/dev/null; then
     # Annotated explicitly: `set -e` would otherwise abort with docker's stderr
     # as the only trace, and the contract is that every failure of this step is
@@ -119,8 +128,10 @@ start() {
     return 1
   fi
 
-  # `docker port` prints one line per address family ("0.0.0.0:PORT" and
-  # "[::]:PORT"); take the first and keep the port.
+  # `docker port` prints one line per address family (with a bare `-p`:
+  # "0.0.0.0:PORT" and "[::]:PORT"); take the first and keep the port. The
+  # loopback bind above prints a single "127.0.0.1:PORT" line, which this parses
+  # identically — the assigned port still flows through $PORT_FILE.
   port="$(docker port "$name" 6379/tcp | head -n 1 | sed 's/.*://')"
   # Digits only, not merely non-empty: $port is exported into $GITHUB_ENV and
   # interpolated into a URI, and a truncated/error line from `docker port`
