@@ -1416,7 +1416,9 @@ jobs:
           #
           # #6137 re-cut the two rows. They are the LPT legs of
           # `slow_files - carve_out` on the committed `durations` map — 30 and
-          # 31 files at 13.817 / 13.813 min, re-derivable with
+          # 32 files at 18.153 / 18.143 min (re-cut by #5285 when a 8.67m file
+          # entered `slow_files`; each row is a partition of the same set),
+          # re-derivable with
           # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
           # (The first cut packed 43 files / 16.21m; eight dual-registered
           # files returned to the fast pool — a second surface's diff would
@@ -1436,27 +1438,34 @@ jobs:
           # legs is #6137's design decision and is not pre-empted here.
           - half: a
             files: >-
-              eval/retrieval/test_gate_1349 eval/retrieval/test_run
-              eval/why_suite/test_why_suite_benchmark test_about_edges test_battery_setup
-              test_billing test_ci_selection test_cli_context test_consistency_divergence_5011
-              test_control_plane test_dream test_embedded_evidence test_ep_selector
-              test_epic903_fixtures test_epic903_scheduler test_event_provenance
-              test_graphcopy_boolean_index_3154 test_hosted_volunteer_context
-              test_import_endpoint test_index_cli test_index_directory test_indexes test_ingest
-              test_monitoring test_oauth_mcp test_pack_shipping_wheel test_platform_seams
-              test_search_engine_gaps test_source_inheritance_own
-              test_unjournaled_mutation_class
+              eval/retrieval/test_gate_1349
+              eval/why_suite/test_why_suite_benchmark test_about_edges
+              test_abuse_integration test_backfill_sources test_battery_setup
+              test_billing test_capture_session test_ci_selection
+              test_client_surface test_commit_endpoint test_embedded_evidence
+              test_enumeration_surfaces test_ep_selector test_ep_sources
+              test_event_provenance test_graphcopy_boolean_index_3154
+              test_hosted_volunteer_context test_import_endpoint
+              test_index_cli test_indexes test_ingest_bundle test_ingest_mode
+              test_markers test_monitoring test_oauth_mcp
+              test_pack_shipping_wheel test_platform_seams
+              test_rebuild_parity_fail_loud_3585 test_search_engine_gaps
           - half: b
             files: >-
-              eval/harness/test_harness_benchmark eval/write_path/test_write_path_runner
-              test_abuse_integration test_backfill_sources test_battery_r1_seed
-              test_capture_session test_client_surface test_commit_endpoint test_dr_endpoints
-              test_enumeration_surfaces test_ep_sources test_epic903_modes
-              test_epic903_warmstart test_extractor_v2 test_graph_diagnostics test_hosted_api
-              test_ingest_bundle test_ingest_mode test_ingest_v2_consolidation
-              test_ingest_validation test_markers test_mcp_http test_mcp_route_challenge
-              test_operator_idempotency_4971 test_projection test_relationships_bounded test_sdk
-              test_sdk_group3 test_skip_guard test_surface_manifest test_write_verb
+              eval/harness/test_harness_benchmark eval/retrieval/test_run
+              eval/write_path/test_write_path_runner test_battery_r1_seed
+              test_cli_context test_consistency_divergence_5011
+              test_control_plane test_dr_endpoints test_dream
+              test_epic903_fixtures test_epic903_modes test_epic903_scheduler
+              test_epic903_warmstart test_extractor_v2 test_graph_diagnostics
+              test_hosted_api test_index_directory test_ingest
+              test_ingest_v2_consolidation test_ingest_validation
+              test_mcp_http test_mcp_route_challenge
+              test_operator_idempotency_4971 test_projection
+              test_relationships_bounded test_sdk test_sdk_group3
+              test_skip_guard test_source_inheritance_own
+              test_surface_manifest test_unjournaled_mutation_class
+              test_write_verb
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
@@ -1464,10 +1473,13 @@ jobs:
     # into these legs, taking their committed `durations` weight from 2.84m to
     # 16.21m (13.82m after the eight dual-registered files returned to the
     # fast pool), so
-    # the #3239 literal budget no longer clears the work: the watchdog goes to
-    # 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x). The cap
-    # still clears the watchdog, so a hung leg prints its counts before the
-    # runner cancels the step.
+    # the #3239 literal budget no longer clears the work: #5285 then moved a
+    # 8.67m file in (the fail-loud rebuild suite, which cannot ride the fast
+    # pool) and re-cut BOTH rows by LPT off the committed map — balanced at
+    # 18.153m / 18.143m, so the watchdog goes to 37m (2.04x the heavier leg)
+    # and this cap stays 40m (2.20x). A one-sided append would have left a
+    # 22.48m leg needing 45m. The cap still clears the watchdog, so a hung leg
+    # prints its counts before the runner cancels the step.
     timeout-minutes: 40
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
@@ -1712,7 +1724,7 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
-          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 37m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
