@@ -668,6 +668,20 @@ durations:
 """
 
 
+# Separates the two states the bridge used to conflate: `test_pending.py` is
+# CLASSIFIED (a `core` surface member) with no `durations:` entry, `test_timed.py`
+# has both. A collector weight for either must resolve; only a file in NEITHER
+# block (e.g. `test_stranger.py`) is refused.
+BRIDGE_MANIFEST_PENDING = """\
+surfaces:
+  core:
+    - test_timed.py
+    - test_pending.py
+durations:
+  test_timed.py: 3.0
+"""
+
+
 def _bridge_manifest(tmp_path: Path, text: str = BRIDGE_MANIFEST) -> Path:
     path = tmp_path / "ci-surfaces.yml"
     path.write_text(text)
@@ -696,7 +710,7 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert "# the #3395 authority comment" in text
     # the machine-readable capture age is written
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
-    assert stats == {"sampled_keys": 2, "manifest_keys": 3,
+    assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
                      "carried_forward": 1, "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
@@ -722,8 +736,9 @@ def test_refresh_durations_zero_key_projection_is_unknown(tmp_path: Path) -> Non
 def test_refresh_durations_rejects_a_collector_key_absent_from_the_manifest(
     tmp_path: Path,
 ) -> None:
-    # ONE-WAY key agreement: a collector key not already in the manifest is a
-    # refusal (register the test file first), never an invented row.
+    # The refusal that must SURVIVE: `test_brand_new.py` is registered in neither
+    # the `surfaces:` block nor the `durations:` map, so the refresh has nothing
+    # to agree with. Registering the file is the fix, never an invented row.
     path = _bridge_manifest(tmp_path)
     before = path.read_text()
     assert ci_timing.refresh_durations(
@@ -732,6 +747,10 @@ def test_refresh_durations_rejects_a_collector_key_absent_from_the_manifest(
 
 
 def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None:
+    # An UNREGISTERED measured path whose basename has two registered owners:
+    # the path is not in the manifest, and the basename cannot say which owner
+    # it belongs to. Refusal, never a guess. (A path that IS registered is not
+    # ambiguous — see test_durations_bridge_resolves_the_registered_path... .)
     text = BRIDGE_MANIFEST.replace(
         "    - test_gamma.py",
         "    - sub/test_gamma.py\n    - test_gamma.py",
@@ -739,8 +758,226 @@ def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None
               "  test_gamma.py: 1.0  # a preserved comment\n  sub/test_gamma.py: 2.0")
     path = _bridge_manifest(tmp_path, text)
     before = path.read_text()
-    assert ci_timing.refresh_durations(path, _bridge_weights(test_gamma=9.0), "T") == 2
+    weights = {"elsewhere/test_gamma.py": 9.0}
+    # the diagnosis is AMBIGUITY (two registered owners), not "unregistered"
+    with pytest.raises(ci_timing.DurationsBridgeError, match="multiple manifest keys"):
+        ci_timing.render_refreshed_manifest(before, weights, "T")
+    assert ci_timing.refresh_durations(path, weights, "T") == 2
     assert path.read_text() == before
+
+
+def test_refresh_durations_adds_a_classified_file_that_has_no_duration_yet(
+    tmp_path: Path,
+) -> None:
+    """REGRESSION — the exact production failure.
+
+    The `measure` job's Task 4b bridge died on
+
+        collector key 'test_mergify_config_guard.py' is not classified in the
+        manifest — register the test file before refreshing the durations map
+
+    for a file that WAS classified (a `surfaces:` member) and merely had no
+    `durations:` entry yet. The bridge refused, the dependent `refresh` job was
+    skipped by `needs` + `success()`, and the map stayed hand-maintained. A
+    classified-but-untimed basename must resolve, and the refresh must ADD its
+    measured entry.
+    """
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_pending.py": 7.34}, "T")
+    assert stats["added_keys"] == 1
+    assert "  test_pending.py: 7.3" in new_text
+    manifest = yaml.safe_load(new_text)
+    assert manifest["durations"]["test_pending.py"] == 7.3
+    # merge, not replace: the entry that already existed is carried forward
+    assert manifest["durations"]["test_timed.py"] == 3.0
+    # the rendered file passes the manifest-side duration gate, so the ADD does
+    # not trade one refusal for another
+    assert ci_timing.validate_refreshed_manifest(new_text) == []
+
+
+def test_refresh_durations_writes_the_added_entry_to_disk(tmp_path: Path) -> None:
+    """Case 2 through the real entry point, not just the renderer: the write
+    path returns 0 and the new key is in the file afterwards."""
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    assert ci_timing.refresh_durations(path, {"test_pending.py": 7.34}, "T") == 0
+    assert yaml.safe_load(path.read_text())["durations"]["test_pending.py"] == 7.3
+
+
+def test_refresh_durations_resolves_the_registered_path_despite_a_basename_twin() -> None:
+    """The measured PATH, not the basename, selects the key.
+
+    `test_dup.py` (a `surfaces:` member with no `durations:` row) and
+    `sub/test_dup.py` (a `durations:` key) share a basename. A measurement of
+    `test_dup.py` is unambiguously the top-level file, so it must resolve to
+    that key and be ADDED — the basename-only rule saw two candidates and refused
+    the whole refresh.
+    """
+    text = "surfaces:\n  core:\n    - test_dup.py\ndurations:\n  sub/test_dup.py: 1.0\n"
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        text, {"test_dup.py": 2.0}, "T")
+    assert stats["added_keys"] == 1
+    durations = yaml.safe_load(new_text)["durations"]
+    assert durations["test_dup.py"] == 2.0
+    assert durations["sub/test_dup.py"] == 1.0
+
+
+def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
+    """END-TO-END on the manifest of record: a real fast-pool file the manifest
+    classifies but has not timed is ADDED, and the result still passes the FULL
+    `--integrity` gate (not only the duration subset).
+
+    The file is DERIVED at run time rather than named, so this survives it
+    getting a duration — the failure mode that made `test_mergify_config_guard.py`
+    a valid but short-lived instance of the bug. It skips only when the manifest
+    times every fast-pool file, at which point there is nothing to add.
+    """
+    import ci_selection as cs
+
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    parsed = ci_timing._manifest_of(before)
+    pending = sorted(set(cs.fast_pool(parsed)) - set(parsed["durations"]))
+    if not pending:
+        pytest.skip("manifest times every fast-pool file — no pending file to add")
+    target = pending[0]
+    # A real stamp: `integrity_problems` treats a PRESENT-but-unparseable
+    # `durations_captured_at` as red, and this test asserts the full gate is green.
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        before, {target: 4.34}, "2026-10-07T00:00:00Z")
+    assert stats["added_keys"] == 1
+    assert f"  {target}: 4.3" in new_text
+    _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
+    _, entries_after = ci_timing._locate_durations_block(new_text.split("\n"))
+    # nothing dropped and exactly the pending key invented
+    assert set(entries_after) == set(entries_before) | {target}
+    assert yaml.safe_load(new_text)["durations"][target] == 4.3
+    assert ci_timing.validate_refreshed_manifest(new_text) == []
+    assert ci_timing.integrity_problems(new_text) == []
+
+
+# ── #6092 review findings F1/F2/F3 ──────────────────────────────────────────
+
+_SHARED_BASENAME_LOG = (
+    "============================= slowest 2 durations =============================\n"
+    "3.00s call     tests/e2e/test_ship_test_onboarding.py::test_probe\n"
+    "1.00s call     tests/test_ship_test_onboarding.py::test_guard\n"
+    "============================= short test summary info =========================\n"
+)
+
+
+def test_parse_log_exposes_the_tests_relative_path(tmp_path: Path) -> None:
+    """F3 prerequisite: the collector carries the PATH, not only the basename.
+
+    `tests/e2e/x.py` and `tests/x.py` are different files, and the basename view
+    (which the artifact renders) cannot tell them apart.
+    """
+    parsed = ci_timing.parse_log(
+        write_log(tmp_path, "paths.log", _SHARED_BASENAME_LOG))
+    # the artifact's basename view still merges them (unchanged contract)
+    assert set(parsed["files"]) == {"test_ship_test_onboarding.py"}
+    # the resolution view keeps them apart
+    assert set(parsed["file_paths"]) == {
+        "e2e/test_ship_test_onboarding.py", "test_ship_test_onboarding.py"}
+    assert parsed["file_paths"]["e2e/test_ship_test_onboarding.py"]["total_ms"] == pytest.approx(3000.0)
+    assert parsed["file_paths"]["test_ship_test_onboarding.py"]["total_ms"] == pytest.approx(1000.0)
+
+
+def test_collector_file_weights_keys_by_path_not_basename(tmp_path: Path) -> None:
+    """F3: two files sharing a basename are two measurements, never one."""
+    write_log(tmp_path, "pytest.log", _SHARED_BASENAME_LOG)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"e2e/test_ship_test_onboarding.py": 3.0,
+                       "test_ship_test_onboarding.py": 1.0}
+
+
+def test_durations_bridge_refuses_a_measured_subdir_file_that_only_shares_a_basename(
+    tmp_path: Path,
+) -> None:
+    """F3 — the repo's real collision pair, driven through the collector.
+
+    `tests/test_ship_test_onboarding.py` is classified; the e2e twin
+    `tests/e2e/test_ship_test_onboarding.py` is not. Collapsing both to the
+    basename attached the e2e measurement to the top-level key. python-ci does
+    not run the e2e leg today, so this is a guard on the resolution rule, not a
+    live production failure.
+    """
+    write_log(tmp_path, "pytest.log", _SHARED_BASENAME_LOG)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    real = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    domain = ci_timing._classified_test_keys(real)
+    # the top-level file's own measurement still resolves to itself
+    assert ci_timing._resolve_to_manifest_keys(
+        {"test_ship_test_onboarding.py": 1.0}, domain
+    ) == {"test_ship_test_onboarding.py": 1.0}
+    # the e2e file shares only the basename and must be refused, not attached
+    with pytest.raises(ci_timing.DurationsBridgeError, match="different path"):
+        ci_timing._resolve_to_manifest_keys(weights, domain)
+
+
+@pytest.mark.parametrize("leg_list", ["slow_files", "carve_out", "tier1"])
+def test_durations_bridge_resolves_a_subdir_file_registered_only_in_a_leg_list(
+    leg_list: str,
+) -> None:
+    """F3 — a subdir file registered only under a python-ci leg list, sharing a
+    basename with a classified-only surface member. `--integrity` accepts it
+    (basename fallback against `surfaces:`), it runs in a python-ci leg that
+    uploads a pytest log, and its measurement must land on its OWN path instead
+    of on the surface twin."""
+    text = ("surfaces:\n  core:\n    - test_foo.py\n"
+            f"{leg_list}:\n  - sub/test_foo.py\n"
+            "durations:\n  test_foo.py: 1.0\n")
+    domain = ci_timing._classified_test_keys(text)
+    assert "sub/test_foo.py" in domain, (
+        f"{leg_list} members are part of the resolution domain")
+    assert ci_timing._resolve_to_manifest_keys(
+        {"sub/test_foo.py": 4.0}, domain) == {"sub/test_foo.py": 4.0}
+
+
+def test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    """F2 — an existing QUOTED row parses to `test_a.py` but is located under
+    the raw text `'test_a.py'`. Comparing the parsed key against the raw one
+    missed it and appended a second row for the same effective key; PyYAML then
+    silently last-wins, so the map carries a duplicate and one of the two values
+    is discarded.
+    """
+    text = "surfaces:\n  core:\n    - test_a.py\ndurations:\n  'test_a.py': 1.0\n"
+    path = _bridge_manifest(tmp_path, text)
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_a.py": 9.9}, "T")
+    assert stats["added_keys"] == 0
+    rows = [ln for ln in new_text.split("\n")
+            if ci_timing._DURATION_LINE_RE.match(ln)]
+    assert len(rows) == 1, rows
+    # the invariant the renderer now guarantees: one locatable row per parsed key
+    _, located = ci_timing._locate_durations_block(new_text.split("\n"))
+    parsed = yaml.safe_load(new_text)["durations"]
+    assert len(located) == len(parsed) == 1
+    assert parsed == {"test_a.py": 9.9}
+
+
+def test_durations_bridge_render_output_is_always_re_locatable(tmp_path: Path) -> None:
+    """F1's post-condition on a normal render (one ADD, one update): the row
+    count the locator reads back equals the parsed `durations:` key count."""
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    new_text, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_pending.py": 7.34, "test_timed.py": 2.0}, "T")
+    _, located = ci_timing._locate_durations_block(new_text.split("\n"))
+    parsed = yaml.safe_load(new_text)["durations"]
+    assert len(located) == len(parsed) == 2
+    assert set(located) == set(parsed)
+
+
+def test_durations_bridge_refuses_an_append_key_the_locator_cannot_re_read() -> None:
+    """F1 — `a b.py` is a valid YAML surface member (so it resolves and the ADD
+    path is reached) but a key with whitespace cannot be rendered as a locatable
+    `durations:` row. Writing it made the NEXT refresh die on `malformed line
+    inside the durations block` — a write the writer itself could not read."""
+    manifest = "surfaces:\n  core:\n    - a b.py\ndurations:\n  a.py: 1.0\n"
+    assert ci_timing._classified_test_keys(manifest) == {"a b.py", "a.py"}
+    with pytest.raises(ci_timing.DurationsBridgeError, match="a b\\.py"):
+        ci_timing.render_refreshed_manifest(manifest, {"a b.py": 2.0}, "T")
 
 
 def test_refresh_durations_dry_run_does_not_write(tmp_path: Path) -> None:
@@ -2123,3 +2360,348 @@ def test_the_pooled_branch_does_not_double_count_a_normalised_duplicate() -> Non
     sel = {"full": True, "test_files": "ALL", "slow_run": False}
     assert ci_timing.selected_weight_s(
         sel, {"tests/a.py": 100}, full_pool={"tests/a", "tests/a.py"}) == 100.0
+
+
+@pytest.mark.parametrize("key", [
+    "*a_test.py", "&a_test.py", "!a_test.py", "[x].py", "'unbal.py", "@x.py",
+])
+def test_durations_bridge_refuses_an_append_key_that_is_not_a_plain_yaml_scalar(key: str) -> None:
+    """A classified-but-untimed key that is a YAML indicator/alias/tag/flow
+    token must be the documented refusal, not a raw yaml error escaping as
+    exit 1 (#6092 review round 2).
+
+    `_DURATION_LINE_RE` matches these (no whitespace, no colon), so the
+    round-1 regex guard let the row be written; the post-condition then
+    re-located it, `_duration_line_key` called `yaml.safe_load`, and the raise
+    was a `ScannerError`/`ConstructorError`/`ParserError` — which
+    `refresh_durations`'s `except DurationsBridgeError` does not catch, so the
+    command died with a traceback instead of the documented exit 2. The key is
+    quoted in `surfaces:` so it is genuinely classified and reaches the ADD.
+    """
+    manifest = f'surfaces:\n  core:\n    - "{key}"\ndurations:\n  keep.py: 1.0\n'
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not parseable as a YAML mapping key"):
+        ci_timing.render_refreshed_manifest(manifest, {key: 2.0}, "T")
+
+
+@pytest.mark.parametrize("manifest,label", [
+    ("anchor: &k keep.py\nsurfaces:\n  core:\n    - keep.py\ndurations:\n  *k: 1.0\n", "alias"),
+    ("surfaces:\n  core:\n    - keep.py\ndurations:\n  [x].py: 1.0\n", "flow"),
+    ("surfaces:\n  core:\n    - keep.py\ndurations:\n  <<: 1.0\n", "merge"),
+])
+def test_durations_bridge_refuses_an_unreadable_input_manifest_without_a_traceback(
+        manifest: str, label: str) -> None:
+    """An input manifest whose `durations:` block the line parser cannot read
+    must be the documented refusal, not a raw yaml error escaping as exit 1
+    (#6092 review round 3).
+
+    The renderer reads the manifest through PyYAML twice before it writes
+    anything. All three shapes below are either valid YAML that the line parser
+    still cannot locate (`*k` resolves only if an anchor is in scope; `<<` is a
+    merge key) or plainly unparseable (`[x].py`), and each raised a
+    `ComposerError`/`ParserError` that `refresh_durations`'s
+    `except DurationsBridgeError` does not catch — so the CLI died with a
+    traceback and exit 1 rather than `2 UNKNOWN (… unreadable manifest)`.
+    """
+    assert label  # documents which shape the case is
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, "T")
+
+
+@pytest.mark.parametrize("stamp", ['T" x', "T: y", "T' z"])
+def test_the_captured_at_stamp_cannot_make_the_render_unparseable(stamp: str) -> None:
+    """The stamp is the only value the renderer persists without validating
+    (#6092 review round 4).
+
+    It was string-interpolated into a double-quoted scalar, so a stamp
+    containing a quote produced a document that could not be parsed back — and
+    the readback that follows the renderer runs outside its own handlers, so
+    the CLI died with a traceback (exit 1) instead of the documented refusal.
+    A stamp that needs escaping is rendered through the YAML writer; a stamp
+    safe to embed is left byte-identical, which the text-preservation test
+    pins.
+    """
+    manifest = "surfaces:\n  core:\n    - keep.py\ndurations:\n  keep.py: 1.0\n"
+    text, _ = ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, stamp)
+    parsed = yaml.safe_load(text)
+    assert parsed["durations_captured_at"] == stamp
+
+
+def test_a_multiline_captured_at_stamp_is_refused() -> None:
+    """A stamp that cannot be written as ONE line is refused rather than
+    folding the document (#6092 review round 4)."""
+    manifest = "surfaces:\n  core:\n    - keep.py\ndurations:\n  keep.py: 1.0\n"
+    with pytest.raises(ci_timing.DurationsBridgeError, match="as a single line"):
+        ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, "T\nz")
+
+
+def test_manifest_of_refuses_an_unreadable_manifest_as_the_documented_error() -> None:
+    """`_manifest_of` is the readback the bridge runs AFTER the renderer.
+
+    It raises `DurationsBridgeError`, which each CLI caller must MAP to exit 2
+    — the exception alone is not the contract, and asserting only the raise is
+    what let the escape stay unpinned through two rounds (#6092 review round
+    5). The CLI-level tests below pin the rc.
+    """
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing._manifest_of("surfaces:\n  core: [\n")
+
+
+def test_manifest_of_refuses_valid_yaml_that_is_not_a_mapping() -> None:
+    """Valid YAML that is not a mapping parsed cleanly and then raised an
+    `AttributeError` inside `_normalize_surfaces`, which no caller caught
+    (#6092 review round 5)."""
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not a YAML mapping"):
+        ci_timing._manifest_of("")
+
+
+@pytest.mark.parametrize("content,label", [
+    ("surfaces:\n  core: [\n", "unparseable"),
+    ("", "empty"),
+    ("null\n", "null"),
+    ("just a scalar\n", "scalar"),
+    ("- a\n- b\n", "list"),
+])
+def test_cli_returns_2_for_an_unreadable_manifest(tmp_path, content: str, label: str) -> None:
+    """The documented contract is exit **2** for an unreadable manifest, not a
+    traceback and exit 1 (#6092 reviews rounds 4-5).
+
+    This is the assertion the round-4 fix was missing: it translated the
+    exception but left the CLI callers outside the handler, so the class was
+    reported closed while still escaping. `--paid-vs-selected` is exercised
+    because it is the entry point that reads `--manifest` directly.
+    """
+    assert label
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--paid-vs-selected", "--run-id", "1",
+         "--changed-files", "a.py", "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+    assert proc.stderr.startswith("2:")
+
+
+@pytest.mark.parametrize("content,label", [
+    ("surfaces: []\n", "surfaces-is-a-list"),
+    ("surfaces:\n", "surfaces-is-null"),
+    ("durations:\n  x.py: 1.0\n", "surfaces-absent"),
+])
+def test_cli_returns_2_when_the_surfaces_block_is_not_a_mapping(tmp_path, content: str, label: str) -> None:
+    """The shape guard must reach the block every consumer indexes (#6092
+    review round 6).
+
+    A `surfaces:` that is a list, a scalar or ABSENT passed the document-level
+    check and then escaped as `AttributeError: 'list' object has no attribute
+    'items'` or `KeyError: 'surfaces'` from `ci_selection`, on both entry
+    points.
+    """
+    assert label
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--paid-vs-selected", "--run-id", "1",
+         "--changed-files", "a.py", "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("label", ["directory", "missing"])
+def test_cli_returns_2_when_the_manifest_path_cannot_be_read(tmp_path, label: str) -> None:
+    """A path that EXISTS but cannot be read was the sixth escape (#6092
+    review round 6): `exists()` guards only absence, so a directory or a
+    permission error reached the boundary as a traceback on both entry points.
+    """
+    target = tmp_path / label
+    if label == "directory":
+        target.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--refresh-durations", "--dry-run",
+         "--manifest", str(target), "--logs-dir", str(tmp_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_CLI = _REPO_ROOT / "tools" / "ci_timing.py"
+_MANIFEST = _REPO_ROOT / "config" / "ci-surfaces.yml"
+
+
+@pytest.mark.parametrize("label", ["existing-file", "file-as-parent"])
+def test_cli_returns_2_when_the_artifact_directory_is_unusable(tmp_path, label: str) -> None:
+    """`--out-dir` escaped as a traceback with rc=1 (#6092 review round 7).
+
+    `mkdir(parents=True, exist_ok=True)` raises `FileExistsError` when the
+    target is an existing file and `NotADirectoryError` when a component of the
+    parent chain is one; both used to reach the boundary uncaught.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    target = blocker if label == "existing-file" else blocker / "sub"
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(target)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("body", ["null", "[]", "not json"])
+def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -> None:
+    """`gh_api` was annotated `-> dict` but never validated what it parsed
+    (#6092 review round 7).
+
+    A `gh` call that exits 0 with valid-but-non-mapping JSON, or with a body
+    that is not JSON at all, escaped from every gh entry point.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$STUB_BODY"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+           "STUB_BODY": body}
+    for argv in (
+        ["--paid-vs-selected", "--run-id", "1", "--changed-files", "a.py",
+         "--manifest", str(_MANIFEST)],
+    ):
+        proc = subprocess.run(
+            [sys.executable, str(_CLI), "--repo", "o/r", *argv],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        assert proc.returncode == 2, f"{body} {argv[0]}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+        assert "Traceback" not in proc.stderr
+    # `--pick-run` is the deliberate exception: ci-timing.yml runs it under
+    # `bash -e` as `RUN_ID=$(... --pick-run)`, so a malformed body must warn and
+    # report "none found" (rc=0), exactly as it does for a non-zero exit — not
+    # redden the weekly measurement job (#6092 review round 8).
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--pick-run"],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, f"{body} --pick-run: rc={proc.returncode}"
+    assert "::warning::" in proc.stderr, f"{body} --pick-run must warn"
+
+
+@pytest.mark.parametrize("body,label", [
+    ("null", "top-level-not-a-mapping"),
+    ("[]", "top-level-is-a-list"),
+    ('{"jobs": null}', "inner-jobs-is-null"),
+    ('{"jobs": "x"}', "inner-jobs-is-a-string"),
+    ('{"total_count": "x"}', "inner-total-count-is-a-string"),
+    ("9" * 5000, "integer-past-the-digit-limit"),
+    ("[" * 50000 + "]" * 50000, "pathologically-nested"),
+])
+def test_cli_never_tracebacks_on_a_hostile_api_body(tmp_path, body: str, label: str) -> None:
+    """The boundary is total (#6092 review round 8).
+
+    Rounds 6 and 7 translated the failures they could name — a non-mapping
+    envelope, a non-zero exit. This asserts the contract for the ones nobody
+    named, including bodies constructed to defeat the JSON decoder itself.
+    The default artifact path must WARN and continue (rc=0), because that is
+    what it documents for a failed fetch.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$STUB_BODY"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}", "STUB_BODY": body}
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
+         "--logs-dir", str(tmp_path), "--out-dir", str(tmp_path / "out")],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert "Traceback" not in proc.stderr, f"{label}: {proc.stderr[-400:]}"
+    assert proc.returncode in (0, 2), f"{label}: rc={proc.returncode}"
+
+
+@pytest.mark.parametrize("content", [
+    "[]", "null", '{"history": null}', '{"history": "x"}',
+    '{"history": [{}]}', '{"history": [{"counts": 1}]}',
+    # Wrong-VALUE rows, not just wrong-shape documents (#6092 review round 9):
+    # these passed the shape filter and then failed the measurement, which is
+    # exactly what this test forbids.
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "steps_max_job_ms": "x"}]}',
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "failed_tests": 5}]}',
+    '{"history": [{"counts": {"passed": 1, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}, "failed_tests": [[1]]}]}',
+])
+def test_a_corrupt_history_artifact_degrades_instead_of_failing(tmp_path, content: str) -> None:
+    """The tool re-reads its OWN committed artifact as the history seed
+    (#6092 review round 8).
+
+    That file can be hand-edited, truncated or mangled by a merge, so valid
+    JSON of the wrong shape must degrade to no history — it must not fail the
+    measurement, and it must not traceback.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "ci-timing.json").write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, f"{content}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_valid_history_artifact_is_still_used(tmp_path) -> None:
+    """Non-vacuity for the test above (#6092 review round 8).
+
+    Dropping unusable rows must not drop usable ones: without this, a guard
+    that returned [] unconditionally would pass the test above.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "ci-timing.json").write_text(json.dumps({"history": [
+        {"counts": {"passed": 2, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "total_ms": 2.0},
+         "failed_tests": [], "run_id": 2, "sample_time": "t2"},
+        {"counts": {"passed": 1, "failed": 1, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "total_ms": 1.0},
+         "failed_tests": ["a"], "run_id": 1, "sample_time": "t1"},
+    ]}))
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0
+    snapshot = json.loads((out / "ci-timing.json").read_text())
+    assert snapshot["candidate_flakes"], "a usable history row was dropped"
+
+
+@pytest.mark.parametrize("key", ["slow_files", "carve_out", "tier1", "push_extra"])
+def test_cli_returns_2_when_a_manifest_leg_list_is_not_a_list(tmp_path, key: str) -> None:
+    """The leg lists are `set()`-ed by the selection code (#6092 review round 8).
+
+    `slow_files: 5` and an explicit `carve_out:` both raised a bare TypeError
+    inside `ci_selection` rather than this module's documented refusal.
+    """
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - a.py\ndurations:\n  a.py: 1.0\n"
+        f"{key}: 5\n")
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\necho "{}"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--paid-vs-selected",
+         "--run-id", "1", "--changed-files", "a.py", "--event", "push",
+         "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 2, f"{key}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+    assert f"`{key}:`" in proc.stderr, "the refusal must name the offending key"
