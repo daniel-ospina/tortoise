@@ -1344,25 +1344,36 @@ def conflict_map(state: Mapping[str, Any]) -> dict[str, list[str]]:
 
     A state file written by an older build carries ``conflicts`` but not
     ``conflict_claimants``. Degrading to "claimants unknown" is honest; reporting
-    the PR as UNOWNED is the exact #7750 false negative — so the PR numbers are
-    preserved and the reader is told the detail is stale.
+    the PR as UNOWNED is the exact #7750 false negative — so the key set is the
+    UNION of ``conflicts`` and ``conflict_claimants``, and a malformed value is
+    never a crash (the file's contract is "degrade to empty, never crash").
     """
+    nums = state.get("conflicts")
+    if not isinstance(nums, (list, tuple, set)):
+        nums = []
+    out: dict[str, list[str]] = {str(n): [] for n in nums}
     have = state.get("conflict_claimants")
-    if isinstance(have, dict) and have:
-        return {str(k): list(v) for k, v in have.items()}
-    return {str(n): [] for n in (state.get("conflicts") or [])}
+    if isinstance(have, dict):
+        for k, v in have.items():
+            out[str(k)] = [str(x) for x in v] if isinstance(v, (list, tuple)) else []
+    return out
 
 
 def lane_live_map(state: Mapping[str, Any]) -> dict[str, bool | None]:
-    """lane label -> True (live pi) / False (dead) / None (liveness unmeasured)."""
+    """lane label -> True (live pi) / False (dead) / None (liveness unmeasured).
+
+    A lane whose liveness WAS measured but that carries no session record is
+    UNMEASURED here, not dead: there is no pid evidence to call dead.
+    """
     out: dict[str, bool | None] = {}
     for lane_ in state.get("lanes") or []:
         try:
             label = lane_["identity"]["lane"]
-            if not (lane_.get("liveness", {}) or {}).get("liveness_measured"):
+            measured = (lane_.get("liveness", {}) or {}).get("liveness_measured")
+            s = lane_.get("session")
+            if not measured or not isinstance(s, dict):
                 out[label] = None
             else:
-                s = lane_.get("session", {}) or {}
                 out[label] = bool(s.get("pi_pid") and s.get("pid_alive"))
         except Exception:
             continue
@@ -1397,7 +1408,8 @@ def cmd_who(args: argparse.Namespace) -> int:
         who = cmap[key]
         live = lane_live_map(state)
         out = {"number": args.number, "kind": "PR", "conflict": True,
-               "lanes": who, "evidence": {}}
+               "lanes": who, "live": {lbl: live.get(lbl) for lbl in who},
+               "evidence": {}}
         if args.json:
             print(json.dumps(out, indent=2))
         else:
@@ -1419,13 +1431,18 @@ def cmd_who(args: argparse.Namespace) -> int:
 def cmd_conflicts(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
     cmap = conflict_map(state)
+    live = lane_live_map(state)
     if args.json:
-        print(json.dumps(cmap, indent=2))
+        # liveness must survive --json: an automation consumer reads this, and
+        # "which claimant is dead" is the decision the channel exists for.
+        print(json.dumps({
+            num: {"claimants": who, "live": {lbl: live.get(lbl) for lbl in who}}
+            for num, who in cmap.items()
+        }, indent=2))
         return 0
     if not cmap:
         print("no ownership conflicts")
         return 0
-    live = lane_live_map(state)
     for num, who in sorted(cmap.items(), key=lambda kv: int(kv[0])):
         if who:
             print(f"  PR {num}: " + ", ".join(f"{lbl}{_live_tag(live.get(lbl))}" for lbl in who))

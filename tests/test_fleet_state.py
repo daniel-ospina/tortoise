@@ -374,6 +374,70 @@ def test_cmd_conflicts_lists_claimants_and_the_empty_case(monkeypatch, capsys) -
     assert "no ownership conflicts" in capsys.readouterr().out
 
 
+def test_cmd_conflicts_stale_branch_is_reachable(monkeypatch, capsys) -> None:
+    """`conflicts` must render the stale-cache branch, not just `who` (finding 1).
+
+    The message names the PR and says the detail is stale; it must NOT crash and
+    must NOT omit the contested PR.
+    """
+    fake = {"conflicts": [7], "lanes": []}          # older cache: no claimants
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_conflicts(argparse.Namespace(json=False)) == 0
+    out = capsys.readouterr().out
+    assert "PR 7" in out and "stale" in out
+
+
+def test_cmd_conflicts_json_carries_liveness(monkeypatch, capsys) -> None:
+    """--json must carry the claimants AND their liveness (finding 3)."""
+    fake = {"conflicts": [7], "conflict_claimants": {"7": ["A", "B"]},
+            "lanes": [
+                {"identity": {"lane": "A"}, "liveness": {"liveness_measured": True},
+                 "session": {"pi_pid": 1, "pid_alive": True}},
+                {"identity": {"lane": "B"}, "liveness": {"liveness_measured": True},
+                 "session": {"pi_pid": 2, "pid_alive": False}},
+            ]}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_conflicts(argparse.Namespace(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["7"]["claimants"] == ["A", "B"]
+    assert payload["7"]["live"] == {"A": True, "B": False}
+
+
+def test_who_json_conflict_carries_liveness(monkeypatch, capsys) -> None:
+    fake = {"index": {"prs": {}, "issues": {}},
+            "conflict_claimants": {"7": ["A"]}, "conflicts": [7],
+            "lanes": [{"identity": {"lane": "A"},
+                       "liveness": {"liveness_measured": True},
+                       "session": {"pi_pid": 1, "pid_alive": False}}]}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_who(argparse.Namespace(number=7, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["conflict"] is True and payload["lanes"] == ["A"]
+    assert payload["live"] == {"A": False}
+
+
+def test_conflict_map_is_shape_robust_and_takes_the_union() -> None:
+    """A malformed or partial cache must never crash or drop a conflict (finding 2)."""
+    # non-iterable `conflicts` and non-list claimant value: empty, not a crash
+    assert fs.conflict_map({"conflicts": 3, "conflict_claimants": {"7": 5}}) == {"7": []}
+    # a proper SUBSET: the union keeps PR 8 (conflicted) visible
+    assert fs.conflict_map({"conflicts": [7, 8], "conflict_claimants": {"7": ["A"]}}) \
+        == {"7": ["A"], "8": []}
+    # non-dict `conflict_claimants` falls back to `conflicts`
+    assert fs.conflict_map({"conflicts": [9], "conflict_claimants": ["x"]}) == {"9": []}
+
+
+def test_lane_live_map_measured_but_sessionless_is_unmeasured() -> None:
+    """No session record = no pid evidence; report untagged, never DEAD (finding 4)."""
+    state = {"lanes": [
+        {"identity": {"lane": "no-session"}, "liveness": {"liveness_measured": True}},
+        {"identity": {"lane": "no-liveness"}},
+        {"identity": {"lane": "dead"}, "liveness": {"liveness_measured": True},
+         "session": {"pi_pid": 9, "pid_alive": False}},
+    ]}
+    assert fs.lane_live_map(state) == {"no-session": None, "no-liveness": None, "dead": False}
+
+
 def test_who_still_reports_truly_unowned_as_not_found(monkeypatch, capsys) -> None:
     """Control for the test above: truly unowned still exits 1 with 'nobody'."""
     fake = {"index": {"prs": {}, "issues": {}}, "conflict_claimants": {}}
