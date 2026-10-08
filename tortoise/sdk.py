@@ -4462,27 +4462,43 @@ class TortoiseSDK:
         from tortoise.exceptions import EmbeddedStoreBusyError
         raise EmbeddedStoreBusyError(db_path, pid)
 
-    def _graph_exists(self, proj=None) -> bool:
-        """Whether the graph a wrapped write targets still EXISTS (#7685).
+    def _graph_exists(self, proj) -> bool:
+        """Whether the graph a wrapped write targets still has its KEY (#7685).
 
-        The measured discriminator between a REBUILD and a plain DELETION: after
-        a rebuild's recreate ``EXISTS <name>`` is 1, after a deletion it is 0
-        (measured live on the v6 core, ver 60001, and the C core, ver 42004).
-        ``retryable_aborted_write`` needs it because the engine's abort text
-        cannot tell the two apart — on v6 it is literally one sentence — and a
-        re-issued ``CREATE`` would otherwise land in a graph FalkorDB
-        auto-created EMPTY and be reported as SUCCESS.
+        The measured discriminator for the graph-abort family: after a rebuild's
+        recreate ``EXISTS <name>`` is 1, after a plain deletion it is 0 (measured
+        live on the v6 core, ver 60001, and the C core, ver 42004/42006 — the
+        CI docker lane's image). ``retryable_aborted_write`` needs it because the
+        engine's abort text cannot tell the two apart — on v6 it is literally
+        one sentence — and a re-issued ``CREATE`` would otherwise land in a graph
+        FalkorDB auto-created EMPTY and be reported as SUCCESS.
+
+        This is PRESENCE, not identity: a rebuild that recreated the key and then
+        failed mid-replay reads 1 and is retried (that is the rebuild's outcome,
+        not the retry's). Separating the two fully would need an engine-level
+        identity token — out of scope (#7685's escalation line).
+
+        Raw ``EXISTS`` deliberately, rather than
+        ``graph_delete_guard.graph_exists`` (which pages ``GRAPH.LIST``): this is
+        a hot-path, per-retry probe and ``EXISTS`` is the O(1) key check, measured
+        to agree with the presence semantics the guard's callers rely on.
 
         Fails LOUD: no projection, no graph name, or a probe that raises all
         answer False — i.e. "do not retry" — never "assume a rebuild".
         """
-        proj = self._proj if proj is None else proj
         if proj is None:
             return False
         name = getattr(proj, "graph_name", None)
         if not name:
             return False
-        return bool(proj.g.execute_command("EXISTS", str(name)))
+        try:
+            return bool(proj.g.execute_command("EXISTS", str(name)))
+        except Exception:  # noqa: BLE001, RUF100 — a failed probe is not a rebuild
+            _logger.warning(
+                "graph-existence probe failed for %r; refusing to retry the "
+                "aborted write (a silent success is worse than a loud miss)",
+                name, exc_info=True)
+            return False
 
     def _graph_write_with_retry(self, fn, *, what: str):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
@@ -4506,22 +4522,28 @@ class TortoiseSDK:
         auto-creates a graph on write, so an unqualified retry reported SUCCESS
         for a genuine deletion — into a fresh EMPTY graph (#6666 class). The
         predicate is therefore state-gated: the graph-abort family is retried
-        ONLY while the graph still exists (``_graph_exists``), and a deletion
-        raises LOUD. This also fixes the C core (the documented default lane),
-        whose rebuild literal the #7615 predicate did not match at all.
+        ONLY while the graph key is present (``_graph_exists``), and a deletion
+        raises LOUD. This also fixes the C core (the documented default lane and
+        the image the CI docker lane provisions), whose rebuild literal the #7615
+        predicate did not match at all — for a rebuild whose recreate has landed
+        before the abort is classified. A slower C-core rebuild, still inside its
+        delete window, reads ``EXISTS 0`` and stays LOUD by design (pre-fix it
+        also raised, so that is not a regression).
 
         What this buys, stated honestly: a rebuild window of roughly 7-14 s now
         heals in place (``base=2.0``, 3 retries). The window #7405 measured
         lasted **over an hour**, and no bounded retry should wait that long — so
         on exhaustion the original error still surfaces, **unchanged in type**.
 
-        Residual window, stated honestly. The existence probe runs when the abort
-        is classified, and the re-issue follows the backoff (~1-2 s), so a SECOND
-        deletion landing in that gap would still let the re-issued ``CREATE``
-        auto-create an empty graph. That window is orders of magnitude narrower
-        than the abort's own, and closing it completely would need an identity
-        token for the graph that the engine does not expose — an engine-side
-        change, out of scope here (#7685's escalation line).
+        Residual window, stated honestly. The classification-time probe can be
+        stale by the time the retry runs — ``call_with_predicate`` evaluates the
+        predicate BEFORE it sleeps, so the backoff is 1-8 s — so the re-issue is
+        probed AGAIN immediately before the write (``_issue`` raises the captured
+        abort when the key is absent). That shrinks the exposed window from the
+        backoff to the probe→``GRAPH.QUERY`` round trip on one client connection.
+        Closing it completely would need an identity token for the graph that the
+        engine does not expose — an engine-side change, out of scope here
+        (#7685's escalation line).
 
         ``retryable_aborted_write`` re-raises anything it does not recognise, so
         a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
@@ -4553,19 +4575,42 @@ class TortoiseSDK:
             self._graph_write_retry_count = getattr(
                 self, "_graph_write_retry_count", 0) + 1
 
-        # Captured at entry: the projection the failed statement ran against,
-        # which is also the object `_get_proj()` re-resolves to. The first
-        # attempt has already been issued by the caller, so this is never None
-        # in production — and if it IS None the state gate fails loud.
-        proj = self._proj
+        # Read the projection AT PROBE TIME, not at entry: the caller resolves
+        # it through `_get_proj()` before (or, in a lazy caller, on) the first
+        # attempt, so `self._proj` is the live authoritative handle. A None still
+        # answers False (`_graph_exists`), so the graph-abort family fails LOUD.
+        attempts = 0
+        last_abort: BaseException | None = None
+
+        def _probe() -> bool:
+            return self._graph_exists(self._proj)
+
+        def _issue():
+            """Re-issue, but only after confirming the graph key is still there.
+
+            The classification-time probe is stale by the time the retry runs
+            (``call_with_predicate`` sleeps AFTER the predicate), so this is the
+            last point at which a deletion that landed during the backoff can be
+            refused instead of silently auto-creating an empty graph. Re-raising
+            the captured abort keeps the caller's error type unchanged; the
+            predicate then refuses it (the key is absent).
+            """
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1 and last_abort is not None and not _probe():
+                raise last_abort
+            return fn()
 
         def _predicate(exc: BaseException) -> bool:
-            return retryable_aborted_write(
-                exc, graph_exists=lambda: self._graph_exists(proj))
+            nonlocal last_abort
+            keep = retryable_aborted_write(exc, graph_exists=_probe)
+            if keep:
+                last_abort = exc
+            return keep
 
         try:
             return call_with_predicate(
-                fn, predicate=_predicate, retries=3,
+                _issue, predicate=_predicate, retries=3,
                 what=what, base=2.0, cap=8.0, on_retry=_note_retry)
         except WriteStageRetriesExhausted as exc:
             # UNWRAP. The sentinel exists for the eval lane's R2 whole-question

@@ -74,35 +74,44 @@ _WRITE_LOCK_RE = re.compile(
     re.IGNORECASE)
 
 #: The graph-deleted-or-replaced abort family — the ONE class whose retry
-#: decision depends on the GRAPH's STATE, not on the error text (#7685). Two
-#: engine cores, three measured literals, and on v6 a single sentence for two
+#: decision depends on the graph KEY's presence, not on the error text (#7685).
+#: Two engine cores, three measured literals, and on v6 a single sentence for two
 #: different realities:
 #:
 #:   - **v6 core** (``MODULE LIST`` ver **60001**, Rust): one sentence, because
 #:     the engine cannot tell the caller which happened — ``graph was deleted or
 #:     replaced while the query was running, aborting``;
 #:   - **C core** (``MODULE LIST`` ver **42004** = the ``docker-compose.yml``-
-#:     pinned ``falkordb-server:v4.20.4``, the documented default lane; 42006 =
-#:     v4.20.6): two literals, measured live on the same race —
-#:     ``Encountered different graph value when opened key <name>`` for a
-#:     REBUILD and ``Encountered an empty key when opened key <name>`` for a
-#:     plain DELETION.
+#:     pinned ``falkordb-server:v4.20.4``, and **42006** = v4.20.6, the image the
+#:     CI docker lane provisions): two literals, measured live on the same race —
+#:     ``Encountered different graph value when opened key <name>`` when the key
+#:     had been replaced, ``Encountered an empty key when opened key <name>``
+#:     when it was absent.
 #:
 #: All three mean the statement did NOT land in the graph the caller is writing
-#: to, so re-issuing cannot duplicate. But **neither core's text is by itself
-#: sufficient to authorize a retry**, because the caller's graph may be GONE:
-#: FalkorDB auto-creates a graph on write, so a re-issued bare ``CREATE`` would
-#: succeed into a fresh EMPTY graph and the caller would be told SUCCESS while
-#: its data vanished (#6666 / #7685(A)). The discriminator is STATE —
-#: ``EXISTS <name>`` is 0 after a deletion and 1 after a rebuild's recreate
-#: (measured on both cores) — which is why :func:`retryable_aborted_write`
-#: REFUSES this family unless it is handed a ``graph_exists`` probe.
+#: to, so re-issuing cannot duplicate. But **neither core's text by itself
+#: authorizes a retry**: FalkorDB auto-creates a graph on write, so a re-issued
+#: bare ``CREATE`` would succeed into a fresh EMPTY graph and the caller would be
+#: told SUCCESS while the graph it wrote against is gone (#6666 / #7685(A)).
 #:
-#: The two C-core literals are additionally LINE-ANCHORED (``^\s*``): they are
-#: whole engine messages, so a diagnostic that merely quotes them must not
-#: match.
+#: The discriminator is the graph key's presence at classification time —
+#: ``EXISTS <name>`` is 0 after a plain deletion and 1 after a rebuild's recreate
+#: (measured on both cores). It is **presence, not identity**: a rebuild whose
+#: recreate has landed reads 1 and retries (correct — the caller's write belongs
+#: in the rebuilt graph); a rebuild still inside its delete window, or a plain
+#: deletion, reads 0 and is refused LOUD. A rebuild that recreated the key and
+#: then failed mid-replay is therefore still retried into the new graph — that is
+#: the REBUILD's outcome, not the retry's, and separating the two fully would
+#: need an engine-level identity token (out of scope, #7685's escalation line).
+#:
+#: All three literals are LINE-ANCHORED (``^\s*``): they are whole engine
+#: messages, so a diagnostic that merely quotes one must not match. Measured on
+#: v6, a parse error echoes the offending CYPHER — which can contain the sentence
+#: — inside ``errCtx:`` on the SAME line, never at line start. A false positive
+#: re-issues a bare, non-idempotent ``CREATE``, so under-matching is the safe
+#: direction.
 _GRAPH_ABORT_RE = re.compile(
-    r"graph was deleted or replaced while the query was running, aborting"
+    r"^\s*graph was deleted or replaced while the query was running, aborting"
     r"|^\s*encountered an empty key when opened key "
     r"|^\s*encountered different graph value when opened key ",
     re.IGNORECASE | re.MULTILINE)
@@ -114,6 +123,9 @@ def retryable_aborted_write(
     graph_exists: Callable[[], bool] | None = None,
 ) -> bool:
     """Retryable ONLY for write refusals whose outcome is definitively *did not land*.
+
+    **The graph-abort family is refused unless the caller supplies graph state**
+    (``graph_exists``); an omitted probe is a refusal, never a guess (see below).
 
     Deliberately narrower than :func:`retryable_transient`, and it exists because
     that predicate is NOT safe for a NON-IDEMPOTENT statement. ``create_point``
@@ -146,23 +158,29 @@ def retryable_aborted_write(
     (#6666 class). The predicate therefore refuses this family unless
     *graph_exists* answers, and the answer is False:
 
-    - ``graph_exists`` — a zero-argument callable answering *"does the graph
-      this write targets currently exist?"* (the SDK passes a raw
-      ``EXISTS <name>`` probe). ``True`` (a rebuild left the key present) →
-      retry; ``False`` (a deletion, or a rebuild whose recreate has not landed)
-      → refuse, so the engine's abort surfaces LOUD.
+    - ``graph_exists`` — a zero-argument callable answering *"is the graph key
+      present right now?"* (the SDK passes a raw ``EXISTS <name>`` probe).
+      ``True`` (a rebuild's recreate has landed, or the key was never gone) →
+      retry; ``False`` (a plain deletion, or a rebuild still inside its delete
+      window) → refuse, so the engine's abort surfaces LOUD.
     - **Omitted, or the probe raises → refuse.** A retry this predicate cannot
       authorize is never guessed: a missed retry surfaces the engine's error,
       while a false retry reports success against a graph the caller never wrote
-      to.
+      to. (The SDK additionally re-probes immediately before each re-issue, so a
+      deletion that lands during the backoff — after this predicate already
+      answered — is still refused; see ``TortoiseSDK._graph_write_with_retry``.)
 
-    **The server guarantee this rests on** (no test pins it — it is an engine
-    property, measured by reading the engine source; see PR #7615's verification
+    **What the two arms rest on.** The write-slot and ``MISCONF`` arms rest on
+    engine *source/semantics* (no test pins it — see PR #7615's verification
     table): the replaced-graph check is ``WriteAbort::GraphUnregistered``, whose
-    registration test runs BEFORE mutation under one continuous GIL hold, and
-    the engine's own test says it *"aborted before mutating"*; ``MISCONF`` is a
-    pre-execution command rejection. So neither can come back after the write
-    applied — which is what makes a bare ``CREATE`` safe to re-issue.
+    registration test runs BEFORE mutation under one continuous GIL hold and the
+    engine's own test says it *"aborted before mutating"*; ``MISCONF`` is a
+    pre-execution command rejection. The two **C-core literals are
+    measurement-backed, not source-cited**: their abort-before-mutate basis is a
+    live one-application measurement (``{1 retry, 1_000_001 nodes}`` on ver
+    42004, and the same ``when opened key`` open-time wording), not an engine
+    test read. Do not copy the pattern onto a fourth literal without that
+    evidence.
 
     This predicate is the SDK write path's own gate; it is intentionally NOT
     :func:`retryable_transient`, which stays the transport-class predicate the

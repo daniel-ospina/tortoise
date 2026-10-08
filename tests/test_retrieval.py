@@ -1267,11 +1267,39 @@ def test_c_core_abort_clauses_are_anchored():
             redis_exc.ResponseError(text), graph_exists=lambda: True) is False
 
 
-def _sdk_for_graph_abort(*, abort: str, graph_exists: bool):
+def test_the_v6_abort_clause_is_line_anchored():
+    """#7685(A), review round 1: a parse-error ECHO must not authorize a retry.
+
+    Measured on v6 (ver 60001): a Cypher parse error echoes the offending source
+    into ``errCtx: CYPHER …`` on the SAME line, and that source can contain the
+    abort sentence. The real abort arrives verbatim at line start, so the clause
+    is ``^\\s*``-anchored like the C-core ones — under-matching is the safe
+    direction for a non-idempotent re-issue.
+    """
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(_DELETED_OR_REPLACED),
+        graph_exists=lambda: True) is True
+    assert retryable_aborted_write(
+        redis_exc.ResponseError("\n" + _DELETED_OR_REPLACED),
+        graph_exists=lambda: True) is True
+    echo = ("Invalid input 'RETURNNN': expected end of input, errCtx: CYPHER "
+            "c=\"graph was deleted or replaced while the query was running, "
+            "aborting\" RETURNNN, pos 80")
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(echo), graph_exists=lambda: True) is False
+
+
+def _sdk_for_graph_abort(*, abort: str, graph_exists: bool = True,
+                         probe_results: list | None = None):
     """A ``TortoiseSDK.__new__`` (no DB, no embedder) whose fake graph raises
-    ``abort`` on its FIRST write, then succeeds; the EXISTS probe reports
-    ``graph_exists``. Tracks attempts/probes/applied writes separately so the
-    "applied exactly once" property is measured, not assumed."""
+    ``abort`` on its FIRST write, then succeeds.
+
+    ``graph_exists`` is the answer every EXISTS probe gives; ``probe_results``
+    overrides it with a per-probe sequence (a ``BaseException`` entry makes the
+    probe raise), so the classification-time probe can differ from the
+    re-issue-time one. Tracks attempts/probes/applied writes separately so the
+    "applied exactly once" property is measured, not assumed.
+    """
     from tortoise.sdk import TortoiseSDK
 
     class _G:
@@ -1290,7 +1318,14 @@ def _sdk_for_graph_abort(*, abort: str, graph_exists: bool):
         def execute_command(self, *a, **k):
             assert a == ("EXISTS", "g7685"), f"unexpected probe {a!r}"
             self.probes += 1
-            return 1 if graph_exists else 0
+            if probe_results is not None:
+                answer = probe_results[
+                    min(self.probes - 1, len(probe_results) - 1)]
+            else:
+                answer = 1 if graph_exists else 0
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
 
     g = _G()
     sdk = TortoiseSDK.__new__(TortoiseSDK)
@@ -1340,6 +1375,87 @@ def test_the_c_core_rebuild_retries_and_its_delete_stays_loud():
         sdk._graph_write_with_retry(
             lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
     assert (g.attempts, g.applied) == (1, 0), "a deletion is never re-issued"
+
+
+def test_a_deletion_landing_in_the_backoff_is_still_refused():
+    """#7685 review round 1: the classification-time probe is STALE.
+
+    ``call_with_predicate`` evaluates the predicate BEFORE it sleeps (1-8 s), so
+    the graph can be deleted after the predicate already answered. The re-issue
+    is probed AGAIN immediately before the write, and that deletion must still be
+    loud rather than auto-create an empty graph.
+
+    probe 1 (classification) = present; probe 2 (pre-issue) = absent; the
+    re-raised abort is then probed by the predicate (probe 3) = absent.
+    """
+    sdk, g = _sdk_for_graph_abort(
+        abort=_DELETED_OR_REPLACED, probe_results=[1, 0, 0])
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert g.attempts == 1, (
+        "the re-issue was refused before fn ran — no write into a fresh graph")
+    assert g.applied == 0, "nothing may be reported as applied"
+    assert g.probes >= 2, "both the classification and the pre-issue probes ran"
+
+
+def test_graph_exists_fails_loud_when_the_probe_cannot_answer():
+    """#7685 review round 1: every branch that cannot answer returns False.
+
+    A degraded projection becomes a loud miss, never a retry into a fresh graph.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+
+    class _Raising:
+        graph_name = "g7685"
+
+        class g:  # mirrors the projection's handle attribute name
+            @staticmethod
+            def execute_command(*a, **k):
+                raise redis_exc.ConnectionError("probe down")
+
+    assert sdk._graph_exists(None) is False
+    assert sdk._graph_exists(type("_P", (), {"g": object()})()) is False
+    assert sdk._graph_exists(_Raising()) is False
+
+    # ...and end-to-end: a rebuild abort with a raising probe RAISES (loud),
+    # it is not retried into an auto-created graph.
+    sdk2, g = _sdk_for_graph_abort(
+        abort=_DELETED_OR_REPLACED,
+        probe_results=[redis_exc.ConnectionError("probe down")])
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk2._graph_write_with_retry(
+            lambda: sdk2._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert (g.attempts, g.applied) == (1, 0)
+
+
+def test_graph_exists_works_through_a_real_projection(tmp_path):
+    """#7685 review round 1: the REAL ``_GuardedGraph`` forwarding is pinned.
+
+    The other #7685 tests stub ``execute_command``; this one exercises the actual
+    probe on whatever backend the lane provides (docker lane = the live graph,
+    embedded otherwise), so a broken forwarding path cannot leave production
+    silently never retrying. Deterministic — no race, just presence then absence.
+    """
+    import contextlib
+    import uuid
+
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "exists7685.db"),
+                      namespace=f"test_7685_exists_{uuid.uuid4().hex[:8]}")
+    try:
+        proj = sdk._get_proj()
+        assert sdk._graph_exists(proj) is True, (
+            "the projection materializes its graph at construction")
+        proj.g.execute_command("GRAPH.DELETE", proj.graph_name)
+        assert sdk._graph_exists(proj) is False, (
+            "EXISTS through the real guarded handle must see the deletion")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()  # teardown is best-effort
 
 
 def test_retry_import_identity():
