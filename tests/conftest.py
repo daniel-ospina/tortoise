@@ -137,7 +137,10 @@ install_scan_guard()
 # directory a live embedded server still holds raises ENOTEMPTY out of teardown
 # and reddens a shard whose tests all passed. Same invariant as this module's own
 # teardown ("teardown must not convert a green suite red"), so it is fixed once
-# here for all 279 call sites rather than per test file.
+# here for all 274 call sites rather than per test file. It tolerates ONLY
+# ENOTEMPTY and logs the directory it leaves behind — deliberately not
+# `ignore_cleanup_errors=True`, which would swallow every rmtree failure and
+# remove the only runtime evidence of the leak.
 install_tolerant_tempdir_cleanup()
 
 # #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.

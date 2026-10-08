@@ -6,6 +6,8 @@ teardown having run).
 """
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import shutil
 import sys
@@ -465,3 +467,81 @@ def test_live_server_in_root_protects_an_outliving_server(tmp_path):
     assert _live_server_in_root(str(root)) is None
     (sock / "redis.pid").write_text(str(os.getpid()))  # THIS process -> live
     assert _live_server_in_root(str(root)) is not None
+
+
+# ── #7735: the tolerant `TemporaryDirectory.cleanup` ────────────────────────────
+#
+# The wrapper is installed by `tests/conftest.py` at import, so it is already
+# live here. These tests pin BOTH halves of the claim: an ENOTEMPTY teardown
+# stays green AND is reported, while every other errno still raises. The second
+# is the mutation check — if the wrapper were a blanket swallow, it would fail.
+
+
+def _boom_with(err: int):
+    def _boom(path, **kwargs):
+        raise OSError(err, os.strerror(err), path)
+
+    return _boom
+
+
+def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
+    #7735: a live server re-creates an entry during rmtree's final rmdir.
+    # `shutil.rmtree` is patched GLOBALLY, so it is restored in a `finally`
+    # BEFORE the test returns — otherwise pytest's own `tmp_path` teardown would
+    # hit the stub and ERROR the test that just passed.
+    import tempfile
+
+    real = shutil.rmtree
+    shutil.rmtree = _boom_with(errno.ENOTEMPTY)
+    try:
+        d = tempfile.TemporaryDirectory(dir=str(tmp_path))
+        victim = d.name
+        with caplog.at_level(logging.WARNING):  # must NOT raise
+            d.cleanup()
+        assert os.path.isdir(victim), "the directory is left for the reaper"
+        assert "#7735" in caplog.text, "REPORTED, not swallowed"
+        assert victim in caplog.text, "the report must name the directory"
+    finally:
+        shutil.rmtree = real
+
+
+@pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])
+def test_a_non_enotempty_cleanup_failure_still_raises(tmp_path, err):
+    #7735: the tolerance is scoped to the ONE race, not to rmtree in general.
+    # A blanket `ignore_cleanup_errors=True` would swallow these too.
+    import tempfile
+
+    real = shutil.rmtree
+    shutil.rmtree = _boom_with(err)
+    try:
+        d = tempfile.TemporaryDirectory(dir=str(tmp_path))
+        with pytest.raises(OSError) as excinfo:
+            d.cleanup()
+        assert excinfo.value.errno == err
+    finally:
+        shutil.rmtree = real
+
+
+def test_tolerant_cleanup_install_is_idempotent_and_restorable():
+    #7735: a second pytest.main() must not double-wrap, and the install must be
+    # reversible like the sibling `install_scan_guard`.
+    import tempfile
+
+    from tests._tmpdir_hygiene import (
+        install_tolerant_tempdir_cleanup,
+        uninstall_tolerant_tempdir_cleanup,
+    )
+
+    install_tolerant_tempdir_cleanup()
+    first = tempfile.TemporaryDirectory.cleanup
+    install_tolerant_tempdir_cleanup()
+    assert tempfile.TemporaryDirectory.cleanup is first, "double-install wrapped twice"
+    try:
+        uninstall_tolerant_tempdir_cleanup()
+        assert not getattr(tempfile.TemporaryDirectory.cleanup,
+                           "_tortoise_tolerant_cleanup", False), (
+            "uninstall left the wrapper in place")
+    finally:
+        install_tolerant_tempdir_cleanup()
+    assert getattr(tempfile.TemporaryDirectory.cleanup,
+                   "_tortoise_tolerant_cleanup", False), "reinstall failed"

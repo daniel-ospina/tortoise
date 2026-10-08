@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import errno
 import functools
 import json
 import logging
@@ -317,6 +318,10 @@ _PREV_HOST_TMPDIR_ENV: str | None = None
 _PREV_TMPDIR_ENV: str | None = None
 _GUARD_INSTALLED = False
 _ORIGINALS: dict[str, object] = {}
+#: #7735 — the pre-install ``TemporaryDirectory.cleanup``, kept so the tolerant
+#: wrapper can be uninstalled by its own test (the other installs here have the
+#: same escape hatch).
+_ORIGINAL_TEMPDIR_CLEANUP = None
 
 # The unpatched primitive, captured at import (before install_scan_guard).
 # Enumerating the shared temp dir is occasionally legitimate — reclaiming a
@@ -854,14 +859,14 @@ def uninstall_scan_guard() -> None:
 
 
 def install_tolerant_tempdir_cleanup() -> None:
-    """Make ``tempfile.TemporaryDirectory`` cleanup obey the suite's own rule.
+    """Keep a live server's temp dir from reddening a green shard (#7735).
 
-    WHY (measured, #7735). ``TemporaryDirectory.__exit__`` calls
-    ``cleanup()``, which calls ``shutil.rmtree(..., ignore_errors=False)``. A
-    directory that is still held by an embedded server which deliberately
-    OUTLIVES the suite — the live-redis case this module already handles for the
-    session root (#4069/#3752) — cannot be removed atomically: ``rmtree`` empties
-    it and the server re-creates an entry before ``os.rmdir``, which then raises
+    WHY (measured, #7735). ``TemporaryDirectory.__exit__`` calls ``cleanup()``,
+    which calls ``shutil.rmtree(..., ignore_errors=False)``. A directory that is
+    still held by an embedded server which deliberately OUTLIVES the suite — the
+    live-redis case this module already handles for the private session root
+    (#3752) — cannot be removed atomically: ``rmtree`` empties it and the server
+    re-creates an entry before ``os.rmdir``, which then raises
 
         OSError: [Errno 39] Directory not empty
 
@@ -872,33 +877,53 @@ def install_tolerant_tempdir_cleanup() -> None:
     is tearing down, not the test's subject).
 
     That is the same failure of the same invariant this module already states
-    for its own teardown — "teardown must not convert a green suite red" — and
-    it is the same class as #4069, which this module answers for the session
-    root by leaving the directory to the reaper.
+    for its own teardown — "teardown must not convert a green suite red".
 
-    STRUCTURAL, NOT PER-FILE. The suite has 279 ``TemporaryDirectory`` call
+    STRUCTURAL, NOT PER-FILE. The suite has 274 ``TemporaryDirectory`` call
     sites; patching them one at a time would be a band-aid on a shared lifecycle
-    bug, and the next test written would reintroduce it. ``ignore_cleanup_errors``
-    is the stdlib's own supported lever for exactly this case, so the default is
-    applied once, here, next to the other tempdir policy.
+    bug, and the next test written would reintroduce it. So the fix is applied
+    once, here, next to the other tempdir policy.
 
-    NOT A LEAK-HIDER. Leak DETECTION is untouched: this module still tracks every
-    directory a test creates and reports what it leaves behind, and
-    ``tests/test_tmpdir_hygiene_4096.py::test_no_pytest_fixture_leaks_a_temp_tree``
-    still fails on a leaked tree. Cleanup of a directory a live server owns is
-    not the detector — it is an incidental crash on the way out.
+    NARROW AND REPORTED — deliberately NOT ``ignore_cleanup_errors=True``.
+    The blanket stdlib lever would swallow EVERY ``rmtree`` failure (``EROFS``,
+    ``EACCES``, ``EBUSY``, ``EIO`` …), not only this race, and it would delete
+    the only runtime evidence of the leak: the tracker's fail-closed guard
+    cannot see a context-managed directory, because ``__exit__`` runs before the
+    fixture teardown, so the ERROR *was* the detector for this case. Tolerating
+    only ``ENOTEMPTY`` keeps the shard green and keeps that evidence — the
+    directory is named in a warning and left for the reaper. Everything else
+    still raises.
     """
-    original_init = tempfile.TemporaryDirectory.__init__
-    if getattr(original_init, "_tortoise_tolerant_cleanup", False):
+    global _ORIGINAL_TEMPDIR_CLEANUP
+    original_cleanup = tempfile.TemporaryDirectory.cleanup
+    if getattr(original_cleanup, "_tortoise_tolerant_cleanup", False):
         return  # idempotent: a second pytest.main() must not double-wrap
+    if _ORIGINAL_TEMPDIR_CLEANUP is None:
+        _ORIGINAL_TEMPDIR_CLEANUP = original_cleanup
 
-    @functools.wraps(original_init)
-    def _init(self, *args, **kwargs):
-        # Only default it: an explicit argument still wins, including the
-        # positional form (suffix, prefix, dir, ignore_cleanup_errors).
-        if len(args) < 4:
-            kwargs.setdefault("ignore_cleanup_errors", True)
-        return original_init(self, *args, **kwargs)
+    @functools.wraps(original_cleanup)
+    def _cleanup(self):
+        try:
+            return original_cleanup(self)
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+            # #7735: a live server re-created an entry between rmtree's
+            # emptying and its final rmdir, so the directory cannot be removed
+            # atomically. Stay green — but NOT silent, so the leak stays
+            # countable and names itself.
+            logging.getLogger(__name__).warning(
+                "#7735: leaving %s in place — a live server still holds it "
+                "(%s); the reaper owns it. This is reported, not swallowed.",
+                self.name, exc.strerror or exc)
+            return None
 
-    _init._tortoise_tolerant_cleanup = True
-    tempfile.TemporaryDirectory.__init__ = _init
+    _cleanup._tortoise_tolerant_cleanup = True  # type: ignore[attr-defined]
+    tempfile.TemporaryDirectory.cleanup = _cleanup  # type: ignore[method-assign]
+
+
+def uninstall_tolerant_tempdir_cleanup() -> None:
+    """Restore the original ``cleanup`` (used by the fix's own test)."""
+    if _ORIGINAL_TEMPDIR_CLEANUP is None:
+        return
+    tempfile.TemporaryDirectory.cleanup = _ORIGINAL_TEMPDIR_CLEANUP  # type: ignore[method-assign]
