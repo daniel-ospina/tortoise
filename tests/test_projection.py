@@ -2346,6 +2346,67 @@ def test_5026_b2_derivable_set_unchanged():
     assert STRUCTURAL_REL_LABELS["extractedFrom"] == "Source"
 
 
+def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_proj):
+    """#5206: the LIVE producer path and the REPLAY resolver must agree on what
+    an ``aboutDocument`` target may be — in BOTH directions.
+
+    Measured before this fix, end to end: ``sdk.create_edge('aboutDocument',
+    point, <provenance Source>)`` returned ``created=True``, supersede reported
+    ``edges_transferred=1``, and ``rebuild_all`` then dropped the edge — leaving
+    it on NEITHER the old nor the successor node, so the live state could not be
+    reproduced from the journal. The replay branch's own comment justified the
+    refusal as *"exactly as live refuses it"*, and live did not: the auto-detect
+    path guards on ``documentKind IS NOT NULL``, but the producer path had no
+    guard at all.
+
+    This pins the INVARIANT — live accepts iff replay resolves — rather than
+    either side alone, so re-opening the asymmetry from EITHER end reds it
+    (guard the producer away -> the refusal assert fails; drop the replay guard
+    -> the ``replay_says is None`` assert fails).
+    """
+    from tortoise.projection.edges import resolve_structural_target
+
+    proj = live_proj
+    # A provenance :Source — no documentKind, so not an aboutDocument target.
+    # NB: `create_edge` resolves its TARGET by id/eventId only (not url), while
+    # the replay resolver keys aboutDocument on the target's `url` — the same
+    # node is addressed two ways, which is exactly why the two must apply the
+    # same target contract.
+    proj.g.query(
+        "MERGE (s:Source {id:'5206-prov', url:'https://x/5206-prov', "
+        "sourceKind:'github'})")
+    proj.g.query("MERGE (p:Point {id:'5206-p', pointKind:'statement'})")
+
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/5206-prov", "aboutDocument") is None, \
+        "replay resolved a provenance Source as an aboutDocument target"
+
+    with pytest.raises(ValueError) as ei:
+        proj.create_edge("5206-p", "5206-prov", "aboutDocument")
+    msg = str(ei.value)
+    # The refusal must be actionable: name the guard and the relation to use.
+    assert "documentKind" in msg and "aboutSource" in msg, msg
+
+    # The legitimate case still works — the guard is about the target's KIND,
+    # not a refusal of the relation.
+    proj.g.query(
+        "MERGE (s:Source {id:'5206-doc', url:'https://x/5206-doc', "
+        "documentKind:'report'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/5206-doc", "aboutDocument") is not None
+    assert proj.create_edge(
+        "5206-p", "5206-doc", "aboutDocument") is True
+
+    # A non-:Source target is refused on the same guard, and the refusal must
+    # NOT diagnose a missing documentKind on a label that cannot carry one.
+    proj.g.query("MERGE (o:Object {id:'5206-obj'})")
+    with pytest.raises(ValueError) as ei2:
+        proj.create_edge("5206-p", "5206-obj", "aboutDocument")
+    msg2 = str(ei2.value)
+    assert "not a document-bearing :Source" in msg2, msg2
+    assert "without documentKind" not in msg2, msg2
+
+
 def test_5026_b6_retired_fields_cannot_reenter(live_proj):
     """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
     reappear — neither via the fixed clause NOR the open passthrough. A

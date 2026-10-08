@@ -992,6 +992,27 @@ class _EdgeHandlers:
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
         if not sources or not targets:
             return False
+        # D10 B1 (#5206): ``aboutDocument``'s target is a DOCUMENT-bearing
+        # :Source (ONTOLOGY v3.15 §4.4); a provenance/session/connector Source is
+        # an `aboutSource` target instead. The replay resolver enforces this
+        # (`resolve_structural_target`) but this live producer path did not, so a
+        # producer-created edge to a non-document Source was created live,
+        # transferred at supersede, then refused on `rebuild_all` — ending on
+        # NEITHER node. Refusing here is what makes live and replay agree.
+        if predicate == 'aboutDocument':
+            for t in targets:
+                props = t.get('properties') or {}
+                if t['label'] != 'Source' or props.get('documentKind') is None:
+                    why = ("(Source without documentKind)"
+                           if t['label'] == 'Source'
+                           else f"(label {t['label']}, not :Source)")
+                    raise ValueError(
+                        f"aboutDocument target {target_id!r} is not a "
+                        f"document-bearing :Source {why} — `aboutDocument` "
+                        "targets a DOCUMENT (ontology §4.4); for a provenance/"
+                        "session/connector Source use `aboutSource`. A live edge "
+                        "on a non-document Source cannot survive `rebuild_all` "
+                        "(#5206), so accepting it loses it silently.")
         # #390: mirror create_owned_by's circular-DAG guard for ownedBy — the
         # generic create_edge path must not bypass it. The new edge is
         # source -[:ownedBy]-> target; a cycle would close iff target already
