@@ -60,13 +60,13 @@ from tortoise import dedup_classify
 from tortoise import extractor_v2 as v2
 
 # ── the residual pins' live trackers ────────────────────────────────────────
-# Every ``*_is_a_known_limit`` test below is a DECLARED residual, written "so it
-# cannot go silent".  A pin whose tracker is CLOSED is precisely the silent case
-# the pins exist to prevent: the words stay and the accountability evaporates,
-# so a residual that still folds reports as healthy.  That happened over this
-# file — pins cited #5139 and #5134 for a month after BOTH closed — and four
-# pins (the apostrophe collapse, the two composing-mark pins, the month-as-name
-# pin) cited no tracker at all (#7524).
+# Every pin below is a DECLARED residual, written "so it cannot go silent".  A
+# pin whose tracker is CLOSED is precisely the silent case the pins exist to
+# prevent: the words stay and the accountability evaporates, so a residual that
+# still folds reports as healthy.  That happened over this file — pins cited
+# #5139 and #5134 for ten days after BOTH closed — and four pins (the apostrophe
+# collapse, the two composing-mark pins, the month-as-name pin) cited no tracker
+# at all (#7524).
 #
 # So the trackers are declared HERE, once, and
 # ``test_every_residual_pin_names_a_declared_open_tracker`` reads the pin
@@ -78,12 +78,21 @@ from tortoise import extractor_v2 as v2
 #
 #     gh issue view <n> --json number,state
 #
-# (verified 2026-10-06: all three OPEN).
+# Which residual class each live tracker owns.  This is a READER'S AID: the
+# guard checks the recorded STATE, not that a pin sits on the tracker whose
+# class actually covers its residual — that alignment is a judgement no scan
+# here makes, and it must be re-checked by hand when a pin is re-pointed (a
+# live-but-wrong-class tracker is the same defect as a closed one):
+#   #5325 — the connective-slot residuals the #5139 floor still folds
+#   #5329 — the boundary's finite marker vocabularies
+#   #7524 — the boundary's NER/POS/syntax-shaped residuals
+#
+# (all three verified OPEN 2026-10-06).
 RESIDUAL_TRACKERS = {
-    # issue: (recorded state, the residual class it tracks)
-    5325: ("open", "the connective-slot residuals the #5139 floor still folds"),
-    5329: ("open", "the boundary's finite marker vocabularies"),
-    7524: ("open", "the boundary's NER/POS/syntax-shaped residuals"),
+    # issue: recorded state
+    5325: "open",
+    5329: "open",
+    7524: "open",
 }
 
 # (prior, candidate, dimension) — one row per dimension of the ruling's
@@ -1642,11 +1651,13 @@ class TestDistinguishingDifference:
 
         The mirror puts the state in the final clause and IS refused, so the
         guard is clause-ORDER dependent today.  Closing it means bounding the
-        complement at a clause boundary — a connective-role decision that
-        belongs with PR #5320 (which closed #5139), not a polarity member;
-        doing it here would duplicate that mechanism.  Filed separately.  The
-        refused mirror is asserted beside the pin, so the pin cannot go
-        vacuous.
+        complement at a clause boundary — the clause-boundary machinery PR
+        #5320 (which closed #5139) built for the connectives, applied to the
+        predicate read rather than to a polarity member.  The residual itself
+        is a SYNTAX one, so it stays on #7524; #5325 owns the connective-SLOT
+        swaps, which is a different shape (its own body enumerates them, and
+        this clause-boundary read is not among them).  The refused mirror is
+        asserted beside the pin, so the pin cannot go vacuous.
         """
         assert not v2.fold_allowed("the build passed and the flag is off",
                                    "the build passed and the flag")
@@ -2297,9 +2308,9 @@ class TestResidualPinsHaveLiveTrackers:
 
     Both halves were missing over this file, and each was measured:
 
-      * the pins cited ``#5139``/``#5134`` for a month after BOTH closed — a pin
-        whose tracker is closed reports health in the failing case, the silent
-        condition the pins exist to prevent (#7524);
+      * the pins cited ``#5139``/``#5134`` for ten days after BOTH closed — a
+        pin whose tracker is closed reports health in the failing case, the
+        silent condition the pins exist to prevent (#7524);
       * four pins (the apostrophe collapse, the two composing-mark pins, the
         month-as-name pin) cited NO tracker at all, so they had no home even
         before a tracker closed.
@@ -2313,7 +2324,10 @@ class TestResidualPinsHaveLiveTrackers:
     declare themselves pins.  A test that pins a residual WITHOUT saying so —
     including the FAIL-CLOSED ones (a wrong keep is noise; the pair is refused,
     not folded) — is not reached, and no name-based scan could reach it without
-    inventing a registry.
+    inventing a registry.  The class each tracker owns is named in the module
+    comment, but the guard checks the recorded STATE only: whether a pin sits on
+    the tracker whose class actually covers its residual is a judgement the
+    reader must make, not something this scans.
     """
 
     @staticmethod
@@ -2376,7 +2390,7 @@ class TestResidualPinsHaveLiveTrackers:
                 f"declare — a pin may not cite an issue that is not recorded "
                 f"OPEN (declared: {sorted(RESIDUAL_TRACKERS)}). If the tracker "
                 f"is live, declare it there; if it closed, re-point the pin.")
-            state, _covers = RESIDUAL_TRACKERS[tracker]
+            state = RESIDUAL_TRACKERS[tracker]
             assert state == "open", (
                 f"{name} names #{tracker}, recorded {state!r} in "
                 f"RESIDUAL_TRACKERS — a closed tracker is a green light with "
