@@ -150,14 +150,19 @@ install_scan_guard()
 # test (c), test (f) and test (g) mid-line on the SAME test, reddening the
 # required `python-ci-gate` on main and with it every PR's entry gate.
 #
-# 240.0, not 300.0: the shard ALSO runs pytest's per-test `--timeout=300`
-# (python-ci.yml), and the point is for THIS budget to fire first, so the load is
-# reported as a load rather than abandoned by the test harness at the same
-# instant. It stays under the hosted pre-warm's 300.0 (`hosted_api.py`), so this
-# lane never out-budgets the lane that runs the same cold torch import.
+# 270.0, not 300.0 and not 240.0. The shard ALSO runs pytest's per-test
+# `--timeout=300` (python-ci.yml), and the point is for THIS budget to fire FIRST,
+# so the load is reported as a load rather than abandoned by the test harness at
+# the same instant — 300 == 300 was the original defect. Within that ceiling the
+# budget goes as high as the headroom allows, because the failure it prevents is
+# ABANDONMENT: the worst cold load this incident OBSERVED was 204.64s (the
+# previously-hanging test passed at 133.55s and 204.64s once the budget covered
+# it), so 240 left only 1.17x over what we have actually seen. It stays at or
+# under the hosted pre-warm's 300.0 (`hosted_api.py`), so this lane never
+# out-budgets the lane that runs the same cold torch import.
 from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane  # noqa: E402
 
-_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 240.0
+_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0
 
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 

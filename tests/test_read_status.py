@@ -703,33 +703,60 @@ class TestHostedSearchRoute:
 # 37723572956 six abandoned loads (90s block + 60s negative cache = a 150s cycle;
 # 900/150 = 6) killed three shards at the watchdog and reddened `python-ci-gate`.
 
-_MEASURED_COLD_LOAD_S = 50.5  # this box, loadavg 172 / 10 CPUs, 2026-10-08
-# The shard ALSO runs pytest's per-test `--timeout=300` (python-ci.yml). The
-# embedder budget must fire BEFORE that one, or the load is abandoned by the test
-# harness at the same instant the embedder would have reported it.
-_PER_TEST_TIMEOUT_S = 300.0
+# The worst cold load this incident ACTUALLY OBSERVED. 50.5s is this box's idle-ish
+# figure and is the WRONG anchor: it sits below the 90s budget that already failed,
+# so a bound built on it does not bound the quantity that caused the incident. The
+# two surviving observations from the hanging test are 204.64s and 133.55s; the
+# runner cold-loads one model in THREE shards at once, so take the worst.
+_WORST_OBSERVED_COLD_LOAD_S = 204.64
+
+
+def _per_test_timeout_s() -> float:
+    """The shard's pytest `--timeout=`, READ from the workflow, not restated.
+
+    This test exists because 300 == 300 was the original defect: the embedder
+    budget and pytest-timeout expired together. A hardcoded copy would silently
+    stop enforcing the moment the workflow's value moves, which is the exact
+    drift it is here to catch.
+
+    Scoped to the SHARD step, not the whole file: `python-ci.yml` also carries a
+    `--timeout=90` for a different job, so a file-wide minimum would compare
+    against a timer this lane never runs under. The shard's own command line is
+    the one that also carries `matrix.watchdog_minutes`.
+    """
+    import re
+    from pathlib import Path
+
+    wf = Path(".github/workflows/python-ci.yml").read_text()
+    shard_lines = [ln for ln in wf.splitlines() if "matrix.watchdog_minutes" in ln]
+    vals = [float(v) for ln in shard_lines
+            for v in re.findall(r"--timeout=(\d+(?:\.\d+)?)\b", ln)]
+    assert vals, ("the shard's per-test --timeout moved or was renamed; it is no "
+                  "longer on the matrix.watchdog_minutes line")
+    return min(vals)
 
 
 def test_the_test_lane_budgets_the_cold_embedder_load_between_two_bounds():
     """Both directions, because either extreme is a real failure.
 
-    TOO SMALL re-opens #6960: the load is abandoned, the in-flight work is
-    thrown away, and the shard pays it again until the watchdog kills it.
-    TOO LARGE and this budget never fires first — pytest's per-test timeout takes
-    the test instead, which is the same abandonment one layer up.
+    TOO SMALL re-opens #6960: the load is abandoned, the in-flight work is thrown
+    away, and the shard pays it again until the watchdog kills it. TOO LARGE and
+    this budget never fires first — pytest's per-test timeout takes the test
+    instead, which is the same abandonment one layer up.
     """
     from tortoise.embeddings import EmbeddingModel
 
     budget = EmbeddingModel._LOAD_TIMEOUT_S
-    assert budget > _MEASURED_COLD_LOAD_S * 2, (
-        f"a {budget}s budget leaves under 2x margin over the measured "
-        f"{_MEASURED_COLD_LOAD_S}s cold load — the margin that got loads "
-        f"abandoned on contended runners (#6960)"
+    per_test = _per_test_timeout_s()
+    assert budget > _WORST_OBSERVED_COLD_LOAD_S, (
+        f"a {budget}s budget does not cover the worst cold load this incident "
+        f"actually observed ({_WORST_OBSERVED_COLD_LOAD_S}s) — which is the "
+        f"whole failure: the load is abandoned mid-flight (#6960)"
     )
-    assert budget < _PER_TEST_TIMEOUT_S, (
-        f"a {budget}s budget does not fire before the per-test "
-        f"--timeout={_PER_TEST_TIMEOUT_S}s, so pytest-timeout abandons the test "
-        f"at the same instant the embedder would have reported the load (#6960)"
+    assert budget < per_test, (
+        f"a {budget}s budget does not fire before the shard's per-test "
+        f"--timeout={per_test}s, so pytest-timeout abandons the test at the same "
+        f"instant the embedder would have reported the load (#6960)"
     )
 
 
@@ -738,8 +765,9 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
     must not be MORE patient than the hosted pre-warm — but the hosted value may
     legitimately grow (its own comment calls 300 a small-machine number), and an
     equality assertion would then be unsatisfiable against the per-test bound
-    above. The hosted value is read from the AST, not by substring: a comment
-    quoting the call must not be able to satisfy a budget guard."""
+    above. The call is located in the AST and bound to `EmbeddingModel`, so only a
+    real pre-warm call counts: a comment quoting it, an unrelated `x.get(...)`, or
+    an integer literal must not be able to satisfy a budget guard."""
     import ast
     from pathlib import Path
 
@@ -751,10 +779,13 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "EmbeddingModel"
         for kw in node.keywords
         if kw.arg == "load_timeout"
         and isinstance(kw.value, ast.Constant)
-        and isinstance(kw.value.value, float)
+        and isinstance(kw.value.value, (int, float))
+        and not isinstance(kw.value.value, bool)
     ]
     assert hosted, "the hosted pre-warm's load budget moved or was renamed"
     assert max(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
