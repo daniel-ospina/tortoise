@@ -143,6 +143,23 @@ class TestSupabaseLaneIdempotentRetry:
         assert out["name"] == "Acme"
         assert len(fake.query("organizations")) == 1
 
+    def test_rate_limited_retry_still_429_before_the_replay(self, fake):
+        """The gate order is pinned 429 -> 409 -> 402, and the replay lives
+        at the duplicate-name (409) gate — so a caller at the org-create rate
+        limit is still answered 429 for their own org name until the window
+        passes. That 429 is itself honest and retryable (it does not assert a
+        false "already exists"), and the replay is reached afterwards."""
+        from datetime import UTC, datetime, timedelta
+        _seed_owned_org(fake, "t-dup", "Acme")
+        since = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+        for i in range(3):
+            fake.seed("org_memberships", [
+                _membership_row(user_id=_USER1, org_id=f"team-{i}",
+                                role="owner", created_at=since)])
+        with pytest.raises(HTTPException) as exc:
+            _create_supabase(fake, "Acme")
+        assert exc.value.status_code == 429
+
 
 # ── Supabase lane — through the real route (the sequence that 504s) ─────────
 
@@ -313,3 +330,35 @@ class TestRegistryLaneIdempotentRetry:
             params={"i": org_id, "u": _USER1})
         r2 = registry_client.post("/v1/organizations", json={"name": "Acme"})
         assert r2.status_code == 409, r2.text
+
+    def test_soft_deleted_org_still_refused(self, registry_client):
+        """The replay requires a LIVE org. The real soft-delete cascade also
+        removes memberships, but this test leaves the owner membership ACTIVE
+        on purpose — proving the explicit ``deleted_at`` guard, not the
+        cascade ordering, is what refuses."""
+        r1 = registry_client.post("/v1/organizations", json={"name": "Acme"})
+        assert r1.status_code == 200, r1.text
+        org_id = r1.json()["org_id"]
+        _registry().query(
+            "MATCH (t:Team {id:$i}) SET t.deleted_at = $now",
+            params={"i": org_id, "now": "2026-01-01T00:00:00+00:00"})
+        r2 = registry_client.post("/v1/organizations", json={"name": "Acme"})
+        assert r2.status_code == 409, r2.text
+
+    def test_two_teams_with_the_same_name_still_refused(self, registry_client):
+        """The replay requires EXACTLY one Team match — an ambiguous registry
+        (two Teams sharing a name) must never be resolved by guesswork."""
+        reg = _registry()
+        reg.query(
+            "CREATE (t:Team {id:'dup-a', name:'Acme', "
+            "graph_name:'org_dup_a', tier:'free'})")
+        reg.query(
+            "CREATE (t:Team {id:'dup-b', name:'Acme', "
+            "graph_name:'org_dup_b', tier:'free'})")
+        reg.query(
+            "MATCH (t:Team {id:'dup-a'}) "
+            "CREATE (m:Membership {id:'m-a', user_id:$u, org_id:'dup-a', "
+            "role:'owner', status:'active'})",
+            params={"u": _USER1})
+        r = registry_client.post("/v1/organizations", json={"name": "Acme"})
+        assert r.status_code == 409, r.text

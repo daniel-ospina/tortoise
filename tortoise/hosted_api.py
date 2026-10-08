@@ -16270,28 +16270,32 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # (pinned 429 → 409 → 402).
     # #7677: the registry twin of the Supabase replay — the wait-bound retry
     # by the SAME owner resolves to the org the abandoned first attempt
-    # created. Exactly one Team + an ACTIVE owner membership; every other
-    # duplicate (different owner, non-owner or non-active membership) 409s.
+    # created. Exactly one Team + an ACTIVE owner membership + a live org
+    # (``deleted_at`` unset, parity with the Supabase lane's explicit
+    # soft-delete guard); every other duplicate (different owner, non-owner or
+    # non-active membership, soft-deleted org) 409s.
     dup_rows = reg.query(
-        "MATCH (t:Team {name:$name}) RETURN t.id, t.graph_name, t.tier",
+        "MATCH (t:Team {name:$name}) "
+        "RETURN t.id, t.graph_name, t.tier, t.deleted_at",
         params={"name": name},
     ).result_set
     if dup_rows:
         _replay = None
         if len(dup_rows) == 1:
-            _dup_id, _dup_graph, _dup_tier = dup_rows[0]
-            _is_owner = reg.query(
-                "MATCH (m:Membership {org_id:$oid, user_id:$uid}) "
-                "WHERE m.status = 'active' AND m.role = 'owner' "
-                "RETURN count(m) > 0",
-                params={"oid": _dup_id, "uid": user["user_id"]},
-            ).result_set[0][0]
-            if _is_owner:
-                _replay = {
-                    "org_id": _dup_id,
-                    "graph_name": _dup_graph or f"org_{name}".replace(" ", "_"),
-                    "tier": _dup_tier or "free",
-                }
+            _dup_id, _dup_graph, _dup_tier, _dup_deleted = dup_rows[0]
+            if _dup_deleted is None:
+                _is_owner = reg.query(
+                    "MATCH (m:Membership {org_id:$oid, user_id:$uid}) "
+                    "WHERE m.status = 'active' AND m.role = 'owner' "
+                    "RETURN count(m) > 0",
+                    params={"oid": _dup_id, "uid": user["user_id"]},
+                ).result_set[0][0]
+                if _is_owner:
+                    _replay = {
+                        "org_id": _dup_id,
+                        "graph_name": _dup_graph or f"org_{name}".replace(" ", "_"),
+                        "tier": _dup_tier or "free",
+                    }
         if _replay is None:
             raise HTTPException(status_code=409, detail="Organization name already exists")
         return {**_replay, "name": name}
