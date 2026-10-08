@@ -433,8 +433,8 @@ def test_t12_unknown_record_types_fail_closed_r8(tmp_path):
         # The KNOWN kinds still folded in the same run. D10: the 3-file corpus
         # yields 3 provenance Sources + 1 document Source. (No second rebuild:
         # the count is asserted here off the failed run, which keeps this
-        # test's CI cost where it was — the D10 count is covered four times
-        # over elsewhere in this file.)
+        # test's CI cost where it was — the D10 count is pinned three more
+        # times in this file, twice inside `test_s15_restore_drill_end_to_end`.)
         g = sdk._get_proj().g
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert _required_sweep(g) == 0

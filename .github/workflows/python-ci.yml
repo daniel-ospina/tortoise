@@ -482,7 +482,7 @@ jobs:
     # wall time drops to ~max(half) ≈ 22-25 min. Watchdog 45m (raised to 55m when R3 corpus growth pushed legs past 45m)
     # (2026-08-14): on HF-unreachable/loaded runners the half + redislite
     # teardown exceeded 30m (1223 passed then watchdog kill) — 55m fits
-    # under test-slow's 75m critical path.
+    # under test-slow's 60m outer cap.
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
@@ -1388,7 +1388,7 @@ jobs:
     # of pytest time vs ~38m serial — main-push wall-clock drops to
     # ~max(leg) ≈ 23-24m incl. setup (~40-50% cut). Separate runners = zero
     # hermeticity risk (slow files share no state across processes).
-    # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
+    # Each leg keeps the 40m watchdog + 5-min heartbeat + guaranteed-summary
     # tail (#798/#964); the drift-guard step pins the union of both legs to
     # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
     # (Task 9 Step 5: the slow carve-out files — the members of
@@ -1428,7 +1428,7 @@ jobs:
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than 13.8.
+          # committed weight was 2.84 min rather than the 19.72 min it is now.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1475,10 +1475,21 @@ jobs:
     # the #3239 literal budget no longer clears the work: #5285 then moved an
     # 11.82m file in (the fail-loud rebuild suite, which cannot ride the fast
     # pool) and re-cut BOTH rows by LPT off the committed map — balanced at
-    # 19.722m / 19.725m, so the watchdog goes to 40m (2.03x the heavier leg)
-    # and this cap to 45m (2.28x). The cap still clears the watchdog, so a hung
-    # leg prints its counts before the runner cancels the step.
-    timeout-minutes: 45
+    # 19.722m / 19.725m, so the watchdog goes to 40m (2.03x the heavier leg).
+    #
+    # #798 is an ORDER constraint, not just a magnitude: the in-step watchdog is
+    # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
+    # measured from job start. So the cap must clear setup + pre-phase + the
+    # watchdog, or the runner kills the step before pytest can print its counts
+    # — exactly the loss the ORDER invariant exists to prevent. Using the fast
+    # job's own figures (`test`, above): ~7m setup + <=10m pre-phase + the 40m
+    # watchdog + ~10s grace = ~57.2m, so 60m. (This job's pre-phase is the
+    # coverage-manifest --collect-only step; it carries no #6142 last-failed
+    # run.) 45m — the value this PR first used, and 40m on main — left 5m for
+    # setup alone, so the watchdog could never fire;
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
+    # literals and cannot see the gap.
+    timeout-minutes: 60
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
     # families: 6379 passworded + 16379 passwordless legacy).
@@ -1618,7 +1629,7 @@ jobs:
           echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
-        # pytest step (off the 75m watchdog), using each leg's committed
+        # pytest step (off the 40m watchdog), using each leg's committed
         # the matrix.files expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
