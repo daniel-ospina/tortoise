@@ -40,9 +40,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.backup import restore
-from tortoise.consistency import check_consistency, recover_from_log
+from tortoise.consistency import (
+    _ENTITY_CREATION,
+    _ENTITY_CREATION_LABELS,
+    check_consistency,
+    recover_from_log,
+)
 from tortoise.log import EventLog
-from tortoise.projection import FalkorProjection
+from tortoise.projection import (
+    _REFERENCE_FOLD_ENTITY_LABELS,
+    FalkorProjection,
+)
 from tortoise.projection.nonfolded import (
     NonFoldedEventsError,
 )
@@ -797,11 +805,10 @@ class TestReReviewRoundThree:
             self, env):
         """P2 (re-review) — the REGRESSION GUARD. FAILS IF: the reference fold
         refuses a belief write whose Point is created LATER in the journal.
-        `rebuild_all` hoists every creation into pass 1 and therefore FOLDS
-        this write, so refusing it here reds a journal the graph reproduces
-        exactly. The engine-order-dependent refusal (`point-belief-miss` exists
-        only in `rebuild_all`) is a recorded bound, not something the
-        chronological reference fold may mirror.
+        Neither the live write nor `rebuild_all` applies a write that precedes
+        its Point (the live system no-op'd it; #3585 P1-1 makes the fold skip
+        it too), so refusing it here would red a journal the graph reproduces
+        exactly.
         REACHABLE: the write precedes its own creation (an append the SDK does
         not emit, but a partial/merged journal can)."""
         sdk, events = env
@@ -811,12 +818,13 @@ class TestReReviewRoundThree:
              point={"id": "p-later", "content": "x", "kind": "statement",
                     "status": "live",
                     "createdAt": "2026-01-01T00:00:00Z"})
-        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)  # folds it: no refusal
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)  # skips it: no refusal
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
-        # The CONTENT leg may still differ (the reference fold is chronological
-        # and does not apply a write that precedes its Point — a pre-existing,
-        # separate limit); what must NOT happen is a fail-LOUD verdict on it.
+        # #3585 (P1-1): the write PRECEDES its Point, so the live system
+        # no-op'd it and BOTH folds now skip it (nothing is applied). What must
+        # NOT happen is a fail-LOUD verdict on a record that simply did not
+        # exist yet.
         assert r["divergence"] != "non-folded", r["divergence"]
 
 
@@ -1179,3 +1187,302 @@ class TestCycleFourSingleSweepAndNameCollapse:
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
         assert any("object-superseded-miss" in e
                    for e in r["non_folded_events"]), r["non_folded_events"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #3585 P1-1 — the ordered EXISTENCE map, both directions
+#
+# `plan_point_restamp_folds` already gated the terminalizer family on the
+# SEQUENCE of first materialization. The retract / state-op / belief arms were
+# not: `rebuild_all` hoists every Point/Operator creation, so it folded a
+# record that PRECEDED its target's creation — inventing an order the live
+# system never had — while the chronological reference fold missed it. These
+# tests pin the two directions the map restores:
+#
+#   * `first > seq`  — a forward reference is a no-op on EVERY engine (live
+#                      no-op'd it); it is neither folded nor recorded.
+#   * `first <= seq` — a target created and then HARD-DELETED is a genuine
+#                      miss and still refuses (the create→delete→fold trap the
+#                      previous, set-membership attempt could not see).
+#
+# ⛔ The ACCEPT cases assert `check_consistency` `ok=True` against a graph that
+# was actually REBUILT — not merely "no non-folded record", and never against a
+# fresh empty graph (which cannot see a content divergence).
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _raw_point(events, pid, *, status="live", event_id=None):
+    """Append one complete `PointAdded` snapshot for `pid`."""
+    _raw(events, type="PointAdded",
+         event_id=event_id or f"e-add-{pid}",
+         point={"id": pid, "content": "x", "kind": "statement",
+                "status": status, "createdAt": "2026-01-01T00:00:00Z"})
+
+
+def _point_status(proj, pid):
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    return rows[0][0] if rows else None
+
+
+def _replay_accept(engine, tmp_path, events, tag):
+    """Run `engine`; assert it ACCEPTS, and return the replayed projection."""
+    proj = _fresh(tmp_path, tag)
+    if engine == "recover_from_log":
+        res = recover_from_log(str(events), proj)
+        assert res["recovered"] is True, f"{engine} refused: {res}"
+        return proj
+    if engine == "rebuild_all":
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    else:
+        proj.rebuild(EventLog(str(events / "events.jsonl")),
+                     confirm_destructive=True)
+    return proj
+
+
+def _expect_refusal(engine, tmp_path, events, tag, shape):
+    """Run a rebuild-family `engine`; assert it REFUSES with `shape`."""
+    proj = _fresh(tmp_path, tag)
+    try:
+        with pytest.raises(NonFoldedEventsError) as ei:
+            if engine == "rebuild_all":
+                proj.rebuild_all(str(events), confirm_destructive=True)
+            else:
+                proj.rebuild(EventLog(str(events / "events.jsonl")),
+                             confirm_destructive=True)
+    finally:
+        proj.close()
+    assert shape in str(ei.value), str(ei.value)
+
+
+def _expect_recovery_refusal(tmp_path, events, tag, shape):
+    proj = _fresh(tmp_path, tag)
+    try:
+        res = recover_from_log(str(events), proj)
+    finally:
+        proj.close()
+    assert res["recovered"] is False, res
+    assert shape in res["reason"], res["reason"]
+
+
+def _expect_check_refusal(sdk, events, shape):
+    r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert r["ok"] is False, r
+    assert r["divergence"] == "non-folded", r["divergence"]
+    assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+    assert any(shape in e for e in r["non_folded_events"]), r["non_folded_events"]
+
+
+class TestExistenceMapForwardReferences:
+    """A record whose target the journal materializes LATER must be a no-op
+    on every engine — the live write no-op'd it, and `rebuild_all`'s creation
+    hoist must not invent the ordering. `check_consistency` is asserted `ok`
+    against the REBUILT graph, so a content divergence is visible."""
+
+    def test_retract_before_its_own_creation_leaves_it_live(self, env,
+                                                            tmp_path):
+        """FAILS IF: `rebuild_all` folds the hoisted-creation retract (p ends
+        `retracted`) while the chronological arms skip it, or the reference
+        fold records a forward-reference miss. The journal is
+        `[PointRetracted(p); PointAdded(p)]` — reachable by hand-writing the
+        file (a partial/merged journal), never by the SDK's append order."""
+        _sdk, events = env
+        pid = "p-fwd-retract"
+        _raw(events, type="PointRetracted", id=pid, event_id="e-fwd-ret")
+        _raw_point(events, pid, event_id="e-fwd-ret-add")
+        for engine in ENGINES:
+            proj = _replay_accept(engine, tmp_path, events, f"fwdret-{engine}")
+            try:
+                assert _point_status(proj, pid) == "live", (
+                    f"{engine} folded a retract that preceded its creation")
+            finally:
+                proj.close()
+        _assert_check_consistency_rebuilt_ok(tmp_path, events, "fwdret-check")
+
+    def test_state_op_before_its_own_creation_is_a_noop(self, env, tmp_path):
+        """FAILS IF: `rebuild_all` applies the hoisted-creation state op (the
+        point would exist to receive it) while the chronological arms skip it.
+        The journal is `[EntityMutated restatus(p); PointAdded(p)]`."""
+        _sdk, events = env
+        pid = "p-fwd-state"
+        _raw(events, type="EntityMutated", op="restatus", label="Point",
+             id=pid, state={"status": "archived"}, event_id="e-fwd-state")
+        _raw_point(events, pid, event_id="e-fwd-state-add")
+        for engine in ENGINES:
+            proj = _replay_accept(engine, tmp_path, events, f"fwdstate-{engine}")
+            try:
+                assert _point_status(proj, pid) == "live", (
+                    f"{engine} applied a state op that preceded its creation")
+            finally:
+                proj.close()
+        _assert_check_consistency_rebuilt_ok(tmp_path, events, "fwdstate-check")
+
+    def test_belief_before_its_own_creation_is_not_applied(self, env,
+                                                           tmp_path):
+        """FAILS IF: `rebuild_all` folds the belief write onto the hoisted
+        Point while the live system (and the chronological arms and the
+        reference fold) no-op'd it. Asserts the FORWARD value (`posterior_
+        alpha=5`) never lands, and that the rebuilt graph is content-consistent
+        with the reference fold."""
+        _sdk, events = env
+        pid = "p-fwd-conf"
+        _raw(events, type="ConfidenceChanged", id=pid, posterior_alpha=5,
+             event_id="e-fwd-conf")
+        _raw_point(events, pid, event_id="e-fwd-conf-add")
+        for engine in ENGINES:
+            proj = _replay_accept(engine, tmp_path, events, f"fwdconf-{engine}")
+            try:
+                rows = proj.g.query(
+                    "MATCH (p:Point {id:$id}) RETURN p.posterior_alpha",
+                    params={"id": pid}).result_set
+                assert rows, f"{engine} lost the point"
+                assert rows[0][0] != 5, (
+                    f"{engine} applied a belief write that preceded its Point")
+            finally:
+                proj.close()
+        _assert_check_consistency_rebuilt_ok(tmp_path, events, "fwdconf-check")
+
+    def test_created_then_hard_deleted_then_state_op_still_refuses(
+            self, env, tmp_path):
+        """THE TRAP. FAILS IF: the gate is set membership ("the journal creates
+        this id") instead of the ORDER of first materialization. `p` IS created
+        (seq 0) and then hard-deleted (seq 1); the state op at seq 2 is a
+        genuine miss — live had the node when the delete happened and no node
+        when the state op ran. `rebuild_all` and `rebuild` must both refuse
+        `state-op-miss`."""
+        _sdk, events = env
+        pid = "p-del-state"
+        _raw_point(events, pid, event_id="e-del-state-add")
+        _raw(events, type="EntityMutated", op="delete", label="Point", id=pid,
+             event_id="e-del-state-del")
+        _raw(events, type="EntityMutated", op="restatus", label="Point",
+             id=pid, state={"status": "archived"},
+             event_id="e-del-state-mut")
+        _expect_refusal("rebuild_all", tmp_path, events, "delstate-ra",
+                        "state-op-miss")
+        _expect_refusal("rebuild", tmp_path, events, "delstate-rb",
+                        "state-op-miss")
+        _expect_recovery_refusal(tmp_path, events, "delstate-rec",
+                                 "state-op-miss")
+        _expect_check_refusal(env[0], events, "state-op-miss")
+
+    def test_created_then_hard_deleted_then_retract_still_refuses(
+            self, env, tmp_path):
+        """THE TRAP, retract shape. FAILS IF: the gate exempts a retract of an
+        id that was created and then hard-deleted. Both rebuild engines refuse
+        `point-retracted-miss`."""
+        _sdk, events = env
+        pid = "p-del-retract"
+        _raw_point(events, pid, event_id="e-del-ret-add")
+        _raw(events, type="EntityMutated", op="delete", label="Point", id=pid,
+             event_id="e-del-ret-del")
+        _raw(events, type="PointRetracted", id=pid, event_id="e-del-ret-ret")
+        _expect_refusal("rebuild_all", tmp_path, events, "delret-ra",
+                        "point-retracted-miss")
+        _expect_refusal("rebuild", tmp_path, events, "delret-rb",
+                        "point-retracted-miss")
+        _expect_recovery_refusal(tmp_path, events, "delret-rec",
+                                 "point-retracted-miss")
+        _expect_check_refusal(env[0], events, "point-retracted-miss")
+
+    def test_retract_of_a_never_created_target_refuses(self, env, tmp_path):
+        """CONTROL. FAILS IF: the forward-reference gate is broadened to
+        exempt a target no record ever materializes — the genuine miss every
+        engine must refuse."""
+        _sdk, events = env
+        _raw(events, type="PointRetracted", id="p-never-fwd",
+             event_id="e-never-ret")
+        _expect_refusal("rebuild_all", tmp_path, events, "neverret-ra",
+                        "point-retracted-miss")
+        _expect_refusal("rebuild", tmp_path, events, "neverret-rb",
+                        "point-retracted-miss")
+        _expect_recovery_refusal(tmp_path, events, "neverret-rec",
+                                 "point-retracted-miss")
+        _expect_check_refusal(env[0], events, "point-retracted-miss")
+
+    def test_state_op_on_a_never_created_target_refuses(self, env, tmp_path):
+        """CONTROL, state-op shape. FAILS IF: the gate exempts an id the
+        journal never materializes."""
+        _sdk, events = env
+        _raw(events, type="EntityMutated", op="restatus", label="Point",
+             id="p-never-fwd", state={"status": "archived"},
+             event_id="e-never-mut")
+        _expect_refusal("rebuild_all", tmp_path, events, "nevermut-ra",
+                        "state-op-miss")
+        _expect_refusal("rebuild", tmp_path, events, "nevermut-rb",
+                        "state-op-miss")
+        _expect_recovery_refusal(tmp_path, events, "nevermut-rec",
+                                 "state-op-miss")
+        _expect_check_refusal(env[0], events, "state-op-miss")
+
+    def test_confidence_write_on_a_never_created_target_refuses(
+            self, env, tmp_path):
+        """CONTROL + ASYMMETRY. FAILS IF: an apply()-based engine accepts a
+        belief write whose target no record materializes. `rebuild_all` and the
+        reference fold both refuse `point-belief-miss`; before the matching
+        change to `apply()`'s arm, `rebuild` / `recover_from_log` discarded the
+        fold count and recorded nothing — so they reported a successful
+        recovery of a journal the health gate rejects."""
+        _sdk, events = env
+        _raw(events, type="ConfidenceChanged", id="p-never-conf",
+             posterior_alpha=5, event_id="e-never-conf")
+        _expect_refusal("rebuild_all", tmp_path, events, "neverconf-ra",
+                        "point-belief-miss")
+        _expect_refusal("rebuild", tmp_path, events, "neverconf-rb",
+                        "point-belief-miss")
+        _expect_recovery_refusal(tmp_path, events, "neverconf-rec",
+                                 "point-belief-miss")
+        _expect_check_refusal(env[0], events, "point-belief-miss")
+
+    def test_annotator_on_a_never_created_target_refuses(self, env, tmp_path):
+        """The same asymmetry, annotator arm — an annotation whose target no
+        record materializes must refuse on every engine, not only
+        `rebuild_all`."""
+        _sdk, events = env
+        _raw(events, type="OperatorAnnotated", id="p-never-ann",
+             annotator_bias=0.5, event_id="e-never-ann")
+        _expect_refusal("rebuild_all", tmp_path, events, "neverann-ra",
+                        "point-belief-miss")
+        _expect_refusal("rebuild", tmp_path, events, "neverann-rb",
+                        "point-belief-miss")
+        _expect_recovery_refusal(tmp_path, events, "neverann-rec",
+                                 "point-belief-miss")
+        _expect_check_refusal(env[0], events, "point-belief-miss")
+
+
+def _assert_check_consistency_rebuilt_ok(tmp_path, events, tag):
+    """`check_consistency` `ok=True` against a graph the journal REBUILT.
+
+    Asserting only "no non-folded record" would pass on a graph the replay
+    never touched; the point of this leg is the CONTENT comparison, so the
+    graph is produced by `rebuild_all` and the point must be present."""
+    proj = _fresh(tmp_path, tag)
+    try:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        r = check_consistency(str(events / "events.jsonl"), proj)
+    finally:
+        proj.close()
+    assert r["ok"] is True, r
+    assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+    return r
+
+
+class TestReferenceFoldEntityLabelSetHasOneHome:
+    """#3585 P1-2. The GRAPH fold records a state-op miss only for a label the
+    REFERENCE fold models; the reference fold records only for its own labels.
+    If the two sets drift, one classifier refuses a journal the other accepts.
+    The set therefore lives in ONE place (``projection._REFERENCE_FOLD_ENTITY_LABELS``,
+    in the lower module, because ``consistency`` imports from ``projection`` and
+    the reverse import would be circular) and ``consistency._ENTITY_CREATION_LABELS``
+    aliases it."""
+
+    def test_the_label_sets_have_one_home(self):
+        """FAILS IF: the shared set drifts from `consistency._ENTITY_CREATION`,
+        so a new creation row (or a removed label) silently stops matching what
+        the graph fold will refuse. (`_ENTITY_CREATION_LABELS` is an alias of
+        the projection constant, so this pins the TABLE to it.)"""
+        assert _ENTITY_CREATION_LABELS == _REFERENCE_FOLD_ENTITY_LABELS
+        assert frozenset(
+            label for label, _status in _ENTITY_CREATION.values()
+        ) == _REFERENCE_FOLD_ENTITY_LABELS

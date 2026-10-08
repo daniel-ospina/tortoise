@@ -209,6 +209,7 @@ def restore(backup_dir: str, db_path: str,
     if into_falkor:
         from tortoise.projection import (  # noqa: I001
             FalkorProjection,
+            journal_first_materialization,
             journal_hard_delete_seqs,
             journal_object_hard_deleted_ids,
             journal_object_surviving_keys,
@@ -276,16 +277,22 @@ def restore(backup_dir: str, db_path: str,
             # must not be handed a kwarg it does not accept).
             journal_object_surviving = journal_object_surviving_keys(records)
             journal_object_deleted = journal_object_hard_deleted_ids(records)
+            # #3585 (P1-1): the whole-journal EXISTENCE map, so a
+            # retract/state-op that precedes its own creation (folded by
+            # `rebuild_all`'s hoist) is not refused on this chronological path.
+            first_materialized = journal_first_materialization(records)
             apply_kwargs: dict = {}
+            _pass_seq = False
             try:
                 _apply_params = inspect.signature(proj.apply).parameters
             except (TypeError, ValueError):
                 _apply_params = {}
             if "journal_object_surviving" in _apply_params:
-                apply_kwargs = {
-                    "journal_object_surviving": journal_object_surviving,
-                    "journal_object_deleted": journal_object_deleted,
-                }
+                apply_kwargs["journal_object_surviving"] = journal_object_surviving
+                apply_kwargs["journal_object_deleted"] = journal_object_deleted
+            if "journal_first_materialized" in _apply_params:
+                apply_kwargs["journal_first_materialized"] = first_materialized
+                _pass_seq = "journal_seq" in _apply_params
             # The refusal is a RUN BOUNDARY, exactly as on the other three
             # engines: without the collector `record_non_folded` is a no-op
             # and the context would change nothing. `assert_no_non_folded`
@@ -307,7 +314,10 @@ def restore(backup_dir: str, db_path: str,
                         if edge is not None:
                             deferred_corrects.append(edge)
                         continue
-                    proj.apply(ev, **apply_kwargs)
+                    if _pass_seq:
+                        proj.apply(ev, journal_seq=seq, **apply_kwargs)
+                    else:
+                        proj.apply(ev, **apply_kwargs)
                 if deferred_corrects:
                     try:
                         proj.fold_deferred_corrects_edges(

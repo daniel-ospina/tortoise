@@ -58,16 +58,19 @@ from .projection import (
     _CANONICAL_ENTITY_LABELS,
     _ENTITY_ID_PROP,
     _ENTITY_MUTATION_STATE_OPS,
+    _REFERENCE_FOLD_ENTITY_LABELS,
     _annotator_value_ok,
     _apply_one,
+    _creation_entity_id_from_record,
+    _journal_forward_reference,
     _load_prewipe_snapshot,
     _norm,
     _promotion_point_with_operator,
     _writable_id,
+    journal_first_materialization,
     journal_hard_delete_seqs,
     journal_object_hard_deleted_ids,
     journal_object_surviving_keys,
-    journal_point_creation_ids,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
@@ -881,9 +884,12 @@ def _fold_journal(events: list[dict]) -> dict:
     # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
     # list (the anchor boundary is an envelope property).
     anchors = journal_hard_delete_seqs(events)
-    # #3585 re-review: the same journal-wide creation set `fold` passes — a
-    # belief/annotator refusal is mirrored only for an id NO record creates.
-    _created = journal_point_creation_ids(events)
+    # #3585 re-review: the same journal-wide existence map `fold` passes — an
+    # order-dependent refusal (a belief/annotator write, a terminalizer) is
+    # mirrored only when the target is NOT a forward reference. The ORDERED map
+    # (first materialization seq), not a creation-id set, is what lets a
+    # create→hard-delete→fold journal still refuse.
+    _first_materialized = journal_first_materialization(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         # Same normalisation the writer applies (`_apply_one`/`apply`): the
@@ -970,6 +976,16 @@ def _fold_journal(events: list[dict]) -> dict:
                                 "(graph fold's named exemption)"),
                     )
                     continue
+                # #3585 (P1-1): a terminalizer whose target the JOURNAL
+                # materializes only LATER is a forward reference — the live
+                # write no-op'd it and `rebuild_all`'s creation hoist skips
+                # it, so refusing it here reds a journal the graph reproduces
+                # exactly. The two named exemptions above are unaffected; the
+                # ORDERED map keeps a create→hard-delete→terminalizer journal
+                # (first <= seq) a genuine miss.
+                if _journal_forward_reference(
+                        _first_materialized, seq, "Point", pid):
+                    continue
                 record_non_folded(
                     SHAPE_POINT_INVALIDATED_MISS if t == "PointInvalidated"
                     else SHAPE_POINT_RETRACTED_MISS if t == "PointRetracted"
@@ -1005,7 +1021,9 @@ def _fold_journal(events: list[dict]) -> dict:
                 if ev.get("expired_at"):
                     entry["expiredAt"] = ev["expired_at"]
             continue
-        _apply_one(by_id, ev, _created)
+        _apply_one(by_id, ev,
+                   journal_first_materialized=_first_materialized,
+                   journal_seq=seq)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
@@ -1121,27 +1139,24 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
     # an id-keyed journal record is a false positive by construction (#4649).
     "EventRecorded": ("Event", None),
 }
-#: The non-Point labels the entity reference fold models.
-_ENTITY_CREATION_LABELS: frozenset[str] = frozenset(
-    label for label, _status in _ENTITY_CREATION.values())
+#: The non-Point labels the entity reference fold models. ONE home: the
+#: projection's `_REFERENCE_FOLD_ENTITY_LABELS` is the same set the GRAPH fold
+#: reads to decide whether a state-op miss is recordable at all (the two
+#: classifiers must agree, #3585). The suite pins it equal to the labels of
+#: `_ENTITY_CREATION` above, so adding a row here cannot leave the two folds
+#: disagreeing silently.
+_ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 
 
 def _creation_entity_id(t: str, ev: dict) -> object:
     """The id a creation record registers, resolved as the GRAPH fold does.
 
-    `_upsert_event` accepts BOTH the nested ``{type, event:{…}}`` shape (the
-    miner) and the flat one (``EventAPI.add_event``), reading ``id`` OR
-    ``eventId``; the other three creation records carry a top-level ``id``.
-    Reading only ``eventId`` here made this leg blind to every Event the
-    public writers produce — a silent false NEGATIVE, the class #3585 exists
-    to remove.
+    Delegates to the projection's ``_creation_entity_id_from_record`` — the
+    SAME reader ``journal_first_materialization`` uses — so the reference
+    fold's key and the existence map's key cannot drift (a shared key is what
+    makes the non-Point forward-reference gate agree with the graph fold).
     """
-    if t == "EventRecorded":
-        inner = ev.get("event")
-        inner = inner if isinstance(inner, dict) else ev
-        return inner.get("id") or inner.get("eventId")
-    label = _ENTITY_CREATION[t][0]
-    return ev.get(_ENTITY_ID_PROP[label])
+    return _creation_entity_id_from_record(t, ev)
 
 
 def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
@@ -1159,8 +1174,13 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # `ObjectSuperseded` fold to a sweep AFTER every Object-creation event AND
     # every delete, so a supersede that PRECEDES its own `ObjectRegistered` is
     # legitimately foldable there. This reference fold therefore resolves EVERY
-    # supersede in ONE trailing sweep against the journal's END index — the
-    # entity-leg analogue of `journal_point_creation_ids`.
+    # supersede in ONE trailing sweep against the journal's END index.
+    #
+    # #3585 (P1-1): the whole-journal EXISTENCE map — the non-Point leg of
+    # `journal_first_materialization`. A state op whose entity the journal
+    # materializes only LATER is a forward reference: the live write no-op'd
+    # it and the graph fold skips it too, so it is neither folded nor recorded.
+    _first_materialized = journal_first_materialization(events)
     #
     # #5285 cycle-4 (FIX 1): there is exactly ONE resolution path. An earlier
     # cut applied non-held supersedes INLINE at their own seq and re-evaluated
@@ -1298,15 +1318,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     # #3585 re-review: the graph fold records `state-op-miss`
                     # (refused) when a state op resolves to no entity or
                     # carries no applied map, so the reference fold must agree.
-                    # Only the four labels this fold models are handled here —
-                    # `_apply_one` owns the Point and non-Point-label cases.
-                    # BOUND (re-review): `Source` is canonical to the graph
-                    # fold but has no entry in `_ENTITY_CREATION` (no
-                    # `SourceCreated` shape), so a Source state-op miss is not
-                    # refused here while `rebuild_all` refuses it. Adding the
-                    # label would need a `Source` row in the entity-parity
-                    # comparison, which the parity leg does not model — the
-                    # gap is recorded, not half-closed.
+                    # Only the labels this fold models are handled here —
+                    # `_apply_one` owns the Point case.
+                    # #3585 (P1-1): a WELL-FORMED state op whose entity the
+                    # journal materializes only LATER is a forward reference —
+                    # the live write no-op'd it and the graph fold skips it, so
+                    # neither side records it. The malformed-state case still
+                    # records in either order, exactly as `_fold_entity_mutation`
+                    # does (its forward gate sits AFTER the state guard).
+                    if (rec is None and isinstance(state, dict)
+                            and _journal_forward_reference(
+                                _first_materialized, seq, label, eid)):
+                        continue
+                    # `Source` is canonical to the graph fold but has no entry
+                    # in `_ENTITY_CREATION` (no `SourceCreated` shape), so this
+                    # fold cannot refuse a Source state-op miss. #3585 (P1-2)
+                    # resolved the asymmetry in THAT direction: the graph
+                    # fold's `_warn_entity_mutation_fold_miss` records the miss
+                    # only for a label in `_REFERENCE_FOLD_ENTITY_LABELS`, so
+                    # neither classifier refuses it (the warning is retained).
+                    # Adding a `Source` row here would need a `Source` entry in
+                    # the entity-parity comparison, which the parity leg still
+                    # does not model; the label stays out of BOTH folds.
                     if label in _ENTITY_CREATION_LABELS:
                         record_non_folded(
                             SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
@@ -2011,16 +2044,23 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # they do not accept would be miscounted as a TORN record.
     journal_object_surviving = journal_object_surviving_keys(events)
     journal_object_deleted = journal_object_hard_deleted_ids(events)
+    # #3585 (P1-1): the whole-journal EXISTENCE map — a retract/state-op that
+    # PRECEDES its own creation is folded by `rebuild_all`'s hoist and no-op'd
+    # live, so this chronological engine must not refuse it. `journal_seq` is
+    # passed per record below (the map alone cannot decide the order).
+    first_materialized = journal_first_materialization(events)
     apply_kwargs: dict = {}
+    _pass_seq = False
     try:
         _apply_params = inspect.signature(projection.apply).parameters
     except (TypeError, ValueError):
         _apply_params = {}
     if "journal_object_surviving" in _apply_params:
-        apply_kwargs = {
-            "journal_object_surviving": journal_object_surviving,
-            "journal_object_deleted": journal_object_deleted,
-        }
+        apply_kwargs["journal_object_surviving"] = journal_object_surviving
+        apply_kwargs["journal_object_deleted"] = journal_object_deleted
+    if "journal_first_materialized" in _apply_params:
+        apply_kwargs["journal_first_materialized"] = first_materialized
+        _pass_seq = "journal_seq" in _apply_params
     # #3585 (R8/R9): this apply-based engine folds inside the non-folded
     # collector too. A refused event means the recovery REPLAYED an incomplete
     # journal — reporting `recovered: True` there is the false PASS #3947's
@@ -2054,7 +2094,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     if edge is not None:
                         deferred_corrects.append(edge)
                 else:
-                    projection.apply(ev, **apply_kwargs)
+                    if _pass_seq:
+                        projection.apply(ev, journal_seq=seq, **apply_kwargs)
+                    else:
+                        projection.apply(ev, **apply_kwargs)
                 applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1
