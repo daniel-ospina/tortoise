@@ -2320,18 +2320,27 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # change closes). Probing the signature is the same idiom `apply`'s
         # kwargs use above, and it keeps the per-record handler free to count
         # REAL fold failures.
-        try:
-            _restamp_params = inspect.signature(
-                projection.apply_journal_point_restamp).parameters
-        except (TypeError, ValueError):
-            _restamp_params = {}
-        if "hard_deleted" not in _restamp_params and not any(
-                _p.kind is inspect.Parameter.VAR_KEYWORD
-                for _p in _restamp_params.values()):
-            raise _RestampSignatureError(
-                "recover_from_log: the projection's "
-                "apply_journal_point_restamp does not accept hard_deleted=...; "
-                "refusing rather than reporting a false recovery (#7719)")
+        #
+        # Guarded on a NON-EMPTY plan: a journal with no terminalizer folds
+        # calls the consumer zero times, so an injected projection that does not
+        # implement it is not violating the contract (#7174's fake projection).
+        # Only a journal that WILL call it is refused a missing kwarg.
+        if restamp_plan:
+            try:
+                _restamp_params = inspect.signature(
+                    projection.apply_journal_point_restamp).parameters
+            except (AttributeError, TypeError, ValueError):
+                # AttributeError: no such method at all; TypeError: not
+                # callable. Both mean the required kwarg cannot be supplied.
+                _restamp_params = {}
+            if "hard_deleted" not in _restamp_params and not any(
+                    _p.kind is inspect.Parameter.VAR_KEYWORD
+                    for _p in _restamp_params.values()):
+                raise _RestampSignatureError(
+                    "recover_from_log: the projection's "
+                    "apply_journal_point_restamp does not accept "
+                    "hard_deleted=...; refusing rather than reporting a false "
+                    "recovery (#7719)")
         deferred_corrects: list[tuple[int, str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
@@ -2344,13 +2353,6 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 # through to ``apply()``'s inline branch and its unshared selection
                 # (#325/#3722's raw-vs-normalized class).
                 if seq in restamp_plan:
-                    # #7719 (E7): a bad call signature must NOT fail open. The
-                    # generic ``except Exception`` below counts a
-                    # missing-kwarg ``TypeError`` as crash damage (``torn``) and
-                    # the function then returns ``recovered=True`` — the exact
-                    # false PASS this change closes. Re-raise it out of the
-                    # per-record guard; only applies to the restamp call, so an
-                    # unrelated ``apply()`` failure is still counted torn.
                     # #7719 (E7): the consumer's contract was validated ONCE
                     # before this loop, so a genuine fold failure inside this
                     # call is NOT reclassified as a signature error — it stays a
@@ -2372,7 +2374,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     first_refusal = str(exc)
             except _RestampSignatureError:
                 # #7719 (E7): a bad call signature is a programming error, not
-                # crash damage. Fail LOUD rather than counting a skip.
+                # crash damage (``torn``). Fail LOUD rather than letting the
+                # generic handler below turn it into a skip that leaves
+                # ``recovered=True`` standing.
                 raise
             except Exception:
                 torn += 1
