@@ -3503,8 +3503,11 @@ _POINT_RESTAMP_EVENT_TYPES = frozenset({
 # lost DB could no longer be recovered.
 #
 # The set is WARN-ONLY: the `apply()` branch that consumes it gives the
-# recognized-not-folded-here case a named message, but the treatment is
-# IDENTICAL to the `else` it displaces. `PointSuperseded` / `PointInvalidated`
+# recognized-not-folded-here case a named message and, like the `else` it
+# displaces, does not fold the record — but it deliberately stops there, where
+# the `else` calls `record_non_folded` and so refuses a graph-backed replay
+# for a gap this engine has and `rebuild_all` does not.
+# `PointSuperseded` / `PointInvalidated`
 # are deliberately NOT listed — the `_POINT_RESTAMP_EVENT_TYPES` branch above
 # consumes and returns on both before this set is reached (#3305).
 _APPLY_WARN_ONLY_TYPES: frozenset[str] = frozenset({
