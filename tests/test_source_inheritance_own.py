@@ -932,3 +932,39 @@ class TestSourceIdentityCollapse:
             f"identity guard is not a cap on evidence (got {alpha_two} for two "
             f"documents vs {alpha_one} for one)"
         )
+
+    def test_identity_less_sources_stay_distinct(self):
+        """A `:Source` with neither `canonicalUrl` nor `url` is NOT folded.
+
+        There is no key to collapse on (and `id` is not the S0a identity), so
+        each such node must keep its own identity. Folding them together would
+        WEAKEN evidence — the opposite error from the one this change fixes.
+        """
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+        try:
+            p = sdk.create_point("statement", "anon", extractedFrom=URL_ONE_DOC)
+            for _ in range(2):
+                sdk._get_proj().g.query(
+                    "MATCH (n:Point {id:$pid}) "
+                    "CREATE (s:Source {credibilityTier:'T4', sourceDate:$sd, "
+                    "ingestedAt:$sd}) CREATE (n)-[:extractedFrom]->(s)",
+                    params={"pid": p["id"], "sd": FRESH},
+                )
+            sdk._get_proj().g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+                "s.sourceDate=$sd, s.ingestedAt=$sd",
+                params={"url": URL_ONE_DOC, "sd": FRESH},
+            )
+            sdk._apply_source_inheritance(recency_decay=1.0)
+            alpha_anon = inherited_alpha(sdk, p["id"])
+        finally:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        assert alpha_anon > alpha_one, (
+            "two identity-less :Source nodes must NOT be folded into one — with "
+            "no S0a key they are unknown, and collapsing unknowns weakens "
+            f"evidence (got {alpha_anon} for three nodes vs {alpha_one} for one)"
+        )

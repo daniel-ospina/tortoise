@@ -15801,22 +15801,33 @@ class TortoiseSDK:
                 continue  # neutral source — no inheritance contribution
             # Identity = the ALREADY-MATERIALISED S0a key. `:Source` carries
             # `canonicalUrl` (written by the write path), which is precisely the
-            # "registration key" `source_identity.py` records; `normalize_source_url
-            # is the pure fallback for a node predating that property. `:Source` has
-            # NO `id` property (verified: keys are url/sourceKind/title/
-            # canonicalUrl/urlAliases/contentHash/ingestedAt), so a source with no
-            # identity at all gets a UNIQUE per-row token: unknown identity must
-            # stay DISTINCT, because folding unknowns together would weaken
-            # evidence, a new error in the opposite direction from this bug.
+            # "registration key" `source_identity.py` records;
+            # `normalize_source_url` is the pure fallback for a node predating
+            # that property. `id` is NOT usable as the key: it is not the S0a
+            # identity (it is the url on create, and is absent entirely on
+            # stub-minted sources — `_upsert_source` sets it, `_mint_source_stub`
+            # does not), so keying on it would split one document again. A source
+            # with no identity at all gets a UNIQUE per-row token: unknown
+            # identity must stay DISTINCT, because folding unknowns together
+            # would weaken evidence — a new error, opposite in direction to this
+            # bug.
             ident = canonurl or normalize_source_url(url) if (canonurl or url) else None
             if ident is None:
                 ident = f"\x00row:{pid}:{len(point_sources[pid])}"
+            # Read the assessment factor HERE, per row, BEFORE collapsing.
+            # `assess_source` keys it on the RESOLVED stored url, and two nodes
+            # of one canonical identity can resolve to different urls — so
+            # re-looking it up after the merge off the surviving url would make
+            # the prior depend on row ORDER (the traversal has no ORDER BY).
+            # Keeping the MAX matches the "strongest" rule used for tier and
+            # dates: collapsing must never weaken the evidence it merges.
+            fac = factor_by_source.get(url, 1.0)
             slot = _identity_slot.get((pid, ident))
             if slot is None:
                 _identity_slot[(pid, ident)] = len(point_sources[pid])
                 point_sources[pid].append({
                     "url": url, "tier": tier, "sourceDate": sdate,
-                    "ingestedAt": ingested,
+                    "ingestedAt": ingested, "factor": fac,
                 })
                 continue
             # One document seen twice: keep the STRONGER tier and the MOST RECENT
@@ -15826,6 +15837,8 @@ class TortoiseSDK:
             kept = point_sources[pid][slot]
             if pc_base(tier) > pc_base(kept["tier"]):
                 kept["tier"] = tier
+            if fac > kept["factor"]:
+                kept["factor"] = fac  # strongest assessment wins, not first-seen
             for field, cand_raw in (("sourceDate", sdate), ("ingestedAt", ingested)):
                 cand, cur = _parse_timestamp(cand_raw), _parse_timestamp(kept[field])
                 if cand is not None and (cur is None or cand > cur):
@@ -15910,8 +15923,7 @@ class TortoiseSDK:
             # Per-source assessment factor (clamped [0.1, 2.0]); factor = 1.0
             # when no assessments — exact tier priors preserved.
             groups = [
-                (src["tier"], src["sourceDate"], src["ingestedAt"],
-                 factor_by_source.get(src["url"], 1.0))
+                (src["tier"], src["sourceDate"], src["ingestedAt"], src["factor"])
                 for src in sources
             ]
             alpha, beta = aggregate_prior(
