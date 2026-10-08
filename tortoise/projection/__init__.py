@@ -2517,13 +2517,16 @@ from tortoise.live import (  # noqa: E402
 )
 from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
-# #5407 - the label sets the INDEX path creates, as data, so a test can
-# compare them with the set the QUERY legs serve (`ENTITY_TYPE_LABELS.values()`).
-# Both were inline literals inside `_ensure_indexes` with nothing tying them
-# to the entities the query legs actually route to, so an entity type could
-# be added and its index silently never created - the shape #4997 caught
-# for the vector pair. `tests/test_5407_index_label_parity.py` holds them
-# together.
+# #5407 - the RANGE and FULL-TEXT label sets the INDEX path creates, as data, so
+# a test can compare them with the set the vector leg's declared routing
+# (`ENTITY_TYPE_LABELS.values()`) resolves to. Both were inline literals inside
+# `_ensure_indexes` with nothing tying them to that routing. `tests/
+# test_5407_index_label_parity.py` holds them together.
+#
+# NOT covered here, and deliberately not claimed: the VECTOR index. Its labels
+# are still literals (`_ensure_vector_index_api`) and it needs no range or
+# full-text index, so a served label with no vector index passes every
+# assertion below. See #5407 for that remainder.
 
 #: ``Point``'s range indexes are the one ranged set this declaration owns.
 #: Its label is written at the DDL site rather than in a ``(label, props)``
