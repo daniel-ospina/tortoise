@@ -309,10 +309,10 @@ def test_search_snapshot_legacy_delegation(sdk, monkeypatch):
     assert len(results) == 1, "must delegate to the legacy scorer"
 
 
-# ── #7615: per-store isolation ──────────────────────────────────────────
+# ── #7760: per-store isolation ───────────────────────────────────────
 
-def test_snapshot_store_isolated_across_embedded_dbs(tmp_path):
-    """#7615: the snapshot store must not serve one embedded DB's corpus to
+def test_snapshot_store_isolated_across_embedded_dbs(tmp_path, monkeypatch):
+    """#7760: the snapshot store must not serve one embedded DB's corpus to
     another.
 
     Every embedded DB defaults to ``graph_name='tortoise'``, so the old
@@ -322,13 +322,26 @@ def test_snapshot_store_isolated_across_embedded_dbs(tmp_path):
     ``tests/test_tortoise_search.py::test_sdk_fts_query_empty`` caused by
     ``tests/test_subject_layer_read_surfaces_4889.py``. Both files must be
     safe in ONE process, which is the property the sharder assumes.
+
+    The embedded mode is forced explicitly. On a URI-bearing session (the lane
+    CI runs for a full selection) ``TortoiseSDK(<path>)`` is redirected to a
+    server and derives a per-path graph name, so the old key would already
+    differ and this test would pass without the fix. Deleting the URI keeps
+    both SDKs genuinely embedded, so the test guards ``snapshot_key`` on every
+    lane instead of only the carve-out lane.
     """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     fs._store.clear()
     a = TortoiseSDK(str(tmp_path / "a.db"))
     b = TortoiseSDK(str(tmp_path / "b.db"))
     try:
-        ka = fs.snapshot_key(a._get_proj(), None)
-        kb = fs.snapshot_key(b._get_proj(), None)
+        proj_a = a._get_proj()
+        proj_b = b._get_proj()
+        assert proj_a._is_embedded and proj_b._is_embedded, (
+            "this test must run against embedded stores, not a redirected "
+            "server — otherwise it passes without the fix")
+        ka = fs.snapshot_key(proj_a, None)
+        kb = fs.snapshot_key(proj_b, None)
         assert ka != kb, (
             "distinct embedded DBs must derive distinct snapshot keys, got "
             f"{ka!r} for both")
@@ -351,3 +364,27 @@ def test_snapshot_store_isolated_across_embedded_dbs(tmp_path):
             except Exception:
                 pass
         fs._store.clear()
+
+
+def test_snapshot_key_memory_identity_is_stamped_not_recycled():
+    """#7760 review: ``:memory:`` must not key on ``id()``.
+
+    A ``:memory:`` projection has no file, so it is identified by a token
+    stamped on the projection. ``id()`` would be recycled once the projection
+    is collected, so a later ``:memory:`` store could inherit a snapshot built
+    before the first was closed — the same cross-store disclosure this key
+    exists to stop. The token is stable for one projection and absent from a
+    fresh one.
+    """
+    class _MemoryProj:
+        _path = ":memory:"
+        graph_name = "tortoise"
+
+    p = _MemoryProj()
+    key = fs.snapshot_key(p, None)
+    assert fs.snapshot_key(p, None) == key, (
+        "the key must be stable for the same projection")
+    assert getattr(p, "_snapshot_store_id", None) == key[1], (
+        "the identity must be the stamped token, not a recyclable id()")
+    assert fs.snapshot_key(_MemoryProj(), None) != key, (
+        "a fresh in-memory store must not inherit the token")

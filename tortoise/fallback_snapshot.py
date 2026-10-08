@@ -28,9 +28,11 @@ protection) and the legacy path runs unchanged.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -96,19 +98,28 @@ def snapshot_key(proj, namespace: str | None) -> tuple:
 
     ``graph_name`` alone does NOT identify an embedded store: every embedded DB
     defaults to ``'tortoise'``, so a store keyed on it alone served one DB's
-    snapshot to another — the leaked point in #7615 (a test's degraded search
+    snapshot to another — the leaked point in #7760 (a test's degraded search
     returned a point written by a different test's SDK on a different file).
     The embedded file's realpath is the second half of the identity — the same
     reason #3049's ``_prewipe_graph_identity`` carries ``db_path``.
 
-    A server/URI graph carries no file: its identity IS its graph name, which
-    the first element already supplies. ``:memory:`` is a fresh server per
-    projection with no file to key on, so the projection itself is the
-    identity (``id()`` is stable because ``TortoiseSDK._get_proj`` caches).
+    A server/URI graph carries no file, so its identity IS its graph name
+    (already the first element), matching #3049; a process holding two servers
+    that carry the SAME graph name is out of contract here and still shares a
+    slot (pre-existing, and unchanged by this key). ``:memory:`` is a fresh
+    server per projection with no file to key on, so a per-projection token is
+    stamped on first use. The token — never ``id(proj)`` — is the identity:
+    ``id()`` is recycled once the projection is collected, which would let a
+    later ``:memory:`` projection inherit a snapshot built before the first was
+    closed — the same cross-store disclosure this key exists to stop.
     """
     path = getattr(proj, "_path", None)
     if path == ":memory:":
-        backend: object = ("memory", id(proj))
+        backend = getattr(proj, "_snapshot_store_id", None)
+        if backend is None:
+            backend = ("memory", uuid.uuid4().hex)
+            with contextlib.suppress(AttributeError, TypeError):
+                proj._snapshot_store_id = backend
     else:
         from tortoise.projection import _prewipe_db_path_identity
         backend = _prewipe_db_path_identity(path)
