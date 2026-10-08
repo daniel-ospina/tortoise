@@ -5492,6 +5492,28 @@ def _cmd_sessions_import(args) -> int:
     return 0
 
 
+def _session_fields(s: dict) -> dict[str, str]:
+    """Render one session's FULL shared projection as label -> display value.
+
+    Driven by `SESSION_LIST_FIELDS` (#5498): a field the API serves cannot be
+    silently absent from the CLI, because this iterates the shared declaration
+    instead of holding a local copy of it. That local copy is exactly how
+    `session list` came to drop six of the nine fields it was meant to show.
+    """
+    from tortoise.session_projection import SESSION_LIST_FIELDS
+
+    out: dict[str, str] = {}
+    for field in SESSION_LIST_FIELDS:
+        val = s.get(field)
+        if val is None or val == "":
+            out[field] = "-"
+        elif field == "created_at" and isinstance(val, str):
+            out[field] = val[:19]
+        else:
+            out[field] = str(val)
+    return out
+
+
 def _cmd_session_list(api_key: str, api_url: str) -> int:
     """GET /v1/sessions — list all sessions."""
     import json as _json, sys as _sys  # noqa: E401, I001
@@ -5518,13 +5540,14 @@ def _cmd_session_list(api_key: str, api_url: str) -> int:
         print("No sessions found.")
         return 0
 
-    print(f"{'ID':<36} {'Turns':<6} {'Created'}")
-    print("-" * 60)
+    # #5498: every field of the shared projection, not the ID/Turns/Created
+    # subset this used to hardcode.
     for s in sessions:
-        sid = s.get("id", s.get("session_id", "?"))
-        turns = s.get("turns", s.get("turn_count", "?"))
-        created = s.get("created_at", s.get("created", ""))[:19]
-        print(f"{sid:<36} {str(turns):<6} {created}")  # noqa: RUF010
+        fields = _session_fields(s)
+        sid = fields.pop("id", "?")
+        print(sid)
+        for key, val in fields.items():
+            print(f"  {key:<13} {val}")
     return 0
 
 
@@ -5552,10 +5575,19 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
 
     print(f"Session: {session_id}")
     print(f"Created: {data.get('created_at', data.get('created', '?'))}")
-    turns = data.get("turns", [])
-    print(f"Turns:   {len(turns)}")
+    # #5498: `turns` is the COUNT and `turn_points` is the LIST. Reading the
+    # count as the list and calling len() on it raised
+    # `TypeError: object of type 'int' has no len()` on EVERY session.
+    turn_points = data.get("turn_points") or []
+    print(f"Turns:   {data.get('turns', len(turn_points))}")
+    if data.get("extracted") is not None:
+        print(f"Extracted: {data.get('extracted')}")
+    if data.get("harness"):
+        print(f"Harness: {data.get('harness')}")
+    if data.get("actor_display") or data.get("actor_user_id"):
+        print(f"Actor:   {data.get('actor_display') or data.get('actor_user_id')}")
     print()
-    for i, t in enumerate(turns):
+    for i, t in enumerate(turn_points):
         role = t.get("role", "?").upper()
         content = t.get("content", "")
         if len(content) > 200:
