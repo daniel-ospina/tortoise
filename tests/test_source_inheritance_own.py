@@ -892,6 +892,78 @@ def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | Non
     return alpha
 
 
+def _seed_assessment(sdk, target_url: str, score: float = 2.0) -> None:
+    """Create an `assessment` Point targeting `target_url` directly.
+
+    Seeded by raw write because the collapse is under test, not
+    `assess_source`'s url RESOLUTION: `factor_by_source` is keyed on the
+    assessment's `targetSource`, so this pins the factor to the exact url whose
+    collapse behaviour is being checked.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (a:Point {id:$aid, pointKind:'assessment', targetSource:$t, "
+        "assessor:'alice', score:$s, assessorReputation:1.0, createdAt:$sd})",
+        params={"aid": f"assess-{target_url}", "t": target_url, "s": score,
+                "sd": FRESH},
+    )
+
+
+def _assessed_single_ref(score: float = 2.0) -> float:
+    """The prior of ONE source at T4/fresh carrying assessment `score`.
+
+    A formula-free reference: whatever `aggregate_prior` makes of a single
+    assessed source, the collapsed two-node case must reproduce it exactly.
+    """
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    try:
+        p = sdk.create_point("statement", "ref", extractedFrom=URL_OTHER_DOC)
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": URL_OTHER_DOC, "sd": FRESH},
+        )
+        _seed_assessment(sdk, URL_OTHER_DOC, score)
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        alpha = inherited_alpha(sdk, p["id"])
+    finally:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+    return alpha
+
+
+def _collapse_with_assessment_on(assessed_url: str, score: float = 2.0) -> float:
+    """Collapse two `:Source` nodes of ONE document, assessing `assessed_url`.
+
+    BOTH nodes are given the SAME tier and date, so the only difference the
+    merge can make is the factor. (Getting this wrong is how the first attempt
+    at this test went wrong: the original node was left with no
+    `credibilityTier`, so `resolve_tier` returned None and the loop skipped it as
+    NEUTRAL — the assessed row never entered the collapse at all, which looked
+    like a dropped factor but was a malformed fixture.)
+    """
+    dup = "https://mirror.example/one-document"
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    try:
+        p = sdk.create_point("statement", "assessed", extractedFrom=URL_ONE_DOC)
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": URL_ONE_DOC, "sd": FRESH},
+        )
+        _link_duplicate_source(sdk, p["id"], dup, tier="T4", sdate=FRESH)
+        _seed_assessment(sdk, assessed_url, score)
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        alpha = inherited_alpha(sdk, p["id"])
+    finally:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+    return alpha
+
+
 class TestSourceIdentityCollapse:
     """#5543 — source-fan-in double counting on the `extractedFrom` prior path.
 
@@ -939,6 +1011,30 @@ class TestSourceIdentityCollapse:
             f"identity guard is not a cap on evidence (got {alpha_two} for two "
             f"documents vs {alpha_one} for one)"
         )
+
+    def test_collapse_keeps_the_assessment_wherever_it_sits(self):
+        """The merge must carry the assessment across, whichever row it is on.
+
+        `factor_by_source` is keyed on the RESOLVED stored url and the traversal
+        has no `ORDER BY`, so a factor re-looked up AFTER the merge off the
+        surviving row would make the prior depend on row order — the round-1
+        finding. Assessing EACH node in turn is what makes this
+        order-INDEPENDENT: whichever row the merge keeps, one of these two cases
+        has the assessment on the row that was NOT kept, so dropping the fold
+        reddens at least one of them.
+        """
+        expected = _assessed_single_ref(2.0)
+        on_original = _collapse_with_assessment_on(URL_ONE_DOC)
+        on_duplicate = _collapse_with_assessment_on(
+            "https://mirror.example/one-document"
+        )
+        for label, got in (("original", on_original), ("duplicate", on_duplicate)):
+            assert got == pytest.approx(expected), (
+                f"an assessment on the {label} :Source node must survive the "
+                "collapse: one document carrying a 2.0 assessment must score "
+                "exactly like a single source carrying it, whatever row the "
+                f"(unordered) traversal kept (got {got}, expected {expected})"
+            )
 
     def test_collapse_keeps_the_strongest_tier_and_clock(self):
         """The merge must keep the STRONGER tier and the NEWER effective clock.
