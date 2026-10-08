@@ -543,11 +543,12 @@ def test_write_tolerated_cleanup_report_is_silent_when_nothing_leaked(tmp_path):
 
 
 def test_tolerated_leak_report_merges_a_peer_workers_record(tmp_path):
-    """xdist: every worker writes the SAME artifact path at its own teardown.
+    """Two writers on the SAME artifact path must union, not truncate.
 
-    CI runs ``-n 4``, so a plain overwrite would let the last worker to finish
-    discard a peer's tolerated leak — the invisibility F1 names. The writer
-    must union by path rather than truncate.
+    CI is SERIAL at this head (``XDIST_WORKERS=0``), so this is the defensive
+    branch for a future xdist re-admission: with ``-n 4`` a plain overwrite
+    would let the last worker to finish discard a peer's tolerated leak — the
+    invisibility F1 names. The writer must union by path rather than truncate.
     """
     import json as _json
 
@@ -580,11 +581,14 @@ def test_tolerated_leak_report_merges_a_peer_workers_record(tmp_path):
 
 
 def test_the_tolerated_leak_artifact_is_wired_into_session_teardown():
-    """#7735 visibility, WIRED: conftest must actually call the writer.
+    """#7735 visibility, WIRED: conftest must call the writer in TEARDOWN.
 
     The tests above prove the writer works; a writer nobody calls is the very
-    failure F1 names (a report no CI surface ever sees). Pin the call inside
-    the session fixture's own statements, not merely somewhere in the file.
+    failure F1 names (a report no CI surface ever sees). Pin the call to the
+    statements AFTER the fixture's ``yield``: at setup the tolerated-leak list
+    is necessarily empty, so a call moved before the yield writes no artifact
+    while still being "in the fixture" — the regression the earlier
+    position-blind walk accepted (#7735 review, F2).
     """
     import ast
 
@@ -593,16 +597,54 @@ def test_the_tolerated_leak_artifact_is_wired_into_session_teardown():
         node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == "_redislite_hygiene")
+    yield_index = next(
+        i for i, stmt in enumerate(fixture.body)
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Yield))
     calls: list[ast.Call] = []
-    for stmt in fixture.body:
+    for stmt in fixture.body[yield_index + 1:]:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue  # the atexit path is not the session teardown
         calls.extend(n for n in ast.walk(stmt) if isinstance(n, ast.Call))
     called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
     assert "write_tolerated_cleanup_report" in called, (
         "tests/conftest.py::_redislite_hygiene must call "
-        "write_tolerated_cleanup_report() at session end, or the tolerated "
-        "leak reaches no CI surface (#7735 review, F1)")
+        "write_tolerated_cleanup_report() AFTER its yield (session teardown), "
+        "or the tolerated leak reaches no CI surface (#7735 review, F1/F2)")
+
+
+def test_every_pytest_job_surfaces_the_tolerated_leak():
+    """#7735 review F1: the report is visible only where the workflow dumps it.
+
+    A job that runs pytest installs the process-global tolerant cleanup (via
+    ``tests/conftest.py``) and can therefore write the artifact — but only a job
+    whose workflow surfaces that file can report a tolerated leak. The first
+    revision dumped it in the ``test`` job alone, so the ``test-slow`` legs that
+    #7735 was actually measured on stayed blind. Derived from the workflow text
+    — every job with a ``python -m pytest`` invocation must also read the
+    artifact — never a frozen list of job names, which would re-stale the moment
+    a pytest job is renamed or added.
+    """
+    import yaml
+
+    wf = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent
+         / ".github" / "workflows" / "python-ci.yml").read_text())
+    blind: list[str] = []
+    covered: list[str] = []
+    for job_name, job in wf["jobs"].items():
+        runs = [step.get("run") or "" for step in (job.get("steps") or [])]
+        if not any("python -m pytest" in run for run in runs):
+            continue
+        if any("tempdir-hygiene-end.json" in run for run in runs):
+            covered.append(job_name)
+        else:
+            blind.append(job_name)
+    assert covered, (
+        "no job in python-ci.yml runs `python -m pytest` — the scan found "
+        "nothing to certify, so this pin would pass on an empty surface")
+    assert blind == [], (
+        "these jobs run pytest but never surface the tolerated-leak artifact "
+        f"(#7735 review F1): {blind}")
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])

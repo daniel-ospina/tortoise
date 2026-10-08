@@ -138,7 +138,10 @@ install_scan_guard()
 # directory a live embedded server still holds raises ENOTEMPTY out of teardown
 # and reddens a shard whose tests all passed. Same invariant as this module's own
 # teardown ("teardown must not convert a green suite red"), so it is fixed once
-# here for all 276 call sites rather than per test file. It tolerates ONLY
+# here for all 276 ``TemporaryDirectory(`` call sites — the reproducible count
+# is `git grep -o "TemporaryDirectory(" -- tests/ | wc -l` (OCCURRENCES, not
+# lines: one line holds two calls, so a line-based `grep -c` totals 275) —
+# rather than per test file. It tolerates ONLY
 # ENOTEMPTY and records the directory it leaves behind — deliberately not
 # `ignore_cleanup_errors=True`, which would swallow every rmtree failure. The
 # record is flushed to `tempdir-hygiene-end.json` at session end, because a

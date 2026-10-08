@@ -888,11 +888,13 @@ def install_tolerant_tempdir_cleanup() -> None:
     That is the same failure of the same invariant this module already states
     for its own teardown — "teardown must not convert a green suite red".
 
-    STRUCTURAL, NOT PER-FILE. The suite has 276 ``TemporaryDirectory`` call
-    sites at this head (counted with the paren-bearing grep over ``tests/``
-    quoted in the PR body); patching them one at a time would be a band-aid on a
-    shared lifecycle bug, and the next test written would reintroduce it. So the
-    fix is applied once, here, next to the other tempdir policy.
+    STRUCTURAL, NOT PER-FILE. The suite has 276 ``TemporaryDirectory(`` call
+    sites at this head — the exact reproducible count is
+    ``git grep -o "TemporaryDirectory(" -- tests/ | wc -l`` = 276, which counts
+    OCCURRENCES (one line of ``tests/`` holds two calls, so a line-based
+    ``grep -c`` totals 275); patching them one at a time would be a band-aid on
+    a shared lifecycle bug, and the next test written would reintroduce it. So
+    the fix is applied once, here, next to the other tempdir policy.
 
     NARROW AND REPORTED — deliberately NOT ``ignore_cleanup_errors=True``.
     The blanket stdlib lever would swallow EVERY ``rmtree`` failure (``EROFS``,
@@ -986,13 +988,16 @@ def write_tolerated_cleanup_report(log_dir: str | None = None) -> str | None:
 
     Best-effort: writing the report never fails the suite. Written ONLY when at
     least one leak was tolerated, so a clean xdist worker never overwrites a
-    peer worker's record with an empty one. Under CI's ``-n 4`` every worker
-    runs its OWN session teardown against this one artifact path, so the write
-    MERGES with whatever is already there keyed by path instead of truncating —
-    otherwise the last worker to finish would discard a peer's leak, which is
-    the invisibility this report exists to remove. (A merge can still lose one
-    record if two workers write in the same instant; the artifact then still
-    names the defect, so the leak stays observable.)
+    peer worker's record with an empty one. The write MERGES with whatever is
+    already there keyed by path instead of truncating, so IF xdist is
+    re-admitted, every worker's OWN session teardown against this one artifact
+    path cannot let the last worker to finish discard a peer's leak — the
+    invisibility this report exists to remove. That branch is INERT at this
+    head: CI runs SERIAL (``XDIST_WORKERS=0`` in ``python-ci.yml``, with the
+    only non-zero admission behind an inert ``if false``), so a single session
+    owns the path today. (A merge can still lose one record if two workers
+    write in the same instant; the artifact then still names the defect, so the
+    leak stays observable.)
     """
     if not _TOLERATED_CLEANUP_LEAKS:
         return None
