@@ -11496,6 +11496,15 @@ _SESSION_HARNESS_VALUES = frozenset({
 # returns m2/v2) — same word, different meaning; do not merge the two.
 _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 
+# #3516 §B / #3515 piece 12: the provenance of ``client_captured_at``. Closed
+# on purpose — the floor's verdict depends on WHICH clock a timestamp came
+# from, so an unrecognised source must fail the boundary 422 rather than be
+# stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
+# backfill/import lane admits a record with no client timestamp and records
+# this honestly, and the floor treats it as NOT passed.
+_SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
+    {"cli_observed", "file_mtime", "unknown"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11526,6 +11535,15 @@ class SessionRequest(BaseModel):
     # never erases a lane the server already stored. `None` is stored as ABSENT,
     # never as a fabricated lane. Invalid values fail the boundary 422.
     capture_lane: str | None = None
+    # #3516 §B / #3515 piece 12: the CLIENT-recorded capture instant (unix
+    # seconds) and the clock it came from. OPTIONAL for the same reason
+    # ``capture_lane`` is — a pre-installed hook, an SDK caller or a backfill
+    # producer that POSTs without it must never 422, and ``None`` is stored as
+    # ABSENT, never as a fabricated instant. It exists because the server's own
+    # ``capturedAt`` is the INGEST transaction time, so it can never witness
+    # what the floor is about (piece 12).
+    client_captured_at: float | None = None
+    client_captured_at_source: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11556,6 +11574,59 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid capture_lane {v!r} — must be one of "
                 f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
+        return v
+
+    # #3516 §B: an unrecognised source is refused at the boundary (same
+    # contract as harness/lane). A source the floor cannot interpret would be
+    # stored as a provenance no reader can act on — and the floor's whole
+    # falsifiability property is that 'unknown' is EXCLUDABLE, which requires
+    # the value set to be closed rather than free-form.
+    @field_validator("client_captured_at_source")
+    @classmethod
+    def _validate_client_captured_at_source(cls, v):
+        if v is not None and v not in _SESSION_CAPTURED_AT_SOURCE_VALUES:
+            raise ValueError(
+                f"invalid client_captured_at_source {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURED_AT_SOURCE_VALUES)}")
+        return v
+
+    # #3516 §B: reject a NON-FINITE instant at the boundary. Pydantic accepts
+    # inf/nan floats by default and `1e400` parses to `inf`, which the floor
+    # would then compare and PASS — a floor-pass on a value that is not a clock
+    # reading, exactly the falsifiability the closed source set exists to
+    # protect. It is also uninterpretable once stored (`json.dumps` emits
+    # non-standard `Infinity`, which a strict reader rejects).
+    @field_validator("client_captured_at", mode="before")
+    @classmethod
+    def _validate_client_captured_at(cls, v):
+        # `mode="before"` is load-bearing: an AFTER validator sees the value
+        # pydantic has ALREADY coerced, and by then `True` is the float `1.0`, so
+        # the bool guard below could never match.
+        # `bool` FIRST: it is an `int` subclass, so pydantic silently coerces
+        # `true` to `1.0` and the field stores a clock reading that is not one.
+        # The coercion is invisible, so the guard has to be explicit.
+        if isinstance(v, bool):
+            raise ValueError(
+                "client_captured_at must be a unix timestamp, got a bool — "
+                "`true` coerces to 1.0 and would be stored as a clock reading")
+        if v is not None:
+            try:
+                number = float(v)
+            except OverflowError:
+                # `float(10**400)` raises, and a 400-digit JSON integer is a
+                # legal body. A ValueError here is a legible 422; letting the
+                # OverflowError escape makes FastAPI answer 500 for an input the
+                # contract says is a client error.
+                raise ValueError(
+                    "client_captured_at is not representable as a unix "
+                    "timestamp") from None
+            except (TypeError, ValueError):
+                # Not numeric at all: leave it to pydantic to report.
+                return v
+            if not math.isfinite(number):
+                raise ValueError(
+                    f"client_captured_at must be a finite unix timestamp, got "
+                    f"{v!r} — an inf/nan instant is not a clock reading")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12346,6 +12417,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
         capture_lane=body.capture_lane,
+        client_captured_at=body.client_captured_at,
+        client_captured_at_source=body.client_captured_at_source,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
