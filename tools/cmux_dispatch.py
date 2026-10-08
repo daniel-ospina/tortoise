@@ -485,6 +485,24 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     )
 
 
+def not_ready_reason(screen: str | None) -> str:
+    """Why a pane is not ready, in operator terms.
+
+    `shell_prompt_below_footer` falls back to scanning the WHOLE capture when no
+    footer BLOCK exists, so a pane with NO footer at all (a bare login shell)
+    also reports True. Branching on it alone would therefore tell the operator
+    "a shell prompt is drawn BELOW pi's footer" for a pane where no footer was
+    ever drawn — naming a footer that does not exist and sending the reader
+    after the wrong failure. Check presence first, then position.
+    """
+    if status_bar_present(screen) and shell_prompt_below_footer(screen):
+        return (
+            "a shell prompt is drawn BELOW pi's footer, so the pane has "
+            "returned to a shell"
+        )
+    return "no pi footer (status bar) was drawn"
+
+
 def screen_ready(screen: str | None) -> bool:
     """True when pi's LIVE TUI owns stdin.
 
@@ -1243,13 +1261,7 @@ class Dispatcher:
             # undo an executed command. A genuinely slow boot is a caller concern
             # (--ready-timeout); a refusal is recoverable, an executed brief is
             # not.
-            if gate_screen is not None and shell_prompt_below_footer(gate_screen):
-                reason = (
-                    "a shell prompt is drawn BELOW pi's footer, so the pane has "
-                    "returned to a shell"
-                )
-            else:
-                reason = "no pi footer (status bar) was drawn"
+            reason = not_ready_reason(gate_screen)
             return DispatchResult(
                 False,
                 "never-became-ready",
@@ -1313,13 +1325,7 @@ class Dispatcher:
             before_screen.splitlines()[-DEFAULT_SCREEN_LINES:]
         )
         if not screen_ready(gate_window):
-            if shell_prompt_below_footer(gate_window):
-                reason = (
-                    "a shell prompt is drawn BELOW pi's footer, so the pane has "
-                    "returned to a shell"
-                )
-            else:
-                reason = "no pi footer (status bar) was drawn"
+            reason = not_ready_reason(gate_window)
             return DispatchResult(
                 False,
                 "never-became-ready",
@@ -1482,15 +1488,27 @@ class Dispatcher:
                 fresh_screen = self.screen(
                     workspace, surface, lines=RECOVERY_SCREEN_LINES
                 )
-                if not screen_ready(fresh_screen):
+                # Judged on the SAME window as the gate, for the SAME reason the
+                # pre-send re-assert is sliced (see `gate_window` above): this
+                # read is `RECOVERY_SCREEN_LINES` deep, and
+                # `shell_prompt_below_footer`'s no-footer-block fallback scans the
+                # WHOLE capture, so an unsliced window can carry an older shell
+                # prompt line the gate's 80-line window never saw. Without this
+                # slice the gate approves the pane and this re-assert refuses it,
+                # reporting "a shell prompt is drawn BELOW pi's footer" when no
+                # footer BLOCK was found at all — a lost delivery, in the one path
+                # that exists to RESCUE a delivery.
+                fresh_window = "\n".join(
+                    (fresh_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
+                )
+                if not screen_ready(fresh_window):
                     result.ok = False
                     result.status = "never-became-ready"
                     result.detail = (
                         f"{tag}{workspace} was not ready immediately before the "
-                        f"recovery re-send (no live pi footer, or a shell prompt "
-                        f"below it) — the re-send was REFUSED rather than written "
-                        f"into a pane with no live pi. Re-dispatch once the pane "
-                        f"is idle."
+                        f"recovery re-send ({not_ready_reason(fresh_window)}) — the "
+                        f"re-send was REFUSED rather than written into a pane with "
+                        f"no live pi. Re-dispatch once the pane is idle."
                     )
                     return result
                 self.cmux.send_text(workspace, text, surface)

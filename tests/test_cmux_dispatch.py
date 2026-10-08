@@ -1166,12 +1166,75 @@ class FakeCmux:
         return cd.CmuxResult(0, "OK")
 
 
+#: A LIVE pane read at the RECOVERY depth (`RECOVERY_SCREEN_LINES`), whose
+#: transcript carries a shell-prompt-shaped line ABOVE the last `DEFAULT_SCREEN_LINES`
+#: and ends in a stats line with NO pwd line above it. Because no footer BLOCK
+#: exists (`_footer_stats_end` == -1), `shell_prompt_below_footer` falls back to
+#: scanning the WHOLE capture and sees that old prompt — so the SAME pane is not
+#: ready at 300 lines and ready at 80. That is what makes the recovery re-send's
+#: window matter: judged unsliced it refuses a pane the gate approved.
+DEEP_READ_WITH_A_TORN_FOOTER = (
+    "$ uv run pytest tests/ -q\n"
+    + ("filler line\n" * 100)
+    + "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 kept a JSONL "
+    "record deepseek-flash \u2022 high\n"
+)
+
+
+class DeepReadTornFooterCmux(FakeCmux):
+    """A pane whose RECOVERY-depth read carries an old shell prompt above the
+    gate's window, with no footer block (see `DEEP_READ_WITH_A_TORN_FOOTER`).
+    Shallower reads behave normally, so the gate and the pre-send re-assert both
+    pass normally and only the recovery re-send sees the wide capture."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deep_reads = 0
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        # Delegate FIRST: the base fake advances its state machine, its read
+        # counter and its failure injection on every read, and the recovery
+        # decision depends on that state. Only the CONTENT of the re-read taken
+        # immediately before the re-send is substituted (deep read #3: the first
+        # two are the recovery decision's own probes, which must see the pane as
+        # it really is or the decision picks `release` instead of `resend`). That
+        # ordering is the point of the test, not an accident of it: the dispatcher
+        # re-reads precisely because the pane can CHANGE during the grace window,
+        # and the change modelled here is the footer being torn mid-redraw.
+        result = super().read_screen(workspace, lines=lines, surface=surface)
+        if lines >= cd.RECOVERY_SCREEN_LINES:
+            self.deep_reads += 1
+            if self.deep_reads >= 3 and result.rc == 0:
+                return cd.CmuxResult(0, DEEP_READ_WITH_A_TORN_FOOTER)
+        return result
+
+
 class BareShellCmux(FakeCmux):
     """A pane that is a BARE LOGIN SHELL: readable, but it never draws pi's footer
     and carries no boot-block marker. The #7158 target."""
 
     def read_screen(self, workspace, lines=80, surface=None):
         return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+
+
+class BareShellAtTheGateThenReadyCmux(FakeCmux):
+    """A pane that is a BARE LOGIN SHELL on the GATE's probe and a live pi after.
+
+    This exists to pin the GATE, which `BareShellCmux` cannot do. `BareShellCmux`
+    is bare on EVERY read, so the pre-send re-assert refuses it too and the
+    refusal is reported identically whichever check made it — measured by
+    mutation: with the gate's fail-closed branch disabled (`if not ready:` never
+    refusing), 133 of 133 tests still passed, because the pre-send re-assert
+    produced the same status and the same zero writes. Here the pane is bare ONLY
+    for the gate's probe, so if the gate stops refusing, the send proceeds and the
+    bytes reach a bare shell — which is the failure #7158 exists to prevent.
+    """
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        self.read_calls += 1
+        if self.read_calls <= 1:
+            return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+        return cd.CmuxResult(0, SCREEN_IDLE_READY)
 
 
 class FakeClock:
@@ -1379,6 +1442,27 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.recoveries, [cd.R_RESEND])
         self.assertEqual(fake.submitted, [PROBE])
         self.assertEqual(fake.sent_log.count(PROBE), 2)
+
+    def test_the_recovery_re_send_judges_the_SAME_window_as_the_gate(self):
+        """The recovery re-send reads `RECOVERY_SCREEN_LINES` (300) deep, and
+        `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        capture — so an unsliced re-assert can refuse a pane the gate just
+        approved, reporting a shell prompt below a footer that was never drawn.
+        That is a LOST delivery, in the one path that exists to RESCUE a delivery.
+        The pre-send re-assert already slices to the gate's window for exactly this
+        reason; this pins the recovery path to the same window."""
+        fake = DeepReadTornFooterCmux(
+            drop_first_send=True, pre_queued="an unrelated brief"
+        )
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertEqual(result.recoveries, [cd.R_RESEND])
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            2,
+            "the re-send must happen: the old prompt is above the gate's window",
+        )
 
     def test_an_unreadable_pre_send_baseline_is_refused(self):
         """Round-6 finding (TOCTOU): the pre-send read is the readiness re-check. If
@@ -1618,6 +1702,29 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.status, "never-became-ready")
         self.assertEqual(fake.submitted, [])
         self.assertEqual(fake.sent_log, [], "no bytes may reach a bare shell")
+
+    def test_the_GATE_itself_refuses_a_bare_shell_before_any_write(self):
+        """The GATE's own pin, which the test above does not provide.
+
+        Both refusals produce the same status and the same zero writes, so a pane
+        that is bare for every read cannot tell them apart — and with the gate's
+        fail-closed branch deleted the suite stayed green (mutation-proven). This
+        pane is a bare shell for the gate's single probe and a live pi afterwards,
+        so the gate is the ONLY thing between the brief and a shell. If the gate
+        stops refusing, the pre-send read sees a ready pane, the bytes are written,
+        and `sent_log` is no longer empty.
+        """
+        fake = BareShellAtTheGateThenReadyCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "the gate must refuse before any write")
+        self.assertNotIn(
+            "on the pre-send read",
+            result.detail,
+            "the refusal must come from the GATE, not from the pre-send re-assert",
+        )
+        self.assertEqual(fake.read_calls, 1, "the gate refuses on its first probe")
 
     def test_STALE_footer_above_a_LIVE_SHELL_PROMPT_is_not_ready(self):
         """#7158, the shape a "bar present anywhere" test misses: a DEAD pane keeps
