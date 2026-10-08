@@ -63,6 +63,30 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 # delenv/patch it (`test_2952_degraded_read`).
 os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
 
+# #6960: the opt-out above removes the warm-up that would have ABSORBED the cold
+# embedder load, so this lane pays that load SYNCHRONOUSLY on its first
+# `create_point` (`encode_for_store` -> `EmbeddingModel.get`). The product default
+# (`_LOAD_TIMEOUT_S = 90.0`) is tuned for a REQUEST path, where blocking longer is
+# worse than degrading. A pytest process is the OPPOSITE trade: it has a 15m shard
+# watchdog and ~5m of real work, so abandoning a load that would have finished is
+# strictly worse than waiting for it.
+#
+# Measured 2026-10-08 (this box, loadavg 172 on 10 CPUs): a cold load takes 50.5s
+# against that 90s budget — a 1.8x margin — and CI cold-loads one model in THREE
+# shards at once on a 4-vCPU runner. On run 37723572956 the timeout fired
+# repeatedly: a 90s block plus the 60s negative-cache gap is a 150s cycle, and
+# 900/150 = 6, so six abandoned loads consumed the whole watchdog and killed
+# test (c), test (f) and test (g) mid-line on the SAME test — reddening the
+# required `python-ci-gate` on main and with it every PR's entry gate.
+#
+# 300.0 is not a new number: it is what the hosted pre-warm already passes
+# (`hosted_api.py`, `EmbeddingModel.get(load_timeout=300.0)`) for the same reason
+# — a cold torch import on a small machine — so the test lane and the hosted lane
+# simply agree. Request paths keep the product default; only this lane moves.
+from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane
+
+_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 300.0
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old

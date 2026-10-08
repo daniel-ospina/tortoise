@@ -691,3 +691,57 @@ class TestHostedSearchRoute:
         assert body["status"] == STATUS_UNCONFIGURED
         assert body["count"] == 1
         assert body["results"]
+
+
+# ---------------------------------------------------------------------------
+# #6960: the test lane's cold-embedder budget
+# ---------------------------------------------------------------------------
+# conftest opts OUT of the background embedder warm-up (#7015), so the first
+# `create_point` pays the cold load synchronously. The product default (90s) is
+# a REQUEST-path trade; a pytest process has a 15m watchdog and ~5m of work, so
+# it must wait rather than abandon a load that would have finished. On run
+# 37723572956 six abandoned loads (90s block + 60s negative cache = a 150s cycle;
+# 900/150 = 6) killed three shards at the watchdog and reddened `python-ci-gate`.
+
+_MEASURED_COLD_LOAD_S = 50.5  # this box, loadavg 172 / 10 CPUs, 2026-10-08
+_SHARD_WATCHDOG_S = 15 * 60.0
+
+
+def test_the_test_lane_budgets_the_cold_embedder_load_between_two_bounds():
+    """Both directions, because either extreme is a real failure.
+
+    TOO SMALL re-opens #6960: the load is abandoned, the in-flight work is
+    thrown away, and the shard pays it again until the watchdog kills it.
+    TOO LARGE is the same kill by another route — a single failed attempt would
+    consume the shard's whole budget and leave nothing for the tests.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    budget = EmbeddingModel._LOAD_TIMEOUT_S
+    assert budget > _MEASURED_COLD_LOAD_S * 2, (
+        f"a {budget}s budget leaves less than 2x margin over the measured "
+        f"{_MEASURED_COLD_LOAD_S}s cold load, which is what got loads abandoned "
+        f"on contended runners (#6960)"
+    )
+    assert budget < _SHARD_WATCHDOG_S / 2, (
+        f"a {budget}s budget is more than half the {_SHARD_WATCHDOG_S}s shard "
+        f"watchdog, so one failed attempt would eat the shard (#6960)"
+    )
+
+
+def test_the_test_lane_budget_is_what_the_hosted_prewarm_already_uses():
+    """It is not a new number: the hosted pre-warm passes the same value for the
+    same reason (a cold torch import on a small machine), so the two lanes agree
+    instead of drifting."""
+    import re
+    from pathlib import Path
+
+    from tortoise.embeddings import EmbeddingModel
+
+    src = Path("tortoise/hosted_api.py").read_text()
+    hosted = re.findall(r"EmbeddingModel\.get\(load_timeout=([0-9.]+)\)", src)
+    assert hosted, "the hosted pre-warm's load budget moved or was renamed"
+    assert float(hosted[0]) == EmbeddingModel._LOAD_TIMEOUT_S, (
+        f"hosted pre-warm uses {hosted[0]}s but this lane now uses "
+        f"{EmbeddingModel._LOAD_TIMEOUT_S}s — the same operation drifting apart"
+    )
