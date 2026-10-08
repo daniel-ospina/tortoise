@@ -1347,9 +1347,17 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # DISPLAY fallback the graph never merges on, and an empty name
             # creates no node at all. The carrier index must use the merge key,
             # never the display name.
+            # #5285 cycle-8 (P2): the predicate is the GRAPH's own writability
+            # check, not "a non-empty str". `_writable_id` is what
+            # `_upsert_object` / `_upsert_subject` use, and it rejects a
+            # non-empty but NON-writable MERGE key (NUL / lone surrogate — the
+            # #7369 class). For such a name the graph writes NO node, so a state
+            # op on that id is a 0-row miss and must be refused; the previous
+            # `isinstance(str) and truthy` test agreed with the graph only for
+            # the EMPTY key, so that fold-leg accepted a `state-op-miss` the
+            # three replay engines refuse.
             _merge_key = payload.get("name")
-            _merge_key = (_merge_key if isinstance(_merge_key, str) and _merge_key
-                          else None)
+            _merge_key = (_merge_key if _writable_id(_merge_key) else None)
             if label in _NAME_MERGE_LABELS:
                 if _merge_key is not None:
                     # The graph MERGEs Object/Subject by name, so the LAST
