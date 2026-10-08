@@ -789,9 +789,11 @@ const COOKIE_DOMAIN = '.premiselabs.co'
 // `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
 // 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
 // silently dropped; Secure over http → dropped) → getSession() null → bounce
-// to /auth on every load. Mirrors website/assets/supabase-session.js (and
-// tortoise/oauth.py) — KEEP IN SYNC (tests/test_cross_subdomain_cookie_sync.py
-// asserts helper parity across the adapters).
+// to /auth on every load. Mirrors the host-conditional helpers in
+// tortoise/oauth.py — the shared website/assets/supabase-session.js bridge was
+// DELETED in #3559, so oauth.py is now the only sibling (and this is a MARKER
+// writer, not a session adapter: tests/test_cross_subdomain_cookie_sync.py
+// pins the helper parity).
 const isLocal = () => {
   const h = window.location.hostname
   if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true

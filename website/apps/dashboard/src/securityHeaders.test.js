@@ -169,7 +169,7 @@ const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
 const AUDITED_COOKIE_WRITERS = new Set([DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS])
 
 /**
- * The three hop-by-hop proxy files strip an UPSTREAM `set-cookie`; they name the
+ * The four hop-by-hop proxy files strip an UPSTREAM `set-cookie`; they name the
  * header in a comma-terminated array entry and never write a cookie themselves.
  * They are the only files allowed to name the literal without being writers.
  *
@@ -185,6 +185,8 @@ const STRIP_LIST_FILES = new Set([
   'website/apps/dashboard/functions/api/v1/[[path]].ts',
   'website/apps/dashboard/functions/api/provision.ts',
   'website/apps/dashboard/functions/blog/api/[[path]].ts',
+  // #4178: the Supabase-directed Token Handler for the blog-admin console.
+  'website/apps/dashboard/functions/api/sb/[[path]].ts',
 ])
 
 /**

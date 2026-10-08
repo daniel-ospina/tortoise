@@ -61,26 +61,27 @@ Host routing lives in `website/functions/_middleware.ts`:
   `SESSIONS` binding) and never reach the browser; revoking a session marks its row revoked
   (`revoked = 1`) — the row is retained, not deleted. Issued by
   `website/apps/dashboard/functions/_shared/auth/session.ts`. A **separate legacy** JS-readable
-  parent-domain cookie is still issued and still accepted — see the ruling bullet below.
+  parent-domain cookie is still issued but no longer accepted — see the ruling bullet below.
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain — is **rejected**. It is JS-reachable from any subdomain and forfeits the `__Host-`
   prefix; one session-bearing origin is worth the extra 301. The recorded ruling is the auth-topology
   decision on **#3501 / #4054** (full rationale: the private `premise-labs` repo,
   `engineering/auth/SCOPE.md` §3, §4 W6, §13 — cited across this repo's Functions the same way, and
   deliberately marked as outside this one). The JS-readable bridge
-  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) is
-  **not** the session backbone: **no BFF page loads** it
-  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`). That is not the
-  whole story though — the cookie is still **issued** by the MCP consent page in
+  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) was
+  **DELETED** (#3559); it was already loaded by no page
+  (`tests/test_cross_subdomain_cookie_sync.py` pinned `PAGES = []`, and now proves its absence).
+  The cookie is still **issued** by the MCP consent page in
   `tortoise/oauth.py` (`/oauth/authorize` on `api.premiselabs.co`,
-  `Domain=.premiselabs.co`, JS-readable) and still **accepted** by two live
-  surfaces: the blog-admin console's supabase-js data layer
-  (`website/apps/blog-admin/src/lib/supabase.ts`, which recovers the session from
-  it on init) and `website/functions/blog/_shared/admin-auth.ts`'s legacy cookie
-  fallback (Bearer first, then the cookie). So a JS-readable parent-domain session is in play, which is exactly
-  what this `OVERRIDES` ruling exists to prevent. Stop issuing: **#3524**. Stop
-  accepting: **#4178**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
-  §4 item 1 (which is OPEN, not closed).
+  `Domain=.premiselabs.co`, JS-readable), but **no Tortoise surface accepts it any more**: the
+  blog-admin console's supabase-js data layer now rides the same-origin `/api/sb/*` Token Handler
+  (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy
+  `src/lib/supabase.ts` adapter is DELETED), and
+  `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is REMOVED (Bearer
+  only). So a JS-readable parent-domain session is still issued to a consent-page visitor —
+  exactly what this `OVERRIDES` ruling exists to prevent — but it authenticates nothing on our
+  side. Stop issuing: **#3524**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
+  §4 item 1 (now RESIDUAL, not closed).
 - The raw API key (`tt_…`) **never** leaves app-origin (sessionStorage on `app.premiselabs.co` only)
 
 ---

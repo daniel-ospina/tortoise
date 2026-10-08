@@ -61,11 +61,13 @@ the token regardless of which subdomain presented it.
 > parent-domain cookie described in the original 2026-08-19 note has been REMOVED: for that
 > session the browser holds only an HttpOnly `__Host-session` opaque handle issued by a
 > server-side BFF on the app origin, and the access/refresh tokens live in D1 (`SESSIONS`) and
-> never reach the browser. **The removed design is still being issued:** the MCP consent page
-> still issues a JS-readable parent-domain cookie, and two surfaces still accept it — the
-> blog-admin console (`/admin`, itself an app-origin BFF page) and the marketing-origin blog
-> Functions — so tokens DO reach the browser for a consent-page visitor (§2.1 "Legacy cohort",
-> where the `OVERRIDES` ruling is violated). §2.1–§2.3 and §5.5 below are the current state;
+> never reach the browser. **The removed design is still being issued, but no longer accepted:**
+> the MCP consent page still issues a JS-readable parent-domain cookie, but the two surfaces that
+> used to accept it — the blog-admin console (`/admin`, itself an app-origin BFF page) and the
+> marketing-origin blog Functions — were migrated onto the BFF in **#4178** and the shared bridge
+> was DELETED in **#3559**, so a consent-page visitor's tokens reach the browser yet authenticate
+> nothing (§2.1 "Legacy cohort": the `OVERRIDES` ruling is now violated on the ISSUE side only,
+> tracked by #3524). §2.1–§2.3 and §5.5 below are the current state;
 > §2.4, §3 and §5.1–§5.4 are the historical record of the pre-BFF design and its fixes (each
 > carries a superseded note). §4 is historical for items 2 and 4 only — **item 1 is open** and
 > item 3 still holds.
@@ -111,13 +113,15 @@ the token regardless of which subdomain presented it.
   `unify-contract-keep-drivers`. What this overrides is the browser-auth norm of letting the
   verifier ride in the same origin-persistent storage as the session: on this page that storage is
   the legacy jar described below, so the verifier is routed away from it instead.
-- **Legacy cohort — a SECOND, LIVE session credential (the ruling above is VIOLATED here).**
+- **Legacy cohort — still ISSUED, no longer ACCEPTED (the ruling above is VIOLATED on the issue
+  side only).**
   The legacy JS-readable parent-domain cookie
   `sb-tortoise-auth-token` is **not** the session backbone (the canonical session is the HttpOnly
-  `__Host-session` above): the bridge that once
-  wrote it (`website/assets/supabase-session.js`) is loaded by no BFF page
-  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`). **But it is still ISSUED and still ACCEPTED** — a real,
-  JS-readable Supabase session, not inert scaffolding:
+  `__Host-session` above). The bridge that once wrote it
+  (`website/assets/supabase-session.js`) was DELETED in **#3559** — it was already loaded by no
+  page (`tests/test_cross_subdomain_cookie_sync.py` proved `PAGES = []`; that guard is now its
+  absence proof). **The cookie is still ISSUED, but no Tortoise surface accepts it any more**, so
+  on our side it is inert scaffolding:
   - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked, not
     accepted): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize`
     (`oauth_authorize` in `tortoise/hosted_api.py`) — that legacy cookie's production origin is
@@ -129,26 +133,26 @@ the token regardless of which subdomain presented it.
     Removing it is **#3524** (`SCOPE.md` §4 W3); `SCOPE.md` §7's ordering guard defers deleting
     this writer until #3524 ships (the `_CONSENT_HTML` template in `tortoise/oauth.py`) — so it is
     still issuing today.
-  - **Accepted by** two live surfaces:
-    1. the blog-admin console's **data layer** — `website/apps/blog-admin/src/lib/supabase.ts`
-       (`STORAGE_KEY`, adapter `authStorage`) is the supabase-js storage adapter, and with `persistSession: true`
-       supabase-js recovers the session from it on init, so the console's direct Supabase calls
-       (11 PostgREST operation entry points over the 5 `.from('blog_posts')` builders —
-       `listPosts`, `listQueue`, `getPost`, `createPost`, `updatePost` — plus 2 authenticated
-       Storage calls, `uploadBlogImage` and `deleteBlogImage`; the `getPublicUrl` inside
-       `uploadBlogImage` builds a URL locally and sends no credential) authenticate off **this**
-       cookie rather than the BFF; and
-    2. `website/functions/blog/_shared/admin-auth.ts` — `getAccessToken` falls back to this cookie
-       when no `Authorization: Bearer` is presented (always, on the marketing origin, which never
-       receives the host-only `__Host-session`).
+  - **Accepted by — NO surface (both former consumers migrated in #4178).**
+    1. the blog-admin console's **data layer** — the legacy
+       `website/apps/blog-admin/src/lib/supabase.ts` adapter is DELETED. The console now builds its
+       supabase-js client in `src/lib/backend.ts` with `persistSession: false`, no storage adapter,
+       and a `global.fetch` that rewrites every `rest/v1` / `storage/v1` request to the same-origin
+       `/api/sb/*` Token Handler, which resolves `__Host-session`, mints the Supabase access token
+       server-side and attaches it. The 11 PostgREST operations (the 5 `.from('blog_posts')`
+       builders — `listPosts`, `listQueue`, `getPost`, `createPost`, `updatePost`) and the 2
+       authenticated Storage calls (`uploadBlogImage`, `deleteBlogImage`; the `getPublicUrl`
+       inside `uploadBlogImage` builds a URL locally and sends no credential) are unchanged — the
+       CREDENTIAL is not; and
+    2. `website/functions/blog/_shared/admin-auth.ts` — the `getAccessToken` **cookie arm is
+       REMOVED**; only `Authorization: Bearer …` is read. The migrated console reaches those
+       endpoints through the `/blog/api/*` Token Handler, which strips the client `cookie` and
+       sets the Bearer header, so the removed arm has no caller.
 
-  Because a legacy parent-domain cookie is genuinely in play, the console's data layer **works
-  while that consent-page cookie is present** — it is not waiting on a missing credential. What is
-  wrong is which credential it trusts: a **legacy** JS-readable parent-domain session rather than
-  the BFF.
-  Migrating it is **#4178**; the app-origin `/blog/api/*` path is already off this cookie (that
-  proxy resolves `__Host-session` and forwards `Authorization: Bearer <access token>`), but its
-  marketing-origin upstream endpoints still accept the cookie via the legacy fallback in (2).
+  The consent page's cookie therefore still exists in a consent-page visitor's browser, but no
+  Tortoise surface reads it as a credential. The remaining work is to STOP ISSUING it — **#3524**
+  (`SCOPE.md` §4 W3), deferred by `SCOPE.md` §7's ordering guard, which is now satisfied on the
+  reader side.
 
 ### 2.2 The auth surfaces
 
@@ -247,9 +251,10 @@ a database outage to the user as "you are signed out".
 ## 4. Residual risks / recommendations
 
 > ⚠️ **Superseded by #4054** for items 2 and 4: the client `getSession()` refresh risk below is
-> gone for BFF pages. **Item 1 is NOT closed** — a second, JS-readable parent-domain session
-> cookie (`sb-tortoise-auth-token`) is still issued (the MCP consent page, §2.1) and still accepted
-> by two live surfaces. Item 3 (server-side authorization) still holds.
+> gone for BFF pages. **Item 1 is RESIDUAL, not closed** — a second, JS-readable parent-domain
+> session cookie (`sb-tortoise-auth-token`) is still issued (the MCP consent page, §2.1) but is no
+> longer accepted by any surface (#4178 removed the console adapter and the blog-endpoint cookie
+> fallback; #3559 deleted the bridge). Item 3 (server-side authorization) still holds.
 
 1. **Non-HttpOnly session cookie** — the shared cookie must be JS-readable
    for supabase-js, so XSS in any subdomain can exfiltrate a session. The
@@ -261,13 +266,15 @@ a database outage to the user as "you are signed out".
    **second** JS-readable parent-domain session cookie
    (`sb-tortoise-auth-token`) is still **issued** — by the MCP consent page in
    `tortoise/oauth.py`, on `api.premiselabs.co`, with `Domain=.premiselabs.co`
-   — and still **accepted** by the two surfaces in §2.1. So the risk this item
-   names is **LIVE, not historic**: while a session holder has visited the
-   consent page, XSS on ANY `premiselabs.co` subdomain can read a real Supabase
-   session. Closing it needs both halves — stop issuing (**#3524**) and stop
-   accepting (**#4178**). Note this is exactly the exposure §2.1's `OVERRIDES`
-   ruling exists to prevent, surviving on a surface the ruling covers but which is not
-   yet fixed.
+   — but is **no longer accepted** by any Tortoise surface (§2.1: #4178 removed
+   the console adapter and the blog-endpoint cookie fallback, #3559 deleted the
+   bridge). So the exposure this item names is **RESIDUAL, not closed**: while a
+   session holder has visited the consent page, XSS on ANY `premiselabs.co`
+   subdomain can still READ a real Supabase session out of that cookie, even
+   though nothing on our side will authenticate it. Closing it fully needs the
+   ISSUE side stopped (**#3524**); the ACCEPT side is done. Note this is exactly
+   the exposure §2.1's `OVERRIDES` ruling exists to prevent, surviving on the
+   one surface the ruling covers that is not yet fixed.
 2. **The dashboard's post-mount `getSession()` can still refresh the token
    over the network** for genuine session holders near expiry — by design
    (keeps sessions alive). Since #1567 the app chrome renders immediately
@@ -365,21 +372,16 @@ graph credential; it can't be written cross-origin — SOP). Instead:
 
 The shared bridge `website/assets/supabase-session.js` exposed one validity
 predicate + clear + last-used + bounce helpers, and was copied into the
-dashboard's `public/assets/`. **#4054 removed that dashboard copy** — a BFF page
-must not ship a JS-readable session bridge. The shared file itself is retained
-(§2.1) and still declares `readValidSession()` / `clearStoredSession()` /
-`getLastAuthMethod()` / `setLastAuthMethod()` / `bounceToAuth()` /
-`storeSession()`, but NO BFF page loads it. Three writers of
-`sb-tortoise-auth-token` therefore never run **from this file on a BFF page** —
-`storeSession()`, `migrateLegacyKeysToCookie()` and `migrateLegacySession()` — and
-`readValidSession()` is not a pure read either: it calls
-`migrateLegacyKeysToCookie()` first, while `migrateLegacySession()` is reached only
-from `createTortoiseSupabaseClient()`. That does NOT make the cookie
-unissued: the MCP consent page in `tortoise/oauth.py` writes it independently
-(§2.1), and the blog-admin console's own adapter writes it too
-(`blog-admin/src/lib/supabase.ts`, `writeCookie`). Whether the cookie is still
-ACCEPTED as a credential is a third fact, and it is: see the two surfaces in
-§2.1, and #4178 for removing them. The dashboard's auth state now comes
+dashboard's `public/assets/`. **#4054 removed that dashboard copy** and **#3559
+DELETED the shared file itself** — a BFF page must not ship a JS-readable
+session bridge, and with no page loading it there was no subject left. The
+blog-admin console's own legacy adapter (`blog-admin/src/lib/supabase.ts`) that wrote
+`sb-tortoise-auth-token` was REMOVED in **#4178**. The cookie is therefore not
+written by anything on our side any more, but it is still ISSUED: the MCP
+consent page in `tortoise/oauth.py` writes it independently (§2.1), and stopping
+that is **#3524**. Whether the cookie is still ACCEPTED as a credential is now a
+settled fact — it is not (§2.1; #4178 removed the last two consumers). The
+dashboard's auth state comes
 from `functions/api/session.ts` and its bounce is a local same-origin
 `location.replace` built by `src/authBounce.js::authBounceTarget({ pathname:
 window.location.pathname, search, errorHash })` — a `/auth?<search>&next=<pathname+query>` target
