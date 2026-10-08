@@ -428,6 +428,14 @@ surfaces:
   # SELECTS `api` — a named-surface match REPLACES the `core` fallback, so a
   # core-only registration would never run on an api-only PR.
   - test_cost_allocation.py
+  # #4241: the metering period-anchor repair's periodic caller. Registered with
+  # `api` because the step (`_reconcile_metering_periods`) and both call sites
+  # live in `tortoise/hosted_api.py`, which SELECTS `api` — a named-surface match
+  # REPLACES the `core` fallback (#2938), so a core-only registration would never
+  # run on an api-only PR. Without this line
+  # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
+  # be classified — the scope-v5 drift trap).
+  - test_4241_metering_period_reconciliation.py
   # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
   # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
   # SOURCE_PATTERN) while the metric family/writer/reader live in

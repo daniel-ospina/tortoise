@@ -813,6 +813,15 @@ def test_event_retention_loop_awaits_the_cost_refresh():
                 # path's tuple in ``_run_boot_sweeps``.
                 ("deleted-account purge", "_purge_deleted_accounts", "offload"),
                 ("oauth retention", "_sweep_oauth_retention", "offload"),
+                # #4241: the period-anchor repair. Declared here because the pin
+                # exists to force a new periodic step to be DELIBERATE; it sits
+                # in the same relative order as the boot tuple in
+                # ``_run_boot_sweeps``, and it MUST be an offload — the RPC is
+                # sync control-plane work, so a direct await would put it on the
+                # event loop and the guard would swallow an ``await None``
+                # TypeError every interval.
+                ("metering period reconciliation",
+                 "_reconcile_metering_periods", "offload"),
                 ("cost allocation refresh", "_refresh_cost_allocation", "direct")]
     assert body == expected, (
         "the periodic body must guard exactly these steps, in order, each sync "
