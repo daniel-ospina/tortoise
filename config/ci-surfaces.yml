@@ -66,6 +66,13 @@ surfaces:
   - test_1162_add_operator_local_svbp.py
   - test_3660_session_upload_identity.py
   - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
+  # #3998 (D30): the absent-raw state is a first-class VALUE on the source
+  # record, and the provenance read paths report it — labelled per cause,
+  # never raising, never holding the bytes. Registered under `api` because the
+  # change is carried by `tortoise/sdk.py`, a SHARED_MODULE (so it runs on the
+  # full matrix anyway); the registration is what pins it to a surface at all,
+  # without which a guard whose own file changes alone never runs.
+  - test_3998_raw_absent_state.py
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
@@ -730,6 +737,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
   # the writer path #4028 left open, so residue regenerated after each purge.
@@ -781,6 +789,11 @@ surfaces:
   - test_comove_dispatch_3627.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
+  # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
+  # `setitimer(ITIMER_REAL)` / `signal.signal(SIGALRM, …)` from silently
+  # disarming pytest-timeout's per-test guard. DB-free, no network — the
+  # default `core` surface is correct.
+  - test_timeout_not_disarmable.py
   - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and

@@ -39,6 +39,16 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict]:
         return None, {}
     label, props = rows[0][0], rows[0][1]
     parsed = dict(props)
+    if label == "Source":
+        # #3998 (D30): the ROOT is a read path too. `_parse_node` filters the
+        # CONNECTED nodes; filtering only there left the same `:Source` root
+        # handing its raw payload straight back — measured, a document created
+        # with a 2400-byte `text` returned that `text` on the root through
+        # `entityProfile` AND `tortoise_traverse`, while `get_entity` correctly
+        # withheld it. A guarantee that holds on one read path and not another
+        # is not a guarantee, so the root takes the same filter as its
+        # neighbours.
+        parsed = _filter_source_props(parsed)
     parsed["type"] = label
     return label, parsed
 
@@ -212,13 +222,34 @@ def _parse_node(node: Any) -> dict:
     """
     if hasattr(node, 'properties'):
         props = dict(node.properties)
+        labels = list(node.labels or [])
+        if "Source" in labels:
+            props = _filter_source_props(props)
         if "id" not in props:
             props["id"] = str(node.id)
-        props["type"] = node.labels[0] if node.labels else "unknown"
+        props["type"] = labels[0] if labels else "unknown"
         return props
     # Raw list form: [id, [labels], [[k, v], ...]]
     props = {k: v for k, v in node[2]}
+    labels = list(node[1] or [])
+    if "Source" in labels:
+        props = _filter_source_props(props)
     if "id" not in props:
         props["id"] = str(node[0])
-    props["type"] = node[1][0] if node[1] else "unknown"
+    props["type"] = labels[0] if labels else "unknown"
     return props
+
+
+def _filter_source_props(props: dict) -> dict:
+    """#3998 (D30): a `:Source` bag must not leave the graph unfiltered.
+
+    `entityProfile` and `tortoise_traverse` are LIVE MCP tools, and a graph
+    written before the `:Source` passthrough closed still holds payload-bearing
+    Sources — so an unfiltered bag here re-hands the bytes the read filter
+    closes elsewhere, one module away from it. The filter runs BEFORE the
+    synthetic `type` key is set: `type` is not a stored property, so the
+    declaration filter would drop it.
+    """
+    from tortoise.projection.entities import filter_source_props
+
+    return filter_source_props(props)[0]
