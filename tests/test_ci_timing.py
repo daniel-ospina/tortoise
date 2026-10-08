@@ -2381,3 +2381,27 @@ def test_durations_bridge_refuses_an_append_key_that_is_not_a_plain_yaml_scalar(
     manifest = f'surfaces:\n  core:\n    - "{key}"\ndurations:\n  keep.py: 1.0\n'
     with pytest.raises(ci_timing.DurationsBridgeError, match="not parseable as a YAML mapping key"):
         ci_timing.render_refreshed_manifest(manifest, {key: 2.0}, "T")
+
+
+@pytest.mark.parametrize("manifest,label", [
+    ("anchor: &k keep.py\nsurfaces:\n  core:\n    - keep.py\ndurations:\n  *k: 1.0\n", "alias"),
+    ("surfaces:\n  core:\n    - keep.py\ndurations:\n  [x].py: 1.0\n", "flow"),
+    ("surfaces:\n  core:\n    - keep.py\ndurations:\n  <<: 1.0\n", "merge"),
+])
+def test_durations_bridge_refuses_an_unreadable_input_manifest_without_a_traceback(
+        manifest: str, label: str) -> None:
+    """An input manifest whose `durations:` block the line parser cannot read
+    must be the documented refusal, not a raw yaml error escaping as exit 1
+    (#6092 review round 3).
+
+    The renderer reads the manifest through PyYAML twice before it writes
+    anything. All three shapes below are either valid YAML that the line parser
+    still cannot locate (`*k` resolves only if an anchor is in scope; `<<` is a
+    merge key) or plainly unparseable (`[x].py`), and each raised a
+    `ComposerError`/`ParserError` that `refresh_durations`'s
+    `except DurationsBridgeError` does not catch — so the CLI died with a
+    traceback and exit 1 rather than `2 UNKNOWN (… unreadable manifest)`.
+    """
+    assert label  # documents which shape the case is
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, "T")

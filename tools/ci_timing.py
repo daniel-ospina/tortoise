@@ -745,9 +745,23 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     check at the end.
     """
     lines = manifest_text.split("\n")
-    _, entries = _locate_durations_block(lines)
-    if not entries:
-        raise DurationsBridgeError("manifest has no top-level `durations:` key")
+    # Both reads below parse manifest text through PyYAML, and either can raise
+    # a raw yaml error on a manifest the line parser cannot handle — an alias
+    # or flow key in the `durations:` block, a merge key, a plainly invalid
+    # line. `refresh_durations` catches only `DurationsBridgeError`, so an
+    # untranslated raise escapes as a traceback and exit 1, contradicting the
+    # documented `2 UNKNOWN (… unreadable manifest)` (#6092 review round 3).
+    import yaml
+    try:
+        _, entries = _locate_durations_block(lines)
+        if not entries:
+            raise DurationsBridgeError("manifest has no top-level `durations:` key")
+        classified_keys = _classified_test_keys(manifest_text)
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"the manifest's `durations:` block is not readable as YAML "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
     if not weights:
         raise DurationsBridgeError(
             "collector produced ZERO measured file durations — UNKNOWN, never 0"
@@ -756,8 +770,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # python-ci leg lists), not against the durations map alone — a classified
     # file with no duration yet is added below instead of refusing the whole
     # refresh (#4364).
-    resolved = _resolve_to_manifest_keys(
-        weights, _classified_test_keys(manifest_text))
+    resolved = _resolve_to_manifest_keys(weights, classified_keys)
     for key in sorted(resolved):
         if key not in entries:
             continue
