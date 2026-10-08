@@ -639,11 +639,12 @@ class TestPassTwoMintOrderingResidual:
                          "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
     def test_the_pass2_gap_is_loud_not_silent(self, env, caplog):
-        """The residual above must not be a second silent loss: the fold's
-        #3299 non-folded-set contract requires a WARNING when a journaled
-        mutation cannot be replayed. (1) Failing value is an empty warning
-        list; (2) the same stub fixture, rebuilt without the xfail's
-        assertion on the outcome."""
+        """The residual above must not be a second silent loss: under #3585 the
+        fold's non-folded-set contract FAILS CLOSED, so a journaled mutation it
+        cannot replay must raise rather than only warn. #3299's warning channel
+        is deliberately not asserted here — the requirement is that the gap is
+        not silent, and it now surfaces through the error channel with the event
+        NAMED."""
         sdk, events = env
         url = "https://example.com/report"
         sdk.create_point("statement", "the claim", extractedFrom=url)

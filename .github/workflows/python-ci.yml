@@ -1672,9 +1672,10 @@ jobs:
           # Same defect class as the fast matrix's manifest step (see above): the
           # collect must see what the run sees, or the expected set silently omits
           # nodeids the run then executes. NO file in `slow_files` gates on the DB
-          # URI today — all 70 collect the identical 4492 nodeids with and
-          # without it (62 of the 70 are across the two legs; measured
-          # 2026-10-08) — so this changes nothing now. It keeps
+          # URI today — all 70 collect the identical 4495 nodeids with and
+          # without it (62 of the 70 are across the two legs; measured 2026-10-08
+          # with this step's own `skip-guard.py --emit-manifest`) — so this
+          # changes nothing now. It keeps
           # the step's stated contract true if one is relocated here, which is
           # exactly how the fast job's hole appeared.
           # Deliberately NOT on the carve-out job, which is URI-unset by design.

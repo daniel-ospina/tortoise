@@ -29,9 +29,13 @@ site that forgets to classify itself still fails the run.
 
 R9 — the invariant asserts the set is empty
 -------------------------------------------
-:func:`collect_non_folded` is the run boundary. The wipe+replay engines
-(``rebuild_all`` / ``rebuild(log)`` / ``recover_from_log``) and
-``consistency.check_consistency`` open it, and assert the set is empty on exit.
+:func:`collect_non_folded` is the run boundary. Five engines open it:
+``rebuild_all`` / ``rebuild(log)`` (through ``_fail_closed``), ``backup.restore``,
+``recover_from_log`` and ``consistency.check_consistency`` — across four ``with``
+sites, since the two rebuild engines share ``_fail_closed``. The first three RAISE
+on a non-empty refusal set; ``recover_from_log`` and ``check_consistency``
+return a failed verdict instead (``recovered=False`` / ``ok=False,
+divergence="non-folded"``).
 The collector is a ``ContextVar`` so a fold reached deep inside a run records
 into the run's set without a signature change at every call site — and so
 concurrent runs in different contexts (threads / asyncio tasks) cannot merge
@@ -89,9 +93,10 @@ SHAPE_UNKNOWN_EVENT_TYPE = "unknown-event-type"
 #: idempotent (a retried delete, or an apply-based replay onto a graph that
 #: already holds the node). DEGRADED GUARANTEE: this exemption does not hide an
 #: unjournaled CREATION — a journal that deletes an entity it never registered
-#: is caught by the rebuild's entity census (the journal registers nothing, but
-#: the delete is still reported) and by ``check_consistency``'s entity parity
-#: leg.
+#: is caught by ``check_consistency``'s entity parity leg: ``_compare_entities``
+#: walks the journal's hard-deleted ``{(label, id)}`` set and reports any key
+#: still PRESENT in the graph as a ``presence`` divergence
+#: (``tortoise/consistency.py``, ``for key in deleted: if key in graph_entities``),
 #:
 #: ``point-superseded-no-new-id`` (recorded decision: the same plan's §Task 4
 #: warning policy): the graph fold treats a ``PointSuperseded`` with no
@@ -131,8 +136,11 @@ EXEMPT_SHAPES: dict[str, str] = {
     ),
 }
 
-#: The two dispositions R8 defines. Both FAIL the run; the label only records
-#: how the fold left the target's state.
+#: The dispositions R8 defines. Both FAIL the run; the label only records how
+#: the fold left the target's state. Only ``refused`` is produced today —
+#: ``disposition`` defaults to it and NO ``record_non_folded`` call site passes
+#: the keyword, so ``flagged`` names a fold that records the gap and then
+#: proceeds, which no site does yet.
 DISPOSITION_REFUSED = "refused"          # target left untouched
 DISPOSITION_FLAGGED = "journaled-and-flagged"  # recorded, run still fails
 
