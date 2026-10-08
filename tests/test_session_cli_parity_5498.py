@@ -115,14 +115,32 @@ def test_turns_is_a_count_and_turn_points_is_the_list(capsys):
 # ── parity: iterate the SHARED declaration, never a local subset ──────────
 
 
-def _rendered_names(out: str) -> set[str]:
-    """Field names rendered as `name value` lines, anchored at line start.
+def _field_lines(out: str) -> list[str]:
+    """The non-empty `name value` lines a command printed BEFORE the turns.
 
-    Anchored deliberately: a bare `field in out` substring check lets
-    `actor_user_id` satisfy a check for `id`, and `extracted_points` satisfy one
-    for `extracted` — a test that passes for the wrong reason.
+    Everything after the first blank line is a different section (the rendered
+    turn list), which is legitimately not part of the projection.
     """
-    return {m.group(1) for m in re.finditer(r"^(\w+)\s", out, re.M)}
+    head = out.split("\n\n", 1)[0]
+    return [ln for ln in head.splitlines() if ln.strip()]
+
+
+def _assert_only_declared_field_lines(out: str, declared: frozenset[str]) -> None:
+    """Every field line must be `<declared name> <value>` — and nothing else.
+
+    Stronger than comparing a set of scanned names. A `^\\w+` name scan is
+    blind to a leaked line whose first token is not a word character, so a
+    stray `print("--- debug ---")` or a raw `json.dumps` dump would pass a
+    name-set comparison while violating the projection. Checking the first
+    TOKEN of every line closes that, and still rejects the substring laxity a
+    bare `field in out` had (where `actor_user_id` satisfied a check for `id`).
+    """
+    lines = _field_lines(out)
+    assert lines, f"no field lines rendered; output was {out!r}"
+    for line in lines:
+        name = line.split()[0]
+        assert name in declared, f"undeclared output line: {line!r}"
+    assert {ln.split()[0] for ln in lines} == set(declared), out
 
 
 def test_session_fields_helper_carries_the_values():
@@ -204,9 +222,9 @@ def test_session_list_command_renders_every_declared_field(capsys):
 
     out = capsys.readouterr().out
     assert rc == 0
-    # anchored, exact: NOT a substring test — `actor_user_id` would satisfy a
-    # substring check for `id`, so the field set is compared whole.
-    assert _rendered_names(out) == set(SESSION_LIST_FIELDS)
+    # exact in BOTH directions: every declared field appears, and no
+    # undeclared line does — the substring laxity is gone.
+    _assert_only_declared_field_lines(out, frozenset(SESSION_LIST_FIELDS))
     # the VALUES, not merely the labels
     assert "claude-code" in out
     assert "mbp-14" in out
@@ -232,7 +250,7 @@ def test_session_list_command_renders_nothing_outside_the_declaration(capsys):
     assert rc == 0
     assert "not_a_projection_field" not in out
     assert "surprise" not in out
-    assert _rendered_names(out) == set(SESSION_LIST_FIELDS)
+    _assert_only_declared_field_lines(out, frozenset(SESSION_LIST_FIELDS))
 
 
 def test_session_list_command_handles_a_session_with_no_actor(capsys):
@@ -256,8 +274,7 @@ def test_session_view_command_renders_exactly_the_declared_detail_fields(capsys)
     """`session view` printed 5 fields by hand before this — not the other 7.
 
     EXACT equality, not a superset: a superset assertion cannot catch a `view`
-    that leaks an undeclared key (e.g. dumping the raw response), while the
-    equivalent `list` leak is caught. Equality checks both directions at once.
+    that leaks an undeclared key, while the equivalent `list` leak is caught.
     """
     args = mock.Mock(id="sess-1")
     with mock.patch("urllib.request.urlopen", _fake_urlopen(DETAIL)):
@@ -265,7 +282,7 @@ def test_session_view_command_renders_exactly_the_declared_detail_fields(capsys)
 
     out = capsys.readouterr().out
     assert rc == 0
-    assert _rendered_names(out) == set(SESSION_DETAIL_FIELDS), out
+    _assert_only_declared_field_lines(out, frozenset(SESSION_DETAIL_FIELDS))
 
 
 def test_session_view_command_renders_nothing_outside_the_declaration(capsys):
@@ -280,7 +297,7 @@ def test_session_view_command_renders_nothing_outside_the_declaration(capsys):
     assert rc == 0
     assert "not_a_projection_field" not in out
     assert "surprise" not in out
-    assert _rendered_names(out) == set(SESSION_DETAIL_FIELDS)
+    _assert_only_declared_field_lines(out, frozenset(SESSION_DETAIL_FIELDS))
 
 
 # ── ONE declaration, not two that must be edited in lockstep ──────────────
