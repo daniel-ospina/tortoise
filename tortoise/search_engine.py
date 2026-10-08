@@ -16,7 +16,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
 from .env_truthy import is_truthy
-from .security import entity_label
+from .security import entity_label, validate_entity_type
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -864,6 +864,13 @@ def run_fts_query(
     breaker additionally short-circuits after consecutive slow/failed
     queries so a wedged DB stops eating caller latency.
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY, not at the label: the breaker short-circuit below
+    # returns [] before any label exists, so a guard placed there would let an
+    # invalid type through silently whenever the breaker is open.
+    validate_entity_type(entity_type)
+
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
         if leg_trace is not None:
@@ -917,6 +924,8 @@ def run_fts_query(
     # the Source label (`_searchText`) — there is no :Document index. The
     # caller-facing entity_type stays "document".
     # point→Point, event→Event, subject→Subject
+    # NOTE: this leg keeps its own derivation rather than entity_label() —
+    # the operator→Point exception is #5407's scope (see security.py).
     label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
@@ -1103,6 +1112,12 @@ def run_vector_query(
     timeout, and the per-strategy circuit breaker short-circuits after
     consecutive slow/failed queries. (#249)
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY: the return branches below (breaker open, empty scope,
+    # no embeddings) all precede the label derivation.
+    validate_entity_type(entity_type)
+
     #: #4199 — the read's OWN scope carries no dense material. Resolved once
     #: below (before the query) and applied to every HEALTHY outcome record.
     _scope_hollow = False
@@ -1545,6 +1560,11 @@ def run_structural_query(
     hang the structural strategy (the third leg of the degradation chain);
     the per-strategy breaker short-circuits after consecutive failures.
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY so the rejection does not depend on which branch runs.
+    validate_entity_type(entity_type)
+
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
         if leg_trace is not None:
