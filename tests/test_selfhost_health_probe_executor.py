@@ -1503,3 +1503,73 @@ def test_a_parked_readiness_probe_frees_its_pool_worker(selfhost, monkeypatch):
         "the readiness worker was NOT released — a timed-out probe still holds "
         "the pool worker, which is the defect this bound exists to remove")
     assert time.monotonic() - began < 5.0
+
+
+def test_a_readiness_cold_start_under_the_inner_bound_reports_ready(
+        selfhost, monkeypatch):
+    """#3320 acceptance bullet 3: do not regress #3143/#3243's cold start.
+
+    The inner bound narrows the effective readiness budget from 6.0 to 5.5s, so
+    the claim that needs proving is not "a bound exists" but "an ordinary slow
+    start still PASSES". #3320's own acceptance requires this for the readiness
+    endpoint, and until now only the LIVENESS coordinator had a cold-start test
+    (`/health`), which does not exercise this path at all.
+
+    A probe needing 1.0s of setup is well inside the 2.5s inner allowance, so it
+    must report READY. If the inner bound were ever set below the connect cost,
+    this is the test that would say so.
+    """
+    class _Graph:
+        def query(self, *a, **k):  # pragma: no cover - shape only
+            return [[1]]
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    def _cold(self):
+        time.sleep(1.0)
+        return _Proj()
+
+    monkeypatch.setattr(_StubSDK, "_get_proj", _cold)
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)  # inner -> 2.5
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            return await ac.get("/health/ready")
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200, (
+        f"a cold start well inside the inner allowance was reported not-ready — "
+        f"this is the false-503 class #3320/#3243 exist to remove: {r.text}")
+
+
+def test_a_readiness_probe_past_the_inner_bound_answers_503_PROMPTLY(
+        selfhost, monkeypatch):
+    """The other direction: past the allowance the answer is prompt, not waited out.
+
+    The measured property is WHICH bound fired. The assertion is therefore
+    against the INNER allowance, not a round number: with the outer bound pinned
+    to 3.0 (inner 2.5) a prompt 503 arrives at ~2.5s, whereas without the inner
+    bound the OUTER one fires at ~3.0s. An earlier version of this test asserted
+    ``elapsed < 5.0``, which the outer bound satisfies on its own — it passed
+    with the fix REVERTED (measured). That is the same vacuity this PR exists to
+    remove, so the bound is read from the code rather than guessed.
+    """
+    monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(30))
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)
+    inner = selfhost._ready_probe_inner_bound_s()
+    assert inner < 3.0, inner
+
+    async def scenario():
+        began = time.monotonic()
+        async with _client(selfhost) as ac:
+            r = await ac.get("/health/ready")
+        return r, time.monotonic() - began
+
+    r, elapsed = asyncio.run(scenario())
+    assert r.status_code == 503, r.status_code
+    assert elapsed < inner + 0.4, (
+        f"the readiness answer took {elapsed:.1f}s but the inner allowance is "
+        f"{inner:.1f}s — the OUTER bound fired instead, i.e. the worker was "
+        f"still parked when the answer went out (the pre-#3320 failure)")
