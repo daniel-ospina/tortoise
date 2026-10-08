@@ -1112,7 +1112,18 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
               f"{stats['added_keys']} added, "
               f"{stats['carried_forward']} carried forward — no write")
         return 0
-    manifest_path.write_text(new_text)
+    try:
+        manifest_path.write_text(new_text)
+    except OSError as exc:
+        # The read guard above covers reading; this covers writing. A read-only
+        # manifest, a read-only volume or a full disk raised a traceback with
+        # rc=1 — which is INDISTINGUISHABLE from the deliberate rc=1 below
+        # ("the refreshed manifest would fail the integrity gate"). Reporting an
+        # unobservable write as a gate failure is exactly the collision this
+        # bridge exists to avoid, so it takes the fail-closed 2 (#6092 review
+        # round 7).
+        print(f"2: manifest not writable: {exc}", file=sys.stderr)
+        return 2
     print(f"refreshed {manifest_path}: {stats['sampled_keys']} sampled, "
           f"{stats['added_keys']} added, "
           f"{stats['carried_forward']} carried forward "
@@ -1443,14 +1454,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # ONE place owns this module's exit-code contract (#6092 review round 6).
-    # Translating the refusal at each individual call site invited a fresh
-    # escape per review round — a path that exists but cannot be read, a
-    # manifest whose `surfaces:` is not a mapping, an unguarded gh fetch —
-    # because the contract lived wherever someone remembered to wrap it. The
-    # refusal class is defined at the process boundary instead, so no path can
-    # reach the user as a traceback with rc=1 while the docstring promises the
-    # documented `2 UNKNOWN`.
+    # A BACKSTOP for this module's own refusal class, not the sole owner of the
+    # exit-code contract (#6092 review round 7): the translation is still
+    # applied where each failure is raised, and this catches anything that
+    # reaches the boundary as a DurationsBridgeError.
+    #
+    # It cannot claim more than that. An early version of this comment said the
+    # boundary meant "no path can reach the user as a traceback with rc=1",
+    # which was false — OSError, JSONDecodeError and AttributeError still
+    # escape from I/O and parse paths that were never translated. A comment
+    # promising more than the code delivers is this repo's most serious defect
+    # class, so the claim is scoped to what is enforced.
     try:
         sys.exit(main())
     except DurationsBridgeError as exc:
