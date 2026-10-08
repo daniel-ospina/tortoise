@@ -25,9 +25,12 @@ import pytest
 
 from tests._signal_hygiene import (
     _REAL_SETITIMER,
+    _REAL_SIGNAL,
     HarnessAlarmStolen,
     _make_guarded_alarm,
     _make_guarded_setitimer,
+    _make_guarded_signal,
+    harness_relinquish_sigalrm,
     harness_safe_sigalrm,
 )
 
@@ -68,14 +71,48 @@ def test_safe_sigalrm_restores_the_harness_timer():
     _REAL_SETITIMER(signal.ITIMER_REAL, 0)  # take over from the live harness
     try:
         _REAL_SETITIMER(signal.ITIMER_REAL, 0.4)  # simulate the harness guard
-        signal.signal(signal.SIGALRM, harness_handler)
+        _REAL_SIGNAL(signal.SIGALRM, harness_handler)
         with harness_safe_sigalrm(0.05, lambda signum, frame: None):
             time.sleep(0.12)  # the in-test alarm fires harmlessly in here
         time.sleep(0.55)  # the RESTORED harness alarm must fire out here
         assert fired, "the harness alarm was not restored after an in-test alarm"
     finally:
         _REAL_SETITIMER(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, outer_handler)
+        _REAL_SIGNAL(signal.SIGALRM, outer_handler)
+        if outer_timer[0] > 0:
+            _REAL_SETITIMER(signal.ITIMER_REAL, outer_timer[0], outer_timer[1])
+
+
+def test_guard_refuses_replacing_the_sigalrm_handler(monkeypatch):
+    """Swapping the handler defeats the guard as surely as stealing the timer."""
+    monkeypatch.setattr(signal, "getitimer", lambda which: (30.0, 0.0))
+    with pytest.raises(HarnessAlarmStolen, match="#7655"):
+        _make_guarded_signal()(signal.SIGALRM, lambda signum, frame: None)
+
+
+def test_relinquish_allows_an_in_process_alarm_and_restores_the_timer():
+    """The reaper's in-process `main()` path (#7655): product code that owns
+    its own alarm runs inside the sanctioned block; the harness timer returns."""
+    outer_timer = signal.getitimer(signal.ITIMER_REAL)
+    outer_handler = signal.getsignal(signal.SIGALRM)
+    fired: list[bool] = []
+
+    def harness_handler(signum, frame):
+        fired.append(True)
+
+    _REAL_SETITIMER(signal.ITIMER_REAL, 0)  # take over from the live harness
+    try:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0.4)  # simulate the harness guard
+        _REAL_SIGNAL(signal.SIGALRM, harness_handler)
+        with harness_relinquish_sigalrm():
+            # exactly what tortoise/embedded_reaper.py:main() does
+            signal.signal(signal.SIGALRM, lambda signum, frame: None)
+            signal.alarm(0)
+        time.sleep(0.55)  # the RESTORED harness alarm must fire out here
+        assert fired, "the harness alarm was not restored after relinquishing it"
+    finally:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0)
+        _REAL_SIGNAL(signal.SIGALRM, outer_handler)
         if outer_timer[0] > 0:
             _REAL_SETITIMER(signal.ITIMER_REAL, outer_timer[0], outer_timer[1])
 
