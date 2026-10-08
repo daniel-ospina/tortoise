@@ -253,8 +253,11 @@ disable_error_code = [
 # the alarm collision (#7655), and it names the stuck thread. It MUST fire
 # strictly before `--timeout` — `_pytest/faulthandler` cancels the timer in a
 # `finally` when the item ends, so `faulthandler_timeout >= --timeout` is a
-# silent no-op. 280 leaves 20s under the 300 used on every pytest leg.
-# The invariant + reproducers are pinned by tests/test_ci_stall_identify.py.
+# silent no-op. 280 sits 20s under the global `--timeout=300`; a per-item
+# `@pytest.mark.timeout(N)` override can raise an item's budget above it, in
+# which case the watchdog dumps a healthy item's stack (a log line, never a
+# failure — `faulthandler_exit_on_timeout` defaults false).
+# The invariant + reproducer are pinned by tests/test_ci_stall_identify.py.
 faulthandler_timeout = 280
 markers = [
     "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",
