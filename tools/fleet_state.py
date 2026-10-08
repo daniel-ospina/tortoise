@@ -103,7 +103,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -573,11 +573,22 @@ def orphan_report(
     open_prs: Sequence[Mapping[str, Any]],
     owner_of_pr: Mapping[int, str | None],
     lane_live: Mapping[str, bool],
+    over_claimed: Collection[int] = (),
 ) -> list[dict[str, Any]]:
-    """Open PRs with no live owner — the class that left #7746 unnoticed."""
+    """Open PRs with no live owner — the class that left #7746 unnoticed.
+
+    ``over_claimed`` holds PRs asserted by more than one lane. Those are an
+    ownership CONFLICT (reported separately) — NOT an orphan. They must be
+    skipped here: a conflicted PR has had its owner cleared before this call,
+    so without this guard it would resurface below as "no lane claims it",
+    which is the exact opposite of the truth.
+    """
+    over_claimed = set(over_claimed)
     out: list[dict[str, Any]] = []
     for pr in open_prs:
         num = pr.get("number")
+        if num in over_claimed:
+            continue
         owner = owner_of_pr.get(num)
         if owner is None:
             out.append({
@@ -1158,7 +1169,7 @@ def build_state(
         )
         for lane_ in lanes
     }
-    orphans = orphan_report(prs, owner_of_pr, lane_live)
+    orphans = orphan_report(prs, owner_of_pr, lane_live, over_claimed=conflicts)
     if not liveness_measured:
         orphans.append({
             "kind": "liveness-unmeasured",

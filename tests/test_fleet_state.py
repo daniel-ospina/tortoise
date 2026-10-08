@@ -243,6 +243,31 @@ def test_orphan_report_flags_a_dead_owner_and_an_unclaimed_pr() -> None:
     assert "no lane claims" in by_num[3]["reason"]
 
 
+def test_orphan_report_never_calls_a_conflicted_pr_unclaimed() -> None:
+    """A PR two lanes both assert is a CONFLICT, not an orphan (#7750).
+
+    The build clears a conflicted PR's owner before orphan detection, so
+    without the guard the instrument would print the exact opposite of the
+    truth: "no lane claims it" for the one PR two lanes claim.
+    """
+    prs = [{"number": 7, "headRefName": "b", "title": "t"},
+           {"number": 8, "headRefName": "b8", "title": "t8"}]
+    orphans = fs.orphan_report(prs, {8: "L-live"}, {"L-live": True}, over_claimed={7})
+    assert orphans == []
+
+
+def test_orphan_report_without_the_guard_would_misfire() -> None:
+    """Controls the test above: the same input WITHOUT over_claimed misfires.
+
+    This is what makes the assertion able to fail — if the guard were removed,
+    PR 7 would be reported as unclaimed.
+    """
+    prs = [{"number": 7, "headRefName": "b", "title": "t"}]
+    orphans = fs.orphan_report(prs, {}, {})
+    assert [o["number"] for o in orphans] == [7]
+    assert "no lane claims" in orphans[0]["reason"]
+
+
 # ---------------------------------------------------------------------------
 # small pure helpers
 # ---------------------------------------------------------------------------
