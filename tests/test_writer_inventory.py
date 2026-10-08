@@ -565,9 +565,16 @@ class TestAgentSignup:
         key, org_id, identity = body["key"], body["org_id"], body["identity"]
         assert identity.startswith("anon-")
 
-        # exactly one provision RPC call, identity path, wrapper fn
-        assert len(fake.rpc_calls) == 1
-        fn, p = fake.rpc_calls[0]
+        # exactly one provision RPC call, identity path, wrapper fn.
+        # Scoped to PROVISION calls: the boot-sweep runner also issues RPCs —
+        # #4241's `metering_repair_period_bounds` — and it is offloaded to a
+        # thread, so it lands AFTER this request. Filtering keeps the pin (no
+        # double provision) without asserting that signup is the only RPC the
+        # whole app ever makes.
+        provision_calls = [c for c in fake.rpc_calls
+                           if c[0] == "provision_team_with_token"]
+        assert len(provision_calls) == 1
+        fn, p = provision_calls[0]
         assert fn == "provision_team_with_token"
         assert p["p_user_id"] is None
         assert p["p_identity"] == identity
@@ -1266,7 +1273,10 @@ class TestOnboardingTeam:
             TEST_TEAM, session_user_id=None)
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
-        assert fake.rpc_calls == []  # no provision attempted
+        # no provision attempted. Scoped to provision calls: unrelated
+        # boot-sweep RPCs (#4241) may land asynchronously in this fixture.
+        assert [c for c in fake.rpc_calls
+                if c[0] == "provision_team_with_token"] == []
         assert all(t["id"] != "orphan" for t in fake.tables["organizations"])
 
     def test_key_auth_owner_from_key_creator(self, client):
