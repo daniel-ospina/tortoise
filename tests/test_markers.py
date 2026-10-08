@@ -648,14 +648,17 @@ def test_no_redirect_stems_registry_exact():
         # pin reding on the addition is the pin working as designed, so the
         # stem is DECLARED here rather than exempted.
         "test_4921_construct_lock",
-        # #4521: the module asserts the embedded engine's `vecf32($embedding)`
-        # write — under the docker redirect the write lands as a plain List and
-        # the dense leg's `vec.euclideanDistance` raises per row, so the whole
-        # Point leg aborts. It is `embedded_only` and joins the carve-out lane;
-        # the first two homes (config/ci-surfaces.yml:carve_out and
-        # TEST_NO_REDIRECT_STEMS) were registered with the PR, and this pin
-        # reding on the addition is the pin working as designed — so the stem is
-        # DECLARED here rather than exempted (the #4921 shape).
+        # #4521: the `_revise_point` guard asserts the EMBEDDED engine's stored
+        # type for a revised Point — it reads `typeof()` back off a real embedded
+        # store. The module is `embedded_only`, so under a URI the hook SKIPS the
+        # whole module (it never runs, and no List is written); a redirected
+        # construction would instead run against the server lane, which lands the
+        # same `vecf32` write, so the assertion would certify nothing. This is the
+        # same rationale registered with the stem in tests/_embedded.py, and the
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
