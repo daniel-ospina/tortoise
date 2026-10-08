@@ -3153,11 +3153,11 @@ def scan_pr_surface(
         #    It would also print "is an OPEN PULL REQUEST" about a PR drawn from the
         #    CLOSED sample.
         #
-        #    `use_closing_field` (True only on the blocking payload) correlates with
-        #    the authority today, but it is a payload-CAPABILITY flag: were the blocking
-        #    path ever to stop requesting `closingIssuesReferences`, keying on it would
-        #    silently DELETE this fail-closed refusal. `surface.authority` cannot drift
-        #    that way — it is assigned per surface at construction from
+        #    `use_closing_field` (True only on the blocking CALL SITE) correlates with
+        #    the authority today, but it is a CALLER-REQUEST flag: were the blocking
+        #    path ever to stop asking gh for `closingIssuesReferences`, keying on it
+        #    would silently DELETE this fail-closed refusal. `surface.authority` cannot
+        #    drift that way — it is assigned per surface at construction from
         #    ADVISORY_SURFACES.
         #
         #    Coverage note, stated accurately: an advisory number==issue test already
