@@ -2342,7 +2342,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
-- test_rebuild_parity_fail_loud_3585.py  # #3585: 47 tests driving real FalkorDB rebuild/recover cycles (~470-720s) — too slow for the fast matrix (see its durations note)
+- test_rebuild_parity_fail_loud_3585.py  # #3585: 47 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -2432,7 +2432,7 @@ slow_files:
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
 # job's own drift-guard step fails closed if the union stops matching this list.
 # Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
-# 19.722m / 19.725m legs), pinned by
+# 14.192m / 14.188m legs), pinned by
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
@@ -3387,7 +3387,7 @@ durations:
   test_render.py: 0.2
   test_rebuild_recreate_content_parity.py: 2.5
   test_rebuild_graph_only_derived_parity.py: 2.2
-  test_rebuild_parity_fail_loud_3585.py: 709.0  # #3585: 47 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency; cycle-3 adds a second name-only supersede, a rename-materialized forward reference, a forward-reference-by-name guard, an incarnation-reuse case, an early-ambiguity-then-zero-carrier refusal, and two backup.restore fail-loud cases; cycle-4 pins the single trailing supersede sweep and the name-MERGE id collapse). REGISTERED IN `slow_files`, forced by the #6133 invariant rather than chosen: `test_watchdog_is_per_shard_and_scales_with_the_shard` requires the 15-min watchdog floor to clear the largest FAST file by >2.5x, i.e. a fast-pool file must stay under 360s — and this one measures 469.2s and 709s under load (two 2026-10-07 observations) — 2.8x to 4.2x the next-largest fast file (170.0s). Leaving it in the fast pool reds that test at ANY honest weight; the 45.0 it originally carried hid its real cost by more than an order of magnitude (709/45 = 15.8x). The weight committed here is the UPPER of the two observations (709s), not the lower: `test_slow_leg_bounds_clear_the_committed_work` treats this map as the lower bound the leg's watchdog must clear by WATCHDOG_HEADROOM (2.0x), so a weight below the real cost would make that bound vacuous and let a healthy leg be killed. Committing the upper observation keeps the bound real at both measured loads. Still not the canonical value — `tools/ci_timing.py --refresh-durations` supplies that after the matrix settles.
+  test_rebuild_parity_fail_loud_3585.py: 45.0  # #3585: 47 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency; cycle-3 adds a second name-only supersede, a rename-materialized forward reference, a forward-reference-by-name guard, an incarnation-reuse case, an early-ambiguity-then-zero-carrier refusal, and two backup.restore fail-loud cases; cycle-4 pins the single trailing supersede sweep and the name-MERGE id collapse). STILL IN `slow_files`, but NOT for the reason the original note gave — that reason was a measurement artifact. The previous lane committed 520.0 then 709.0 from two readings taken 2026-10-07 while THIS HOST was at a 1-minute load average of ~97 (the fleet's own overload); on a healthy docker lane the file runs in ~36s (measured here 2026-10-08: 47 passed in 35.62s; five further independent runs land in 35.6-48.0s, and 109s only with HF online). 709 was therefore ~16-19x the real cost, and the real cost is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives from 900/2.5 — so the #6133 invariant does NOT force this file out of the fast pool, contrary to what the earlier note claimed. The placement in `slow_files` is retained deliberately rather than reverted in the same diff: it costs ~36s on a 13.8m leg that runs on every full push anyway, and the LOADED cost is the uncertain quantity a fast shard's 15m watchdog would have to absorb. 45.0 is committed as the weight — above every healthy reading, so the bound `test_slow_leg_bounds_clear_the_committed_work` asserts stays conservative. Revisit the placement with `tools/ci_timing.py --refresh-durations`, whose CI measurement settles it.
   test_restore_container_recovery.py: 0.1
   test_sdk_adapter_cap.py: 0.1
   test_sentry.py: 0.1
