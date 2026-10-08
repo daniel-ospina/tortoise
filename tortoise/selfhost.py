@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import threading
+from concurrent import futures
 from contextlib import asynccontextmanager, contextmanager, suppress
 
 from fastapi import FastAPI
@@ -103,9 +104,9 @@ def _ready_probe_inner_bound_s() -> float:
     """
     from tortoise import monitoring
 
-    return max(_READY_PROBE_INNER_FLOOR_S,
-               min(monitoring.probe_setup_timeout(),
-                   _READY_PROBE_TIMEOUT_S - _READY_PROBE_INNER_MARGIN_S))
+    return min(max(0.05, _READY_PROBE_TIMEOUT_S - _READY_PROBE_INNER_MARGIN_S),
+               max(_READY_PROBE_INNER_FLOOR_S,
+                   monitoring.probe_setup_timeout()))
 
 # ── #3035 / #3287 / #3286: the READINESS probe gets its OWN DAEMON pool ─────
 #
@@ -198,6 +199,11 @@ _READY_PROBE_WORKER = "selfhost-ready-probe"
 #: narrowing the pool is not.
 _READY_PROBE_WORKERS = 8
 
+#: The DB leg's OWN pool (#3320), sized to the readiness width: a readiness
+#: worker submits at most one leg at a time, so this can never queue.
+_DB_LEG_WORKER = "selfhost-ready-probe-db-leg"
+_DB_LEG_WORKERS = _READY_PROBE_WORKERS
+
 
 def _probe_worker(name: str, workers: int):
     """The named process-wide DAEMON pool for one probe lane.
@@ -225,52 +231,52 @@ def _submit_probe(pool, fn):
 
 
 def _run_bounded(fn, allowance_s: float) -> None:
-    """Run ``fn`` with its OWN bound, so the CALLER always returns (#3320).
+    """Run ``fn`` on a BOUNDED daemon pool, so the CALLER always returns (#3320).
 
     The readiness pool's worker is the scarce, REUSED resource: while it is
     inside a socket read it cannot serve the next request, so a black-holed DB
     parks the pool and a later healthy request gets a FALSE 503. This gives the
-    DB leg an allowance that always fires before the outer
-    ``_READY_PROBE_TIMEOUT_S``, so the worker returns by itself and the pool is
-    released.
+    DB leg an allowance that fires before the outer ``_READY_PROBE_TIMEOUT_S``,
+    so the worker returns by itself and the pool is released.
 
-    The overrunning thread is ABANDONED, not cancelled — blocking socket I/O
-    cannot be cancelled, and the repo's ``monitoring`` module states the same
-    rule for its own probe phases. That is the trade this makes deliberately:
-    an abandoned short-lived thread (which dies when its socket timeout fires)
-    instead of a held pool worker (which cannot serve anyone).
+    The leg runs on ``monitoring``'s process-wide ``daemon_worker`` pool, NOT on
+    a raw thread. That is deliberate and it is the whole reason this is sound:
+    ``monitoring.py``'s ``_SingleSlotWorker`` docstring records the defect a
+    thread-per-probe repeats (#2850 — "every probe leaked a thread"), and states
+    the fix — "what bounds the thread count is the SHAPE … the count is exactly
+    ``workers`` no matter how many times a probe hangs". A fresh
+    ``threading.Thread`` per probe would make live threads scale with
+    ``arrival_rate × socket_timeout`` on an endpoint that is deliberately
+    un-throttled and un-authenticated; the pool makes the count exactly
+    ``_DB_LEG_WORKERS`` and REFUSES beyond its bounded backlog (fail-closed).
+
+    The overrunning leg is ABANDONED, not cancelled — blocking socket I/O cannot
+    be cancelled, and ``monitoring`` states the same rule for its own phases ("a
+    phase that overruns its ENFORCED deadline is ABANDONED, not cancelled … the
+    WAIT is bounded; the WORKER is not"). So the promise here is precise: the
+    REUSED pool worker is always released; an abandoned leg thread is bounded in
+    number and dies when its own socket timeout fires.
+
+    Since a readiness worker can submit at most one leg at a time, at most
+    ``_READY_PROBE_WORKERS`` legs are ever in flight, and ``_DB_LEG_WORKERS`` is
+    set to that same number — so in practice the pool never queues and never
+    refuses.
 
     Contextvars are copied for the same reason ``_submit_probe`` copies them:
-    the SDK/projection layer reads them, and a bare thread does not inherit
-    them (cpython#78195).
+    the SDK/projection layer reads them, and a pool thread does not inherit them
+    (cpython#78195).
     """
     ctx = contextvars.copy_context()
-    failure: list[BaseException] = []
-
-    def _target() -> None:
-        try:
-            ctx.run(fn)
-        except BaseException as exc:  # re-raised in the caller below
-            failure.append(exc)
-
-    # Named AFTER the pool worker that spawned it, not with a fixed label: the
-    # DB leg runs on a thread of its own (see below), and a fixed name would
-    # make N concurrent readiness probes indistinguishable from ONE — which is
-    # exactly what ``test_readiness_lane_actually_has_two_usable_workers``
-    # measures (it reads ``current_thread().name`` from inside the probe). Its
-    # intent — two readiness workers usable concurrently — is preserved by the
-    # pool; this keeps its MEASUREMENT working rather than papering over a
-    # regression in it.
-    thread = threading.Thread(
-        target=_target, name=f"{threading.current_thread().name}-db-leg",
-        daemon=True)
-    thread.start()
-    thread.join(allowance_s)
-    if thread.is_alive():
+    pool = _probe_worker(_DB_LEG_WORKER, _DB_LEG_WORKERS)
+    fut = pool.submit(lambda: ctx.run(fn))
+    # ``wait`` + ``result`` rather than ``result(timeout=…)`` alone: it separates
+    # OUR timeout from a ``TimeoutError`` raised BY the leg, which would
+    # otherwise be indistinguishable and reported as this bound firing.
+    done, _ = futures.wait([fut], timeout=allowance_s)
+    if not done:
         raise TimeoutError(
             f"readiness database leg exceeded its {allowance_s:.1f}s allowance")
-    if failure:
-        raise failure[0]
+    fut.result()  # re-raises the leg's own failure in the CALLER (no false green)
 
 
 # ── #2988: /health is IN-MEMORY, kept fresh by a background refresher ────────

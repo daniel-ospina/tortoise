@@ -1448,12 +1448,27 @@ def test_a_parked_readiness_probe_frees_its_pool_worker(selfhost, monkeypatch):
     probe must return WITHOUT the client's socket timeout (30s here) having to
     fire.
     """
+    monkeypatch.setattr(
+        selfhost, "_READY_PROBE_WORKER", "selfhost-ready-probe-acceptance")
     monkeypatch.setattr(selfhost, "_READY_PROBE_WORKERS", 1)
     monkeypatch.setattr(_StubSDK, "_get_proj",
                         lambda self: time.sleep(30))     # black-holed DB
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)
 
-    pool = selfhost._probe_worker(_module_literal(READY_NAME_CONST), 1)
+    # A DEDICATED pool NAME plus a tripwire, not the module constant alone. The
+    # daemon registry is process-wide and keyed by name, and ``workers`` applies
+    # only at FIRST creation — so patching ``_READY_PROBE_WORKERS`` by itself is
+    # INERT once any earlier test in this file has created
+    # ``selfhost-ready-probe`` at width 8, and a request is then served by one of
+    # the other seven workers. Measured on bc9740673: with the constant pinned
+    # and the name left alone, a full-file run reported 35 passed with the
+    # pre-fix ``sdk._get_proj()`` restored — this assertion was satisfied by the
+    # free members of the width-8 pool. The assert below turns that silent
+    # vacuity into a loud failure the next time the pin stops taking.
+    pool = selfhost._probe_worker("selfhost-ready-probe-acceptance", 1)
+    assert pool.workers == 1, (
+        "the width pin did NOT take — falling back to a wider pool makes this "
+        "assertion vacuous")
 
     async def scenario():
         async with _client(selfhost) as ac:
