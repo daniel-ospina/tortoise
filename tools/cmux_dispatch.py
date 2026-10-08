@@ -182,12 +182,15 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 #: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
 #: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
 #: NO `↑`/`↓` counters — do not key readiness off those.
-#: A login-shell prompt sigil at the END of a line. Used ONLY to detect that a
-#: pane has returned to a shell BELOW a stale pi frame — never to detect pi.
-SHELL_PROMPT_RE = re.compile(r"[%$#>]\s*$")
-
-#: pi's footer (status bar) token. Matches the `NN.N%/NNNk` context/token cell.
 READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
+
+#: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
+#: BELOW a stale pi frame — never to detect pi. The sigil must be a STANDALONE
+#: token (`%`, `$`, `#`, `>` at a whitespace/line boundary) or end the line
+#: without being preceded by a digit. Requiring token boundaries is what keeps
+#: pi's own extension-status text out: `#general thread` has no standalone
+#: sigil, and `Uploading 50%` is excluded by the digit guard.
+SHELL_PROMPT_RE = re.compile(r"(?:(?:^|\s)[%$#>](?=\s|$)|(?<!\d)[%$#>]\s*$)")
 
 #: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
 #: chars with a trailing `…`, so the fingerprint MUST come from the head of the
@@ -354,14 +357,18 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     the case where no marker is present to catch it. That prompt is what makes
     the stale frame EXECUTABLE: bytes sent there run as commands (#7158).
 
-    A prompt line ends in a shell sigil (`% $ # >`); pi's own footer and its
-    EXTENSION-STATUS lines do not (`Loop: <slug> (cycle 2)`, `#general thread`) —
-    pi pushes those below its stats line whenever an extension calls
-    `ctx.ui.setStatus` (verified in the installed renderer:
+    A prompt is detected by a STANDALONE shell sigil (`% $ # >` as its own token,
+    or ending the line): `host % ls -la`, `% <text>`, `user@host dir %`. pi's own
+    footer and its EXTENSION-STATUS lines carry no standalone sigil
+    (`Loop: <slug> (cycle 2)`, `#general thread`), and the digit guard keeps
+    `Uploading 50%` out. pi pushes status lines BELOW its stats line whenever an
+    extension calls `ctx.ui.setStatus` (verified in the installed renderer:
     `modes/interactive/components/footer.js`), so "the footer must be the literal
-    last line" would refuse healthy lanes. Only lines strictly AFTER the stats
-    line are examined, so the stats line's own trailing `$`/`%` cannot be
-    mistaken for a prompt.
+    last line" would refuse healthy lanes. RESIDUAL: an extension status whose
+    own text ends in a standalone sigil (none shipped in this fleet today) reads
+    as a prompt and is refused — the fail-closed direction. Only lines strictly
+    AFTER the stats line are examined, so the stats line's own trailing `$`/`%`
+    cannot be mistaken for a prompt.
     """
     text = screen or ""
     end = _last_status_bar_end(text)
@@ -1126,22 +1133,30 @@ class Dispatcher:
                 fingerprint=fp,
             )
         if not ready:
-            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but never
-            # presented pi's footer, so there is no evidence a pi owns stdin —
-            # it may be a bare login shell (a dead lane), which EXECUTES the
-            # bytes as a command. The old fail-open ("sending anyway —
-            # confirmation will decide") wrote the brief first and observed
-            # afterwards; confirmation cannot undo an executed command. Refuse.
-            # A genuinely slow boot is a caller concern (--ready-timeout); a
-            # refusal is recoverable, a brief typed into a shell is not.
+            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but pi does not
+            # own stdin: either no footer was ever drawn, or a stale footer sits
+            # above a live shell prompt. In both cases the pane may be a bare
+            # login shell (a dead lane), which EXECUTES the bytes as a command.
+            # The old fail-open ("sending anyway — confirmation will decide")
+            # wrote the brief first and observed afterwards; confirmation cannot
+            # undo an executed command. A genuinely slow boot is a caller concern
+            # (--ready-timeout); a refusal is recoverable, an executed brief is
+            # not.
+            if gate_screen is not None and shell_prompt_below_footer(gate_screen):
+                reason = (
+                    "a shell prompt is drawn BELOW pi's footer, so the pane has "
+                    "returned to a shell"
+                )
+            else:
+                reason = "no pi footer (status bar) was drawn"
             return DispatchResult(
                 False,
                 "never-became-ready",
-                f"{tag}{workspace} showed no pi footer (status bar) within "
-                f"{ready_timeout:g}s — refusing to send into a pane with no "
-                f"live pi: the bytes would be typed into a bare shell and "
-                f"EXECUTED. Confirm the lane has a live pi (or raise "
-                f"--ready-timeout for a slow boot), then re-dispatch.",
+                f"{tag}{workspace}: {reason} within {ready_timeout:g}s — "
+                f"refusing to send into a pane with no live pi: the bytes would "
+                f"be typed into a bare shell and EXECUTED. Confirm the lane has "
+                f"a live pi (or raise --ready-timeout for a slow boot), then "
+                f"re-dispatch.",
                 fingerprint=fp,
             )
 
@@ -1307,6 +1322,21 @@ class Dispatcher:
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
             else:
+                # ⛔ R_RESEND writes the brief a SECOND time, so it must face the
+                # same liveness gate as the first send (#7158): a pane that died
+                # between the gate and here would otherwise get the brief written
+                # into the shell and executed. `screen` is the recovery read
+                # already taken above — no extra cmux call.
+                if not screen_ready(screen):
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was not ready on the recovery read "
+                        f"(no live pi footer, or a shell prompt below it) — the "
+                        f"re-send was REFUSED rather than written into a pane "
+                        f"with no live pi. Re-dispatch once the pane is idle."
+                    )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
 

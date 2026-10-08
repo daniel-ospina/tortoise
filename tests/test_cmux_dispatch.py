@@ -221,6 +221,24 @@ SCREEN_LIVE_WITH_EXTENSION_STATUS_FOOTER = SCREEN_IDLE_READY + (
     "Loop: 7158-heartbeat-dead-lane (cycle 2)\n"
 )
 
+#: A DEAD pane whose stale footer is followed by a shell prompt WITH a typed
+#: command — the line ends in text, not a sigil, so an end-anchored detector misses
+#: it and the brief is EXECUTED (round-3 finding).
+SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND = (
+    SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT.rstrip("\n") + " ls -la\n"
+)
+
+#: A LIVE pi extension-status line carrying a percent. pi's own status text, not a
+#: prompt: the digit guard must keep readiness TRUE.
+SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER = SCREEN_IDLE_READY + "Uploading 50%\n"
+
+#: A DEAD pane that still parses as pi's composer (two rules) while showing a bare
+#: shell prompt — the shape where recovery picks `R_RESEND` (the second write site).
+SCREEN_DEAD_SHELL_WITH_COMPOSER = (
+    "\u2500" * 36 + "\n" + "\u2500" * 36 + "\n"
+    + "danielospina@Daniels-MacBook-Pro 7158-dead % \n"
+)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1545,6 +1563,66 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = self._send(fake, ready_timeout=0.0, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(fake.submitted, [PROBE])
+
+    def test_a_stale_footer_above_a_PROMPT_WITH_A_COMMAND_is_not_ready(self):
+        """Round-3 finding: an end-anchored prompt detector misses a prompt line
+        that carries a typed command (`host % ls -la`) — the sigil is mid-line, so
+        readiness said YES and the brief was executed. The STANDALONE-sigil rule
+        catches it while leaving pi's status text alone."""
+        stale = SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND
+        self.assertTrue(cd.status_bar_present(stale))
+        self.assertFalse(cd.boot_blocked(stale))
+        self.assertTrue(cd.shell_prompt_below_footer(stale))
+        self.assertFalse(cd.screen_ready(stale))
+
+    def test_dispatch_into_a_STALE_footer_above_a_shell_COMMAND_is_REFUSED(self):
+        class StaleCommandCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_COMMAND)
+
+        fake = StaleCommandCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertIn("shell prompt", result.detail)
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
+
+    def test_a_LIVE_pi_with_a_PERCENT_in_its_extension_status_is_READY(self):
+        """The digit guard: `Uploading 50%` is pi's own status text, not a prompt,
+        and must not be refused (the round-2 over-refusal class)."""
+        screen = SCREEN_LIVE_WITH_PERCENT_STATUS_FOOTER
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_recovery_RESEND_refuses_when_the_pane_died_after_the_gate(self):
+        """Round-3 finding: the `R_RESEND` recovery writes the brief a SECOND time,
+        so a pane that dies between the readiness gate and the recovery must be
+        refused there too — otherwise the bytes land in the shell."""
+
+        class DiesAfterSend(FakeCmux):
+            def __init__(self):
+                super().__init__(never_consumes=True)
+                self.dead = False
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                if self.dead:
+                    return cd.CmuxResult(0, SCREEN_DEAD_SHELL_WITH_COMPOSER)
+                return cd.CmuxResult(0, SCREEN_IDLE_READY)
+
+            def send_text(self, workspace, text, surface=None):
+                if text != "\\n":
+                    self.dead = True
+                return super().send_text(workspace, text, surface)
+
+        fake = DiesAfterSend()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE),
+            1,
+            "the brief must not be re-sent into a pane that became a shell",
+        )
 
     def test_a_pane_with_a_STALE_footer_above_a_shell_prompt_is_REFUSED(self):
         """The no-footer refusal alone does not cover the stale-footer shape: the
