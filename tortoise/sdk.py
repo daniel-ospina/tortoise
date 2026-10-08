@@ -13324,18 +13324,6 @@ class TortoiseSDK:
             self._audit_logger.close()
             self._audit_logger = None
         if self._proj is not None:
-            # #7760: the degraded-fallback snapshot store is process-global and
-            # keyed per backend, so this SDK's entry would outlive the
-            # projection that owns it — and its key is never presented again,
-            # so the lazy TTL could never drop it. Invalidate before the
-            # projection is closed and cleared.
-            try:
-                from tortoise.fallback_snapshot import _store as _fb_store, snapshot_key  # noqa: I001
-                _fb_store.invalidate(
-                    snapshot_key(self._proj, getattr(self, "_namespace", None)),
-                )
-            except Exception:  # noqa: BLE001, RUF100
-                pass
             self._proj.close()
             self._proj = None
         self._registry_g = None

@@ -390,29 +390,38 @@ def test_snapshot_key_memory_identity_is_stamped_not_recycled():
         "a fresh in-memory store must not inherit the token")
 
 
-def test_snapshot_is_dropped_when_its_sdk_closes(tmp_path, monkeypatch):
-    """#7760 review: a closed SDK must not leave its snapshot in the store.
+def _snap():
+    return {"built_at": time.monotonic(), "dirty": False, "points": [],
+            "vectorizer": None, "doc_vecs": None, "model_id": None}
 
-    The store is now keyed per backend, so an entry whose projection is gone is
-    never read again — its key is never presented — and the lazy TTL can never
-    fire. Invalidate on close so a long-lived process does not accumulate one
-    corpus (up to MAX_CORPUS_POINTS plus cached vectors) per closed SDK.
+
+def test_snapshot_store_is_bounded_and_lru(monkeypatch):
+    """#7760 review: per-backend keys must not make the store grow without
+    bound; eviction is LRU so a hot store survives.
+
+    The old ``(graph_name, namespace)`` key was bounded by the number of such
+    pairs a process held; a per-backend key is not, so a long-lived process
+    that opens many distinct embedded DBs (or ``:memory:`` stores) would retain
+    one corpus each. A read bumps an entry so the hosted per-request-SDK
+    pattern keeps its one graph's snapshot.
     """
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setattr(fs, "MAX_SNAPSHOT_ENTRIES", 3)
     fs._store.clear()
-    sdk = TortoiseSDK(str(tmp_path / "close.db"))
     try:
-        sdk.create_point("statement", "close invalidation probe")
-        key = fs.snapshot_key(sdk._get_proj(), None)
-        _no_match_query(sdk)  # builds + caches the snapshot
-        assert fs._store.get(key) is not None, (
-            "the snapshot must exist before close")
-        sdk.close()
-        assert fs._store.get(key) is None, (
-            "closing the SDK must drop its snapshot from the global store")
+        for i in range(5):
+            fs._store.put((f"g{i}", None, None), _snap())
+        assert len(fs._store._store) == 3, (
+            "the store must not grow past MAX_SNAPSHOT_ENTRIES")
+        assert fs._store.get(("g0", None, None)) is None, "oldest must be gone"
+
+        fs._store.clear()
+        for i in range(3):
+            fs._store.put((f"g{i}", None, None), _snap())
+        assert fs._store.get(("g0", None, None)) is not None  # read bumps g0
+        fs._store.put(("g3", None, None), _snap())
+        assert fs._store.get(("g0", None, None)) is not None, (
+            "a recently-read entry must survive the cap (LRU, not FIFO)")
+        assert fs._store.get(("g1", None, None)) is None, (
+            "the least-recently-used entry is evicted")
     finally:
-        try:  # noqa: SIM105
-            sdk.close()
-        except Exception:
-            pass
         fs._store.clear()
