@@ -1439,6 +1439,13 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
         assert "set +e" in lint and "set -e" in lint, report
         # ... and the wrapper must BRACKET the xargs, not merely appear somewhere.
         assert "xargs" in lint[lint.index("set +e") :], report
+        # The differ reports a KNOWN finding as a COUNT only, so the raw report
+        # must also be PRINTED or a baselined finding goes invisible in CI while
+        # the required check stays green — the visibility half of "the snapshot
+        # is a ceiling, not an amnesty". Pin the `cat` that publishes it: a
+        # mutant deleting BOTH `cat` lines survived the full suite (#7542 review
+        # round 10), because the redirect assertion above only proves capture.
+        assert f'cat "$RUNNER_TEMP/{report}"' in lint, report
     # (No `assert ".rc" not in lint` here. No step writes a `.rc` file — the status
     # is captured in a shell variable — so that assert could not fail and only read
     # as if it pinned the property; a vacuous assert is worse than none. #7542
