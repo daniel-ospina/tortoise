@@ -47,6 +47,9 @@ DEFAULT_FROM_ADDRESS = "noreply@premiselabs.co"  # single managed sender identit
 KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "billing_cancel",
          # #308: abuse prevention notifications
          "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity",
+         # #5425: the engine no longer auto-suspends; a persistent breach alerts
+         # for HUMAN review instead.
+         "abuse_review_needed",
          # #1081: R8 signup-velocity (anon signups per IP per window)
          "abuse_signup_velocity",
          # #1709: recovery-velocity (keyless recovery mints per IP per window)
@@ -106,7 +109,8 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
     That is why repeated failures must not be filed by the caller — pass a
     SUBJECT that identifies the outage, not the individual send.
 
-    Mirrors the ``abuse_suspended`` call site below (same
+    Mirrors the abuse-incident call site below (``abuse_suspended`` /
+    ``abuse_review_needed`` — same
     ``_backup_config_safe`` → ``_alert_store_from`` → ``open_incident`` path),
     factored out because more than one send leg now needs it. The hosted_api
     import is function-level for the reason stated at that call site: hosted_api
@@ -280,10 +284,16 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
 
-    if kind == "abuse_suspended":
+    if kind in ("abuse_suspended", "abuse_review_needed"):
         # Ops incident alert (GH issue + Telegram) — best-effort: absence of
         # backup config or any failure degrades to the Telegram leg above
         # (there is no email leg since #3639).
+        #
+        # #5425: the engine no longer suspends, so ``abuse_review_needed`` is
+        # the branch that actually fires — a PERSISTENT breach is a request for
+        # a human DECISION, and an incident is the durable, assignable artifact
+        # that carries it. ``abuse_suspended`` is kept for a deliberate
+        # operator-initiated suspension.
         # Function-level import: notify must never import hosted_api at
         # module level (hosted_api imports notify).
         try:
@@ -291,9 +301,16 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
             cfg = _ha._backup_config_safe()
             if cfg is not None:
                 store = _ha._alert_store_from(cfg)
+                # Round 7: this branch is the OPERATOR-initiated path now — the
+                # engine never suspends (that is what #5425 deleted), so
+                # "Auto-suspended" misattributed an out-of-band decision and read
+                # as the very behaviour this change removed.
+                what = ("Suspended by an operator"
+                        if kind == "abuse_suspended"
+                        else "Human review needed — rate-limit, do not suspend")
                 store.open_incident(
-                    "abuse_suspended", org.get("org_id") or "_",
-                    {"detail": (f"Auto-suspended: {details.get('rule', '?')} "
+                    kind, org.get("org_id") or "_",
+                    {"detail": (f"{what}: {details.get('rule', '?')} "
                                 f"count={details.get('count', '?')}")})
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: alert_store incident failed (%s)",

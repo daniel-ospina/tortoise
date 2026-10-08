@@ -4,6 +4,7 @@ import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
+import { LIMIT_CONTACT, withLimitContact } from './limitContact.js'
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
@@ -5256,8 +5257,8 @@ function claimIntentInFlight() {
           // gate's.
           // (Named by symbol, never by line number: a citation into this file
           // is a claim that re-stales on the next edit above it.)
-          ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
-          : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
+          ? withLimitContact('You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.')
+          : withLimitContact('You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.'))
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -5510,7 +5511,8 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #4639: carry the STRUCTURED status so the banner's nudge gate
           // reads the 402 rather than guessing from the copy.
-          setError({ message: 'Graph limit reached for this tier — upgrade to add more graphs.', status: res.status })
+          setError({ message: withLimitContact(
+            'Graph limit reached for this tier — upgrade to add more graphs.'), status: res.status })
           return
         }
         if (res.status === 409) {
@@ -5518,7 +5520,10 @@ function claimIntentInFlight() {
           // OR API-key cap (the create mints the graph's first key; a full
           // key table rolls the graph back with a 409). The detail is
           // authoritative (plan §6.2 contract).
-          setError({ message: b.detail || 'Graph limit reached — delete a graph or upgrade.', status: res.status })
+          // #5425: the server's detail carries the contact route; the FALLBACK
+          // literal did not, so a 409 without a detail left the customer with
+          // no way to talk to us.
+          setError({ message: b.detail || withLimitContact('Graph limit reached — delete a graph or upgrade.'), status: res.status })
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)
@@ -5898,7 +5903,14 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
           // #4639: carry the structured 402 for the banner's nudge gate.
-          setError({ message: typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.', status: res.status })
+          // #5425: the server's string detail carries the contact route, but
+          // THIS fallback did not — a non-string or absent detail (proxied /
+          // empty body) left the customer at a tier ceiling with no way to talk
+          // to us. The server's own copies of this sentence are routed, so this
+          // one was the only silent copy (round 6).
+          setError({ message: typeof b.detail === 'string'
+            ? b.detail
+            : withLimitContact('Invites require the Builder or Team tier — upgrade to invite members.'), status: res.status })
           setBusy(false)
           return
         }
@@ -8900,7 +8912,7 @@ function claimIntentInFlight() {
                       accessible NAME (aria-labelledby) — a screen reader must
                       hear the gate, not a generic "Create a new organization". */}
                   <h3 id="create-org-title-limit">You can only have one free organization</h3>
-                  <p className="dim" id="create-org-desc-limit">Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.</p>
+                  <p className="dim" id="create-org-desc-limit">{withLimitContact("Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.")}</p>
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     {/* #2392 (a11y): autoFocus moves focus INTO the dialog on
@@ -9053,7 +9065,9 @@ function claimIntentInFlight() {
             <ul>
               {alerts.map((a, i) => (
                 <li key={i}>
-                  <strong>{a.type}</strong> — {a.message}{' '}
+                  {/* #5425/round 7: `type` is our internal enum (recovery_velocity,
+                      flag, read_velocity) — the customer reads the human LABEL. */}
+                  <strong>{a.label || a.type}</strong> — {a.message}{' '}
                   <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
                 </li>
               ))}
@@ -9654,7 +9668,8 @@ function claimIntentInFlight() {
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
-                    <button className="ghost" onClick={upgrade}>Upgrade to add more</button>
+                    <button className="ghost" onClick={upgrade}>Upgrade to add more.</button>
+                    {LIMIT_CONTACT}
                   </span>
                 ) : (
                   <div className="inline-form">
@@ -10120,7 +10135,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.{LIMIT_CONTACT}</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
