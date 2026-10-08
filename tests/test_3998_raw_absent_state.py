@@ -1323,15 +1323,23 @@ def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
 
 # NOTE (#3998): there is deliberately NO test here pinning the identity keys either
 # way. #5438 (`58cd62ed3`, merged, and an ANCESTOR of this branch's base) made a
-# url-keyed `:Source` WRITABLE through the generic entity surface; its contract
-# tests are `tests/test_url_keyed_source_write_4649.py::TestUrlKeyedSourceIsWritable`,
-# and they FAIL if `url` is refused through this route — so they are the pin, and a
-# second copy here would only be able to disagree with them. An earlier revision of
-# this file asserted the refusal, which is why this PR was red for its whole life.
-# The residual a refusal was aimed at — a re-key rewriting the MERGE key, so a
-# rebuild can split the `:Source` and detach the Point's provenance — is #4649's
-# structural issue (the outer label loop takes the FIRST matching label) and is
-# PRE-EXISTING to #3998. It is recorded in #4649, not closed by refusing the write.
+# url-keyed `:Source` WRITABLE through the generic entity surface, and main pins it
+# in `tests/test_url_keyed_source_write_4649.py` — BOTH
+# `::TestUrlKeyedSourceIsWritable::test_a_rekeying_update_returns_the_node_at_its_new_address`
+# AND `::TestTheStateReadBackIsTheSameStatement::test_a_name_update_that_rekeys_a_url_source_still_journals`
+# (two classes, not one). Restoring the refusal fails exactly those 2 of that
+# file's 6 tests, measured. They are the pin; a second copy here could only
+# disagree with them. An earlier revision of this file asserted the refusal, which
+# is why this PR was red for its whole life.
+#
+# The residual a refusal was aimed at is NOT covered by those tests, so nothing
+# here buys it back: a re-key rewriting the MERGE key, so a rebuild splits the
+# `:Source` (two nodes) and the Point's `get_provenance_chain` returns EMPTY —
+# re-measured live at this head with a 1517-byte `url`. It is PRE-EXISTING to #3998
+# and it is #4649's structural issue (the outer label loop takes the FIRST matching
+# label), recorded on #4649 — which is CLOSED, so it is neither open-tracked nor
+# test-pinned. That is a real gap, stated rather than papered over: the structural
+# fix belongs with #4649's loop, not with a guard on this write.
 
 
 def test_a_multi_source_point_prefers_the_source_that_has_an_entity(sdk):
