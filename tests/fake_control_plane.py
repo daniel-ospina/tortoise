@@ -1451,12 +1451,20 @@ class FakeControlPlane:
         way to exercise the complete-vs-truncated decision.
         """
         _ = count_exact
-        rows = self.query(table, select=select, filters=filters, method=method,
-                          json_body=json_body, order=order, limit=limit,
-                          timeout=timeout)
-        if offset:
-            rows = rows[offset:]
-        return rows, None
+        # Fetch UNLIMITED and apply offset BEFORE limit. `query()` applies the
+        # limit itself, so slicing its result by offset afterwards under-serves
+        # every page after the first — and returns an EMPTY page when
+        # offset == limit, which is the exact "a truncated page looks like the
+        # end of the fleet" signature #5388 is about, reintroduced inside the
+        # double that is supposed to model the seam faithfully (and which 67
+        # test files share).
+        rows_all = self.query(table, select=select, filters=filters,
+                              method=method, json_body=json_body, order=order,
+                              limit=None, timeout=timeout)
+        start = offset or 0
+        page = (rows_all[start:start + limit] if limit is not None
+                else rows_all[start:])
+        return page, None
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,

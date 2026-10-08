@@ -126,6 +126,22 @@ class TestEnumerationCompleteness:
             f"should stop at the page cap, not walk 500 pages: {len(cp.calls)}"
         )
 
+    def test_a_short_page_with_a_stated_total_is_not_the_end(self, monkeypatch):
+        """THE case the issue names: a per-request cap LOWER than our limit.
+
+        The server serves 500 rows per request but states a 1500 total. A short
+        page must NOT be read as end-of-data when the server has said more rows
+        exist — stopping there enumerates only the first page of a larger fleet,
+        which is precisely the deployment shape #5388 exists to fix.
+        """
+        cp = FakeControlPlane(1500, state_total=1500, page_size=500)
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None, "a per-request cap must not truncate the fleet"
+        assert len(got) == 1500, (
+            f"must walk past the server's per-request cap (got {len(got)})"
+        )
+        assert [c[0] for c in cp.calls][:3] == [0, 500, 1000], cp.calls
+
     def test_count_exact_is_requested_once_not_per_page(self, monkeypatch):
         """The total is a property of the FILTER, so one exact count suffices —
         asking every page would charge the server a COUNT per page."""
@@ -138,3 +154,91 @@ class TestEnumerationCompleteness:
 def ha_pages() -> int:
     from tortoise import hosted_api as ha_mod
     return ha_mod._ORG_ENUMERATION_MAX_PAGES
+
+
+# ── the REAL seam's wiring ─────────────────────────────────────────────────
+
+class _StubResp:
+    status_code = 200
+    content = b"[]"
+
+    def __init__(self, headers):
+        self.headers = headers
+
+    def json(self):
+        return []
+
+
+class _StubHTTP:
+    """Records the outgoing headers so the Prefer wiring is observable."""
+
+    def __init__(self, headers):
+        self._headers = headers
+        self.seen: list[dict] = []
+
+    def get(self, url, params=None, headers=None, **kw):
+        self.seen.append(dict(headers or {}))
+        return _StubResp(self._headers)
+
+
+def _real_cp(content_range: str):
+    """A REAL SupabaseControlPlane with only its transport stubbed."""
+    from tortoise.supabase_control import SupabaseControlPlane
+    cp = object.__new__(SupabaseControlPlane)
+    cp._url = "https://stub.supabase.co"
+    cp._key = "stub-key"
+    cp._http = _StubHTTP({"Content-Range": content_range})
+    return cp
+
+
+class TestRealSeamWiring:
+    """The production mechanism itself — not a fake's reimplementation.
+
+    Without these, deleting the `Prefer: count=exact` send or the
+    `Content-Range` parse leaves every test green: the whole change would be
+    unverified while the fake-driven tests kept passing.
+    """
+
+    def test_count_exact_sends_prefer_and_parses_the_total(self):
+        cp = _real_cp("0-999/1500")
+        _rows, total = cp.query_with_total("organizations", count_exact=True)
+        assert total == 1500, "the server's total must reach the caller"
+        assert cp._http.seen[0].get("Prefer") == "count=exact", (
+            "without Prefer: count=exact PostgREST reports `*/\u002a`, i.e. no "
+            "usable total, so the header is the whole point"
+        )
+
+    def test_the_total_is_not_requested_when_not_asked_for(self):
+        """An exact count costs the server a COUNT, so it is opt-in."""
+        cp = _real_cp("0-0/*")
+        _rows, total = cp.query_with_total("organizations")
+        assert total is None
+        assert "Prefer" not in cp._http.seen[0]
+
+    def test_query_still_returns_only_the_row_list(self):
+        """The wrapper must keep every existing caller's shape."""
+        cp = _real_cp("0-999/1500")
+        assert cp.query("organizations") == []
+
+    def test_a_response_without_headers_does_not_raise(self):
+        """The fail-open guard: an AttributeError here would be swallowed by
+        the callers' best-effort except and turn a COMPLETE enumeration into an
+        EMPTY one."""
+        from tortoise.supabase_control import SupabaseControlPlane
+
+        class _NoHeaders:
+            status_code = 200
+            content = b"[]"  # a real attribute, `headers` genuinely ABSENT
+
+            def json(self):
+                return []
+
+        class _HTTP:
+            def get(self, url, params=None, headers=None, **kw):
+                return _NoHeaders()
+
+        cp = object.__new__(SupabaseControlPlane)
+        cp._url, cp._key = "https://stub.supabase.co", "k"
+        cp._http = _HTTP()
+        rows, total = cp.query_with_total("organizations", count_exact=True)
+        assert rows == [] and total is None

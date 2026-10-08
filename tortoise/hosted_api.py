@@ -1065,8 +1065,17 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 short_page = len(page) < _ORG_ENUMERATION_MAX_ROWS
                 if total is not None and len(rows) >= total:
                     break  # the server's count is satisfied
-                if short_page or not page:
-                    break  # nothing further to walk
+                if not page:
+                    break  # nothing left to walk
+                if short_page and total is None:
+                    # ONLY a short page with NO stated total means "that was all".
+                    # When the server DID state a total, a short page is a
+                    # per-request cap being applied -- exactly the deployment
+                    # whose `max_rows` is lower than our requested limit -- and
+                    # stopping here would enumerate only the first page of a
+                    # larger fleet. That is the case #5388 exists to fix, so
+                    # keep walking until the stated total is met.
+                    break
                 offset += len(page)
 
             parsed = [{"org_id": r["id"], "name": r.get("name")}
@@ -1457,10 +1466,11 @@ async def _refresh_cost_allocation() -> None:
     def _run() -> None:
         rows = _iter_registered_orgs(require_complete=True)
         if rows is None:
-            # The page filled its bound and ``query`` cannot tell a complete
-            # 1000-org fleet from a truncated one (#5388): the fleet is
-            # UNKNOWN, so publish an unavailable snapshot and leave the metric
-            # at last-known-good rather than pruning orgs beyond the page.
+            # The walk could NOT confirm the whole fleet (#5388): either the
+            # server stated a total the walk never reached, or it stated no
+            # total and never returned a short page. The fleet is UNKNOWN, so
+            # publish an unavailable snapshot and leave the metric at
+            # last-known-good rather than pruning orgs on a partial list.
             refresh_and_publish([])
             return
         orgs = [o["org_id"] for o in rows if o.get("org_id")]
