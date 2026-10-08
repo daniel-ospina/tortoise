@@ -1890,6 +1890,42 @@ def _git_refs(
     return refs
 
 
+def _live_remote_tip(
+    git_bin: str, repo: str, timeout: float, ref: str,
+) -> str | None:
+    """The LIVE tip of the remote branch a `refs/remotes/…` ref caches, or None.
+
+    ⛔ THE CACHED SHA IS NOT THE REMOTE'S SHA, AND NOTHING HERE FETCHES. A local
+    `refs/remotes/<remote>/<branch>` records the last FETCH, so a branch that was
+    squash-merged and then REUSED for new work still reads here as its old,
+    merged commit until somebody fetches — `_branch_terminal_state` says exactly
+    this in its own docstring. Judging terminality from the cache therefore calls
+    a LIVE branch merged, which is the false-CLEAN direction on a blocking
+    surface. A demotion that rests on the cache must confirm the tip against the
+    remote itself first, and this is that confirmation.
+
+    `git ls-remote` is a READ, not a fetch: it changes no local ref and cannot
+    itself cause a collision. None on ANY failure — an unreadable tip is not a
+    match, and the caller must keep the ref blocking (fail closed).
+    """
+    if not ref.startswith("refs/remotes/"):
+        return None
+    remote, _sep, branch = ref[len("refs/remotes/"):].partition("/")
+    if not remote or not branch:
+        return None
+    rc, out, _err, _timed_out = _run(
+        [git_bin, "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+        repo, timeout,
+    )
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == f"refs/heads/{branch}":
+            return fields[0].strip() or None
+    return None
+
+
 def _first_parent_shas(
     git_bin: str, repo: str, timeout: float,
 ) -> set[str] | None:
@@ -4006,10 +4042,12 @@ def run_preflight(
     # remote pass reads it. It exists because the terminal tests cannot run on a
     # remote-tracking ref (`_branch_terminal_state` refuses to judge one) while
     # the ref's NAME still matches the issue number and so still blocks — so a
-    # merged branch's remote twin refused every dispatch for good. An EXACT tip
-    # match is safe where a name match is not: `refs/remotes/o/x` and
-    # `refs/heads/x` at one sha are the same immutable commit, whereas a REUSED
-    # branch has moved and its tip no longer matches, so it still blocks.
+    # merged branch's remote twin refused every dispatch for good. What makes a
+    # demotion safe is NOT the local match alone: `refs/remotes/o/x` is a FETCH
+    # CACHE, so a branch reused since the last fetch carries the same stale sha
+    # as its local twin while the remote has moved. The remote pass therefore
+    # also requires `_live_remote_tip` to confirm the same sha against the
+    # remote itself, and blocks when it cannot.
     local_terminal_shas: dict[str, tuple[str, str]] = {}
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
@@ -4084,12 +4122,13 @@ def run_preflight(
                             local_terminal_shas[_sha] = (_ref, _reason)
             else:
                 # #7693: the remote twin of a branch this run proved terminal on
-                # the LOCAL surface. Demote it ONLY on an EXACT tip match against
-                # a tip already proven terminal — never on the name alone, which
-                # is the false-CLEAN direction the surface note warns about. A
-                # reused branch has moved, so its tip differs and it still
-                # blocks; a ref whose terminal witness could not be read simply
-                # finds no entry here and also still blocks.
+                # the LOCAL surface. The demotion requires BOTH an EXACT tip
+                # match against a proven-terminal tip AND confirmation that this
+                # is still the remote's CURRENT tip: the cached sha is only the
+                # last fetch, so a branch reused since then would otherwise be
+                # called merged. Never a NAME match — that is the false-CLEAN
+                # direction the surface note warns about. A ref whose live tip
+                # cannot be read, or has moved, keeps blocking.
                 for _ref, _sha in refs:
                     if _sha is None or not number_present(_ref, issue):
                         continue
@@ -4098,11 +4137,16 @@ def run_preflight(
                     _witness = local_terminal_shas.get(_sha)
                     if _witness is None:
                         continue
+                    _live = _live_remote_tip(git_bin, cwd, timeout, _ref)
+                    if _live is None or _live != _sha:
+                        # Stale cache, moved branch, or unreadable — all BLOCK.
+                        continue
                     _local_ref, _why = _witness
                     targeted_terminal[_ref] = (
                         f"its tip {_sha[:12]} is the SAME COMMIT as {_local_ref}, which "
-                        f"this run proved terminal ({_why}) — an exact tip match, so "
-                        "this is the same immutable history and not a live holder"
+                        f"this run proved terminal ({_why}), and it is CONFIRMED as "
+                        "this remote branch's CURRENT tip — so this is the same "
+                        "immutable history and not a live holder"
                     )
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
@@ -4117,7 +4161,8 @@ def run_preflight(
                     "remote-tracking ref is a local fetch cache, so judging it "
                     "terminal on its NAME could call a reused live branch merged) — "
                     "but a ref whose tip is an EXACT match for a local ref this run "
-                    "proved terminal IS demoted (#7693)"
+                    "proved terminal, and whose LIVE tip is confirmed identical, IS "
+                    "demoted (#7693); a moved or unreadable live tip still blocks"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict

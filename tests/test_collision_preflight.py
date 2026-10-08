@@ -2699,17 +2699,19 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertNotIn("squash-merged", out)
 
-    def test_remote_twin_of_a_terminal_local_branch_is_demoted(self):
-        # #7693. `refs/remotes/origin/x` and `refs/heads/x` at ONE sha are the
-        # same immutable commit, so when the local surface has already PROVEN
-        # that tip terminal the remote twin is the same history, not a holder.
-        # Without this the merged branch's remote copy refused every dispatch
-        # for good while the local copy was correctly demoted in the row above
-        # it — the defect this test pins.
+    def test_remote_twin_of_a_terminal_local_branch_is_demoted_when_live(self):
+        # #7693. The remote twin of a branch this run PROVED terminal is the same
+        # immutable commit — but only once the remote itself confirms the sha,
+        # because `refs/remotes/…` is a fetch cache. `origin` here is a REAL bare
+        # repo holding the branch at that sha, so the confirmation succeeds.
         ref = f"fix/{ISSUE}-landed"
-        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
+        bare = self.tmp / "bare.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
         _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
-        sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        sha = self._git_out("rev-parse", "HEAD")
         self.gh_fixtures(closed_prs=[{
             "number": 4243, "title": "land it", "body": "", "state": "closed",
             "headRefName": ref, "headSha": sha,
@@ -2718,8 +2720,31 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        # The demotion must SAY why — an exact tip match, not the name.
+        # The demotion must SAY why — a confirmed CURRENT tip, not the name.
         self.assertIn("SAME COMMIT", out)
+        self.assertIn("CONFIRMED", out)
+
+    def test_remote_twin_with_no_confirmable_live_tip_still_blocks(self):
+        # #7693, the fail-closed half — and the one that matters, because this is
+        # how a REUSED branch is caught. `refs/remotes/…` holds the last FETCH, so
+        # a branch reused since then carries the same stale sha as its local twin
+        # while the remote has moved. Here `origin` cannot be read at all, so the
+        # confirmation fails; the ref must keep blocking rather than be called
+        # merged on the cache alone.
+        ref = f"fix/{ISSUE}-unverifiable"
+        _git(self.repo, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", "HEAD")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4245, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
 
     def test_remote_twin_at_a_different_sha_still_blocks(self):
         # #7693, the fail-closed half. A REUSED branch has moved, so its remote
