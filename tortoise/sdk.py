@@ -21643,18 +21643,23 @@ class TortoiseSDK:
             # itself satisfied.
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
-                _managed = sorted(
-                    k for k in props
-                    if k in _SOURCE_SERVER_MANAGED_PROPS or k in _SOURCE_IDENTITY_PROPS
-                )
+                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
                 if _managed:
-                    # #3998: two subsets are refused through the generic surface.
-                    # The STATE is server-managed (see below). The IDENTITY keys
-                    # are refused because they are the node's MERGE key: measured,
-                    # `update_entity(src_url, url=<2 KB body>)` rewrote it, and
-                    # after a rebuild that produced duplicate `:Source` nodes and
-                    # an EMPTY provenance chain for the Point — a payload route
-                    # and a silent provenance loss in one call.
+                    # #3998: the STATE and the merge TOKEN are refused through the
+                    # generic surface.
+                    #
+                    # ⛔ The IDENTITY keys (`url`, `canonicalUrl`, `urlAliases`) are
+                    # deliberately NOT refused here. An earlier revision of this
+                    # guard refused them too, and that BROKE A LIVE CONTRACT: #4649
+                    # pins url re-keying through `update_entity` as SUPPORTED
+                    # (`tests/test_url_keyed_source_write_4649.py`
+                    # ::TestUrlKeyedSourceIsWritable), so the broad refusal is a
+                    # regression, not a payload route closed. The residual it was
+                    # aimed at — a huge value re-keying the MERGE key, producing
+                    # duplicate `:Source` nodes and an empty provenance chain after
+                    # a rebuild — is #4649's structural issue (the outer label loop
+                    # takes the FIRST matching label), is PRE-EXISTING to #3998, and
+                    # belongs with that fix rather than here.
                     raise ValueError(
                         f"{_managed!r} is server-managed on a :Source and "
                         f"cannot be set through the generic entity surface "

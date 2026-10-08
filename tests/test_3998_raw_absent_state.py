@@ -1321,33 +1321,17 @@ def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
     assert _raw(s)["available"] is False
 
 
-def test_the_identity_keys_are_refused_through_the_generic_route(sdk):
-    """Review round 5, P2: the allowlist admitted the IDENTITY keys, so
-    ``update_entity(src_url, url=<2 KB body>)`` rewrote the MERGE key — a payload
-    route AND a silent provenance loss at once (measured: after a rebuild the
-    Point's ``get_provenance_chain`` came back EMPTY, and duplicate ``:Source``
-    nodes existed). The identity keys are the node's merge key and must be as
-    unwritable as the state.
-
-    (1) FAILS if only the server-managed subset is refused: the ``url`` rewrite
-        lands and the chain for the Point empties out.
-    (2) REACHABLE: the body is passed as ``url`` through the real tenant surface.
-    """
-    s, events = sdk
-    body = "IDENTITY_PAYLOAD " + ("raw. " * 300)
-    # Source FIRST, so it carries the `id` the guard and the write both resolve
-    # on — an id-less stub (from `_memory`'s link) is not what this tests.
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
-    pid = _memory(s)
-    with pytest.raises(ValueError, match=r"server-managed|cannot be set"):
-        s.update_entity(RAW_URL, url=body)
-    assert _raw(s)["raw_state"] == "present", "the source stopped being readable"
-    assert _source_props(s)["url"] == RAW_URL
-    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
-    assert len(s.get_provenance_chain(pid)) == 1, (
-        "the identity rewrite split the source and lost the Point's provenance"
-    )
-    assert body not in repr(_source_props(s))
+# NOTE (#3998): there is deliberately NO test here pinning the identity keys either
+# way. #5438 (`58cd62ed3`, merged, and an ANCESTOR of this branch's base) made a
+# url-keyed `:Source` WRITABLE through the generic entity surface; its contract
+# tests are `tests/test_url_keyed_source_write_4649.py::TestUrlKeyedSourceIsWritable`,
+# and they FAIL if `url` is refused through this route — so they are the pin, and a
+# second copy here would only be able to disagree with them. An earlier revision of
+# this file asserted the refusal, which is why this PR was red for its whole life.
+# The residual a refusal was aimed at — a re-key rewriting the MERGE key, so a
+# rebuild can split the `:Source` and detach the Point's provenance — is #4649's
+# structural issue (the outer label loop takes the FIRST matching label) and is
+# PRE-EXISTING to #3998. It is recorded in #4649, not closed by refusing the write.
 
 
 def test_a_multi_source_point_prefers_the_source_that_has_an_entity(sdk):
