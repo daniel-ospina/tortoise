@@ -4327,6 +4327,19 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # P2-1 (#3299): a record type outside the recognized vocabulary must
         # not vanish silently. #3585 (R8): it is a non-folded event — record it
         # so a run that skipped it fails closed.
+        # REACHABILITY (traced 2026-10-08, PR #5285 review): this arm also
+        # catches the four point-lifecycle types `_NO_POINT_FOLD` deliberately
+        # omits (PointPromoted / OperatorPromoted / PointSuperseded /
+        # PointInvalidated — see its NOTE above), so SHAPE_UNKNOWN_EVENT_TYPE is
+        # imprecise for those four: they ARE recognized, this point-only index
+        # simply has no fold for them. No collector-active caller reaches them
+        # here, so it is latent rather than a live false refusal — the only
+        # in-memory caller holding a `collect_non_folded()` boundary is
+        # `consistency._fold_journal`, which `continue`s on all four before the
+        # fallthrough. It becomes real if anyone wraps `fold()` /
+        # `InMemoryProjection` in a collector, and the fix is then a distinct
+        # shape (or a guard) — NOT a silent `pass`, which would drop the signal
+        # for a genuinely unknown type as well.
         record_non_folded(
             SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
             event_type=str(t), detail="in-memory fold: unrecognized type",

@@ -163,7 +163,9 @@ record type is unrecognized and skips it, and silently drops unknown
 `PointRevised` extras. A binary carrying #3585 or later instead fails the
 replay loudly (R8) on the graph-backed rebuild/recover engines: the type is
 recorded as a non-folded event and the run refuses rather than returning an
-incomplete graph. The in-memory index alone opens no run boundary and warns
+incomplete graph. The three documented `EXEMPT_SHAPES` are the only non-folded
+records that are recorded WITHOUT refusing the run. The in-memory index alone
+opens no run boundary and warns
 without refusing. The
 rebuild path has no pre-wipe allowlist analogous to
 `_assert_episodic_points_recreatable`; forward-only evolution of the JSONL

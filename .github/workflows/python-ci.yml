@@ -1486,16 +1486,19 @@ jobs:
     # watchdog, or the runner kills the step before pytest can print its counts
     # — exactly the loss the ORDER invariant exists to prevent.
     # The cap must therefore clear the pre-phase on the path where the watchdog
-    # has to fire, and that path is bounded: the fast job's own ~7m setup figure
-    # (`test`, above) plus the coverage-manifest --collect-only step for this
-    # leg's 31 files (both legs hold 31). The `Embedding model REQUIRED` step later in the job
-    # is separately capped at 10m: a hang there FAILS the step and pytest never
-    # starts, so it does not open the watchdog window at all, and a slow but
-    # successful run contributes at most that same 10m to the pre-phase — the
-    # 20m remainder absorbs it. 45m — the value this PR first used, and 40m on
-    # main — left 5m for setup alone, so the watchdog could never fire;
+    # has to fire. That path is NOT fully bounded, and the clearance rests on an
+    # unstated slack: the ONLY pre-pytest step in this job carrying its own
+    # `timeout-minutes` is `Embedding model REQUIRED` (10m) — checkout, the CPU
+    # install, the drift guard, the FalkorDB provision and the coverage-manifest
+    # `--collect-only` step are all UNBOUNDED. So of the 60 - 40 = 20m remainder,
+    # the fast job's own ~7m setup figure plus a <=10m embedder leaves ~3m for
+    # the collect-only step (both legs hold 31 files), and the ORDER invariant
+    # holds only while collect-only stays inside that. No gate enforces it —
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
-    # literals and cannot see the gap.
+    # literals and cannot see the pre-phase at all. The clearance being slack
+    # rather than proven is why the cap is 60 and not the minimal 52.
+    # 45m — the value this PR first used, and 40m on main — left 5m for setup
+    # alone, so the watchdog could never fire.
     timeout-minutes: 60
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
