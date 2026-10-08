@@ -522,7 +522,8 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
 
 def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
                       s_node: str, session: list[dict], session_date: str,
-                      point_created_at: str, chunk_turns: int) -> dict:
+                      point_created_at: str, chunk_turns: int,
+                      sdk_retries: dict[str, int] | None = None) -> dict:
     """#1786 (R1): one Phase-A write attempt — session node + turn/chunk raw
     leg (the E7 batch existence probe FIRST, then the writes). Module-level
     (no loop-variable closure — B023-clean) so the live ingest loop can wrap
@@ -531,6 +532,9 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
     never a blind re-CREATE. Returns per-attempt deltas so a retried attempt
     cannot double-count the caller's stats."""
     a = {"sessions": 0, "chunks": 0}
+    # #7405 P1-1: capture the SDK inner-retry baseline BEFORE this attempt's
+    # writes (the orchestration must not read the SDK at all — see the helper).
+    _observe_sdk_write_retries(sdk, sdk_retries)
     # ── Session node (mirrors the deterministic leg) ──
     # #4106: the session's RECORDED time is the dataset's session date, and a
     # session the dataset does NOT date records NO time. `_now_iso()` here
@@ -614,6 +618,7 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": s_node, "tid": chunk_id},
         )
+    _observe_sdk_write_retries(sdk, sdk_retries)
     return a
 
 
@@ -621,8 +626,8 @@ def _write_v2_phase_c(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
                       s_node: str, session_date: str | None,
                       all_evidence_turns: list[str], turns: list[dict],
                       payload: dict, out: dict, ev_sessions: set[str],
-                      evidence_turns: list[str],
-                      gold_answer: str) -> tuple[dict, int, int]:
+                      evidence_turns: list[str], gold_answer: str,
+                      sdk_retries: dict[str, int] | None = None) -> tuple[dict, int, int]:
     """#1786 (R1): one Phase-C write attempt — the Layer-1 payload write +
     the E7 consolidation records (NOOP folds, DELETE-soft retractions) + the
     extracted-point CONTAINS edges. Module-level (B023-clean) so the live
@@ -630,6 +635,9 @@ def _write_v2_phase_c(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
     deletion / supersession write) is absorbed here instead of falling
     straight to the ~25-min R2 re-burn. Returns (written-stats, noops_applied,
     deletions_applied)."""
+    # #7405 P1-1: capture the SDK inner-retry baseline BEFORE this attempt's
+    # writes (the orchestration must not read the SDK at all — see the helper).
+    _observe_sdk_write_retries(sdk, sdk_retries)
     written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
                              evidence_turns=all_evidence_turns,
                              turns=turns, ev_sessions=ev_sessions,
@@ -654,6 +662,7 @@ def _write_v2_phase_c(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": s_node, "tid": pid},
         )
+    _observe_sdk_write_retries(sdk, sdk_retries)
     return written, noops, deletions
 
 
@@ -661,6 +670,33 @@ def _bump_retry(counter: dict[str, int], _exc: BaseException) -> None:
     """#1786 (Task 1 Step 5): the ``ingest_retries`` per-question counter —
     module-level (B023-clean) hook passed to ``call_with_predicate``."""
     counter["n"] += 1
+
+
+def _new_sdk_retry_observer() -> dict[str, int]:
+    """#7405 P1-1: accumulator for the SDK's private inner-write-retry
+    counter — ``base`` is the counter on the FIRST attempt (``-1`` = unset),
+    ``delta`` the count observed at the latest attempt's return."""
+    return {"base": -1, "delta": 0}
+
+
+def _observe_sdk_write_retries(sdk: TortoiseSDK,
+                               acc: dict[str, int] | None) -> None:
+    """Fold the SDK's inner write-retry count into ``acc`` (#7405 P1-1).
+
+    Called from INSIDE a phase writer — the layer that legitimately touches
+    the SDK — and NEVER from ``ingest_haystack_v2``'s orchestration: an
+    aborted ingest must not touch the SDK at all (the stall guard in
+    ``tests/longmem_eval/test_ingest_stall_guard.py`` explodes on ANY SDK
+    attribute access), and a diagnostic read must never be able to abort the
+    operation it observes. ``base`` is set on the FIRST attempt and never
+    reset, so the monotonic counter still reports the inner retries a FAILED
+    attempt consumed before the outer loop retried the phase."""
+    if acc is None:
+        return
+    now = getattr(sdk, "_graph_write_retry_count", 0)
+    if acc["base"] < 0:
+        acc["base"] = now
+    acc["delta"] = now - acc["base"]
 
 
 def _attach_ingest_usage(worker_model: Any, qid: str) -> None:
@@ -868,26 +904,54 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # counters are approximate (attempt-1 items now in the graph but
         # skipped by the re-probe are NOT re-counted). Recall@k is computed
         # from live graph queries, so outcomes are UNAFFECTED.
-        # ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════
-        # Write-stage retries (#1806) are EVAL-ONLY — the product SDK
-        # write path has NO bounded retry (idempotency-only). Full note at
-        # errors.py::retryable_transient. Not shipped; candidate port
-        # (audit G8).
+        # ══ PRODUCT-PARITY NOTE (updated #7405) ═════════════════════════
+        # The write-stage retry machinery is no longer eval-only: the product
+        # SDK's direct graph-write path retries via `_graph_write_with_retry`
+        # (#7405). This outer loop therefore remains the retry layer for the
+        # PHASE (E7 probe + the UNWRAPPED direct writes + a whole-question
+        # re-attempt), while the SDK owns the write refusals it wraps. The two
+        # layers are disjoint ONLY for the replaced-graph / write-lock family
+        # (`retryable_transient` deliberately no longer matches either, so only
+        # the SDK's inner loop retries them). MISCONF is deliberately in BOTH
+        # predicates — it predates #7405 and the eval's UNWRAPPED direct writes
+        # rely on the outer loop — so a MISCONF can nest, bounded by the SDK
+        # exhausting before the outer retries.
         # ═════════════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════════
+        # #7405 P1-1: the SDK now retries its OWN direct graph writes
+        # internally (replaced-graph / write-lock / MISCONF), one layer
+        # BELOW this loop — so a transient absorbed there would leave
+        # `ingest_retries` (a Layer-1 outcome field) reading 0. The phase
+        # writer observes the SDK's private, monotonic inner-retry counter
+        # (``_sdk_a``) and the delta is folded in below: the metric must see
+        # a write retry wherever it happened. The observation lives in the
+        # WRITER, never here — an aborted ingest must not touch the SDK at
+        # all (the stall guard explodes on ANY SDK attribute access), and a
+        # diagnostic read must never be able to abort the ingest it observes.
+        # The delta is exact because Phase A writes are sequential (the
+        # session-parallel pool below runs Phase B extraction only) and the
+        # writer's baseline survives a failed attempt that the outer loop
+        # retries.
+        # ══════════════════════════════════════════════════════════════
+        _sdk_a = _new_sdk_retry_observer()
         _phase_a = call_with_predicate(
             partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
                     s_node=s_node, session=session,
                     session_date=session_date,
                     point_created_at=point_created_at,
-                    chunk_turns=chunk_turns),
+                    chunk_turns=chunk_turns, sdk_retries=_sdk_a),
             predicate=retryable_transient,
             retries=ingest_write_retries,
             what=f"session raw-leg write for {qid} s{si}",
             marker_armed=write_marker_armed,
             on_retry=partial(_bump_retry, _retries_a))
+        # The fold stays on the SUCCESS path (never a `finally`): `stats`
+        # (function-local) does not escape when a phase raises, so folding on
+        # the error path observes nothing — and touching the SDK there would
+        # abort the very ingest the stall guard exists to abort cleanly.
+        stats["ingest_retries"] += _retries_a["n"] + _sdk_a["delta"]
         stats["sessions"] += _phase_a["sessions"]
         stats["chunks"] += _phase_a["chunks"]
-        stats["ingest_retries"] += _retries_a["n"]
         hb.stage(f"s{si}:extract")
 
         return {
@@ -1045,6 +1109,13 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # mid-consolidation (noop/deletion/supersession write) is absorbed
         # here instead of falling straight to the ~25-min R2 re-burn.
         _retries_c: dict[str, int] = {"n": 0}
+        # #7405 P1-1: same fold-in as Phase A — the SDK's inner write retry is
+        # invisible to this outer loop when it absorbs the transient, so the
+        # phase writer observes the counter (``_sdk_c``) and its delta is
+        # folded below. The read lives in the writer, not here: an aborted
+        # ingest must not touch the SDK (the stall guard enforces it) and
+        # `stats` does not escape on the error path anyway.
+        _sdk_c = _new_sdk_retry_observer()
         # #1786 (R1): same FINAL-attempt delta semantics as phase A — the
         # counters reflect the last successful attempt (a retried partial
         # write is approximate; recall@k is live-graph-derived, unaffected).
@@ -1054,13 +1125,13 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                     all_evidence_turns=all_evidence_turns, turns=turns,
                     payload=payload, out=out, ev_sessions=ev_sessions,
                     evidence_turns=evidence_turns,
-                    gold_answer=gold_answer),
+                    gold_answer=gold_answer, sdk_retries=_sdk_c),
             predicate=retryable_transient,
             retries=ingest_write_retries,
             what=f"payload write for {qid} s{si}",
             marker_armed=write_marker_armed,
             on_retry=partial(_bump_retry, _retries_c))
-        stats["ingest_retries"] += _retries_c["n"]
+        stats["ingest_retries"] += _retries_c["n"] + _sdk_c["delta"]
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += _written.get(k, 0)

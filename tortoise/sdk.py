@@ -4446,6 +4446,68 @@ class TortoiseSDK:
         from tortoise.exceptions import EmbeddedStoreBusyError
         raise EmbeddedStoreBusyError(db_path, pid)
 
+    def _graph_write_with_retry(self, fn, *, what: str):
+        """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
+
+        A rebuild/replace aborts an IN-FLIGHT query with
+        ``ResponseError("graph was deleted or replaced while the query was
+        running, aborting")``. Measured against THIS client (``falkordb``), that
+        abort is a **per-query race, not a poisoned handle**: ``Graph`` is
+        stateless — it holds only ``name`` + ``execute_command`` and re-issues
+        ``GRAPH.QUERY <name>`` on every call — so the SAME cached handle and
+        client succeed on a plain re-issue (reviewer reproduced: abort, then
+        retry on the same handle, one write, no duplicate). No re-resolution is
+        needed, and an earlier ``on_retry`` cache-drop was REMOVED: it rebuilt
+        the whole ``FalkorProjection`` (connection pool + embedding warm-up) for
+        nothing, and its test assertion held with or without the drop.
+
+        What this buys, stated honestly: a rebuild window of roughly 7-14 s now
+        heals in place (``base=2.0``, 3 retries). The window #7405 measured
+        lasted **over an hour**, and no bounded retry should wait that long — so
+        on exhaustion the original error still surfaces, **unchanged in type**.
+
+        ``retryable_aborted_write`` re-raises anything it does not recognise, so
+        a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
+        retried and never wrapped in the sentinel.
+
+        Retry budget (#7405 P2-2). This inner loop owns the write refusals
+        (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
+        is the ONLY retry for a replaced graph — ``retryable_transient`` (the
+        eval's outer phase predicate) deliberately does not carry that arm, so a
+        graph-replaced error is not multiplied 3x4. MISCONF IS still in the outer
+        predicate (it predates #7405 and the eval's UNWRAPPED direct writes rely
+        on the outer loop), so a MISCONF on a ``create_point`` write may nest;
+        the outer loop engages only once this inner loop EXHAUSTS, bounding it at
+        4 inner x 3 outer attempts (12).
+
+        Observability (#7405 P1-1): the retry count is accumulated in
+        ``self._graph_write_retry_count`` (private, monotonic) so a caller that
+        measures retry behaviour — the eval's ``ingest_retries`` Layer-1 outcome
+        — can observe a retry that happened INSIDE the SDK, not only the outer
+        phase retry.
+        """
+        from .retry import (
+            WriteStageRetriesExhausted,
+            call_with_predicate,
+            retryable_aborted_write,
+        )
+
+        def _note_retry(_exc: BaseException) -> None:
+            self._graph_write_retry_count = getattr(
+                self, "_graph_write_retry_count", 0) + 1
+
+        try:
+            return call_with_predicate(
+                fn, predicate=retryable_aborted_write, retries=3,
+                what=what, base=2.0, cap=8.0, on_retry=_note_retry)
+        except WriteStageRetriesExhausted as exc:
+            # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
+            # marker, not for create_point's contract: surface the ORIGINAL error,
+            # whose TYPE callers depend on — `_classify_db_failure` buckets the
+            # redis family as "db" and anything else as "structural", so a new
+            # wrapper type would silently misbucket every exhausted write.
+            raise (exc.__cause__ or exc) from None
+
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
             # Resolve the URI's own graph name first (used as the fallback
@@ -5330,7 +5392,12 @@ class TortoiseSDK:
         # legacy `outdated` flag prop (#2491), so `status` is the complete
         # born-terminal surface.
         _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
-        _epv = self._advance_ep_version(proj)
+        # THE FIRST WRITE in this method is `_advance_ep_version`, which stamps the
+        # epoch the CREATE below reuses — so an aborted write fails THERE, and
+        # wrapping only the CREATE would leave this path unretried, making the
+        # retry dead code in the failure mode it targets (#7405 review P0). Both
+        # writes therefore go through the helper, on the same (stateless) handle.
+        _epv = self._advance_ep_version()
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
                                 "now": now, "embedding": embedding,
                                 "_epv": _epv}
@@ -5474,10 +5541,17 @@ class TortoiseSDK:
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
-        proj.g.query(
-            "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-            params=_create_params,
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                params=_create_params,
+            ),
+            what="create_point CREATE(:Point)",
         )
+        # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+        # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+        # a per-query race and `proj` is as valid after a retry as before it
+        # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):
@@ -13518,8 +13592,9 @@ class TortoiseSDK:
         scope is a node id). The pool is the NEAREST retrievable candidates,
         not an exact-match set: fusion scores are rank-based, so when two or
         more legs return hits every fused id scores > 0 — but a SINGLE-leg run
-        reuses the ``rrf`` field for the raw leg score (0.0 on a fulltext tie,
-        or a signature-B cosine clamped to 0.0 at search_engine.py:659), and
+        reuses the ``rrf`` field for the raw leg score (whatever a fulltext tie
+        scores, or a signature-B cosine clamped to 0.0 in ``run_vector_query``),
+        and
         those ids are dropped by the score guard below. The pool is normally
         non-empty even for a scope that matches nothing. Retrieval failure
         degrades to an EMPTY pool (fail quiet — never crash a read-only
@@ -14271,7 +14346,7 @@ class TortoiseSDK:
             claim_ids = [r[0] for r in rows]
         return op_ids, claim_ids
 
-    def _advance_ep_version(self, proj) -> int:
+    def _advance_ep_version(self) -> int:
         """Advance the graph-wide EP epoch and return the new value (#1163).
 
         Split out of :meth:`_mark_dirty` (#2952) so a create path can stamp
@@ -14279,11 +14354,15 @@ class TortoiseSDK:
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
         """
-        rows = proj.g.query(
-            "MERGE (m:EpMeta) "
-            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-            "RETURN m.ep_version"
-        ).result_set
+        proj = self._get_proj()
+        rows = self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MERGE (m:EpMeta) "
+                "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+                "RETURN m.ep_version"
+            ).result_set,
+            what="_advance_ep_version MERGE(:EpMeta)",
+        )
         return int(rows[0][0]) if rows else 1
 
     def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
@@ -14332,7 +14411,7 @@ class TortoiseSDK:
         # guard's discriminator). A caller that already advanced it (a CREATE
         # that stamped ep_dirty_at inline) passes the value in.
         if ep_version is None:
-            ep_version = self._advance_ep_version(proj)
+            ep_version = self._advance_ep_version()
         # Operators targeting the mutated points, then the claims those
         # operators target (shared 1-hop reverse-BFS — delete_point's
         # pre-delete neighbor capture uses the same helper, #1916).
@@ -17789,11 +17868,10 @@ class TortoiseSDK:
                 weights = _recency_factors([(row[0], row[1]) for row in rows])
                 fused = {pid: s * (1.0 + recency_boost * weights.get(pid, 0.0))
                          for pid, s in fused.items()}
-                # Secondary sort key = the recency factor: at EQUAL multiplied
-                # score (including the degenerate all-0.0 case — FalkorDBLite's
-                # fulltext scores identical documents 0.0), the newer doc still
-                # ranks first (the plan's D1 multiplier can't break a 0×1.5=0
-                # tie on its own). Enabled branch only — default stays
+                # Secondary sort key = the recency factor. It only has to break
+                # ties the multiplier cannot: rows whose raw leg score is 0
+                # multiply to 0 whatever their recency weight, so the newer doc
+                # must still rank first. Enabled branch only — default stays
                 # byte-identical.
                 fused = dict(sorted(fused.items(),
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),

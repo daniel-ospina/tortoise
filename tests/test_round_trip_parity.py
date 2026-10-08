@@ -20,7 +20,7 @@ def _docker_reachable(host: str | None = None,
     so the probe passes there and the docker leg actually runs.
 
     #6673: the port used to be the 6379 literal; it is now the ephemeral host
-    port assigned by the provision step (docker `-p 0:6379`). `host=None`
+    port assigned by the provision step (docker `-p 127.0.0.1:0:6379`). `host=None`
     resolves through `_live_utils.service_host()`, so a
     `TORTOISE_TEST_DOCKER_HOST` override reaches the probe exactly as it reaches
     the clients (the product's `FALKORDB_HOST` is not read — see the seam).
