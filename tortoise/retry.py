@@ -46,10 +46,8 @@ _NETWORK_ERRNOS = frozenset({
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 
 #: Write refusals where the engine ABORTED the statement, so the outcome is
-#: definitively *did not land* (#7405). Three measured messages, from two
-#: engine code paths:
-#:   - a rebuild/replace aborts an in-flight query: ``graph was deleted or
-#:     replaced while the query was running, aborting``;
+#: definitively *did not land* (#7405) AND the graph's own state is irrelevant
+#: to the decision — the same graph is still there when the retry is issued:
 #:   - a concurrent writer holds the write lock, reported on the constraint
 #:     path: ``Write query aborted: another write is in progress``;
 #:   - a concurrent writer holds the slot, reported on the ``GRAPH.QUERY``
@@ -60,33 +58,61 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #:     SDK's own wrapped statements actually receive — ``_advance_ep_version``'s
 #:     ``MERGE`` and ``create_point``'s bare ``CREATE`` both take the write
 #:     path, so without this clause a contended ``create_point`` write is
-#:     raised instead of retried (the #7405 loss). Version scope: all three
-#:     clauses are v6 literals, and the repo's pinned
-#:     ``falkordb-server:v4.20.4`` is the older **C** core, which emits
-#:     ``Encountered different graph value when opened key <name>`` for the same
-#:     race. Same *did-not-land* semantics as the other two: the engine's own
-#:     concurrency test documents the message as retryable, and the message
-#:     itself instructs a retry.
-#: All three are **retryable**, but ONLY on the write path — see
-#: :func:`retryable_aborted_write` for the layering, and
-#: :func:`retryable_transient` for why they are deliberately NOT in the
-#: transport predicate (putting them there made one error retryable at two
-#: nested layers).
+#:     raised instead of retried (the #7405 loss).
+#: Both are v6 literals; the engine's own concurrency test documents the
+#: message as retryable and the message itself instructs a retry.
 #:
 #: ANCHORED on the full abort context, deliberately: a bare alternation over
 #: ``re.search`` matches ANY message merely CONTAINING the phrases (measured:
 #: three crafted non-abort diagnostics all returned True). Because the predicate
 #: gates a re-issued bare ``CREATE`` — non-idempotent, no uniqueness constraint
-#: on ``Point.id`` — a false positive IS the duplicate-point failure this PR
+#: on ``Point.id`` — a false positive IS the duplicate-point failure #7405's fix
 #: exists to prevent, so the whole refusal clause must be present.
-_ABORTED_WRITE_RE = re.compile(
-    r"graph was deleted or replaced while the query was running, aborting"
-    r"|(?:write query )?aborted:\s*another write is in progress"
+_WRITE_LOCK_RE = re.compile(
+    r"(?:write query )?aborted:\s*another write is in progress"
     r"|another write is in progress, retry the query",
     re.IGNORECASE)
 
+#: The graph-deleted-or-replaced abort family — the ONE class whose retry
+#: decision depends on the GRAPH's STATE, not on the error text (#7685). Two
+#: engine cores, three measured literals, and on v6 a single sentence for two
+#: different realities:
+#:
+#:   - **v6 core** (``MODULE LIST`` ver **60001**, Rust): one sentence, because
+#:     the engine cannot tell the caller which happened — ``graph was deleted or
+#:     replaced while the query was running, aborting``;
+#:   - **C core** (``MODULE LIST`` ver **42004** = the ``docker-compose.yml``-
+#:     pinned ``falkordb-server:v4.20.4``, the documented default lane; 42006 =
+#:     v4.20.6): two literals, measured live on the same race —
+#:     ``Encountered different graph value when opened key <name>`` for a
+#:     REBUILD and ``Encountered an empty key when opened key <name>`` for a
+#:     plain DELETION.
+#:
+#: All three mean the statement did NOT land in the graph the caller is writing
+#: to, so re-issuing cannot duplicate. But **neither core's text is by itself
+#: sufficient to authorize a retry**, because the caller's graph may be GONE:
+#: FalkorDB auto-creates a graph on write, so a re-issued bare ``CREATE`` would
+#: succeed into a fresh EMPTY graph and the caller would be told SUCCESS while
+#: its data vanished (#6666 / #7685(A)). The discriminator is STATE —
+#: ``EXISTS <name>`` is 0 after a deletion and 1 after a rebuild's recreate
+#: (measured on both cores) — which is why :func:`retryable_aborted_write`
+#: REFUSES this family unless it is handed a ``graph_exists`` probe.
+#:
+#: The two C-core literals are additionally LINE-ANCHORED (``^\s*``): they are
+#: whole engine messages, so a diagnostic that merely quotes them must not
+#: match.
+_GRAPH_ABORT_RE = re.compile(
+    r"graph was deleted or replaced while the query was running, aborting"
+    r"|^\s*encountered an empty key when opened key "
+    r"|^\s*encountered different graph value when opened key ",
+    re.IGNORECASE | re.MULTILINE)
 
-def retryable_aborted_write(exc: BaseException) -> bool:
+
+def retryable_aborted_write(
+    exc: BaseException,
+    *,
+    graph_exists: Callable[[], bool] | None = None,
+) -> bool:
     """Retryable ONLY for write refusals whose outcome is definitively *did not land*.
 
     Deliberately narrower than :func:`retryable_transient`, and it exists because
@@ -104,14 +130,31 @@ def retryable_aborted_write(exc: BaseException) -> bool:
     ``derived == replay(journal)``. Both arms below instead mean the engine
     ABORTED the statement, so nothing was applied and re-issuing cannot duplicate:
 
-    - the graph was replaced underneath the running query, or a concurrent writer
-      held the write slot (#7405) — the engine's own *aborting* refusal, reported
-      on two code paths (the constraint path's ``Write query aborted: …`` and the
-      ``GRAPH.QUERY`` write path's ``another write is in progress, retry the
-      query``), both with the same *did not land* semantics (see
-      ``_ABORTED_WRITE_RE`` for why the write-path clause exists);
+    - a concurrent writer held the write slot (#7405) — the engine's own
+      *aborting* refusal, reported on two code paths (the constraint path's
+      ``Write query aborted: …`` and the ``GRAPH.QUERY`` write path's
+      ``another write is in progress, retry the query``), both with the same
+      *did not land* semantics (see ``_WRITE_LOCK_RE``);
     - persistence refused the write (``MISCONF`` / ``Can't persist``) — a write
       refusal, not a completed write.
+
+    **The graph-deleted-or-replaced family needs the caller's state (#7685).**
+    The engine's abort text (``_GRAPH_ABORT_RE``) admits BOTH a legitimate
+    rebuild and a plain deletion, and on the v6 core it is literally the same
+    sentence. Retrying a deletion re-issues the ``CREATE`` into a graph FalkorDB
+    auto-created EMPTY, so the caller is told SUCCESS while its data is gone
+    (#6666 class). The predicate therefore refuses this family unless
+    *graph_exists* answers, and the answer is False:
+
+    - ``graph_exists`` — a zero-argument callable answering *"does the graph
+      this write targets currently exist?"* (the SDK passes a raw
+      ``EXISTS <name>`` probe). ``True`` (a rebuild left the key present) →
+      retry; ``False`` (a deletion, or a rebuild whose recreate has not landed)
+      → refuse, so the engine's abort surfaces LOUD.
+    - **Omitted, or the probe raises → refuse.** A retry this predicate cannot
+      authorize is never guessed: a missed retry surfaces the engine's error,
+      while a false retry reports success against a graph the caller never wrote
+      to.
 
     **The server guarantee this rests on** (no test pins it — it is an engine
     property, measured by reading the engine source; see PR #7615's verification
@@ -127,9 +170,25 @@ def retryable_aborted_write(exc: BaseException) -> bool:
     """
     import redis.exceptions as _re
 
-    if isinstance(exc, _re.ResponseError):
-        return bool(_MISCONF_RE.search(str(exc)) or _ABORTED_WRITE_RE.search(str(exc)))
-    return False
+    if not isinstance(exc, _re.ResponseError):
+        return False
+    text = str(exc)
+    if _MISCONF_RE.search(text) or _WRITE_LOCK_RE.search(text):
+        return True
+    if not _GRAPH_ABORT_RE.search(text):
+        return False
+    # The graph-abort family. The text cannot distinguish a rebuild from a
+    # deletion, so the STATE decides — and a retry we cannot authorize is
+    # refused (loud), never guessed.
+    if graph_exists is None:
+        return False
+    try:
+        return bool(graph_exists())
+    except Exception:  # noqa: BLE001, RUF100 — a failed probe is not a rebuild
+        logger.warning(
+            "graph-existence probe failed; refusing to retry the aborted write "
+            "(a silent success is worse than a loud miss)", exc_info=True)
+        return False
 
 
 class WriteStageRetriesExhausted(Exception):
@@ -164,7 +223,8 @@ def retryable_transient(exc: BaseException) -> bool:
       fsync / disk-full write refusal) → True; unrelated ResponseErrors → False.
       **Deliberately NOT here: the replaced-graph / write-lock aborts** (#7405).
       They ARE retryable, but only on the write path
-      (:func:`retryable_aborted_write`). Adding them to this predicate as well
+      (:func:`retryable_aborted_write`) — and the graph-abort family only when
+      the graph still exists (#7685). Adding them to this predicate as well
       made ONE error retryable at two nested layers — the eval's outer phase
       loop (``tools/longmem_eval/ingest_v2.py``) wrapping the SDK's inner write
       retry — which multiplies the budget with no benefit, because the SDK

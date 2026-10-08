@@ -4462,25 +4462,66 @@ class TortoiseSDK:
         from tortoise.exceptions import EmbeddedStoreBusyError
         raise EmbeddedStoreBusyError(db_path, pid)
 
+    def _graph_exists(self, proj=None) -> bool:
+        """Whether the graph a wrapped write targets still EXISTS (#7685).
+
+        The measured discriminator between a REBUILD and a plain DELETION: after
+        a rebuild's recreate ``EXISTS <name>`` is 1, after a deletion it is 0
+        (measured live on the v6 core, ver 60001, and the C core, ver 42004).
+        ``retryable_aborted_write`` needs it because the engine's abort text
+        cannot tell the two apart — on v6 it is literally one sentence — and a
+        re-issued ``CREATE`` would otherwise land in a graph FalkorDB
+        auto-created EMPTY and be reported as SUCCESS.
+
+        Fails LOUD: no projection, no graph name, or a probe that raises all
+        answer False — i.e. "do not retry" — never "assume a rebuild".
+        """
+        proj = self._proj if proj is None else proj
+        if proj is None:
+            return False
+        name = getattr(proj, "graph_name", None)
+        if not name:
+            return False
+        return bool(proj.g.execute_command("EXISTS", str(name)))
+
     def _graph_write_with_retry(self, fn, *, what: str):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
 
         A rebuild/replace aborts an IN-FLIGHT query with
         ``ResponseError("graph was deleted or replaced while the query was
-        running, aborting")``. Measured against THIS client (``falkordb``), that
-        abort is a **per-query race, not a poisoned handle**: ``Graph`` is
-        stateless — it holds only ``name`` + ``execute_command`` and re-issues
-        ``GRAPH.QUERY <name>`` on every call — so the SAME cached handle and
-        client succeed on a plain re-issue (reviewer reproduced: abort, then
-        retry on the same handle, one write, no duplicate). No re-resolution is
-        needed, and an earlier ``on_retry`` cache-drop was REMOVED: it rebuilt
-        the whole ``FalkorProjection`` (connection pool + embedding warm-up) for
-        nothing, and its test assertion held with or without the drop.
+        running, aborting")`` (v6 core), or ``Encountered different graph value
+        when opened key <name>`` (C core). Measured against THIS client
+        (``falkordb``), that abort is a **per-query race, not a poisoned
+        handle**: ``Graph`` is stateless — it holds only ``name`` +
+        ``execute_command`` and re-issues ``GRAPH.QUERY <name>`` on every call —
+        so the SAME cached handle and client succeed on a plain re-issue
+        (reviewer reproduced: abort, then retry on the same handle, one write,
+        no duplicate). No re-resolution is needed, and an earlier ``on_retry``
+        cache-drop was REMOVED: it rebuilt the whole ``FalkorProjection``
+        (connection pool + embedding warm-up) for nothing, and its test
+        assertion held with or without the drop.
+
+        **#7685 — the retry must not mask a DELETION.** The engine reports the
+        same abort for a rebuild and for a plain deletion, and FalkorDB
+        auto-creates a graph on write, so an unqualified retry reported SUCCESS
+        for a genuine deletion — into a fresh EMPTY graph (#6666 class). The
+        predicate is therefore state-gated: the graph-abort family is retried
+        ONLY while the graph still exists (``_graph_exists``), and a deletion
+        raises LOUD. This also fixes the C core (the documented default lane),
+        whose rebuild literal the #7615 predicate did not match at all.
 
         What this buys, stated honestly: a rebuild window of roughly 7-14 s now
         heals in place (``base=2.0``, 3 retries). The window #7405 measured
         lasted **over an hour**, and no bounded retry should wait that long — so
         on exhaustion the original error still surfaces, **unchanged in type**.
+
+        Residual window, stated honestly. The existence probe runs when the abort
+        is classified, and the re-issue follows the backoff (~1-2 s), so a SECOND
+        deletion landing in that gap would still let the re-issued ``CREATE``
+        auto-create an empty graph. That window is orders of magnitude narrower
+        than the abort's own, and closing it completely would need an identity
+        token for the graph that the engine does not expose — an engine-side
+        change, out of scope here (#7685's escalation line).
 
         ``retryable_aborted_write`` re-raises anything it does not recognise, so
         a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
@@ -4512,9 +4553,19 @@ class TortoiseSDK:
             self._graph_write_retry_count = getattr(
                 self, "_graph_write_retry_count", 0) + 1
 
+        # Captured at entry: the projection the failed statement ran against,
+        # which is also the object `_get_proj()` re-resolves to. The first
+        # attempt has already been issued by the caller, so this is never None
+        # in production — and if it IS None the state gate fails loud.
+        proj = self._proj
+
+        def _predicate(exc: BaseException) -> bool:
+            return retryable_aborted_write(
+                exc, graph_exists=lambda: self._graph_exists(proj))
+
         try:
             return call_with_predicate(
-                fn, predicate=retryable_aborted_write, retries=3,
+                fn, predicate=_predicate, retries=3,
                 what=what, base=2.0, cap=8.0, on_retry=_note_retry)
         except WriteStageRetriesExhausted as exc:
             # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
