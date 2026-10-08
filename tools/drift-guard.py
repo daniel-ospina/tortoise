@@ -12,12 +12,18 @@ It also REPORTS, but no longer fails on, how far behind origin/main the branch
 is (#1531's threshold arm, relaxed by #4764). The count was a PROXY for "the
 green we measured does not describe the tree that would land", and it reddened
 branches that were merely behind — measured 2026-10-07: open PRs blocked on
-distance alone (24 and 21 commits) with no failing code check, while a base that
-is merely old is made current by the merge rail before it evaluates the tree.
-The one thing the count cannot replace — a stale base whose merge breaks the
-build WITHOUT reverting content — is caught where it is measurable: the
-refreshed head re-runs CI on the tree that lands. The revert arm below is
-unchanged and remains the failure mode (#4764).
+distance alone (24 and 21 commits) with no failing code check.
+
+⚠️ THE RESIDUAL THIS LEAVES, stated rather than assumed. The proxy did bound one
+case the revert arm does not: a stale base whose merge into a GREEN main breaks
+the build WITHOUT reverting content — a semantic or API conflict, a removed
+symbol, fixture drift. GitHub recomputes the merge ref when the base moves but
+does NOT re-run the PR's checks, and the merge rail re-runs them only where it
+refuses BECAUSE of the lag, which it does only when the base is RED. So a branch
+far behind a green main is no longer bounded by any distance. That residual is
+UNMEASURED here — no instance of it has been observed, which is why the arm is
+reported rather than gating — but it is a real widening and NOT a compensated
+one. The revert arm below is unchanged and remains the failure mode (#4764).
 
 WHY THE FETCH IS NOT OPTIONAL (#4174). A worktree that never fetched holds a
 STALE `origin/main`. Every read against it is self-consistent — the branch
@@ -27,7 +33,8 @@ FETCHES the base before measuring and FAILS CLOSED (exit 2) when the ref
 cannot be proven fresh: a possibly-stale read is never a pass.
 
 The check's two arms are independent:
-  * threshold arm (BEHIND): commits on main missing from the branch, > max;
+  * distance arm (BEHIND): commits on main missing from the branch, REPORTED
+    against max and advisory since #4764 — it never fails the gate;
   * revert arm (SILENT REVERT): the paths main moved since the merge base
     whose merged content differs from main's, where the merge is
     conflict-free — i.e. merging the branch would not keep main's version.

@@ -791,11 +791,13 @@ def test_pr_ref_but_single_parent_head_falls_back_to_head(tmp_path: Path) -> Non
     _git_ok(repo, "update-ref", f"refs/remotes/{_PR_MERGE_REF.removeprefix('refs/')}",
             "HEAD")
     report, p = _payload(repo, github_ref=_PR_MERGE_REF)
-    assert p.returncode != 2, (
+    # `== 0` also excludes the rc=2 crash this test exists to catch (a
+    # single-parent HEAD resolved to `HEAD^2` dies inside `rev-list`), so a
+    # separate `!= 2` assertion would be dead beside it.
+    assert p.returncode == 0, (
         f"single-parent HEAD must report drift, not crash; rc={p.returncode}\n{_out(p)}")
     assert "measured" not in report
     assert report["behind"] == 30, "the real drift must still be measured"
-    assert p.returncode == 0, _out(p)
 
 
 def test_identical_merge_shape_off_the_pr_path_measures_head(tmp_path: Path) -> None:
