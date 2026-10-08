@@ -1129,10 +1129,12 @@ def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
     Shape AND value types are checked, and the ``type`` must be one the
-    replay dispatches on: an unknown type is silently skipped by EVERY pass
-    (pass 1a, 1b and 2 all filter on it), so the sidecar would be cleared
-    after a wipe that restored nothing. `operator.inputs` is the one nested
-    structure the capture writes; every other value must be storable.
+    replay dispatches on: an unknown type is dispatched by NO pass (pass 1a,
+    1b and 2 all filter on it), so the restore would drop that entry. A STRING
+    type is also recorded as a non-folded event, which reds the run that folds
+    it (R8, #3585); a non-STRING type is recorded by no engine, so this
+    validator is its only guard. `operator.inputs` is the one nested structure
+    the capture writes; every other value must be storable.
     """
     if not isinstance(entry, dict):
         return f"not an object ({type(entry).__name__})"
@@ -1401,7 +1403,9 @@ def _validate_prewipe_snapshot(data: dict, path: str) -> None:
     AttributeError/ValueError/ResponseError in the restore loop AFTER
     `DETACH DELETE` — i.e. after the wipe the validator exists to prevent (a
     non-primitive value reaches the driver, and an unknown event type is
-    skipped by every pass, so the sidecar gets cleared with nothing restored).
+    dispatched by no pass, so that entry would be dropped; a STRING type is
+    also recorded as a non-folded event, which reds the run that folds it —
+    R8, #3585).
     """
     version = data.get("version")
     if version is not None and version not in _PREWIPE_SNAPSHOT_READABLE_VERSIONS:
@@ -4321,7 +4325,7 @@ def _apply_one(points: dict[str, dict], ev: dict,
             SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
             event_type=str(t), detail="in-memory fold: unrecognized type",
         )
-        logger.warning("unrecognized event type %r — skipped", t)
+        logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
 
 
 def fold(events: list[dict]) -> dict[str, dict]:
@@ -5716,19 +5720,20 @@ class FalkorProjection(
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
             # must not be dropped silently. #3585 (R8): non-folded and NOT
-            # exempt — the run fails. Only a STRING type is a real record: a
-            # malformed line with no type is dropped identically by every
-            # engine (the writer never emits it), so recording it would be a
-            # false positive. (The one recognized-not-folded-here type,
-            # `DirectEdgeRepoint`, is caught by the warn-only branch above, so
-            # this arm is reserved for a genuinely unknown record.)
+            # exempt — record it so a run that folds it fails. Only a STRING
+            # type is a real record: a malformed line with no type is dropped
+            # identically by every engine (the writer never emits it), so
+            # recording it would be a false positive. (The one
+            # recognized-not-folded-here type, `DirectEdgeRepoint`, is caught by
+            # the warn-only branch above, so this arm is reserved for a
+            # genuinely unknown record.)
             if isinstance(t, str):
                 record_non_folded(
                     SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
                     event_type=t,
                     detail="graph fold: unrecognized type",
                 )
-            logger.warning("unrecognized event type %r — skipped", t)
+            logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
 
     def _episodic_point_ids(self) -> set[str]:
         """Ids of every ``:Point`` currently carrying ``is_episodic = true``.
@@ -7598,7 +7603,7 @@ class FalkorProjection(
                         event_type=t, seq=seq,
                         detail="rebuild_all: unrecognized type",
                     )
-                logger.warning("unrecognized event type %r — skipped", t)
+                logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
 
         # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
