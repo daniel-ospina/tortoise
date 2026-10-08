@@ -46,12 +46,14 @@
 | 15 | audit_events (`identity_link`/`identity_unlink`/`identity_confirm_resend`) | DB | Write | Integration | detail JSONB (provider/email/user_id + adoption signal — team_claim precedent) | Missing audit rows; adoption-signal field untested; PII hygiene |
 
 ### Bug Pattern Flags
+
 - **SQL business logic** (surfaces 4,5,6,7): SQL-suite REQUIRED (PGlite harness) — permit predicate + unique-index backstop + TTL aging, intent consumed-once/TTL, created_by UPDATE parens, index pre-scan. TS mocks alone are blocking.
 - **Race conditions** (surface 4): two-tab unlink — the partial unique index IS the backstop; assert via SEQUENTIAL double-reserve 23505 in the SQL suite (PGlite single-connection; the index rejects regardless of MVCC) AND FakeControlPlane threading (emulation must enforce the one-pending-permit invariant with the same error string). Concurrent registers — threaded FakeControlPlane test (API mapping) + ONE docker-lane integration test (true concurrency).
 - **Conditional guards** (surfaces 3,13): `created_by` namespace classifier + `linking_available` + banner threshold — boundary tests both sides.
 - **Silent function skips** (surfaces 6,8): claim Step-6 removal + onboarding PATCH re-point must assert no residual `teams.email` write (invariant guard test with allowlist).
 
 ### Checklist Notes
+
 - **Atomic writes:** permit reserve→DELETE→consume compensates on EVERY failure path; unique-index 23505 → 409.
 - **Idempotency:** link-commit "newness" check; register 23505 → 409 `already_registered`; stale-permit 404 benign; intent consumed-once.
 - **Boundary values:** login_methods 0/1/2/3; OAuth-empty-password `''`; unconfirmed-OAuth-email; password-only (#2085); confirmed-email-no-password. **Harness seed MUST include the check-(b)=YES shape (OAuth user WITH an email identity row) — otherwise the count-FILTER bug ships green.**
@@ -60,17 +62,20 @@
 ### Journey Test Map
 
 ### Journey: Add a login method before you lose access
+
 1. **Step:** Single-method user opens dashboard → **Acceptance:** recovery banner shows, CTA visible → **Test:** `tests/e2e/test_dashboard_identity.py::test_banner_single_method`
 2. **Step:** Clicks CTA → **Acceptance:** lands on Profile tab → **Test:** `test_dashboard_identity.py::test_banner_cta_lands_profile`
 3. **Step:** Clicks "Connect GitHub" → **Acceptance:** provider round-trip, mount effect POSTs link-commit, method listed, banner gone → **Test:** `test_dashboard_identity.py::test_commit_fires_on_return`; full OAuth round-trip = **staging-manual checklist item in the Task 5 runbook** (hosted suite conftest is API-only — no browser)
 4. **Step:** Clicks "Connect email and password" → **Acceptance:** branch-on-confirmed logic, password set, same auth.uid after re-login → **Test:** `test_user_identity_authority.py::test_add_password_same_uid` (staging-manual for the live re-login; hermetic parts: verified-email, audit, permit compensation)
 
 ### Journey: Remove a login method safely
+
 5. **Step:** User with 2 methods clicks Remove → **Acceptance:** confirm dialog names provider + post-state → **Test:** `test_dashboard_identity.py::test_unlink_confirm`
 6. **Step:** Two tabs both remove → **Acceptance:** exactly one succeeds (unique-index backstop), other 409 → **Test:** `test_user_identity_authority.py::test_unlink_two_tab`
 7. **Step:** User with 1 method clicks Remove → **Acceptance:** blocked (disabled + 409 backstop) → **Test:** `test_user_identity_authority.py::test_unlink_floor`
 
 ### Failure Modes
+
 - Manual linking off → **Expected:** fail-closed UI + promise-free banner → **Test:** `test_dashboard_identity.py::test_fail_closed_manual_linking`
 - Inventory fetch fails (502/offline) → **Expected:** no banner, retry affordance → **Test:** `test_user_identity_inventory.py::test_fetch_error_fail_closed`
 - Intent expires mid-OAuth round-trip → **Expected:** "already linked — refresh your profile" (audited) → **Test:** `test_user_identity_authority.py::test_link_commit_expired_intent`
@@ -92,12 +97,14 @@
 **Acceptance:** PGlite harness green at task end (new suite + flipped 20260813000004 suite); `uq_teams_email` gone; identity flows can't write `teams.email`; foreign-team keys untouched by claim; permit two-tab backstop enforced by the unique index.
 
 **Files:**
+
 - Create: `supabase/migrations/20260827000001_user_identity_profile.sql`
 - Create: `supabase/tests/20260827000001_user_identity_profile.sql` (plain-SQL RAISE assertions — PGlite harness)
 - Modify: `supabase/tests/20260813000004_claim_membership.sql` (flip: uq_teams_email exists → gone; Step-6 overwrite A→B → no-write; `email_in_use` raise → gone — SAME migration-behavior change, do it HERE not in Task 6; the 403 lift is API-layer → Task 3, nothing to flip here)
 - Modify: `supabase/tests/pglite/validate.mjs` (register new migration + suite; bootstrap `auth.identities` + `last_sign_in_at` + `encrypted_password=''` seeds + **OAuth-user-WITH-email-identity-row seed (check-(b)=YES shape)**)
 
 **Step 1:** Write the SQL assertion suite first (TDD). MUST assert:
+
 - `user_unlink_permits`/`link_intents` RLS deny-by-default (service_role-only).
 - `user_identity_inventory` login_methods for the 6 shapes: zero-method (email-identity-only, unconfirmed, no password → 0); OAuth-empty-password → has_password FALSE; unconfirmed-OAuth-email → email_method 0; password-only → 1; confirmed-email-no-password → email_method 1; **OAuth-user WITH email identity row + password → login_methods 2 (NOT 3 — catches the count-FILTER bug)**. Unknown `p_user_id` → 0 methods + empty keys tier, never an error.
 - `reserve_unlink` grants at login_methods=3 (one permit); SEQUENTIAL double-reserve at 3 → second raises `reserve_unlink:floor_violated` (unique-index 23505, named code); blocks at 2; bad identity_id → `reserve_unlink:identity_not_found` (zero-row INSERT distinguished); stale permit older than 5 min is aged (released) by the TTL UPDATE inside reserve_unlink.
@@ -108,6 +115,7 @@
 **Step 2:** Run to verify failure: `cd supabase/tests/pglite && npm run validate` → FAIL (new suite asserts migration missing).
 
 **Step 3:** Implement the migration:
+
 - Tables `user_unlink_permits`, `link_intents` — ENABLE RLS, REVOKE from anon/authenticated, GRANT service_role (0006-0009 pattern). **Partial unique indexes (DECISION: SQL enforcement, mirror the permit pattern):** `uq_user_unlink_permits_active ON user_unlink_permits(user_id) WHERE consumed_at IS NULL` (READ-COMMITTED two-tab backstop); `uq_link_intents_nonce_active ON link_intents(nonce) WHERE consumed_at IS NULL` (consumed-once).
 - RPCs `user_identity_inventory(p_user_id)` + `reserve_unlink(p_user_id, p_identity_id)` — SECURITY DEFINER, `SET search_path=''`, service_role-only grants.
   - `has_password := encrypted_password IS NOT NULL AND encrypted_password <> ''`
@@ -128,6 +136,7 @@
 **Acceptance:** `user_identity_inventory`/`reserve_unlink`/`owner_email` callable via the seam (`cp.rpc(fn, body)` dialect — NOT `cp.query("rpc", ...)` which does not exist); `_CLAIM_ERROR_CODES["email_in_use"]` pruned; FakeControlPlane updated.
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py` (beside `org_email` :1203 / `update_org_email` :1209; prune `_CLAIM_ERROR_CODES["email_in_use"]` :1614 + docstring :1589-1592)
 - Modify: `tests/fake_control_plane.py` (RPC dispatch :51; remove claim email_in_use raise :171/:416; add inventory/reserve emulations; claim emulation stops writing teams.email)
 - Modify: `tests/test_supabase_control.py` (:1032-1065 team-email seam; :1815-1825 email_in_use test → replaced with no-write assertions; :1690/:1707 claim email-overwrite assert → no-write — flipped HERE since the fake change is here, not Task 6)
@@ -145,6 +154,7 @@
 **Acceptance:** `GET /v1/user/identity` session-only + `linking_available` + registry `{"unsupported":true}` + 502 fail-soft; link-intent/commit verify re-auth (`now() - last_sign_in_at <= TORTOISE_REAUTH_WINDOW_SECONDS`), nonce, newness, ownership, verified-email, adoption signal, audit; unlink permits + forwarded DELETE (no-log transport) + post-verify + audit; claim `providers=['email']` 403 LIFTED (confirmed-email conjunct kept); register race → 409 (test-first); abuse/onboarding/oauth consumer re-points; `POST /v1/user/identity/resend-confirmation`.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (claim trio :7616, onboarding GET :8199/PATCH :8208, register :2985, `_gotrue_admin_get_user` :3250, comment :7570-7579)
 - Modify: `tortoise/abuse.py` (owner-email resolution re-point via seam; NULL fallback → ops inbox)
 - Modify: `tortoise/oauth.py` (:500 team email → user email)
@@ -168,6 +178,7 @@
 **Acceptance:** Banner iff `login_methods ≤ 1 AND NOT (email confirmed AND has_password)`, non-anon, fetch OK; promise-free when linking off; CTA lands on Profile; link-commit fires on OAuth return; add-email branches on `email_confirmed_at`; re-auth dialog works for password + OAuth-only (same-provider); fail-closed + loading/empty/error states; no horizontal scroll <768px.
 
 **Files:**
+
 - Create: `website/apps/dashboard/src/profile.jsx` (ProfileTab, RecoveryBanner, AddLoginMethodButtons, ReauthDialog)
 - Create: `website/apps/dashboard/src/identity.js` + `website/apps/dashboard/src/identity.test.js` (node --test, COLOCATED — sessionKey.test.js precedent; NOT `tests/` — none exists)
 - Modify: `website/apps/dashboard/src/main.jsx` (nav :2641-2649 6th tab; RecoveryBanner mount; mount-effect OAuth-return :875-925 — **POST link-commit on return BEFORE stripping params**; re-auth marker resume; inventory refetch on focus/mutation; vendored supabase-js storage — VERIFY existing cookie adapter :49-71 is used by the linkIdentity flow, extend if not)
@@ -189,6 +200,7 @@
 **Acceptance:** Runbook covers the Supabase dashboard steps + staging checks (a)-(e); **forwarded bearer token never appears in logs (no-log transport asserted)**; `TORTOISE_LINK_INTENT_SECRET` unset → link-intent 503 (fail-closed) + rotation note; `.env.example` + website_architecture.md updated.
 
 **Files:**
+
 - Create: `docs/plans/2026-08-26-1765-ops-runbook.md` (link + steps below)
 - Modify: `.env.example` (`TORTOISE_LINK_INTENT_SECRET`, `TORTOISE_REAUTH_WINDOW_SECONDS`, per-user rate-limit envs)
 
@@ -205,6 +217,7 @@
 **Acceptance:** All legacy surfaces updated; full docker-lane suite + PGlite + `vite build` + e2e smoke green; no residual `teams.email` overwrite / `email_in_use` / 403 assertions.
 
 **Files:**
+
 - Modify: `tests/test_claim_endpoints.py` (REMAINDER only — header + :154 owned by Task 3 Step 9; Task 6 owns :185/:202/:363 provider-invariant tests + remaining email sites)
 - Modify: `tests/test_email_signup.py:278` (TestEmailSignupClaim), `tests/test_agent_signup.py:332-364`
 - Modify: `tests/e2e/hosted/test_13_claim.py:382,386-392` (email assert + 403 assert — TWO breakages)

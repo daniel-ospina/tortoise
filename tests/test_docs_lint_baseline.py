@@ -1634,7 +1634,7 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     # number: slack above the observed range is an amnesty window, so it is
     # bounded at 160 and any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 9688, "lychee": 50}
+    ceilings = {"markdownlint": 3220, "lychee": 50}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1672,7 +1672,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "2eae1464767c6eeb9d103393ea36d134d42db77242221483ee537a613ce5a830"
+        "d21042595218c6bd3aef55156179dfb3d5b64cf04d3519dabd4663fc2216e199"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "dd6c71c15e276c0a524731d97ca05638e0759e0a2e4820e1ec1362dd2b9d8714"

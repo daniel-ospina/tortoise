@@ -31,6 +31,7 @@ The practical impact:
 The NPS survey verbatims cluster around several themes:
 
 **Negative themes (detractors):**
+
 - "Product has become too complex" (mentioned by 18 respondents)
 - "Hard to get started / steep learning curve" (14 respondents)
 - "Support takes too long to respond" (11 respondents)
@@ -38,6 +39,7 @@ The NPS survey verbatims cluster around several themes:
 - "Features I don't need keep getting added, features I need don't exist" (7 respondents)
 
 **Positive themes (promoters):**
+
 - "Core analytics are solid and reliable" (22 respondents)
 - "Great value for the price" (15 respondents)
 - "CSM [name] has been incredibly helpful" (12 respondents)

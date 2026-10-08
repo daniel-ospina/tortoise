@@ -35,6 +35,7 @@ Domain: backend. Complexity: standard. No UI/UX (skip ux-verification depth). Ve
 **Intent:** Pin the #2249 semantics at the shared-helper layer before any implementation: reverse-emitted same-payload chains must converge to the payload-literal fold order end state; the guard-(h) discriminator, cycles, and same-ref stability must NOT move.
 **Acceptance:** New tests exist; the chain-convergence RED tests FAIL on current code (reverse arm: applied=1, chain head stays live / middle link skipped); all green-regression pins PASS on current code. RED commit contains tests only and is committed LOCALLY — the PR opens only after Task 2 lands, so the RED state is never CI-tested in isolation (same as #2194/#2295; CI tiered selection would otherwise run test_capture_session.py and fail).
 **Files:**
+
 - Test: `tests/test_capture_session.py` (append after `test_apply_supersessions_divergent_successor_keeps_first`, ~line 1770; module already imports `apply_supersessions` per-test + `json`, `pytest`)
 
 **Step 1: Add the discriminating RED tests + regression pins** (full code below — exact test text):
@@ -413,6 +414,7 @@ git commit -m "test(capture): pin #2249 same-payload chain fold-order convergenc
 **Intent:** Make same-payload chains order-independent at the ONE shared consumer, without touching the per-record gates (they stay byte-identical and remain the same-payload/cross-commit discriminator at fold time).
 **Acceptance:** All Task-1 RED tests pass; all 13 existing `test_apply_supersessions_*` + guards (a)–(h) + parity/e2e chain tests stay green; docstring contract updated; no new warnings in single-record payloads.
 **Files:**
+
 - Modify: `tortoise/commit_ops.py` (add module helper above `apply_supersessions`; wire the order into the loop; update the docstring chain contract)
 
 **Step 1: Add the `_supersession_fold_order` helper** (module-level, above `apply_supersessions`):
@@ -588,6 +590,7 @@ with:
 **Step 3: Update the docstring chain contract** (commit_ops.py docstring, the #2249 paragraph):
 
 Replace:
+
 ```
     CHAINS (A→B and B→C in one payload) must be emitted in fold order
     ([A→B, B→C]): the visible-successor gate warns and skips a fold whose
@@ -596,7 +599,9 @@ Replace:
     in #2249; extractor-side emission currently preserves embed/LLM order
     with no sort). Returns the number of
 ```
+
 with:
+
 ```
     CHAINS (A→B and B→C in one payload) fold in DEPENDENCY order regardless
     of emission order (#2249): the pre-pass orders records so each fold
@@ -633,6 +638,7 @@ git commit -m "feat(supersession): fold same-payload chains in dependency order 
 **Intent:** Pin the fix at the hosted §6b layer — the consumer that processes EXTERNAL client payloads (the producer capture can't be disciplined; the endpoint must converge on reverse-emitted chains end-to-end).
 **Acceptance:** A single POST carrying a reverse-order chain [B→C, A→B] converges to A.sb=B, B.sb=C, C live; the cross-commit guard (h) test still passes.
 **Files:**
+
 - Test: `tests/test_commit_endpoint.py` (add a `test_same_commit_reverse_chain_converges` to `Test6bEntitySupersessionGuards`, after guard (h) ~line 1141)
 
 **Step 1: Add a chain supersession-commit helper + the e2e test** (near `_supersede_commit` / guard (h)):
@@ -689,19 +695,23 @@ git commit -m "test(commit): pin hosted reverse-order chain convergence end-to-e
 **Intent:** Prove no regression across the supersession/journaling surface and leave the in-code #2193 contract comments truthful (order-sensitivity resolved).
 **Acceptance:** Core suite green; ruff clean; ci_selection integrity clean; `hosted_api.py:7424` comment no longer mandates client fold-order discipline.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (the #2193 residue comment ~7424)
 - Test: full core suite (no new files → no ci-surfaces registration needed)
 
 **Step 1: Update the §6b in-code comment** (`hosted_api.py`, the block ending ~7426)
 
 Replace:
+
 ```
     # supersession chains must be emitted in fold order ([A→B, B→C]) — the
     # visible-successor gate skips a fold whose successor this payload has
     # already terminalized (order-sensitivity pinned in #2249). The step-6
     # entity writes above have landed the payload's net-new successors.
 ```
+
 with:
+
 ```
     # supersession chains fold in dependency order inside apply_supersessions
     # (#2249) — emission order is irrelevant; the helper's pre-pass sorts so
@@ -714,12 +724,14 @@ with:
 **Step 2: Full verification**
 
 Run:
+
 ```bash
 cd <worktree>
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/ -q -x
 uv run ruff check tortoise/commit_ops.py tortoise/hosted_api.py tests/test_capture_session.py tests/test_commit_endpoint.py
 uv run python tools/ci_selection.py --integrity
 ```
+
 Expected: all tests green (no -x failure), ruff clean, integrity clean (no new test files).
 
 **Step 3: Commit**

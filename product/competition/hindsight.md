@@ -243,6 +243,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 **Sources checked:** Product Hunt, G2, Reddit (r/AI_Agents), GitHub Discussions
 
 **What users/customers praise:**
+
 - Benchmark credibility — results cited/covered by Virginia Tech and the Washington Post (⚠️ methodology not independently verified — see §6)
 - Developer experience — "Polished, dependable" (Product Hunt), "effortless" (G2), 60-second quick start
 - Production-ready — SOC 2, PostgreSQL, Docker one-command, no feature walls between OSS and Cloud
@@ -250,6 +251,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 - "Standout support" from the team (Product Hunt)
 
 **What users/customers complain about:**
+
 - API stability concerns for multi-agent setups (Reddit)
 - UI bugs reported on G2 (likely RAG platform, not Hindsight)
 - Pricing opacity — docs-domain pricing page (`hindsight.vectorize.io/pricing`) returns 404; pricing lives on the company domain (`vectorize.io/pricing`)

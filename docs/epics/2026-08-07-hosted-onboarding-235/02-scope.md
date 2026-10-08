@@ -87,6 +87,7 @@ created: 2026-08-07
 > Written BEFORE user journeys. These define what must be true at the system level, not how to achieve it.
 
 ### E2E-1: New user signup → receive API key
+
 **Given:** Tortoise hosted platform is live at api.premiselabs.co
 **When:** A new user completes signup (email or GitHub OAuth)
 **Then:** The system provisions an API key with prefix `tt_` scoped to a default team
@@ -94,6 +95,7 @@ created: 2026-08-07
 **And:** The key can authenticate against `GET /mcp` returning transport metadata
 
 ### E2E-2: Paste one-artifact → agent connects
+
 **Given:** User has API key from E2E-1 and is on the welcome page
 **When:** User copies the one-artifact block (MCP config + onboarding prompt) and pastes it into their agent (Claude Code, Codex, or Cursor)
 **Then:** The agent successfully connects to api.premiselabs.co/mcp using the Bearer key
@@ -101,6 +103,7 @@ created: 2026-08-07
 **And:** The agent begins executing the onboarding prompt (asks the first yes/no question)
 
 ### E2E-3: Yes/no flow → GitHub connected
+
 **Given:** Agent is executing the onboarding prompt (E2E-2 state)
 **When:** User answers "yes" to "Connect GitHub?" and provides their GitHub org/username
 **Then:** The system initiates GitHub OAuth and returns an auth_url
@@ -110,6 +113,7 @@ created: 2026-08-07
 **And:** If authorization times out, the agent records `github_connected: false, github_error: "oauth not completed"` and continues with the remaining questions
 
 ### E2E-4: Yes/no flow → indexing → first memory written
+
 **Given:** GitHub is connected (E2E-3 state)
 **When:** User answers "yes" to "Index your GitHub issues and PRs into memory?"
 **Then:** The system begins background indexing of issues/PRs from authorized repos
@@ -117,6 +121,7 @@ created: 2026-08-07
 **And:** The agent can call `tortoise_query(kind="observation")` and see indexed content
 
 ### E2E-5: Yes/no flow → demo graph shown
+
 **Given:** Agent is executing the onboarding prompt, at least one data source connected
 **When:** User answers "yes" to "See the demo graph?"
 **Then:** The agent verifies the signup-seeded demo graph (respecting the `_demo_sentinel`; backfills only if missing — never deletes-and-overwrites)
@@ -124,6 +129,7 @@ created: 2026-08-07
 **And:** The agent explains what the demo graph shows ("You have 3 decisions connected by evidence...")
 
 ### E2E-6: Yes/no flow → session recording enabled
+
 **Given:** Agent is executing the onboarding prompt
 **When:** User answers "yes" to "Record agent sessions automatically?"
 **Then:** The system enables session recording for the team
@@ -131,6 +137,7 @@ created: 2026-08-07
 **And:** The onboarding state records `session_recording: true`
 
 ### E2E-7: Onboarding complete → memory digest shown
+
 **Given:** All yes/no questions answered (user may have said "no" to some)
 **When:** The agent reaches the final Verification step of the onboarding prompt
 **Then:** The agent calls `tortoise_health` and `tortoise_context` (MCP tool wrapping `GET /v1/context`)
@@ -139,6 +146,7 @@ created: 2026-08-07
 **And:** Funnel event `onboarding_complete` is tracked with elapsed time < 5 min — fired server-side once, when `tortoise_onboarding_complete` sets `completed_at`
 
 ### E2E-8: User says "no" to everything → minimal setup
+
 **Given:** Agent is executing the onboarding prompt
 **When:** User answers "no" to all 5 yes/no questions
 **Then:** The agent still verifies the connection (`tortoise_health` returns OK)

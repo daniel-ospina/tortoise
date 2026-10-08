@@ -20,6 +20,7 @@ aboutObjects: tortoise-hosted-platform
 ## Scope boundaries (from epic scope + issue body)
 
 **IN:**
+
 1. Supabase migration: `graphs` table + RLS + partial unique index; `api_keys` +graph_id/scopes/created_by_key_id/delegation_depth + `chk_minted_key_no_escalation` CHECK
 2. `resolve_api_key` extension (graph scope + scopes + legacy_full_access + delegation_depth; graph_id NULL → default graph)
 3. Registry parity: Graph node +status/recording; APIKey node +graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path returns same shape
@@ -48,9 +49,11 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** Migration applies cleanly on top of 20260830000001; re-apply (rollback drill) is safe; graphs table has RLS GUC read policy + service_role ALL; partial unique index `(org_id, name) WHERE status <> 'deleted'`; CHECK fires on direct INSERT of escalation scope with deleg=0 (graph-bound AND team-wide); graph_id FK ON DELETE CASCADE; scopes default `[]`.
 
 **Files:**
+
 - Create: `supabase/migrations/20260901000001_graphs_and_key_scopes.sql`
 
 **Steps:**
+
 1. `CREATE TABLE IF NOT EXISTS public.graphs` (id text PK, org_id FK→teams ON DELETE CASCADE, name, kind default 'custom', namespace, status default 'active', recording bool NULL, created_at) — per plan §4.1 DDL.
 2. `CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_name_active ON public.graphs (org_id, name) WHERE status <> 'deleted'`.
 3. RLS: `ENABLE ROW LEVEL SECURITY`; `graph_guc_read` FOR SELECT TO authenticated USING (org_id = current_setting('app.current_org_id', true)); `graph_service_role_all` FOR ALL TO service_role. Column grants: REVOKE ALL from anon/authenticated/public; GRANT SELECT (id, org_id, name, kind, namespace, status, recording, created_at) TO authenticated (mirror 0006 pattern).
@@ -69,10 +72,12 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** `resolve_api_key` returns new keys: `graph_id`, `graph_namespace`, `scopes`, `legacy_full_access`, `delegation_depth`; a key with NULL graph_id resolves to default-graph namespace (`teams.graph_name`); pre-C1 keys (schema one behind) resolve with safe defaults (D3); existing dict keys unchanged (no consumer breakage).
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py`
 - Test: `tests/test_supabase_control.py` (extend)
 
 **Steps:**
+
 1. Extend the api_keys primary read select (the `enabled` pattern at supabase_control.py:515-542): add `graph_id, scopes, delegation_depth, created_by_key_id` to the combined select list. The EXISTING except-fallback (base-only retry, `_API_KEY_BASE_SELECT`) already covers a pre-C1 schema (new columns absent → 400 → retry base-only → keys resolve with safe defaults below). Declare `_API_KEY_ADDITIVE_C1_TIER = ["graph_id", "scopes", "delegation_depth", "created_by_key_id"]` as documentation of the additive tier (same fail-open class as the `enabled` column; the existing one-tier ladder is the mechanism — no second ladder needed).
 2. Initialize the new vars BEFORE the `if rows:` branch (membership-path safety — the current return dict only guards `enabled` with `if rows else True`): `graph_id = None; scopes: list = []; delegation_depth = None; created_by_key_id = None; legacy_full_access = True` (a membership-path key has no api_keys row → full legacy, matches today).
 3. In the row path (overwrite the step-2 initals): `graph_id = row.get("graph_id")`, `scopes = row.get("scopes") or []`, `delegation_depth = row.get("delegation_depth")`, `created_by_key_id = row.get("created_by_key_id")`.
@@ -87,11 +92,13 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** `_graph_create` registry branch stores `status:'active'` (+ recording:null absent → default); `api_key_create` stores optional graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path (hosted_api get_current_org registry branch) returns the same five new dict keys with the same D2 legacy rule; nodes without the props (pre-C1 selfhost graphs) resolve with safe defaults.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`_graph_create` :12078, `api_key_create` :12450/12605, `apikey_list` :12482)
 - Modify: `tortoise/hosted_api.py` (registry resolve :1306-1420 + dict build ~1419)
 - Test: `tests/test_hosted_auth.py` (extend)
 
 **Steps:**
+
 1. `_graph_create` registry CREATE: add `status:'active'` to the CREATE params (recording stays absent = NULL default).
 2. `apikey_create` (sdk.py:12439; CREATE at :12461, recovery-mint at :12620): accept `graph_id=None, scopes=None, created_by_key_id=None, delegation_depth=None` kwargs; include non-None values in the CREATE string (back-compat: old callers unchanged). Same for the recovery-mint at :12620 if it shares the pattern.
 3. `apikey_list` (def :12478 / RETURN :12482): add graph_id/scopes/delegation_depth to RETURN + output rows (dashboard/C7 parity; additive).
@@ -105,11 +112,13 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** Supabase `graph_metadata` returns default row + active custom rows from the graphs table, each with `status`; registry `graph_list` rows gain `status` (+recording); `graph_count` returns `1 + count(custom active)` in Supabase mode (deleted excluded), registry count unchanged.
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py` (`graph_metadata` :2117)
 - Modify: `tortoise/sdk.py` (`graph_list` :12121, `graph_count` :12153)
 - Test: `tests/test_supabase_control.py`, `tests/test_graph_diagnostics.py` or adjacent graph tests (extend)
 
 **Steps:**
+
 1. `graph_metadata`: after the teams.graph_name read, ALSO query `graphs` WHERE org_id AND status='active' (ORDER BY created_at); build default row `{graph_id:'default', org_id, name:'default', kind:'default', namespace: graph_name, status:'active'}` first, then custom rows `{graph_id, org_id, name, kind, namespace, status}`. Empty-graphs-table (pre-C1 schema) → degrade to default-only (drift-safe: the graphs query is wrapped in try/except → log + default-only, never 500 the dashboard).
 2. `graph_list` registry branch: RETURN adds `g.status` (+`g.recording`); output rows gain both (None-safe).
 3. `graph_count`: Supabase branch — `1 + count(*) WHERE org_id AND kind='custom' AND status='active'`; registry branch unchanged (existing MATCH count — note: `team_create` :12055 creates the `kind='default'` Graph node, so the registry count already includes the default; verified no double-count). NOTE for C3: registry `graph_count` (:12153-12159) has no status filter — correct for C1 (no delete yet), but C3's soft-delete must filter `status <> 'deleted'` in the registry MATCH to avoid registry↔Supabase overcount drift.
@@ -122,9 +131,11 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** Suite runs green in the PGlite harness (`npm --prefix supabase/tests/pglite run validate`) alongside all existing suites.
 
 **Files:**
+
 - Create: `supabase/tests/20260901000001_graphs_and_key_scopes.sql`
 
 **Steps (mirror 20260827000001 harness conventions — tests.assert helper, service_role seeding, cleanup):**
+
 1. Schema presence: graphs table + 4 api_keys columns + CHECK constraint + partial unique index exist.
 2. CHECK enforcement (surface 2): direct INSERT escalation scope with deleg=0 → violation, graph-bound AND team-wide; deleg NULL + escalation scope → allowed (owner).
 3. Partial unique: insert same (org_id,name) twice active → violation; delete first → reuse allowed.
@@ -139,9 +150,11 @@ aboutObjects: tortoise-hosted-platform
 **Acceptance:** DROP the new columns/table (rollback) → `resolve_api_key`/`graph_metadata`/`graph_count` still work (D3 drift-safe ladder); re-apply → full function; all pre-existing tests green in both modes (docker lane + carve-out per AGENTS.md).
 
 **Files:**
+
 - Test: `tests/test_supabase_control.py`, `tests/test_hosted_auth.py` (regression runs)
 
 **Steps:**
+
 1. Run the full docker-lane suite: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/ -v` (or the carve-out subset per AGENTS.md if docker unavailable).
 2. Run `npm --prefix supabase/tests/pglite run validate` (all migrations + suites).
 3. Run `uv run pytest tests/test_migration_append_only.py tests/test_migration_drift_gate.py` (migration hygiene gates).

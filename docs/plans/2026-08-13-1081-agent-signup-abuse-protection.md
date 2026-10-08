@@ -10,6 +10,7 @@
 **Role:** (omitted — no AGENT_SESSION_ROLE)
 
 **Architecture:** Two independent, precedented mechanisms, deliberately NOT coupled:
+
 1. **Per-IP signup limiter** — a parametrized in-memory IP-bucket primitive (`_check_ip_bucket_rate_limit`) that replaces the two existing duplicated limiter bodies (register + sensitive-op, hosted_api.py:1411/1448 — already near-identical copies) and adds a third call site for agent_signup with its OWN bucket store + env knobs. The shared `_register_buckets` (3/hr) that /v1/register + /v1/signup/email depend on is untouched.
 2. **R8 signup_velocity** — an in-memory `SignupVelocityTracker` in abuse.py mirroring the `ReadVelocityTracker` (R3) precedent: fed on the SUCCESSFUL mint path per IP, notify-only via `notify_abuse` (BILLING_NOTIFY_TO fallback — the documented anon ops path, notify.py:153), never suspends. The durable sweeper over audit_events is a documented follow-on; the `idx_audit_ip_time` index ships now (tiny, idempotent, data already accruing).
 
@@ -20,6 +21,7 @@
 > **Gate skipped: plan touches zero third-party dependencies.** All changes are in-repo Python (asyncio/time/defaultdict/os/threading stdlib), FastAPI/starlette patterns already used throughout hosted_api.py, urllib (CLI stdlib), and one idempotent Postgres `CREATE INDEX IF NOT EXISTS`. No new library versions, no new API surfaces, no SDKs. Prior research (Stripe 7.4% multi-account abuse, AIPower post-mortem, Harness/Nexu, Mem0 shadow-account scoping, NAT/CGNAT false-positive mitigations) is carried in the issue Context (verified 2026-08-13) and consumed as the design posture: friction + ceiling, not hard gates; soft-threshold awareness for shared NAT.
 
 **Design postures adopted from prior research (issue Context, verified):**
+
 - 2/24h means "3rd signup within rolling 24h → 429 + Retry-After" (P2 #8 — hard default, documented 429 appeal path via support email, env-tunable).
 - Anonymous = scoped + limited (Mem0 shadow-account pattern); reduced anon ceiling is **deferred to #1082** (one-way lockout without a claim path) — this issue only asserts existing free-tier caps bind anon teams.
 - No CAPTCHA/device-fingerprint on the agent path (headless CLI constraint; #741 makes client device IDs untrustworthy) — rejected-alternative documented below.
@@ -44,16 +46,19 @@
 ### Journey Test Map
 
 ### Journey: "Vibecoder mints a key in one command"
+
 1. **Step:** `tortoise signup` → **Acceptance:** key returned, config saved, works immediately → **Test:** `test_minted_key_authenticates_team_info`, `test_signup_returns_key` (unchanged, stay green)
 2. **Step:** CLI hits 429 → **Acceptance:** friendly Retry-After + support pointer, not raw JSON body → **Test:** `tests/test_cli_signup.py::test_signup_429_friendly`
 
 ### Journey: "Farmer hammers signup from one IP"
+
 1. **Step:** 1st–2nd mints → **Acceptance:** 200 (legit flow unaffected) → **Test:** `test_signup_ip_limit_2_per_24h`
 2. **Step:** 3rd mint in rolling 24h → **Acceptance:** 429 + computed `Retry-After` (≤ 86400) + `error_code: over_signup_ip_rate_limit` + support email → **Test:** `test_signup_ip_limit_2_per_24h`
 3. **Step:** client identity rotation → **Acceptance:** still 429 (IP is the key, not the identity) → **Test:** rewritten `test_rate_limit_not_bypassable_via_client_identity`
 4. **Step:** ops inbox → **Acceptance:** `abuse_signup_velocity` notification (BILLING_NOTIFY_TO fallback since anon team has no email) → **Test:** `test_abuse.py::TestSignupVelocity`
 
 ### Failure Modes
+
 - **Restart resets buckets** → 2/24h and R8 windows reset on deploy → **Expected:** documented degradation, identical to register limiter precedent (#498) → **Test:** n/a (documented); durable sweeper is the follow-on fix
 - **Multi-instance (Fly) deployment** → per-process in-memory limits, each instance allows 2/24h → **Expected:** documented degradation; deferred durable sweeper (audit_events + idx_audit_ip_time) is the authoritative multi-instance signal → **Test:** n/a (documented in plan + artifact)
 - **Shared NAT office (2 devs mint in 24h)** → 429 on 3rd, R8 fires on 2nd → **Expected:** hard-limit false positive posture documented in 429 detail (support email); env-tunable; R8 is notify-only (one ops email, dedup'd once/window) → **Test:** `test_signup_ip_limit_2_per_24h` asserts the contract
@@ -91,6 +96,7 @@
 **Acceptance:** `_check_ip_bucket_rate_limit` exists with the register + sensitive-op wrappers re-implemented on it (behavior byte-identical: Retry-After 3600, same detail strings, 10k memory bound); `agent_signup` calls `_check_signup_ip_rate_limit` (own store, env knobs); `test_shared_ip_bucket_3_per_hour` green; new signup 429 tests green; rewritten dead test green.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:1404-1475` (limiter block), `:4705` (agent_signup call), `:26` import block
 - Test: `tests/test_agent_signup.py`, `tests/test_email_signup.py` (locked), `tests/test_export_delete.py` (regression), `tests/conftest.py:255`
 
@@ -320,6 +326,7 @@ Replace `await _check_register_rate_limit(request)` (hosted_api.py:4705) with `a
 **Step 5: Run the tests**
 
 Run:
+
 - `pytest tests/test_agent_signup.py::TestSignupIpRateLimit tests/test_email_signup.py::TestEmailSignup::test_shared_ip_bucket_3_per_hour -v` → PASS
 - `pytest tests/test_export_delete.py -v` → PASS (sensitive-op refactor regression)
 
@@ -339,6 +346,7 @@ git commit -m "feat(abuse): parametrized IP-bucket limiter + standalone 2/24h si
 **Acceptance:** agent_signup has no membership_count_since/registry count block; `test_rate_limit_query_shape` rewritten to assert the NEW per-IP 429 in Supabase mode; writer-inventory suite green.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:4715-4747` (dead query block + `membership_count_since` in the function-level import at 4720)
 - Test: `tests/test_writer_inventory.py:347`
 
@@ -391,6 +399,7 @@ git commit -m "fix(abuse): remove dead per-identity signup count; rewrite dead-s
 **Acceptance:** `SignupVelocityTracker` with success-path + block-path feeds, notify-once-per-window dedup, memory bound, kill switch; fed from agent_signup on BOTH success branches; `abuse_signup_velocity` in KINDS + ALERT_TYPES; unit + integration tests green.
 
 **Files:**
+
 - Modify: `tortoise/abuse.py` (EVENT_SIGNUP_VELOCITY, ALERT_TYPES, `_alert_dict`, tracker class, singleton seam)
 - Modify: `tortoise/notify.py:30-33` (KINDS)
 - Modify: `tortoise/hosted_api.py:4793, 4821` (feed call sites)
@@ -610,6 +619,7 @@ Also add `"abuse_signup_velocity"` to `KINDS` in `tortoise/notify.py:30-33`.
 **P3-4 (phase-7):** add an `ip` line to BOTH renderers — `_abuse_email_text` (notify.py:112-137) and the Telegram parts (notify.py:165-175) — the IP is the single most actionable field in an IP-scoped ops alert. Assert it in `TestNotifyAbuse` (the `notified` fixture details tuple index 2 carries `ip`).
 
 Add R8 to the abuse.py header rule list (P3-FIX-7):
+
 ```python
 # - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
 #   notify ops only (BILLING_NOTIFY_TO; never suspends)
@@ -702,6 +712,7 @@ git commit -m "feat(abuse): R8 signup_velocity in-memory tracker + ops notify (#
 **Acceptance:** Registry-mode test asserts minted Team node props == `tier_limits("free")`; writer-inventory Supabase-mode test asserts `p_*` params match `tier_limits("free")`; both green.
 
 **Files:**
+
 - Test: `tests/test_agent_signup.py`, `tests/test_writer_inventory.py`
 
 **Step 1: Write the failing tests**
@@ -765,6 +776,7 @@ git commit -m "test(abuse): lock free-tier caps binding for anon signup teams (#
 **Acceptance:** Migration file created, idempotent (applies twice cleanly), dry-run passes; no unit test needed (pure DDL — audit schema tests are DSN-gated; the JSONL-mode tests in test_audit_events.py are unaffected).
 
 **Files:**
+
 - Create: `supabase/migrations/20260813000003_audit_ip_time_index.sql`
 
 **Step 1: Write the migration**
@@ -810,6 +822,7 @@ git commit -m "feat(abuse): idx_audit_ip_time index for durable R8 sweeper (#108
 **Acceptance:** On 429, `_cmd_signup` prints a friendly message with the Retry-After window + `support@premiselabs.co` pointer and returns 1; happy path unchanged; new CLI tests green.
 
 **Files:**
+
 - Modify: `tortoise/__main__.py:644-651`
 - Test: Create `tests/test_cli_signup.py`
 
@@ -895,6 +908,7 @@ git commit -m "fix(cli): friendly 429 UX for tortoise signup — Retry-After + s
 **Acceptance:** `.env.example` lists the four knobs; `docs/scoping/scoping-1081-agent-signup-abuse.md` exists with converged design, rejected alternatives (with "when this would have been better"), and the durable-sweeper follow-on contract.
 
 **Files:**
+
 - Modify: `.env.example:190-200`
 - Create: `docs/scoping/scoping-1081-agent-signup-abuse.md`
 
@@ -1027,11 +1041,13 @@ supabase db push --dry-run && supabase db push   # + idempotent re-apply check
 **Env vars added (documented in `.env.example`):** `TORTOISE_SIGNUP_IP_LIMIT` (default 2), `TORTOISE_SIGNUP_IP_WINDOW_S` (default 86400), `TORTOISE_ABUSE_SIGNUP_THRESHOLD` (default 2, follows `TORTOISE_SIGNUP_IP_LIMIT`), `TORTOISE_ABUSE_SIGNUP_WINDOW_S` (default 86400). All read via `abuse._int_env`; limiter knobs read at call time, R8 knobs at tracker init (restart to apply — R3 precedent).
 
 **Task 0 staging probe — ⛔ NOT YET RUN (pre-deploy gate).** No staging environment access from the implementation machine. The middleware fix is SHIPPED (P1-FIX-11 design: read non-spoofable `Fly-Client-IP`, never XFF; `--forwarded-allow-ips="*"` REJECTED). Before deploying Tasks 1/3 to production, run these probes in staging and record the results here:
+
 1. **Premise check:** log `request.client.host` vs `X-Forwarded-For` vs `Fly-Client-IP` for 2 distinct egress IPs. If `client.host` differs per egress IP → premise false (limiters already correct).
 2. **Spoof probe (hard blocker, two directions):** (a) POST with forged `X-Forwarded-For: 203.0.113.99` → assert `request.client.host != "203.0.113.99"` AND `request.state.client_ip != "203.0.113.99"` (middleware ignores XFF). (b) POST with forged `Fly-Client-IP: 203.0.113.99` behind the real proxy → assert `request.state.client_ip != "203.0.113.99"` (the proxy overwrites client-supplied values; if a non-proxy ingress passes it through, the middleware must be hardened to trust Fly-Client-IP only from the proxy).
 3. **Instance count / scaling policy:** record instance count + autoscaling policy — single instance = real 2/24h enforcement; auto-scaled = effective 2N/24h (changes the deferred-sweeper urgency). `Dockerfile.hosted` unchanged (no `--forwarded-allow-ips` — correct posture).
 
 **Deviations from plan (all minimal, noted):**
+
 1. `abuse.py` memory-bound prune re-wraps `defaultdict(list, …)` — the plan's literal dict-comprehension replace lost defaultdict semantics and KeyError'd on new IPs after the prune (exposed by the plan's own `test_memory_bound`, 10,100 distinct IPs).
 2. `agent_signup` block-path feed: `_abuse` import moved ABOVE the limiter call — the plan's placement (later import block) raised `UnboundLocalError` at the 429 site.
 3. Success-path feed tasks are ALSO retained in `_SIGNUP_FEED_TASKS` (plan's literal success-feed code used bare `create_task`; P2-1's stated intent — hold a reference — applied to both paths).
@@ -1065,13 +1081,16 @@ Rejected alternative (when better): audit-count R8 (Reviewer 1 A / Converger 2) 
 ## Solution-verify — Cycle 1 → controller fixes (2 P1 + 6 P2/P3/P4, all incorporated)
 
 ### P1-FIX-1: helper keeps per-call-site keying (`key` param)
+
 `_check_ip_bucket_rate_limit(request, *, buckets, lock, limit, window_s, detail, retry_after_s, key=None)` — wrapper passes the bucket key explicitly:
+
 - register: `key=request.client.host`
 - signup: `key=request.client.host`
 - sensitive-op: `key=(request.client.host, op)` — PRESERVES the composite `(ip, op)` keying; export (20/hr) and delete (5/hr) keep independent budgets (locked by `test_export_delete.py::test_export_rate_limited_independently`). Helper must NOT hardcode `buckets[ip]`.
 - Test added: `test_sensitive_op_composite_key_preserved` (burn delete budget, assert export unaffected).
 
 ### P1-FIX-2: R8 success feed fires at allowance boundary (`>=` breach, single dedup key)
+
 - Breach semantics: `if len(bucket) >= self.threshold` — success feed fires on the **2nd** successful mint = "an IP consumed its entire anonymous allowance" (the designed review signal; the user's "or contact support" trigger).
 - **One dedup key per (ip) per window across BOTH feeds** — `_notified[(ip)]` (drop the `("block", ip)` second key) → one ops email per episode, never two.
 - `_blocks` store DROPPED: block feed only touches `_notified` dedup (no count needed for the review signal); `_notified` prune moved into BOTH `record_signup` and `record_block` (memory-bound; R3 precedent prunes inside `record_read`).
@@ -1080,30 +1099,39 @@ Rejected alternative (when better): audit-count R8 (Reviewer 1 A / Converger 2) 
 - Integration test added: `test_signup_ip_limit_and_velocity_single_notify` — 3rd signup 429 AND exactly ONE `abuse_signup_velocity` notify (block path, same episode).
 
 ### P2-FIX-3: Task 0 becomes a real task (uvicorn forwarded-allow-ips)
+
 Task 0 (pre-deploy gate, BEFORE Task 1 deploy): verify `request.client.host` is the real client IP behind the Fly proxy (Dockerfile.hosted:68 has no `--forwarded-allow-ips`; proxy IP would collapse ALL per-IP limiters into a global cap).
+
 - Acceptance: staging test posts from 2 distinct egress IPs → `request.client.host` differs; if proxy IP observed → fix `CMD ... --forwarded-allow-ips="*"` (with XFF-spoof caveat: Fly must overwrite client-supplied XFF) → re-verify.
 - Also un-breaks the pre-existing register 3/hr + sensitive-op limiters (currently global in prod if confirmed).
 - Files: Dockerfile.hosted, staging verify script; test: none (manual/staging gate), noted in Handoff.
 
 ### P2-FIX-4: TestSignupVelocity uses the list-fixture convention
+
 `notified` fixture returns a list — assert `[c[0] for c in notified] == ["abuse_signup_velocity"]`, `len(notified) == 1`, `notified[0][1]["ip"]`. No Mock API on a list.
 
 ### P2-FIX-5: Retry-After precision (signup wrapper only)
+
 Problem-verify fix #5 restored: helper computes `remaining = int(oldest + window_s - now)` for the Retry-After header when the bucket is exhausted; register/sensitive wrappers keep flat 3600 (byte-identical, locked tests); signup wrapper uses computed `remaining` (test asserts `retry_after` ≤ 86400 and reflects oldest entry). CLI prints the computed value.
 
 ### P3-FIX-6: conftest fixture TDD sequencing
+
 Autouse reset fixture uses `getattr(ha_mod, "_SIGNUP_BUCKETS", None)` and clears only if present — no ImportError during the red phase before the store exists. `_SIGNUP_BUCKETS` + `_SIGNUP_LOCK` created in Task 1 Step 1 alongside the helper.
 
 ### P3-FIX-7: abuse.py header rule list gains R8
+
 `- R8 signup_velocity: N anon signups/IP/window (breach >= threshold) -> notify ops only (BILLING_NOTIFY_TO; never suspends)`.
 
 ### P4-FIX-8: CLI Retry-After int() guard
+
 `if retry.isdigit(): remaining = int(retry)` — tolerate RFC 7231 HTTP-date Retry-After.
 
 ### P4-FIX-9: env-knob naming supersession
+
 `TORTOISE_SIGNUP_IP_WINDOW_S=86400` supersedes the scoping fix's `_WINDOW_H` proposal (consistent with `_int_env` seconds convention) — noted in .env.example comment + issue body addendum.
 
 ### ASN note (P3, research dimension)
+
 IP-count alone is the shipped posture; ASN grouping is deferred to the sweeper contract in Task 7 (no ASN data source exists — R4 documents IPINFO_TOKEN as follow-on). Recorded as explicit rejection rationale.
 
 ---
@@ -1113,7 +1141,9 @@ IP-count alone is the shipped posture; ASN grouping is deferred to the sweeper c
 Both re-verifiers confirmed the Cycle-1 fix INTENTS are sound; the remaining P1s are plan-text lag (addendum vs task blocks) + a genuine Task-0 correctness flaw. Controller fixes:
 
 ### P1-FIX-10: Task blocks reconciled with addendum semantics (executable plan)
+
 The addendum described `key=` param, `>=` breach, single dedup key, computed Retry-After, list-fixture asserts — but Task 1/3 code blocks were NOT updated (contradiction). Execution rules (overrides the earlier Task 1/3 text where they conflict with the addendum):
+
 - **Task 1 helper signature (FINAL, superseded by P1-A):** `def _check_ip_bucket_rate_limit(request, *, buckets, lock, limit, window_s, detail, retry_after_s=None, key=None, max_entries=10_000)`; `key` is a REQUIRED kwarg at the wrapper call sites (no silent re-keying footgun); wrappers resolve `key=(getattr(request.state, "client_ip", None) or request.client.host)` (sensitive: composite `(resolved_ip, op)`). `retry_after_s=None` → compute `int(oldest + window_s - now)` on exhaustion; register/sensitive wrappers pass `retry_after_s=3600` (flat, byte-identical).
 - **Task 1 test (FINAL):** `test_signup_ip_limit_2_per_24h` asserts `retry-after` header is an integer ≤ 86400 (NOT `== "86400"` — computed remaining is 86399 after ≥1s elapse); register contract test (`test_shared_ip_bucket_3_per_hour`) still asserts exact `"3600"`.
 - **Task 3 tracker (FINAL):** breach = `>=`; threshold default 2; dedup key = bare `ip` in BOTH `record_signup` (on breach) and `record_block` (on 429) — byte-identical key form; NO `_blocks` store; `_notified` pruned inside both feeds; `reset()` method; `notify` payload `{"ip": ip, "count": n, "threshold": t, "window_s": w}`. Memory-bound test asserts stale-prune (`== 9900` per P1-B), not `< 10100`.
@@ -1122,7 +1152,9 @@ The addendum described `key=` param, `>=` breach, single dedup key, computed Ret
 - **P3-FIX-6 (fixture):** conftest autouse resets `_SIGNUP_BUCKETS` (getattr-guarded) AND calls `SignupVelocityTracker.reset()` (new method clearing `_by_ip` + `_notified`) — prevents order-dependent dedup flake from the module-scoped `testclient` host.
 
 ### P1-FIX-11: Task 0 → Fly-Client-IP (NOT `--forwarded-allow-ips="*"`)
+
 Verifier B verified against Fly docs: X-Forwarded-For is client-and-proxy chain; uvicorn parses the FIRST entry; a spoofing client controls it → `--forwarded-allow-ips="*"` is bypassable (defeats the entire per-IP cap) and the 2-egress-IP staging test doesn't catch the spoof dimension. **FINAL Task 0 design:**
+
 1. Confirm the premise in staging: log `request.client.host` vs `X-Forwarded-For` vs `Fly-Client-IP` for 2 distinct egress IPs.
 2. **Spoof probe (hard blocker):** send `X-Forwarded-For: 203.0.113.99` (forged) → assert `request.client.host != "203.0.113.99"`. If it equals the forged value → do NOT ship `--forwarded-allow-ips="*"`.
 3. **Fix:** app middleware parses `Fly-Client-IP` header (non-spoofable per Fly docs — set by the Fly proxy, no upstream override) into `request.state.client_ip`; limiters read `request.state.client_ip` (fallback: `request.client.host`). Precedented middleware pattern in hosted_api.py. Small, contained, testable (monkeypatch header).
@@ -1131,11 +1163,13 @@ Verifier B verified against Fly docs: X-Forwarded-For is client-and-proxy chain;
 ### P3-FIX-12: Handoff = 8 tasks (Task 0 listed explicitly with staging gate + spoof probe as pre-deploy blocker)
 
 ### P3-FIX-13: Test placement
+
 - `test_signup_ip_limit_and_velocity_single_notify` → Task 3, tests/test_agent_signup.py.
 - `test_sensitive_op_composite_key_preserved` → DROPPED (redundant with locked `test_export_rate_limited_independently` which already guards composite keying).
 - `test_signup_feeds_velocity_tracker` (feed-spy) → Task 3, monkeypatch `tortoise.abuse.record_signup` + `record_signup_block`.
 
 ### P3-FIX-14: dedup key form documented
+
 `_notified` keyed by bare `ip` (string) in both feeds; the success-breach and block paths MUST use the identical key form (`_notified[ip]`) — guarded by `test_block_path_same_episode`.
 
 ### Exit: cycle 2 — both verifiers: P0=0, P1→fixed. Gate advances on next clean pass.

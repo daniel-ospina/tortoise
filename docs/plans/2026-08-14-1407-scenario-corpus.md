@@ -49,6 +49,7 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** Establish the `battery` package and the single source of truth for schema enums/constants; gitignore the gold store BEFORE any build can stage it (a staged gold store is unpatchable git history).
 **Acceptance:** `battery/config/schema.py` exports all enum sets + `PACK_COUNTS` + `PACK_SPLITS` + `GOLD_ENUMS` + `CORPUS_VERSION` + `CONTRADICTION_K` + `ATTACK_DISTRIBUTION`; `.gitignore` contains `battery/config/.gold_store/`; `git check-ignore battery/config/.gold_store/golds.json` exits 0; enum smoke test passes.
 **Files:**
+
 - Create: `battery/__init__.py`, `battery/config/__init__.py`, `battery/config/schema.py`
 - Modify: `.gitignore` (MUST precede any build)
 - Test: `tests/test_battery_corpus.py`
@@ -56,6 +57,7 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Step 1:** Create `battery/__init__.py` (module docstring: eval-battery scenario corpus; epic #1402) and `battery/config/__init__.py`.
 **Step 2:** Modify `.gitignore` — append `battery/config/.gold_store/`. Verify: `git check-ignore battery/config/.gold_store/golds.json` → exit 0.
 **Step 3:** Create `battery/config/schema.py` (`from __future__ import annotations`):
+
 - `TIERS`, `FAMILIES` (13 values; packless D1/D2/L6 documented in the docstring), `TASK_TYPES` (12), `ATTACK_TYPES` (5), `SPLITS` (5), `EVIDENCE_TIERS = ("T1","T2","T3","T4")`, `SOURCE_TIERS = ("T0","T1","T2","T3","T4")` (D4 adversarial source tiers — T0 highest credibility; **separate from EVIDENCE_TIERS** because T0 is a source-credibility tier, not an evidence tier), `VALENCES = ("supports", "undercuts")` (calibration evidence tiers + flapping flip valences), `REP_VALUES = (1, 2, 3)` (family_rep), `GOLD_ENUMS = ("undecided",)`, `PACK_COUNTS` (20/15/15/10/12/10/18/10/6/6/6/6), `PACK_SPLITS` (per the pack table — exact), `CORPUS_VERSION = "1.0"`, `CONTRADICTION_K = 5`, `ATTACK_DISTRIBUTION = {poisoned: 2, sybil: 2, echo_chamber: 2, flapping: 2, anchoring: 2}`, `FAMILY_REP_NAMES = ("incident-triage","customer-churn-review","vendor-selection","feature-priority","pricing-review","compliance-assessment")`, `HELD_OUT_FAMILY = "compliance-assessment"`.
 **Step 4:** Write `test_enum_schema` (enum sets; `sum(PACK_COUNTS.values()) == 134`; `sum of PACK_SPLITS.values()` per pack == PACK_COUNTS) and `test_gold_store_gitignored` (subprocess `git check-ignore`, exit 0). Tests import via `sys.path.insert(0, repo_root)` (conftest convention). Run — must PASS.
 **Step 5 (CI registration with file creation — drift gate green from the first commit):** register `test_battery_corpus.py` NOW: `config/ci-surfaces.yml` (new `battery:` surface + entry under `core:`), `tools/ci_selection.py` `SOURCE_PATTERNS["battery"] = ("battery/",)` (REQUIRED — unmapped = silent full-matrix bloat), `.github/workflows/python-ci.yml` matrix half-a `files += test_battery_corpus`. Verify `uv run python tools/ci_selection.py --integrity` exits 0. Run `uv run pytest tests/test_battery_corpus.py -v` — PASS.
@@ -65,10 +67,12 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** The reader path must never retrieve gold answers (S5 seal). Guards are recursive with exact-key equality, cover multi-session packs, and fail closed. The shared validators module is created here so Task 3's per-pack checkpoints can run them incrementally.
 **Acceptance:** `corpus_loader.py` exposes `load_corpus` (fail-closed), `Corpus` (`.filter` with documented seed semantics), `assert_no_gold` (recursive, exact-key), `render_reader_prompt(scenario, session=None)`, `GoldStore` (fail-closed on missing/corrupt/unknown), `verify_seal(corpus, store)`; `validate.py` exposes the per-task_type validators; guard + fail-closed + validator tests pass on synthetic dicts.
 **Files:**
+
 - Create: `battery/config/corpus_loader.py`, `battery/config/validate.py`
 - Test: `tests/test_battery_corpus.py`
 
 **Step 1:** Write `battery/config/corpus_loader.py` (stdlib only):
+
 - `GOLD_KEY = "gold"`, `GOLD_HASH_KEY = "gold_sha256"`
 - Exceptions: `GoldLeakError`, `SealMissingError`, `SealMismatchError`, `StoreEntryMissingError`, `CorpusMissingError`, `CorpusCorruptError`
 - `canonical_json(obj) -> bytes` (pinned serializer)
@@ -87,10 +91,12 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** Author the full v1 corpus with machine-checked content bindings; every pack checkpoint runs the shared validators so binding errors surface in the pack where they occur (bounded fix loop ~15 scenarios), not after all 134.
 **Acceptance:** `battery/config/corpus.yaml` loads with the duplicate-key-rejecting loader; exactly 134 scenarios; **after each pack batch the shared validators run on the accumulated list with zero errors**; final full validation passes.
 **Files:**
+
 - Create: `battery/config/corpus.yaml`
 - Test: `tests/test_battery_corpus.py` (YAML loads; per-task_type required-field + binding tests)
 
 **Step 1:** Author `battery/config/corpus.yaml` **pack-by-pack; after each batch run the per-pack checkpoint** — `uv run python -c "...load via load_yaml_dupreject; run validate_scenario per scenario with the ACCUMULATED id sets; run accumulated-local checks (id uniqueness, dup-key rejection, enum/binding validity, splits for COMPLETE packs only)"`. ⛔ **Checkpoint scope (pinned):** per-pack checkpoints run ONLY per-scenario validators + accumulated-local checks. Cross-scenario invariants (`matched_control_for` bijection/resolution, `PACK_SPLITS` exact totals, id-set completeness) are DEFERRED to the final checkpoint (Step 2) and the builder (Task 4) — they cannot pass while later packs are absent, and the authoring loop must not deadlock on them. **"Complete pack" semantics (pinned):** a pack is complete iff accumulated count ≥ `PACK_COUNTS[task_type]`; count > target is an immediate checkpoint error. Zero errors before continuing to the next pack.
+
 - Header: `meta: {corpus_version: "1.0", seed: 1407, threat_model: "reader isolation (internal tooling) — authored golds live here; the reader path never sees them"}`.
 - Common: `id, tier, family, task_type, split, prompt: {system, turns: [{role, content}], question}, gold: {expected, rubric?}`.
 - **decision (d-001..d-020, R2 ×14 / R4 ×6):** R4 gold.expected = non-empty list of defeat conditions; 15 (11 R2 + 4 R4) carry `matched_control_for: ct-XXX` (bijection; control = same decision shape, comparable turn count ±1).
@@ -112,10 +118,12 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** Derive the sealed artifacts deterministically: validate (with golds) → **recursive strip (delete every `key == GOLD_KEY` at any depth)** → re-check the emitted form is gold-free → digest → emit; `--check` proves committed corpus.json matches a fresh build; no mutation of the authoring file.
 **Acceptance:** `build_corpus()` emits `corpus.json` (gold-free, per-scenario `gold_sha256`, manifest `{corpus_version, content_sha256, golds_sha256, pack_counts, split_counts, family_coverage}`) + `.gold_store/golds.json`; `--check` byte-diffs (exit 0/1); two builds byte-identical **across processes with different PYTHONHASHSEED**.
 **Files:**
+
 - Create: `battery/config/build_corpus.py`
 - Test: `tests/test_battery_corpus.py`
 
 **Step 1:** Write `battery/config/build_corpus.py` (stdlib + yaml):
+
 - Loads via `validate.load_yaml_dupreject`; runs the shared validators (per-scenario + cross-scenario: id uniqueness, bijection, PACK_SPLITS exact, meta.corpus_version == CORPUS_VERSION, corpus non-empty).
 - **Strip phase:** recursive delete of every `key == GOLD_KEY` at any depth (the SAME walker as `assert_no_gold`, inverted); then `assert_no_gold` on the emitted scenarios (post-strip proof — a nested gold inside `hostile` is caught here).
 - Emission: scenarios sorted by id; `gold_sha256 = sha256(canonical_json(gold))`; store `{scenario_id: gold}` sorted by id; manifest per the digest conventions (dict basis, never file bytes); files written `json.dumps(indent=2, sort_keys=True, ensure_ascii=False)` + trailing newline. No timestamps, no sets (every manifest aggregate a sorted list), no absolute paths.
@@ -127,10 +135,12 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** Lock the corpus contract for downstream; store-dependent tests are hermetic (tmp-built fixture, never the local gitignored store); CI registration lands in Task 1 Step 5 with the test file creation (drift gate green from the first commit) — Task 5 verifies only.
 **Acceptance:** All tests pass with a tmp-built store fixture; `uv run pytest tests/ -v` regression passes; `uv run python tools/ci_selection.py --integrity` exits 0 (registration already landed in Task 1 — verify only).
 **Files:**
+
 - Modify: `tests/test_battery_corpus.py`
 - Verify (already modified in Task 1): `config/ci-surfaces.yml`, `tools/ci_selection.py`, `.github/workflows/python-ci.yml`
 
 **Step 1:** Add `sealed_corpus` fixture: `build_corpus(source=<corpus.yaml>, out_dir=<tmp_path>)` → (Corpus loaded from the TMP-built corpus.json — hermetic, not the committed file, so the fixture stays green pre-commit; GoldStore on the tmp store). Fixture setup asserts `verify_seal` passes; on failure the message instructs rerunning `uv run python battery/config/build_corpus.py` (fixture validity requires Task 4's build to be current). Add tests:
+
 - `test_pack_counts` (manifest == PACK_COUNTS exactly; totals == 134)
 - `test_pack_splits` (per-task_type split counts == PACK_SPLITS; split totals match manifest.split_counts)
 - `test_k_pin` + `test_claim_placement` (bindings incl. first-appearance) + `test_feedback_iterations` (==5) + `test_sybil_counts` (100/1, T4/T0 via SOURCE_TIERS) + `test_hostile_bound_to_turns` (each D4 scenario's key hostile text appears in the rendered prompt)
@@ -152,6 +162,7 @@ task_type ∈ {decision, contradiction, calibration, retraction, loopy_contested
 **Intent:** Land the committed corpus.json (pinned reader artifact), README, CI registration; prove the whole suite passes.
 **Acceptance:** `battery/config/corpus.json` committed; `battery/config/README.md` documents the full contract; `git status` shows NO `.gold_store/`; full `uv run pytest tests/ -v` green.
 **Files:**
+
 - Create: `battery/config/README.md`
 - Modify: committed `battery/config/corpus.json` (Task 4 output)
 - Test: full suite

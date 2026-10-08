@@ -67,6 +67,7 @@ And the sting: **clangd's index key is `SymbolID` = truncated SHA1 of the USR** 
 The prior scan's single query on id-reuse returned nothing. Targeted rephrasing split the finding in two, and the split matters for confidence.
 
 **Non-reuse is the norm (High confidence — two independent normative sources, plus one corroborating default):**
+
 - **NIST SP 800-171 §3.5.5 (normative):** "**Prevent reuse of identifiers for a defined period.**"
 - **PLOS Biology 2017 ("Identifiers for the 21st century", normative):** identifiers must never be deleted or reassigned to another record.
 - **PostgreSQL `CREATE SEQUENCE` (corroborating, not normative):** `NO CYCLE` is the **default** — the fail-closed choice. `CYCLE` (reuse) must be opted into. This is an **overridable implementation default**: it is evidence that fail-closed is *conventional*, not that non-reuse is *required*.
@@ -271,6 +272,7 @@ Therefore, for any revision in which legacy aliases are still resolvable, the **
 **Policy choices, not findings:** **R5** (mint a fresh id after deletion) is a **safe default** backed by the non-reuse norm — it is not a convergent finding, and it **closes the framework's open question** (Axon #3323) by choice rather than inheriting its answer. **R6** is **migration-scoped** (see R6 in detail); its Linux counter-argument is partly rejected, and it is not a permanent rule.
 
 **Explicit gaps — do not treat as settled:**
+
 - **Greg Young's primary writings and KurrentDB/EventStoreDB primary docs** were not retrieved (secondhand only). This is the canonical source for event-sourcing identity, it should be read before Stage 3 — and it is **why the R1, R3, R4, R7 bundle is one school, not a convergent finding**.
 - **Kimball's SCD primary chapter** — typology corroborated via secondary sources only. The canonical SCD2 mechanism (**new surrogate key per tracked change, continuity via the natural key**) is the *opposite* of a fix for a mutable natural key.
 - **ISBN/ISAN/ARK/DOI explicit non-reuse rules** — not retrieved; would strengthen R5.

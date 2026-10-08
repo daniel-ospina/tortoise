@@ -21,6 +21,7 @@ aboutObjects: supabase-auth, signup-page, welcome-page, ci
 **Role:** — (no AGENT_SESSION_ROLE)
 
 **Architecture:**
+
 - **Live no-429 monitor (Approach C):** the live E2E becomes a *smoke* — real signup against prod must reach `#confirmation-required` (confirmations are ON post-#832) with `#error` hidden and HTTP 200 on `auth/v1/signup`; teardown deletes the created auth user via the GoTrue Admin API (FK cascade clears the placeholder membership row). No sign-in, no provisioning, no key reveal in the live test — those stay covered by the mocked welcome suite (green in CI today) and #839's deploy verification.
 - **Client 429 lockout:** on a rate-limit error, `signup.html` persists a 1h lockout timestamp in `sessionStorage`, disables `#btn-submit`/`#btn-resend`, shows a live `Try again in MM:SS` countdown, and early-returns from `signUpWithEmail` before any request. Static pins + the extended mocked 429 e2e prove it.
 - **CI wiring:** the signup-safety e2e suite (currently only runnable locally) joins the `legal-e2e` CI job and the post-deploy `verify-legal` job; the `welcome-e2e` job gains a warn-only check that the live smoke is not silently skipping (it has been — see Pattern Research).
@@ -33,6 +34,7 @@ Skipped — plan touches zero third-party dependencies (inline JS in checked-in 
 - `DELETE /auth/v1/admin/users/{id}` — deletes the auth user; `org_memberships.user_id` FK is `ON DELETE CASCADE` (migration 0001, preserved through 0003/0009 renames) → the placeholder row created by `handle_new_user()` is cleaned too. Teams/api_keys/FalkorDB graphs are NOT cascaded (this is why Approach A was rejected).
 
 **Repo-verified facts the plan depends on:**
+
 - #832 closed 2026-08-10: Resend→Supabase SMTP wired, confirmation emails verified, confirmations ON in prod. GoTrue email-send limiter is **project-wide** (built-in 2/hr; custom SMTP 30/hr), not per-IP as the issue claimed.
 - ⚠️ `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` are **NOT configured** as repo secrets (`gh secret list` — only RESEND_API_KEY etc.). The `welcome-e2e` job references them → unset → the live test has been **silently skipping** (CI: "25 passed, 3 skipped" — the skips are the live test + the two module-level opt-in suites). Making the live run map to acceptance requires adding both secrets (owner action, see Runtime Prerequisites).
 - `website/signup.html` already renders `#confirmation-required` on signup success (shipped pre-#832) → the live smoke is valid against the *currently deployed* page, pre-deploy and post-deploy.
@@ -60,11 +62,13 @@ Skipped — plan touches zero third-party dependencies (inline JS in checked-in 
 ### Journey Test Map
 
 ### Journey: Real visitor signs up on premiselabs.co/signup (email/password)
+
 1. **Step:** Fill email+password → Create account → **Acceptance:** check-your-inbox state, URL clean, no error → **Test:** `test_live_signup_no_429_confirmation_required` (live smoke, CI welcome-e2e)
 2. **Step:** (Rate-limit hit — shared bucket exhausted) submit again → **Acceptance:** friendly copy + button disabled with countdown, no further requests → **Test:** `test_429_signup_rate_limit_is_humanized` (extended)
 3. **Step:** Click confirmation link → **Acceptance:** welcome page provisions + reveals `tt_` key once → **Test:** mocked `test_welcome_provisions_via_edge_function_when_no_membership` + `test_reveal_shows_key_once_then_returning_state` (existing, green)
 
 ### Failure Modes
+
 - Prod email bucket trips during a CI run (parallel PRs / real traffic) → **Expected:** smoke fails with the 429 body in the assertion message — this is the monitored signal, not flake → **Test:** live smoke's `signup_status == 200` assert
 - Secrets missing → **Expected:** smoke skips + `::warning::` in welcome-e2e log → **Test:** skip-detection step (Task 3; env-var check, NOT pytest output parsing — `--collect-only` never prints skip status, verified)
 - Admin DELETE fails (network/4xx) → **Expected:** smoke still passes, cleanup logged as warning. An orphaned unconfirmed auth user + placeholder `org_memberships` row would persist until manual cleanup — **the `tenant_cleaned_up` auto-expiry is only an epic spec, NOT implemented** (verified: no such function exists in supabase/functions/; GoTrue auto-expires only anonymous users). Harmless but permanent; a weekly Admin-API sweep of `e2e-live-*@premise-labs.dev` users is the optional mitigation → **Test:** best-effort wrapper
@@ -97,6 +101,7 @@ Skipped — plan touches zero third-party dependencies (inline JS in checked-in 
 **Acceptance:** `signup.html` contains the pinned literals (`RATE_LIMIT_LOCKOUT_MS`, `applyRateLimitLockout`, `tortoise_signup_rate_limited_until`, `sessionStorage`, `rateLimitRemainingMs() > 0`); the extended `test_429_signup_rate_limit_is_humanized` passes against wrangler dev (disabled button, countdown, storage timestamp in ~1h window, zero retry requests after guard, reload persistence); the new static pin passes; the EXISTING 60s resend cooldown is preserved (no regression); all pre-existing pins in `tests/test_signup_form_safety.py` stay green; `node --check` parses the inline script.
 
 **Files:**
+
 - Modify: `website/signup.html` (inline script: constants + `isRateLimitError`/`rateLimitRemainingMs`/`setRateLimitLockout`/`applyRateLimitLockout`; guard in `signUpWithEmail` + `resendConfirmation`; `applyRateLimitLockout()` in the `finally` of both handlers)
 - Modify: `tests/e2e/test_signup_form_safety_e2e.py` (`test_429_signup_rate_limit_is_humanized` — extend)
 - Modify: `tests/test_signup_form_safety.py` (new pin `test_rate_limit_lockout_guards_present`)
@@ -362,6 +367,7 @@ git commit -m "feat(801): 1h client rate-limit lockout on signup (shared email b
 **Acceptance:** `tests/e2e/supabase_admin.py` imports cleanly and is best-effort; the rewritten live test (renamed `test_live_signup_no_429_confirmation_required`) is gated on `LIVE_SIGNUP`, asserts HTTP 200 on `auth/v1/signup` + `#confirmation-required` visible + `#confirm-email` == typed email + `#error` hidden + URL clean, and deletes the created user in `finally`; `python -m pytest tests/e2e/test_welcome_page.py -q` passes locally (13 passed, 1 skipped). Junk premise resolved: no pre-confirmation minting possible (hook disabled per #832 + `AUTH_HOOK_SECRET` removed → function Path 2 fails closed; Path 1 never exercised by the smoke).
 
 **Files:**
+
 - Create: `tests/e2e/supabase_admin.py`
 - Modify: `tests/e2e/test_welcome_page.py` (module docstring, `LIVE_SIGNUP` block, rename + rewrite the live test)
 
@@ -503,6 +509,7 @@ git commit -m "test(801): live signup smoke — confirmations-ON assertion + Adm
 **Acceptance:** legal-e2e job runs `test_legal_pages.py` + `test_signup_form_safety_e2e.py` together; deploy-pages verify-legal job likewise; welcome-e2e prints a `::warning::` when `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` are unset (env-var check — pytest `--collect-only` output never contains "skipped", so output parsing is NOT used; verified empirically).
 
 **Files:**
+
 - Modify: `.github/workflows/ci.yml` (legal-e2e job pytest line; welcome-e2e `-rs` + warn step)
 - Modify: `.github/workflows/deploy-pages.yml` (verify-legal job pytest line)
 
@@ -565,6 +572,7 @@ git commit -m "ci(801): run signup-safety e2e in legal-e2e + verify-legal; warn 
 **Acceptance:** `supabase/config.toml` has `enable_confirmations = true` under `[auth.email]`; the stale "Remote state: hook_after_user_created_enabled=true" comment is corrected to reflect #832 (hook disabled; AUTH_HOOK_SECRET removed — function fails closed); no repo test depends on local confirmations being OFF (verified: zero `:54321` consumers in tests/).
 
 **Files:**
+
 - Modify: `supabase/config.toml` (`enable_confirmations = false` → `true` under `[auth.email]`; correct the stale remote-hook comment ~L275; **leave `[auth.sms]`'s `enable_confirmations = false` untouched** — it is a different setting)
 
 **Step 1: Flip the toggle + correct the stale hook comment**
@@ -607,6 +615,7 @@ git commit -m "chore(801): enable local email confirmations (prod parity, inbuck
 **Acceptance:** `docs/epics/2026-08-07-tortoise-user-journeys/05-plan.md` carries the STALE/STATUS annotations under E2E-1 and E2E-8; the scoping comment with the reworded acceptance is posted on #801 (comment only — closing is a separate decision after CI proves the smoke green with secrets).
 
 **Files:**
+
 - Modify: `docs/epics/2026-08-07-tortoise-user-journeys/05-plan.md` (E2E-1 setup note + E2E-8 status)
 - GitHub: `gh issue comment 801` (reworded acceptance below — **comment only; do NOT close**; closing is a separate decision after CI proves the smoke green with secrets)
 
@@ -615,6 +624,7 @@ git commit -m "chore(801): enable local email confirmations (prod parity, inbuck
 **Step 2: Reword the issue acceptance** (post the comment; **do NOT close** — closing is a separate decision after CI proves the smoke green with secrets, per the Task 5 Acceptance):
 
 > **Acceptance (reworded 2026-08-10 — originals contradicted prod state; #832 fixed the root cause):**
+>
 > 1. **No-429 monitor (live, per CI run):** `tests/e2e/test_welcome_page.py::test_live_signup_no_429_confirmation_required` passes in CI with `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` set — a fresh prod signup returns HTTP 200, the page shows `#confirmation-required` with the typed email, `#error` is hidden, the URL stays clean, and the created user is deleted via the Admin API. Consecutive CI runs = consecutive fresh signups (the "two consecutive" evidence). A 429 anywhere in the funnel = red CI with the server body in the message.
 > 2. **Client 429 lockout:** `test_429_signup_rate_limit_is_humanized` (legal-e2e CI job + post-deploy verify-legal) asserts the humanized copy, disabled submit with live countdown, sessionStorage lockout timestamp (~1h), zero retry requests after lockout, and reload persistence. Static pin `test_rate_limit_lockout_guards_present` (main suite) pins the literals.
 > 3. **Key-reveal journey stays covered:** mocked welcome suite (provision-via-edge-function, reveal-once, returning state) green in CI; live key-reveal remains owned by deploy verification (#839) — a live full journey is NOT run per-push because it mints permanent prod teams/graphs with no cleanup endpoint.

@@ -52,18 +52,22 @@
 ### Journey Test Map
 
 ### Journey: First-run signup from `$HOME`
+
 1. **Step:** `tortoise signup` from `~` → **Acceptance:** mints once, no `IsADirectoryError`, writes `~/.tortoise/credentials.json` (0600, dir 0700) → **Test:** `tests/test_cli_signup.py::test_signup_from_home_no_crash`
 2. **Step:** run `tortoise signup` again → **Acceptance:** reuses, exits 0, `urlopen` never called (0 new keys) → **Test:** `test_reuse_global_config_skips_mint`
 3. **Step:** run from a different CWD → **Acceptance:** finds global config, reuses → **Test:** `test_reuse_from_other_cwd`
 
 ### Journey: Key rotation / recovery
+
 1. **Step:** stored key revoked → **Acceptance:** validation 401 → auto re-mint → **Test:** `test_reuse_invalid_key_remints`
 2. **Step:** bad `TORTOISE_API_KEY` env → **Acceptance:** `--force` mints fresh and warns the env key shadows it → **Test:** `test_force_mints_despite_existing`
 
 ### Journey: Dashboard key table
+
 1. **Step:** session key listed → **Acceptance:** renders "ephemeral · session", cannot be toggled/revoked → **Test:** no harness — build + code-review (see Task 5)
 
 ### Failure Modes
+
 - API unreachable during validation → **Expected behavior:** fail-closed exit 1 with `--force` hint (no mint, no orphan) → **Test:** `test_reuse_validation_network_fail_closed` / `test_reuse_validation_5xx_fail_closed` / `test_reuse_validation_200_garbage_fail_closed`
 - `./.tortoise` is a directory (some repos use it) → **Expected behavior:** treated as no-config, next candidate wins → **Test:** `tests/test_cli_resolver.py::test_dot_tortoise_dir_skipped`
 - Suspended team's stored key 403s → **Expected behavior:** fail-closed exit 1 with the suspension message, NO mint → **Test:** `test_reuse_suspended_403_no_remint`
@@ -107,15 +111,19 @@ UX gate skipped (`UX_RATING = low` per scope). Decisions recorded for the implem
 ## Design Decisions
 
 ### D1 — Resolver precedence: env → cwd → global ("cwd wins for legacy projects")
+
 The scope text states "precedence env → global → cwd (cwd wins for legacy projects)". The parenthetical governs the global-vs-cwd tie: `./.tortoise` is an explicit per-project pin (written deliberately by `init --api-key`), and a global default silently overriding it would switch which team a legacy project talks to (data-integrity footgun). **Effective precedence: `TORTOISE_API_KEY` env → `Path.cwd()/.tortoise` → `~/.tortoise/credentials.json`, first-found-wins.** Legacy projects (cwd-only) are unaffected; the two orders differ only in the both-exist case, where cwd-first is strictly safer. The reuse-before-mint path uses the same resolver (running `signup` inside a legacy project reuses the project key — no new key).
 
 > ⚠️ **Explicit sign-off item (scope-divergence):** the approved scope's literal enumeration is `env → global → cwd`; this plan implements `env → cwd → global` per the "cwd wins for legacy projects" parenthetical. The divergence is documented, tested, and strictly safer, but it is a reading of an internally contradictory sentence in an approved contract — the user/controller should ratify the precedence at plan-review approval. If they prefer the literal order, only D1, the resolver order in Task 1, and `test_cwd_wins_over_global` change.
 
 ### D1b — `_cmd_context` deviation: env EXCLUDED for the context command
+
 `_cmd_context` is the one converted command with a **local-mode fallback** (no config → `TortoiseSDK.session_context()` for the Claude Code SessionStart hook). `TORTOISE_API_KEY` is commonly exported in dev shells (`serve --http --auth static`, stdio-MCP guard at L4134), so an env-first resolver would silently flip `tortoise context` from local-memory digest to hosted mode in those shells — a silent backend switch for a documented consumer. **Deviation (explicit):** `_cmd_context` calls the resolver with `include_env=False` (file candidates only: cwd → global). Global-config presence still flips it to hosted (intended per scope A6 — a machine that ran `signup` has a hosted identity); env alone does not. This is the GOOD>EASY choice: the env-exclusion is one parameter and preserves a documented consumer's semantics.
 
 ### D2 — Reuse validation outcome mapping
+
 `GET /v1/team` with the found key (same pattern `_cmd_init` uses, `timeout=10`):
+
 - **200** → reuse: print source + "already have a key", exit 0, **0 new keys**. (Note: `GET /v1/team` is NOT per-IP limited — reuse never consumes the 2/24h signup budget; verified the limiter attaches only to `POST /v1/agent/signup`.)
 - **401** → key invalid → print "stored key invalid (401) — minting fresh", set `reminting_after_401 = True`, fall through to mint (acceptance criterion 3). Mint target = **the validated config's base URL** (host-consistency, D1), not the ambient env/default.
 - **403** → parse the body with the existing `_suspended_info` helper (`__main__.py:794`): **SUSPENDED** (`detail.code == "SUSPENDED"`) → fail-closed exit 1 with the suspension message + appeal URL, **NO mint** (a suspended team must not be silently orphaned by a fresh anonymous mint — every other `_cmd_*` team command already handles this, e.g. L982/L1048/L1120). **Non-suspended 403** → key invalid → re-mint (mirrors `_cmd_init`'s `key_rejected`; both branches tested).
@@ -124,17 +132,21 @@ The scope text states "precedence env → global → cwd (cwd wins for legacy pr
 - **Mint-POST 200-with-garbage-body (proxy/mitm):** the existing mint handler prints "Cannot reach API" on JSON-decode failure, but the server DID mint — that message actively misleads the user into retrying (the double-fire pattern). Change the mint POST JSON-decode failure message to: "A key may have been minted but the response was unreadable — check the dashboard or support before re-running; do NOT blindly retry." (covers both the validation and mint legs).
 
 ### D3 — `--force` semantics
+
 Skips reuse-before-mint **and** validation entirely → mints fresh → writes global. If `TORTOISE_API_KEY` is set, print a warning that the env key shadows the new key at read time (env wins per D1). `--force` does NOT unset or edit the env.
 
 ### D4 — Global credentials file
+
 Path `Path.home() / ".tortoise" / "credentials.json"`. Dir: `mkdir(parents=True, exist_ok=True)` then `os.chmod(dir, 0o700)` unconditionally (the data home already stores `tortoise.db` + audit logs; private by design). Write: create a **unique per-writer tmp** file **born at 0600** via `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` + `os.fdopen` — `Path.write_text` would create at umask (typically 0644) with a plaintext-key window before the chmod, and a crash in that window leaves key material world-readable; `os.replace(tmp, credentials.json)` — atomic, last-writer-wins. Content: `{api_key, api_url, org_id, org_name, device_id}`.
 **Stale-tmp hygiene:** on each successful write, sweep `credentials.json.tmp-*` files in `~/.tortoise` (a crashed writer leaves one behind; unbounded accumulation = key-material residue).
 **Write-failure handling (the orphan class):** wrap the mkdir/chmod/write/replace block in `try/except OSError` → on failure print to stderr: a key WAS minted but could NOT be saved to `{path}` (`{err}`); **echo the minted key** so it is not lost; tell the user to fix the path or store the key manually; exit 1. Never exit 0 with an unsaved key, never re-mint silently.
 
 ### D5 — Read-path dir guards
+
 In the resolver, every candidate path is read only `if path.is_file()`: a directory at `cwd/.tortoise` (some repos use `.tortoise/` as a dir) or a directory at `~/.tortoise/credentials.json` is skipped as "no config here". `~/.tortoise` being a directory is by design — the config is the `credentials.json` *file inside it*.
 
 ### D6 — Shared resolver shape + corrupt-config semantics
+
 ```python
 class _ConfigError(Exception):
     """Candidate config file exists but is corrupt or unreadable."""
@@ -150,17 +162,20 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
       non-string api_key raises _ConfigError(path) (catch (OSError, JSONDecodeError, TypeError)).
     - include_env=False: file candidates only (used by _cmd_context, D1b)."""
 ```
+
 - `_read_config(json_mode)` becomes a thin wrapper preserving its exact 3-tuple contract + `_cmd_fail` messages (4 callers: `_cmd_team_info`, `_cmd_team_keys_{list,create,revoke}`); `_ConfigError` maps to the existing `_cmd_fail(json_mode, "no_config", "Invalid config at {path}: ...")` shape. The no-config message keeps the pinned substring `"Run 'tortoise init --api-key <key>' first"` contiguous (tests/test_cli_team_keys.py L88/L167 pin it): `"No .tortoise config found. Run 'tortoise init --api-key <key>' first, or run 'tortoise signup' for a free hosted key."`
 - **Per-site `_ConfigError` handling (all converted sites, not just signup):** `_cmd_create_point` and `_cmd_session` → print `"Invalid config at {path}"` + return 1 (preserves today's clean corrupt-config behavior); `_cmd_context` → print a warning to stderr and **fall back to local mode** (preserves today's graceful degradation — the SessionStart hook must never traceback on a corrupt global config; test this); `_cmd_signup` → stderr `config at {path} is corrupt or unreadable — fix or delete it, or use --force` → exit 1, never mint.
 - Inline sites converted: `_cmd_create_point` (L1167-1184), `_cmd_context` (L1231-1240, `include_env=False`), `_cmd_session` (L1316-1330).
 - **Explicitly NOT converted (documented):** `_cmd_init` (L248 write + already-connected read — deliberate per-project connect flow, its own semantics), `_cmd_serve_http` (L3717 reads `args.api_key or TORTOISE_API_KEY` only — no cwd config read; unchanged). MCP config writers (`_write_mcp_config_file`/`_print_mcp_configs`) receive the key explicitly from `init` — no config read of their own.
 
 ### D7 — `list_api_keys` additive fields
+
 - Supabase lane: extend `org_api_keys` select to `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`; response adds `"created_via": row.get("created_via"), "expires_at": row.get("expires_at")`.
 - Registry lane: `RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.created_via, k.expires_at` → `"created_via": row[5], "expires_at": row[6]`. **None-tolerant for the registry mints that omit the props until #1709 — `agent_signup` (L6946) and `create_api_key` (L3653); the `session_key` mint (L7250+) already writes them.** Existing `row[0..4]` readers unchanged.
 - Additive only — no consumer breaks.
 
 ### D8 — Dashboard predicate (API-first, active-key self-revocation guard)
+
 ```js
 // extracted to src/sessionKey.js — pure, unit-testable with node --test
 // (k: key row, activeKey: the current session's plaintext key, or null)
@@ -180,9 +195,11 @@ export function isActiveKey(k, activeKey) {
   return !!activeKey && !k.revoked_at && (k.key_prefix === String(activeKey).slice(0, 10))
 }
 ```
+
 `main.jsx`: status rendering uses `isSessionKey(k, active)`; the toggle/revoke guard (L2883) becomes `!isSessionKey(k, active) && !isActiveKey(k, active)` — the old heuristic protected the active key by prefix regardless of kind (Fix A comment: "so revoke can tell whether the active data-plane key is being revoked"); the API-first predicate alone would make a durable active key revocable (self-lockout). `teamKeysRef`/`currentOrgId` stay (used by loadAll/restore for the real key value).
 
 ### D9 — Test determinism (HOME isolation)
+
 The reuse path reads the developer's real `$HOME/.tortoise/credentials.json`; CLI tests that exercise the mint/no-config path would break non-deterministically on machines with a real global config. Every affected CLI test class gets an autouse HOME isolation (`monkeypatch.setenv("HOME", str(tmp_path))`). This is a **test-only** change; `tests/test_agent_signup.py` stays untouched.
 
 ---
@@ -198,10 +215,12 @@ The reuse path reads the developer's real `$HOME/.tortoise/credentials.json`; CL
 **Intent:** One canonical "where is my key?" answer for the CLI (env → cwd → global), killing the four duplicated `cwd/.tortoise` reads and making the global credentials store reachable from every hosted command — the foundation Tasks 2–3 build on.
 **Acceptance:** All four enumerated read sites (L760 `_read_config`, L1167 `_cmd_create_point`, L1231 `_cmd_context`, L1316 `_cmd_session`) resolve through one helper with precedence env → cwd → global; `./.tortoise`-is-a-dir is skipped; existing CLI suites green with HOME isolation in place; `tortoise create-point/context/session/team` work from a global config.
 **Files:**
+
 - Modify: `tortoise/__main__.py:748-779` (`_read_config` → resolver wrapper), `tortoise/__main__.py:1159-1184`, `tortoise/__main__.py:1218-1240`, `tortoise/__main__.py:1308-1330`
 - Test: `tests/test_cli_team_keys.py`, `tests/test_cli_context.py`, `tests/test_cli_claim.py`, `tests/test_cli_signup.py` (HOME isolation)
 
 **Step 1: Write the failing resolver tests (new `tests/test_cli_resolver.py`)**
+
 ```python
 # tests/test_cli_resolver.py
 """Shared config resolver — env → cwd → global (#1708 D1/D5/D6)."""
@@ -294,6 +313,7 @@ def test_non_string_api_key_raises_config_error(monkeypatch, tmp_path):
     except main._ConfigError:
         pass
 ```
+
 **Step 2: Run to verify fail**
 Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_cli_resolver.py -v`
 Expected: FAIL — `AttributeError: module 'tortoise.__main__' has no attribute '_resolve_config_path'`
@@ -309,6 +329,7 @@ Expected: PASS (new resolver tests; existing team-keys/context tests — cwd fix
 
 **Step 4b: Command-level smoke tests from a global config + env-only + D1b regression**
 Task 1's acceptance ("tortoise create-point/context/session/team work from a global config") needs command-level verification, not just resolver unit tests. **Create `tests/test_cli_global_config.py` (mandatory — the run commands below reference it):**
+
 1. Global-config smoke: seed ONLY `~/.tortoise/credentials.json` (HOME isolated, empty cwd), mock `urlopen`, assert `team info`, `create-point`, and `session capture` issue their request with `Authorization: Bearer tt_global` on the expected path; `context` gets one hosted-mode test (global config present → `/v1/context` called).
 2. **Env-only smoke (the config=None crash guard):** `TORTOISE_API_KEY` set + no files → `team keys list` (human + `--json`) and `team keys create --json` resolve and call the API with the env key — never `AttributeError: 'NoneType' object has no attribute 'get'`.
 3. **D1b regression:** `TORTOISE_API_KEY` set + no cwd/global config → `tortoise context` stays on the LOCAL SDK path (no `/v1/context` urlopen call); global config present + env set → hosted.
@@ -331,10 +352,12 @@ Expected: PASS
 **Intent:** Signup stops writing to `cwd/.tortoise` (the `~` IsADirectoryError crash + per-directory key scattering) and persists a stable `device_id` so client identity is anchored for reuse (and for #1709 later).
 **Acceptance:** `tortoise signup` from `$HOME` writes `~/.tortoise/credentials.json` (0600, dir 0700) with `device_id`; no `IsADirectoryError`; a second mint reuses the stored `device_id`; config no longer written to CWD.
 **Files:**
+
 - Modify: `tortoise/__main__.py:632-705` (`_cmd_signup` write block)
 - Test: `tests/test_cli_signup.py`, `tests/test_cli_claim.py` (update the cwd-path assertion)
 
 **Step 1: Write the failing tests**
+
 ```python
 # tests/test_cli_signup.py (extend)
 import os, stat
@@ -426,6 +449,7 @@ class TestGlobalWrite:
         second = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())["device_id"]
         assert first == second
 ```
+
 Also update `tests/test_cli_claim.py::test_signup_claim_prints_dashboard_instructions` — the existing assertion `json.loads((tmp_path / ".tortoise").read_text())` now fails (config is global). Change to read `tmp_path / ".tortoise" / "credentials.json"` (with HOME isolation).
 **Step 2: Run to verify fail**
 Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_cli_signup.py tests/test_cli_claim.py -v`
@@ -433,6 +457,7 @@ Expected: FAIL — on a fresh tmp HOME (no pre-existing `~/.tortoise` dir) the p
 
 **Step 3: Implement the global write (D4)**
 In `_cmd_signup`, replace the `config_path = Path.cwd() / ".tortoise"` block with the D4 write, wrapped for write-failure handling:
+
 ```python
 # Global credentials store (#1708 D4): ~/.tortoise/credentials.json (0600),
 # dir 0700, atomic unique-tmp write — fixes the IsADirectoryError crash when
@@ -476,6 +501,7 @@ except OSError as e:
     print("Fix the path permissions and re-run, or use the key directly.", file=sys.stderr)
     return 1
 ```
+
 Move the `device_id` generation to before the POST so the mint sends the stable id (body + `X-Device-Id`).
 
 **Step 4: Run to verify pass**
@@ -491,11 +517,13 @@ Expected: PASS
 **Intent:** The core idempotency fix — a second `tortoise signup` in the same environment mints **0 new keys** by validating and reusing the existing one; `--force` escapes a poisoned env/file key.
 **Acceptance:** With an existing valid key (env/global/cwd per D1), signup validates and exits 0 with a reuse message and **0 new keys**; 401/403 stored key → auto re-mint; validation network/5xx → fail-closed exit 1; `--force` mints despite existing valid config.
 **Files:**
+
 - Modify: `tortoise/__main__.py:632-705` (`_cmd_signup` head + argparse `--force`)
 - Test: `tests/test_cli_signup.py`
 
 **Step 1: Write the failing tests**
 > Imports to add at the top of `tests/test_cli_signup.py`: `import io` and `from urllib.error import URLError`. **All reuse-path calls below pass `mock.Mock(force=False)`** — a bare `mock.Mock()` has truthy attribute access, so `getattr(args, "force", False)` would be truthy and the reuse gate would always be skipped (the tests would be vacuous).
+
 ```python
 # tests/test_cli_signup.py (extend) — reuse path
 class TestReuse:
@@ -774,12 +802,14 @@ class TestReuse:
         err = capsys.readouterr().err
         assert "TORTOISE_API_KEY" in err and "shadow" in err.lower()
 ```
+
 **Step 2: Run to verify fail**
 Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_cli_signup.py -v`
 Expected: FAIL — mint still runs unconditionally.
 
 **Step 3: Implement reuse-before-mint + `--force` (D2/D3)**
 In `_cmd_signup`, before the mint POST (keep a comment cross-referencing `_cmd_init._validate_key` — the two `GET /v1/team` validation sites must stay in sync):
+
 ```python
 force = getattr(args, "force", False)
 mint_url = api_url  # may be overridden below when re-minting after a 401/403
@@ -826,6 +856,7 @@ if not force:
                   "keys. Retry later or use --force.", file=sys.stderr)
             return 1
 ```
+
 Use `mint_url` (not the ambient `api_url`) for the POST. **Device_id backfill:** the `stored`/`device_id` logic in the Task 2 write block must ALSO consult the resolved legacy config (`cfg.get("device_id")`) when re-minting after a 401 — a pre-#1708 `cwd/.tortoise` has no `device_id`; a fresh one every re-mint cycle would defeat the client-side anchor. Add `--force` to the argparse block (L4003-4009): `signup_p.add_argument("--force", action="store_true", help="Mint a fresh key even if a stored key exists (#1708)")`. After a forced mint, if `os.environ.get("TORTOISE_API_KEY")`, warn on stderr that the env key shadows the new key at read time (D3). **Mint-POST handler updates:** (a) extend the existing `(URLError, ValueError, json.JSONDecodeError)` except tuple with `TimeoutError, OSError` — `test_remint_post_timeout_reports_orphan` requires the timeout leg; (b) split the tuple so plain `URLError` keeps "Cannot reach API" but a JSON-decode failure (200-with-garbage) prints "A key may have been minted but the response was unreadable — check the dashboard or support before re-running; do NOT blindly retry" (D2, `test_mint_200_garbage_reports_orphan`); (c) when the 429 follows a 401-triggered re-mint (`reminting_after_401`), append "your stored key is also invalid" context (D2).
 
 **Step 4: Run to verify pass**
@@ -843,10 +874,12 @@ Expected: PASS — this single run covers acceptance criterion 1 (reuse tests as
 **Intent:** Give the dashboard (and API consumers) first-class session-key metadata instead of the fragile prefix heuristic; registry lane stays None-tolerant until #1709 writes the props at mint.
 **Acceptance:** `GET /v1/team/keys` includes `created_via` + `expires_at` for every key in BOTH lanes; Supabase lane reads them through `org_api_keys`; registry lane returns them None-safe; no mint-path code changes (`test_agent_signup.py` untouched).
 **Files:**
+
 - Modify: `tortoise/supabase_control.py:1468-1479` (`org_api_keys` select), `tortoise/hosted_api.py:3700-3755` (`list_api_keys`)
 - Test: `tests/test_supabase_control.py`, `tests/test_hosted_api.py`
 
 **Step 1: Write the failing tests**
+
 ```python
 # tests/test_supabase_control.py (extend TestTeamApiKeys)
 def test_team_api_keys_selects_created_via_expires_at(self, fake):
@@ -862,6 +895,7 @@ def test_team_api_keys_missing_created_via_fails_closed(self, fake):
     with pytest.raises(RuntimeError):
         org_api_keys(fake, "team-free-001")
 ```
+
 ```python
 # tests/test_hosted_api.py (extend TestListApiKeys — registry lane; BOTH registry
 # tests must pin the lane: exported SUPABASE_URL + service key would silently run
@@ -892,6 +926,7 @@ def test_list_keys_agent_signup_registry_none_tolerant(self, client, monkeypatch
     assert keys[0]["expires_at"] is None
     app.dependency_overrides.clear()
 ```
+
 ```python
 # tests/test_hosted_api.py — Supabase lane (reuse the existing `client` fixture +
 # autouse monkeypatch, NOT a bare TestClient: the app lifespan composes the MCP
@@ -941,12 +976,14 @@ class TestListApiKeysSupabase:
         real key auth, assert GET /v1/team → 401."""
         ...
 ```
+
 (Implementer note for the two auth pins: they belong in the Supabase-lane class fixture — seed a disabled (`enabled=false`) and an expired (`expires_at` past) `api_keys` row, call `GET /v1/team` through the real `get_current_org` dependency (REMOVE the `get_current_org` override for these — the override bypasses auth, so the disabled/expired rejection must be observed with real key auth, e.g. `Authorization: Bearer <plaintext>` against the fake's resolve path, mirroring test_dashboard_login's auth tests). The essential pin: `enabled=false` and past-`expires_at` keys return 401 on `/v1/team`, so the CLI reuse path's 401→re-mint contract holds in both lanes. Document the #1096 fail-open degrade window as an accepted residual in the PR body.)
 **Step 2: Run to verify fail**
 Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_supabase_control.py tests/test_hosted_api.py -k 'created_via or expires_at or org_api_keys or none_tolerant' -v`
 Expected: FAIL — `created_via`/`expires_at` absent (the `none_tolerant` token ensures `test_list_keys_agent_signup_registry_none_tolerant` participates in the red run).
 
 **Step 3: Implement the seam + endpoint changes (D7)**
+
 - `supabase_control.py org_api_keys`: select → `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`.
 - `hosted_api.py list_api_keys` Supabase branch: add `"created_via": row.get("created_via"), "expires_at": row.get("expires_at")` to each key dict.
 - Registry branch: `RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.created_via, k.expires_at`; add `"created_via": row[5], "expires_at": row[6]` (None for agent_signup-minted nodes pre-#1709; registry recovery/bootstrap mints already carry values).
@@ -968,11 +1005,13 @@ Expected: PASS — and `git diff tests/test_agent_signup.py` is empty (server mi
 **Intent:** Remove the prefix-match heuristic; session-key rendering/toggle/revoke gating now derives from server-provided `created_via`/`expires_at`, with the old active-key guard retained ONLY as a fallback when the API fields are absent (stale cache / registry lane pre-#1709) so the live session key can never be revoked from the UI.
 **Acceptance:** `isSessionKey(k, activeKey)` returns true iff not revoked AND (`created_via === 'bootstrap'` OR `expires_at` truthy OR, when `created_via` is null/absent, the key matches the active session's prefix); behavior is identical to today for the currently-active session key; older bootstrap keys are now uniformly classified session (intended per scope — removes the only UI cleanup path for stale session keys; expiry + registry/Supabase sweep is the cleanup, note in the PR body); unit-tested with `node --test` (AC 6 unit/component check).
 **Files:**
+
 - Create: `website/apps/dashboard/src/sessionKey.js` (pure exported predicate)
 - Modify: `website/apps/dashboard/src/main.jsx:1973-1981` (`isSessionKey` → thin wrapper passing the active key), consumers at L2882-2899
 - Test: `website/apps/dashboard/src/sessionKey.test.js`
 
 **Step 1: Write the failing unit test (pure predicate, no harness needed)**
+
 ```js
 // website/apps/dashboard/src/sessionKey.test.js — run with node --test (Node 20+,
 // zero deps: the predicate is pure, no jsdom/React needed)
@@ -1009,6 +1048,7 @@ test('stale-cache (no created_via field) active-key fallback protects the live s
   assert.equal(isSessionKey({ key_prefix: 'tt_otherkey', revoked_at: null }, live), false)
 })
 ```
+
 **Step 2: Run to verify fail**
 Run: `cd website/apps/dashboard && node --test src/sessionKey.test.js`
 Expected: FAIL — `sessionKey.js` does not exist / module not found.
@@ -1039,9 +1079,11 @@ Call out in the PR: older bootstrap/session keys (prior logins, multiple session
 ## Final Verification
 
 After all tasks: run the full affected suite in one command:
+
 ```bash
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_cli_signup.py tests/test_cli_claim.py tests/test_cli_team_keys.py tests/test_cli_context.py tests/test_cli_resolver.py tests/test_cli_global_config.py tests/test_main_guards.py tests/test_hosted_api.py tests/test_supabase_control.py tests/test_agent_signup.py tests/test_writer_inventory.py tests/test_dashboard_login.py tests/test_session_login.py -v
 ```
+
 Expected: PASS; `git diff --stat` shows no changes to `tests/test_agent_signup.py`. Dashboard: `cd website/apps/dashboard && node --test src/sessionKey.test.js && npm run build`.
 > Note: `test_cli_serve.py` shares the `TORTOISE_API_KEY` env surface — run it once (`pytest tests/test_cli_serve.py -v`) to confirm the resolver/env changes don't perturb it; it is not part of the core regression set because it exercises the self-hosted serve path, which the plan does not change.
 
@@ -1087,6 +1129,7 @@ CHANGELOG (fixes applied inline by orchestrator):
 **Summary:** Fixes applied: 24 (7 P1, 17 P2). Research queries: 0 (all fixes grounded in code verification; no third-party API surface involved). New content introduced: yes (6 new test specs, extracted dashboard predicate, `_ConfigError` semantics, D1b deviation, sign-off item).
 
 ### Cycle 2
+
 Fresh-context re-review (3 parallel reviewers) after Cycle 1 fixes. Reviewer findings merged + deduped: **0 P0, 5 P1, 15 P2** (23 raw findings — the gate catching real new issues, not re-flagging old ones). Confidence: high — function-attribution claims verified against source (the registry `session_key` mint at L7250+ writes both props; `create_api_key` registry mint at L3653 and `agent_signup` registry mint at L6946 do not).
 
 CHANGELOG (Cycle 2 fixes applied inline):
@@ -1123,6 +1166,7 @@ CHANGELOG (Cycle 2 fixes applied inline):
 **Summary (Cycle 2):** Fixes applied: 26 (5 P1, 21 P2). Research queries: 0 (all fixes grounded in code verification). New content: 6 new test specs, `isActiveKey` split, born-0600 tmp + sweep, per-site `_ConfigError`, env-config synthesis, TimeoutError leg, device_id backfill.
 
 ### Cycle 3
+
 Final verification (fresh-context reviewer, combined dimensions) after Cycle 2 fixes: **0 P0, 1 P1, 4 P2** — all execution-facing. The P1 (capsys double-read draining the capture buffer in `test_reuse_suspended_403_no_remint`, making the assertion check stdout-only while the implementation writes stderr) was verified empirically and fixed to a single `cap = capsys.readouterr()` capture. P2 fixes: mint-POST except tuple extended with `TimeoutError, OSError` + split so plain URLError keeps "Cannot reach API" while JSON-decode failures get the orphan-aware message; the two auth-pin tests marked IMPLEMENTER-AUTHORED, FAILING-FIRST (no comment-only stubs); Task 4 Step 2 `-k` filter gains the `none_tolerant` token; `tests/test_cli_global_config.py` pinned as mandatory; Task 5 Step 4 corrected 6/6 → 7/7. Final verification verdict: **clean** — "No P0s … the plan is structurally sound, internally consistent on the resolver precedence contract, and the code/test snippets are otherwise verified accurate against the current sources."
 
 🔍 Final verification: found 5 residuals — resolved in 1 fix cycle.

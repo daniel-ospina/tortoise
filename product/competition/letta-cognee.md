@@ -219,6 +219,7 @@ Explicitly segmented into three audiences on the homepage:
 | **Versioning** | Every memory edit is committed to git → "version history, conflict resolution, and a clear boundary between saved memory and uncommitted changes." Memory subagents use git worktrees |
 
 **Search & retrieval:**
+
 - **MemFS has no semantic or vector index by default** (verbatim: "MemFS does not include a semantic or vector index by default. Agents find memory in its Markdown files with normal file-search and read tools.")
 - Optional `memfs-search` mod adds keyword search (no extra deps) and optional semantic/hybrid modes (requires QMD indexed over `$MEMORY_DIR`)
 - Conversation-history search is **separate** from MemFS: `letta messages search` supports full-text/vector/hybrid on Letta Cloud; local backends are full-text only
@@ -226,6 +227,7 @@ Explicitly segmented into three audiences on the homepage:
 **Other surfaces:** skills (agent-authored, versioned in MemFS), mods (self-modifying the harness with local code), schedules, subagents, messaging channels, permissions/allowlists, secrets, cloud "computers"/sandboxes, teleportation, Letta Evals (open-source eval framework for stateful agents).
 
 **Notable gaps (Letta):**
+
 - ❌ No knowledge graph, no node/edge model of facts
 - ❌ No confidence weights or belief scores on anything
 - ❌ No typed logical relations (no implies/contradicts operators)
@@ -272,6 +274,7 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 **Memory flow:** session cache (short-term, raw, no graph extraction) → `improve(session_ids=...)` distills lessons and pushes Q&A/traces into the permanent graph (self-improvement defaults on) → `recall(query, session_id=...)` checks session cache first, falls through to the graph, tags results with `_source`.
 
 **Notable gaps (Cognee):**
+
 - ❌ No belief propagation / no inference engine over the graph (no EP, no factor graph, no transitive implication closure)
 - ❌ No general typed logical operators — `contradicts` is the only logical edge type found; there is no `implies`/support/attack primitive
 - ⚠️ Contradiction detection is opt-in; confidence is an LLM judgement, not a calibrated, propagated number
@@ -430,6 +433,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 | Other | MemGPT academic citations; `letta-ai/mods` package registry | Creator program, academy, biweekly newsletter; Berkeley Xcelerator |
 
 **Community mechanics:**
+
 - **Letta** — Discord-centric, research-community flavored. Extensive contributor base on the legacy repo (155) relative to team size (16). Ecosystem extension point is *mods* (agents self-modifying the harness) plus an npm mod registry.
 - **Cognee** — contributor-growth flavored (304 contributors, `good-first-issue` / `good-first-pr` labels), with a structured creator program and academy. Ecosystem extension point is *integrations* (frameworks, connectors, MCP clients) plus migration importers for rival memory systems.
 
@@ -448,6 +452,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 **Sources checked:** GitHub issues (letta-ai/letta), Letta blog, third-party review pages (aitoolsatlas, vectorize.io comparison), Reddit/HN via search.
 
 **What users praise:**
+
 - Research pedigree — Berkeley Sky Computing Lab, MemGPT authors, advisors Ion Stoica / Joey Gonzalez
 - The git-versioned MemFS / Context Repositories model — memory changes are reviewable, diffable, and mergeable
 - Genuinely model-agnostic (every frontier provider + local models + coding plans)
@@ -455,6 +460,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - No vendor lock on memory format — memory is plain Markdown files
 
 **What users complain about:**
+
 - **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison: Letta "has a steeper learning curve, with concepts like core/recall/archival memory and Python-only setup taking more time to internalize"
 - **Integration friction.** Issue #689: MemGPT "did not update the expected memory layer"
 - **Concept churn.** MemGPT → Letta server → Letta Code pivot; heartbeats deprecated; memory blocks now "legacy." Docs explicitly tell users to migrate off the shared-blocks pattern
@@ -468,6 +474,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 **Sources checked:** Reddit (r/LLMDevs, r/AI_Agents), GitHub issues, third-party review pages, cognee.ai case studies/testimonials.
 
 **What users praise:**
+
 - Time-to-first-memory — "give your agents memory in 60 seconds"; Homepage/PH-style quote: "Been using cognee for over 7 months now after migrating from Graphiti. Great product."
 - Knowledge-graph framing resonates with the "RAG isn't enough" audience: "Knowledge graphs for representing information are unbeatable. I used cognee." (@svpino)
 - Integration breadth into coding agents (Claude Code, Codex, Cursor) and MCP
@@ -476,6 +483,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - Fast POCs: Knowunity — "we managed to get a POC done in 2 days on 40,000 students"
 
 **What users complain about:**
+
 - **Ingestion quality / duplication.** Reddit: "There was a significant amount of nearly identical memories being stored… the same information kept getting pushed to Cognee repeatedly." Another thread warns Cognee "may assume input is already well-structured"
 - **Permissions friction.** Reddit: "The graph endpoint still enforces per-user permissions and throws 403s even though dataset listing works fine"
 - **Setup & ops.** GitHub issues: install errors ("psycopg2 only satisfied when PostgreSQL is installed"), "The behavior of path handling in the `.env` file is inconsistent", "Insights does not work with custom datapoints insertions". Review: "self-host setup is a real ops project"; Neo4j "adds infrastructure complexity"
@@ -495,6 +503,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 ### Primary sources (fetched live)
 
 **Letta**
+
 - [letta.com](https://www.letta.com/) — homepage: positioning, research chronology, case studies (Bilt, 11x, Kognitos, Hunt Club), investors, press. Retrieved 2026-09-11
 - [docs.letta.com/pricing](https://docs.letta.com/pricing) — live pricing (Free/Pro/API/Teams Pro/Enterprise) + FAQ. `letta.com/pricing` redirects here. Retrieved 2026-09-11
 - [docs.letta.com/llms.txt](https://docs.letta.com/llms.txt) — canonical product framing, surfaces, model providers, docs index. Retrieved 2026-09-11
@@ -514,6 +523,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [Tracxn profile](https://tracxn.com/d/companies/letta/__U0QCJ7iCo3pX97e44fpKmKTCiUKKF6Ki8rWRAUaHxHY) — 16 employees (2026-04-30), $10M raised. Retrieved 2026-09-11
 
 **Cognee**
+
 - [cognee.ai](https://www.cognee.ai/) — homepage: positioning, three-segment framing, 5M+ SDK runs/month, 30.6k stars, Bayer/Knowunity case studies, testimonials, integration list, "Ask an AI" GEO block. Retrieved 2026-09-11
 - [cognee.ai/pricing](https://www.cognee.ai/pricing) — live pricing (Free/Standard/Enterprise/BYOC engagement tiers) + the Enterprise-only feature list (bi-temporal & conflict resolution, provenance on every answer). Retrieved 2026-09-11
 - [docs.cognee.ai/core-concepts/architecture](https://docs.cognee.ai/core-concepts/architecture) — three-store architecture, provenance role. Retrieved 2026-09-11
@@ -550,6 +560,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - ⚠️ **pypistats.org rate-limited** on several attempts; figures above are from successful calls.
 
 ### Suggested follow-up
+
 - Read the MemGPT paper and Letta's "Memory Models" / "Context Constitution" research posts for the theoretical claim that token-space context management substitutes for a graph.
 - Run Cognee's `contradiction_feedback_demo.py` and `fact_validity.py` locally to verify the `contradicts` edge, confidence score, and `valid_to` behavior on a non-default backend (the documented Kuzu/Ladybug limitation).
 - Check whether Cognee's `valid_to` and `contradicts` are available in Cognee Cloud outside the Enterprise tier (pricing page implies not).

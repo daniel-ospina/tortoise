@@ -28,10 +28,12 @@ Preference (`single-session-preference`) and temporal (`temporal-reasoning`) que
 ## What changes
 
 **Mechanism** (minimal plumbing, backward-compatible):
+
 - `Reader.answer()` protocol + `LLMReader.answer()` / `MockReader.answer()` gain `question_type: str | None = None`.
 - `run.py` passes `question.get("question_type", "")` through.
 
 **Prompt** (the lever):
+
 - Harden the generic `_SYSTEM_PROMPT`: answer from the retrieved context when evidence is present; do not refuse/hedge on questions the context answers; commit to a concrete answer.
 - Type-specific fragments appended when `question_type` is:
   - `temporal-reasoning`: use `Current Date` + per-session dates; compute elapsed time; **commit to a number** (off-by-one acceptable — the official judge does not penalize it); never hedge on date math when the dated evidence is present.
@@ -44,6 +46,7 @@ Preference (`single-session-preference`) and temporal (`temporal-reasoning`) que
 ## Testability (no full 500-Q run)
 
 New `tests/test_longmem_reader_prompting.py` (offline, mock judge, embedded DB):
+
 1. Plumbing: `run_evaluation` forwards `question_type` to the reader.
 2. Prompt content: system prompt carries the temporal fragment for `temporal-reasoning` and the preference fragment for `single-session-preference`; generic prompt unchanged for other types.
 3. Behavior (red→green): a prompt-faithful fake model — computes "N days ago" from the rendered dates when the temporal fragment is present (else hedges "I do not know"), and commits to the user's stated option when the preference fragment is present — judged correct by MockJudge. This mirrors the issue's documented failure mode (hedge with evidence present) and proves the prompt, not retrieval, is the fix.

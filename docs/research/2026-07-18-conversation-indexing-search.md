@@ -150,6 +150,7 @@ Graphiti is the most architecturally mature approach. Key design decisions:
 | Freeform NL | "Tell me about the pricing discussion" | All systems (semantic search) |
 
 **How results should be structured for agents:**
+
 1. **Not raw text dumps** — agents need structured facts with provenance
 2. **Ranked by relevance, not chronology** — "what's most relevant to my question" beats "what's most recent"
 3. **With confidence signals** — agents should know whether a result is a settled conclusion or a speculative claim
@@ -205,6 +206,7 @@ Where `recency_boost(t) = e^(-λt)` and `graph_confidence_boost(c) = c` (0-1 sca
 **This is Tortoise's differentiator.** No other system we surveyed uses epistemic confidence to boost search rankings.
 
 **How it works:**
+
 1. Agent searches for "pricing decision"
 2. Search returns 5 Points across 3 sessions
 3. For each Point, look up its EP confidence in the tortoise graph
@@ -212,6 +214,7 @@ Where `recency_boost(t) = e^(-λt)` and `graph_confidence_boost(c) = c` (0-1 sca
 5. Sessions that contributed to high-confidence Points get a provenance boost
 
 **Implementation sketch:**
+
 ```python
 def graph_informed_rank(results, ep):
     for r in results:

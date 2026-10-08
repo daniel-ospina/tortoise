@@ -83,6 +83,7 @@ High-level E2E (scope §4) → Detailed E2E (plan §7) → Issue test references
 **Review Gates:** 5/5 passed (align 5c, research 2c, scope + human gate, plan 11c + 3 sync cycles, decompose 3 batches + MECE 3c) + both human gates approved and recorded (2026-08-29)
 
 **Key pressure-test outcomes (what changed vs the raw issue):**
+
 1. Completion gates are FORK-AWARE (self/build/compact) — the issue body's single-gate framing was unsatisfiable for builders/org-B
 2. Store SPLIT (flow→graph, operational→jsonb) — full migration would break live jsonb consumers (session_recording gate, install probes, PATCH allowlist)
 3. OTP on BOTH invite mismatch-override paths — accept-with-mismatch was an invite-hijack path
@@ -100,6 +101,7 @@ High-level E2E (scope §4) → Detailed E2E (plan §7) → Issue test references
 **Gate:** fresh-context reviewer (dispatched via `task`).
 
 **Cycle 1 findings (reviewer):**
+
 1. P1 — human-gate approvals not recorded in artifacts (03-scope/00/06 said pending) → both approvals recorded (2026-08-29); gate records updated.
 2. P1 — plan per-substep review record was an empty stub → full 11-cycle coherence record + 3 test-design sync cycles written into 06-plan.md Review-gate record.
 3. P2 — proud test had no verification home → added to capstone #2008 (pass criteria + failure → P0/P1 fix in owning issue).

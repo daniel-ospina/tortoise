@@ -47,6 +47,7 @@ There are **two storage adapters** that write to the `sb-tortoise-auth-token` co
 **The consequence:**
 
 When supabase-js on the dashboard SPA saves the full session (after `getSession()` + `_getUser()`), it writes a cookie with:
+
 - `user.identities` — a potentially large array (~500-2000+ bytes depending on number of linked identities)
 - `user.user_metadata` — full object with all Google profile fields (iss, sub, picture URL, etc.)
 

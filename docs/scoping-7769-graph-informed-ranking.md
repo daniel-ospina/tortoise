@@ -4,6 +4,7 @@
 **Root cause:** All Tortoise ranked-result surfaces (`tortoise_search`, `tortoise_suggest_entry_points`) use one-dimensional ranking — pure cosine similarity or string-match heuristics. Graph topology (EP confidences, operator edges, entity relationships) — which is Tortoise's unique structural advantage — is invisible to ranking. The session-entry-point use case is the most acute pain point: agents calling `suggest_entry_points("pricing")` get results ordered by keyword overlap, not by which sessions produced well-reasoned, high-confidence knowledge.
 
 This is not just a session problem — it affects every ranked result. But sessions are the right MVP scope because:
+
 1. The aboutObject edge (Event→Object) is a graph-native signal no competitor has
 2. Session ranking is the most common agent query pattern
 3. The solution architecture (a composable `GraphRanker`) generalizes to Point search when ready
@@ -13,11 +14,13 @@ This is not just a session problem — it affects every ranked result. But sessi
 ## Verification Gates
 
 ### problem-verify: 1 cycle (internal synthesis — sub-agent API unavailable)
+
 - **problem-diverge:** Generated 3 alternative framings. Converged on the broader framing (all ranked results lack graph signals, not just sessions) with session MVP scope.
 - **problem-converge:** Evidence-based — the 2026-07-18 research doc independently validated this as Tortoise's "unique differentiator" with no competitor implementing anything similar.
 - **Quality over convenience check:** PASS. The broader framing (all ranked results) was selected over the narrower framing (sessions only), even though it means designing for generality.
 
 ### solution-verify: 1 cycle (internal)
+
 - **solution-diverge:** 3 approaches generated (inline boost, GraphRanker class, full RRF pipeline).
 - **solution-converge:** GraphRanker class selected — quality over convenience. Rejected inline boosts as coupling ranking into already-large functions. Rejected full RRF pipeline as premature (BM25 indexing doesn't exist yet).
 - **Genuineness:** All 3 approaches differ architecturally (modification vs new module vs pipeline refactor).
@@ -25,6 +28,7 @@ This is not just a session problem — it affects every ranked result. But sessi
 ## Plan
 
 ### Problem Statement
+
 Tortoise's ranking functions (`search_points`, `suggest_entry_points`) use only text similarity. They ignore graph topology — EP confidences, operator edges, entity relationships, and session→Object links. This means agents get results ordered by keyword match quality, not by epistemic quality. A well-reasoned claim with high EP confidence ranks below a keyword-dense but unverified claim. Sessions that produced rich knowledge graphs rank identically to sessions that produced nothing.
 
 ### Proposed Solution
@@ -90,26 +94,31 @@ class GraphRanker:
 ### Implementation Steps
 
 **Step 1: `tortoise/ranking.py` — GraphRanker class (~120 lines)**
+
 - `rerank()` method with weighted signal fusion
 - `graph_boost()` — dispatches to signal-specific methods
 - `recency_decay()` — exponential decay function
 - Unit-testable with mocked projection
 
 **Step 2: Wire into `tortoise/embeddings.py:search_points()` (~15 lines)**
+
 - Accept optional `graph_ranker` parameter
 - After similarity sort, pass through `graph_ranker.rerank()`
 - Backward-compatible: None → no graph boost
 
 **Step 3: Wire into `tortoise/sdk.py:suggest_entry_points()` (~15 lines)**
+
 - After confidence sort, pass through `graph_ranker.rerank()`
 - Same backward-compatible pattern
 
 **Step 4: Graph signal queries in `tortoise/projection.py` (~40 lines)**
+
 - `get_session_object_count(session_id)` — aboutObject edge count
 - `get_session_point_confidence(session_id)` — avg EP confidence of connected Points
 - These become the data sources for `GraphRanker.graph_boost()`
 
 **Step 5: Tests (~100 lines)**
+
 - `tests/test_ranking.py` — unit tests for GraphRanker math
 - `tests/test_tortoise_search.py` — integration tests with graph boost enabled
 - `tests/test_suggest_entry_points.py` — integration tests with graph boost enabled
@@ -124,12 +133,14 @@ class GraphRanker:
 6. **AC6:** GraphRanker is independently unit-testable without a live FalkorDB instance
 
 ### Testing Strategy
+
 - **Unit:** `test_ranking.py` — test `rerank()` with mock results dicts, verify score math
 - **Integration:** `test_tortoise_search.py` — seed Points with varying EP confidences, verify ranking order
 - **Integration:** ranking tests (tests/test_ranking.py) — seed sessions with/without aboutObject edges, verify ranking order
 - **Regression:** Existing search/suggest tests must pass unchanged
 
 ### Runtime Prerequisites
+
 - EP confidence must be computed before graph boost is meaningful (uncalibrated Points get neutral boost of 0.0)
 - aboutObject edges must exist (this is a dependency on the session→Object linking from session indexing; `_connect_issue_objects` wires them per ONTOLOGY v3.2 §3.2)
 - No new dependencies required (all graph traversal uses existing FalkorDB Cypher queries)
@@ -137,11 +148,13 @@ class GraphRanker:
 ## Rejected Alternatives
 
 ### Approach A: Inline boost in existing functions
+
 **Rejected because:** Couples ranking logic into already-large functions (`search_points` is 44 lines, `suggest_entry_points` is 38 lines). Makes testing harder — ranking math can't be tested independently of embedding models or DB setup. Violates single-responsibility. Would need to be refactored out when BM25 or cross-encoder ranking is added later.
 
 **When this WOULD have been better:** If this were a quick experiment to validate that graph signals improve ranking at all. But the 2026-07-18 research doc already validated the concept. We're building infrastructure, not experimenting.
 
 ### Approach C: Full RRF pipeline (BM25 + vector + graph)
+
 **Rejected because:** Premature. BM25 indexing doesn't exist yet in Tortoise (it's a separate recommendation R2 from the research doc). Building RRF without BM25 is just vector+graph fusion — which is what Approach B does but with cleaner architecture. Full pipeline is the right end-state but wrong starting point.
 
 **When this WOULD have been better:** When BM25 indexing is implemented (likely next cycle after this issue). Then RRF becomes the natural extension: swap GraphRanker's `rerank()` to use RRF fusion instead of weighted sum.
@@ -167,6 +180,7 @@ class GraphRanker:
 ## Review Cycle Log
 
 **Cycle 1 (internal synthesis):**
+
 - problem-diverge: Explored 3 framings. Codebase scout confirmed the diagnosis.
 - problem-converge: Framing 1 (all ranked results) selected over narrower framing. Research doc independently validates.
 - solution-diverge: 3 approaches generated.
@@ -190,5 +204,6 @@ During codebase scouting, two adjacent gaps were identified that should be separ
 2. **Cross-encoder reranking** — Optional LLM-powered reranking of top-K results for complex queries. R8 from the research doc. Separate issue, depends on LLM config availability.
 
 📋 These should be filed as:
+
 - #TBD: Add BM25 sparse retrieval alongside vector search
 - #TBD: Cross-encoder reranking for top-K search results

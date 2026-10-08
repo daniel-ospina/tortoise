@@ -50,6 +50,7 @@ Honest trade-off (corrected after verifier):
 - **Migration path:** if #669 (Supabase control-plane) lands, `:GraphEvent` maps 1:1 to a Postgres event table; the poll API is storage-agnostic (cursor interface).
 
 **#4 — Delivery semantics: at-least-once + event_id dedup (unique constraint), 30-day retention, opaque cursor. Confirmed.** External check: FalkorDB supports `GRAPH.CONSTRAINT CREATE UNIQUE` (unique constraints on node properties) and composite indexes over multiple properties (e.g. `(org_id, seq)`) — the storage-layer dedup and indexed-cursor reads are implementable (verified by verifier cycle-2 external queries; docs.confirmed).
+
 - At-least-once is the canonical contract (idempotent consumer pattern); enforce with a **unique constraint on `event_id`** in FalkorDB (dedup at the storage layer — mirrors "atomic dedup" best practice) instead of scan-based dedup. Retention bounds the dedup set automatically.
 - 30-day retention + size cap via boot/scheduled Cypher DELETE; cursor = opaque token encoding `(seq)` so compaction never breaks clients; expired cursors get a clean 410-style "replay from tail" response.
 - Append-before-projection + single-writer discipline (per team) stays per scoping; document at-least-once as the contract (clients must be idempotent on replay).
@@ -68,4 +69,5 @@ Honest trade-off (corrected after verifier):
 | :GraphEvent zero-relationship isolation (internal) | HIGH | sdk.py query layer, ep.py |
 
 ## Open Question for User
+
 None blocking. If the team prefers file-based logs, the documented alternative is JSONL on the existing `/data` volume + accepting single-machine risk and building rotation/compaction — not recommended vs FalkorDB nodes.

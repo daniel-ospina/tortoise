@@ -42,6 +42,7 @@ Skipped — zero third-party dependencies; pure in-repo string edits (skip rule 
 **Intent:** Every user-facing 'team' word in the four chrome surfaces + claim-guard reads Organization (matching the wizard vocabulary).
 **Acceptance:** After edits, grepping main.jsx for the old strings (C1-C17 list) finds only comments/identifiers that the §3 boundary allows; no layout/markup structure changed; wizardArchived.test.js:47 pin ('Organization name required' literal at :3366) untouched.
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (lines per table)
 
 Apply these exact copy changes (file:line on the current worktree HEAD):
@@ -67,6 +68,7 @@ Apply these exact copy changes (file:line on the current worktree HEAD):
 | C17 | `'This team has been suspended due to unusual activity.'` `:5988` (banner fallback) | `'This organization has been suspended due to unusual activity.'` |
 
 Then:
+
 1. `grep -n "No team\|Switch team\|Create new team\|Invalid team name\|Team members\|teammate\|teammates\|Welcome to the team\|anonymous team\|same key, same graph\|Could not create the team\|Create another team\|Could not load your teams\|Remove this member from the team\|another team\|This team has been suspended" website/apps/dashboard/src/main.jsx` — every remaining hit must be a comment, identifier, or §3-boundary keep (tier badge, Billing). Update the e2e-mirroring comment at `tests/e2e/test_dashboard_identity.py:141` (done in Task 3).
 2. Commit: `git add website/apps/dashboard/src/main.jsx && git commit -m "fix(vocab): sweep dashboard chrome 'team' copy to Organization (#2391)"`
 
@@ -77,6 +79,7 @@ Then:
 **Intent:** The server `detail` strings the swept chrome renders verbatim (create-org dialog, invite members branch, claim error, suspended banner/alerts) use the same Organization vocabulary — coordinated with the UI.
 **Acceptance:** Grep of each old string across tortoise/ finds only §3-boundary hits (SDK sdk.py, 403/404 contracts, onboarding sub-team mechanics, seed content); pytest substring pins survive.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py`, `tortoise/abuse.py`, `tortoise/__main__.py`
 
 | Id | File:line | Old | New |
@@ -97,6 +100,7 @@ Then:
 | S12 | __main__.py:1703 | `"This team has been suspended due to unusual activity."` | `"This organization has been suspended due to unusual activity."` |
 
 Then:
+
 1. Re-run the grep sweep over `tortoise/` for the old strings — remaining hits must be only: sdk.py (`Team name must be…`, `Invalid team name:`, `Confirmation must match team name`), 403/404 contracts (`No team membership…`, `Unknown team`, `Team not found`, `No membership in team`), onboarding sub-team mechanics (`A session user is required to create a sub-team`, `Sub-team already created`), CLI claim print (`Claim your team`, `attaches to THIS team`), runtime seed (`Teams using structured agent memory`). All are documented §3 keeps.
 2. Commit: `git add tortoise/hosted_api.py tortoise/abuse.py tortoise/__main__.py && git commit -m "fix(vocab): org-cased server error strings rendered by dashboard chrome (#2391)"`
 
@@ -107,9 +111,11 @@ Then:
 **Intent:** The coordinated sweep moves the pins so a naive future sweep cannot regress the e2e suite.
 **Acceptance:** All old-string pins in the two files replaced with the new copy; test names/identifiers unchanged; mock fixture + comments refreshed; no other test file pins the old strings (verified by grep).
 **Files:**
+
 - Modify: `tests/e2e/test_dashboard_identity.py`, `tests/test_free_team_entitlement.py`
 
 `tests/e2e/test_dashboard_identity.py`:
+
 - :257 `get_by_text("Switch team")` → `get_by_text("Switch organization")`
 - :286 `get_by_text("Switch team")` → `get_by_text("Switch organization")`
 - :305 docstring `Members section reads Team members.` → `reads Members.`
@@ -121,9 +127,11 @@ Then:
 - :553-554 402 route-mock detail `"Create another team requires a paid plan — upgrade an existing team first"` → org phrasing (fixture hygiene; only the fixed free-cap client copy at :573 is asserted)
 
 `tests/test_free_team_entitlement.py`:
+
 - :27 `_UPGRADE_MSG = "Create another team requires a paid plan"` → `"Create another organization requires a paid plan"` (5 call sites assert `_UPGRADE_MSG in detail`; S6 detail starts with that substring — safe)
 
 Then:
+
 1. Grep the whole repo (tests/, tortoise/, website/) for every old string in Tasks 1-3 — remaining hits must be only §3 keeps + this task's updated lines.
 2. Commit: `git add tests/e2e/test_dashboard_identity.py tests/test_free_team_entitlement.py && git commit -m "test(e2e): move team→org copy pins with the sweep (#2391)"`
 
@@ -134,9 +142,11 @@ Then:
 **Intent:** Honor the committed-dist convention (#2175): the `dashboard-e2e` CI job serves the committed bundle and triggers on `src/` changes — a stale dist silently tests the pre-sweep copy.
 **Acceptance:** `website/apps/dashboard/dist/` contains a fresh build whose JS bundle no longer contains the old strings and whose stale hashed `index-CMTXyLTN.js` asset is removed.
 **Files:**
+
 - Modify: `website/apps/dashboard/dist/` (regenerated assets + index.html)
 
 Steps:
+
 1. `cd website/apps/dashboard && npm run build` (vite present in node_modules; node v22). Expect a new hashed `dist/assets/index-*.js` + unchanged `index.html`/css + deletion of the old `index-CMTXyLTN.js`.
 2. `grep -c "Switch team\|Team members\|No team" dist/assets/index-*.js` → expect 0 hits (minified copy may appear only in string form if any survived — must be 0 for the swept strings; a couple of §3 keeps like 'Billing team'/'Team tier' may legitimately remain).
 3. Commit: `git add -A website/apps/dashboard/dist && git commit -m "chore(dashboard): rebuild committed dist for org-vocab sweep (#2391)"`
@@ -148,6 +158,7 @@ Steps:
 **Intent:** Proof the sweep is complete and green before commit-workflow.
 **Acceptance:** Unit + targeted pytest green; residual audit passes; no old pinned string remains outside the §3 allowlist.
 **Files:**
+
 - Run (no edits except fixes if a check fails)
 
 1. **Node unit tests** (CI runner is `node --test src/*.test.js` via agent-infra node-ci — there is no npm test script):

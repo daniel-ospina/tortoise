@@ -17,24 +17,29 @@ The issue's framing also carries two assumptions that need correction:
 **Quality over convenience:** The easy path (issue's own framing) is bolting a `tortoise_subscribe`-style endpoint onto the existing REST/MCP surface and calling indicator 2 done. The right path is (a) defining and enforcing the state model in SDK/API paths (indicator 1), (b) making transitions emit durable events in **both** write paths (EventAPI and SDK/hosted), and (c) layering the subscription surface on that stream. Without (a)+(b), the subscription delivers stale or phantom notifications.
 
 ### Why This Framing
+
 - **Issue's framing ("zero subscription code; add one") rejected** — the hard dependency (durable, tenant-scoped event stream) is unstated. Every solution approach must first solve "where do events live," which the issue assumes away.
 - **Indicator 3's EventCodec framing corrected, not discarded** — the *machinery* (versioning/upcasters/JSONL) is the right substrate; the *claim* that graph events already use it is wrong. Scoping targets the true integration point.
 - **Poll vs push is a solution question, not a problem question** — the confirmed problem is "tenant observes state changes without full-graph polling." Both poll and push satisfy it; the choice is resolved in the solution diamond on capability evidence (FastMCP 3.4.6 exposes **no** notification API — verified `dir(FastMCP)` has no notify/stream/subscribe surface).
 - **"Challenged" as a state vs a NAND edge** is left open (see Open Questions) — the state model can ship draft/live/retracted/superseded and treat challenged as a first-class state added behind a flag if product confirms it.
 
 ### Falsification Check
+
 This definition is wrong if any of:
+
 1. Hosted/SDK mutations **do** emit durable events somewhere (grep for `_emit`/`EventLog`/`append` in hosted_api.py, mcp_server.py, sdk.py → **none found**; all SDK mutations are direct Cypher).
 2. A subscription/notify/watch mechanism already exists outside `tortoise/*.py` (grep for subscribe/notify/watcher/listener/webhook → only connector webhooks in `tortoise/connectors/`, unrelated).
 3. `PointRetracted` keeps a tombstone in the projection (projection/__init__.py:125 `points.pop` → **deletes**).
 4. `POINT_STATUS_VALUES` already contains challenged/retracted/superseded (sdk.py:26 → **does not**).
 
 ### Confidence: 80
+
 All four falsification checks code-verified on origin/main. Residual uncertainty: product semantics of `challenged`; hosted event-store placement (per-team JSONL vs FalkorDB event nodes); whether FastMCP gains notification support in a version we can adopt (verified absent at 3.4.6).
 
 ## Verification Gates
 
 Single-session inline execution (per exec constraints — no sub-agent dispatch, no git ops).
+
 - **problem-verify (inline):** 4 falsification checks run against code; 2 framing corrections (EventCodec integration point; event-source prerequisite) incorporated.
 - **solution-verify (inline):** 3 approaches (below) checked for architectural distinctness; convergence selected Approach A on capability evidence (FastMCP notification gap verified in .venv), not on diff size.
 
@@ -67,6 +72,7 @@ Single-session inline execution (per exec constraints — no sub-agent dispatch,
 **Best fit if:** an external system (not an MCP client) must react to graph changes — a Phase-2 delivery mode, not the v1 surface.
 
 ### Claim-state model placement options (orthogonal axis)
+
 - **SDK-first** (recommended): the SDK is the shared choke point both MCP tools and REST route through (`_get_org_sdk()`, mcp_auth.py) — one enforcement location covers all consumers. `update_point` already validates status (sdk.py:545-548); extend the valid-set + add transition guards there.
 - **API-first:** enforce only in `EventAPI` (CLI/ingest path) — leaves hosted SDK path unenforced (the exact gap this issue exists to close). Rejected.
 - **Parallel:** build subscriptions before the state model — delivers notifications of a lifecycle that doesn't exist. Rejected (issue's own indicator ordering makes this a non-sequitur).
@@ -88,6 +94,7 @@ Single-session inline execution (per exec constraints — no sub-agent dispatch,
 **Step 4 — Tests + docs.** New `tests/test_subscriptions.py` (emit→poll round-trip, cursor replay, dedup, tenant isolation — team A cannot read team B events, tombstone retraction, status transition guards, EventCodec round-trip for ClaimStateChanged). Extend `tests/test_api.py` (retraction tombstone), `tortoise/shared_state/tests/` (new event types). Document the state model + event catalog in `docs/` (ontology §5 vocabulary) and `docs/00_index.md`.
 
 ### Acceptance Criteria
+
 1. **AC1:** Every SDK mutation (point/operator/retract/supersede) appends a durable, team-scoped event; `fold`-replay reconstructs retracted points with `status:'retracted'`.
 2. **AC2:** A tenant polls `GET /v1/events?after=C` and receives exactly the events appended after C, dedup'd, across a retract→re-add race, without full-graph polling.
 3. **AC3:** Team A's poll cursor never returns team B's events (HTTP-mode isolation test).
@@ -163,7 +170,6 @@ Single-session inline execution (per exec constraints — no sub-agent dispatch,
 5. **Filter scope:** the issue target says "subscribe to a query/filter." v1 = filter by event type + team scope (recommended). Do you need arbitrary property/pointKind filters or Cypher-query subscriptions in v1, or is topic-based sufficient?
 6. **Push surface priority:** is the REST `GET /v1/events` poll + `tortoise_events_poll` MCP tool sufficient for the target consumer (agents/pi sessions poll; long-lived HTTP MCP clients can use an SSE endpoint later)? Or should the SSE stream ship in v1?
 7. **Cursor semantics:** opaque token vs (timestamp, event_id) composite? Opaque token is recommended (survives compaction without breaking clients).
-
 
 ## User Decisions (2026-08-08) — recorded after human approval gate + research
 

@@ -90,6 +90,7 @@ One-time download per dataset into the cache
 Encode (CPU, MiniLM-class): nfcorpus+scifact+fiqa ≈ 66k passages ≈
 2-4 min; msmarco 100k-passage sample ≈ 5-10 min; +1000 query encodes ≈ 1
 min. Peak RAM ≈ 154MB for the 100k×384-dim float32 doc matrix + ~90MB model
+
 + batching — comfortably inside 2GB. The full 8.8M-passage MS MARCO corpus
 is never materialized (streaming seeded-reservoir sample, one I/O pass).
 Runtime budget on the benchmark box: ~15-25 min per model-config for all

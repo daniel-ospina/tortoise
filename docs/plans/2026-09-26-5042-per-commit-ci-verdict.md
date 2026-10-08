@@ -183,6 +183,7 @@ re-derives one.
 `tests/test_ci_verdict.py` covers the checklist, the polarity decisions, group separation, read
 failure and truncation; the CLI exits 2 (never a verdict) when the surface cannot be read.
 **Files:**
+
 - Create: `tools/ci_verdict.py`
 - Create: `tests/test_ci_verdict.py`
 - Create: `docs/plans/2026-09-26-5042-per-commit-ci-verdict.md` (this file)
@@ -252,6 +253,7 @@ reads it, or the migration changes merge behaviour.
 **Intent:** The rail's `check_surface_probe` is the largest re-derivation site; it must read the
 verdict, not a per-name rollup.
 **Acceptance:**
+
 - The probe's green/red/pending decision is the verdict, and the rail feeds its **already-fetched**
   payload through the pure function (the CLI's `--check-runs-json`/`--runs-json` seam). The run map
   must be built **unconditionally** (not only on reds) and must carry `workflowDatabaseId` as well as

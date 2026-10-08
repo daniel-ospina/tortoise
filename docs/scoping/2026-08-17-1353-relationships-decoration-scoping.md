@@ -24,14 +24,17 @@ created: 2026-08-17
 ## Context
 
 ### Profiling (2026-08-15)
+
 Decoration pipeline split: EP annotation ~1ms (1.1%, derived from persisted values — trivially cheap, stays eager); relationships 2-hop fan-out 68ms sparse → 1,919ms dense (84%, super-linear, 122K relationship dicts at limit=100) — the real cost; entity fetch + serialize ~1ms.
 
 **Root cause of the blowup:** `get_relationships` runs `(n)-[r]-(op)-[r2]-(other)` — *per result point* it re-expands its operators' full neighborhoods. Dense corpus: operators every 50th point, ~200 edges each → 100 results × ~6 shared ops × 200 = 122K dicts. Cost scales with **n-results × operator degree**, not operator count.
 
 ### Eval-impact analysis (2026-08-17)
+
 The memory eval (LongMemEval, `tools/longmem_eval/`) reader consumes ONLY hit `content` + session dates (`render_context`) — relationships/EP payloads never reach the reader. **#1353 is a product-speed/context-quality lever, not an eval-score lever.** The eval measures accuracy levers (#1369 extractor wiring, #1349/#1348 retrieval, #1367 supersede); the #316 benchmark measures speed levers. Both arms are intentional.
 
 ### Verified facts (design session 2026-08-17, re-verified on origin/main)
+
 - `tortoise_fts_query` always decorates with `get_relationships` for `entity_type=point` — no flag, no cap today (sdk.py:8949).
 - `get_relationships` is already a single batched Cypher (not N+1) — the problem is the unbounded expansion, not the batching.
 - **`related_content` (truncated to 200 chars per entry) is unconsumed by every codebase consumer** — not topic_summarization, not the dashboard, not the eval. It is pure payload bloat (the single largest token source).
@@ -42,6 +45,7 @@ The memory eval (LongMemEval, `tools/longmem_eval/`) reader consumes ONLY hit `c
 - Subject attribution today is indirect: Point →(aboutEvent)→ Event →(aboutSubject)→ Subject; points rarely get a direct `aboutSubject`. Chain-derived attribution (via operators) is unreliable and can misattribute (→ follow-up issue, filed).
 
 ### Industry context (surveyed 2026-08-17)
+
 - **GraphRAG (Microsoft):** local search caps at `top_k_relationships = 10` per entity + a **global token budget** (`max_context_tokens` 4K–12K; ~40% to entity+relationship descriptions). Ranks + filters to fit the budget — never dumps.
 - **LightRAG:** ranks relationships by centrality/degree/edge weight (selection policy); their paper reports **smaller top_k performs better on factual QA** — "overly large retrieved context can be detrimental."
 - **Mem0:** ~6.9K tokens per retrieval call average (whole response).

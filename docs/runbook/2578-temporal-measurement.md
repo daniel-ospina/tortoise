@@ -126,6 +126,7 @@ Written before any arm runs by `measure_temporal.write_preregistration`
 (pinned ARM TABLE with per-arm reach statements, the conversion null, the
 R5 rollback guard, reader-constancy assertion, refusal-classifier bars).
 See the scoped plan `docs/plans/2026-09-09-2578-temporal-measurement.md`
+
 + the scope comment on issue #2578.
 
 ## Gate output
@@ -160,6 +161,7 @@ baseline (0/52). `tr_top_k24` sits at the edge: 1/52 answerable-correct
 movement, not an effect.
 
 **Known limitations (recorded, not hidden):**
+
 1. The R5 rollback guard is non-discriminating on this data — the
    pre-registered bound (baseline refusal 0.982 + margin 0.10 = 1.082)
    exceeds the ceiling of a refusal rate (1.0), so no arm could ever be

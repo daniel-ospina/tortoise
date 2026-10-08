@@ -73,6 +73,7 @@ Tortoise's raw 70-tool count includes ~13 tools with no competitor equivalent: E
 Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 
 **Group: memory (17 tools: 11R / 5W / 1I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 1 | `tortoise_create_point` | I | Create a Point node | **Core** — every session |
@@ -94,6 +95,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 17 | `tortoise_calibrate_summary` | R | Audit graph calibration state | **Rare** — EP calibration audit |
 
 **Group: reasoning (10 tools: 9R / 1W / 0I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 18 | `tortoise_check_structure` | R | Gate 0→4 chain integrity | **Periodic** — structure audit |
@@ -108,6 +110,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 27 | `tortoise_dream` | W | Run EP stabilization | **Rare** — compute-heavy, operator-only |
 
 **Group: graph (12 tools: 3R / 7W / 2I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 28 | `tortoise_create_operator` | I | Create an operator (IMPL, NAND, etc.) | **Core** — linking claims |
@@ -124,6 +127,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 39 | `tortoise_delete_entity` | W | Delete any entity by ID | **Rare** — destructive |
 
 **Group: sessions (6 tools: 5R / 1W / 0I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 40 | `tortoise_session_context` | R | "What happened last session?" | **Core** — every session start |
@@ -134,6 +138,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 45 | `tortoise_list_namespaces` | R | List installed pack namespaces | **Rare** — pack management |
 
 **Group: sources (4 tools: 1R / 1W / 2I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 46 | `tortoise_list_sources` | R | All Sources with point counts | **Periodic** — source discovery |
@@ -142,6 +147,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 49 | `tortoise_ingest_corpus` | W | Batch document ingestion from directory | **Rare** — admin, filesystem access |
 
 **Group: journal (5 tools: 1R / 3W / 1I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 50 | `tortoise_checkpoint` | I | Session batch save with dedup | **Core** — session end |
@@ -151,6 +157,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 54 | `tortoise_file_human_approval` | W | Record human approval artifact | **Periodic** — gate approvals |
 
 **Group: admin (5 tools: 3R / 2W / 0I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 55 | `tortoise_status` | R | Graph health + entity counts | **Periodic** — health check |
@@ -160,6 +167,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 59 | `tortoise_backfill_v25` | W | Schema migration to v2.5 | **Rare** — migration, one-shot |
 
 **Group: onboarding (6 tools: 2R / 3W / 1I)**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 60 | `tortoise_onboarding_demo_create` | I | Create demo epistemic graph | **Onboarding-only** — run once |
@@ -170,6 +178,7 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 | 65 | `tortoise_onboarding_github_status` | R | Return GitHub connection status | **Onboarding-only** — run once |
 
 **Also (not in GROUP_BY_NAME, defaulting to "memory"):**
+
 | # | Tool | R/W/I | Purpose | Agent-need classification |
 |---|---|---|---|---|
 | 66 | `tortoise_assess_source` | W | Record agent's Source assessment | **Periodic** — source quality |
@@ -187,10 +196,13 @@ Source: `tortoise/tool_registry.py` (static analysis of commit at clone time).
 #### Cluster A: Query surface (3 tools → 1 with merged params)
 
 **`tortoise_query`**
+
 ```
 query(kind=None, *, include_retracted=False, **filters) → list[dict]
 ```
+
 **`tortoise_paginated_query`**
+
 ```
 paginated_query(kind=None, skip=0, limit=20, *, include_retracted=False, **filters) → {results, total, hasMore}
 ```
@@ -202,10 +214,13 @@ paginated_query(kind=None, skip=0, limit=20, *, include_retracted=False, **filte
 ---
 
 **`tortoise_query_points_by_tag`**
+
 ```
 query_points_by_tag(tag: str) → list[dict]
 ```
+
 vs:
+
 ```
 query(kind=None, **filters) → list[dict]
 ```
@@ -219,12 +234,15 @@ query(kind=None, **filters) → list[dict]
 #### Cluster B: Search surface (2 tools → 1)
 
 **`tortoise_search`** (sdk_method: `tortoise_fts_query`)
+
 ```
 tortoise_fts_query(query=None, kind=None, *, entity_type="point",
     min_confidence=0.0, order_by="relevance", limit=10,
     threshold=0.0, relationship_filter=None, traversal_path=None) → list[dict]
 ```
+
 **`tortoise_search_sessions`**
+
 ```
 search_sessions(query, *, agent=None, topics=None, after=None, before=None,
     limit=10, offset=0) → list[dict]
@@ -262,6 +280,7 @@ search_sessions(query, *, agent=None, topics=None, after=None, before=None,
 | `tortoise_summarize_structure` | `{gateN_*, total}` | Structure count queries |
 
 **Evidence:**
+
 - `tortoise_health` (mcp_server.py:867) calls `monitoring.metrics()` — an in-memory monitoring layer with counters for errors, uptime, and last ingest timestamps. `tortoise_status` (mcp_server.py:864) calls `sdk.status()` — direct FalkorDB queries for connectivity + taxonomy counts. **These are different infrastructure, not a subset relationship.** They are partially overlapping (both check FalkorDB connectivity, both return entity counts via taxonomy), but health adds in-memory metrics (errors, uptime) that status cannot produce.
 - `tortoise_taxonomy` returns a flat dict of label counts. `tortoise_status` already returns `counts` via the same `taxonomy()` call. Merge `taxonomy` into `status`.
 - `tortoise_check_structure` and `tortoise_summarize_structure` are distinct operations (violations vs counts) but can be merged with a `detail: "summary" | "violations"` parameter.
@@ -296,6 +315,7 @@ search_sessions(query, *, agent=None, topics=None, after=None, before=None,
 **Corrected evidence:** The ToolDefinition description (tool_registry.py:277) says "Equivalent to invalidate(old_id, new_id)" — this is a **description inaccuracy**, not a code fact. `supersede_point` inlines the invalidate logic (outdated flag + CORRECTS) but adds edge-transfer semantics that `invalidate_point` does NOT have. They share the first 2 writes (outdated flag, CORRECTS edge) but diverge fundamentally on edge transfer. The tool description should be corrected separately.
 
 **Consolidation analysis:**
+
 - `supersede` must remain a separate tool — edge-transfer semantics are qualitatively different from flag-only operations. Merging them would force agents to understand a `mode` parameter that toggles 80+ lines of edge-transfer logic.
 - `invalidate` + `retract` could merge: both are flag-only operations on a single Point (`outdated=true` vs `status='retracted'`). A `mode: "invalidate" | "retract"` parameter is reasonable. But `retract` is terminal (requires `corrects` context); `invalidate` requires `corrected_by_id`. The parameter shapes differ.
 - **Verdict:** Keep `supersede` separate (edge-transfer semantics). At most merge `invalidate` + `retract` into one tool with `mode` param (both flag-only). Mark any lifecycle consolidation as **high-risk pending telemetry evidence** that agents confuse these three operations.
@@ -350,6 +370,7 @@ Each orphan is classified by: (a) where it's used, (b) whether an agent needs it
 | 43 | `graph_count` | sdk.py, hosted_api.py (1 ref) | 4 | **Rare** — admin | **FOLD INTO** `tortoise_status` | MEDIUM |
 
 **Summary (corrected after grep re-verification):**
+
 - **14/43 orphans are control-plane/team/auth methods** → KEEP SDK-ONLY (no tool needed)
 - **3/43 are internal utilities** (`close`, `ulid`, `test_guard`, `resolve_id`) → KEEP SDK-ONLY
 - **4/43 are migrations** (`backfill_*`, `migrate_*`) → KEEP SDK-ONLY
@@ -375,6 +396,7 @@ Each orphan is classified by: (a) where it's used, (b) whether an agent needs it
 | `tortoise_onboarding_github_status` | Once/twice | None — connection verified | **RETIRE** |
 
 **Decision:** All 6 onboarding tools should be **removed from the steady-state MCP surface**. The controlled removal path from the converged decision (cycle 4) applies:
+
 - Remove at onboarding-completion signal, not at connect time
 - Dedicated POST /v1/onboarding/* REST endpoints remain for the web onboarding flow
 - MCP tools are the target for removal
@@ -388,6 +410,7 @@ The telemetry (work item #0, issue #889) emits: `{tool_name, status: ok|validati
 ### 3.1 Diagnostic Matrix
 
 **Diagnostic protocol** — two-phase, cheapest-first:
+
 1. **Fix descriptions first** (cheapest intervention): improve tool descriptions for the top 10 tools by validation-error rate. Re-measure after 3 days / 200 calls.
 2. **If errors persist on the SAME tools** → NAMING is the root cause (confusing names, not unclear descriptions). Only then rename/alias tools.
 
@@ -403,6 +426,7 @@ This protocol avoids the confound: the 4-field schema cannot distinguish NAMING 
 ### 3.2 Composite Diagnosis
 
 If the data shows:
+
 - **High validation_error rate + spread across 40+ tools** → COUNT + DESCRIPTIONS both likely (surface is too large AND poorly described)
 - **High validation_error rate + concentrated on 8–10 tools** → DESCRIPTIONS or NAMING (fix the specific tools — descriptions first, then names if needed)
 - **Low validation_error rate + high exec_error rate** → STEERING (tools work but agent doesn't know the workflow)
@@ -411,6 +435,7 @@ If the data shows:
 ### 3.3 Telemetry Quality Gate (from cycle 4 decision)
 
 The gate requires **≥500 tool calls, ≥10 distinct tools invoked, over ≥7 days** before Stage 2 can conclude. If threshold unmet:
+
 1. Extend window (option a)
 2. Default to **keep-and-fix path** (option b) — fix docs + merge 9 overlaps + retire onboarding tools; no shrink
 
@@ -425,6 +450,7 @@ The gate requires **≥500 tool calls, ≥10 distinct tools invoked, over ≥7 d
 IF telemetry supports shrinking, the target is a **~35-tool surface** organized into 5 curation groups (down from 8). This follows the benchmark pattern of ~1 primary search/query tool per domain. **This target is preliminary-pending-telemetry** — the keep-and-fix fallback (~60 tools after no-regret consolidation + remove onboarding) remains the default path.
 
 **Group: memory (10 tools) — the core agent surface**
+
 | # | Tool | Consolidated From | R/W/I |
 |---|---|---|---|
 | 1 | `tortoise_create_point` | (unchanged, add explicit `dedup` param description) | I |
@@ -439,6 +465,7 @@ IF telemetry supports shrinking, the target is a **~35-tool surface** organized 
 | 10 | `tortoise_set_point_baseline` | (unchanged) | W |
 
 **Group: graph (8 tools)**
+
 | # | Tool | Consolidated From | R/W/I |
 |---|---|---|---|
 | 11 | `tortoise_create_entity` | `create_subject` + `create_object` + `create_event` + `create_document` (new param: `entity_type`) | W |
@@ -451,6 +478,7 @@ IF telemetry supports shrinking, the target is a **~35-tool surface** organized 
 | 18 | `tortoise_get_governance` | + merge `get_org_structure` | R |
 
 **Group: navigation (7 tools)**
+
 | # | Tool | Consolidated From | R/W/I |
 |---|---|---|---|
 | 19 | `tortoise_traverse` | (unchanged) | R |
@@ -462,6 +490,7 @@ IF telemetry supports shrinking, the target is a **~35-tool surface** organized 
 | 25 | `tortoise_check_structure` | + merge `summarize_structure` (new param: `detail`) | R |
 
 **Group: sessions (7 tools)**
+
 | # | Tool | Consolidated From | R/W/I |
 |---|---|---|---|
 | 26 | `tortoise_session_context` | (unchanged) | R |
@@ -473,6 +502,7 @@ IF telemetry supports shrinking, the target is a **~35-tool surface** organized 
 | 32 | `tortoise_file_decision` | (kept standalone — atomic multi-Point creation; semantic mismatch with create_point) | W |
 
 **Group: sources (4 tools)**
+
 | # | Tool | Consolidated From | R/W/I |
 |---|---|---|---|
 | 33 | `tortoise_create_source` | (unchanged — provenance is core to remember→connect loop) | I |
@@ -483,6 +513,7 @@ IF telemetry supports shrinking, the target is a **~35-tool surface** organized 
 ### 4.2 Tools NOT in the preliminary target (but preserved)
 
 **Excluded from steady-state MCP surface, kept as SDK methods + REST endpoints:**
+
 - 6 onboarding tools (removed at onboarding-completion)
 - `tortoise_team_create` (provisioning, admin-only, REST endpoint preserved)
 - `tortoise_backfill_v25` (migration, one-shot)
@@ -523,6 +554,7 @@ The 4 source-related tools (`create_source`, `assess_source`, `get_source_reliab
 ### 4.4 No-Regret Actions (already authorized)
 
 The Stage 0 parallel workstream authorized three no-regret actions that proceed regardless of telemetry outcome:
+
 1. **Remove 6 onboarding tools** from steady-state MCP surface (at onboarding-completion signal)
 2. **Fix 9 read-tool overlaps** (query+paginated_query+query_by_tag, search+search_sessions, list_* tools, status+taxonomy, check_structure+summarize_structure)
 3. **Fix GROUP_BY_NAME coherence bugs** (assess_source/get_source_reliability/set_source_tier → "sources"; retract_point → "memory" or keep in "memory"; events_poll → surface explicitly or move to "sessions")
@@ -541,6 +573,7 @@ These are well-supported by static analysis and benchmark evidence, independent 
 ### 4.6 What Telemetry Could Overturn
 
 If the telemetry shows:
+
 - **Tool-selection error rate <5% across all 70 tools** → COUNT is NOT the problem. Keep 70, fix only descriptions/naming.
 - **90% of agent calls hit the same 15 tools** → The long tail is harmless. Prune onboarding + merge 9 overlaps only.
 - **Zep collapse didn't improve their metrics** (external research) → Consolidation may not be the answer for any memory server.

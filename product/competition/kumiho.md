@@ -53,6 +53,7 @@
 **Primary tagline:** **"The memory layer AI agents can trust."**
 
 **Secondary taglines (verbatim):**
+
 - "One graph. Every surface."
 - "Inside the memory engine — A cognitive memory core, not an embedding cache."
 - "Built on a versioned provenance graph… Agent memory inherits that rigor; it isn't a vector store with a marketing layer."
@@ -90,6 +91,7 @@ The About page headline is a positioning pivot worth noting: **"We built provena
 | **Creative / studio pipelines** | VFX, animation, game studios needing revision + dependency + provenance tracking for assets | About page: "We spent years inside VFX, animation, and AI workflows"; pricing "built for asset operations — now with Cognitive Memory"; Kumiho Browser, ComfyUI plugin |
 
 **Explicit buyer constraints they advertise:**
+
 - **Local-first / privacy-first:** "Not with Community Edition — the server binds to loopback only and stores everything in your local Neo4j. Full conversations can stay local as markdown artifacts; if you opt into cloud, short structured summaries are what sync."
 - **Model-agnostic:** "Kumiho does not provide or resell LLM inference. Connect your own OpenAI, Anthropic, local model, or AI agent runtime." (BYO-LLM is stated as a *feature*, and pricing is infrastructure/indexing only.)
 - **Governance/audit buyers:** "Every agent belief has a URI, a revision history, provenance edges to source evidence, and an immutable audit trail" → positions for teams that need "the same accountability standard applied to human workers."
@@ -149,6 +151,7 @@ The About page headline is a positioning pivot worth noting: **"We built provena
 > "**Principle 5 (Immutable Revisions, Mutable Pointers).** Memory states are never overwritten; they are versioned."
 
 Worked example from §6.4.1:
+
 ```
 Item: "api-design.decision"
   Rev1 (Jan 15): "Use REST for public API"
@@ -335,12 +338,14 @@ The formal system is **propositional logic over ground triples** (`At_G`), expli
 **Sources checked:** kumiho.io (homepage, About, Pricing, FAQ, blog), GitHub issues/repo metadata, third-party blog analysis (ranjankumar.in), Atlas's independent paper and AGM compliance artifact, Reddit r/KumihoIO, web search for reviews/discussion.
 
 **What users/customers praise:**
+
 - ⚠️ **No user reviews found** — no G2, Capterra, Product Hunt, TrustRadius, or Hacker News thread located.
 - Third-party *analysis* (not user sentiment) is positive on the architecture: ranjankumar.in frames Kumiho as the reference example of why agent memory needs a graph.
 - The strongest external validation is a **citation, not a customer**: AWS's Generative AI Innovation Center cites Kumiho as demonstrating "the operational feasibility of these guarantees for agent memory."
 - The most concrete external *adoption evidence* is Atlas choosing to build on (and credit) the spec.
 
 **What users/customers complain about:**
+
 - ⚠️ **No user complaints found** — consistent with having essentially no public user base.
 - The sharpest technical critique found is **from a third-party implementer, not a customer**: Atlas's paper argues Kumiho's `AnalyzeImpact` only *flags* impacted downstream beliefs and never re-evaluates them, and that Kumiho "ships a commercial cloud service with thin open-source SDKs." Atlas positions its `Ripple` engine as the fix.
 - The paper itself pre-empts the obvious criticism by naming the circularity: "**Self-evaluation bias.** The system is evaluated on its own deployment data during the authorship of this paper, creating an inherent circularity."
@@ -354,6 +359,7 @@ The formal system is **propositional logic over ground triples** (`At_G`), expli
 ## Notes & Sources
 
 **Primary sources (all retrieved 2026-09-11 unless noted):**
+
 - **Paper (abs):** [arXiv:2603.17244](https://arxiv.org/abs/2603.17244) — "Graph-Native Cognitive Memory for AI Agents: Formal Belief Revision Semantics for Versioned Memory Architectures", Young Bin Park, 56 pages, submitted 2026-03-18, CC BY-NC-ND 4.0
 - **Paper (full HTML):** [arxiv.org/html/2603.17244v1](https://arxiv.org/html/2603.17244v1) — **read in full** for this profile (all §7, §8, §11, §12, §15 quotations come from here)
 - **Company site:** [kumiho.io](https://kumiho.io/) — homepage, taglines, benchmark table, desktop installers, FAQ
@@ -369,6 +375,7 @@ The formal system is **propositional logic over ground triples** (`At_G`), expli
 - **Third-party analysis:** [ranjankumar.in](https://ranjankumar.in/why-agent-memory-needs-a-graph-lessons-from-the-kumiho-architecture)
 
 **Gaps documented (not filled by inference):**
+
 1. **No founders, no funding, no HQ, no team size** — Kumiho Inc. publishes none of it; no Crunchbase/Tracxn/press record found.
 2. **Annual pricing not captured** — the pricing page defaults to monthly; the yearly figures require toggling a control not reachable via text fetch.
 3. **PyPI download counts unavailable** — pypistats.org returned HTTP 429 during research.

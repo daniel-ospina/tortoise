@@ -27,6 +27,7 @@ The Tortoise work graph (FalkorDB port 6379) violates its own wiring contract in
 ## Verification Gates
 
 ### problem-verify: 2 cycles, clean — 6×P1 fixed by controller
+
 - Cycle 1: Verifier A — no P0/P1 (2×P2, 2×P3, 1×P4). Verifier B (Devil's Advocate) — **4×P1**: (1) claim (b) sourceKind-neutrality re-adopted original framing without code validation (registry/credibilityTier/extractedFrom are the real levers; cycle evidence has no Source node); (2) #348 boundary mischaracterized (its title includes operator annotation/mitigation migration) + sibling EP epics #395/#901/#903 missed; (3) falsification condition 2 measured the wrong property (audit.py legacy point-level sourceKind — a Source-level backfill never moves it); (4) cleanup mechanics unresolved (delete→dangling edges; 'archived' is LIVE for EP; cap-skip class; Subject-stub class; no quiescence).
 - Controller: all 4 P1s REAL (verified #395/#901/#903 exist; entities.py provenanceSource string; live.py excludes only 'draft') → fixed (problem (b) rewritten; boundary re-drawn incl. sibling epics; exit criteria re-based to Source-level metrics; cleanup contract pinned). P2s/P3s incorporated (graph-as-memory assumption re-validated via merged PR #1014; search claim qualified; EP test count corrected; findings-date added; counter-evidence query added).
 - Cycle 2 (re-dispatch): Verifier A — 2×P1 (criterion-6 recurrence guardrail tested out-of-scope write path; who-measures-it contradiction "measured by #348's audit" vs "verification queries #334-owned") + 4×P2. Verifier B — 4×P1 (registry policy unpersisted → criterion 3 unmeasurable; cap-skip "declared inputs" not computable (event-log or content-string only); exit 3/4 "agreed with human / or explicitly none" = no-op escape; option B 'archived' path not implementable — terminal status, no SDK write path). No P0 from either.
@@ -34,11 +35,13 @@ The Tortoise work graph (FalkorDB port 6379) violates its own wiring contract in
 - Outcome: clean (0 P0/P1 remaining after controller fixes).
 
 ### solution-verify: 1 cycle, clean — 8×P1 fixed by controller
+
 - Cycle 1: Verifier A — 1×P1 (EP determinism protocol unverifiable — `random.shuffle(factors)` unseeded at ep.py:1049) + P2s (restore scope, quiescence for phases 3-4, #395/#901 non-conflict, FTS index refresh, 6b landing point). Verifier B (Devil's Advocate) — **7×P1**: (1) EP restore not implementable — no snapshot/restore tooling exists; restore must reset posteriors + edge msg caches; (2) backup path broken for docker:// URI (tortoise backup --db takes file path; JSONL replay resurrects stubs + drops SDK-created points; real restore = docker-aware RDB); (3) exit-5 seed set + exit-3 denominator undefined; (4) cap-skip "best-effort" no-op escape; (5) recurrence risk externalized to #348 with no contingency; (6) no quiescence for destructive phases 3-4; (7) backfill can manufacture stub Sources (provenanceSource strings not URLs → `_link_source` MERGE auto-creates Source on any string); + event-log normalization decision ownerless.
 - Controller: all 8 P1s REAL (verified backup.py docstring, ep.py `_flush_cache`, entities.py provenanceSource values) → fixed in plan (docker-aware RDB snapshot + verified restore; EP snapshot/restore script as Phase-5 prerequisite with full-state contract + seeded RNG; seed set/denominator defined; cap-skip UNVERIFIABLE floor; risk-acceptance with owner/date; quiescence extended; identity-validation + stub-Source detector; event-log decision owner+default). P2s incorporated (degenerate-operator review artifact, A/C distinctness framing, rebuild durability, EP scale bound, Koza-archive reconciliation carried in, FTS index refresh, audit variant home = graph-scripts/).
 - Outcome: clean (0 P0/P1 after controller fixes).
 
 ### coherence review (Phase 5.6): 1 cycle — 2×P1 fixed
+
 - `[QWEN-GATE] substitute reviewer used` — qwen3.8-max unavailable (401); ONE fresh-context substitute dispatched.
 - Verdict: no P0 (problem-solution alignment PASS, edge-case coverage PASS, research cross-check consistent). 2×P1: (1) F4 consumer-impact lens dropped — no context-reconstruction/queryability verification in plan (the diamond's own falsification co-equal signal); (2) weakest assumption — live-graph connectivity mode (docker:// vs bolt://) unverified; RDB snapshot requires local Docker, no bolt:// fallback. Both FIXED (context-reconstruction test added to Phase 7; connectivity-mode Phase-0 gate + bolt:// fallback). 4×P2 incorporated (deleted-stub inventory artifact; EP cache surface + PYTHONHASHSEED; EP machinery shared with #903; mitigation/EP-carve-out stale-confidence interplay).
 
@@ -47,11 +50,13 @@ The Tortoise work graph (FalkorDB port 6379) violates its own wiring contract in
 **Chosen approach: A+C hybrid — "audit-gated one-shot remediation migration"** (execution vehicle = one-shot migration scripts; gating = Source-level audit variant built first as verification instrument). Rejected: SDK-level enforcement (B) = #348 Phase 3 + engine-semantics risk, boundary-assigned; pure incremental (C) — bulk classes need the one-shot migration.
 
 ### Boundary decision (#334 vs #348 — the dedup outcome)
+
 - **SPLIT BY CONCERN — do NOT merge.** #334 = one-shot data-correctness remediation of the LIVE graph (orphans/cap-skip/backfill/verified-EP/mitigations) with 8 exit criteria verified by **#334-owned queries**. #348 = audit CLI/MCP product, skill-enforcer enforcement, migration tooling; its "operator annotation" = GRADE dimensions on decision-critical operators (distinct target from #334's Source-level sourceKind/credibilityTier); its "mitigation migration" hands off to #334 criterion 7. #348's audit = ongoing/maintenance measurement post-close; #334's exit gate is **#348-independent**.
 - Sibling epics: **#903** (Dreaming, ongoing whole-graph EP) — #334's EP pass is a one-shot verified baseline with quiescence/hand-off protocol (snapshot/restore machinery built as shared #903-beneficiary tooling); **#395/#901** (EP subgraph semantics for new data) — non-conflict check via recorded params; **#388** (connectors emit proper Source nodes) — complementary forward-path fix for component (b); **#52** (ID normalization, closed) — short-ID stub problem is a facet, NOT absorbed.
 - **Overlap resolution:** who backfills = #334 (live-graph current state); #348 = ongoing tooling-driven cycles. Recurrence: #334 owns idempotency (6a), FTS filter (6b), documented residual + risk-acceptance (6c); hard write-path enforcement = #348 Phase 3 with re-open contingency.
 
 ### Implementation phases
+
 1. **Pre-migration** (no graph writes): Phase-0 connectivity gate (docker:// vs bolt:// → RDB snapshot vs fallback); docker-aware RDB snapshot + verified restore path; baseline scan (stub/cap-skip/Subject-stub/Source-tier/extractedFrom/draft-live counts); registry policy pre-commit + persistence (config YAML or graph node); event-log normalization decision (owner + default: graph-only durability unless log is source of truth); cap-skip source-of-truth determination (event-log > content-string; neither → class UNVERIFIABLE, blocks close or explicit unremediated acceptance).
 2. **Source-level audit variant** (graph-scripts/; #334-owned verification instrument; hand-off note for #348 CLI): Source-level sourceKind/resolved-tier/extractedFrom checks + stub/cap-skip/degenerate-operator detection + stub-Source detector.
 3. **Orphan remediation** (write-quiescence for all non-#334 writers during destructive phases): idempotent script — enumerate stubs → DETACH DELETE stub + incident edges → degenerate-operator pass (reviewable artifact + human approval; supersede is terminal) → Subject-stub decision → verify-0 queries + Point-FTS index refresh. Deleted-stub inventory artifact committed (feeds #348 enforcement + per-apply migration log). Koza-archive reconciliation: deletion safe (stubs carry no information — ISSI 2011/Choi 2006) vs 'archived' path unimplementable.
@@ -61,6 +66,7 @@ The Tortoise work graph (FalkorDB port 6379) violates its own wiring contract in
 7. **Verification + hand-off**: 8 exit criteria via #334-owned queries; context-reconstruction test (before/after Phase 3); recurrence risk-acceptance (owner + date; re-open with fail-closed `_create_edges` guardrail if #348 Phase 3 stalled); rebuild-durability statement (migration writes bypass event log; expected loss on rebuild; pre-rebuild baseline); regression tests (EP excludes stubs, FTS excludes [missing] + index refresh, idempotent re-run).
 
 ### Acceptance criteria (exit criteria 1-8)
+
 1. 0 stub Points (content='[missing]'); 0 IMPL/NAND/INPUT edges with stub endpoints.
 2. Cap-skip baseline counted (documented source of truth; UNVERIFIABLE → blocks close) + degenerate-operator pass with reviewed artifact.
 3. ≥50% (default) of evidence-backed Sources resolved non-neutral (denominator defined); registry policy artifact committed + persisted; verification loads same registry state.
@@ -71,10 +77,13 @@ The Tortoise work graph (FalkorDB port 6379) violates its own wiring contract in
 8. Subject-stub class decided (0 aboutSubject-to-stub edges or documented acceptance).
 
 ### Runtime prerequisites
+
 - Phase-0 connectivity gate (docker:// vs bolt://) with restore-path fallback; docker-aware RDB snapshot + verified restore before ANY destructive op (JSONL replay is NOT a restore path — resurrects stubs, drops SDK-created points); human approval for destructive migration incl. degenerate-operator supersede list; registry policy artifact signed; event-log normalization decision with owner + default; write-quiescence for non-#334 writers during destructive phases; EP machinery verified against full state surface.
 
 ## Clarifications
+
 No clarifying-questions skill dispatch (streamlined mode; questions surfaced inline). **Human decisions required before planning:**
+
 1. **Registry/tier policy** — which sourceKind values map to which tiers (or a written "explicitly none" rationale with owner signature). Default: document/github_issue/slack_message/linear_card stay neutral; T0-T4-form values inherit.
 2. **#334-vs-#348 dedup** — recommended: keep separate (split by concern), #334 first. Human sign-off requested on the boundary.
 3. **Live-graph verification first?** — port 6379 not reachable from repo; issue stats (2,057 ops / 94 stubs / 230 issues) unverifiable here. Recommend a live baseline scan (Phase 1) as the first execution step before committing to targets.
@@ -83,6 +92,7 @@ No clarifying-questions skill dispatch (streamlined mode; questions surfaced inl
 ## External Research (Phase 1.5 artifact)
 
 ### Axis Research
+>
 > **Findings-date:** 2026-08-13. Queries: 5 fresh (exa MCP) post-dedup. Graphiti prior-research deduped (CRITICAL comment + prior-art docs); figures attributed to hypothesis doc via PR #1014 — re-verify before citing in plan.
 
 - **Ontology/Provenance (high)** — canonical: W3C PROV-DM (w3.org/TR/prov-dm): provenance is the record for trust judgments; attribution critical; provenance-of-provenance. Tortoise's extractedFrom + sourceKind TYPE vocabulary + credibilityTier inheritance aligns; remediation = completing the attribution record. Pitfalls: DataAIHub KG best-practices (dataaihub.co/learn/knowledge-graph-best-practices): no provenance = cannot audit; quality decays without ingest validation; weekly orphan-rate/validation-failure metrics are the sustained practice.
@@ -91,16 +101,19 @@ No clarifying-questions skill dispatch (streamlined mode; questions surfaced inl
 - **Migration execution (high, adversarial)** — pitfalls: Dataconomy (dataconomy.com/2026/05/25): dry-run default, idempotent markers, paired verification script, migration log; GitLab 2017 quiet-corruption lesson. DataSemantics: clean-first fails without governance enforcement; post-migration KPIs + 30/60/90-day checks. Datachecks: 80% of migrations fail; scripts lack lineage/rollback. Stackable: pre-migration baseline, continuous validation, "migration endpoint is the start of ongoing operational responsibility."
 
 ### Integration Docs
+
 - **No new third-party deps.** Existing stack only: falkordb client + redisgraph (FalkorDB), docker CLI (RDB snapshot via pre_migration_snapshot.py pattern), in-repo EP engine (tortoise/ep.py), in-repo audit (tortoise/audit.py). Registry policy persistence introduces no dep (config YAML or graph node). Docker-aware snapshot/restore scripts are repo-local (graph-scripts/). Nothing to verify externally beyond the existing stack; `#398` source-credibility model is the in-repo precedent for tier resolution.
 
 ## Rejected Alternatives
 
 **Problem diamond:**
+
 - F2 (tooling-first — missing measurement): would have been better IF the graph were already clean and the only issue were observability — but stub corruption is real data corruption independent of tooling. Assigned to #348.
 - F3 (root-cause systemic — write-side invariants): the deepest root cause, but full write-path enforcement + ID normalization are separate epics (#348 Phase 3, #52); absorbed the minimal recurrence guardrail as verification/risk-acceptance rather than a rewrite.
 - F4 (consumer-impact) alone: the prioritization lens, not a standalone scope — cleanup needed regardless of which consumer is hit first; embedded as exit criterion (context-reconstruction test).
 
 **Solution diamond:**
+
 - B (SDK-level enforcement + continuous guardrails): would have been better IF #334+#348 were merged (they're not — boundary decided and twice verified) or if corruption were actively flowing (no evidence — legacy from cross-file wiring scripts). Engine-semantics risk (write-path change mid-migration races the cleanup; 'archived' status has no SDK write path; `_live_only` change is graph-wide). Contingency documented (re-open with fail-closed guardrail if #348 Phase 3 stalls).
 - Pure A (unscripted one-shot): faster but repeats the unmeasured-migration failure mode (Dataconomy/Datachecks).
 - Pure C (incremental batches only): fine execution rhythm but the bulk classes (94 stubs) are a single batch anyway; surviving distinction is instrument-first gating.
@@ -128,21 +141,25 @@ No clarifying-questions skill dispatch (streamlined mode; questions surfaced inl
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1
+
 - Verifier A: P0=0, P1=0, P2=2, P3=2, P4=1 (recurrence test missing; Koza mechanics not folded; cap-skip class; findings-date; test count; Graphiti numbers)
 - Verifier B: P0=0, P1=4, P2=2, P3=1 (sourceKind-neutrality claim (b); #348 boundary + sibling epics; falsification measures wrong property; cleanup mechanics; (c) restatement; Graphiti attribution; search claim; exit criteria absent; sibling owners)
 - Controller: Fixed P1-1/2/3/4 (all code-verified real); incorporated P2s; re-dispatched.
 
 ### problem-verify — Cycle 2
+
 - Verifier A: P0=0, P1=2, P2=4, P3=3 (criterion-6 out-of-scope; measurement-ownership contradiction; cap-skip measurement basis; Subject-stub unmeasured; mitigation unmeasured; convergence over-claim; test count; wording)
 - Verifier B: P0=0, P1=4, P2=3, P3=1 (registry unpersisted; cap-skip uncomputable; no-op escape; option B unimplementable; criterion-1 vacuous; criterion-5 vacuous; Subject-stub gap; #903 no mechanism; research one-sided)
 - Controller: Fixed all 6 P1s; incorporated P2s (criterion 7 mitigation, criterion 8 Subject-stub, criterion 1/5 de-vacuoused, #903 protocol, counter-evidence query). **Max 1 re-dispatch honored; gate closed by controller adjudication.**
 
 ### solution-verify — Cycle 1
+
 - Verifier A: P0=0, P1=1, P2=3, P3=2, P4=1 (EP unseeded shuffle; restore scope; quiescence; #395/#901; test count; 6b landing)
 - Verifier B: P0=0, P1=7, P2=6, P3=2 (EP restore tooling; backup path; seed set/denominator; cap-skip floor; recurrence contingency; quiescence; stub-Source manufacturing; event-log owner; degenerate-operator review; A/C framing; rebuild durability; EP scale; Koza reconciliation; FTS index; audit home)
 - Controller: Fixed all 8 P1s; incorporated P2s; gate closed by controller adjudication (no P0 from either).
 
 ### coherence review (Phase 5.6) — Cycle 1
+
 - `[QWEN-GATE] substitute reviewer used` (qwen3.8-max 401).
 - Substitute: P0=0, P1=2, P2=4 (context-reconstruction dropped; connectivity-mode assumption; deleted-stub inventory; EP cache surface + hash seed; EP machinery #903-sharing; mitigation stale-confidence interplay)
 - Controller: Fixed both P1s; incorporated P2s. No re-dispatch (fixes mechanical, verifiable).

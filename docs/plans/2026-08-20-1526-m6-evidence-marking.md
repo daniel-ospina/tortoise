@@ -34,6 +34,7 @@
 ## Design Decisions
 
 ### D1 — Three independent marks replace the single ≥0.4 predicate
+
 The v2 failure mechanism: v2 points are **paraphrased** (S1 story-summarizes), so a ≥0.4 token-overlap predicate against the verbatim answer turn almost never fires (1/12,085). The recalibration ORs three marks, each independent and each recoverable when the others fail:
 
 - **(a) source-session attribution** — a point written from an evidence-bearing session is marked. Evidence session = a haystack session containing ≥1 `has_answer` turn (equivalently the question's `answer_session_ids`; the M7 dataset-semantics audit owns the equivalence proof — for the 52 healthy, `answer_session_ids` ≡ the single has-answer session, verified 52/52). Implementation: compare the point's existing `session_id` prop (already written by both ingest legs) against the evidence-session id set. The point carries its session already — no new point property needed.
@@ -43,6 +44,7 @@ The v2 failure mechanism: v2 points are **paraphrased** (S1 story-summarizes), s
 OR-combined at write time: `has_answer = (a) or (b) or (c)`. Each mark is independently attributable in the stats (D7), so the report can say *why* evidence exists (extractor wrote from the right session / anchored the right turn / the raw chunk contains it).
 
 ### D2 — Shared predicate module `tools/longmem_eval/evidence.py`
+
 Single source of truth for both ingest legs (and the fixture calibration test). Move `_STOPWORDS`/`_tokens`/`_overlap` from `ingest_v2.py` here (public names); add:
 
 ```python
@@ -61,6 +63,7 @@ def mark_for(point, *, session_id, evidence_sessions, answer_turn_contents) -> d
 `ingest_v2.py` re-exports `_overlap` (back-compat) and delegates to `evidence.py`. `mark_for` returns the per-mark breakdown so `_write_payload` can count `stats["evidence_marks"]` by type (D7).
 
 ### D3 — Deterministic quote population (verbatim anchor without an extractor prompt change)
+
 The extractor's S2 payload points carry `"quote": ""` (verified `tortoise/extractor_v2.py:1164`). Making mark (b) real requires quotes to exist — done **deterministically at ingest** so the calibration is LLM-free and CI-runnable:
 
 1. For each v2 point, find the raw turn with maximum token overlap against the point's content (the anchor).
@@ -71,9 +74,11 @@ The extractor's S2 payload points carry `"quote": ""` (verified `tortoise/extrac
 E3 (speaker attribution) later reuses the same `quote` for read-time source-turn role derivation — no conflict (single ≤200-char field, E3 adds offsets separately).
 
 ### D4 — Mark (b) boundary: verbatim containment OR n-gram overlap ≥ 0.5
+
 41/54 evidence turns exceed the 200-char quote cap, so strict substring containment alone would under-fire on truncation. (b) = `normalize(quote) contains normalize(answer_turn)` **or** `_overlap(quote, answer_turn) >= 0.5`. BVA at 0.49/0.50/0.51 (test-design #1515 flag; the threshold is the run-protocol step-2 knob — pilot and 500 run the chosen value).
 
 ### D5 — N/A-not-0.0 in `retrieve_for_question` (never forced 0.0 on an empty denominator)
+
 Today `_evidence_recall[k] = 0.0` when `evidence_point_count == 0` and `turn_recall[k] = 0.0` when no evidence turns — the #1369 measurement bug: "evidence exists but never surfaces" and "no evidence exists" are indistinguishable. New semantics:
 
 - `evidence_recall@k[k] = None` when the graph has **zero** `has_answer` points (`evidence_point_count == 0`). Real number otherwise.
@@ -83,11 +88,13 @@ Today `_evidence_recall[k] = 0.0` when `evidence_point_count == 0` and `turn_rec
 Concretely, replace the `else: _evidence_recall[str(k)] = 0.0` branch with `None`, and the inner `else: turn_recall[str(k)] = 0.0` with `None`.
 
 ### D6 — Vacuity accounting in `report.py` (evidence-bearing questions only)
+
 - Mean `evidence_recall@k` over outcomes whose value is **not None** (drop N/A from the denominator — today `_mean([v or 0.0 ...])` coerces `None`→0.0, silently re-dragging vacuity).
 - Record alongside the mean: `evidence_recall_n@k` (denominator count), `evidence_vacuity_rate@k` (fraction of evidence-bearing questions with 0.0 — the "0.0 while evidence exists" rate), and `evidence_coverage` (fraction of evidence-bearing questions with `ingest.evidence_points > 0`, computed from the per-outcome ingest stats — the E2E-3 >95% gate metric).
 - Methodology records the vacuity **expectation band**: initial band from the fixture calibration (0/52 vacuous on healthy questions), to be re-anchored from the 500-Q run after run protocol step 6 (mechanical fixes) — the epic's "recorded in the report methodology after M6/M7 calibration (run protocol step 6) as the expectation band" contract.
 
 ### D7 — Fixture: 52 healthy qids + compact question subset + v2-checkpoint subset
+
 `tests/fixtures/lme_v2_healthy52.json` (~0.9 MB, verified committable):
 
 - **Healthy criterion:** v2 checkpoint outcome with `ingest.points > 0` (the 52/496; all `single-session-user`, first in run order — extraction health decays with run position via 402 exhaustion, `msr-category-report.md`).
@@ -98,6 +105,7 @@ Concretely, replace the `else: _evidence_recall[str(k)] = 0.0` branch with `None
 Builder script `tools/longmem_eval/build_healthy52_fixture.py` (CLI `--checkpoint /tmp/lme-v2-full.json --dataset ~/.cache/tortoise-longmemeval/longmemeval_s_cleaned.json --out tests/fixtures/lme_v2_healthy52.json`): reproducible regeneration + honest provenance; the committed JSON is the artifact CI consumes.
 
 ### D8 — Calibration micro-test (run protocol step 2, "knob selected")
+
 `tests/test_lme_m6_evidence.py::test_healthy52_calibration_coverage` runs the new marks over the fixture — no graph, no LLM:
 
 1. **(a)+(c) coverage:** for each of the 52, rebuild `_session_transcript(answer_session)` from the fixture and assert `chunk_mark(...)` (and the session-id mark) fires → `evidence_points ≥ 1` → **52/52**, asserting the E2E-3 **>95% gate** is achievable with the chosen marks/thresholds (the knob).
@@ -108,6 +116,7 @@ Builder script `tools/longmem_eval/build_healthy52_fixture.py` (CLI `--checkpoin
 The pilot and 500 run the chosen knob values (mark set + thresholds) per run protocol step 2's gate.
 
 ### D9 — Idempotency + consistency across both ingest legs
+
 - `ingest_v2._write_payload`'s existing `_point_exists` OR-in path must **OR** the new marks (`SET p.has_answer = true` when any mark fires — never overwrite `True` with `False` on collision).
 - `ingest.py` (deterministic leg) keeps evidence-turn marks and gains mark (c) on the raw-transcript Point + mark (a) on the Session's points — both legs produce the same `stats["evidence_points"]`-style accounting (D7) so `evidence_coverage` is comparable across ingest modes.
 - The ≥0.4 predicate, its BVA tests, and the `EXTRACTION_APPROACH_V2` docstring text ("marked has_answer by content overlap (>=0.4)", `run.py:72`) are removed/updated together — no dead references.
@@ -122,6 +131,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** `mark_for()` returns the OR of (a)/(b)/(c) with a per-mark breakdown; `chunk_mark` fires on normalized-verbatim containment; `quote_mark` fires on containment or ≥0.5 overlap; existing `_overlap` behavior preserved (re-exported by `ingest_v2`).
 
 **Files:**
+
 - Create: `tools/longmem_eval/evidence.py`
 - Test: `tests/test_lme_m6_evidence.py`
 
@@ -136,6 +146,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** For a fixture-like question with a paraphrased evidence point + an answer-session raw transcript, the graph contains `has_answer=true` on (i) the raw transcript via (c), (ii) any point from the evidence session via (a), (iii) a quoted point overlapping an answer turn via (b); `stats["evidence_points"]` counts all marked points incl. the raw transcript; idempotent re-ingest ORs marks.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest_v2.py` (`_write_payload` mark path, raw-transcript `has_answer`, quote write, `evidence_marks` stats)
 - Modify: `tools/longmem_eval/run.py:72` (`EXTRACTION_APPROACH_V2` text → the 3-mark description)
 - Test: `tests/test_lme_m6_evidence.py` (integration: FalkorDBLite ingest → query marks) + `tests/test_longmem_runner.py` (extend `test_v2_ingest_writes_payload_with_evidence_marks` — keep the existing assertions green)
@@ -148,6 +159,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** The answer-session raw-transcript Point carries `has_answer=true`; evidence-turn points unchanged; `stats` gains `evidence_points`.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest.py` (raw-transcript write, stats)
 - Test: `tests/test_lme_m6_evidence.py` (integration over `longmemeval_mini.json`)
 
@@ -159,6 +171,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** `evidence_recall@k` is `None` when the graph has zero `has_answer` points; `turn_recall@k` is `None` when both legs are empty; the deterministic leg still reports its real number when only the v2 leg is empty; docstrings updated.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/retrieve.py` (the two forced-0.0 branches; module docstring recall definitions)
 - Test: `tests/test_lme_m6_evidence.py` (empty-graph question → both `None`; evidence-less abstention mini fixture → `None`, not 0.0; existing `test_retrieval_recalls_evidence_session` stays green)
 
@@ -170,6 +183,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** `retrieval.evidence_recall@k` is the mean over evidence-bearing outcomes only; `evidence_recall_n@k`, `evidence_vacuity_rate@k`, `evidence_coverage` present; methodology has `vacuity_band` + `vacuity_band_anchor: "fixture calibration 2026-08-20 (0/52 vacuous); re-anchor at run protocol step 6"`.
 
 **Files:**
+
 - Modify: `tools/longmem_eval/report.py` (aggregation + methodology)
 - Test: `tests/test_lme_m6_evidence.py` (mixed None/real outcomes — the vacuity-drag regression)
 
@@ -181,6 +195,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** `tools/longmem_eval/build_healthy52_fixture.py --checkpoint /tmp/lme-v2-full.json --dataset ~/.cache/tortoise-longmemeval/longmemeval_s_cleaned.json` regenerates a byte-identical `tests/fixtures/lme_v2_healthy52.json` (52 questions; every question has exactly 1 `answer_session`; `_meta` complete).
 
 **Files:**
+
 - Create: `tools/longmem_eval/build_healthy52_fixture.py`
 - Create: `tests/fixtures/lme_v2_healthy52.json` (~0.9 MB; build now with the verified script, commit the artifact)
 
@@ -192,6 +207,7 @@ The pilot and 500 run the chosen knob values (mark set + thresholds) per run pro
 **Acceptance:** `test_healthy52_calibration_coverage` asserts (a)+(c) coverage **52/52** with the chosen thresholds; the 1/12,085 pin asserts the old-state regression; (b) BVA over the fixture's 54 evidence turns; vacuity baseline 0/52.
 
 **Files:**
+
 - Modify: `tests/test_lme_m6_evidence.py` (calibration section, fixture-loaded)
 - Modify: `tests/test_longmem_runner.py` only if an existing assertion contradicts the new semantics (grep `evidence_recall` — line 755's `is not None` stays valid; no forced-0.0 assertions exist)
 

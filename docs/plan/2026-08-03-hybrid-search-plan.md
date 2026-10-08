@@ -8,6 +8,7 @@
 ## 1. Agent Journeys (replaces User Journeys — no UI)
 
 ### Journey A: Reasoning Agent (Full-Scan Mode)
+
 ```
 Agent: "Review the licensing-decision subgraph for weak spots"
 → tortoise_query(context="licensing-decision")  // no text query → full-scan
@@ -18,6 +19,7 @@ Agent: "Review the licensing-decision subgraph for weak spots"
 ```
 
 ### Journey B: Delegated Agent (Best-Match Mode)
+
 ```
 Agent: "Before implementing pricing, check what the graph believes about pricing models"
 → tortoise_search("pricing model for hosted platform", min_confidence=0.0)  // default: no filter
@@ -28,6 +30,7 @@ Agent: "Before implementing pricing, check what the graph believes about pricing
 ```
 
 ### Edge Cases
+
 - No results: empty list returned, no exception
 - Indexes missing: degradation chain activated, logged
 - Embedding model absent: skip embeddings, fall back to FTS + structural
@@ -69,6 +72,7 @@ tortoise_fts_query(query, kind=None, context=None, *,
 ```
 
 ### Failure Modes
+
 | Failure | Behavior |
 |---------|----------|
 | FTS timeout (>500ms) | Log warning, skip FTS, continue with remaining strategies |
@@ -90,17 +94,20 @@ tortoise_fts_query(query, kind=None, context=None, *,
 ## 3. Data Model
 
 ### New Point Property: `embedding`
+
 ```python
 # Added to Point node on create_point() / ingest() / PointRevised
 {
   "embedding": [0.0123, -0.0456, ...],  # list[float], 384-dim, nullable
 }
 ```
+
 - Created/updated when sentence-transformers is available AND content changes
 - `None` when model not installed (graceful degradation)
 - **PointRevised must re-compute embedding** — revised points with stale embeddings break vector search
 
 ### Search Result Schema
+
 ```python
 @dataclass
 class SearchResult:
@@ -143,6 +150,7 @@ class EpEvidence:
 `search()` is removed. Legacy code archived at `tortoise/archived/search_legacy.py`.
 
 ### Indexes (created in `_ensure_indexes()`)
+
 ```python
 # Range (existing — unchanged)
 CREATE INDEX FOR (n:Point) ON (n.id)
@@ -163,6 +171,7 @@ CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')
 ## 4. Architecture
 
 ### Component Diagram
+
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ MCP Server (mcp_server.py)                               │
@@ -207,9 +216,11 @@ CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')
 ```
 
 ### New Module: `tortoise/search_engine.py`
+
 All search logic in dedicated module. SDK is ~62K lines — adding ~600 lines of search logic there is irresponsible. Extraction cost is zero: all functions are net-new, nothing is moved.
 
 ### Modified Files
+
 | File | Change |
 |------|--------|
 | `tortoise/sdk.py` | Add `tortoise_fts_query()`, remove `search()` (archive to `tortoise/archived/search_legacy.py`), update `tortoise_query()` |
@@ -221,6 +232,7 @@ All search logic in dedicated module. SDK is ~62K lines — adding ~600 lines of
 | `tests/test_tortoise_search.py` | Extend with hybrid search tests (see Test Footprint below) |
 
 ### Test Footprint
+
 | Layer | Count | Notes |
 |-------|-------|-------|
 | Unit (pytest) | ~14 tests | RRF fusion, 3-tier classifier, order_by/min_confidence params, degradation logic, removed |
@@ -234,6 +246,7 @@ All search logic in dedicated module. SDK is ~62K lines — adding ~600 lines of
 ## 5. Interfaces (API Contracts)
 
 ### `tortoise_fts_query()` — New Public API
+
 ```python
 def tortoise_fts_query(
     self,
@@ -259,6 +272,7 @@ def tortoise_fts_query(
 ```
 
 ### `tortoise_query()` — Updated
+
 ```python
 def tortoise_query(
     self,
@@ -284,6 +298,7 @@ def tortoise_query(
 **Migration:** `sdk.search(q, kind=k, context=c)` → `sdk.tortoise_fts_query(q, kind=k, context=c)`
 
 ### MCP Tool Signatures
+
 ```
 tortoise_search(query, kind?, context?, threshold?, limit?,
                 min_confidence?, order_by?)
@@ -299,6 +314,7 @@ tortoise_suggest_entry_points(query, kind_filter?)
 ```
 
 ### MCP Serialization (SearchResult → JSON)
+
 ```python
 def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
     """Convert SearchResult dataclasses to JSON-safe dicts for MCP response."""
@@ -310,6 +326,7 @@ def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
 ## 6. Implementation Steps (with Parallelism)
 
 ### Phase 0: Foundation — MVP (~600 lines impl + ~400 lines tests, 1 PR)
+>
 > **MVP CHECKPOINT:** Phase 0 delivers FTS + structural search with RRF fusion + EP annotation + degradation chain. Independently shippable — no new dependencies (no sentence-transformers needed). Vector search is implemented but returns no results until embeddings exist (Phase 1).
 
 | Step | File | What | Parallel? |
@@ -328,6 +345,7 @@ def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
 ### Phase 1: Embeddings + MCP Wiring (parallel streams)
 
 **Stream A — Embeddings (#7698):** Depends on Phase 0 (shares `sdk.py` and `projection/__init__.py` — merge conflict risk if parallel). Logically independent of search engine but serialized by file overlap. Implement after Phase 0 merges.
+
 | Step | File | What |
 |------|------|------|
 | 1.1a | `embeddings.py` | `EmbeddingModel` lazy singleton: loads `all-MiniLM-L6-v2` on first use, caches, handles download failure gracefully |
@@ -336,6 +354,7 @@ def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
 | 1.1d | `projection/__init__.py` | Wire `compute_embedding()` into `PointRevised` — re-compute when content changes |
 
 **Stream B — MCP Wiring:** Depends on Phase 0 (needs `tortoise_fts_query()` to exist).
+
 | Step | File | What |
 |------|------|------|
 | 1.2 | `mcp_server.py` | Wire `tortoise_search` → `sdk.tortoise_fts_query()`, add `min_confidence` + `order_by` params, serialize via `asdict()` |
@@ -346,6 +365,7 @@ def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
 ### Phase 2: Confidence + Skill (parallel streams, 1 PR)
 
 All three steps are independent — can run in parallel.
+
 | Step | Issue | What |
 |------|-------|------|
 | 2.1 | #7699 | `sdk.py`: add `order_by` + `min_confidence` to `tortoise_query()` (text path maps to `tortoise_fts_query` params) |
@@ -353,11 +373,13 @@ All three steps are independent — can run in parallel.
 | 2.3 | — | `skills/how-to-use-tortoise/SKILL.md`: add search section (two modes: full-scan vs best-match, when to use each MCP tool, `order_by`/`min_confidence` semantics, EP breakdown fields) |
 
 ### Phase 3: Optional (deferred)
+
 | Step | Issue | What |
 |------|-------|------|
 | 3.1 | #7702 | Cross-encoder reranking — only if Phase 0 latency budget allows. Feature-flagged, default off. |
 
 ### Deferred
+
 | Step | Original Phase | Why Deferred |
 |------|---------------|-------------|
 | Benchmark suite (#7700) | Phase 1 | Deferred to post-MVP. Ad-hoc `timeit` checks sufficient during Phase 0/1 development. Formal benchmarks can run as follow-up. |
@@ -368,8 +390,10 @@ All three steps are independent — can run in parallel.
 ## 7. Detailed E2E Test Specifications
 
 ### E2E-1: Point Creation Stores Embedding
+
 **Setup:** sentence-transformers installed, FalkorDB running  
 **Steps:**
+
 1. `create_point("statement", "quantum mechanics and wave functions")`
 2. Query the created Point by ID
 3. Assert: `embedding` is `list[float]`, length 384, non-null, not all zeros
@@ -379,8 +403,10 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration (pytest + real FalkorDB)
 
 ### E2E-2: FTS Query Returns Keyword-Ranked Results
+
 **Setup:** Points: "quantum computing", "quantum gravity", "cookie recipes"  
 **Steps:**
+
 1. `tortoise_fts_query("quantum physics")`
 2. Assert: ≥2 results returned
 3. Assert: "quantum computing" and "quantum gravity" rank above "cookie recipes"
@@ -388,8 +414,10 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration
 
 ### E2E-3: Vector Query Returns Semantically Similar Results
+
 **Setup:** Points with embeddings: "neural networks", "deep learning architectures", "cookie recipes", "car maintenance"  
 **Steps:**
+
 1. `tortoise_fts_query("machine learning")`
 2. Assert: "neural networks" and "deep learning architectures" rank above "cookie recipes" and "car maintenance"
 3. Assert: at least 1 result if semantically similar content exists
@@ -397,8 +425,10 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration
 
 ### E2E-4: Hybrid RRF Fuses Keyword + Semantic
+
 **Setup:** Points: "quantum computing breakthrough" (dual match), "wave function collapse" (semantic only), "quantum of solace" (keyword only)  
 **Steps:**
+
 1. `tortoise_fts_query("quantum physics")`
 2. Assert: "quantum computing breakthrough" ranks highest (dual match → highest RRF)
 3. Assert: "wave function collapse" and "quantum of solace" appear lower
@@ -406,16 +436,20 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration
 
 ### E2E-5: Graceful Degradation
+
 **Setup:** FalkorDB with indexes, then drop vector index  
 **Steps:**
+
 1. Drop vector index → `tortoise_fts_query("test")` → success, no exception, FTS + structural fusion (vector skipped)
 2. Drop all indexes → `tortoise_fts_query("test")` → in-memory TF-IDF fallback, results returned (may be empty)
 3. Re-create indexes → `tortoise_fts_query("test")` → full RRF fusion restored
 **Layers:** Integration
 
 ### E2E-6: Full-Scan Structural Query (No Confidence Filter)
+
 **Setup:** Subgraph with Points at confidence 0.1, 0.5, 0.95  
 **Steps:**
+
 1. `tortoise_query(context="licensing-decision")` — no text, no min_confidence
 2. Assert: ALL Points returned, including 0.1 confidence
 3. Assert: each result has EP breakdown (confidence_mean, impl_count, nand_count, total, contention)
@@ -425,8 +459,10 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration
 
 ### E2E-7: Confidence-Breakdown Hybrid Search
+
 **Setup:** Points with diverse EP states (high confidence, high contention, low evidence)  
 **Steps:**
+
 1. `tortoise_fts_query("pricing model")` → RRF-ranked
 2. Assert: EP breakdown on every result (confidence_mean, evidence, contention)
 3. Find Point with 0.50 mean + low total evidence → assert: `evidence.total < 5`
@@ -437,8 +473,10 @@ All three steps are independent — can run in parallel.
 **Layers:** Integration (steps 1-6), E2E (step 7 — MCP)
 
 ### E2E-8: MCP tortoise_search Uses Hybrid Search
+
 **Setup:** FalkorDB with populated indexes, MCP server running  
 **Steps:**
+
 1. `mcp__tortoise__tortoise_search` with query "quantum mechanics"
 2. Assert: `match_source` not "tfidf" (NOT in-memory TF-IDF path)
 3. Assert: `scores` (fts, vector, structural, rrf) + `ep` (confidence_mean, evidence, contention) in result
@@ -448,8 +486,10 @@ All three steps are independent — can run in parallel.
 **Layers:** E2E (MCP client or manual clickthrough)
 
 ### E2E-9: Agent Skill Teaches Search Modes
+
 **Setup:** `skills/how-to-use-tortoise/SKILL.md` exists  
 **Steps:**
+
 1. Read the skill file
 2. Assert: search section exists with two-mode design explanation
 3. Assert: describes when to use `tortoise_search` (best-match) vs `tortoise_query` (full-scan) vs `tortoise_suggest_entry_points` (entity resolution)
@@ -484,6 +524,7 @@ All three steps are independent — can run in parallel.
 ---
 
 ## Implementation Dependency Graph
+
 ```
                     ┌─────────────────────────────────┐
                     │ Phase 0: Foundation (MVP)        │

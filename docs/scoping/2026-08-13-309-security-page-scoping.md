@@ -34,6 +34,7 @@ ownedBy: epistemic-team
 ## Verification Gates
 
 ### full-diamond-verify (Micro — 1 verifier, all 4 phases)
+
 - **Cycle 1:** Verifier returned **no P0**; 1×P1 (TLS "terminated at the Fly.io edge" not repo-verifiable), 1×P2 (SOC 2 research note not persisted), 3×P3, 2×P4. All four phases rated strong (diverge genuine, converge evidence-based + challenged original framing, solution approaches architecturally distinct, hybrid justified).
 - **Controller action:** P1 resolved with live DNS/whois evidence (above); P2 → committed `docs/research/2026-08-13-309-soc2-roadmap-notes.md`; P3/P4 incorporated (unconditional product.html footer assertion; crypto anchor on `Fernet(` import/usage; deploy-parity kept as CI-bypass defense-in-depth with comment; mobile justification dropped; e2e docstring comment updates).
 - **Cycle 2:** Verifier returned **no P0**; 2×P1 — (1) TLS evidence not yet present in the plan artifact (draft doc — final doc now embeds it), (2) **SOC 2 negation spec internally unsatisfiable**: `must_not_contain "certified"` collides with required "not SOC 2 certified" copy, and a page-wide audit-date regex collides with the mandatory `Effective date: YYYY-MM-DD` line.
@@ -47,10 +48,13 @@ ownedBy: epistemic-team
 ## Plan
 
 ### Problem statement
+
 Ship a static `/security` page on tortoise.premiselabs.co (linked from the legal footer on all 5 footer pages) documenting encryption, key management, audit, and compliance posture, under a binding claim-accuracy constraint: every claim code-verifiable, credentials attributed per surface (Tortoise runtime vs Supabase dashboard), SOC 2 roadmap-only.
 
 ### Proposed solution — Hybrid: C-core + selective A
+
 `website/security.json` (single source of truth: per-claim **executable check specs** `check: {must_contain, must_not_contain}` + `source`/`notes`) → `website/security_render.py` (stdlib, deterministic, dpa.html template) → committed `website/security.html`. Enforcement in three layers:
+
 1. **Repo-local `tests/test_website_security.py`** (python-ci half-b): JSON schema (non-empty `must_contain` mandatory), **executes every claim's check spec against the actual source files**, byte-parity (renderer output == committed HTML), tag balance, SOC 2 + credential structural checks, unconditional product.html footer assertion.
 2. **E2E suite extensions** (`tests/e2e/test_legal_pages.py`): `LEGAL_PAGES` + `FOOTER_LINK_HREFS` + `CRAWL_PAGES` += `/security` (inherits revision-history + exactly-once effective-date gates — both satisfied by the dpa template), mobile-render set += `/security`, one new unconditional `test_security_soc2_roadmap_negation_safe`.
 3. **Deploy-time render-and-verify** (deploy-pages.yml staging step: re-render from JSON, byte-compare vs committed HTML, mismatch fails deploy — intentional CI-bypass defense-in-depth for a compliance surface).
@@ -81,12 +85,14 @@ Ship a static `/security` page on tortoise.premiselabs.co (linked from the legal
 9. **Persistence:** this scope doc + `docs/research/2026-08-13-309-soc2-roadmap-notes.md` + deferred-issue filing (below).
 
 ### Testing strategy
+
 - **Pre-merge, repo-local (python-ci half-b):** `test_website_security.py` — executable claim specs, byte-parity, tag balance, SOC 2/credential structure, product.html footer link.
 - **Pre-merge, e2e (ci.yml legal-e2e vs local wrangler preview; opt-in `RUN_LEGAL_E2E=1`):** tuple extensions pick up /security automatically; new SOC 2 negation-safe test; revision-history + effective-date gates green for /security (LEGAL_PAGES membership).
 - **Post-deploy (deploy-pages.yml `verify-legal` job, `ALLOW_PROD=1`):** served bytes verified against production — the only thing a buyer reads.
 - **Deploy-time:** render-and-byte-compare staging step (CI-bypass defense).
 
 ### Verification plan (mapped to E2E-7-D Security Baseline, documentation portion)
+
 | Indicator (issue O/I/T) | How proven |
 |---|---|
 | /security route renders with the 5 sections | `wrangler pages dev` + repo-local suite; e2e 200 check; post-deploy verify-legal |
@@ -97,14 +103,17 @@ Ship a static `/security` page on tortoise.premiselabs.co (linked from the legal
 | Runtime never attributes passwords | credential-scoping must_not_contain `passwords` in runtime block |
 
 ### Runtime prerequisites
+
 - None for serving (no middleware edit — non-root pass-through verified in `functions/_middleware.ts`; route serves on both hosts, canonical tortoise.premiselabs.co).
 - Mandatory: python-ci half-b allowlist entry; deploy-pages staging step; e2e tuple edits.
 - No new third-party deps, no secrets, no API/DB/auth changes.
 
 ### Deferred / separate issues
+
 - **File separately:** privacy.html §7 + dpa.html §7 "passwords… salted hashing" → precision edit attributing account passwords to the dashboard (Supabase Auth). 2-line doc edit; nothing pins that line in e2e (verified) — filing separately keeps #309's diff small.
 
 ### Acceptance criteria
+
 1. `/security` returns 200 on both hosts (tortoise canonical), dpa-template styling.
 2. Page renders the 5 sections (TLS, encryption at rest, API key hashing, audit logging, SOC 2 roadmap) + credential-scoping block + scope sentence.
 3. Every claim's check spec executes green in CI half-b against the actual source files.
@@ -118,20 +127,24 @@ Ship a static `/security` page on tortoise.premiselabs.co (linked from the legal
 ---
 
 ## Clarifications
+
 *(No clarifying questions needed — issue-scoping Phase 0.5 clarifying-questions invocation skipped: tier = micro, per clarifying-questions skill skip conditions. All open questions were resolved by research or evidence.)*
 
 ## External Research (Phase 1.5 artifact)
 
 ### Axis Research
+>
 > **Trigger assessment:** axes low (Architecture=low, UX=low, Ontology=low); no third-party deps; no novel pattern — in-repo precedents: `website/dpa.html` (static legal-page template), `tortoise/onboarding/stage_variants.py` + `tests/test_website_static.py` (canonical-source → rendered artifact + repo-local parity tests), `tests/e2e/test_legal_pages.py` (legal-page e2e machinery). External research fired on ONE demonstrated gap: SOC 2 roadmap phrasing (highest-risk claim, claim-accuracy binding constraint).
 
 - **SOC 2 roadmap communication** (1 query, findings-date 2026-08-13, 4 sources — promise.legal / soc2auditors.org / lorikeetsecurity.com / zipsec.com): roadmap language must be separated from certification language; milestone-based roadmap (scoping → readiness → audit) with control-area milestones beats a hard date that can slip; minimum viable SOC 2 scope = access control, change management, vendor management, training, incident response; enterprise buyers expect references to information security/access control/acceptable use/incident response/change management policies. Persisted: `docs/research/2026-08-13-309-soc2-roadmap-notes.md`.
 - **TLS version claim** (diverge-phase external check, findings-date 2026-08-13): Fly proxy supports TLSv1.2 + TLSv1.3 only (fly.io/docs/networking/tls); `fly.toml` pins no `tls_options.versions` → claim as "TLS 1.2 + 1.3 supported", never "TLS 1.3 only".
 
 ### Integration Docs
+
 - **No new third-party dependencies introduced.** Renderer = stdlib only. All external surfaces (Fly, Cloudflare Pages, Supabase Auth) are existing, already-deployed infrastructure referenced only descriptively by the page.
 
 ## Rejected Alternatives
+
 - **A — Legal-Family Clone (hand-authored HTML, full pins, reviewer checklist):** the code↔claim link is human-maintained pins in an opt-in e2e suite; stale pins are green — the exact failure the binding constraint forbids. The present-tense-guard interplay is a real landmine if security copy enters `PINNED_CANONICAL`. *Would have been better if* claims had no code anchors (pure marketing copy) or the team refused all tooling.
 - **B — Canonical Markdown + Build + Grep-Parity:** best authoring UX, but grep patterns live in a separate file from the claim text → they drift independently (the two-copy problem moves up a level), and absence claims (TLS pinning) and SOC 2 status check weakly. *Would have been better if* the page were long-form prose (500+ words/section) where JSON escaping hurts and markdown diffs matter — this page is 5 short technical sections.
 - **Pure C (no LEGAL_PAGES membership):** would avoid the revision-history/effective-date ceremony but give up two served-content gates that are provably free (verified: 2 iterations, dpa template satisfies both, guard not auto-applied). *Rejected in favor of hybrid* — membership is the quality-over-convenience choice.

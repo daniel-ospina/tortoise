@@ -64,6 +64,7 @@
 | **Best-match / Ranked** | "Give me the top N relevant points" | Delegated agents, entity resolution, context retrieval | **Annotate, don't filter** — annotate each result with EP confidence; caller decides composite |
 
 **Rules:**
+
 1. `min_confidence` is OPTIONAL — defaults to no filter (0.0)
 2. `order_by` supports `relevance` (RRF, default) and `confidence` (EP, explicit opt-in)
 3. EP confidence is always a **post-retrieval annotation**, never a pre-retrieval gate
@@ -76,24 +77,28 @@
 ## High-Level E2E Test Cases
 
 ### E2E-1: Point creation stores embedding
+
 **Given:** sentence-transformers is installed  
 **When:** `create_point("statement", "quantum mechanics and wave functions")` is called  
 **Then:** Point is created with `embedding` property (384-dim float list)  
 **And:** embedding is non-null, non-empty  
 
 ### E2E-2: FTS query returns keyword-ranked results
+
 **Given:** Points exist with content "quantum computing", "quantum gravity", "cookie recipes"  
 **When:** `tortoise_fts_query("quantum physics")` is called  
 **Then:** Results are ranked by full-text relevance  
 **And:** "quantum computing" and "quantum gravity" rank above "cookie recipes"  
 
 ### E2E-3: Vector query returns semantically similar results
+
 **Given:** Points with diverse semantic content exist  
 **When:** `tortoise_fts_query("machine learning")` is called (with vector strategy active)  
 **Then:** Results semantically related to ML (e.g., "neural networks", "deep learning") rank above unrelated content  
 **And:** At least 1 result is returned if semantically similar content exists  
 
 ### E2E-4: Hybrid RRF fuses keyword + semantic rankings
+
 **Given:** Fulltext + vector indexes both exist and are populated  
 **When:** `tortoise_fts_query("quantum mechanics")` is called  
 **Then:** Results reflect both keyword match AND semantic similarity via RRF fusion  
@@ -101,6 +106,7 @@
 **And:** A result matching only one strategy appears lower than dual-strategy matches  
 
 ### E2E-5: Graceful degradation when indexes unavailable
+
 **Given:** Vector index does not exist (e.g., embedded mode, or creation failed)  
 **When:** `tortoise_fts_query("test query")` is called  
 **Then:** Query succeeds — falls back to FTS + structural fusion (or further to in-memory TF-IDF)  
@@ -108,6 +114,7 @@
 **And:** Results are returned (may be empty if no matches)  
 
 ### E2E-6: Full-scan structural query (no confidence filter)
+
 **Given:** A subgraph has Points with EP confidence ranging from 0.1 to 0.95  
 **When:** `tortoise_query(context="licensing-decision")` is called with NO min_confidence  
 **Then:** ALL Points in the context are returned, including low-confidence ones  
@@ -115,6 +122,7 @@
 **And:** Low-confidence Points (0.1-0.3) are NOT filtered out — reviewer needs to see weak spots  
 
 ### E2E-7: Confidence-annotated hybrid search (optional filter)
+
 **Given:** Hybrid search is active with EP confidences computed  
 **When:** `tortoise_fts_query("pricing model", order_by="relevance")` is called  
 **Then:** Results are ranked by RRF relevance score  
@@ -125,6 +133,7 @@
 **And:** `order_by="relevance"` sorts by RRF (default)  
 
 ### E2E-8: MCP tortoise_search uses hybrid search (customer surface)
+
 **Given:** Hybrid search is deployed with FTS + vector indexes populated  
 **When:** Agent calls `tortoise_search("quantum mechanics")` via MCP  
 **Then:** Results are returned via `tortoise_fts_query()` hybrid RRF, NOT in-memory TF-IDF  
@@ -132,6 +141,7 @@
 **And:** Latency is under 300ms for typical query load  
 
 ### E2E-9: Agent skill teaches search modes
+
 **Given:** `how-to-use-tortoise` skill is updated with search section  
 **When:** An agent reads the skill before performing a Tortoise operation  
 **Then:** The skill describes when to use `tortoise_search` (best-match), `tortoise_query` (full-scan), and `tortoise_suggest_entry_points` (entity resolution)  

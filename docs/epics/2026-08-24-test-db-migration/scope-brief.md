@@ -22,6 +22,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 **Verification baseline (measured, research-brief §5):** 6,837 collected tests (40.60s collect) · fast-matrix halves a=2,606 (151 files) / b=2,654 (150 files) · carve-out **342 tests** (17 files + 3 busy-error per-test = 5.0% of suite) → **≈95% migrates** (target ≥90%) · CI walls a=41–42m, b=57–58m (half b rides the 45/55m watchdog — already marginal) · post-#1645 orphan baseline **4** (<20 precondition ✓) · docker services already provisioned in CI (falkordb 6379 passworded + falkordb-legacy 16379 passwordless, #1436).
 
 **What ships overall (end state):**
+
 1. Default `pytest` runs against `TORTOISE_DB_URI` (docker FalkorDB) for DB-agnostic tests; embedded remains ONLY for the behavioral carve-out (342 tests).
 2. Zero unexpected docker-vs-embedded divergence; an explicit documented change list (research-brief §2, D1–D16) is enforced by mode-split test expectations, not by accident.
 3. The reaper's scope shrinks to local-dev embedded hygiene; no CI/dev dependency on the reaper for correctness.
@@ -36,6 +37,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 **Goal:** build every mechanism the flip needs, with **embedded still the default and the suite provably unchanged**. The only test-visible changes in P1 are expectations that were already wrong on docker (index-shape assertions get docker siblings; nothing embedded changes).
 
 #### In scope
+
 - **URI-aware seam (tests/_embedded.py + tests/conftest.py):**
   - `shared_proj`, `sdk_factory` (conftest.py:83), `shared_embedded_db` become URI-aware: when `TORTOISE_DB_URI` is set → docker construction with guard-passing graph names; unset → today's exact embedded construction.
   - `shared_proj` default graph name `"test"` → guard-passing `test_suite_<job-uuid>` when in docker mode (embedded mode keeps `"test"` — zero change for the embedded default).
@@ -50,6 +52,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 - **CI:** *no matrix/service change in P1.* Optionally add a CI step that asserts the redirect is inert (run a representative embedded file with `TORTOISE_DB_URI` unset and confirm embedded construction path is taken — cheap regression guard).
 
 #### Out of scope (P1)
+
 - No matrix flip; no job-level `TORTOISE_DB_URI`; no default inversion.
 - No changes to carve-out files (lifecycle/reaper/busy-error/recovery) — they keep running embedded exactly as today.
 - No `RAW_EMBEDDED_ALLOWLIST` changes (P4).
@@ -57,6 +60,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 - No changes to `sdk.py` namespace→graph mapping (already correct, sdk.py L1115–1123) or `hosted_api` fallback (D14, documented no-op).
 
 #### Acceptance criteria (P1)
+
 1. Full embedded suite (6,837 tests) green — **same as pre-P1 baseline**; no test file changes behavior in embedded mode (name-only sweep; index-split only adds docker siblings).
 2. `wipe_server()` unit-tested: wipes only `test_*` graphs, refuses/skips non-test graphs, refuses non-loopback hosts (per research Q6 decision).
 3. Class-level redirect unit-tested: with `TORTOISE_DB_URI` unset → embedded path identical to today (assert `_is_embedded is True`); with URI set → server path with derived `test_*` graph name.
@@ -64,6 +68,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 5. CI: both halves green, wall within 20% of baseline (41–42m / 57–58m).
 
 #### Risks + mitigations
+
 | Risk | Mitigation |
 |---|---|
 | The name-only graph sweep accidentally changes embedded behavior (graph-name is observable in embedded mode via `graph_name` attribute) | Sweep is mechanical (name replacement); embedded tests asserting `graph_name == "test"` are grep'd and updated consciously; the P1 diff review checks embedded-mode assertions explicitly |
@@ -78,6 +83,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 **Goal:** run ONE fast-matrix half on docker against the other half embedded, so every divergence the research table predicted is **observed and confirmed on real CI** before the default inverts. Half **b** is the flip candidate: it is the redislite-heavy half (test_search_engine 121, test_reaper 52, test_ranking, test_embedded_concurrency) whose wall (57–58m) already rides the watchdog — the strongest signal that per-test spawn is the cost driver docker removes.
 
 #### In scope
+
 - **CI half-b flip:** matrix include for `half: b` sets job-level `TORTOISE_DB_URI: docker://:falkordb@localhost:6379` (passworded service, already provisioned). The existing `falkordb` + `falkordb-legacy` service block is unchanged.
 - **Redirect activation:** with job-level URI set, the class-level redirect (P1) fires for every raw `path=` construction in half-b files → all half-b DB-agnostic tests now run against docker automatically. This is the **P2-flip blocker resolution** — without the redirect, ~half of half-b's raw constructions would land on graph `"tortoise"` and raise on first bulk-wipe (safe but red).
 - **Skip-guard extension (coverage manifest):** `tools/skip-guard.py` gains a **per-matrix-half expected-nodeid manifest** (generated from `tools/ci_selection.py` half lists × collect-only): any nodeid in the manifest missing from BOTH `PASSED` and `SKIPPED(reasoned)` → **red**. **Scope-review M2:** the manifest needs a PASSED-nodeid source — the pinned `-r fEs` summary (asserted by test_skip_guard.py test_workflow_keeps_rs) emits NO PASSED lines; the manifest must collect nodeids from junitxml or `-v` (pick in plan) and test_workflow_keeps_rs must be updated. Also `test_missing_log_is_not_a_failure` pins missing-log → exit 0 — under the manifest model a missing log = every expected nodeid absent → must be RED on migrated halves; that test flips. This kills the vacuous early-return class (`skip_if_no_falkor` retired from migrated half-b files, replaced by visible `pytest.skip` with reason or fail-fast). Existing `FalkorDB`-reason matcher stays.
@@ -87,12 +93,14 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 - **Carve-out file exemption (scope-review H1 — REQUIRED):** 6 carve-out files ride half b (`test_embedded_lifecycle_fast_close`, `test_redis_guard`, `test_guard`, `test_config`, `test_ops_safety`, `test_pre_migration_safety`). With job-level URI set, the class-level redirect would flip them to docker and break their embedded-specific assertions (recovery tests raise instead of auto-rebuild; atexit-seam asserts find no redislite server). Fix: a **per-file redirect exemption** — `TORTOISE_TEST_NO_REDIRECT=<comma-separated file stems>` honored by the class-level redirect (a file in the set keeps `path=` embedded construction even when URI is set). The 6 carve-out files in half b are added at P2; the 3 busy-error PER-TEST carve-outs use the D-2 embedded-only MARKER (skip visibly on docker, pass on embedded — E2E-3 / P2 AC5), a skip mechanism DISTINCT from the per-file redirect exemption; TORTOISE_TEST_NO_REDIRECT stays file-stem-only. ALTERNATIVE (rejected for P2): matrix re-partition to move carve-out files out of half b — requires selector/manifest + drift-guard updates (ci_selection pins halves fail-closed) — deferred to P4 if the exemption proves fragile.
 
 #### Out of scope (P2)
+
 - No half-a flip (stays embedded — the control arm).
 - No allowlist shrink, no reaper demotion (P4).
 - No test-slow / e2e / track-b changes — they are not in the fast matrix and follow in P3/P4.
 - No xdist adoption; no matrix merge (P3/P4 decision).
 
 #### Acceptance criteria (P2)
+
 1. Half b green on docker with job-level URI; **no FalkorDB-reasoned skips** (skip-guard red otherwise).
 2. Half a (embedded control) green — same as P1.
 3. Observed divergences match the research table exactly; **zero unexpected** divergence (each unexpected one is a P2 blocker, fixed before P3).
@@ -100,6 +108,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 5. The 3 busy-error tests skip visibly (embedded-only marker) on the docker half and pass on the embedded half — never green-skip.
 
 #### Risks + mitigations
+
 | Risk | Mitigation |
 |---|---|
 | A half-b file's assertions are embedded-calibrated and break on docker (EP numeric cascades, recall ordering) | The divergence-confirmation pass is the gate; docker-calibrated expectations are added in P2 (same class as D9); the documented change list absorbs them, not silent fixes |
@@ -114,6 +123,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 **Goal:** the fast matrix runs entirely on docker; embedded runs only the carve-out.
 
 #### In scope
+
 - **Flip half a** to job-level `TORTOISE_DB_URI` (same as half b in P2). Both halves now docker.
 - **Skip-guard manifest extended to both halves** (expected-nodeid set per half, same mechanism as P2).
 - **`TORTOISE_FAST_ATEXIT` + `_redislite_hygiene` gating:** on docker halves, the conftest env line and hygiene sweeps become no-ops (gated on whether any embedded server was actually created) — cosmetic but removes the redislite dependency from the default path.
@@ -122,10 +132,12 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 - **Non-fast surfaces (test-slow, track_b, e2e/, fixtures):** flip to docker default in this phase (same URI mechanics, no per-file probes), with the same skip-guard manifest coverage. Carve-out files (342 tests incl. fixtures/redis-guard + bench smoke) remain embedded-only.
 
 #### Out of scope (P3)
+
 - No allowlist shrink (P4). No reaper demotion (P4).
 - No embedded-path removal — the embedded engine stays fully supported (carve-out + prod fallback).
 
 #### Acceptance criteria (P3)
+
 1. **Full fast matrix (both halves) green on docker services**; half walls within 20% of embedded baseline (half a ≤ ~50m; half b must clear the 55m watchdog — target ≤ ~45m).
 2. Skip-guard manifest passes with **zero FalkorDB-reasoned skips and zero missing nodeids** on both halves.
 3. **0 flaky failures attributable to docker-vs-embedded divergence in 5+ consecutive CI runs** (epic indicator #2).
@@ -133,6 +145,7 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 5. Carve-out suite (342 tests) still green on embedded (run in CI: a dedicated embedded-only job or the carve-out files in a URI-unset job).
 
 #### Risks + mitigations
+
 | Risk | Mitigation |
 |---|---|
 | Hidden cross-file state on the shared docker graph (a file wipes another's data) | Hermeticity mechanics (§5): per-test graph names for exact-set files, filtered `wipe_server()` for shared-graph files; the guard makes bare-`test` wipes impossible |
@@ -147,23 +160,27 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 **Goal:** delete the debt — the drift registry shrinks, the reaper is demoted, the migration's end state is explicit.
 
 #### In scope
+
 - **`RAW_EMBEDDED_ALLOWLIST` shrink 34 → ~21:** the 7 drift-registered files migrate (already docker-verified DB-agnostic: test_export_cli, test_import_endpoint, test_projection, test_indexes, test_ingest, test_supplementary, test_semantic_extractor) + the 6 non-carve-out entries migrate (test_de2e1_entity_extraction, test_extractor_doc, test_extractor_priors, test_index_github_cli, test_m1, test_remove_context_migration); `e2e/hosted/test_12_selfhost_migration` reviewed (selfhost path IS docker FalkorDB — likely a drift fix); `repro/reproduce_redislite_leak.py` + fixtures + 16 carve-out files stay. The `test_no_new_raw_embedded_constructions` enforcement test (test_embedded_lifecycle.py:186) keeps working against the smaller list.
 - **Reaper demotion:** scheduled reaper scope narrows to local-dev embedded hygiene; CI loses its correctness dependency on it (docker halves produce no orphans). Reaper code stays (embedded carve-out + dev machines still spawn redislite servers) but is no longer a CI-correctness gate.
 - **Documentation:** the migration's divergence change list (D1–D16) is filed as the canonical reference for "what legitimately differs docker vs embedded" (epic indicator #3).
 - **Post-#1645 orphan verification:** run the default suite on a dev machine WITHOUT the scheduled reaper; assert orphan count stays < 20 (epic indicator #2 — the precondition, re-measured at end state).
 
 #### Out of scope (P4)
+
 - No removal of the embedded engine itself (carve-out, dev fallback, prod `TORTOISE_DB_PATH` mode all stay).
 - No changes to the 342-test behavioral carve-out content (their behavior is the point).
 - No xdist, no test-count reduction.
 
 #### Acceptance criteria (P4)
+
 1. Allowlist enforcement test passes with the shrunk list (~21 entries); the 13 migrated files run on docker with no embedded markers.
 2. Default `pytest` run requires `TORTOISE_DB_URI`; embedded-only carve-out is the sole embedded surface.
 3. **Orphan count < 20 on a dev machine without the scheduled reaper** (end-state re-measure of the 4-orphan baseline).
 4. Epic indicators all green: ≥90% docker (measured ≈95%), 0 divergence flake in 5+ CI runs, orphan <20, fast-matrix wall ≤ 20% baseline regression.
 
 #### Risks + mitigations
+
 | Risk | Mitigation |
 |---|---|
 | A drift-registered file is less DB-agnostic than the audit believed | P2/P3 already ran these files on docker (they're in the matrix); the P4 move is a registry update, not a first run |
@@ -177,36 +194,42 @@ The migration is a **phased strangler rollout** mandated by the strategy review.
 Each E2E is runnable in the final state and gates a specific phase. Marked `[docker]`, `[embedded]`, or `[both]`.
 
 ### E2E-1 — DB-agnostic round-trip is identical docker vs embedded
+
 - **Scenario:** a point create → search round-trip (the simplest DB-agnostic op) yields identical results on both backends.
 - **Setup:** parametrized over `TORTOISE_DB_URI` set (docker) and unset (embedded); same test body; guard-passing graph name in both modes (name differs by mode, semantics identical).
 - **Assertion:** point id, content_hash, search hit list, and vector/brute-force results identical where the divergence table says identical (D1/D5-identical paths); where the table documents divergence (D6 composite, D8 ordering), each side asserts its documented expectation.
 - **Gates:** P1 (mechanism works, embedded unchanged) → P2 (docker half proves it).
 
 ### E2E-2 — Bulk-wipe runs on docker without tripping the graph guard
+
 - **Scenario:** a test file that wipes its graph between tests runs green on docker.
 - **Setup:** shared-graph tier (`test_suite_<uuid>` via URI-aware `shared_proj`) + per-test `wipe_server()`; graph name passes `_assert_test_graph`.
 - **Assertion:** no `RuntimeError` from the guard; the graph is empty at each test start (exact count asserts pass); a control test proves a bare-`test` wipe still raises (guard intact).
 - **Gates:** P1 (wipe_server unit) → P2 (docker half runs wipe-heavy files).
 
 ### E2E-3 — Concurrency: multi-tenant semantics, no EmbeddedStoreBusyError
+
 - **Scenario:** a cross-process / multi-SDK concurrency test runs on docker and never raises `EmbeddedStoreBusyError`; concurrent writers on one graph coexist (last-writer-wins per op, no lost writes).
 - **Setup:** the live-writer portion of `test_embedded_concurrency` (:130) + `test_concurrent_writers_live_falkor_no_lost_writes` under job-level URI; the 3 busy-error tests remain embedded-marked (skip visibly on docker, pass on embedded).
 - **Assertion:** 0 busy errors; all concurrent writes present; the documented D11/D12 divergence holds (multi-tenant on docker, single-writer busy-error on embedded).
 - **Gates:** P2 (docker half proves no busy errors) → P3 (both halves).
 
 ### E2E-4 — Carve-out (342 tests) still passes on embedded
+
 - **Scenario:** the behavioral carve-out — lifecycle (7+7), reaper (52+6), ops-safety/recovery (11), guard/hard-reject/redis-guard, config, migrate/backup, projection-lifecycle, hosted-backup (78), pre-migration-safety, bench smoke — runs green on embedded, unchanged by the migration.
 - **Setup:** a CI job (or local run) with `TORTOISE_DB_URI` unset running exactly the carve-out file set; skip-guard exempts them from the docker manifest (their skips are redislite-availability class, not FalkorDB-availability — research §6.5).
 - **Assertion:** all 342 pass; recovery auto-rebuild (D2/D3) and busy-error (D11) semantics verified embedded-only. **Scope-review M1:** the assertion is NOT "no file references TORTOISE_DB_URI" — 7 carve-out files legitimately reference it for their live/URI branches (test_config, test_embedded_concurrency, test_reaper, test_hard_reject, test_flip_gate, test_pre_migration_safety, test_migrate_db). The correct assertion: no carve-out file's EMBEDDED path depends on `TORTOISE_DB_URI` being set.
 - **Gates:** P1 (untouched) → P4 (post-shrink, registry consistency).
 
 ### E2E-5 — Fast matrix (both halves) green on docker; wall within 20% of baseline
+
 - **Scenario:** the default `pytest` fast matrix runs against the CI docker services and completes green.
 - **Setup:** job-level `TORTOISE_DB_URI` on both halves; falkordb (6379) + falkordb-legacy (16379) services; skip-guard coverage manifest active.
 - **Assertion:** both halves pass; half a ≤ ~50m and half b clears the 55m watchdog with margin (target ≤ ~45m) — i.e., no >20% regression vs the embedded baseline (41–42m / 57–58m); wall recorded for the P3/P4 merge decision.
 - **Gates:** P2 (half b only) → P3 (both halves, full gate).
 
 ### E2E-6 — Missing docker → fail-closed / visible skip, never green-skip
+
 - **Scenario:** simulate a docker outage (service removed, URI unset) and confirm the run cannot go silently green.
 - **Setup:** run the migrated set without `TORTOISE_DB_URI`; skip-guard scans the log.
 - **Assertion:** every migrated test either fails loudly (connect error) or skips with a `FalkorDB`-reason → skip-guard exits 1 (job red); no nodeid vanishes from both PASSED and SKIPPED (coverage-manifest check trips red); the carve-out (embedded) still passes — a *different* availability class, guard-exempt.
@@ -214,12 +237,14 @@ Each E2E is runnable in the final state and gates a specific phase. Marked `[doc
 - **Gates:** P2 (manifest on half b) → P3 (both halves).
 
 ### E2E-7 — Zero redislite orphans on docker halves; bounded on carve-out
+
 - **Scenario:** after a full docker-matrix run, no redislite orphan servers accumulate.
 - **Setup:** the existing `Assert no redislite orphans` CI step, re-targeted: docker halves expect ~0; carve-out/embedded jobs keep the bounded (<20) assertion.
 - **Assertion:** docker halves: 0 orphans (post-run `pgrep -f "redislite/bin/redis-server"`); the conftest `_redislite_hygiene` end-sweep logs no action needed on docker.
 - **Gates:** P3 (flip complete) → P4 (reaper demotion — CI no longer depends on it).
 
 ### E2E-8 — Divergence change-list conformance (the documented change list)
+
 - **Scenario:** each D1–D16 divergence behaves exactly as documented — no silent engine differences beyond the list.
 - **Setup:** a conformance test file that asserts the divergence table: D2/D3 recovery auto-rebuild raises on docker (carve-out-only on embedded); D6 composite index exists on docker and not embedded; D8 HNSW index created on docker, brute-force ordering on embedded (bench smoke); D11 busy-error embedded-only; D12 multi-tenant on docker; D14 hosted fallback untouched.
 - **Assertion:** all conformance asserts pass in both modes; the file is the executable version of the epic indicator #3 change list.
@@ -323,7 +348,9 @@ Watchdog: embedded half b already rides the 45/55m watchdog — the docker flip 
 > The human approves or redirects scope. Four decisions below are explicitly requested; each has a recommended default so the gate can proceed with "approve with recommendations" if desired.
 
 ### D-1 — Class-level redirect scope
+
 **Options:**
+
 - **(a) `path=` only (recommended)** — redirect fires only for `FalkorProjection(path=...)` when `TORTOISE_DB_URI` (supported scheme) is set. Narrowest prod surface; matches the research brief's wording ("`FalkorProjection(db_path=...)` must redirect"); covers all ~93 test raw constructions (they pass paths).
 - (b) `path=` + no-arg — "URI wins" fully (no-arg would also redirect); consistent with sdk.py behavior but changes no-arg prod semantics when URI is set (today no-arg = embedded canonical path).
 - (c) env-gated flag (`TORTOISE_TEST_REDIRECT=1`) — most explicit, zero prod surface, but adds a knob and a second condition to keep in sync.
@@ -331,18 +358,21 @@ Watchdog: embedded half b already rides the 45/55m watchdog — the docker flip 
 **Recommendation: (a).** Proceed with (a) unless the human wants full URI-wins semantics.
 
 ### D-2 — The 3 busy-error tests: per-test carve-out vs whole-file
+
 - **(a) Per-test carve-out (recommended)** — mark `test_audit` (d), `test_pack_state` TestBackfillScript dry-run, `test_index_directory` E2E-9 embedded-only; migrate the remaining 133 tests in those files. Keeps ≈95% migration headroom (342 carve-out stays).
 - (b) Whole-file — add the 3 files to the carve-out (~135 more tests stay embedded → ≈92% migrates). Simpler, fewer markers, less headroom.
 
 **Recommendation: (a).**
 
 ### D-3 — Matrix split timing
+
 - **(a) Keep the 2-half split through P3; decide merge at P4 on measured walls (recommended)** — preserves the side-by-side divergence confidence of P2 and the epic's "split only if a half exceeds ~40m" rule; the merge becomes a measured, post-migration optimization.
 - (b) Commit to merging to a single fast job at P3 if both halves < ~40m — fewer CI minutes but loses the second runner's parallelism and flips two things (default + matrix shape) at once.
 
 **Recommendation: (a).** The P2 half-b wall (expected 57–58m → ≤ ~40m) is the decisive data point.
 
 ### D-4 — `wipe_server()` host protection
+
 - **(a) Refuse non-loopback hosts (recommended)** — mirror the CLI's `docker://` warning; a test cannot wipe a remote dev/shared server even if it's `test_`-prefixed. Slight CI-local-only restriction (CI services are loopback).
 - (b) Prefix filter only — simpler; accepts any host.
 

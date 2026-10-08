@@ -16,6 +16,7 @@
 > **Findings date:** 2026-08-28
 
 > Gate skipped: plan touches zero third-party dependencies (FastAPI/Supabase/FalkorDB in-repo; no new libraries). Prior UX research consumed from the #1877 scoping `### Axis Research`:
+>
 > - **Create-workspace entry placement** [canonical]: Vercel/Linear/Notion put "Create/Add workspace" at the bottom of the workspace switcher dropdown; shadcn multi-tenant navbar block has an org switcher with "Create New"; VibeWeek: "Create new workspace" CTA at the bottom of the switcher.
 > - **Per-tenant billing gates** [canonical + pitfalls]: entitlement gates that say "upgrade" at the point of action (not signup) are the standard B2B pattern; the anti-pattern is a silent 403/500 (userpilot: burying primary actions kills activation). 402-with-upgrade-message matches the repo's existing invite-gate precedent (hosted_api.py ~6252 "Invites require the Team tier").
 > - **Dialog copy** (user decision): "upgrade a team, then create" — the new team doesn't exist until the gate passes; the CTA lands on the existing team's Billing (#1876's team selector).
@@ -33,11 +34,13 @@
 ### Journey Test Map
 
 **Journey: "I want a second team"**
+
 1. Account menu → "Create new team" → **Acceptance:** dialog opens → **Test:** e2e create-team
 2. Type a name + submit → **Acceptance:** validation matches the API (≤64, [a-zA-Z0-9_-]); free-capped → upgrade message + CTA → **Test:** e2e gate
 3. (Eligible) Submit → **Acceptance:** dashboard switches to the new team → **Test:** e2e success
 
 ### Failure Modes
+
 - **Free+paid → 402**: the new team would start Free (2 free teams) — blocked; CTA says "upgrade a team, then create" (verified scope).
 - **Duplicate name**: 409 preserved (before the 402 — ordering pinned).
 - **Abuse**: 429 rate-limit preserved (first).
@@ -70,6 +73,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** `count_active_free_memberships` counts active memberships in teams without an active subscription (supabase) / tier='free' (selfhost); excludes removed/invited.
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py` (supabase twin, near membership_count_since ~1889), `tortoise/hosted_api.py` (mode-aware wrapper)
 - Test: `tests/test_writer_inventory.py` (or a new focused test)
 
@@ -85,6 +89,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** order 429 → 409 → 402 (string detail) → provision; free+paid → 402.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (create_team ~5925)
 - Test: `tests/test_writer_inventory.py` TestCreateTeam
 
@@ -100,6 +105,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** a free-capped session user calling create_onboarding_team → 402.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (create_onboarding_team ~9839)
 - Test: `tests/test_writer_inventory.py` TestOnboardingTeam
 
@@ -113,6 +119,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 **Acceptance:** entry in the account menu (single-team visible); dialog validates like the API; 402 → upgrade message + CTA to Billing; success → switchTeam.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (account menu ~3846, state near the menu, modal markup)
 - Modify: `website/apps/dashboard/src/index.css`
 - Test: `tests/e2e/test_dashboard_identity.py` (add a POST /v1/organizations handler to `_wire`)

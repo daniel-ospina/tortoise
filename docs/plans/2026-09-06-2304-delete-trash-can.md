@@ -63,6 +63,7 @@ cron cadence second). Locked per-team against concurrent restore (same as restor
 ## Task 3 — Dashboard trash UI (frontend)
 
 Trash list view (Graphs tab → "Trash (N)" when owner/admin): rows show name/kind/`deleted_at`
+
 + purge countdown; actions: Restore (full — with destructive-overwrite confirm modal when the
 name is reused) and Open read-only (points view). Empty state. Delete-confirm copy updated:
 "Graph is recoverable for 7 days, then permanently erased (data + backups)."

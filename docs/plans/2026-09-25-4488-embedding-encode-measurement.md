@@ -25,12 +25,14 @@ aboutObjects: "#4488, #5045"
 **Scope guard:** no cap, price, quota, entitlement, or recorded decision changes. `get_cohort_spend_usd` is untouched (the new columns are excluded from the spend ceiling). The pre-existing `show_progress_bar` signature bug found during scoping is filed as **#5321** and is NOT fixed here.
 
 **Measured vs excluded (state this, so generic field names are not over-read):**
+
 - **Counted:** `EmbeddingModel.encode` reached through `compute_embeddings` — the store-vector funnel used by `sdk.create_point`, the capture turn batch, `api.py`, and `projection/entities.py`.
 - **Excluded, with reason:** `_encode` / `search_points` / `kind_index._DefaultEncoder.encode` pass `show_progress_bar=False`, which `EmbeddingModel.encode` does not accept → `TypeError` → TF-IDF (**#5321**), so they run **no model work** today; `sdk.py:14358` and `fallback_snapshot` are read/query-side. If #5321 is fixed, extending the measurement to those paths is a follow-up (and the same hook design applies).
 
 ### Pattern Research
 
 In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`time.perf_counter`).
+
 - **Writer/reader shape:** `metering.record_ask_usage` / `get_ask_usage` (+ `metering_increment_ask` / `metering_get_usage`). Canonical.
 - **Ledger + atomic increment + migration:** `supabase/migrations/20260829000001_metering_ask_columns.sql`, **`20260917000001_metering_capture_cost.sql` (the NOT NULL DEFAULT 0 precedent)**, `20260918000001_metering_period_window.sql` (window keying + `SECURITY DEFINER`/ACLs).
 - **Mutable tally across off-loop/worker context copies:** `hosted_api._submit_off_loop` (`contextvars.copy_context()`, cpython#78195). Sibling pattern reference (not a dependency): the unmerged `tortoise/graph_ops.py` (PR #5292).
@@ -52,10 +54,12 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 ### Journey Test Map
 
 ### Journey: an operator reads an org's embedding workload
+
 1. **Step:** an org writes Points (store encode) → **Acceptance:** the ledger row carries texts/chars/wall_ms/model/revision → **Test:** `test_compute_embeddings_notes_the_encode` (hook) + `test_record_then_read_back` (row)
 2. **Step:** `GET /v1/team` → **Acceptance:** the `embed_*` fields render the figure (zeros for a fresh org) → **Test:** `test_renders_zeros_then_the_recorded_figure`
 
 ### Failure Modes
+
 - Metering window unresolvable → **Expected:** dropped + alerted via `metering.report_unmetered_increment(lane="embed", …)`; the write is served → **Test:** `test_unresolvable_window_alerts_and_does_not_raise`
 - Non-empty tally with no resolvable org → **Expected:** same alert, never a silent drop → **Test:** `test_unbound_nonempty_flush_alerts`
 - Nothing encoded on a non-GET request → **Expected:** no RPC, no zero row → **Test:** `test_empty_flush_records_nothing_and_calls_no_rpc`
@@ -74,6 +78,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 
 **Intent:** Own the per-request primitive with zero I/O on the encode path; exactly one boundary takes it.
 **Acceptance:**
+
 - `EmbedTally` accumulates `calls/texts/chars/wall_ms/skipped` + the observed `(model, revision)` identity.
 - `note_encode(...)`, `bind_org(...)`, `flush(...)` are **total** (never raise); `bind_org` is a no-op when unarmed.
 - One `threading.Lock` guards the tally's consumed-transition **and** its counter snapshot (one critical section, so a concurrent boundary can neither double-write nor lose an increment that landed mid-flush); `record_embedding_usage` is called **after** the lock is released (a blocking ledger RPC must not serialize concurrent encodes).
@@ -82,6 +87,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 - `EmbedMeteringMiddleware` (pure ASGI): non-GET → `arm()`; `finally` → resolve org as `tally.org_id or scope.get("state", {}).get("org_id")` and `flush(org)`, then restore `_ACTIVE`.
 
 **Files:**
+
 - Create: `tortoise/embed_metering.py`
 - Test: `tests/test_embed_metering.py`
 
@@ -96,6 +102,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 **Acceptance:** `compute_embeddings` notes `(texts, chars, wall_ms)` around `model.encode(...)` using the **truncated** strings actually passed; `model is None` notes `skipped` and still returns `[None]*n`; return values and the frozen `(texts, max_tokens)` signature unchanged; `_encode`'s TF-IDF fallback untouched/uncounted; the `embed_metering` import is lazy (no cycle).
 
 **Files:**
+
 - Modify: `tortoise/embeddings.py` (`compute_embeddings`) · Test: `tests/test_embed_metering.py`
 
 **Step 1: Write failing tests** (armed+stub → tally; unarmed → no effect; model None → `skipped`; return value unchanged). **Step 2: Run.** **Step 3: Implement the `perf_counter` hook.** **Step 4: Re-run.**
@@ -106,6 +113,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 **Acceptance:** `record_embedding_usage(org_id, *, calls, texts, chars, wall_ms, skipped, model, revision, _selfhost_transport: bool = False)` mirrors `record_ask_usage` (exemption `not org_id or _selfhost_transport or _selfhost_transport_active()`, `_require_period` raises, per-org `_ask_meter_lock`, registry Cypher MERGE, increment-RPC failure logged non-fatally). The MERGE's mixed rule is **sticky, paired, and skip-safe**: assign the flag BEFORE the identity, `embed_identity_mixed = coalesce(m.embed_identity_mixed,false) OR $mixed OR (m.embed_model IS NOT NULL AND $model IS NOT NULL AND (coalesce(m.embed_model,'') <> coalesce($model,'') OR coalesce(m.embed_revision,'') <> coalesce($revision,''))` — the `$mixed` term carries an identity change observed WITHIN one tally (two models encoded in the same window), which no comparison against the stored row can see; then `m.embed_model = coalesce($model, m.embed_model), m.embed_revision = coalesce($revision, m.embed_revision)`. `get_embedding_usage(org_id)` mirrors `get_ask_usage` (`_current_period` + zero view, never raises). `get_cohort_spend_usd` untouched.
 
 **Files:**
+
 - Modify: `tortoise/metering.py` · Test: `tests/test_embed_metering.py`
 
 **Step 1: Write failing tests** — record→read back; zeros for no row; identity == `embedding_identity()`; model-only change flips; **revision-only** change flips; **A→B→B stays TRUE**; **real-A → skipped-only → real-A leaves the flag FALSE and identity A**; exemption records nothing; writer raises on an unresolvable window, reader degrades to zeros.
@@ -115,6 +123,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 
 **Intent:** Make the dimension durable on the production lane and keep the metering fences green.
 **Acceptance:**
+
 - New file `supabase/migrations/20260925000003_metering_embedding_columns.sql` (prefix verified free) adds — via `ADD COLUMN IF NOT EXISTS` — `embed_calls int NOT NULL DEFAULT 0`, `embed_texts bigint NOT NULL DEFAULT 0`, `embed_chars bigint NOT NULL DEFAULT 0`, `embed_wall_ms double precision NOT NULL DEFAULT 0`, `embed_skipped int NOT NULL DEFAULT 0`, `embed_model text`, `embed_revision text`, `embed_identity_mixed boolean NOT NULL DEFAULT false`. **Every counter is NOT NULL DEFAULT 0** (the 20260917000001 precedent) so a row first created by `metering_increment`/`metering_increment_ask` cannot make `embed_x + n` evaluate to NULL forever.
 - `metering_increment_embedding` is `DROP FUNCTION IF EXISTS <the same signature>` + `CREATE` with `SECURITY DEFINER`, `SET search_path = ''`, parameters `p_org_id text, p_period_start timestamptz, p_period_end timestamptz, p_calls int, p_texts bigint, p_chars bigint, p_wall_ms double precision, p_skipped int, p_model text, p_revision text`; then `REVOKE ALL ON FUNCTION … FROM public, anon, authenticated` + `GRANT EXECUTE … TO service_role`.
 - **The INSERT column list is explicit** (the 20260918000001 precedent, `:178-180`), because `period text NOT NULL` (`supabase/migrations/0014_metering_records.sql:15`, no default) and `period_start`/`period_end` are NOT NULL with no default (`20260918000001:133-134`):
@@ -125,6 +134,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 - **`tests/test_metering_window_admission.py::SITE_LANES` gains `"embed": "tortoise/embed_metering.py"`**, its "six swallow sites" wording and `metering.report_unmetered_increment`'s lane-list docstring are updated to seven, or the fence reds.
 
 **Files:**
+
 - Create: `supabase/migrations/20260925000003_metering_embedding_columns.sql`
 - Modify: `tortoise/supabase_control.py`, `tests/test_metering_window_admission.py`, `tortoise/metering.py` (docstring)
 - Test: `tests/test_embed_metering.py`, `tests/fake_control_plane.py`
@@ -136,6 +146,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 
 **Intent:** Arm on every per-org write request, attribute the org, flush once, own detached work, expose the figure.
 **Acceptance:**
+
 - `EmbedMeteringMiddleware` registered **before `app.add_middleware(InFlightMiddleware)` (`hosted_api.py:2222`)** — NOT before `WaitBoundMiddleware` (`:2681`). Starlette inserts at index 0, so this yields `[WaitBound, InFlight, EmbedMetering, …]`: still inner to the WaitBound-owned task, while the pinned order `classes[0] is WaitBoundMiddleware, classes[1] is InFlightMiddleware` (`tests/test_hosted_api.py:563-578`) holds. Registering it between the two would push `InFlightMiddleware` to index 2 and red that pin.
 - Org sources: the middleware reads `scope["state"]["org_id"]`, which the org-resolving dependencies set — the **key-auth** lanes (`hosted_api.py:3809`, `:3927`) and the **session lane** (`_session_user_org`, which stamps `request.state.org_id` before returning). The internal lane (`_check_internal`, `:2748`) sets NOTHING, so `/internal/starter-seed` (`:22077`, org from the request body) is **NOT** covered by scope state and must be bound explicitly — done by decorating the RUNNERS (`_run_onboarding_seed`, `_run_starter_seed`) with `_embed_metered`, which also covers the MCP caller that reaches them directly. Without that, every tenant provisioning fires a spurious UNMETERED-INCREMENT incident on a resolvable org. MCP `_quota_gated` resolves `_current_org_id` (and arms only when it is truthy: the stdio transport has no org).
 - **NO flush from `_record_write_op` (deviation from the plan's first draft, deliberate).** That site is SYNCHRONOUS and runs ON the event loop (the documented #4451 residual), and `metering.record_write_ops` is already the one blocking ledger write there. A second one per write op lengthened responses enough to trip the transport wait bound in `tests/test_hosted_api.py` (4 POST /v1/points timeouts under load; verified load-sensitive, and two of the four reproduce on a CLEAN base tree). The middleware flush is offloaded and the runner flushes are offloaded, so the measurement never sits between a write and its response, and coverage is unchanged: HTTP → middleware, MCP → `_quota_gated`, detached runners → `_embed_metered`. `test_record_write_op_does_not_add_a_second_ledger_write` pins the absence.
@@ -144,6 +155,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 - `/v1/team` gains **additive, defaulted** optional `embed_calls/embed_texts/embed_chars/embed_wall_ms/embed_skipped/embed_model/embed_revision/embed_identity_mixed` rendered inline from `get_embedding_usage` (mirroring `hosted_api.py:6540-6583`).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` · Test: `tests/test_embed_metering.py`
 
 **Step 1: Write failing tests** — middleware records once on a real ASGI POST and does not arm GET; the middleware order pin (`tests/test_hosted_api.py`) still holds; second flush is a no-op; empty flush writes nothing; `/v1/team` zeros then values; `/v1/points`, `/v1/objects`, `/v1/subjects`, `/v1/sessions/commit`, `/v1/onboarding/seed`, `/internal/starter-seed`, the capture lane, the background index job, and the dream lane each record once — and **never alert** (assert no `UNMETERED_INCREMENT` for the session/internal lanes, i.e. the `meted` bindings work); off-loop encode recorded.
@@ -155,6 +167,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 **Acceptance:** `_quota_gated` uses `with meted(org_id):` (sync arm) around `fn` when `_current_org_id` is set — a fresh tally + flush on exit, so an exception cannot leave a stale tally and it cannot double-count the middleware.
 
 **Files:**
+
 - Modify: `tortoise/mcp_server.py` · Test: `tests/test_embed_metering.py`
 
 **Step 1: Write a failing test** (a `_quota_gated`-wrapped stub that notes an encode records once; an exception leaves no stale tally). **Step 2: Run.** **Step 3: Implement.** **Step 4: Re-run.**
@@ -165,6 +178,7 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 **Acceptance:** `tests/test_embed_metering.py` registered under `api`, `core`, **and `eval`** (`tortoise/embeddings.py` selects `eval`), with a comment naming each guarded file; added to `DELIBERATE_URI_MUTATIONS` in `tests/test_uri_env_mutations_declared.py` (the `test_metering_period_window.py` fixture-param precedent, `DELIBERATE_EMBEDDED_LANE` comment).
 
 **Files:**
+
 - Modify: `config/ci-surfaces.yml`, `tests/test_uri_env_mutations_declared.py`
 - Test: `tests/test_ci_selection.py`, `tests/test_uri_env_mutations_declared.py`
 
@@ -174,8 +188,10 @@ In-repo precedent only; no new third-party dependency (stdlib `contextvars`/`tim
 
 **Intent:** Prove the change on the real suite.
 **Step 1:**
+
 ```
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embed_metering.py tests/test_metering.py tests/test_metering_period_window.py tests/test_metering_window_admission.py tests/test_migration_append_only.py tests/test_migration_drift_gate.py tests/test_uri_env_mutations_declared.py tests/test_graph_write_loop_responsiveness.py tests/test_hosted_api.py tests/test_ci_selection.py -v
 bash .github/scripts/check-migration-append-only prefix
 ```
+
 **Step 2:** Record the verbatim output as the PR's test evidence.

@@ -134,11 +134,13 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 ### The accuracy/cost tradeoff, honestly stated
 
 **What you gain with (d):**
+
 - S2 prompt: ~1,788 → ~1,000 vocab tokens today (and the vocabulary share of the prompt *stops growing* as packs ship). At 300 kinds (hypothetical ~10k vocab tokens in-context), (a) is dead on cost and accuracy; (d) is unchanged.
 - **Kind accuracy at pack scale *improves*** over (a): the classifier sees 5–10 candidate kinds with full descriptions instead of 300 in a flat list (HierLabelNet: +23 points from filtering; primacy bias removed by never listing the whole space).
 - Classification-later enables **per-kind enforcement** (warn/retry/block), **calibrated confidence**, and a **cheap retrain loop** (wrong kind → add to kind's examples → re-embed) that in-context prompting cannot offer.
 
 **What you give up / must pay for:**
+
 - **Error propagation + context loss**: the classifier sees bit+quote+slots, not the whole conversation. For context-dependent kinds this is a real regression *if* you don't pass the local context (UFET evidence). Pass the bit's quote/source span and slots into the classifier; measure the delta.
 - **Latency**: +1 embedding pass per bit (fast; the repo already runs bge-small with calibrated thresholds) and, for the ambiguous minority, an extra LLM call. Amortized over batching, small.
 - **Extraction-recall risk (unmeasured)**: today the vocabulary may anchor S2's *what counts as durable* judgments. No direct evidence on this; OpenIE evidence suggests open (untyped) extraction finds *more* surface facts but with noise — tortoise's mechanics-token VALUE FILTER is instruction-driven, not vocabulary-driven, so the risk is modest, but it must be measured (below).
@@ -153,6 +155,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 **Corpus:** 200 conversation stories drawn from the real S1 output stream (stratified across the pack activations in production). Ground truth: (1) run today's S2 → take its entity/event/slot kind assignments; (2) a reviewer pass (LLM adjudicator with the kindDefs + source text, or the owner) corrects ~200 sampled bits — target ≥200 *bit-level* gold labels (bits ≈ entities+events+slots emitted, typically 5–15 per story, so ~200 stories gives 1,000+ bits; label the first 200–400).
 
 **Arms (same 200 stories, same S1 input):**
+
 - **A (baseline):** today's S2, full vocab, as-is. Record kinds + cost (tokens/call).
 - **A′ (order shuffle):** same as A but vocabulary order randomized per call → measure kind-change rate. This is a *free* diagnosis of position bias in the current system (primacy-effect protocol).
 - **B (untyped + LLM-classify-later):** S2 without the vocab block (emit `kind: null` bits + quote + slots); classifier = LLM per bit with the *full* vocab. Sweep batch size {1, 25, 50} (batch evidence: safe to 100; JSON-array output, never index selection).
@@ -160,6 +163,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - **D (hybrid):** S2 with core-only vocab; pack-kind bits classified via retrieve-top-5 → LLM adjudicate among top-5 (batch 25). Optionally D′: embedding top-1 accepted when margin high, LLM only on the ambiguous tail.
 
 **Metrics:**
+
 1. **Kind accuracy** per arm, per surface (entity/event/slot), macro-F1 + confusion matrix over the gold bits. Report the nearMiss-pair accuracy separately (that's where the arms will diverge).
 2. **Bit recall**: did B/C/D's untyped S2 still emit the same bits as A? (The "does the vocabulary anchor extraction" question.)
 3. **Cost per 1k calls** (input tokens), **p95 latency**, and for B: token cost vs batch size.
@@ -172,6 +176,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 ## Sources (URLs)
 
 **Label space / many-bucket classification**
+
 - NICE (Srivastava et al., ACL 2024): https://aclanthology.org/2024.acl-long.300/ · https://arxiv.org/abs/2402.06733
 - In-Context Learning for Text Classification with Many Labels (GenBench 2023): https://aclanthology.org/2023.genbench-1.14/ · https://arxiv.org/abs/2305.15744
 - LongICLBench (arXiv 2404.02060): https://arxiv.org/abs/2404.02060
@@ -185,12 +190,14 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - 100 Labelled Samples to Break Even (EMNLP 2025): https://aclanthology.org/2025.emnlp-main.9/
 
 **Batch classification**
+
 - Researchers waste 80% of LLM annotation costs (arXiv 2604.03684): https://arxiv.org/abs/2604.03684
 - Multi-Instance Processing degradation (ACL 2026): https://aclanthology.org/2026.acl-long.1470/
 - Batch size for requirements classification (Utrecht 2025): https://research-portal.uu.nl/en/publications/one-size-does-not-fit-all-on-the-role-of-batch-size-in-classifyin/ · https://chuniversiteit.nl/papers/classifying-requirements-using-llms
 - Multi-problem evaluation (ACL 2025 Insights): https://aclanthology.org/2025.insights-1.12/
 
 **Pipeline vs joint extraction**
+
 - PURE (Zhong & Chen, NAACL 2021): https://aclanthology.org/2021.naacl-main.5/ · https://arxiv.org/abs/2010.12712
 - Pipeline vs Joint empirical study (AACL 2022): https://aclanthology.org/2022.aacl-short.55/
 - RareDis E2E RE comparison (2023): https://arxiv.org/abs/2311.13729
@@ -199,6 +206,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - GCIE (Findings EMNLP 2024): https://aclanthology.org/2024.findings-emnlp.4/
 
 **Schema-aware / retrieval-first extraction**
+
 - ASEE (Findings EMNLP 2025): https://aclanthology.org/2025.findings-emnlp.419/ (pdf: .../anthology-files/pdf/findings/2025.findings-emnlp.419.pdf)
 - Schema as Parameterized Tools SPT (2025): https://arxiv.org/abs/2506.01276
 - Adaptive RL Planning for IE (2024): https://arxiv.org/abs/2406.11455
@@ -207,6 +215,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - LEC-KG (2026): https://doi.org/10.48550/arxiv.2602.02090
 
 **Entity typing (context-dependence + large type sets)**
+
 - Ultra-Fine Entity Typing (Choi et al., ACL 2018): https://aclanthology.org/P18-1009/
 - UFET with weak supervision from MLM (ACL 2021): https://aclanthology.org/2021.acl-long.141/
 - LITE — UFET as NLI (TACL 2022): https://aclanthology.org/2022.tacl-1.35/
@@ -215,6 +224,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - Neural-PCRF for UFET (EMNLP 2022): https://aclanthology.org/2022.emnlp-main.459/
 
 **Embedding-based classification**
+
 - BTZSC zero-shot benchmark (ICLR 2026): https://arxiv.org/abs/2603.11991 · https://mlanthology.org/iclr/2026/aarab2026iclr-btzsc/
 - The Embedder's Dilemma (2026): https://arxiv.org/abs/2608.12875
 - RaLP (2022): https://arxiv.org/abs/2212.10391
@@ -228,6 +238,7 @@ Classify by **cosine similarity between the bit's embedding and each kind's embe
 - Instruction Tuning vs ICL few-shot CSS (2024): https://arxiv.org/abs/2409.14673
 
 **Tortoise repo (grounding)**
+
 - tortoise/extractor_v2.py — S2_TMPL, build_master_list, _render_master (measured: master list 7,154 chars ≈ 1,788 tokens; template ≈ 2,218 tokens)
 - tortoise/embeddings.py — BAAI/bge-small-en-v1.5 (384-dim), calibrated thresholds (0.72 default / 0.89 near-dup)
 - tortoise/model_adapters.py — deepseek-v4-flash (temp 0) via OpenRouter / DeepSeek-direct / Venice

@@ -208,7 +208,7 @@ and the commit endpoint (in-repo, test pattern at tests/test_commit_endpoint.py)
 
 1. `packs/agent-ops/manifest.yaml` (validate via `PackRegistry.load_all()`).
 2. `tortoise/pack_state.py`: DEFAULT_STARTER_PACKS + "agent-ops".
-3. `tortoise/extractor_v2.py`: PACK_NS + _PACK_TRIGGERS + 
+3. `tortoise/extractor_v2.py`: PACK_NS + _PACK_TRIGGERS +
    `validate_chain_completeness` wiring.
 4. Fixtures x3.
 5. Tests: `tests/test_agent_ops_pack.py` (extraction happy-path +

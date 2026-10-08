@@ -56,6 +56,7 @@ Not a standalone product. Priced through Viva Topics ($5/user/month) — now ret
 ## 6. Product & Features
 
 3-stage pipeline:
+
 1. **Query Engine** — extract high-probability knowledge snippets from billions of documents
 2. **Probabilistic Parser** — unsupervised template matching (thousands of templates)
 3. **Probabilistic Inversion** — run generative model backwards via Infer.NET to extract facts

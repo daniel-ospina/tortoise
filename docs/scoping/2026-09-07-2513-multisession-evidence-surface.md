@@ -130,6 +130,7 @@ model; the reader-model swap #2512 proved it is a lens, not the product).
 
 Primary (per category — MSR, knowledge-update, single-session-preference tail; all-`_abs`-
 filtered):
+
 1. **evidence_recall@5** (pool; marked extracted points surfaced / marked total — per-category),
 2. **official `recall_all@5`** binary projection — `session_recall@k == 1.0` over the
    question's answer sessions (all pieces in top-5). This is the *all-pieces* semantics the

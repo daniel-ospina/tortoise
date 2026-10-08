@@ -73,6 +73,7 @@ those follow-ups.
 ## Follow-up (2) status — #2070 retrieval optimisation loop (2026-08-31)
 
 Shipped as an optimisation loop (baseline → lever → measure → keep/revert):
+
 - **A1** sparse numeric-token policy (ask-lane-only; SAME-VALUE money),
 - **A4** additive `search_keys` PRF expansion (OR-cap budget — original
   tokens always keep their slots; **default OFF since #4593** — the library
@@ -315,6 +316,7 @@ answering defect (the graded eval already used the semantic judge; the
 published benchmark numbers were never produced by the broken bar).
 
 **What changed (files):**
+
 - `tools/ask_spotcheck.py::_grade` — every question routes to `build_judge()`
   (official gpt-4o anscheck, benchmark-identical); the word-overlap bar is
   gone from the live path; the `_abs` marker path is unchanged (precedes
@@ -671,6 +673,7 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
 > #1549 `RotatingModel` whose deterministic reorder picks the primary
 > (rotation order wins over the explicit provider for the PRIMARY slot; the
 > explicit value still gates the servable set fail-closed).
+
 4. **Meter re-baseline** (`tortoise/metering.py`, `tortoise/sdk.py`):
    `ASK_METER_RATES_STRONG = {3.00, 9.00}` (qwen $2/$6 × 1.5, the same
    over-cover convention); `select_ask_meter_rates(model.model)` picks by

@@ -11,6 +11,7 @@
 > (`docs/research/2026-08-31-gbrain-learnings/research-brief.md`).
 
 ## Cross-cutting principle (the epistemic-eval niche)
+
 The market evaluates agent memory on **recall / staleness / persistence**
 (mem0 "State of AI Agent Memory 2026": LoCoMo, LongMemEval, BEAM are the
 comparison set; vendor guidance = third-party recall@10, persistence SLAs,
@@ -21,6 +22,7 @@ benchmarks are **not universal leaderboards** (hydradb 2026) → the battery's
 numbers, never silent re-tunes) is the direct methodological answer.
 
 ## #2291 (A4 product-semantics + EP path)
+
 - **Best practice — measure the product, not a mimicry:** the vectorize/AMB
   manifesto (02-brief §Landscape) and MemoryArena's
   Memory-Agent-Environment loop (2602.16313; 02-brief §35) both mandate a
@@ -43,6 +45,7 @@ numbers, never silent re-tunes) is the direct methodological answer.
   decisive-outcome-only R3 semantics (judge-free objective EP read-out).
 
 ## #2292 (rubric / model / budget)
+
 - **Judge rubric best practices (2026 refresh — all decision-relevant):**
   - *Binary (anchored yes/no) criteria are the most reliable automated
     judgments*; ordinal scales need careful design, better coarsened —
@@ -71,6 +74,7 @@ numbers, never silent re-tunes) is the direct methodological answer.
   deliberation rubric — a first, buyer-visible (02-brief §19 gap).
 
 ## #2284 Tasks 8-10 (executor / exposure / streams) — advance grounding
+
 - **Executor v1 (TVDE single-session):** AMB's fixed
   ingest→retrieve→generate→judge pipeline = the exposure skeleton; the
   emission-loss-proof executor requirement (PR #2341 second-model P1) maps
@@ -89,6 +93,7 @@ numbers, never silent re-tunes) is the direct methodological answer.
   arm vs the no-memory/naive baselines under byte-identical scaffolds.
 
 ## #1416 (verdict) — advance prescope
+
 - Buyers evaluate persistence/staleness/recall@10 and REASONING is the
   unmeasured differentiator (02-brief §19; agentmarketcap/sparkco 2026):
   the verdict must map measured deltas to buyer-visible claims (staleness,
@@ -103,6 +108,7 @@ numbers, never silent re-tunes) is the direct methodological answer.
   differentiator evidence the verdict cites.
 
 ## Source register (2026-09-07 sweep)
+
 - mem0.ai/blog/state-of-ai-agent-memory-2026 — LoCoMo/LongMemEval/BEAM comparison set.
 - arxiv.org/abs/2602.05665 — graph-based agent memory survey (libraries + benchmarks, taxonomy).
 - o-mega.ai/articles/ai-agent-memory-in-2026 — Zep/Graphiti eval dims (recall, ingest cost, temporal behavior).

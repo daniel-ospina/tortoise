@@ -15,12 +15,14 @@
 ### Pattern Research
 
 **Axis Architecture (high)**
+
 - **FalkorDB graph deletion** (in-repo precedent: `_journal_append_product`/delete paths, test_export_delete.py): no cascade delete — delete each owned node type explicitly; DETACH DELETE removes a node + its edges in one statement. Session-owned subgraph (from _capture_session_impl + sdk.py capture_session + _materialize_session_source): `(:Session {id})`, `(:Point {id: '{sid}_t{i}'})` turn Points + extracted Points wired `(s)-[:CONTAINS]->(p)`, `(:Event {eventKind:'sessionCaptured', sessionId, eventId})` (the provenance event stamped onto extracted Points as `p.eventId`), `(:Source {url: 'session:{sid}'})` (agentSession materialization). Entity links `(s)-[:aboutObject]->(Object)` die with the Session DETACH DELETE; the Object survives (deleting a transcript never deletes the issue/entity it referenced).
 - **Capture receipts** (in-repo: _capture_receipt_key / _record_capture_last_error, hosted_api.py:5364+): per-harness jsonb timestamps (`session_capture_receipt`, `session_capture_receipt_{harness}`), set only on 2xx (T1-P12 receipt↔Session invariant: a receipt proves a durable Session). Receipts carry NO session id — cleanup must recompute from the remaining graph (a receipt is an orphan iff zero Sessions remain for its harness bucket).
 - **Jsonb key clear** (in-repo precedent: `_record_capture_last_error(..., None)`): write the key = None through the shared writer (`_update_onboarding_state`) — registered keys pass the allowlist; the projection/dashboard read falsy → 'install-pending'/'waiting' honest states (never a fabricated receipt).
 - **FalkorDB concurrency** (canonical: https://docs.falkordb.com/design/concurrency — per-graph write serialization, atomic single queries): delete-vs-capture races narrow to (a) the capture-side session-existence re-verify before the receipt write + (b) the delete-side recompute AFTER graph removal (interleavings converge: whichever op's receipt-write lands last recomputes against the freshest graph in the delete path; the capture path skips the receipt when the Session is gone).
 
 **Axis UX (standard)**
+
 - Settings Captured-sessions home (W4, merged #2139) renders honest list states (loading / state-missing / recording-off / empty) + rows (date · turns · extracted · truncated id). W6 adds View + Delete per row + an inline transcript panel. Reuses existing CSS (#714 .session-detail/.turn-list/.turn-item/.kind-* — already shipped in index.css) and existing patterns (confirm() like revokeKey/remove-member; per-row busy + inline error like the Memory-sources row errors). No new design language.
 
 > **Findings date:** 2026-09-02
@@ -41,11 +43,13 @@
 | 11f | Settings view/delete UI (W4 home consumer) | UI | Both | JS unit (node --test) + ux-verification | Per-row View (transcript panel: turns + extracted) + Delete (confirm → DELETE → list mutates via pure filter fn); busy/error states honest; capture-status derivation (captureStatus.js) untouched |
 
 **Bug Pattern Flags**
+
 - Race conditions (MEDIUM → HIGH per epic risk "Capture delete orphans graph data"): delete-during-capture → capture-side Session re-verify before receipt write + delete-side recompute after removal; deterministic negative test (replay-after-delete).
 - Silent function skips: announcement trigger must be reachable from BOTH REST + MCP capture surfaces (shared impl) — docker-lane test drives POST /v1/sessions; MCP surface inherits by construction (mcp_server imports the same impl — not re-tested here, W8 lane).
 - Conditional guards: off-switch 409 path must stay byte-identical (#1927); receipt write skip must not fire on normal replay convergence (T1-P12 regression: replay-with-session-present still writes the receipt).
 
 **Checklist Notes**
+
 - Atomicity: single-query graph removals per node type (each DETACH DELETE is atomic in FalkorDB).
 - Idempotency: checkpoint write FWW; delete 404-on-absent; receipt clear idempotent (None write).
 - Boundary values: zero sessions (empty state already handled), one session, two sessions same harness (receipt survives), two harnesses (only the empty bucket's receipt clears), unknown session id.
@@ -63,6 +67,7 @@
 ### Journey Test Map
 
 ### Journey: First capture → Settings view/delete (DE2E-11)
+
 1. **Step:** first capture POST /v1/sessions → **Acceptance:** 200; response first_capture=true; capture-disclosed edge on the OnboardingState node; receipts set → **Test:** docker-lane trigger tests + graph assertion.
 2. **Step:** agent fires the ONE in-conversation line (copy in SKILL.md §6 — code returns the marker only) → **Acceptance:** marker true on first capture only → **Test:** replay + second-session negatives.
 3. **Step:** Settings → Captured sessions → View → **Acceptance:** transcript panel shows turns + extracted (GET /v1/sessions/{id} dual-auth) → **Test:** JS transcript-row derivation + docker-lane detail GET.
@@ -115,6 +120,7 @@
 ## Review-Round Deltas (post-verification, committed before merge)
 
 Two reviewer passes ran on the worktree diff/PR (#2180). Round-1 findings fixed:
+
 - **P1 event-gather ordering:** `delete_session` now gathers the point-derived `sessionCaptured` `eventId`s BEFORE the CONTAINS point DETACH DELETE (the gather previously ran after the points were gone — `ev_rows` was always empty, orphaning the Event whenever the Source carried no eventId). Delete census asserts `events` 1→0.
 - **P2 guarded reconcile:** receipt cleanup moved into `_reconcile_capture_receipts` (best-effort; state-read/count/clear failures skip the pass) and runs on the success path AND the 404 re-delete path — a mid-delete outage self-heals on retry (404 can no longer strand an orphan).
 - **P2 bucket-aware compensation:** the capture-side post-write compensation clears the receipt ONLY when the whole harness bucket is empty (`_session_count_by_harness(body.harness) == 0`), mirroring delete-side semantics (a same-harness sibling keeps the receipt); truthful additive warnings for cleared / retained / clear-failed.

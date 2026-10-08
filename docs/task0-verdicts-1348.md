@@ -130,6 +130,7 @@ topic-correlated connectivity does. Cohen's d on between-topic confidence was
 necessary-but-not-sufficient, as pre-registered.
 
 **GRAPHRANKER VERDICT: HYBRID (evidence, corpus-bounded).**
+
 - The graph signal as a static, query-independent EP boost delivers a real but
   modest lift at eval depth 50 (+1.86 nDCG pts) and a small real lift at the
   production-parity surface (+0.36, CI excludes 0) — **but the lift is carried

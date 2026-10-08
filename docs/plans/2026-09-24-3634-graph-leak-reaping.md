@@ -42,6 +42,7 @@ aboutObjects: tests/_embedded.py, tests/conftest.py, tortoise/sdk.py, tortoise/p
 > Bucket *Library/framework pitfalls* skipped: the FalkorDB semantics the plan depends on (`GRAPH.LIST`/`GRAPH.DELETE`/`GRAPH.QUERY` auto-creates, the `noeviction` failure mode, graphs carrying no creation timestamp) were triangulated in `issue-scoping` Phase 1.5 and are recorded on #3634. Re-firing would re-research a settled question.
 
 **Prior research consumed (issue-scoping Phase 1.5, on #3634):**
+
 - Canonical: ephemeral-per-run is the default SOTA (Testcontainers/Ryuk deletes when the test process stops checking in). Our substrate is the **persistent** variant, so it inherits obligations Ryuk does not — completeness and unconditionality.
 - Competitor variance: Kubernetes/OpenShift reap by `ownerReferences` + a TTL controller, never by name shape.
 - Known pitfall: a name prefix is **not** proof of ownership, and prefix/pattern deletion is non-atomic in Redis-family stores. The journal is the correct shape; the defect is a prefix gate outvoting it.
@@ -71,6 +72,7 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 **Bug Pattern Flags** — *Race:* 5, 7, 13. *Cleanup/idempotency:* 3, 4, 6, 10. *Fail-open:* 1, 3, 6, 8, 10, 11, 12 — **both sides of every gate asserted**; a gate that silently does not apply is this issue's whole defect class. *Destructive-by-default:* 6, 7, 8 — the shared registries present in every fixture and asserted **survived**. *Conditional guard:* 1, 8, 9, 10, 11, 12 — boundary values required. *Added:* duplicated-derivation drift (s2) and duplicated vocabulary (Task 1's register). *Not present:* SQL business logic, N+1, stale closures.
 
 **Untestable properties — do not invent tests for these:**
+
 1. **"This session's sweep removed all owned names" as an in-process property.** `_server_graph_hygiene` is `scope="session", autouse=True`, so it has run before any test body; its failure cannot be observed from inside the session it governs (`tests/test_tripwire.py:6-9`). → Extract the predicate as a named helper and unit-test it; AST-pin the capture-before-sweep ordering; treat session-level observation as **not covered** rather than pretending otherwise.
 2. **The whole-server count's correctness** — it *cannot* distinguish our residue from foreign graphs. That is the departure's justification. → Test only the predicate and the arithmetic.
 3. **P3's "1,608 → 0"** — the `:6379` lane was restored on a **fresh volume (0 graphs)**; the census is historical. → Test the **mechanism** on fixtures on a live server; keep the census as out-of-band evidence.
@@ -111,6 +113,7 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 **Intent:** The test-prefix vocabulary is copied in five uncoordinated places, which is why a name could be journalled, refused, and its record discarded. Declare it once and make an unregistered **named** constant fail the suite.
 **Acceptance:** The sets are declared together with their rationale; `_SERVER_WIPE_PREFIXES` and `_PRODUCT_GRAPH_PREFIXES` are tied to the declaration **by reference**; `wipe_server`'s and `_sweep_drop`'s behaviour are unchanged (existing tests green); the residue predicate is **deny-safe** (a `tortoise_restored_*` name and a non-`str` are never residue).
 **Files:**
+
 - Modify: `tests/_embedded.py` (the divergence register ~653-663; `wipe_server`'s literal ~825)
 - Test: `tests/test_graph_name_ownership.py` (new)
 
@@ -229,6 +232,7 @@ def is_legacy_residue(name: str, *, default_graph: str | None) -> bool:
 `_PRODUCT_GRAPH_PREFIXES` is declared **below** this block today (its module-level declaration in `tests/_embedded.py`); **move it above the register** so the dict can reference it at import time by object identity (`is`), which is what the tie test asserts.
 
 **Rewire the consumers — do not leave a copy behind.** Three concrete edits, all in `tests/_embedded.py`:
+
 - `wipe_server`'s anonymous literal (`startswith(("test_", "tortoise_test"))` at ~`:825`) → `startswith(_SERVER_WIPE_PREFIXES)`.
 - `_sweep_drop`'s gate (~`:1049`) → `owns_by_ownership_record(g)`.
 - Extend the existing DIVERGENCE comment so its "this literal" reference names `_SERVER_WIPE_PREFIXES` rather than a bare tuple (the register tie cannot detect a re-inlined literal — that is why the comment must name the symbol).
@@ -242,6 +246,7 @@ Verify no copy remains: the diff for this task must show that literal appearing 
 **Intent:** A test-derived registry name must match the reaper filter that already exists, so it is dropped by its own session's sweep instead of leaking forever.
 **Acceptance:** A test-derived registry name matches `_SERVER_WIPE_PREFIXES`; an already-compliant name is unchanged; the `elif ns`/`else` branches are unchanged; `tests/test_derived_names.py` stays green.
 **Files:**
+
 - Modify: `tortoise/sdk.py::_get_registry` (~2638-2644)
 - Modify: `graph-scripts/backfill_invite_ghost_members.py` (~52-59, 89)
 - Test: `tests/test_derived_names.py`
@@ -309,6 +314,7 @@ def test_shared_registry_name_is_never_prefixed(tmp_path):
 **Intent:** 723 legacy `registry_test_*` graphs and ~31 eval graphs have no journal left, so only a prefix-scoped sweep can reach them — and #7795/#1884 forbid that by default.
 **Acceptance:** Gate unset/`0`/any non-`"1"` ⇒ `deleted == []`. Gate exactly `"1"` ⇒ exactly the declared residue; the shared registries, the URI default, `tortoise_restored_*`, a `None`, `org_*`/`team_*` and `test_`/`tortoise_test_` names are untouched. The function has **no** default call site, pinned by an AST walk.
 **Files:**
+
 - Modify: `tests/_embedded.py` (new `_legacy_sweep_allowed` + `_sweep_legacy_strays`, modelled on `_team_sweep_allowed` ~1131-1157 and `_sweep_team_strays` ~1142)
 - Modify: `tests/test_env_truthy.py` (`_KNOWN_NARROW_READS` entry + amend its "can only shrink" docstring)
 - Modify: `config/ci-surfaces.yml` (register any **new** test file — see the note below)
@@ -403,6 +409,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
 **Intent:** A `maxmemory` refusal, a `LOADING` reply, and a fork/errno-17 failure must each report **their own** cause. Routing all three into the maxmemory message would be the misattribution this task exists to remove.
 **Acceptance:** Each cause yields a message naming **that** cause; none yields the rebuild command; genuine corruption still reaches the rebuild advice.
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` (add `_BACKEND_FAILURE_MARKERS` ~1222 and `_BACKEND_FAILURE_REMEDIES` ~1270, and add `_backend_failure_message` ~2875; `_WRITE_REFUSAL_MARKERS` ~1198 and `_write_refusal_message` ~2845 are **NOT** modified). Fork detection **delegates** to `fork_slot.is_fork_refusal` — the ONE canonical classifier, which owns the marker vocabulary (`could not fork`, `can't fork for module`, `cannot fork for module`) and walks the `__cause__`/`__context__` chain; the table must NOT restate fork markers, or the vocabulary re-forks and `could not fork` goes unrecognised again.
 - Test: `tests/test_projection_maxmemory_message.py`
 
@@ -440,6 +447,7 @@ The corruption direction is **already pinned** by `test_genuine_corruption_still
 **Intent:** Make accumulation loud on the property actually claimed — this session's **owned** journalled names are gone — without false-positiving on a preserved name and without being swallowed by the surrounding handler.
 **Acceptance:** The gate raises iff an owned journalled name survives **and the sweep reported no failure**; it never raises on a preserved-but-journalled shared registry, the URI default, or after a transient delete error; the name set is captured **before** the sweep; the assert is not inside the broad `except`; the whole-server count stays a logged warning and `server-hygiene-end.json` is still written.
 **Files:**
+
 - Modify: `tests/_embedded.py` (add `_owned_survivors` and `_live_graph_names`)
 - Modify: `tests/conftest.py` (imports ~700-707; capture ~757; gate ~781-808)
 - Modify: `docs/epics/2026-08-24-test-db-migration/plan.md` (changelog table)
@@ -535,6 +543,7 @@ Add the matching rows to the epic changelog table (`docs/epics/2026-08-24-test-d
 git diff "$(git merge-base origin/main HEAD)..HEAD" -- tests/_embedded.py | grep -n 'allkeys' || echo "no allkeys — OK"
 grep -c 'startswith(("test_", "tortoise_test"))' tests/_embedded.py   # must print 0 — the literal now has one home
 ```
+
 **Step 4:** Commit; run `commit-workflow`.
 
 ---

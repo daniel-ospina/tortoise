@@ -9,6 +9,7 @@ understand in six months. If a detail is specific to this moment's mechanics,
 drop it.
 
 KEEP:
+
 - the story arc: what happened, in order, why (the decisions, discoveries,
   pivots)
 - the 3 layers: State (subjects/objects and how they changed) · Epistemic
@@ -16,6 +17,7 @@ KEEP:
 - durable claims, reasoning, tradeoffs, chosen vs discarded options
 
 STRICTLY REMOVE — these never survive the six-month test:
+
 - issue/PR numbers (#992, #1000, PR #1004...), commit hashes, code identifiers
   (function names, line numbers, `split('-')`, `cid[:8]`), file paths
 - test counts, "N tests passed/failed", "review gate found N findings"

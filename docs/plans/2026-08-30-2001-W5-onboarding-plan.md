@@ -15,6 +15,7 @@
 ### Pattern Research
 
 **Axis Architecture (high)**
+
 - **FalkorDB property-value types** (canonical: https://docs.falkordb.com/datatypes.html): "Maps cannot be stored as property values"; storable = strings, booleans, ints, floats, geospatial, temporal, arrays (no graph-entity/null elements). → member_progress = JSON-string property (string is storable); wire shape stays {user_id: {steps[]}}. Confirms codebase precedent hosted_api.py:10593 (#498).
 - **FalkorDB concurrency** (canonical: https://docs.falkordb.com/design/concurrency): per-graph reader-writer model — write queries serialized FIFO per graph, every write query atomic, readers see snapshot isolation. → keyed MERGE {org_id, step_id} is race-free; concurrent inits converge to one node; JSON-string RMW in ONE query is atomic. Embedded FalkorDBLite re-fire caveat (sdk.py:694-745: concurrent same-key MERGEs re-fire ON CREATE and report "created:1" for both) → per-org in-process lock (`_step_write_locks`, the `_source_merge_locks` pattern) so the W11 created-signal is honest in the embedded lane; docker lane (bolt://) stats are honest natively.
 - **MERGE ON CREATE SET / ON MATCH SET** (canonical: https://docs.falkordb.com/cypher/merge.html): idempotent first-write-wins directly expressible → W11 edge-new-creation signal via MERGE stats (created vs no-op).
@@ -22,6 +23,7 @@
 - > Deduplicated from epic brief §1 (migration context: one-org special case, grandfathering) + §4 (architecture patterns: graph-held state, idempotent #398, versioned, edge-derived steps).
 
 **Axis Ontology (standard)**
+>
 - > Deduplicated: epic plan §4 DM-1 pins the node schema + onboards edge + canonical step list; ONTOLOGY.md §3.6 memberOf precedent. No fresh queries fired (in-repo precedent: #452 name-MERGE, Subject organization/naturalPerson).
 
 > **Findings date:** 2026-08-30
@@ -35,12 +37,14 @@
 | 17 | Cross-W full-journey E2E slice (DE2E-12) | E2E | Both | Hosted-e2e (RUN_HOSTED_E2E=1) + docker-lane | signup→org→fork→connect→seed→decide one sitting (scripted/mock agent via checkpoint calls + graph reads); fork-aware gates per self/build/compact; dismissal alone never completes; org B never re-asks the fork card; W11 events fire once via edge new-creation; graph-down degraded render |
 
 **Bug Pattern Flags**
+
 - Silent function skips (HIGH): completion set without the fork-aware gate → monotonic server-owned status + per-step write-surface ownership (PATCH = {catalog-presented} only; server-owned steps 403/422; status 403) + forge-negative E2Es.
 - Race conditions (MEDIUM): concurrent org-creates → exactly one node (single-statement MERGE + per-graph write serialization + concurrent-init test); embedded MERGE re-fire → per-org in-process lock.
 - Contract drift (MEDIUM): FLOW keys added to jsonb defaults would persist via the whole-dict RMW → router branches BEFORE the allowlist filter + `_write_onboarding_state` defensive strip + registration-split negative assertions.
 - Graph-down false checklist (MEDIUM): graph EXCEPTION → 'unavailable' (never defaults); node-absent → defaults (distinct).
 
 **Checklist Notes**
+
 - Atomicity: org-create + OnboardingState init graph-side (one Cypher statement); checkpoint step + member writes single-query.
 - Idempotency: keyed MERGE (#398, never-overwrite); backfill re-run no-op; W11 dedup via edge new-creation.
 - Boundary values: fork render 0/1/2 (per-org-once); unknown step_id; set-once changed-409 vs same-value-200; graph-down read vs write.
@@ -57,6 +61,7 @@
 ### Journey Test Map
 
 ### Journey: First-run one-sitting (DE2E-1/12) — signup → org → fork → connect → seed → decide
+
 1. **Step:** create org (name required) → **Acceptance:** OnboardingState node exists (version=1, team-named edge) → **Test:** test_onboarding_state_split.py::test_org_create_inits_node
 2. **Step:** pick fork (self) → **Acceptance:** fork set-once persisted; replay 409/same-value 200 → **Test:** test_onboarding_state_split.py::test_fork_set_once
 3. **Step:** agent connects (harness-connected checkpoint) → **Acceptance:** step edge created, created-signal true, replay no-op → **Test:** test_onboarding_state_split.py::test_checkpoint_idempotent
@@ -66,10 +71,12 @@
 > Graph-read assertions (node version, completed_steps match, onboards edge) live in the docker-lane leg (direct graph access); the hosted-e2e leg asserts merged GET states + checkpoint signals only (substrate single-writer constraint).
 
 ### Journey: Legacy-org migration (DE2E-6)
+
 1. **Step:** backfill legacy jsonb → **Acceptance:** node created, status from jsonb complete, re-run no-op, fork null, operational keys untouched → **Test:** test_onboarding_state_split.py::test_backfill_idempotent
 2. **Step:** first Settings open → **Acceptance:** fork defaults at read (not persisted); card collapse status-driven → **Test:** test_onboarding_state_split.py::test_fork_defaults_at_read
 
 ### Failure Modes
+
 - Graph down at read → **Expected:** merged GET 200 {operational keys, FLOW 'unavailable'}; card DEGRADED (never "N of 4") → **Test:** test_onboarding_state_split.py::test_graph_down_read
 - Graph down at checkpoint write → **Expected:** 503 fail-loud, retry-safe → **Test:** test_onboarding_state_split.py::test_checkpoint_graph_down
 - Cross-org checkpoint → **Expected:** 403 (auth-context derivation) → **Test:** test_onboarding_state_split.py::test_checkpoint_cross_org_403
@@ -86,6 +93,7 @@
 **Acceptance:** The module exports `ONBOARDING_STEPS` (6), `CARD_STEPS` (3, ⊆ canonical — was 4 before #3913 dropped the build fork's `catalog-presented` row), `PER_KEY_SEMANTICS`, `completion_gate_satisfied`, `validate_step_id`, graph writers (`ensure_onboarding_state_node`, `write_completed_step`, `write_fork`, `write_compact`, `write_last_decide_attempt`, `write_member_progress`, `write_status`), `read_onboarding_node`. Unit tests: unknown step rejected; card-subset ⊆ canonical; gate logic per fork (self/build/compact, compact-first, fork=None→'self'); set-once/LWW semantics table complete.
 
 **Files:**
+
 - Create: `tortoise/onboarding/state.py`
 - Create: `tests/test_onboarding_state.py`
 
@@ -102,6 +110,7 @@
 **Acceptance:** Node exists immediately after every MINT path (lane-coverage test incl. SDK-lane CI-visible assertion); eager-init writes {org_id, fork (inherited/'self' fallback, null first org), status 'active', version 1, compact (creator's prior memberships > 0)} + team-named edge; write-time create-on-write mirrors jsonb onboarding_complete → status (never clobber); concurrent creates → one node; export/restore round-trip preserves fork + completed_steps; OnboardingState/OnboardingStep NOT added to `_EXPORT_SKIP_LABELS` (asserted).
 
 **Files:**
+
 - Modify: `tortoise/onboarding/state.py` (`onboarding_node_init_cypher()`, `ensure_onboarding_state_node()`)
 - Modify: `tortoise/hosted_api.py` (register_user pre-RPC ~3418 + registry ~3499, `_create_team_supabase_lane` ~6266 (TeamMeta statement at 6261 — eager wire in the SAME statement), `_create_onboarding_team_lane` ~10886 — Supabase branch rides create-on-write (no TeamMeta statement exists there today; no behavior change), agent_signup ~8944 → post-RPC hook, `provision_tenant` ~964 (5th TeamMeta mint statement — eager wire; W12-scope selfhost excluded but the statement is in this file))
 - Modify: `tortoise/sdk.py` (`team_create` ~11003)
@@ -118,6 +127,7 @@
 **Acceptance:** `_get_onboarding_state` byte-unchanged (raw; test seams + registry auto-init + sub-team guard + session gate intact); `_get_onboarding_projection` composes it (graph leg strictly read-only; node-absent → defaults, no write; graph exception → FLOW 'unavailable', 200); GET re-pointed; `_team_onboarding_complete` coerces non-bool → False (fail-open); `tortoise_onboarding_state` re-pointed; 5 pinned test seams pass unmodified — named: test_mcp_http.py (gate), test_onboarding_analytics_patch.py (DB-free echo), test_onboarding_health_flip.py (wire), test_onboarding_endpoints.py (registration), test_onboarding_integration.py (complete-flag).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (GET handler ~10705, new `_get_onboarding_projection`)
 - Modify: `tortoise/mcp_server.py` (`_team_onboarding_complete` ~2409, `_onboarding_state` ~2436)
 - Test: `tests/test_onboarding_state_split.py::TestProjection`, `tests/test_mcp_http.py` (seams)
@@ -131,6 +141,7 @@
 **Acceptance:** `_update_onboarding_state` becomes the router (name preserved); PATCH wire-compat preserved (underscore→hyphen, team_created strip, email/harness/section pops); FLOW keys never in jsonb (defensive strip = the 7 FLOW keys ONLY — fork, status, version, completed_steps, member_progress, last_decide_attempt, compact; `onboarding_complete` is a LEGACY jsonb key, NOT FLOW, until the T7 flip — both the mcp_http seam and the integration complete-flag seam stay green through T4→T7; the guard's jsonb-true trigger grandfathers any T4→T7 jsonb-true org, incl. self-forged PATCH completions — pre-existing surface, indistinguishable from wizard completers — accepted); registration-split negatives; checkpoint: dual-auth, auth-context team, unknown step 422, fork/compact set-once (same-value 200, changed 409), LWW conditional, member_progress session-only 403, status 403, extra="forbid", graph-down 503, `{created_steps, noop_steps}` response; post-write gate eval (monotonic); per-org in-process lock for embedded re-fire; mixed-key PATCH partial-failure (jsonb-first graph-second; graph failure after jsonb success → 500 fail-closed retry-safe); MCP TTL-cache invalidation on completion (created-signal); preserved-409 regression (session-recording-off, dup-name, sub-team re-entry, already_registered all still 409).
 
 **Files:**
+
 - Modify: `tortoise/onboarding/state.py` (writers + eval)
 - Modify: `tortoise/hosted_api.py` (`_update_onboarding_state` ~10612 router, PATCH ~10720, `OnboardingStatePatchRequest`, new POST /v1/onboarding/state/checkpoint, `_write_onboarding_state` strip)
 - Modify: `tortoise/mcp_server.py` (invalidate `_onboarding_state_cache` on created-signal completion)
@@ -145,6 +156,7 @@
 **Acceptance:** `backfill_onboarding_state()` importable + `graph-scripts/backfill_onboarding_state.py --apply` (DRY-RUN default); both source lanes (Supabase jsonb → node; registry Team-node JSON → node); absent-node-only (never clobber node-present; never jsonb-false→complete; never status→jsonb); fork null; exclusions (placeholder teams.id='' + soft-deleted); re-run no-op; wire stable across materialization.
 
 **Files:**
+
 - Create: `graph-scripts/backfill_onboarding_state.py`
 - Modify: `tortoise/onboarding/state.py` (backfill fn)
 - Test: `tests/test_onboarding_state_split.py::TestBackfill`
@@ -158,6 +170,7 @@
 **Acceptance:** `setupGuide.js` pure derivation module + node --test (N-of-M = ∩ card-subset; fork-aware; status-collapsed; DEGRADED); card component in main.jsx (one shared component; reentry card defers); Python parity test (JS CARD_STEPS ⊆ canonical); LOADING = fetch transient.
 
 **Files:**
+
 - Create: `website/apps/dashboard/src/setupGuide.js` + `setupGuide.test.js`
 - Modify: `website/apps/dashboard/src/main.jsx` (card mount in the Overview grid ~4556)
 - Test: `tests/test_onboarding_state.py` (parity)
@@ -171,6 +184,7 @@
 **Acceptance:** Node-aware wire (node present → node.status; node absent → jsonb) with the grandfathered-window guard (node present, status 'active', ZERO completed-step edges, jsonb onboarding_complete=true → wire true — one-directional, self-terminating: first step edge → node governs; kills the poisoned-false window for orgs completing via the legacy wizard during T2→T7); accept-and-drop activation ORDERED AFTER W1 (#1997) removes wizardComplete (cross-PR ordering pin — interim carve-out extends until W1 merges; the node-aware precedence for agent-flow orgs is independent and ships at T7); recompute sweep over existing node-present orgs — GRANDFATHERED BRANCH RUNS BEFORE GATE EVAL (zero edges + jsonb onboarding_complete=true → status stays/writes 'complete', skip gate eval — never active; then gate eval → status for edge-bearing orgs, monotonic; the grandfathered 'complete' write mirrors a real legacy completion, monotonic-up, consistent with server-owned status); named completion suites migrated to node-aware wire semantics: test_onboarding_integration.py (test_e2e_onboarding_complete_flag), test_onboarding_health_flip.py, test_onboarding_endpoints.py, test_mcp_http.py::TestOnboardingToolGating (T7 flips gate + suite to node status; test_onboarding_analytics_patch.py re-checked — DB-free → node-absent → jsonb fallback → unaffected); poisoned-false + poisoned-new-org negatives in TestCompletionWire; DE2E-12 green; graph-down + divergence negatives green.
 
 **Files:**
+
 - Modify: `tortoise/onboarding/state.py` + `tortoise/hosted_api.py` (projection flip + sweep runner)
 - Modify: `graph-scripts/backfill_onboarding_state.py` (add `--recompute` flag — sweep runner; DRY-RUN default; backfill_pack_installs precedent)
 - Create: `tests/e2e/hosted/test_14_onboarding_journey.py` (DE2E-12, RUN_HOSTED_E2E opt-in; calls `skip_unless_hosted_e2e()`)

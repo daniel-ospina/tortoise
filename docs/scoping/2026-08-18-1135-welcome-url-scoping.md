@@ -35,6 +35,7 @@ Explicitly NOT changing: `_ALLOWED_ORIGINS` (CORS allowlist, different concern),
 ## Tests
 
 New `tests/test_welcome_url_consolidation.py`:
+
 - github callback denied path → redirect host follows `EMAIL_LINK_BASE_URL` (both set + default).
 - billing checkout/portal defaults follow `TORTOISE_DASHBOARD_URL` when no `BILLING_*_URL` overrides.
 

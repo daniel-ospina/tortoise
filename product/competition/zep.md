@@ -40,6 +40,7 @@
 **Brand voice:** Enterprise infrastructure. Heavy emphasis on governance, compliance, and scale. SOC 2, HIPAA, S&P coverage, and a live demo dashboard (not cartoon illustrations). Tone: "serious infrastructure for production AI teams."
 
 **Alternative/comparison pages** (competitive posture — at least six; not an exhaustive list):
+
 - Zep vs Mem0 Alternative
 - Zep vs Letta Alternative
 - Zep vs AWS AgentCore Alternative
@@ -116,17 +117,21 @@
 | **Webhooks** | Available on Flex Plus |
 
 ### SDKs & Languages
+
 - Python: `pip install zep-cloud`
 - TypeScript: `npm install @getzep/zep-cloud`
 - Go: `go get github.com/getzep/zep-go/v3`
 
 ### Framework Integrations
+
 Google ADK, Microsoft Agent Framework, AutoGen/AG2, CrewAI, LangGraph, LiveKit, Pydantic AI, Mastra, Vercel AI SDK
 
 ### Graphiti (Open-Source Engine)
+
 ~31K GitHub stars (crossed 20K), ~62 contributors (including AWS, Microsoft, FalkorDB, Neo4j), ~25,000 weekly PyPI downloads. Backends: Neo4j, FalkorDB, AWS Neptune. *(star contributor figures retrieved 2026-09-11)*
 
 ### Tech Stack
+
 Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB.
 
 [Source](https://www.getzep.com/), [GitHub](https://github.com/getzep/graphiti) — retrieved 2026-07-06
@@ -214,6 +219,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 **Sources checked:** getzep.com testimonials, GitHub issues, web search, Reddit (r/LLMDevs)
 
 **What users/businesses praise:**
+
 - Temporal knowledge graph approach — tracks when facts were true, not just what is true
 - Sub-200ms P95 latency at any scale (benchmarked to 100M graphs)
 - Enterprise governance: SOC 2, HIPAA, ABAC, audit logs — unusual for a startup
@@ -221,6 +227,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 - Open-source Graphiti with AWS/Microsoft contributors = strong developer validation
 
 **What users/businesses complain about:**
+
 - Community Edition discontinued — some open-source users frustrated by cloud-only shift
 - ⚠️ No public review sites (G2, Capterra, ProductHunt) — enterprise infra tools rarely get public reviews
 - Small team (5 people) supporting managed cloud + ~31K-star OSS project = potential scaling risk

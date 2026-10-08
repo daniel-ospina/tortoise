@@ -8,6 +8,7 @@
 ---
 
 ## ⚠️ Evidence-tier legend
+
 **[HIGH]** 3+ independent sources (or peer-reviewed w/ full-text check) · **[MEDIUM]** 2 independent · **[LOW]** single source · **vendor** = self-reported, not independent · Claims with no citation are labeled *design-inference*.
 
 ---
@@ -15,6 +16,7 @@
 ## 1. Decomposition evidence (cost, when needed, deterministic alternatives)
 
 ### Decomposition improves temporal/comparative QA — with one strong quantified ablation
+
 - **RTQA (arXiv:2509.03995, independent academic):** a *Temporal Question Decomposer* rewrites questions with implicit constraints — `"before"`, `"last"` — into explicit sub-questions, first resolving the implicit time. **Ablation removing decomposition drops Hits@1 overall 0.765 → 0.709, and the "Multiple" question type 0.424 → 0.214** (comparison/aggregation collapses without decomposition). **[HIGH]**. Caveat: the ablation removes the whole recursive pipeline, so the drop conflates decomposition + recursive retrieval — but the *category* that collapses is exactly the compare/aggregate class, consistent with the comparator evidence below.
 - **RERC (Findings EMNLP 2021, aclanthology.org/2021.findings-emnlp.17):** explicit 3-stage pattern for comparative questions — **Relation Extractor decomposes → Reader answers sub-questions (one per side) → Comparator performs the numerical comparison** to produce the final answer. SOTA on 2WikiMultiHopQA (joint F1 53.58; 1.95 below human on support facts). This is the canonical architecture for "compare two things": per-side reads + a separate compare step, where the decomposition itself is the evidence path. **[HIGH]** (peer-reviewed, full abstract verified)
 - **MultiTQ (ACL 2023, aclanthology.org/2023.acl-long.637):** multi-granularity temporal questions (incl. comparisons spanning granularity boundaries) — now a standard eval for decomposition/rewriting methods. **[HIGH]** (peer-reviewed)
@@ -22,11 +24,13 @@
 - **Decomposed Prompting / DecomP-ODQA (arXiv:2210.02406, ICLR 2023, independent):** decomposer module + one sub-task handler per sub-question; large gains on multi-hop ODQA. **Cost structure is explicit: one LLM call per sub-task plus the decomposer call** (handlers can be cheap/stateless, and simple single-hop questions are not the target — decomposition is for complex tasks). **[HIGH]** (ID verified by fetch after a wrong-ID false start)
 
 ### When is decomposition actually the bottleneck? Mostly not — retrieval/assembly is
+
 - **ChronoQA failure taxonomy (PMC full text of Nature Sci Data 2025, pmc.ncbi.nlm.nih.gov/articles/PMC12638886; nature.com/articles/s41597-025-06098-y):** 5,176 questions. **Retrieval failure = 72% of incorrect answers** (largest error source); **relative/implicit time expressions = 69% of analyzed failures**; **day-level granularity = hardest (62% of errors)**. Decomposition of the question is *not* the dominant failure class — getting the right dated evidence in hand is. **[HIGH]** (peer-reviewed; full-text verified)
 - Cross-check from adjacent evals: **TimeBench (ACL 2024, aclanthology.org/2024.acl-long.66)** reports a **25.2% gap vs humans on event-temporal reasoning**; a temporal-reasoning survey reports LLMs **up to 43% below human** on several datasets (openreview.net/pdf?id=jWBZdlU5Xl); temporal-robustness work shows **47–67% accuracy drops under date-format/reversal transformations** (Findings ACL 2025, aclanthology.org/2025.findings-acl.810); NAACL 2024 "Are LLMs Temporally Grounded?" finds **high inconsistency on mutually exclusive event orderings** (aclanthology.org/2024.naacl-long.391). Net: even with evidence present, reader LLMs mis-order and miscalculate — the reader is a real error surface, not just retrieval. **[HIGH]** on the gap numbers; the *specific* ordering-inconsistency claim is **[MEDIUM→HIGH]** (two papers).
 - "Which came first" as a benchmark family exists and is KG-native: **TempQuestions (Freebase) → Wikidata adaptations (TimeQuestions / TempQA-WD, 664 test + 175 dev after removing KB-unanswerable; github.com/IBM/tempqa-wd; ibm.github.io/neuro-symbolic-ai/toolkit/tempqa-wd)** plus **CronQuestions / Complex-CronQuestions / MultiTQ** (see temporal-KGQA survey arXiv:2406.14191 and SABET-QA, arxiv.org/html/2608.20083). These encode ordering via entity-fact temporal qualifiers; answering requires both entities' dated qualifier facts (SPARQL shape). **[HIGH]** for existence/design; no controlled "LLM decomposition vs direct" head-to-head on these found — *absence noted*.
 
 ### Deterministic alternatives to LLM decomposition (evidence)
+
 - **Entity-centric subgraph extraction instead of question decomposition:** arXiv:2402.13188 (Question Calibration & Multi-Hop Modeling) retrieves the *entity-centered subgraph* and combines sub-questions' information from it — i.e., when retrieval is organized around entities, per-side evidence arrives without splitting the question into LLM sub-queries. **[MEDIUM→HIGH]** (peer-reviewed)
 - **Template/grammar detection:** the compare/order morphology ("which came first", "before/after", "earlier than") is closed-form relative to open decomposition — TEQUILA's constraint rewrite and TempQuestions' template families are deterministic structure. **[MEDIUM]** (lineage above)
 - **Cost summary (sourced + inference):** LLM decomposition costs a decomposer call + a call+retrieval per sub-question (Decomposed Prompting architecture; RERC's reader-per-side); RTQA's temporal case additionally costs an implicit-time resolution pass. Deterministic alternatives trade that for (a) a template/type classifier (near-free) + (b) retrieval that returns *all* dated facts for both subjects in one pass. *Design-inference:* for ~43 ordering/compare questions the LLM-decomposition overhead is avoidable if the assembler recognizes the compare shape and fetches both subject timelines directly.
@@ -36,6 +40,7 @@
 ## 2. Current-state resolution patterns (deterministic vs LLM, per system)
 
 ### The split that matters: **LLM at write (typing + same-fact identity), deterministic at read (interval math)**
+
 - **Mem0 (vendor; full mechanism verified by fetch of mem0.ai/blog/introducing-temporal-reasoning-in-mem0 + docs.mem0.ai/platform/features/temporal-reasoning):**
   - *Write:* a **separate temporal LLM pass** (explicitly "one additional model call per batch" in sync mode; async background patch in latency mode) assigns: when it happened, ongoing/completed, **time_precision** (day/week/month/year/approximate), and **memory type** (7: event/state/plan/relationship/preference/absence/timeless). Ongoing facts get a **state_key**; when a new state supersedes, "the old one's event_end gets set **automatically**" — the *closing* is a deterministic rule chained onto the LLM's state_key/type assignment. Nothing deleted. **[HIGH vendor]**
   - *Read:* query classified into temporal intent (**current_state, historical_range, duration_state, upcoming, soft_recency**…) **"with no extra LLM call"** (mechanism unspecified — likely classifier/heuristic; vendor does not disclose — *absence noted*). **Intent never pre-filters the candidate pool** — quoted rationale: "pre-filtering by time would silently drop memories with imprecise or missing dates"; instead **additive rerank** scoring stored time-metadata against intent; "semantic relevance always dominates." Low-precision dates are down-weighted, "represented, not silently dropped." **[HIGH vendor]**
@@ -51,6 +56,7 @@
 ## 3. Relative-time + date-arithmetic mitigations with evidence
 
 ### Relative/"ago" expressions: anchoring is the practice; arithmetic must be taken from the reader
+
 - **Reference-date injection is documented practice:** TA-ARE (Findings ACL 2024, aclanthology.org/2024.findings-acl.415) explicitly prompts **"Today is current_date()"** to make time-sensitive adaptive retrieval work — direct support for Tortoise's existing "Current Date:" + per-session-date headers. **[HIGH]**
 - **ChronoQA:** implicit/relative expressions = 69% of failures; the dataset breakdown is 3,176 implicit vs 2,000 explicit time expressions (PMC full text + table). Relative time is the hard class by construction. **[HIGH]**
 - **TA-RAG (arXiv:2507.22917):** temporal parsing at query time + event-interval-based retrieval; on diachronic QA, disabling time filtering measurably degrades (ADQAB benchmark). Relevant to "ago" → the *parsed interval* drives retrieval, not the raw words. **[HIGH]**
@@ -88,6 +94,7 @@ Synthesized from the evidence above (each clause maps to a cited finding):
 ---
 
 ## Sources (load-bearing only)
+
 - ChronoQA (Nature Sci Data 2025): nature.com/articles/s41597-025-06098-y · full text: pmc.ncbi.nlm.nih.gov/articles/PMC12638886 (+ Table 2 breakdown)
 - RTQA: arxiv.org/html/2509.03995v1 · RERC: aclanthology.org/2021.findings-emnlp.17 · MultiTQ: aclanthology.org/2023.acl-long.637 · Decomposed Prompting/DecomP: arxiv.org/abs/2210.02406, github.com/HarshTrivedi/DecomP-ODQA · entity-centric subgraphs: arxiv.org/html/2402.13188v1 · TEQUILA lineage: mpi-inf.mpg.de/.../question-answering
 - TempQuestions→Wikidata: github.com/IBM/tempqa-wd, ibm.github.io/neuro-symbolic-ai/toolkit/tempqa-wd · TKGQA survey: arxiv.org/html/2406.14191v3 · SABET-QA listing: arxiv.org/html/2608.20083

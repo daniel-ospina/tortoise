@@ -27,6 +27,7 @@ aboutObjects: tortoise, mcp-server, bsl-license
 **Root cause (5 Whys):** License friction is not about BSL specifically — it's about *where the license boundary sits*. When a copyleft/source-available library is embedded via import, its terms bind the adopter's distribution. When the same engine runs as a service (self-hosted or hosted) and the adopter only connects over MCP/REST, the boundary sits at the network — the adopter's code never inherits the license.
 
 **Alternative framings considered:**
+
 - *"How might we keep Tortoise adoptable by MIT products without changing the engine license?"* → Service model + thin connectors.
 - *"How might we make MCP the product and the SDK a power-user add-on?"* → MCP-first positioning.
 - *Reverse:* "What if we made the SDK MIT and the service the paid layer?" (RecallWorks model — see §3.5.)

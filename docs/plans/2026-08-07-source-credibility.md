@@ -14,6 +14,7 @@ aboutObjects: Source, Point, Operator
 ---
 
 ---
+
 title: "Source Credibility: Log-Scale Aggregation + Reliability Derivation — Implementation Plan"
 aboutSubjects: organisation-design-team, epistemic-team
 aboutObjects: Source, Point, Operator
@@ -38,6 +39,7 @@ Reliability is a query-time derivation materialized as a documented cache on the
 untouched (additive-only). No connector changes, no migration, no per-operator complexity.
 
 ### Pattern Research
+
 Skipped — the plan touches zero third-party dependencies (pure stdlib: os, datetime, math; in-repo
 FalkorDB projection). All external patterns (GRADE, journalism tiers, Daubert, Beta reputation, knowledge
 half-life) were researched during the scoping tortoise-decide cycles and are recorded in the scoping doc.
@@ -76,10 +78,12 @@ reputation-weighted mean of scores), `SOURCE_KIND_DEFAULTS`
 `resolve_source_tier(source_kind)`. `tests/test_source_credibility.py` passes embedded.
 
 **Files:**
+
 - Create: `tortoise/source_credibility.py`
 - Create: `tests/test_source_credibility.py`
 
 **Steps:**
+
 1. Write `tests/test_source_credibility.py` (failing): N=1 identity (`aggregate_prior(tier,1) ==
    TIER_PRIORS[tier]`), strictly diminishing gains, anti-Sybil (1000×T4 pc ≈ 0.997 < T3 pc=1.0),
    monotonic prior mean in N (uniform weight), mixed-tier sum, `pc_base := alpha−1`, decay_factor
@@ -115,10 +119,12 @@ dirty-mark the point/source gate timestamp. Gate is graph-persisted so multiple 
 dedupe.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`set_point_baseline` ~1521-1538; `_apply_source_inheritance` WHERE + gate)
 - Test: `tests/test_source_credibility.py`
 
 **Steps:**
+
 1. Failing tests: (a) explicit baseline persists `baseline_source='explicit'`; (b) inherited persists
    `'inherited'`; (c) explicit baseline never clobbered by stronger source; (d) inherited recomputes when
    sourceDate ages (interval=0); (e) two calls within interval → no rewrite (no dirty churn);
@@ -142,10 +148,12 @@ stale assertions updated (moved here from Task 7 so the inheritance change lands
 green).
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`_apply_source_inheritance` ~1545-1612)
 - Create: `tests/test_source_inheritance_own.py`
 
 **Steps:**
+
 1. Failing OWN tests (real path: create_source/_link_source → extractedFrom → _apply_source_inheritance;
    embedded `TortoiseSDK(db_path)`; distinct URLs; per-call `recency_decay=1.0` for aggregation-only cases;
    fixed-epoch + runtime-clock pattern for decay cases). **Assertions on `ep_alpha`/`ep_beta` via
@@ -187,11 +195,13 @@ untiered WITH assessments → assessment-only reliability (reputation-weighted m
 display-only — untiered sources never feed EP).
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (add `get_source_reliability` near reputation section)
 - Modify: `tortoise/source_credibility.py` (`derive_reliability`)
 - Test: `tests/test_source_inheritance_own.py`
 
 **Steps:**
+
 1. Failing tests: (a) untiered+unassessed → null with reason; untiered+assessed → assessment-only
    reliability; (b) decayed tier mean matches `mean_from_beta(1+pc·decay, 1)`; (c) consistency invariant
    (single-source): `get_source_reliability(url).mean ≈ prior mean EP applied` — tolerance **rel ~5e-4**
@@ -218,11 +228,13 @@ Statement Points.
 outdated), weighted by `compute_reputation(assessor).mean` (snapshot at write), factor clamped [0.1,2.0].
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (add `assess_source`)
 - Modify: `tortoise/source_credibility.py` (assessment aggregation consumed by `_compute_source_prior`)
 - Test: `tests/test_source_inheritance_own.py`
 
 **Steps:**
+
 1. Failing tests: creates assessment with correct props; score validation (non-numeric → clean ValueError;
    out-of-[0,1] → ValueError); rationale required; re-assessment by same assessor supersedes — **aggregation
    picks the LATEST active assessment per (targetSource, assessor) by createdAt (crash-safe: even if two
@@ -248,6 +260,7 @@ credibilityTier; **existing Source never gets sourceKind overwritten** — URL-c
 (get_source_reliability = NO readOnlyHint — it writes the cache; assess_source = destructiveHint).
 
 **Files:**
+
 - Modify: `tortoise/source_credibility.py` (registry data + functions)
 - Modify: `tortoise/sdk.py` (`create_source`, `set_source_tier`, `calibrate_summary`)
 - Modify: `tortoise/mcp_server.py` (tortoise_get_source_reliability, tortoise_assess_source,
@@ -256,6 +269,7 @@ credibilityTier; **existing Source never gets sourceKind overwritten** — URL-c
 - Test: `tests/test_source_inheritance_own.py`, `tests/test_mcp_server.py`, `tests/test_mcp_http.py`
 
 **Steps:**
+
 1. Failing tests: (a) `create_source(url, "github_issue", tier="T2")` → credibilityTier="T2", sourceKind
    unchanged; `create_source(url, "T0")` → sourceKind="T0" AND credibilityTier="T0"; `set_source_tier`
    never touches legacy type strings; (b) **URL collision: `create_point(extractedFrom=url)` first
@@ -279,6 +293,7 @@ docs/00_index.md registration; audit.py remediation text updated. (test_calibrat
 moved to Task 3.)
 
 **Files:**
+
 - Modify: `docs/ONTOLOGY.md` (§2 pointKind vocabulary + assessment; §3.4 parenthetical; §4.6 Source table:
   sourceKind=type vocabulary, credibilityTier=tier, reliability cache fields, sourceDate; §5 Source Kind
   Vocabulary: tier semantics moved to credibilityTier + assessment kind; §10 decay decision log; §11
@@ -290,6 +305,7 @@ moved to Task 3.)
 - Modify: `tortoise/audit.py` (missing_sourceKind remediation text → set_source_tier/create_source(tier=))
 
 **Steps:**
+
 1. Doc updates (ONTOLOGY v3.2, experiment doc annotations) + docs/00_index.md registration + audit.py
    remediation text.
 2. Run full embedded suite → PASS. Commit.

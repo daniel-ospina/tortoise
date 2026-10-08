@@ -39,6 +39,7 @@ governingAgreement: "#1527 (epic #1509, M7)"
 > **Gate skipped:** plan touches zero new third-party dependencies — `fcntl` (stdlib, in-repo pattern `tortoise/shared_state/concurrency.py::locked_append`), `hashlib`, `sys`, `json` (stdlib); all other surfaces are in-repo modules already used by the runner. Step B (Perplexity verification gate) does not fire per the zero-deps skip rule. Step A (prior research intake) ran: epic 02-research-brief (dataset/recall + eval-discipline sections), 03-scope M7/M8, 04-plan §6, 05-detailed-e2e E2E-2/E2E-3.
 
 **Canonical + paper-verification (conducted during intake — verifiable, cited):**
+
 - LongMemEval official repo `src/evaluation/print_retrieval_metrics.py` **excludes `_abs` questions** from all retrieval metrics (`in_data = [x for x in in_data if '_abs' not in x['question_id']]`). Our aggregates include them → divergence vs the paper.
 - LongMemEval official `src/retrieval/run_retrieval.py` builds the **turn corpus from `role == 'user'` turns only** and asserts `'has_answer' in turn` on every user turn; evidence turns become positive corpus ids. Our deterministic leg indexes all turns regardless of role.
 - Official recall is `recall_any` / `recall_all` (binary) + `ndcg` per `src/retrieval/eval_utils.py::evaluate_retrieval`. Ours is a per-question **fraction** of evidence in top-k — a documented variant, not the paper's binary.
@@ -79,37 +80,48 @@ governingAgreement: "#1527 (epic #1509, M7)"
 ## Design decisions
 
 ### D1 — Integrity block is a first-class report key, printed before score
+
 `report["integrity"] = {valid, threshold, n_attempted, n_valid, n_invalid, invalid_rate, error_census{...}, checks[...]}`.
+
 - `n_attempted = n_completed + n_failed` (dedup by qid across outcomes+failures); `invalid` = a failed question **or** a completed question with `n_ingest_errors > 0` (per-question `valid` flag, D4); `invalid_rate = invalid / n_attempted`; `valid = invalid_rate <= threshold`.
 - Threshold default **0.0**, overridable via `--integrity-threshold <float>` (effective value recorded in `integrity.threshold`); when an override is used, `integrity.justified=True` and `integrity.threshold_violation_justification` carries the free text from `--integrity-justification`. `valid = invalid_rate <= threshold` with the **effective** threshold — a violated override (`invalid_rate > threshold`) still yields `valid=false`; the report always records the numbers and the reason, so no degraded run can masquerade as clean (E2E-2).
 - `checks` is a fixed list of self-describing strings (python guard, dataset loaded, audit present, fingerprint matched, census computed). `_print_summary` prints the integrity block + error census **first**, then accuracy/retrieval/latency.
 
 ### D2 — Leg-mix is a per-hit `match_source` aggregation, never re-derived
+
 `match_source` already lands on annotated hits (D8 field passthrough in `retrieve.py::_annotate_hits`). No new engine work: per outcome compute `leg_mix` = Counter of `h["match_source"] or "unknown"` over the **top_k context points** (what the reader saw) **and** `leg_mix@k` per k in `ks` (over `hits[:k]`). Report aggregate: `report["leg_mix"] = {total_counts, mean_share, unknown_count, n_questions}`. Embedded mode will legitimately show `{"tfidf": n}`; real mode `{"rrf": n}` (+ per-leg when the engine emits it) — E2E-1's "never null" is asserted at the hit level in `retrieve_for_question` (missing → `"unknown"`, never `""`).
 
 ### D3 — Pool size is a live graph count, not derived from stats
+
 After ingest (before retrieval), one authoritative Cypher: `MATCH (p:Point {lme_question_id:$qid}) RETURN count(*)`. Per outcome `pool_size`; report `pool_size = {mean, p50, p95}`. This is the retrieval-pool denominator the existing `methodology.retrieval_scope` paragraph documents ("question-scoped corpus") — now quantified. Single query, ~1ms, no N+1.
 
 ### D4 — Evidence written/retrieved + vacuity are explicit numbers
+
 - `evidence_written` per outcome: deterministic leg = `ingest_stats["evidence_turns"]`; v2 leg = `ingest_stats["evidence_points"]` (already produced by `ingest_v2._write_payload`).
 - `evidence_retrieved@k` per outcome: count of annotated hits with `has_answer` in `hits[:k]` (already computable; the `turn_recall` numerator — now persisted).
 - Report `evidence = {written_mean, retrieved_mean@k, evidence_bearing_n, evidence_absent_n, vacuity_rate}` where **vacuity is computed over evidence-bearing questions only** (`evidence_written > 0`): vacuity_rate = share of those with `evidence_retrieved@k == 0` at the design-locked k (top_k). Evidence-absent questions (the 21 `_abs`) are counted separately (`evidence_absent_n`) and excluded — E2E-3's "ground-truth-absent abstentions do not drag the denominator". M6 owns the N/A-not-0.0 *per-question* semantics; M7's vacuity aggregate assumes it lands (Cross-lane gate ⛔-2).
 
 ### D5 — Write-path cost is an isolated `ingest_latency_ms`
+
 In `_run_one`, time the ingest call (`time.monotonic()` around `ingest_haystack`/`ingest_haystack_v2`) → `ingest_latency_ms` per outcome; report `latency_ms["ingest"] = {mean_ms, p50_ms, p95_ms}` alongside retrieval/reader/judge. `total_ms` stays the wall-clock question total (ingest is a component of it, not double-counted). This makes the per-question LLM-vs-write attribution visible: ingest (extractor) vs retrieve vs reader vs judge.
 
 ### D6 — Error census uses a documented eval taxonomy, aligned to the P2 contract
+
 New `tools/longmem_eval/errors.py`:
+
 ```python
 EVAL_ERROR_CLASSES = ("fatal", "fatal_config", "transient", "retries_exhausted", "ingest", "parse", "unknown")
 def classify_eval_error(exc: BaseException, *, site: str) -> str: ...
 ```
+
 - Classification reuses the P2 status-code semantics (401/402/403→`fatal`, 400/404+other-4xx→`fatal_config`, 408/425/429/500/502/503/504+5xx→`transient`, connection/timeout/URLError/OSError→`transient`, non-HTTP parse/KeyError→`parse`, else `unknown`). `site ∈ {"reader", "judge", "ingest"}` recorded with the class (e.g. `reader:transient`).
 - **P2 alignment:** when `tortoise/model_adapters.py::classify_llm_error` lands (#1530), `classify_eval_error` delegates to it for the coarse class and keeps `site` as the eval's own dimension. Until then it uses its own frozensets — documented, not forked silently (Cross-lane note).
 - Per-failure entries gain `error_class`; per-outcome `error_classes` lists classified classes for `ingest_stats["errors"]` (v2) + the failure class. Report `integrity.error_census` = Counter over all failure classes + ingest error classes.
 
 ### D7 — Checkpoint fingerprint: refuse stale resume by construction
+
 Checkpoint schema v2:
+
 ```json
 {
   "fingerprint": {
@@ -127,6 +139,7 @@ Checkpoint schema v2:
   "outcomes": [...], "failures": [...], "updated_at_utc": "..."
 }
 ```
+
 - `_build_fingerprint(...)` computes the live fingerprint from the effective run config (reader/judge `model_id`, resolved extractor spec, `reader_prompt_source()`, `JUDGE_RUBRIC_ID`, ks/top_k/split/ingest_mode/max_retries, `git_sha()`, `sys.version`, dataset file hash).
 - `_load_checkpoint(path, expected)` compares; on mismatch raises `CheckpointStaleError(RuntimeError)` listing the differing fields — **refuse stale resume** (E2E-2 owned negative: "stale resume → clear abort"). A legacy v1 checkpoint (no `fingerprint` key) is **also refused** with "checkpoint predates the fingerprint contract — delete or re-fingerprint".
 - `workers` is deliberately **excluded** from the fingerprint (per-question isolation ⇒ results are workers-invariant) but recorded in `methodology.workers`.
@@ -139,26 +152,34 @@ Checkpoint schema v2:
 - ENV-DEPENDENCE (default path, review #1742): with `--extractor-model` unset the fingerprint resolves via `resolve_extractor_provider` — which lanes the router serves is a function of the extractor-key env (`DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` / `VENICE_API_KEY` / `TORTOISE_EXTRACTOR_PROVIDER`). A resume is therefore only valid within the SAME provider/key environment: identical `git_sha` + CLI across machines with differing key env (e.g. DEEPSEEK-only vs OPENROUTER-only) refuses with `CheckpointStaleError` — safe direction, the env changes what the default path serves.
 
 ### D8 — Checkpoint flock: merge-under-lock, no lost updates
+
 - `_save_checkpoint` becomes: acquire an exclusive **flock on `<checkpoint>.lock`** (reuse the `fcntl` mechanics of `tortoise/shared_state/concurrency.py::locked_append` — extract a small `flock_exclusive(path)` context manager into `tools/longmem_eval/errors.py`-adjacent `_checkpoint.py` or reuse `tortoise/shared_state/concurrency.py` directly), then **re-read the file under the lock**, merge disk outcomes/failures with the in-memory snapshot (dict-by-qid for outcomes, list-merge for failures), write tmp, `os.replace`, release.
 - Re-read-under-lock makes two concurrent run **processes** on one checkpoint lose nothing (each merge adds its qids). The in-process `threading.Lock` stays (guards the shared `done`/`failures` state between worker threads); flock adds the cross-process layer. `_load_checkpoint` also takes the lock (short) so a reader never sees a mid-merge file (os.replace already makes the final file atomic).
 - Contract note: a checkpoint is per-run (one dataset+config). Two processes with *different* configs sharing a file → fingerprint mismatch aborts (D7). Same-config/disjoint-subset sharing is supported by the merge.
 - `fcntl` is POSIX (macOS/Linux eval env) — documented; no Windows story needed.
 
 ### D9 — Python ≥3.12 runtime guard
+
 `run_main` starts with:
+
 ```python
 if sys.version_info < (3, 12):
     raise SystemExit("longmem_eval requires Python >= 3.12 (got %d.%d) — pyproject requires-python >=3.12; the eval graph write path is 3.12-only" % sys.version_info[:2])
 ```
+
 Factored into `_assert_python_version()` for unit testing (monkeypatch `sys.version_info`). Guard is **before** dataset load / key checks — refuse fast. `methodology.python_version` records the actual.
 
 ### D10 — Dataset recall-semantics audit + publication gate (E2E-3 Precondition 2)
+
 New `tools/longmem_eval/dataset_audit.py`:
+
 ```python
 def audit_dataset(instances: list[dict]) -> dict: ...  # census + consistency + divergences + verdict
 def semantics_baseline() -> dict: ...                  # the 2026-08-20 expected values (D11 table)
 ```
+
 Audit record (persisted under `methodology.dataset_semantics_audit`):
+
 ```json
 {
   "findings_date": "2026-08-20",
@@ -178,11 +199,13 @@ Audit record (persisted under `methodology.dataset_semantics_audit`):
   "gate": "no turn_recall/evidence_recall number is published unless this record is present in the report methodology"
 }
 ```
+
 - **Paper-aligned aggregates:** `retrieval.session_recall_paper@k` / `turn_recall_paper@k` / `evidence_recall_paper@k` = the same fraction metric computed over **non-`_abs` questions only** (the official exclusion), keeping legacy keys for backward compatibility; both definitions recorded in `methodology.recall_definition`. (User-role-only turn denominators are recorded as a known residual divergence — v2-leg evidence points carry no role; see Open questions.)
 - **Publication gate (enforced by construction):** `build_report(...)` gains a required `dataset_semantics_audit` argument — `ValueError` if absent. `run_evaluation` computes the audit from the loaded instances and threads it through `outcomes_to_report → build_report`. There is no flag to skip it. This *is* E2E-3 Precondition 2: a report containing recall numbers provably contains the audit record.
 - The audit also runs on the MINI fixture in CI — it doubles as a fixture-consistency check (surfacing `mini_abs_005_abs`'s empty `answer_session_ids` as a recorded divergence from real data).
 
 ### D11 — Report contract: additive top-level keys only
+
 New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms.ingest`; `methodology` gains `python_version`, `workers`, `dataset_fingerprint`, `dataset_semantics_audit`, `integrity_threshold`. Per-outcome gains: `valid`, `error_classes`, `leg_mix`, `leg_mix@k`, `pool_size`, `evidence_written`, `evidence_retrieved@k`, `ingest_latency_ms` (all persisted in the `outcomes` projection — the Layer-1 payload, surface 22). The `test_outcomes_to_report_golden_shape` exact key-set pin **must** be updated to the new contract (this is the M1-regression-class guard, not a freeze). The #1414 parity battery compares methodology *hashes* (`reader_prompt_hash`/`judge_rubric_id_hash`), not the shape — additive keys are safe (verified: `battery/parity/runner.py:80-84`).
 
 ---
@@ -194,6 +217,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** refuse a <3.12 eval env fast and record what code/version produced every report (run-hygiene half of M7).
 **Acceptance:** `run_main` exits nonzero with a clear message on 3.11; report methodology carries `python_version`, `workers`, `dataset_fingerprint`.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (`run_main`, new `_assert_python_version`, `run_evaluation` signature, `outcomes_to_report` signature)
 - Modify: `tools/longmem_eval/report.py` (`build_report` methodology block)
 - Test: `tests/test_longmem_runner.py`
@@ -209,6 +233,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** a resumed checkpoint is only trustworthy if the effective run config is byte-identical to what produced it (E2E-2: stale resume → clear abort).
 **Acceptance:** checkpoint writes `fingerprint`; resume with a different reader/judge/ks/top_k/split/ingest_mode/max_retries/prompt-hash/git-sha/dataset raises `CheckpointStaleError` with the differing fields named; legacy v1 checkpoints are refused.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (`_load_checkpoint`, `_save_checkpoint`, new `_build_fingerprint`, new `CheckpointStaleError`, `run_evaluation` gets `dataset_fingerprint` param)
 - Modify: `tools/longmem_eval/run.py::run_main` (compute dataset file sha256 → pass through)
 - Test: `tests/test_longmem_runner.py`
@@ -223,6 +248,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** two run processes sharing one checkpoint must not lose each other's results (surface 20, checkpoint race; E2E-2 owned negative).
 **Acceptance:** concurrent `_save_checkpoint` calls from separate processes merge outcomes/failures without loss; `_load_checkpoint` is lock-guarded.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (flock around load + save; re-read-and-merge inside `_save_checkpoint`)
 - Modify: `tortoise/shared_state/concurrency.py` (extract `flock_exclusive(path) -> fd` context-manager helper reused by `locked_append` and the runner — small refactor, backward-compatible) — *alternatively* keep the helper private in `run.py`; prefer the shared helper (single flock implementation, tested once).
 - Test: `tests/test_longmem_runner.py` + `tortoise/shared_state/tests/test_concurrency.py`
@@ -237,6 +263,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** the report can answer "which leg found what, how big was the pool, how much evidence was written vs retrieved, and what did ingestion cost" per question and per run (E2E-2 report contents).
 **Acceptance:** every outcome carries `leg_mix`, `leg_mix@k`, `pool_size`, `evidence_written`, `evidence_retrieved@k`, `ingest_latency_ms`; the report aggregates them.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (`_run_one` — time ingest, query pool size, compute evidence counters; `outcomes_to_report` projection)
 - Modify: `tools/longmem_eval/retrieve.py` (`retrieve_for_question` returns `match_source_counts`, `match_source_counts@k`, `evidence_retrieved@k`; ensure `match_source` is never `""` on annotated hits)
 - Modify: `tools/longmem_eval/ingest.py` / `ingest_v2.py` (no change needed — `evidence_turns`/`evidence_points` already in stats; verify only)
@@ -252,6 +279,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** the report proves the run wasn't silently degraded and its failures are explainable (E2E-2: `integrity.valid`, `invalid_rate`, per-question error census; M4 print-before-score).
 **Acceptance:** `report["integrity"]` present with valid/threshold/rates/census/checks; `report["leg_mix"]`, `report["pool_size"]`, `report["evidence"]`, `latency_ms.ingest` aggregates present; `_print_summary` prints integrity first; golden-shape test updated to the new contract.
 **Files:**
+
 - Create: `tools/longmem_eval/errors.py` (taxonomy + `classify_eval_error` + `census_classes`)
 - Modify: `tools/longmem_eval/run.py` (`_run_one` valid/error_classes; `_print_summary` reorder; `--integrity-threshold`/`--integrity-justification` CLI)
 - Modify: `tools/longmem_eval/report.py` (`build_report` aggregates + integrity)
@@ -268,6 +296,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** no `turn_recall`/`evidence_recall` number leaves the harness until the dataset semantics it stands on are verified against the paper (E2E-3 Precondition 2).
 **Acceptance:** `methodology.dataset_semantics_audit` present on every report; `build_report` raises `ValueError` without it; `retrieval.*_paper@k` keys present; the @slow real-S-split audit test matches the measured baseline (or the test is updated to the new census with a review note).
 **Files:**
+
 - Create: `tools/longmem_eval/dataset_audit.py`
 - Modify: `tools/longmem_eval/run.py` (`run_evaluation` computes audit; `outcomes_to_report` passes it)
 - Modify: `tools/longmem_eval/report.py` (`build_report` requires `dataset_semantics_audit`; paper-aligned aggregates; `recall_definition` methodology text)
@@ -283,6 +312,7 @@ New top-level keys: `integrity`, `leg_mix`, `pool_size`, `evidence`; `latency_ms
 **Intent:** the harness is operable and the report contract is documented for downstream consumers (M8, the run protocol).
 **Acceptance:** README documents the new flags/keys/audit; full test suite green; report example regenerated.
 **Files:**
+
 - Modify: `tools/longmem_eval/README.md`
 - Modify: `tests/test_longmem_runner.py` (any final pins)
 - Verify: `tools/longmem_eval/report.py` docstring + module docstrings updated (report contract)
@@ -310,6 +340,7 @@ Surface→test-layer mapping: see Integration Surface Map above. Every M7-owned 
 ### Test list (new/updated)
 
 `tests/test_longmem_runner.py`:
+
 - `test_python_guard_refuses_lt_312` (Task 1)
 - `test_report_methodology_env_fields` (Task 1)
 - `test_checkpoint_fingerprint_refuses_stale_resume` / `_legacy_refused` / `_matching_resumes` (Task 2)

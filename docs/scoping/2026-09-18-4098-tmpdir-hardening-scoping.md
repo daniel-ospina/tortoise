@@ -127,6 +127,7 @@ on a Linux box with the default `/tmp`. The attacker does **not** need the reape
 can write" and "can SIGTERM a redis-server the reaper's uid can signal".
 
 ### Demonstrated classes (reproduced at `b86f6ef20`; `_real_gettempdir` redirected to a private
+
 scratch dir and `_pgrep_redis_servers` stubbed so the host is never touched)
 
 | # | Class | Mechanism | Verified consequence |

@@ -15,6 +15,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 | `identity.js` — keep `reauthStale()` (has unit tests, represents deliberate config constant) | Pure fn | Existing identity.test.js |
 
 **Failure modes enumerated:**
+
 - Empty/null providers (identityInv still null when ReauthDialog mounts) → map on empty array, fallback text shown
 - Re-auth in-flight race (double click) → reauthBusy disables buttons
 - Dialog dismissed mid-OAuth round-trip → onClose clears pendingReauthRef (intended abandon)
@@ -28,7 +29,8 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 
 **Intent:** Eliminate the dead-code "Re-authenticate now" button. Instead, 403 REAUTH_REQUIRED from change-email/unlink operations auto-opens the ReauthDialog with pending action context.
 
-**Acceptance:** 
+**Acceptance:**
+
 - Standalone button at profile.jsx:212 is GONE
 - No proactive re-auth affordance anywhere (`onOpenReauth` prop removed entirely)
 - 403 REAUTH_REQUIRED in handleAddEmail: already works (sets `pendingReauthRef.current`, opens dialog)
@@ -57,6 +59,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 
 4. **main.jsx: Wire reactive re-auth into handleUnlink**
    - handleUnlink currently catches all errors generically (lines ~1519-1530). Add specific 403 REAUTH_REQUIRED handling:
+
      ```js
      async function handleUnlink(identityId) {
        setProfileBusy('unlink'); setProfileError('')
@@ -82,7 +85,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
        }
      }
      ```
-   
+
    **Note:** The rest of handleUnlink's try block must NOT set `profileBusy` to `''` prematurely — the catch handler re-opens the dialog, and the profileBusy state is needed to show the loading state. The `setProfileBusy('')` in `finally` will fire AFTER the dialog opens, which is fine — the dialog has its own busy state (`reauthBusy`).
 
 5. **main.jsx: Retry limit + unlink re-execution in handleReauthPassword**
@@ -101,6 +104,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 **Intent:** For accounts with no email+password method, show ONLY provider buttons (Google/GitHub) in ReauthDialog — no password field at all.
 
 **Acceptance:**
+
 - When `identityInv.methods` has at least one method with `provider === 'email'`: show password field as normal
 - When NO method has `provider === 'email'` (OAuth-only): password field + form are HIDDEN. Only provider buttons (Google/GitHub) shown
 - When `passwordMode=true`: show password field regardless of method type (user is setting new password after OAuth re-auth)
@@ -112,7 +116,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 1. **profile.jsx ReauthDialog: Add `hasPasswordMethod` detection**
    - Compute inside ReauthDialog: `const hasPasswordMethod = providers.includes('email')` (providers is already the array of provider strings passed from main.jsx)
    - Predicate reference: scoping-output.md specifies `!identityInv.methods.some(m => m.provider === 'email')` — since `providers` is `identityInv.methods.map(x => x.provider)`, `providers.includes('email')` is equivalent.
-   
+
 2. **Conditional render in ReauthDialog**
    - When `!hasPasswordMethod && !passwordMode`: render ONLY the provider buttons section (Google/GitHub). No password form, no "Sign in again with your password above" text, no empty-state `<p>` for no providers.
    - When `hasPasswordMethod || passwordMode`: render password form + provider buttons as normal (existing behavior unchanged)
@@ -122,12 +126,14 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 **Intent:** The `reauthStale()` function in identity.js is a pure predicate with existing unit tests and represents a deliberate server-side config constant (15-min window). Keep it as-is. No code changes needed for this file.
 
 **Rationale:**
+
 - `reauthStale()` has 4 dedicated unit tests in identity.test.js
 - The function encodes the `REAUTH_WINDOW_SECONDS = 900` constant as a default parameter — removing it would erase this config value from the codebase
 - The function itself is not "dead code" in the strict sense — it's a pure helper used for offline defensive paths (server payload unavailable). Keeping it is the YAGNI-correct choice
 - The scoping output already documents the window aggressiveness as a separate concern (Fix 3: config audit). Removing the client-side constant would not fix the config issue
 
 **Acceptance:**
+
 - identity.js exports `reauthStale()` — untouched
 - identity.test.js tests for `reauthStale()` — untouched
 - No changes to identity.js or its tests in this issue
@@ -141,6 +147,7 @@ Prior scoping consumed. External research: not needed (zero third-party deps, in
 ## OAuth round-trip behavior note
 
 The retry limit (`reauthAttemptRef`) is per-session (React component lifetime). OAuth re-auth causes a full-page navigation → component remount → ref resets to 0. This means:
+
 - Password re-auth respects the 3-attempt limit (same session)
 - OAuth re-auth naturally resets the limit (full navigation)
 - This is INTENTIONAL: an OAuth round-trip is a fresh sign-in, so the retry counter should reset

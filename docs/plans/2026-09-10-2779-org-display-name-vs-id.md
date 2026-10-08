@@ -258,6 +258,7 @@ slug, and the two lanes finally agree on `org_{identifier}`.
 
 7. **Migration `supabase/migrations/<ts>_teams_display_name.sql`** — the only
    migration in this design.
+
    ```sql
    -- 0011's unique index on teams.name guarded org_{name} as a shared
    -- namespace. Since #1903 (/docs/plans/2026-08-30-team-graph-name-parity.md)
@@ -482,6 +483,7 @@ tell them apart.
 | `Team` registry node needs a separate `display_name` property? | no — `name` is the display name, `id` is the identifier; same shape as `teams` and as `graphs.name`/`graphs.namespace` (#2701) |
 
 **Product decisions to confirm before slice 2 ships** (do not block slice 1):
+
 1. Display names may repeat globally (dropping `uq_teams_name`). This intentionally
    changes the duplicate-name **409** into a collision-resolved identifier, and
    rewrites the tests that pin 409.
