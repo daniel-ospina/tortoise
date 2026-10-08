@@ -307,3 +307,47 @@ def test_search_snapshot_legacy_delegation(sdk, monkeypatch):
     snap["model_id"] = None
     results = fs.search_snapshot("alpha", snap, limit=10)
     assert len(results) == 1, "must delegate to the legacy scorer"
+
+
+# ── #7615: per-store isolation ──────────────────────────────────────────
+
+def test_snapshot_store_isolated_across_embedded_dbs(tmp_path):
+    """#7615: the snapshot store must not serve one embedded DB's corpus to
+    another.
+
+    Every embedded DB defaults to ``graph_name='tortoise'``, so the old
+    ``(graph_name, namespace)`` key collided across files: a point written by
+    one test's SDK surfaced in another test's degraded search — the leaked
+    ``fallback producer probe point`` in
+    ``tests/test_tortoise_search.py::test_sdk_fts_query_empty`` caused by
+    ``tests/test_subject_layer_read_surfaces_4889.py``. Both files must be
+    safe in ONE process, which is the property the sharder assumes.
+    """
+    fs._store.clear()
+    a = TortoiseSDK(str(tmp_path / "a.db"))
+    b = TortoiseSDK(str(tmp_path / "b.db"))
+    try:
+        ka = fs.snapshot_key(a._get_proj(), None)
+        kb = fs.snapshot_key(b._get_proj(), None)
+        assert ka != kb, (
+            "distinct embedded DBs must derive distinct snapshot keys, got "
+            f"{ka!r} for both")
+        a.create_point("statement", "fallback producer probe point")
+        _no_match_query(a)  # builds + caches A's corpus snapshot
+        assert fs._store.get(ka) is not None, "A must cache its own snapshot"
+        assert fs._store.get(kb) is None, (
+            "another embedded DB's snapshot is visible under this DB's key")
+        # End-to-end shape of the original leak: B's degraded search must not
+        # return A's point.
+        b_hits = _no_match_query(b)
+        assert all(r["content"] != "fallback producer probe point"
+                   for r in b_hits), (
+                    "another embedded DB's point leaked into this search: "
+                    f"{[r['content'] for r in b_hits]}")
+    finally:
+        for s in (a, b):
+            try:  # noqa: SIM105
+                s.close()
+            except Exception:
+                pass
+        fs._store.clear()

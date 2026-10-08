@@ -50,7 +50,7 @@ _SNAPSHOT_QUERY = (
 
 
 class FallbackSnapshotStore:
-    """Thread-safe snapshot store keyed by (graph_name, namespace)."""
+    """Thread-safe snapshot store keyed by ``snapshot_key`` (graph, backend, namespace)."""
 
     def __init__(self) -> None:
         self._store: dict[tuple, dict] = {}
@@ -92,7 +92,27 @@ _store = FallbackSnapshotStore()
 
 
 def snapshot_key(proj, namespace: str | None) -> tuple:
-    return (getattr(proj, "graph_name", "tortoise"), namespace)
+    """Identity of the corpus a snapshot describes.
+
+    ``graph_name`` alone does NOT identify an embedded store: every embedded DB
+    defaults to ``'tortoise'``, so a store keyed on it alone served one DB's
+    snapshot to another — the leaked point in #7615 (a test's degraded search
+    returned a point written by a different test's SDK on a different file).
+    The embedded file's realpath is the second half of the identity — the same
+    reason #3049's ``_prewipe_graph_identity`` carries ``db_path``.
+
+    A server/URI graph carries no file: its identity IS its graph name, which
+    the first element already supplies. ``:memory:`` is a fresh server per
+    projection with no file to key on, so the projection itself is the
+    identity (``id()`` is stable because ``TortoiseSDK._get_proj`` caches).
+    """
+    path = getattr(proj, "_path", None)
+    if path == ":memory:":
+        backend: object = ("memory", id(proj))
+    else:
+        from tortoise.projection import _prewipe_db_path_identity
+        backend = _prewipe_db_path_identity(path)
+    return (getattr(proj, "graph_name", "tortoise"), backend, namespace)
 
 
 def build_snapshot(proj) -> dict | None:
