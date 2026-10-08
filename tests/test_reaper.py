@@ -24,6 +24,7 @@ import pytest
 # refuses to hand back the shared tree, so the delta-sweep fixtures below can
 # no longer silently degrade into an O(whole-host) scan that also matches
 # another test's (or another session's) redis.socket / redis.pid.
+from tests._signal_hygiene import harness_relinquish_sigalrm
 from tests._tmpdir_hygiene import scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
@@ -1229,6 +1230,19 @@ def _run_cli(*args, timeout=600):
         capture_output=True, text=True, timeout=timeout, env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _reaper_main(args):
+    """Run `embedded_reaper.main()` IN-PROCESS without losing the guard (#7655).
+
+    `main()` owns SIGALRM for its sweep (its own process in production), but
+    in-process it leaves the pytest-timeout guard disarmed for the rest of the
+    test. Relinquish SIGALRM for the call and restore the harness handler +
+    timer afterwards.
+    """
+    from tortoise.embedded_reaper import main as _main
+    with harness_relinquish_sigalrm():
+        return _main(args)
 
 
 def test_cli_defaults_to_dry_run(monkeypatch):
@@ -2889,7 +2903,6 @@ def test_cli_json_emits_stale_socket_shape(monkeypatch):
     """S9: the CLI --json contract carries the new classification + path
     keys for stale actions. Reaper lock monkeypatched so a dev-box cron
     reaper can't make the test non-hermetic (cycle 2)."""
-    from tortoise.embedded_reaper import main
     with _stale_dir_env() as (dbdir, sock):
         _backdate_dir(dbdir)
         monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
@@ -2904,7 +2917,7 @@ def test_cli_json_emits_stale_socket_shape(monkeypatch):
         import json as _json
         out = io.StringIO()
         monkeypatch.setattr("sys.stdout", out)
-        rc = main(["--no-dry-run", "--json", "--timeout", "60"])
+        rc = _reaper_main(["--no-dry-run", "--json", "--timeout", "60"])
         assert rc == 0
         data = _json.loads(out.getvalue())
         stale = [d for d in data if d.get("classification") == "stale_socket"]
@@ -4232,12 +4245,12 @@ def test_cli_full_scan_resolves_from_flag_and_env(monkeypatch, capsys):
     monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
     monkeypatch.delenv("TORTOISE_REAPER_FULL_SCAN", raising=False)
 
-    assert _R.main([]) == 0 and seen["full_scan"] is False
-    assert _R.main(["--full-scan"]) == 0 and seen["full_scan"] is True
+    assert _reaper_main([]) == 0 and seen["full_scan"] is False
+    assert _reaper_main(["--full-scan"]) == 0 and seen["full_scan"] is True
     monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "1")
-    assert _R.main([]) == 0 and seen["full_scan"] is True
+    assert _reaper_main([]) == 0 and seen["full_scan"] is True
     monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "0")
-    assert _R.main([]) == 0 and seen["full_scan"] is False
+    assert _reaper_main([]) == 0 and seen["full_scan"] is False
     capsys.readouterr()
 
 
@@ -4253,7 +4266,7 @@ def test_main_surfaces_truncation(monkeypatch, capsys):
     monkeypatch.setattr(_R, "_run_sweep", _truncated)
     monkeypatch.setattr(_R._ReaperLock, "acquire", lambda self: True)
     monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
-    assert _R.main(["--no-dry-run"]) == 0
+    assert _reaper_main(["--no-dry-run"]) == 0
     assert "SCAN TRUNCATED" in capsys.readouterr().out
 
 

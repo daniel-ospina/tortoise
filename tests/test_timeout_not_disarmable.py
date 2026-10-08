@@ -1,0 +1,247 @@
+"""#7655 — the per-test timeout must not be silently disarmed in-process.
+
+``pytest-timeout``'s ``signal`` method shares ``ITIMER_REAL`` with the code
+under test, so one ``signal.alarm()`` (or ``setitimer(ITIMER_REAL, ...)``)
+inside a test replaces the per-test alarm and a later hang is only caught by
+the coarse shard watchdog.  ``tests/_signal_hygiene.py`` refuses that takeover;
+these tests pin the refusal, the sanctioned replacement, and — end to end —
+that the issue's own reproducer now fails fast instead of stalling a shard.
+
+The C-extension half of the same root is #7649; this file covers the
+in-process theft only.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
+
+from tests._signal_hygiene import (
+    _REAL_SETITIMER,
+    _REAL_SIGNAL,
+    HarnessAlarmStolen,
+    _make_guarded_alarm,
+    _make_guarded_setitimer,
+    _make_guarded_signal,
+    harness_relinquish_sigalrm,
+    harness_safe_sigalrm,
+)
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM"), reason="SIGALRM is not available (POSIX only)"
+)
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_guard_refuses_alarm_while_the_harness_owns_the_timer(monkeypatch):
+    """`signal.alarm` must not be allowed to replace the harness timer."""
+    monkeypatch.setattr(signal, "getitimer", lambda which: (30.0, 0.0))
+    with pytest.raises(HarnessAlarmStolen, match="#7655"):
+        _make_guarded_alarm()(600)
+
+
+def test_guard_refuses_setitimer_on_itimer_real(monkeypatch):
+    """The same theft through `setitimer(ITIMER_REAL, ...)` is refused too."""
+    monkeypatch.setattr(signal, "getitimer", lambda which: (30.0, 0.0))
+    with pytest.raises(HarnessAlarmStolen, match="#7655"):
+        _make_guarded_setitimer()(signal.ITIMER_REAL, 600)
+
+
+def test_safe_sigalrm_restores_the_harness_timer():
+    """The sanctioned helper must leave the harness timer armed (#7655).
+
+    A passing test is the point: before the fix, the harness alarm was gone
+    after the in-test alarm, so nothing fired here.
+    """
+    outer_timer = signal.getitimer(signal.ITIMER_REAL)
+    outer_handler = signal.getsignal(signal.SIGALRM)
+    fired: list[bool] = []
+
+    def harness_handler(signum, frame):
+        fired.append(True)
+
+    _REAL_SETITIMER(signal.ITIMER_REAL, 0)  # take over from the live harness
+    try:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0.4)  # simulate the harness guard
+        _REAL_SIGNAL(signal.SIGALRM, harness_handler)
+        with harness_safe_sigalrm(0.05, lambda signum, frame: None):
+            time.sleep(0.12)  # the in-test alarm fires harmlessly in here
+        time.sleep(0.55)  # the RESTORED harness alarm must fire out here
+        assert fired, "the harness alarm was not restored after an in-test alarm"
+    finally:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0)
+        _REAL_SIGNAL(signal.SIGALRM, outer_handler)
+        if outer_timer[0] > 0:
+            _REAL_SETITIMER(signal.ITIMER_REAL, outer_timer[0], outer_timer[1])
+
+
+def test_guard_refuses_replacing_the_sigalrm_handler(monkeypatch):
+    """Swapping the handler defeats the guard as surely as stealing the timer."""
+    monkeypatch.setattr(signal, "getitimer", lambda which: (30.0, 0.0))
+    with pytest.raises(HarnessAlarmStolen, match="#7655"):
+        _make_guarded_signal()(signal.SIGALRM, lambda signum, frame: None)
+
+
+def test_relinquish_allows_an_in_process_alarm_and_restores_the_timer():
+    """The reaper's in-process `main()` path (#7655): product code that owns
+    its own alarm runs inside the sanctioned block; the harness timer returns."""
+    outer_timer = signal.getitimer(signal.ITIMER_REAL)
+    outer_handler = signal.getsignal(signal.SIGALRM)
+    fired: list[bool] = []
+
+    def harness_handler(signum, frame):
+        fired.append(True)
+
+    _REAL_SETITIMER(signal.ITIMER_REAL, 0)  # take over from the live harness
+    try:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0.4)  # simulate the harness guard
+        _REAL_SIGNAL(signal.SIGALRM, harness_handler)
+        with harness_relinquish_sigalrm():
+            # exactly what tortoise/embedded_reaper.py:main() does
+            signal.signal(signal.SIGALRM, lambda signum, frame: None)
+            signal.alarm(0)
+        time.sleep(0.55)  # the RESTORED harness alarm must fire out here
+        assert fired, "the harness alarm was not restored after relinquishing it"
+    finally:
+        _REAL_SETITIMER(signal.ITIMER_REAL, 0)
+        _REAL_SIGNAL(signal.SIGALRM, outer_handler)
+        if outer_timer[0] > 0:
+            _REAL_SETITIMER(signal.ITIMER_REAL, outer_timer[0], outer_timer[1])
+
+
+def test_a_failed_arm_does_not_leak_the_relinquish_counter(monkeypatch):
+    """#7655: if arming raises, the block must not leave the guard disabled.
+
+    `harness_safe_sigalrm` is what the refusal message tells authors to use; an
+    exception between the counter increment and the `try` (e.g. a negative or
+    computed `seconds`) would leak `_relinquished` and silently disable the
+    guard for the rest of the session.
+    """
+    from tests import _signal_hygiene as sh
+
+    before = sh._relinquished
+    with pytest.raises(OSError), harness_safe_sigalrm(
+        -1.0, lambda signum, frame: None
+    ):
+        pass  # pragma: no cover — the arm raises before the body
+    assert sh._relinquished == before, (
+        "a failed arm leaked the relinquish counter — the guard is now disabled"
+    )
+
+
+def test_the_reproducer_fails_fast_instead_of_stalling_the_run(tmp_path):
+    """The issue's reproducer, run under the repo's guard, must fail fast.
+
+    Without the guard the inner run reaches `signal.alarm(600)` — which
+    silences its own `--timeout=5` — and then sits in `sleep(60)` until an
+    outer watchdog kills it. With the guard it fails at the offending line.
+    This is the pin: reverting the guard makes it run past the bound.
+    """
+    test_file = tmp_path / "test_disarm_repro.py"
+    test_file.write_text(
+        textwrap.dedent(
+            """
+            import signal, time
+
+
+            def test_arms_its_own_alarm_and_hangs():
+                signal.alarm(600)   # steals ITIMER_REAL from pytest-timeout
+                time.sleep(60)
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file),
+        "-q",
+        "-p",
+        "tests._signal_hygiene",
+        "--timeout=5",
+        "--timeout-method=signal",
+        "-p",
+        "no:cacheprovider",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(_REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "#7655 not fixed: an in-test signal.alarm hung the inner run past "
+            "45s — the per-test timeout was silently disarmed"
+        )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"the disarm must fail the inner test:\n{out}"
+    assert "#7655" in out, f"the guard's refusal was not reported:\n{out}"
+
+
+def test_a_normal_failure_is_not_an_internalerror(tmp_path):
+    """#7655: `pytest_timeout`'s own `cancel()` must stay exempt from the guard.
+
+    On a failing test, `pytest_timeout.cancel()` legitimately calls
+    `signal.setitimer(ITIMER_REAL, 0)` from inside the `pytest_timeout` module.
+    If that module exemption regresses, the refusal fires during teardown and
+    an ordinary failure turns into an `INTERNALERROR`, hiding the real failure —
+    and the reproducer pin above would not notice (it only asserts
+    `returncode != 0` and `"#7655" in out`, both of which an INTERNALERROR
+    satisfies). This pins the clean path: a plain `assert False` under the
+    guard reports `FAILED`, with its real message and no INTERNALERROR.
+    """
+    test_file = tmp_path / "test_ordinary_failure.py"
+    test_file.write_text(
+        textwrap.dedent(
+            """
+            def test_this_fails_normally():
+                assert False, "an ordinary assertion failure"
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file),
+        "-q",
+        "-p",
+        "tests._signal_hygiene",
+        "--timeout=5",
+        "--timeout-method=signal",
+        "-p",
+        "no:cacheprovider",
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(_REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    out = proc.stdout + proc.stderr
+    assert "INTERNALERROR" not in out, (
+        "an ordinary failure became an INTERNALERROR — the `pytest_timeout` "
+        f"exemption from the guard regressed:\n{out}"
+    )
+    assert "1 failed" in out, f"the ordinary failure was not reported:\n{out}"
+    assert "an ordinary assertion failure" in out, (
+        f"the real failure message was not surfaced to the reporter:\n{out}"
+    )

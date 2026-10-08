@@ -160,6 +160,10 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
+from tortoise.session_projection import (  # #5498: the ONE session projection
+    SESSION_DETAIL_FIELDS,
+    SESSION_LIST_FIELDS,
+)
 from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
@@ -14879,6 +14883,15 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     return await asyncio.to_thread(_commit_sync)
 
 
+# ── The session projection (#5498) ────────────────────────────────────────
+# The field list itself lives in `tortoise/session_projection.py` — ONE
+# declaration, derived from by `list_sessions`, `get_session_detail`, the
+# self-hosted CLI renderers and the parity test, so a field cannot reach the
+# wire and be silently absent from the CLI. It lives in a dependency-free
+# module so the CLI can import it without pulling this API stack. The names
+# are imported above; this note is the pointer to the single source.
+
+
 @app.get("/v1/sessions")
 async def list_sessions(request: Request, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """List captured sessions with turn and extracted point counts (#714).
@@ -14977,19 +14990,32 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     else:
         # graph-bound key (tk_) — least-privilege: no member-email read
         members_by_id = {}
-    return {"sessions": [
-        {
-            "id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3],
-            "actor_user_id": r[4], "harness": r[5],
-            "actor_display": None if not r[4]
-            else (members_by_id.get(r[4]) or r[4]),
-            # #2599: machine_id and model — client-claimed informational
-            # fields, null when absent (legacy / hook-less sessions).
-            "machine_id": r[6],
-            "model": r[7],
-        }
-        for r in rows
-    ]}
+    sessions = [_session_row_dict(r, members_by_id) for r in rows]
+    return {"sessions": sessions}
+
+
+def _session_row_dict(r, members_by_id: dict) -> dict:
+    """Positional SQL row -> the shared session projection (#5498).
+
+    The `assert` is the BINDING that keeps `SESSION_LIST_FIELDS` the single
+    source rather than a fourth copy: a field added to the wire dict without
+    the declaration (or the reverse) fails here, in a unit a test exercises
+    directly — not only in production.
+    """
+    d = {
+        "id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3],
+        "actor_user_id": r[4], "harness": r[5],
+        "actor_display": None if not r[4]
+        else (members_by_id.get(r[4]) or r[4]),
+        # #2599: machine_id and model — client-claimed informational
+        # fields, null when absent (legacy / hook-less sessions).
+        "machine_id": r[6],
+        "model": r[7],
+    }
+    assert set(d) == set(SESSION_LIST_FIELDS), (
+        f"session projection drifted: wire={sorted(d)} "
+        f"declared={sorted(SESSION_LIST_FIELDS)}")
+    return d
 
 
 def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
@@ -15155,9 +15181,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "eventId": source_rows[0][2],
         }
 
-    return {
+    detail = {
         "id": sess[0],
         "created_at": sess[1],
+        # #5498: `turns` is the COUNT; the turn LIST is `turn_points` below.
         "turns": sess[2],
         # #2600: actor + harness on the detail dict (raw actor_user_id +
         # resolved display; null for legacy sessions).
@@ -15173,6 +15200,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted_points": extracted,
         "source": source,
     }
+    # #5498: same binding as list_sessions — the detail payload must serve
+    # EXACTLY the shared projection plus the detail-only fields.
+    assert set(detail) == set(SESSION_DETAIL_FIELDS), (
+        f"session detail projection drifted: wire={sorted(detail)} "
+        f"declared={sorted(SESSION_DETAIL_FIELDS)}")
+    return detail
 
 
 # #B7: the activation scorecard — which sessions actually produced memory, and
