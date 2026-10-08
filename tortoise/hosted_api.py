@@ -22,6 +22,7 @@ import functools
 import hmac
 import inspect
 import ipaddress
+import itertools
 import json as _json
 import logging
 import math
@@ -992,8 +993,8 @@ _ORG_ENUMERATION_MAX_ROWS = 1000
 #: Page-walk bound for the enumeration (#5388). Guards against an endless walk
 #: when a server neither states a total nor returns short pages — a page cap is
 #: NOT proof of completeness, so hitting it leaves ``complete`` False and the
-#: fail-closed caller still refuses. 100 pages = 100k orgs, ~50x the fleet size
-#: the 1000-row cap was sized for.
+#: fail-closed caller still refuses. 100 pages = 100k orgs, ~100x the fleet
+#: size the 1000-row cap was sized for.
 _ORG_ENUMERATION_MAX_PAGES = 100
 
 
@@ -1091,6 +1092,23 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 # completeness check satisfiable while rows are still unserved.
                 if asked_for_count and page_total is not None:
                     total = page_total
+                if page:
+                    page_ids = [r["id"] for r in page]
+                    # The cursor must be the page MAXIMUM, which is only true if
+                    # the server honoured ``order="id"``. A server that filters
+                    # by ``id > cursor`` but returns rows in another order makes
+                    # ``page[-1]`` a NON-max id: the cursor then advances past
+                    # ids that were never served, they are excluded forever, and
+                    # because the walk still ends on an empty page it reports
+                    # COMPLETE and the destructive caller PRUNES them. Refusing
+                    # to certify is the correct response — `order` is part of
+                    # the contract and this is the one place that can check it.
+                    unsorted = any(a >= b for a, b in itertools.pairwise(page_ids))
+                    # A falsy id cannot be a cursor (``id > None`` is not a
+                    # filter, it is a restart) and cannot be counted as served.
+                    if unsorted or not all(page_ids):
+                        break  # `exhausted` stays False -> fail closed
+                    last_id = page_ids[-1]
                 if not page:
                     # THE sound end-of-walk signal: the server returned no more
                     # rows for this filter. Nothing weaker works — a short page
@@ -1109,13 +1127,21 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             #     duplicated row is not progress, and letting one satisfy the
             #     total is how a shifted window certifies an incomplete fleet);
             #   * with NO total -> the empty page IS the signal.
+            # A total of 0 is NOT evidence of an empty fleet — it is the absence
+            # of a usable count — so it takes the `exhausted` branch too. Left
+            # as `len(seen) >= 0` it would be vacuously satisfied and certify a
+            # page-cap exit (round 5).
             # Two shapes were REMOVED here and must not come back (#5388 rounds
             # 1 and 3): a short page as end-of-data (wrong whenever a server's
             # per-request cap is below our ``limit`` — the exact deployment this
             # issue names, and a fail-OPEN that pruned real orgs), and a
             # satisfied total as a STOP condition (wrong because the total is a
             # page-1 snapshot while ``seen_ids`` grows with concurrent inserts).
-            complete = (len(seen_ids) >= total if total is not None else exhausted)
+            complete = (
+                len(seen_ids) >= total
+                if total is not None and total > 0
+                else exhausted
+            )
             if not complete:
                 _logger.warning(
                     "org enumeration is INCOMPLETE: %d row(s) walked, server "
@@ -1150,7 +1176,14 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
         return [{"org_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
     except Exception:
-        return []
+        # #5388 (round 5): the exception means the fleet is UNKNOWN, and
+        # `require_complete` already defines UNKNOWN as None. Returning ``[]``
+        # here is a FAIL-OPEN: an empty list is indistinguishable from a
+        # genuinely empty fleet, and the destructive caller
+        # (`_refresh_cost_allocation`) PRUNES every org when it sees one — so a
+        # transient transport or schema error would wipe the whole metric. The
+        # best-effort caller keeps ``[]`` (it must never fail a sweep).
+        return None if require_complete else []
 
 
 # ═══════════════════════════════════════════════════════════════════════════

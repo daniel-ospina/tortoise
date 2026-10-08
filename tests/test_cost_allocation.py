@@ -993,7 +993,7 @@ class _FakeControlPlane:
         # What the server CLAIMS, independent of what it will serve. A total
         # larger than the rows available is the genuinely-unconfirmable case
         # (#5388); the default (None) means "no Content-Range", which leaves
-        # completeness to the walk reaching a short page.
+        # completeness to the walk reaching an EMPTY page.
         self._state_total = state_total
 
     def query(self, _table, **kw):
@@ -1007,8 +1007,9 @@ class _FakeControlPlane:
         moving window can serve a row twice and SKIP an original, yet still
         satisfy a stated total. It deliberately states no total, because the
         fake has no ``Content-Range``: completeness then rests on the walk
-        reaching a short page, which is the production fallback when a server
-        does not answer ``count=exact``.
+        reaching an EMPTY page, which is the production fallback when a server
+        does not answer ``count=exact``. A short page is NOT that signal — it is
+        a per-request cap (round 1's fail-open).
         """
         rows = self._rows
         last = None
@@ -1024,7 +1025,11 @@ class _FakeControlPlane:
 
 
 def _cap_rows():
-    return [{"id": f"org_{i}", "name": None}
+    # Zero-padded so STORAGE order is also `order="id"` order. Unpadded ids make
+    # `org_10` sort before `org_9`, so a fake that returns storage order is NOT
+    # an ordered server — the walk's keyset cursor requires the cursor column to
+    # be the sort key, and an out-of-order page must fail closed.
+    return [{"id": f"org_{i:06d}", "name": None}
             for i in range(ha._ORG_ENUMERATION_MAX_ROWS)]
 
 
@@ -1036,8 +1041,8 @@ class _FakeSweepSDK:
 def test_truncated_supabase_org_enumeration_fails_closed_for_the_cost_caller(monkeypatch):
     """#4493/#5388: ``query`` cannot distinguish a complete page from a
     truncated one, so a caller that needs the WHOLE fleet passes
-    ``require_complete=True`` and gets ``None`` when the page FILLS the limit
-    (a partial fleet must never prune orgs from the published metric).
+    ``require_complete=True`` and gets ``None`` whenever the walk cannot confirm
+    the fleet (a partial fleet must never prune orgs from the published metric).
 
     #5388: the truncation is now expressed the way a real server expresses it —
     a stated total LARGER than the rows it will serve — because "the page filled
@@ -1099,7 +1104,7 @@ def test_a_filled_page_is_still_returned_to_a_best_effort_caller(monkeypatch):
     rows = ha._iter_registered_orgs()
     assert rows is not None, "a best-effort caller must still get its page"
     assert len(rows) == ha._ORG_ENUMERATION_MAX_ROWS
-    assert rows[0] == {"org_id": "org_0", "name": None}
+    assert rows[0] == {"org_id": "org_000000", "name": None}
 
 
 def test_retention_sweep_processes_a_full_page_at_the_cap(monkeypatch):

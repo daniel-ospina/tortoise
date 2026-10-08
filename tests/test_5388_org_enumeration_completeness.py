@@ -377,6 +377,81 @@ class TestEndOfWalkSignals:
             "because a later page volunteered the remaining count"
         )
 
+    def test_an_unsorted_server_cannot_advance_the_cursor(self, monkeypatch):
+        """The cursor must be the page MAXIMUM, so `order` is enforced not assumed.
+
+        A server that filters by ``id > cursor`` but returns rows in another
+        order makes ``page[-1]`` a non-max id: the cursor jumps past ids that
+        were never served, they are excluded forever, and the walk still ends on
+        an empty page — so it reports COMPLETE and the destructive caller prunes
+        them. Nothing in the suite fed an unsorted server before this test.
+        """
+        stored = ["d", "a", "c", "b"]
+
+        class UnsortedCP:
+            def query_with_total(self, _table, **kw):
+                last = None
+                for col, op, val in (kw.get("filters") or []):
+                    if col == "id" and op == "gt":
+                        last = val
+                # Honours the cursor filter, IGNORES `order`. Rows must be DICTS
+                # (`r["id"]`): returning bare ids raises TypeError, which the
+                # caller's fail-soft handler swallows into `[]` — a green test
+                # that never reached the guard.
+                view = [{"id": i, "name": None} for i in stored
+                        if last is None or i > last]
+                return view[:2], None
+
+        assert _run(monkeypatch, UnsortedCP(), require_complete=True) is None, (
+            "an out-of-order page must fail closed, not certify a short fleet"
+        )
+
+    def test_a_zero_total_cannot_certify_a_page_cap_exit(self, monkeypatch):
+        """A stated total of 0 is the ABSENCE of a count, not an empty fleet.
+
+        Left as `len(seen) >= 0` it is vacuously true, so a page-cap exit is
+        reported COMPLETE with rows unserved.
+        """
+        from tortoise import hosted_api as _ha
+        n = (_ha._ORG_ENUMERATION_MAX_PAGES
+             * _ha._ORG_ENUMERATION_MAX_ROWS + 500)
+        ids = [f"o{i:06d}" for i in range(n)]
+
+        class ZeroCP(self._Server):
+            def query_with_total(self, table, **kw):
+                page, _ = super().query_with_total(table, **kw)
+                return page, 0  # an understating server
+
+        assert _run(monkeypatch, ZeroCP(ids), require_complete=True) is None, (
+            "total=0 must not satisfy the completeness check"
+        )
+
+    def test_a_walk_exception_is_unknown_not_an_empty_fleet(self, monkeypatch):
+        """An exception must NOT become ``[]`` for a completeness-demanding
+        caller.
+
+        ``_iter_registered_orgs`` wraps its whole body in a fail-soft
+        ``except``, and ``[]`` is indistinguishable from a genuinely empty
+        fleet — the destructive caller PRUNES every org when it sees one. So a
+        transient transport or schema error would wipe the whole metric, which
+        is the exact harm #5388 exists to prevent. `require_complete` defines
+        UNKNOWN as None, so the fail-soft path must honour that.
+
+        (Found by a fixture bug: a fake returned bare ids instead of row dicts,
+        the resulting TypeError was swallowed, and the test passed while never
+        reaching the guard. The fail-soft's own fail-open was the real defect.)
+        """
+
+        class ExplodingCP:
+            def query_with_total(self, _table, **kw):
+                raise RuntimeError("transient transport failure")
+
+        assert _run(monkeypatch, ExplodingCP(), require_complete=True) is None, (
+            "an unreadable fleet is UNKNOWN, never 'complete and empty'"
+        )
+        # A best-effort caller must still never be failed by a sweep.
+        assert _run(monkeypatch, ExplodingCP(), require_complete=False) == []
+
     def test_a_later_page_total_cannot_mask_a_shortfall(self, monkeypatch):
         """The fleet count is a CONSISTENCY CHECK, not just a label.
 
