@@ -187,8 +187,12 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
 export function capRevokeFirstClause(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   if (!a || !a.exhausted) return ''
-  // #5425: appended to four paste rejections, so it goes through the seam
-  // (which rstrips and terminates) rather than starting with a bare space.
-  return withLimitContact(
+  // #5425: routed through the seam, which rstrips its base and terminates it.
+  // The LEADING space is load-bearing and must be restored HERE, not at the call
+  // sites: all four concatenate this clause directly after a period-ended
+  // sentence (`'…create one here.' + capRevokeFirstClause(...)`), and the seam's
+  // rstrip would otherwise leave the customer reading "here.You are at…" — the
+  // exact malformed-prose class this seam exists to remove. Round 6 caught it.
+  return ' ' + withLimitContact(
     "You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one.")
 }

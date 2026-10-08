@@ -5903,7 +5903,14 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
           // #4639: carry the structured 402 for the banner's nudge gate.
-          setError({ message: typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.', status: res.status })
+          // #5425: the server's string detail carries the contact route, but
+          // THIS fallback did not — a non-string or absent detail (proxied /
+          // empty body) left the customer at a tier ceiling with no way to talk
+          // to us. The server's own copies of this sentence are routed, so this
+          // one was the only silent copy (round 6).
+          setError({ message: typeof b.detail === 'string'
+            ? b.detail
+            : withLimitContact('Invites require the Builder or Team tier — upgrade to invite members.'), status: res.status })
           setBusy(false)
           return
         }

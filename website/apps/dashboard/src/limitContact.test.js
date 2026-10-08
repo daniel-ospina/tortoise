@@ -64,6 +64,22 @@ test('#5425: every dashboard limit notice carries the human route', () => {
   }
 })
 
+test('#5425: the paste clause stays well-formed when CONCATENATED', () => {
+  // Round 6: `capRevokeFirstClause` is concatenated directly after a
+  // period-ended sentence at four main.jsx call sites —
+  // `'…create one here.' + capRevokeFirstClause(team, keys)` — so it must bring
+  // its OWN leading separator. Routing it through the seam alone stripped it and
+  // rendered "here.You are at…". Asserted on the JOINED text, because the
+  // builder in isolation looks well-formed either way.
+  const clause = capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }])
+  assert.ok(clause.startsWith(' '), `the clause must carry its own separator: ${JSON.stringify(clause)}`)
+  const joined = "Paste a key from this organization's API Keys tab, or create one here." + clause
+  assert.match(joined, /\.\s+You are at your plan's key limit/, joined)
+  assert.doesNotMatch(joined, /\.You are/, `malformed prose: ${joined}`)
+  // …and the contact route survives the join, at the very end.
+  assert.ok(joined.endsWith(LIMIT_CONTACT), joined)
+})
+
 test('#5425: a NOT-at-ceiling notice is left alone', () => {
   // The seam is for CUSTOMER CEILINGS. A nudge that is merely "close to" a
   // limit must not acquire a support address: the route is for someone who was
