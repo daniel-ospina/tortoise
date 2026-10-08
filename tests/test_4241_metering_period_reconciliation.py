@@ -47,10 +47,24 @@ class _FakeCP:
 
 
 def _patch(monkeypatch, cp, *, enabled=True):
+    """Install the fake control plane; return a list recording FETCHES.
+
+    The returned list exists because the registry-mode test claims the control
+    plane is not *reached for*, and `cp.calls` cannot see that: it records only
+    `.rpc` calls, so a `get_control_plane()` moved above the enabled check
+    would pass unnoticed (proved by mutation in review cycle 2).
+    """
     from tortoise import supabase_control as sc
 
+    fetches: list[int] = []
+
+    def _get_control_plane():
+        fetches.append(1)
+        return cp
+
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: enabled)
-    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+    monkeypatch.setattr(sc, "get_control_plane", _get_control_plane)
+    return fetches
 
 
 def test_caller_is_a_noop_when_supabase_is_disabled(monkeypatch):
@@ -60,11 +74,15 @@ def test_caller_is_a_noop_when_supabase_is_disabled(monkeypatch):
     swallows every Exception, so a raise-based sentinel would be vacuous.
     """
     cp = _FakeCP()
-    _patch(monkeypatch, cp, enabled=False)
+    fetches = _patch(monkeypatch, cp, enabled=False)
 
     ha._reconcile_metering_periods()
 
-    assert cp.calls == [], "registry mode must not fetch the control plane"
+    assert cp.calls == [], "registry mode must not call the repair RPC"
+    assert fetches == [], (
+        "registry mode must not fetch the control plane — asserting only on "
+        "cp.calls would pass with get_control_plane() hoisted above the "
+        "is_supabase_enabled() gate")
 
 
 def test_caller_invokes_the_repair_rpc(monkeypatch):
