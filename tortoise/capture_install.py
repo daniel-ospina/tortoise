@@ -303,6 +303,33 @@ VERDICT_FAILED = "failed"
 VERDICT_DISABLED = "disabled"
 
 
+def install_at_unix(value) -> float | None:
+    """Coerce an ``install_probe_{harness}`` state value to unix seconds.
+
+    The probe endpoint records ``datetime.now(UTC).isoformat()`` — an ISO-8601
+    **STRING** — so a caller wiring the floor to the recorded artifact must
+    convert first. This is that conversion, named rather than left implicit,
+    because passing the ISO string straight in as ``install_at`` raises
+    ``TypeError: unsupported operand type(s) for -: 'str' and 'float'``.
+
+    An absent or unparseable value returns ``None``, which the floor reports as
+    DISABLED — never as a FAILURE, and never as a pass.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def client_capture_floor_verdict(
     client_captured_at: float | None,
     client_captured_at_source: str | None,
@@ -316,9 +343,13 @@ def client_capture_floor_verdict(
     {``VERDICT_PASSED``, ``VERDICT_FAILED``, ``VERDICT_DISABLED``}. The reason
     is always a real string so a rejection can never be silent.
 
-    ``client_captured_at`` and ``install_at`` are BOTH unix seconds: the
-    client's own clock and the server-recorded install time (the
-    ``install_probe_{harness}`` instant written by the probe endpoint).
+    ``client_captured_at`` is unix seconds. ``install_at`` is ALSO unix
+    seconds — NOT the raw ``install_probe_{harness}`` state value, which is an
+    ISO-8601 string; pass that through :func:`install_at_unix` first. A
+    ``client_captured_at_source`` of ``None`` is deliberately NOT disabled: it
+    is the in-process recorder's shape (piece 12's row 1 — "none, the recorder
+    always has a clock"), and only the explicit ``'unknown'`` marks an admitted
+    backfill gap that must not count as a pass.
     """
     if client_captured_at is None:
         return VERDICT_DISABLED, (

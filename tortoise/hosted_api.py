@@ -11586,6 +11586,21 @@ class SessionRequest(BaseModel):
                 f"{sorted(_SESSION_CAPTURED_AT_SOURCE_VALUES)}")
         return v
 
+    # #3516 §B: reject a NON-FINITE instant at the boundary. Pydantic accepts
+    # inf/nan floats by default and `1e400` parses to `inf`, which the floor
+    # would then compare and PASS — a floor-pass on a value that is not a clock
+    # reading, exactly the falsifiability the closed source set exists to
+    # protect. It is also uninterpretable once stored (`json.dumps` emits
+    # non-standard `Infinity`, which a strict reader rejects).
+    @field_validator("client_captured_at")
+    @classmethod
+    def _validate_client_captured_at(cls, v):
+        if v is not None and not math.isfinite(v):
+            raise ValueError(
+                f"client_captured_at must be a finite unix timestamp, got {v!r} "
+                "— an inf/nan instant is not a clock reading")
+        return v
+
     # #2599: reject non-printable characters in machine_id/model (a newline
     # or control char in an opaque string can break dashboard display / JS
     # rendering). Printable-ASCII + common Unicode is allowed; null bytes,

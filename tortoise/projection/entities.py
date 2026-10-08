@@ -1506,6 +1506,23 @@ class _EntityHandlers:
         if lane is not None and _annotator_value_ok(lane):
             sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
             params["v_capture_lane"] = lane
+        # #3516 §B: the client-timestamp floor's inputs, with the SAME guard
+        # status as `capture_lane` above — no producer journals these yet, so
+        # this is a GUARD for the first journaling lane rather than a parity
+        # property that holds today. Without it a journal-only rebuild restores
+        # a Session whose floor reads DISABLED where live it was evaluable, and
+        # the two legs would disagree about the same session.
+        _cap_at = ev.get("client_captured_at")
+        if _cap_at is not None and _annotator_value_ok(_cap_at):
+            sets.append(
+                "s.client_captured_at=coalesce(s.client_captured_at, $v_client_captured_at)")
+            params["v_client_captured_at"] = _cap_at
+        _cap_src = ev.get("client_captured_at_source")
+        if _cap_src is not None and _annotator_value_ok(_cap_src):
+            sets.append(
+                "s.client_captured_at_source=coalesce(s.client_captured_at_source, "
+                "$v_client_captured_at_source)")
+            params["v_client_captured_at_source"] = _cap_src
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):

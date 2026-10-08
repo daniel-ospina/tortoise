@@ -845,7 +845,8 @@ def write_spool_entry(
     # so the marker itself never claims a lane it did not deliver, and note the
     # mechanism lives in the skip clause, not here. (#3516 §B review)
     if (prior and prior.get("content_digest") == new_digest
-            and prior.get("filed_key") and not lane_upgrade):
+            and prior.get("filed_key") and not lane_upgrade
+            and not stamp_upgrade):
         meta["filed_key"] = prior["filed_key"]
         prior_lane_delivered = prior.get("filed_lane")
         if prior_lane_delivered:
@@ -1186,7 +1187,8 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         })
         return
     if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
-            and meta.get("filed_lane") == meta.get("capture_lane")):
+            and meta.get("filed_lane") == meta.get("capture_lane")
+            and meta.get("filed_stamp") == meta.get("client_captured_at")):
         # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
         # content was delivered — not that the LANE was. An entry filed
         # lane-less and then upgraded must be re-posted, or the lane is
@@ -1245,6 +1247,12 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         payload["model"] = meta["model"]
     # The lane actually put on the wire — part of the CAS identity below.
     posted_lane = payload.get("capture_lane")
+    # #3516 §B: the client stamp is part of the posted identity for the SAME
+    # reason the lane is — it is metadata, not content — so an entry whose stamp
+    # appears (or is replaced) while a POST is in flight must not be cancelled
+    # by the CAS and stranded. `posted_stamp` is the value the 2xx actually
+    # carried; `None` means the wire carried no stamp at all.
+    posted_stamp = payload.get("client_captured_at")
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
@@ -1293,7 +1301,8 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         fresh = read_spool_meta(root, sid)
         if (fresh is not None
                 and content_digest(fresh_turns) == posted_digest
-                and fresh.get("capture_lane") == posted_lane):
+                and fresh.get("capture_lane") == posted_lane
+                and fresh.get("client_captured_at") == posted_stamp):
             fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
             # OMIT the key for a lane-less filing rather than writing `null`: the
             # TS leg's `readSpoolEntry` is a raw `JSON.parse`, so it would see
@@ -1304,6 +1313,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 fresh["filed_lane"] = posted_lane
             else:
                 fresh.pop("filed_lane", None)
+            # #3516 §B: record the stamp the 2xx actually carried, and OMIT the
+            # key (rather than writing `null`) when the wire carried none — the
+            # same cross-leg rule as `filed_lane` above, because the TS leg's
+            # `readSpoolEntry` is a raw `JSON.parse` whose strict `===` would
+            # otherwise see `null` where its own writer leaves `undefined` and
+            # re-POST a Python-filed entry.
+            if posted_stamp is not None:
+                fresh["filed_stamp"] = posted_stamp
+            else:
+                fresh.pop("filed_stamp", None)
             fresh["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0

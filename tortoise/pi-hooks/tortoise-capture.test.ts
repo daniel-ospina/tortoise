@@ -287,6 +287,84 @@ test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () 
   );
 });
 
+test("buildCapturePayload forwards the ENTRY's client stamp, and omits it when absent", () => {
+  // #3516 §B / #3515 piece 12: the stamp is the store-proven floor's INPUT.
+  // Two opposite bugs, both fatal to falsifiability: inventing an instant on a
+  // pre-#3516 entry makes the floor pass on nothing, and dropping one the entry
+  // carries makes the floor read DISABLED for a session that WAS stamped.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  const withStamp = buildCapturePayload({
+    ...base,
+    clientCapturedAt: 1234.5,
+    clientCapturedAtSource: "file_mtime",
+  });
+  assert.equal(withStamp.client_captured_at, 1234.5);
+  assert.equal(withStamp.client_captured_at_source, "file_mtime");
+  assert.ok(
+    !("client_captured_at" in buildCapturePayload(base)),
+    "a stamp-less entry was given an instant on the wire",
+  );
+  // A source must never ride the wire WITHOUT its instant — that is a
+  // provenance recorded for a timestamp that does not exist.
+  assert.ok(
+    !("client_captured_at_source" in
+      buildCapturePayload({ ...base, clientCapturedAtSource: "cli_observed" })),
+    "a source rode the wire without its instant",
+  );
+});
+
+test("the spooled stamp survives a drain, and a LATE stamp is re-delivered", async () => {
+  // #3516 §B. The stamp is METADATA, not content — exactly like the lane — so
+  // the filing marker must account for it. Otherwise a stamp that appears
+  // after a filing is stranded on the spool forever and the floor reads
+  // DISABLED for precisely the session the floor exists for. This mirrors
+  // `fix(capture): the drain CAS must include the lane`, the same defect the
+  // LANE field forced on this codebase.
+  const spool = tmpSpool();
+  const server = recordingServer();
+
+  // (1) filed with a lane but NO stamp.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-stamp", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(
+    !("client_captured_at" in (server.sessions.get("sess-stamp") ?? {})),
+    "a stamp-less entry was given an instant",
+  );
+
+  // (2) a byte-identical re-snapshot that DOES carry a stamp.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-stamp", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+    clientCapturedAt: 1234.5,
+    clientCapturedAtSource: "cli_observed",
+  });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(
+    server.posts(),
+    2,
+    "the stamped entry was SKIPPED — the stamp is stranded on the spool",
+  );
+  assert.equal(server.sessions.get("sess-stamp")?.client_captured_at, 1234.5);
+  assert.equal(
+    server.sessions.get("sess-stamp")?.client_captured_at_source,
+    "cli_observed",
+  );
+
+  // (3) and now the marker covers the stamp: a third flush is a no-op.
+  const third = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 3 });
+  assert.equal(third.attempted, 0, "the stamped entry re-posted forever");
+  assert.equal(server.posts(), 2);
+});
+
 test("sourceName is a basename only (never a full path)", () => {
   assert.equal(sourceName("/Users/x/.pi/agent/sessions/--p--/s.jsonl"), "s");
   assert.equal(sourceName(undefined), "pi");

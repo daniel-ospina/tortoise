@@ -14,6 +14,8 @@ own verdict — never that a helper was called.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -216,3 +218,93 @@ def test_spool_entry_without_a_stamp_has_none(tmp_path):
     meta = read_spool_meta(root, sid)
     assert "client_captured_at" not in meta
     assert "client_captured_at_source" not in meta
+
+
+def test_a_stamp_appearing_after_a_filing_is_re_delivered(tmp_path):
+    """The stamp is METADATA, not content — exactly like the lane — so an entry
+    already filed must be RE-POSTED when a stamp appears. Without this the
+    stamp is stranded on the spool forever and the floor reads DISABLED for
+    precisely the session the floor exists for. This is the same defect the
+    LANE field forced this codebase to fix (`fix(capture): the drain CAS must
+    include the lane`), and it is asserted on the WIRE — the payload actually
+    posted — not on the helper."""
+    from tortoise.capture_spool import (
+        PostOutcome,
+        Snapshot,
+        flush_spool,
+        write_spool_entry,
+    )
+
+    root = tmp_path / "spool"
+    sid = "3516-late-stamp"
+    turns = [{"role": "user", "content": "hi"}]
+    posted: list[dict] = []
+
+    def post(payload):
+        posted.append(payload)
+        return PostOutcome(ok=True, status=200, body={"session_id": sid})
+
+    # 1. filed with a lane but NO stamp.
+    write_spool_entry(root, Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        harness="claude", capture_lane="hook"))
+    flush_spool(root, post)
+    assert len(posted) == 1, posted
+    assert "client_captured_at" not in posted[0]
+
+    # 2. a byte-identical re-snapshot that DOES carry a stamp.
+    write_spool_entry(root, Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        harness="claude", capture_lane="hook",
+        client_captured_at=1234.5, client_captured_at_source="cli_observed"))
+    flush_spool(root, post)
+    assert len(posted) == 2, (
+        "the stamped entry was SKIPPED — the stamp is stranded on the spool")
+    assert posted[1]["client_captured_at"] == pytest.approx(1234.5)
+    assert posted[1]["client_captured_at_source"] == "cli_observed"
+
+    # 3. and now the filing marker covers the stamp: a third flush is a no-op.
+    flush_spool(root, post)
+    assert len(posted) == 2, (
+        "the stamped entry was re-posted forever — the marker never captured it")
+
+
+def test_non_finite_instant_is_refused_at_the_boundary():
+    """An inf/nan instant makes the floor PASS on a value that is not a clock
+    reading, and `1e400` parses to `inf`. Refused at the boundary."""
+    from tortoise.hosted_api import SessionRequest
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            SessionRequest(conversation=[{"role": "user", "content": "x"}],
+                           client_captured_at=bad,
+                           client_captured_at_source="cli_observed")
+
+
+def test_absent_source_passes_where_unknown_does_not():
+    """Deliberate, not an oversight. piece 12's row 1 gives the in-process
+    recorder 'none — the recorder always has a clock', so an ABSENT source is a
+    pass while the explicit 'unknown' is not. Pinned here so the distinction is
+    a recorded decision rather than an accident of the fall-through."""
+    assert client_capture_floor_verdict(
+        INSTALL + 1, None, INSTALL)[0] == VERDICT_PASSED
+    assert client_capture_floor_verdict(
+        INSTALL + 1, "unknown", INSTALL)[0] == VERDICT_DISABLED
+
+
+def test_install_probe_iso_string_is_coerced_not_passed_raw():
+    """The probe endpoint records an ISO-8601 STRING, so passing it straight in
+    as `install_at` would raise on the subtraction. The conversion is named and
+    an unparseable value degrades to DISABLED, never to a failure or a pass."""
+    from tortoise.capture_install import install_at_unix
+
+    iso = "2026-10-08T00:00:00+00:00"
+    assert install_at_unix(iso) == pytest.approx(
+        datetime.fromisoformat(iso).timestamp())
+    assert install_at_unix("1970-01-01T00:00:00Z") == pytest.approx(0.0)
+    assert install_at_unix(None) is None
+    assert install_at_unix("not-a-date") is None
+    # the coerced value is usable by the floor; the raw string is not.
+    assert client_capture_floor_verdict(
+        INSTALL + 1, "cli_observed", install_at_unix(iso))[0] in (
+            VERDICT_PASSED, VERDICT_FAILED)
