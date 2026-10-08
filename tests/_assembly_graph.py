@@ -261,10 +261,10 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
     token crowds + 2 dated golds + 30 unrelated fillers) over 87 sessions.
 
     MEASURED platform reality (pinned empirically, not asserted by design):
-    this FalkorDB fulltext returns score ties (0.0) for every match — the
-    result order is a deterministic-but-opaque internal order, NOT BM25
-    relevance — and the DEFAULT ask evidence keeps the first ~40 rows (the
-    pool-40 rerank depth).
+    this FalkorDB fulltext gives every tied row the SAME score, so the result
+    order is a deterministic-but-opaque internal order, NOT BM25 relevance —
+    and the DEFAULT ask evidence keeps the first ~40 rows (the pool-40 rerank
+    depth).
 
     #3095 update (post-#3018, `fix(retrieval): deterministic ranking order
     for a static store`): the pre-#3018 ranks were measured against an index

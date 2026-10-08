@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import stat
 import sys
 import threading
@@ -23,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests._signal_hygiene import harness_safe_sigalrm
 from tortoise.__main__ import main
 from tortoise.capture_consent import (
     CAPTURE_OPT_IN_ENV,
@@ -295,13 +295,13 @@ def test_a_fifo_at_the_notice_path_is_refused(tmp_path):
     def _stuck(signum, frame):
         raise AssertionError("the stamp write blocked on the fifo (no O_NONBLOCK)")
 
-    previous = signal.signal(signal.SIGALRM, _stuck)
-    signal.alarm(10)
-    try:
+    # #7655: write the alarm through `harness_safe_sigalrm`, not a bare
+    # `signal.alarm` — pytest-timeout's `signal` method shares `ITIMER_REAL`
+    # with the code under test, so `signal.alarm(0)` in a `finally` silently
+    # disarms the per-test guard for the rest of the test. The helper saves and
+    # restores the harness handler AND timer.
+    with harness_safe_sigalrm(10, _stuck):
         mark_capture_notice_shown(tmp_path)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
     assert stat.S_ISFIFO(stamp.lstat().st_mode)
 
 

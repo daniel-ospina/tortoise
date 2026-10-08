@@ -326,9 +326,9 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
     """R9 geometry calibration (Task 1): the pool-depth discriminator, pinned
     NOW (Task 7 is forbidden from editing the substrate).
 
-    Measured platform truth: this FalkorDB fulltext scores ties (0.0) — the
-    result order is a deterministic internal order, not BM25 — and DEFAULT
-    evidence keeps the first ~40 rows.
+    Measured platform truth: this FalkorDB fulltext scores every tied row
+    alike — the result order is a deterministic internal order, not BM25 — and
+    DEFAULT evidence keeps the first ~40 rows.
 
     #3095 RE-MEASUREMENT (post-#3018, `fix(retrieval): deterministic ranking
     order for a static store`): the pre-#3018 calibration had pDeepG1
