@@ -1932,6 +1932,21 @@ def _write_capture_turns(
     ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
     persists. Both lanes surface it on their capture receipt.
     """
+    # #7369 review r8: this writer holds the ONE ``UNWIND $turns`` statement,
+    # whose rows MERGE on a ROW FIELD (``MERGE (t:Point {id: turn.id})``). The
+    # parameter boundary deliberately does NOT null a row merge key — a null key
+    # is refused by the engine, so nulling it would swap one abort for another —
+    # which means the FOLD owns the skip, exactly as the top-level identity
+    # anchors do via ``_writable_id``. Every row id is derived from
+    # ``session_id`` (``_capture_turn_id`` → ``f"{session_id}_t{i}"``), so an
+    # unwritable ``session_id`` makes EVERY row id unwritable: skip the whole
+    # batch, WARN, and issue no statement. With this, no unwritable ROW merge
+    # key can reach the engine from this writer (see `tests/...boundary.py`,
+    # `test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded`).
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(session_id):
+        _log_identity_skip("capture turn batch", session_id, "session id")
+        return 0
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
     else:
@@ -3079,6 +3094,25 @@ def _capture_resp_error_split(errors: list[str]) -> tuple[list[str], list[str]]:
     own headline AND its own diagnostic (fail-safe — never hidden)."""
     return ([_capture_error_to_human(e) for e in errors],
             list(errors))
+
+
+def _attach_source_change_notices(resp: dict, meta: dict) -> None:
+    """#5516: surface a capture's write-time source-change notices on its receipt.
+
+    The v2 point loop discards each ``create_point`` result, so the notices it
+    produced are aggregated into ``meta["source_change_notices"]``; both capture
+    lanes call this to put them on the receipt the WRITER sees (otherwise the
+    notice would be written-but-unread — the #4041 class).
+
+    Additive by contract: the key is present ONLY when a Source actually
+    changed, so an ordinary capture's receipt is unchanged. ONE home for the
+    condition — the SDK and hosted receipts are kept byte-identical by
+    contract, and duplicating the ``if`` in each is exactly how such a mirror
+    rots silently.
+    """
+    notices = (meta or {}).get("source_change_notices")
+    if notices:
+        resp["source_change_notices"] = notices
 
 
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
@@ -4443,6 +4477,68 @@ class TortoiseSDK:
         from tortoise.exceptions import EmbeddedStoreBusyError
         raise EmbeddedStoreBusyError(db_path, pid)
 
+    def _graph_write_with_retry(self, fn, *, what: str):
+        """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
+
+        A rebuild/replace aborts an IN-FLIGHT query with
+        ``ResponseError("graph was deleted or replaced while the query was
+        running, aborting")``. Measured against THIS client (``falkordb``), that
+        abort is a **per-query race, not a poisoned handle**: ``Graph`` is
+        stateless — it holds only ``name`` + ``execute_command`` and re-issues
+        ``GRAPH.QUERY <name>`` on every call — so the SAME cached handle and
+        client succeed on a plain re-issue (reviewer reproduced: abort, then
+        retry on the same handle, one write, no duplicate). No re-resolution is
+        needed, and an earlier ``on_retry`` cache-drop was REMOVED: it rebuilt
+        the whole ``FalkorProjection`` (connection pool + embedding warm-up) for
+        nothing, and its test assertion held with or without the drop.
+
+        What this buys, stated honestly: a rebuild window of roughly 7-14 s now
+        heals in place (``base=2.0``, 3 retries). The window #7405 measured
+        lasted **over an hour**, and no bounded retry should wait that long — so
+        on exhaustion the original error still surfaces, **unchanged in type**.
+
+        ``retryable_aborted_write`` re-raises anything it does not recognise, so
+        a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
+        retried and never wrapped in the sentinel.
+
+        Retry budget (#7405 P2-2). This inner loop owns the write refusals
+        (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
+        is the ONLY retry for a replaced graph — ``retryable_transient`` (the
+        eval's outer phase predicate) deliberately does not carry that arm, so a
+        graph-replaced error is not multiplied 3x4. MISCONF IS still in the outer
+        predicate (it predates #7405 and the eval's UNWRAPPED direct writes rely
+        on the outer loop), so a MISCONF on a ``create_point`` write may nest;
+        the outer loop engages only once this inner loop EXHAUSTS, bounding it at
+        4 inner x 3 outer attempts (12).
+
+        Observability (#7405 P1-1): the retry count is accumulated in
+        ``self._graph_write_retry_count`` (private, monotonic) so a caller that
+        measures retry behaviour — the eval's ``ingest_retries`` Layer-1 outcome
+        — can observe a retry that happened INSIDE the SDK, not only the outer
+        phase retry.
+        """
+        from .retry import (
+            WriteStageRetriesExhausted,
+            call_with_predicate,
+            retryable_aborted_write,
+        )
+
+        def _note_retry(_exc: BaseException) -> None:
+            self._graph_write_retry_count = getattr(
+                self, "_graph_write_retry_count", 0) + 1
+
+        try:
+            return call_with_predicate(
+                fn, predicate=retryable_aborted_write, retries=3,
+                what=what, base=2.0, cap=8.0, on_retry=_note_retry)
+        except WriteStageRetriesExhausted as exc:
+            # UNWRAP. The sentinel exists for the eval lane's R2 whole-question
+            # marker, not for create_point's contract: surface the ORIGINAL error,
+            # whose TYPE callers depend on — `_classify_db_failure` buckets the
+            # redis family as "db" and anything else as "structural", so a new
+            # wrapper type would silently misbucket every exhausted write.
+            raise (exc.__cause__ or exc) from None
+
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
             # Resolve the URI's own graph name first (used as the fallback
@@ -5327,7 +5423,12 @@ class TortoiseSDK:
         # legacy `outdated` flag prop (#2491), so `status` is the complete
         # born-terminal surface.
         _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
-        _epv = self._advance_ep_version(proj)
+        # THE FIRST WRITE in this method is `_advance_ep_version`, which stamps the
+        # epoch the CREATE below reuses — so an aborted write fails THERE, and
+        # wrapping only the CREATE would leave this path unretried, making the
+        # retry dead code in the failure mode it targets (#7405 review P0). Both
+        # writes therefore go through the helper, on the same (stateless) handle.
+        _epv = self._advance_ep_version()
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
                                 "now": now, "embedding": embedding,
                                 "_epv": _epv}
@@ -5367,6 +5468,29 @@ class TortoiseSDK:
             _source_versions = resolve_source_versions(
                 proj.g, props["extractedFrom"])
             _source_version_sv = _source_version_transit(_source_versions)
+        # #5516: the write-time notice that the Source being written against has
+        # changed since it was last read. Computed HERE, BEFORE the new Point's
+        # `extractedFrom` edge is stamped below, so the comparison reads the
+        # PRIOR recorded read version (`r.sourceVersion`, #5256) rather than the
+        # version this very write is about to record. It never blocks or fails
+        # the write — a broken notice read is logged and dropped (the advisory
+        # contract). It is a READ over the recorded links; the only side effect
+        # is `resolve_source_key`'s idempotent adopt-on-touch, and
+        # `resolve_source_versions` above already ran the identical resolution
+        # for these refs, so no NEW write occurs here (see the helper docstring).
+        # The notice rides the write RESULT only; it is never a node property and
+        # is never journaled.
+        _source_change_notices: list[dict] = []
+        if props.get("extractedFrom"):
+            try:
+                from .projection.edges import source_change_notices
+                _source_change_notices = source_change_notices(
+                    proj.g, props["extractedFrom"], _source_versions)
+            except Exception:  # noqa: BLE001, RUF100 — advisory only
+                _logger.warning(
+                    "create_point: source-change notice read failed — "
+                    "continuing without a notice (#5516)", exc_info=True)
+                _source_change_notices = []
         _create_map: dict[str, str] = {
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
@@ -5448,10 +5572,17 @@ class TortoiseSDK:
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
-        proj.g.query(
-            "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-            params=_create_params,
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                params=_create_params,
+            ),
+            what="create_point CREATE(:Point)",
         )
+        # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+        # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+        # a per-query race and `proj` is as valid after a retry as before it
+        # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):
@@ -5520,9 +5651,17 @@ class TortoiseSDK:
                          pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        _snapshot = self.get_point(pid)
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
-                         point=self.get_point(pid))
-        return self.get_point(pid)
+                         point=_snapshot)
+        if _source_change_notices:
+            # #5516: the notice is TRANSIENT — it rides the write result the
+            # writer sees, on a COPY, so the journaled snapshot above and every
+            # later `get_point` stay free of it. Present only when a Source
+            # actually changed: an unchanged-source write's result is byte-
+            # identical to before this feature.
+            return {**_snapshot, "source_change_notices": _source_change_notices}
+        return _snapshot
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
@@ -6653,6 +6792,10 @@ class TortoiseSDK:
         # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
             resp["extraction_provider"] = meta.get("provider")
+        # #5516: the write-time notice that a fact was written against a Source
+        # whose recorded read version is no longer current (shared with the
+        # hosted receipt via the ONE home, so the two cannot drift).
+        _attach_source_change_notices(resp, meta)
         # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
         # capture write path (after provenance stamp + operators wired) the
         # extracted claims are promoted draft→live and the BOUNDED ingest EP
@@ -7084,6 +7227,13 @@ class TortoiseSDK:
         errors = [e if isinstance(e, str) else f"{type(e).__name__}: {e}"
                   for e in (out.get("errors") or [])]
         warnings = list(out.get("warnings") or [])
+        # #5516: the write-time source-change notices produced by THIS capture's
+        # point writes. Aggregated here (a dict key, not a warning string) so the
+        # capture RECEIPT carries the structured notice — otherwise the notice
+        # reaches only `create_point`'s own return and the per-point write result
+        # is discarded, i.e. the #4041 "written-but-unread" class the issue
+        # names. Additive: absent (not []) on every receipt that produced none.
+        source_change_notices: list[dict] = []
         proj = self._get_proj()
 
         # ── entities ──
@@ -7285,7 +7435,7 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
-                    self.create_point(
+                    _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
                         is_episodic=False, status="draft",
@@ -7302,6 +7452,12 @@ class TortoiseSDK:
                         # that whitelist, so the response never advertises it.
                         **create_props,
                     )
+                    # #5516: a fresh create may have found the session Source
+                    # changed since it was last read — carry its notice to the
+                    # capture receipt. A dedup hit (the other branch) writes no
+                    # edge, so it contributes nothing.
+                    source_change_notices.extend(
+                        _created.get("source_change_notices") or [])
                 pid = resolved
                 # #4716 Part 1: remember which graph id this payload id
                 # resolved to (identity on a fresh create) — the remap source
@@ -7675,6 +7831,9 @@ class TortoiseSDK:
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.
             "error_census": out.get("error_census") or {},
+            # #5516: this capture's write-time source-change notices — the
+            # capture RECEIPT is the write result its caller sees.
+            "source_change_notices": source_change_notices,
         }
         return extracted, meta
 
@@ -14282,7 +14441,7 @@ class TortoiseSDK:
             claim_ids = [r[0] for r in rows]
         return op_ids, claim_ids
 
-    def _advance_ep_version(self, proj) -> int:
+    def _advance_ep_version(self) -> int:
         """Advance the graph-wide EP epoch and return the new value (#1163).
 
         Split out of :meth:`_mark_dirty` (#2952) so a create path can stamp
@@ -14290,11 +14449,15 @@ class TortoiseSDK:
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
         """
-        rows = proj.g.query(
-            "MERGE (m:EpMeta) "
-            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-            "RETURN m.ep_version"
-        ).result_set
+        proj = self._get_proj()
+        rows = self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MERGE (m:EpMeta) "
+                "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+                "RETURN m.ep_version"
+            ).result_set,
+            what="_advance_ep_version MERGE(:EpMeta)",
+        )
         return int(rows[0][0]) if rows else 1
 
     def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
@@ -14343,7 +14506,7 @@ class TortoiseSDK:
         # guard's discriminator). A caller that already advanced it (a CREATE
         # that stamped ep_dirty_at inline) passes the value in.
         if ep_version is None:
-            ep_version = self._advance_ep_version(proj)
+            ep_version = self._advance_ep_version()
         # Operators targeting the mutated points, then the claims those
         # operators target (shared 1-hop reverse-BFS — delete_point's
         # pre-delete neighbor capture uses the same helper, #1916).

@@ -1239,52 +1239,23 @@ Rolling liveness record for the out-of-band availability pager (#4573). Written 
 # Python toolchain and `tortoise/notify.py` imports httpx at module level, so
 # importing the shared sender would add a dependency + supply-chain surface to
 # the one job whose whole value is that it sits OUTSIDE the app's failure
-# domain. Status-only was not enough: a misconfigured chat id answers
+# domain.
+# #4574 item 1 (landed by #2240): the shell driver is now the SHARED file
+# `.github/scripts/telegram-send.sh`, so the contract has one implementation
+# instead of one per monitor. This wrapper is what keeps the monitor's own
+# logging and redaction semantics — it hands the sender its `warn` logger, its
+# `scrub_output` redactor and its page text already redacted by `redact_text`
+# (a page carries the probe URL, flyctl's echoed output and, inside curl's URL,
+# the bot token: same publication boundary as the issue helpers).
+# Status-only was not enough: a misconfigured chat id answers
 # `200 {"ok":false,"description":"chat not found"}`, which would have been
-# recorded as a delivered page — the fail-open this contract closes.
+# recorded as a delivered page — the fail-open that contract closes.
 # Returns 0 only when a human actually received the message.
+TELEGRAM_SEND_LIB_ONLY=1 . "$(dirname "${BASH_SOURCE[0]}")/telegram-send.sh"
+
 telegram_send() { # <chat_id> <text>
-  local chat="$1" text body_file err resp
-  if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$chat" ]; then
-    warn "telegram send skipped — TELEGRAM_BOT_TOKEN and the escalation chat are both required (a page must be addressed and signed)"
-    return 1
-  fi
-  # Same publication boundary as the issue helpers: a page carries the probe
-  # URL, flyctl's echoed output and (inside curl's URL) the bot token.
-  text="$(redact_text "$2")"
-  # Round 4, P3-7: `--fail-with-body` makes an HTTP 4xx a failure, but
-  # `-o /dev/null` THREW AWAY Telegram's own error JSON — the actionable
-  # `description` ("chat not found", "Unauthorized") never reached the log,
-  # only curl's opaque `(22) ... error: 400`. Capture the body to a file and
-  # surface it through scrub_output (which already covers the token) so a dead
-  # paging channel is diagnosable from the public run log.
-  body_file="$RUN_TMP/telegram-body.json"
-  : > "$body_file"
-  # The bot token is IN THE URL, and curl echoes the URL in its error text —
-  # which would land in a PUBLIC Actions log. Capture stderr and redact the
-  # token before logging.
-  if ! err="$(curl -sS --fail-with-body --max-time 15 -o "$body_file" \
-      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      --data-urlencode "chat_id=${chat}" \
-      --data-urlencode "text=$text" 2>&1)"; then
-    resp="$(scrub_output "$(cat "$body_file" 2>/dev/null || true)" 200)"
-    if [ -n "$resp" ]; then
-      warn "telegram page failed: $(scrub_output "$err" 200) — api response: ${resp}"
-    else
-      warn "telegram page failed: $(scrub_output "$err" 200)"
-    fi
-    return 1
-  fi
-  # A 2xx is NOT delivery. Telegram answers `{"ok":false,"description":"..."}`
-  # for a bad chat id / a bot removed from the chat, and `--fail-with-body`
-  # passes that through with exit 0. The API's own verdict is the authority
-  # (same rule as tortoise/telegram_push.py).
-  if ! jq -e '.ok == true' "$body_file" >/dev/null 2>&1; then
-    resp="$(scrub_output "$(cat "$body_file" 2>/dev/null || true)" 200)"
-    warn "telegram page REJECTED by the API (HTTP 2xx but ok != true) — api response: ${resp:-<empty>}"
-    return 1
-  fi
-  return 0
+  TG_WARN_FN=warn TG_SCRUB_FN=scrub_output \
+    tg_send "$1" "$(redact_text "${2:-}")"
 }
 
 # Best-effort wrapper — the EXISTING contract of the 6 transition/restart page

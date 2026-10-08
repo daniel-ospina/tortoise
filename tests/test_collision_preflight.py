@@ -756,6 +756,242 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
+    def test_advisory_surface_cannot_refuse_a_number_that_is_the_issue(self):
+        """An ADVISORY surface must never be able to force exit 2 (#7009).
+
+        The advisory closed-PR sample's elements are whatever the payload
+        returned, and `_pr_terminal_state` accepts a NON-TERMINAL `state` — so an
+        UNSCOPED number==issue refusal raised `NotAWorkItem` from the ADVISORY
+        scan too: a surface with no authority to block stopped a dispatch with
+        exit 2, stderr only and no report at all.
+
+        `test_closed_pr_own_number_is_weak_not_blocking` structurally could not
+        catch it. It does put a number==issue PR on the advisory surface, but its
+        fixture omits `state`, which `gh_fixtures` normalizes to "closed" — i.e.
+        TERMINAL — so the guard's `terminal is None` clause was False and the
+        number clause never decided. This test is that same shape with the state
+        made non-terminal: the one value that reaches the guard, and therefore the
+        only shape that pins the scoping.
+
+        Measured 2026-10-07: it fails against the PRE-FIX tool (`origin/main`, exit
+        2, "is an OPEN PULL REQUEST") and passes here. It also passes against the
+        intermediate tool that scoped on `use_closing_field` instead of
+        `surface.authority` — those two are behaviourally identical at the
+        production call sites, so this test pins that SOME scope exists.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "body": "restored in #3061", "state": "OPEN",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        # The hit is still REPORTED — an advisory surface reports, it just cannot
+        # block — and the verdict stays CLEAN at exit 0.
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("PR number == issue (3061)", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The pre-fix symptom, pinned by its exact text: the refusal must not be
+        # reachable from the CLOSED sample.
+        self.assertNotIn("is an OPEN PULL REQUEST", out)
+
+    def test_blocking_surface_without_the_closing_field_reports_it_unread(self):
+        """A BLOCKING surface that never requested the closing field must not
+        claim the PR "names no closing issue".
+
+        The refusal guard keys on `surface.authority` (may this surface refuse?)
+        while the closing-reference read keys on `use_closing_field` (did the
+        CALLER request the field?). Those are different questions, and this is the
+        only shape where they diverge: authority BLOCKING with the field not
+        requested. `linked` stays empty but `unreadable` is True, so the message
+        says the field could not be read instead of asserting contents the tool
+        never looked at.
+
+        No production call site reaches this arm today — which is exactly why it
+        needs a test. A branch already shipped in this PR unpinned (the
+        `use_closing_field` scoping at `48ceaca5a`), and a defence that no test
+        exercises can be deleted without anything going red: mutation confirmed a
+        hard `raise` substituted for this arm left the whole suite green.
+        """
+        cp = _tool_module()
+        surface = cp.Surface("open PRs", authority=cp.AUTHORITY_BLOCKING)
+        pr = {
+            "number": 3061, "state": "open", "title": "fix(scanner): something",
+            "headRefName": "fix/3061-something", "body": "",
+        }
+        with self.assertRaises(cp.NotAWorkItem) as caught:
+            cp.scan_pr_surface(surface, [pr], 3061, cp.Identity(),
+                               use_closing_field=False)
+        message = str(caught.exception)
+        # The refusal still happens — the arm changes only what it CLAIMS.
+        self.assertIn("is an OPEN PULL REQUEST", message)
+        self.assertIn("closing-reference field could not be read", message)
+        # The present-and-empty wording belongs to a field that was READ.
+        self.assertNotIn("It names no closing issue", message)
+
+    def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
+        """An OPEN PR's number is not a work item — the run must refuse (#7009).
+
+        The test above pins `CLEAN` for a TERMINAL PR, and both answers are
+        correct: a merged/closed PR is immutable history, while an OPEN PR names
+        a live work item whose ownership its own number says nothing about.
+
+        Measured 2026-10-06: with the self-match filed as a `weak` hit,
+        `collision_preflight.py <open-PR-number>` returned `CLEAN (exit 0)` for a
+        PR whose issue was held on FOUR surfaces at once. Exit 0 is this
+        protocol's instruction to DISPATCH, so the fail-closed tool was
+        authorising a dispatch onto held work — the failure the whole pre-flight
+        exists to prevent (#3061). Note the polarity history: #7009's original
+        symptom was the same input read as COLLISION (fail-CLOSED, lost
+        throughput, nothing duplicated); once the self-match was downgraded to
+        `weak` it became fail-OPEN.
+
+        Exit 2 is pinned deliberately rather than 1: it is the protocol's own
+        "could not be completed — do not start on a guess" verdict, so the
+        refusal lands in a channel lanes already know how to obey.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        # The REMEDY text is part of the contract and nothing pinned it: mutation
+        # showed restoring the old hardcoded "Re-run against the issue number
+        # (#7009)." left every refusal test green.
+        self.assertIn("Re-run with the issue number", out)
+        self.assertNotIn("#7009", out)
+        # The refusal is delivered on STDERR WITH NO REPORT: `main()` prints it
+        # and returns before `format_report` runs. Pin the WHOLE guarantee, not
+        # just "not CLEAN": the module docstring and AGENTS.md both promise a
+        # caller that keys its remedy on `VERDICT: INCOMPLETE` that this cause
+        # emits NO `VERDICT` line at all, and `assertNotIn("VERDICT: CLEAN")`
+        # alone would pass a regression that ended the refusal in
+        # `VERDICT: INCOMPLETE` — still exit 2, but now mis-remedied as a
+        # broken surface ("fix gh auth/network") instead of "re-run with the
+        # issue number". The two causes must stay distinguishable.
+        self.assertNotIn("VERDICT", out)
+        # The refusal names the number it refused. This does NOT distinguish a
+        # targeted refusal from a blanket one — the number is in the message by
+        # construction, as is "is an OPEN PULL REQUEST". What it does catch is a
+        # regression that drops the number from the message.
+        self.assertIn("#3061", out)
+
+    def test_open_pr_own_number_REFUSES_even_when_its_branch_is_the_callers(self):
+        """The refusal must not be suppressible by the caller's OWN branch (#7009).
+
+        Regression for the fail-open found in review. The self/ownership check
+        ran FIRST and `continue`d, so when the open PR's head branch was also one
+        of `--self-branch` the self-arm matched, filed a `weak` hit, and the run
+        fell through to `VERDICT: CLEAN` (exit 0) — a refusal the caller's own
+        branch could suppress.
+
+        That is not an exotic input: `main()` auto-declares the current branch
+        for the documented `--repo .` invocation, so the case that broke was the
+        PR belonging to the lane RUNNING the gate — exactly the #7477 shape that
+        motivated the change. Measured before this fix, both via `--self-branch
+        <PR head>` and via auto-detect: RC=0, `CLEAN`, refusal absent.
+
+        Declaring the branch is how the tool models auto-detect here: both paths
+        reach the same `identity.owns_branch` predicate, so pinning the declared
+        form pins the mechanism (an auto-detect test would only re-assert that
+        `main()` populates the same set).
+
+        The refusal is an INPUT-VALIDITY test, not a match test, so the
+        "self before match" ordering (#4567) does not apply to it.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool(
+            self_branches=("fix/2712-pin-preflight-test",))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        # No `VERDICT` line at all — see the sibling test for why "not CLEAN"
+        # is too weak a pin (it would let `VERDICT: INCOMPLETE` through).
+        self.assertNotIn("VERDICT", out)
+        # Names the object it refused — see the sibling test for what this
+        # assertion does and does not prove.
+        self.assertIn("#3061", out)
+
+    def test_open_pr_own_number_with_UNREADABLE_closing_field_still_refuses(self):
+        """The refusal must survive a malformed closing-reference field (#7009).
+
+        Regression for a guard that could not fire in CI. `_closing_ref_numbers`
+        raises `SurfaceError` on an absent/malformed `closingIssuesReferences`, and
+        it is evaluated to DECORATE the refusal message — so without the guard the
+        open-PR handler absorbs that error and the run reports a MISLABELLED broken
+        surface (`closing-reference-source-unavailable … fix gh auth/network`)
+        instead of the refusal. That remedy is unrelated to the problem and no
+        amount of retrying resolves it.
+
+        No other test reaches this path: the only open-PR fixture whose number ==
+        the issue carries the field, and the existing deleted-field test uses a
+        different number, so block 0 never runs. Reaching it at all requires
+        DELETING the key after `gh_fixtures`, which normalizes it in — a draft of
+        this test that omitted it was VACUOUS: the field was present-and-empty,
+        the guard never ran, and the test stayed green against a guard-removed
+        copy (measured).
+
+        It also pins the SECOND fix here: the message must not assert "it names no
+        closing issue" for a field that was merely UNREADABLE. A wrong reason for a
+        right decision is the defect class this whole change is about.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "no closing reference in this body", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        # The harness normalizes `closingIssuesReferences` IN (setdefault, ~20
+        # call sites) so no call site can forget it, which means the key must be
+        # DELETED explicitly to reach the guard at all — exactly as
+        # `test_missing_closing_reference_field_is_incomplete_not_clean` does.
+        # Without this the field is present-and-empty, `_closing_ref_numbers`
+        # never raises, and the guard can be deleted with the test still green.
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["closingIssuesReferences"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertNotIn("fix gh auth/network", out)
+        # No report at all — the same contract the sibling refusal tests pin.
+        self.assertNotIn("VERDICT", out)
+        # The REASON must not assert a fact the tool cannot know. The field was
+        # UNREADABLE, not absent, so "It names no closing issue" is false — a
+        # wrong reason for a right decision, the defect class this change is
+        # about. The corrected message names the unreadable field instead.
+        self.assertIn("could not be read", out)
+        self.assertNotIn("It names no closing issue", out)
+
+    def test_open_pr_own_number_with_a_closing_reference_names_it(self):
+        """The linked arm of the refusal message is exercised (#7009).
+
+        The message's `where` clause has three arms — a NAMED linked issue, an
+        UNREADABLE field, and a field that names nothing. The last two are pinned
+        by their own tests; without this one the linked arm would be unpinned,
+        and that arm is the one most pull requests hit (this repo puts
+        `Closes #N` in the body). TWO linked issues, deliberately: with one, the
+        `", ".join` separator is unexercised, so a regression in it would leave
+        this test green (measured — `" and "` passed a single-issue version).
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 3061, "title": "fix(battery): restore the pin test",
+            "body": "Closes #999, closes #1000.", "state": "open",
+            "headRefName": "fix/2712-pin-preflight-test",
+            "closingIssuesReferences": [{"number": 999}, {"number": 1000}],
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        self.assertIn("It closes #999, #1000.", out)
+        self.assertNotIn("VERDICT", out)
+
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
         # make — and on a TERMINAL PR it is still history, not in-flight work.
@@ -2169,10 +2405,16 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("closingIssuesReferences", hits_block)
 
     def test_pr_that_is_the_issue_is_decided_before_any_match_test(self):
-        # The OTHER ordering arm (#4567). A PR whose NUMBER is the issue is that
-        # issue's own PR, not separate in-flight work — and it must be decided
-        # before any match test, so an undeclared head branch does not turn it
-        # into a COLLISION.
+        # A PR whose NUMBER is the issue is ambiguous input: the number names BOTH
+        # an open PR and the issue, and the tool cannot tell which object the
+        # caller meant. It must therefore NOT answer CLEAN — exit 0 is this
+        # protocol's instruction to DISPATCH, so a silent CLEAN authorises
+        # starting work the PR may already belong to (the #7009 fail-open).
+        #
+        # It is still decided BEFORE any match test, which is the ordering this
+        # test exists for (#4567): an undeclared head branch must not turn it into
+        # a COLLISION. Exit 2 is neither CLEAN nor COLLISION — it is "could not be
+        # completed, do not start on a guess" — so both properties hold at once.
         self.gh_fixtures(open_prs=[{
             "number": ISSUE, "title": f"feat: do the thing (#{ISSUE})",
             "body": f"Closes #{ISSUE}",
@@ -2181,11 +2423,23 @@ class CollisionPreflightTest(unittest.TestCase):
             "closingIssuesReferences": [{"number": ISSUE}],
         }])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("*is* the issue", out)
-        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
-        self.assertNotIn("matched issue-number", hits_block)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
+        # The ordering property this test exists for (#4567) is pinned by
+        # `rc == 2` alone. The old `HITS`-block assertions were removed after
+        # review found them VACUOUS: the refusal never calls `format_report`, so
+        # there is no report to inspect and those `assertNotIn`s could not fail
+        # once `assertEqual(rc, 2)` passed. The earlier comment here claimed the
+        # refusal "short-circuits before any surface is scanned" — also false:
+        # the issue surface is queried first; only the PR loop refuses.
+        #
+        # The ONE non-vacuous assertion at this seam is the ABSENCE of a
+        # `VERDICT` line: the documented promise is that this cause emits no
+        # report at all (stderr only), which is precisely what makes a caller
+        # that keys its remedy on `VERDICT: INCOMPLETE` miss it. "not CLEAN"
+        # would pass a regression ending in `VERDICT: INCOMPLETE` (still exit
+        # 2) — the exact mis-remedy the distinction exists to prevent.
+        self.assertNotIn("VERDICT", out)
 
     def test_found_clone_is_not_the_callers_checkout(self):
         # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
@@ -4635,6 +4889,246 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("CLEAN p<0.50", out)
         self.assertIn("COLLISION p>=0.70", out)
         self.assertIn("COLLISION-uncertain", out)
+
+
+class BranchTerminalLookupTests(unittest.TestCase):
+    """#5485: the TARGETED terminal lookup, and the two arms that close the gap.
+
+    Why it exists: every terminal test in the tool read data already in hand, so
+    a squash-merge older than `CLOSED_PR_LIMIT` (100) was invisible — and
+    `refs/heads/fix/6134-6146-6151-graph-correctness` therefore blocked #6151
+    permanently, because its PR #6156 merged 2026-09-28 (measured 2026-10-06).
+    The branch had 1 commit ahead of main, 0 worktrees, no open PR, and no
+    assignee: it was the one row the priority stack labels UNHELD, held by
+    nothing but a stale ref.
+    """
+
+    SHA = "adcfedc4221329a0f5ae9079248b3b0261134a73"
+    PR_HEAD = "a749c662d075a5dc0c96560b21b784578e5c1d63"
+    MAIN_TIP = "b9c1a1323000000000000000000000000000000000"
+    BRANCH = "refs/heads/fix/6134-6146-6151-graph-correctness"
+    SHORT = "fix/6134-6146-6151-graph-correctness"
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "collision_preflight.py"
+        spec = importlib.util.spec_from_file_location("cp_under_test", path)
+        cls.mod = importlib.util.module_from_spec(spec)
+        sys.modules["cp_under_test"] = cls.mod
+        spec.loader.exec_module(cls.mod)
+
+    def _call(self, prs, status="ahead", sha=None, main_tip=None, raises=False,
+              first_parent=None, ancestor_merged=frozenset(), branch=None):
+        """Drive the real function with `_gh_json` stubbed at the boundary.
+
+        `ancestor_merged` defaults to an EMPTY frozen set, i.e. "the `--merged`
+        walk RAN and this ref was not in it" — the ordinary production state.
+        `None` is the different, deliberate state where that walk could NOT run,
+        and the function must then refuse the demotion (fail-closed); pass it
+        explicitly to pin that arm. (`frozenset()` rather than `set()` only to
+        avoid a mutable default.)
+
+        The stub records every `args` list it is called with (`self.seen`) so a
+        test can pin the REQUEST, not just the response: a projection or filter
+        regression would otherwise make these arms silently inert while every
+        response-shaped assertion still passed (the class PR #5595's cycle 1
+        raised on this same file).
+        """
+        self.seen = []
+
+        def fake(_gh, args, _cwd, _timeout):
+            self.seen.append(list(args))
+            if raises:
+                raise self.mod.SurfaceError("gh failed")
+            if any("compare" in a for a in args):
+                return {"status": status}
+            return prs
+
+        with mock.patch.object(self.mod, "_gh_json", side_effect=fake):
+            return self.mod._branch_terminal_state_from_prs(
+                "gh", "daniel-ospina/tortoise", ".", 30.0,
+                self.BRANCH if branch is None else branch,
+                self.SHA if sha is None else sha,
+                self.MAIN_TIP if main_tip is None else main_tip,
+                first_parent=first_parent,
+                ancestor_merged=ancestor_merged,
+            )
+
+    def _merged_pr(self, head_sha):
+        return [{"number": 6156, "state": "closed", "headSha": head_sha,
+                 "mergedAt": "2026-09-29T00:03:52Z"}]
+
+    def test_exact_tip_match_demotes(self):
+        # Predicate 1, carried past the sample's edge.
+        reason = self._call(self._merged_pr(self.SHA))
+        self.assertIsNotNone(reason, "an exact head match must demote")
+        self.assertIn("#6156", reason)
+
+    def test_containment_demotes_when_the_pr_head_is_not_the_tip(self):
+        # ⛔ THE CASE #6151 ACTUALLY HIT, and the reason equality alone does not
+        # close #5485's half: a merged PR's head is often a MERGE COMMIT (main
+        # merged into the branch) or an amend, so the local tip is its ANCESTOR.
+        # Equality refuses it; containment is what proves the work landed.
+        reason = self._call(self._merged_pr(self.PR_HEAD))
+        self.assertIsNotNone(reason, "a contained tip must demote")
+        self.assertIn("contained in the MERGED PR #6156", reason)
+
+    def test_compare_polarity_is_ahead_not_behind(self):
+        # ⛔ THE TRAP THAT MADE THE FIRST IMPLEMENTATION SILENTLY INERT: for
+        # `compare/{base}...{head}` the status describes the HEAD relative to the
+        # BASE, so `tip` being an ancestor of `head_sha` is reported as AHEAD.
+        # Reading it as `behind` meant every containment failed, the arm never
+        # fired, and the run looked like a pass (#6151 still returned COLLISION).
+        for status in ("behind", "diverged"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    self._call(self._merged_pr(self.PR_HEAD), status=status),
+                    f"status={status} is NOT containment and must keep blocking",
+                )
+        self.assertIsNotNone(
+            self._call(self._merged_pr(self.PR_HEAD), status="ahead")
+        )
+
+    def test_fresh_branch_sitting_on_a_merged_head_never_demotes(self):
+        # The fail-OPEN this test exists to prevent: a lane that has just created
+        # its worktree sits on main's tip, and if that tip is itself a merged
+        # PR's head (fast-forward or empty-diff landing) an unguarded arm would
+        # call a branch with NO COMMITS OF ITS OWN terminal — a live lane read as
+        # free, which is the dangerous direction for every demotion here.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), sha=self.SHA, main_tip=self.SHA),
+            "tip == main's tip must never demote",
+        )
+
+    def test_closed_unmerged_pr_does_not_demote(self):
+        # An abandoned PR is not a landing. `_pr_terminal_state` names it
+        # "closed"; only "merged" may demote.
+        prs = [{"number": 6156, "state": "closed", "headSha": self.SHA,
+                "mergedAt": ""}]
+        self.assertIsNone(self._call(prs))
+
+    def test_missing_head_sha_does_not_crash_and_does_not_demote(self):
+        self.assertIsNone(self._call(self._merged_pr("")))
+
+    def test_tip_on_mains_first_parent_chain_never_demotes(self):
+        # ⛔ THE P0 BOTH REVIEWERS FOUND, and the reason `sha != main_tip` is not
+        # enough: `_branch_terminal_state_from_prs` is reached precisely when
+        # `_branch_terminal_state` has ALREADY refused, so any guard omitted here
+        # is bypassed BY CONSTRUCTION. A lane that merely CLAIMED the issue by
+        # creating `fix/<N>-…` sits on a main-line commit; that commit can be a
+        # merged PR's head (fast-forward / rebase / empty-diff landing); and ONE
+        # commit of drift makes the weak guard pass. Predicate 1 refuses on the
+        # first-parent witness for exactly this state, so this arm must too —
+        # otherwise a branch with no commits of its own is read terminal, i.e. a
+        # live lane reported free.
+        self.assertIsNone(
+            self._call(self._merged_pr(self.SHA), first_parent={self.SHA}),
+            "a tip on main's first-parent chain must never demote",
+        )
+
+    def test_tip_in_the_merged_fallback_set_never_demotes(self):
+        # The second half of predicate 1's exclusion: with the first-parent
+        # witness UNAVAILABLE, a tip in the `--merged` walk's set is still a
+        # commit main already contains, so it cannot be an absorbed branch head.
+        # `ancestor_merged` holds FULL refnames (`for-each-ref %(refname)`), which
+        # is the shape the production call site passes — pinned here, and in both
+        # spellings below, so the guard cannot be dodged by how a caller spells
+        # the ref.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNone(
+                    self._call(
+                        self._merged_pr(self.SHA),
+                        first_parent=None,
+                        ancestor_merged={self.BRANCH},
+                        branch=spelling,
+                    ),
+                    "a tip in the --merged set must never demote",
+                )
+
+    def test_the_lookup_is_shape_agnostic_for_the_ref_name(self):
+        # ⛔ Review round 2: the guard compares against `ancestor_merged`, which is
+        # a set of REFNAMES, while the URL needs the SHORT branch name. The one
+        # production caller happens to pass the full refname, so the equivalence
+        # rested on an undocumented coincidence — and a caller (or refactor) passing
+        # the natural short name would have made the guard compare a short name
+        # against refnames, never match, and re-open the fail-open with a GREEN
+        # suite. The function now normalises, so BOTH spellings must behave
+        # identically on the wire AND behind the guard.
+        for spelling in (self.BRANCH, self.SHORT):
+            with self.subTest(branch=spelling):
+                self.assertIsNotNone(
+                    self._call(self._merged_pr(self.SHA), branch=spelling),
+                    "the demotion must not depend on how the ref is spelled",
+                )
+                url = next(a for a in self.seen[0] if "pulls?" in a)
+                self.assertIn("head=daniel-ospina:fix/6134-", url)
+                self.assertNotIn("refs%2Fheads", url)
+                self.assertNotIn("refs/heads", url)
+
+    def test_a_full_page_is_refused_rather_than_read_as_not_found(self):
+        # `sort=created desc` puts the OLDEST PR last — so the merged PR this
+        # lookup exists to find is exactly what falls off a full page. Reading
+        # that as "not found" would re-create the very bug #5485 removes, while
+        # looking like a completed lookup.
+        page = [self._merged_pr("aa" * 20)[0]] * self.mod._TARGETED_PR_PAGE
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(page)
+
+    def test_a_missing_merged_walk_refuses_rather_than_demoting(self):
+        # The third clause of predicate 1's exclusion, and the state it exists for:
+        # main's tip is known, the first-parent witness is NOT readable, and the
+        # `--merged` walk could not run either. Then `sha != main_tip` is the only
+        # witness left — one commit deep — so the demotion is REFUSED. This is the
+        # fail-closed direction and it must survive any refactor of the guards.
+        self.assertIsNone(
+            self._call(
+                self._merged_pr(self.SHA),
+                first_parent=None,
+                ancestor_merged=None,
+            ),
+            "with no witness available the demotion must be refused",
+        )
+
+    def test_gh_failure_propagates_so_the_caller_can_report_it(self):
+        # ⛔ THE DEAD-CODE DEFECT THE REVIEW FOUND: swallowing `SurfaceError` here
+        # made the caller's `except` unreachable, so `targeted_failures` was always
+        # 0 and the promised "⚠ … could not run" note could never print — leaving
+        # "I could not ask" indistinguishable from "there is no such PR". The
+        # failure must PROPAGATE; the caller counts it and the ref keeps blocking.
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call(self._merged_pr(self.SHA), raises=True)
+
+    def test_a_non_list_payload_is_refused_not_demoted(self):
+        with self.assertRaises(self.mod.SurfaceError):
+            self._call("not-a-list")
+
+    def test_the_request_is_scoped_sorted_and_percent_encoded(self):
+        # Pins the WIRE, not the response. Both halves are load-bearing:
+        #  * a ref may legally contain `&`, `#`, `+`, `%` (git check-ref-format),
+        #    so an unencoded name like `fix/N&head=owner:other` would append a
+        #    SECOND `head=` parameter — honored LAST by the API — and the lookup
+        #    would be answered by another branch's PRs, breaking the scoping the
+        #    demotion rests on;
+        #  * `sort=created desc` is what makes the page cap meaningful.
+        hostile = "fix/6151&head=daniel-ospina:some-other-branch#frag"
+        self._call(self._merged_pr(self.SHA), branch=hostile)
+        url = next(a for a in self.seen[0] if "pulls?" in a)
+        self.assertNotIn("&head=daniel-ospina:some-other-branch", url)
+        self.assertIn("%26", url)
+        self.assertIn("%23", url)
+        self.assertIn("state=all", url)
+        self.assertIn("sort=created", url)
+        self.assertIn("direction=desc", url)
+        # ⛔ `per_page` is UNPINNED COUPLING unless asserted here: the same constant
+        # is both the page size and the truncation bound, so a request that drifts
+        # below it can never fill the page, `test_a_full_page_is_refused…` would
+        # still pass on its fabricated fixture, and the refusal would be dead code
+        # while an off-page merged PR silently read as "not found" (#5485 again).
+        self.assertIn(f"per_page={self.mod._TARGETED_PR_PAGE}", url)
+        # And the projection the arms read is still requested.
+        self.assertIn("headSha", " ".join(self.seen[0]))
 
 
 if __name__ == "__main__":

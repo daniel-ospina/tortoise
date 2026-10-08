@@ -4,17 +4,19 @@ fix/invert-retrieval-to-product).
 
 Moved from ``tools/longmem_eval/errors.py`` (where the eval's ingest write
 path consumed it) so the product owns the capability: ``retryable_transient``
-is the pinned transport-class predicate and ``call_with_predicate`` is the
-bounded jittered retry loop. The eval harness re-exports both unchanged
-from ``tools/longmem_eval/errors.py`` and keeps its own run knobs
-(``INGEST_WRITE_RETRIES`` etc.) eval-side.
+is the pinned transport-class predicate, ``retryable_aborted_write`` is the
+narrower write-path predicate (the SDK's direct graph writes, #7405), and
+``call_with_predicate`` is the bounded jittered retry loop. The eval harness
+re-exports ``retryable_transient`` / ``call_with_predicate`` /
+``WriteStageRetriesExhausted`` unchanged from ``tools/longmem_eval/errors.py``
+and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
 
-⚠️ FOLLOW-UP (documented, NOT in this PR): wiring this module into the SDK
-write path — ``_post_commit`` (tortoise/sdk.py) and the capture/commit
-graph writes — is a separate change (audit G8). The product's write
+⚠️ PARTIALLY WIRED (#7405): ``TortoiseSDK._graph_write_with_retry`` retries
+``create_point``'s two direct writes through ``retryable_aborted_write``.
+Wiring the remaining write surfaces — ``_post_commit`` (tortoise/sdk.py) and
+the capture/commit graph writes — is separate work (audit G8); those paths'
 robustness today remains idempotent-MERGE + ``client_commit_id`` replay +
-server-side dedup; this module is the reusable bounded-retry primitive for
-when the retry decision ships.
+server-side dedup.
 """
 from __future__ import annotations
 
@@ -42,6 +44,92 @@ _NETWORK_ERRNOS = frozenset({
 #: ``ResponseError`` — retried (bounded) because the recovery under disk
 #: pressure IS the retry; unrelated ResponseErrors (WRONGTYPE, ...) are not.
 _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
+
+#: Write refusals where the engine ABORTED the statement, so the outcome is
+#: definitively *did not land* (#7405). Three measured messages, from two
+#: engine code paths:
+#:   - a rebuild/replace aborts an in-flight query: ``graph was deleted or
+#:     replaced while the query was running, aborting``;
+#:   - a concurrent writer holds the write lock, reported on the constraint
+#:     path: ``Write query aborted: another write is in progress``;
+#:   - a concurrent writer holds the slot, reported on the ``GRAPH.QUERY``
+#:     write path: ``ERR another write is in progress, retry the query``.
+#:     This is a SEPARATE engine code path from the constraint-path abort
+#:     above (``src/graph_core.rs::execute_query_write``, raised before the
+#:     slot is claimed), and on the **v6 Rust core** it is the refusal the
+#:     SDK's own wrapped statements actually receive — ``_advance_ep_version``'s
+#:     ``MERGE`` and ``create_point``'s bare ``CREATE`` both take the write
+#:     path, so without this clause a contended ``create_point`` write is
+#:     raised instead of retried (the #7405 loss). Version scope: all three
+#:     clauses are v6 literals, and the repo's pinned
+#:     ``falkordb-server:v4.20.4`` is the older **C** core, which emits
+#:     ``Encountered different graph value when opened key <name>`` for the same
+#:     race. Same *did-not-land* semantics as the other two: the engine's own
+#:     concurrency test documents the message as retryable, and the message
+#:     itself instructs a retry.
+#: All three are **retryable**, but ONLY on the write path — see
+#: :func:`retryable_aborted_write` for the layering, and
+#: :func:`retryable_transient` for why they are deliberately NOT in the
+#: transport predicate (putting them there made one error retryable at two
+#: nested layers).
+#:
+#: ANCHORED on the full abort context, deliberately: a bare alternation over
+#: ``re.search`` matches ANY message merely CONTAINING the phrases (measured:
+#: three crafted non-abort diagnostics all returned True). Because the predicate
+#: gates a re-issued bare ``CREATE`` — non-idempotent, no uniqueness constraint
+#: on ``Point.id`` — a false positive IS the duplicate-point failure this PR
+#: exists to prevent, so the whole refusal clause must be present.
+_ABORTED_WRITE_RE = re.compile(
+    r"graph was deleted or replaced while the query was running, aborting"
+    r"|(?:write query )?aborted:\s*another write is in progress"
+    r"|another write is in progress, retry the query",
+    re.IGNORECASE)
+
+
+def retryable_aborted_write(exc: BaseException) -> bool:
+    """Retryable ONLY for write refusals whose outcome is definitively *did not land*.
+
+    Deliberately narrower than :func:`retryable_transient`, and it exists because
+    that predicate is NOT safe for a NON-IDEMPOTENT statement. ``create_point``
+    issues a bare ``CREATE`` with a client-minted id and there is **no uniqueness
+    constraint on ``Point.id``** (a plain index only, so a duplicate is accepted);
+    the eval lane documents the same hazard independently — *"create_point uses
+    CREATE (not MERGE), so re-running ingest over the same fresh graph would
+    duplicate points"* (``tools/longmem_eval/ingest.py``, ``_point_exists``).
+
+    ``retryable_transient`` also returns True for redis ``TimeoutError`` /
+    ``ConnectionError``, where the server may have APPLIED the write and only the
+    reply was lost — re-issuing those on a bare ``CREATE`` can mint two points
+    with one id, and ``get_point`` would silently return one of them, breaking
+    ``derived == replay(journal)``. Both arms below instead mean the engine
+    ABORTED the statement, so nothing was applied and re-issuing cannot duplicate:
+
+    - the graph was replaced underneath the running query, or a concurrent writer
+      held the write slot (#7405) — the engine's own *aborting* refusal, reported
+      on two code paths (the constraint path's ``Write query aborted: …`` and the
+      ``GRAPH.QUERY`` write path's ``another write is in progress, retry the
+      query``), both with the same *did not land* semantics (see
+      ``_ABORTED_WRITE_RE`` for why the write-path clause exists);
+    - persistence refused the write (``MISCONF`` / ``Can't persist``) — a write
+      refusal, not a completed write.
+
+    **The server guarantee this rests on** (no test pins it — it is an engine
+    property, measured by reading the engine source; see PR #7615's verification
+    table): the replaced-graph check is ``WriteAbort::GraphUnregistered``, whose
+    registration test runs BEFORE mutation under one continuous GIL hold, and
+    the engine's own test says it *"aborted before mutating"*; ``MISCONF`` is a
+    pre-execution command rejection. So neither can come back after the write
+    applied — which is what makes a bare ``CREATE`` safe to re-issue.
+
+    This predicate is the SDK write path's own gate; it is intentionally NOT
+    :func:`retryable_transient`, which stays the transport-class predicate the
+    eval's OUTER phase loops use (see the layering note there).
+    """
+    import redis.exceptions as _re
+
+    if isinstance(exc, _re.ResponseError):
+        return bool(_MISCONF_RE.search(str(exc)) or _ABORTED_WRITE_RE.search(str(exc)))
+    return False
 
 
 class WriteStageRetriesExhausted(Exception):
@@ -74,6 +162,13 @@ def retryable_transient(exc: BaseException) -> bool:
       → True — the verified write-path loss mechanism.
     - redis ``ResponseError`` matching ``/MISCONF|Can't persist/`` (AOF
       fsync / disk-full write refusal) → True; unrelated ResponseErrors → False.
+      **Deliberately NOT here: the replaced-graph / write-lock aborts** (#7405).
+      They ARE retryable, but only on the write path
+      (:func:`retryable_aborted_write`). Adding them to this predicate as well
+      made ONE error retryable at two nested layers — the eval's outer phase
+      loop (``tools/longmem_eval/ingest_v2.py``) wrapping the SDK's inner write
+      retry — which multiplies the budget with no benefit, because the SDK
+      retry already covers the write. So this predicate returns False for them.
     - ``requests``/``urllib`` provider-network errors (LLM provider
       transients) → True.
     - ``OSError`` narrowed to transport errnos (ECONNRESET/ETIMEDOUT/

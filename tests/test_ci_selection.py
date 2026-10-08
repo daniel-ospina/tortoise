@@ -18,6 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
@@ -1006,6 +1008,70 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
+    # #7435 review P1: tools/docs_lint_baseline.py owns
+    # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's
+    # fail-CLOSED behaviour — the unreadable report, the missing `Summary:`, the
+    # count mismatch, the multiset semantics, the generated-file fix target.
+    #
+    # The `core` registration alone is INERT for a differ-only change: `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+    # tool, so `select()` returned NO surface and fell back to the 31-file tier-1
+    # smoke set, which does not contain the guard. The PR that can make the
+    # differ fail OPEN would therefore never run the tests that catch it. Same
+    # #3261/#3332/#3616 silent-drop class as tools/queue_resweep.py above.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails the second assert.
+    r = _sel(["tools/docs_lint_baseline.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_docs_lint_baseline.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
+    # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
+    # config from ANY directory on the path to a linted file, and a more specific
+    # config OVERRIDES the repo one — so `docs/.markdownlint.json` turns a rule off
+    # for every doc beneath it, and `battery/.markdownlint.json` does the same for
+    # `battery/`.
+    #
+    # TWO silent routes out of the gate had to be closed, and the first fix closed
+    # only one. (a) `_keep_changed` DROPPED the path — `docs/` is a
+    # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the basename —
+    # so the PR selected the 31-file tier-1 smoke set. (b) Keeping the path is not
+    # enough: the match loop still CLAIMED it under a surface-owned prefix
+    # (`battery/.markdownlint.json` → ['battery'], `tools/longmem_eval/...` →
+    # ['eval']), and neither of those legs runs
+    # `tests/test_docs_lint_baseline.py` — whose committed-policy pin is the only
+    # thing that makes a config edit move the snapshot. A config-only PR also skips
+    # the `docs` job's differ steps (there is no changed `.md`), so the edit landed
+    # with the snapshot unmoved: exactly the invariant
+    # `docs/ci/docs-lint-baseline.md` promises.
+    #
+    # Mutation check: each half fails on its own. Dropping the
+    # `_is_linter_policy_path` claim in `_keep_changed` makes the `docs/` and
+    # `website/` cases tier-1, and dropping the early `_full_selection` return in
+    # `select()` makes every surface-owned case select its surface instead of ALL.
+    for path in (
+        "docs/.markdownlint.json",                 # dropped by the prefix fallback
+        "website/.markdownlintrc",                 # dropped by the prefix fallback
+        "battery/.markdownlint.json",              # CLAIMED by a surface
+        "battery/.lycheeignore",                   # CLAIMED by a surface
+        "battery/lychee.toml",                     # CLAIMED by a surface
+        "tools/longmem_eval/.markdownlint.json",   # CLAIMED as `eval`
+        ".markdownlint-cli2.jsonc",                # root: already full
+        "lychee.toml",                             # root: already full
+    ):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+    # An ordinary nested doc is still docs-only (tier 1) — not swept into `full`.
+    assert _sel(["docs/notes.md"])["surfaces"] == []
+    assert _sel(["docs/notes.md"])["full"] is False
+
+
 def test_queue_resweep_tool_change_selects_core_not_tier1():
     # tools/queue_resweep.py owns tests/test_queue_resweep.py (82 hermetic cases
     # pinning dry-run-by-default, the never-touch-a-queued-PR rule, and the
@@ -1025,6 +1091,21 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_queue_resweep.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_test_lane_tool_change_selects_core_not_tier1():
+    # #5084 review P1: tools/test_lane.py owns tests/test_test_lane_tool.py
+    # (`core`). Without the CORE_ALSO entry the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallowed the path, so a tool-only change
+    # selected NO surface and fell back to tier-1 smoke — the tests that pin
+    # the tool's fail-closed ownership guard (never remove a shared instance;
+    # never remove a peer lane's container) would not run on the PR editing
+    # that guard. Same silent-drop class as #4069/#6138/#4174 above.
+    r = _sel(["tools/test_lane.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_test_lane_tool.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
 
 
 def test_queue_conflict_census_tool_change_selects_core_not_tier1():
@@ -2905,6 +2986,89 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                    "test_hosted_backup"):
         assert carved not in leg_files.split(), \
             f"slow carve-out file {carved} must not ride the docker slow legs"
+
+
+def test_xdist_is_admitted_only_in_the_d3_shape():
+    """#6136 / epic #5215 owner decision D3: xdist is admitted for ONE shard
+    only, with `--dist loadscope`, gated to the docker (URI-set) shape.
+
+    Every expectation is DERIVED from the workflow text — the invocation
+    sites that pass `-n`, the `--dist` mode they pass, and the guard that
+    admits the pinned worker count — never a frozen literal naming a job or
+    a half. A literal would re-stale the moment the admitted shard moved;
+    D3's properties (one site / loadscope / docker-gated) do not.
+    """
+    wf = _load_python_ci()
+    sites: list[tuple[str, str, str]] = []
+    for job_name, job in wf["jobs"].items():
+        for step in job.get("steps", []) or []:
+            for line in (step.get("run") or "").splitlines():
+                if "python -m pytest" in line:
+                    sites.append((job_name, step.get("name", ""), line))
+    assert sites, "no pytest invocation site found in python-ci.yml"
+
+    xdist_sites = [s for s in sites
+                   if _re.search(r'(?:^|\s)-n(?:\s|")', s[2])]
+    assert len(xdist_sites) == 1, (
+        "D3 admits xdist on ONE shard only: the workflow passes `-n` at "
+        f"{len(xdist_sites)} pytest invocation site(s) "
+        f"{[(j, n) for j, n, _ in xdist_sites]}")
+    assert not any("--dist loadfile" in line for _, _, line in sites), (
+        "D3 names `--dist loadscope`; `--dist loadfile` is not the admitted "
+        "distribution mode")
+
+    job_name, step_name, cmdline = xdist_sites[0]
+    assert "--dist loadscope" in cmdline, (
+        f"{job_name}/{step_name}: the admitted xdist site must pass "
+        f"`--dist loadscope` (D3), got: {cmdline}")
+    assert '-n "$XDIST_WORKERS"' in cmdline, (
+        f"{job_name}/{step_name}: the worker count must flow through the "
+        "step-local `XDIST_WORKERS`, so the admit/deny decision has ONE home")
+    pinned = wf.get("env", {}).get("PYTEST_XDIST_WORKERS", "")
+    assert pinned.isdigit() and int(pinned) > 0, (
+        "the pinned xdist worker count must be a positive integer (D3: a "
+        f"pinned count, not `auto`), got {pinned!r}")
+    for jn, job in wf["jobs"].items():
+        for step in job.get("steps", []) or []:
+            if "PYTEST_XDIST_WORKERS" in (step.get("run") or ""):
+                assert (jn, step.get("name", "")) == (job_name, step_name), (
+                    f"{jn}/{step.get('name', '')}: the pinned count must be "
+                    "consumed at exactly the ONE admitted site")
+
+    # Derive the admitted shard(s) from the step's own guard + the job's
+    # matrix, so "one shard" is computed rather than asserted by name.
+    script = next(s["run"] for s in wf["jobs"][job_name]["steps"]
+                  if s.get("name", "") == step_name)
+    assert "TORTOISE_DB_URI" in script, (
+        f"{job_name}/{step_name}: the xdist site must be gated on the docker "
+        "URI — the URI-less embedded lane is the RC5 leak surface (#2875, "
+        "#3653) D3 keeps serial")
+    guard = _re.search(
+        r'matrix\.half \}\}" = "([^"]+)" \] && '
+        r'\[ -n "\$\{TORTOISE_DB_URI:-\}" \]',
+        script)
+    assert guard, (
+        f"{job_name}/{step_name}: the xdist site is not gated on BOTH a "
+        "single matrix half and a non-empty TORTOISE_DB_URI — D3 admits ONE "
+        "shard on the docker shape only")
+    # #6135: the `test` matrix is DERIVED — the workflow carries no literal
+    # shard list (`matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}`,
+    # and python-ci.yml says so itself: "this job carries no literal shard
+    # list"). Reading a literal `matrix["half"]` here re-created exactly the
+    # coupling #6135 removed, and against the derived expression it is a
+    # STRING, not a list. `ci_selection.push_legs()` is the single source
+    # (`parse_matrix_halves`'s own docstring routes callers there), so the
+    # halves are read from it rather than re-declared here.
+    halves = [s["name"] for s in cs.push_legs(cs.load_manifest())["shards"]]
+    admitted = [h for h in halves if h == guard.group(1)]
+    assert len(admitted) == 1, (
+        f"{job_name}/{step_name}: the guard `matrix.half == "
+        f"{guard.group(1)!r}` admits {len(admitted)} of the job's {halves} "
+        "half/ies; D3 admits one")
+    # Every shape that misses the guard must run serial (xdist's `-n 0`).
+    assert _re.search(r"^\s*XDIST_WORKERS=0\s*$", script, _re.M), (
+        f"{job_name}/{step_name}: the worker count must DEFAULT to xdist's "
+        "serial mode (`0`) and be raised only inside the D3 guard")
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():
@@ -5387,6 +5551,40 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     test) through this single function is what makes the mutation visible.
     """
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
+
+
+def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
+    """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
+
+    Measured on main 2026-10-07: `ci.yml`'s `changes` gate script reached 21043
+    UTF-8 bytes and GitHub refused to LOAD the workflow, so `CI` ran ZERO jobs on
+    every branch — none of the five required contexts (`docs`, `legal-e2e`,
+    `license-surface`, `pricing-artifact`, `test-isolation`) could appear, and no
+    PR could go green. The cap is on the COMPILED scalar, and a `run:` with NO
+    `${{ }}` is never compiled (`ai-review-gate.yml` loads a 34 KB one), so this
+    pin guards exactly the scalars GitHub compiles. actionlint catches expression
+    SYNTAX but not this length (#6253), which is why the invariant is pinned here
+    — a comment added to a script this size re-arms a silent full-CI outage.
+    """
+    limit = 21000
+    expr = "${{"
+    offenders = []
+    for wf in _workflow_files(REPO / ".github" / "workflows"):
+        doc = yaml.safe_load(wf.read_text(encoding="utf-8")) or {}
+        for job_id, job in (doc.get("jobs") or {}).items():
+            for step in (job or {}).get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str) or expr not in run:
+                    continue
+                size = len(run.encode("utf-8"))
+                if size > limit:
+                    offenders.append((wf.name, job_id, step.get("name", "?"), size))
+    assert not offenders, (
+        "a `run:` containing `${{ }}` reached GitHub's 21000-byte expression cap, "
+        f"so GitHub refuses to LOAD the workflow (zero jobs, no check-runs): {offenders}"
+    )
 
 
 def _scan_changed_set_diffs(workflows: list[Path]) -> tuple[int, list[str], list[str]]:

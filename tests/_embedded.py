@@ -24,6 +24,7 @@ import re
 import shutil
 import tempfile
 import threading
+from typing import Any
 
 import pytest
 
@@ -132,6 +133,17 @@ _disable_redislite_rdb_save()
 # fixture's own finalizer would run first, destroy that evidence, and could orphan
 # a live redislite server (the #4068/#1005 class).
 SESSION_TMPDIRS: list[str] = []
+
+# The pytest-LOADED ``tests/conftest.py`` module, published by conftest at
+# import time. It must be HANDED OVER, never looked up: pytest loads
+# ``tests/conftest.py`` as the top-level module ``conftest``, and every
+# ``__init__``-less conftest in the tree shares that bare ``sys.modules`` key —
+# so a nested one (``tests/e2e/auth/conftest.py``) TAKES THE KEY OVER, and the
+# loaded instance is then left in NO ``sys.modules`` entry at all (measured
+# 2026-10-06: after collecting ``tests/e2e/**`` the only ``conftest.py`` module
+# in ``sys.modules`` is the nested one). A scan therefore scans the wrong set —
+# which is why conftest publishes itself here instead.
+LOADED_CONFTEST: Any = None
 
 
 def register_session_tmpdir(path: str) -> None:

@@ -81,13 +81,11 @@ jobs:
       - name: Compute per-surface path gates (#2149)
         id: gate
         run: |
-          # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base
-          # — `github.event.pull_request.base.sha` is empty and the empty-diff
-          # fallback below would set EVERY gate true and re-run the whole
-          # ~20-gate matrix nightly (the cost this plan exists to cut). Under
-          # `main_health` only the five always-on required jobs run, so every
-          # gated surface is explicitly false. `inputs.main_health` is empty on
-          # a `pull_request` event, so this branch is main-health only.
+          # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base,
+          # so the empty-diff fallback below would set EVERY gate true and re-run
+          # the whole ~20-gate matrix nightly. Under `main_health` only the five
+          # always-on required jobs run, so every gated surface is explicitly
+          # false. (`inputs.main_health` is empty on a `pull_request` event.)
           if [ "${{ inputs.main_health }}" = "true" ]; then
             for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
@@ -344,21 +342,18 @@ jobs:
                   # asserted /health/ready once after polling the strictly
                   # weaker db.ok, reddening healthy deploys.
                   startswith(".github/scripts/deploy-health-gate"),
-                  # #3907: the SHARED auto-file substrate the re-pointed
-                  # monitors file through (e2e-live-reconcile, tenant-provision)
-                  # — its harness pins search-before-file (one issue per
-                  # finding), the recurrence counter, the machine-author +
-                  # exact-title guard against a forged look-alike title, and
-                  # fail-closed on a failed search.
-                  # TODO(#5019): availability-watchdog.sh — the monitor #3907
-                  # names as "the shape the fix is about" — and
-                  # availability-record.sh / welcome-e2e-monitor.sh /
-                  # registry-cron.sh still POST inline, so the substrate is not
-                  # yet what EVERY monitor files through.
+                  # #3907: the SHARED auto-file substrate — its harness pins
+                  # search-before-file, the recurrence count, the forged-title
+                  # guard, and fail-closed search. TODO(#5019): the watchdog and
+                  # the other monitors still POST inline, so it is not yet
+                  # universal.
                   startswith(".github/scripts/auto-file-issue"),
                   # #4759: the bypass reporter / expiry helper and the scheduled
                   # check that ages every SKIP_* lane left set.
                   startswith(".github/scripts/deploy-bypass"),
+                  # #2240/#4574: the deploy failure alert and its shared Telegram sender.
+                  startswith(".github/scripts/deploy-api-alert"),
+                  startswith(".github/scripts/telegram-send"),
                   isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/availability-liveness.yml"),
@@ -735,6 +730,93 @@ jobs:
             printf './%s\0' "$entry" >> "$RUNNER_TEMP/pr-md.nul"
           done < "$RUNNER_TEMP/pr-md.raw.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/pr-md.nul" > "$RUNNER_TEMP/pr-md.txt"
+          # A changed file that ADDS a markdownlint suppression directive hides the
+          # very findings this check exists to catch: cli2 reports 0 issues, the
+          # differ sees 0 new, and a suppressed new finding passes. A PRE-EXISTING
+          # directive is part of the baselined debt; only an ADDED one is rejected
+          # — and a MOVED one re-adds the line it removed, because git's patch
+          # format has no line-move detection, so a pure reorder is refused too.
+          # That is a deliberate false positive (fail closed); the remedy is to
+          # leave a baselined directive where it is.
+          # (A same-PR rule change in any .markdownlint* config, or in
+          # .lycheeignore, is caught by the snapshot's linter-policy digest.)
+          #
+          # The grep reads a FILE, never a pipe: `grep -q` exits at its first
+          # match, and under `set -o pipefail` the SIGPIPE that sends `git diff`
+          # made the whole pipeline non-zero — so a LARGE markdown diff silently
+          # skipped the guard (measured: a >64 KB diff exited 0 with a directive
+          # present). It is CASE-INSENSITIVE because cli2's directive parser is
+          # (`<!-- MARKDOWNLINT-DISABLE -->` suppresses just as the lowercase form
+          # does, and a case-sensitive guard stayed silent on it), and anchored on
+          # the HTML comment opener so ordinary prose that merely NAMES the
+          # directive is not a false failure. `--find-renames`, not
+          # `--no-renames`: with rename detection off a pure `git mv` of a file
+          # that already carries a directive reads as the WHOLE file being added,
+          # failing a change that added nothing. The gap class is
+          # `[^[:alnum:]>-]*`, NOT `[[:space:]]*`: cli2's matcher is a JS regex
+          # whose `\s` includes U+FEFF, so ONE zero-width BOM before
+          # `markdownlint-` suppressed a finding while an ASCII-only whitespace
+          # class missed it (measured in every locale, C included). The class
+          # still excludes `>` (a closed comment), `-` (`<!---` is not a directive
+          # to cli2 either) and alphanumerics (prose that NAMES the directive
+          # stays a non-failure), and it matches zero characters, so the bare
+          # form is unaffected.
+          #
+          # TWO greps, because cli2's directive regexes are not all line-scoped.
+          # `disable`/`disable-line`/`disable-next-line` are matched line by line,
+          # so the opener must sit on the same added line. `configure-file` is the
+          # ONE directive matched against the WHOLE document joined with newlines
+          # (cli2 passes `[lines.join("\n")]` to it alone), so
+          # `<!--\nmarkdownlint-configure-file {...}\n-->` is honoured while a
+          # same-line opener anchor never sees it — measured end-to-end before
+          # this split: the guard exited 0, cli2 reported `0 issues`, and the
+          # differ read `0 new` on a genuinely new finding.
+          #
+          # The second grep is deliberately NOT anchored, and carries
+          # `capture`/`restore` beside `configure-file`. Those two are matched
+          # per-line like `disable`, but they re-arm a CAPTURED suppression, so
+          # they belong in the unanchored set as well. The cost is that prose
+          # naming one of the three is a false positive — these are whole-file or
+          # re-arming suppressions, so the guard fails CLOSED.
+          #
+          # `--text` because git treats a `.md` containing a NUL byte as BINARY
+          # and prints `Binary files ... differ` with no `+` lines at all, while
+          # cli2 still lints that file and honours a directive inside it
+          # (measured): without this flag the guard was blind and the suppression
+          # silent.
+          if ! git diff --find-renames -U0 --text "${BASE_SHA}...HEAD" -- '*.md' \
+              > "$RUNNER_TEMP/added-md.txt"; then
+            echo "::error::could not read the changed-markdown diff to check for suppression directives"
+            exit 1
+          fi
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line)' "$RUNNER_TEMP/added-md.txt" \
+             || grep -qiE '^\+.*markdownlint-(configure-file|capture|restore)' "$RUNNER_TEMP/added-md.txt"; then
+            echo "::error::this change ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
+            exit 1
+          fi
+          # cli2 treats every positional argument as a GLOBBY PATTERN, so a changed
+          # path containing a glob metacharacter is EXPANDED to a different,
+          # pre-existing file. The linter then truthfully reports `Linting: 1 file`
+          # for a file it never read, the differ's cardinality check is satisfied,
+          # and a genuinely new finding in the changed file passes the required
+          # check silently (measured: `./docs/a[1].md` lints `./docs/a1.md`).
+          # No cli2 flag disables this — `--no-globs` only ignores the CONFIG's
+          # `globs` property.
+          #
+          # ALLOWLIST, not a metacharacter denylist. globby/micromatch also expand
+          # extglob — `@(README).md`, `+(target).md`, `!(x).md` — and those contain
+          # NONE of `* ? [ ] { }`, so an enumerated denylist misses them and the
+          # differ was measured returning 0 on a changed file it never linted.
+          # The set of glob metacharacters is micromatch's, not ours, so we accept
+          # only the characters a tracked markdown path actually needs: letters,
+          # digits, and `._@/-` (every one of the 838 tracked `*.md` paths matches;
+          # `@` is required by node_modules/@scope names and is inert without a
+          # following `(`). Anything else cannot be linted by this invocation, so
+          # fail closed rather than lint the wrong file.
+          if grep -qvE '^\./[A-Za-z0-9._@/-]+$' "$RUNNER_TEMP/pr-md.txt"; then
+            echo "::error::a changed markdown path contains a character this linter invocation cannot treat literally (cli2 expands every positional arg as a glob, including extglob) — the docs check would report a DIFFERENT file's findings and could pass a real one. Rename the file to letters, digits, and . _ - / @."
+            exit 1
+          fi
           count="$(grep -c . "$RUNNER_TEMP/pr-md.txt" || :)"
           echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
@@ -746,7 +828,26 @@ jobs:
           # .markdownlint-cli2.jsonc and silently fell back to DEFAULTS, so MD013
           # (line-length 80) fired on the long prose lines the repo config turns
           # off. This mirrors the main-health path above.
-          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3
+          #
+          # #7435: the findings are CAPTURED here, not adjudicated. The step lints
+          # each changed file WHOLE, so pre-existing debt in a file a change merely
+          # touches used to red this required check (#5434: 9 findings in a file the
+          # PR authored, ~24 s to reproduce locally but a full CI cycle to discover;
+          # #7475: a link broken on main since the file existed). The snapshot differ
+          # below decides pass/fail — new findings still fail, known ones do not.
+          #
+          # The exit code is deliberately NOT the verdict: GNU xargs (this runner)
+          # rewrites a child's exit 1-125 to 123, so cli2's 1 (findings) and 2
+          # (fatal) are indistinguishable here. The differ decides from the report
+          # — `Linting: N` must equal the changed-set count, and the findings
+          # parsed must equal the Summary count.
+          set +e
+          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
+            > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
+          md_rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mdlint-pr.txt"
+          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
@@ -754,7 +855,37 @@ jobs:
           # `--files-from` reads the list from a FILE — no filename reaches a
           # shell command (#4449).
           args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
+          # #7435: PIN the linter. `lychee-action@v2` defaults to a linter version
+          # in ITS OWN action.yml, so without this the required check's lychee is a
+          # number that changes under us while `tools/docs_lint_baseline.py`
+          # asserts the snapshot was taken with a specific one — and the snapshot's
+          # keys encode that version's status text. The markdownlint half is pinned
+          # for the same reason (`markdownlint-cli2@0.23.3`).
+          lycheeVersion: v0.24.2
+          # #7435: report JSON and do NOT fail the step here — the snapshot differ
+          # below decides, so inherited link debt in a touched file stops redding
+          # the required check while a NEW dead link still fails it.
+          format: json
+          output: ${{ runner.temp }}/lychee-pr.json
+          fail: false
           failIfEmpty: false
+      - name: Docs lint baseline (changed files)
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
+        env:
+          # A COUNT, from this workflow's own `grep -c` — never a filename, so it
+          # is safe to pass as a value (the #4449 rule covers paths, not integers).
+          EXPECTED_MD_FILES: ${{ steps.changed.outputs.count }}
+        run: |
+          # #7435 (owner ruling, Option 1): fail only on findings that are NOT in
+          # the committed snapshot. This does not weaken the check — a new finding
+          # still fails it; it stops a change being charged for debt already on
+          # main. The snapshot is a CEILING, not an amnesty: #7534 drains it to
+          # zero. See the module docstring in tools/docs_lint_baseline.py.
+          python3 tools/docs_lint_baseline.py check \
+            --markdownlint-output "$RUNNER_TEMP/mdlint-pr.txt" \
+            --markdownlint-expected-files "$EXPECTED_MD_FILES" \
+            --lychee-output "$RUNNER_TEMP/lychee-pr.json" \
+            --baseline config/docs-lint-baseline.json
       # ----- main-health path (#5215 Task 8 / D13) --------------------------
       # The PR path above cannot run on a schedule (there is no
       # `github.event.pull_request.base.sha`), so under `main_health` the
@@ -782,6 +913,31 @@ jobs:
             > "$RUNNER_TEMP/changed-md.nul"
           tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
             > "$RUNNER_TEMP/changed-md.txt"
+          # Same suppression-directive guard as the PR path (see its comment,
+          # including why the gap class is `[^[:alnum:]>-]*` and not
+          # `[[:space:]]*`): the grep reads a FILE, not a pipe, so a large diff
+          # cannot skip it by SIGPIPE; it is case-insensitive like cli2's own
+          # parser; `--find-renames` keeps a pure rename from reading as an
+          # added file; and `--text` keeps a NUL-bearing `.md` from reading as a
+          # binary diff with no `+` lines to grep.
+          if ! git diff --find-renames -U0 --text HEAD^ HEAD -- '*.md' \
+              > "$RUNNER_TEMP/added-md-mh.txt"; then
+            echo "::error::could not read the changed-markdown diff to check for suppression directives"
+            exit 1
+          fi
+          if grep -qiE '^\+.*<!--[^[:alnum:]>-]*markdownlint-(disable|disable-line|disable-next-line)' "$RUNNER_TEMP/added-md-mh.txt" \
+             || grep -qiE '^\+.*markdownlint-(configure-file|capture|restore)' "$RUNNER_TEMP/added-md-mh.txt"; then
+            echo "::error::this commit ADDS a markdownlint suppression directive, which would hide the very findings the REQUIRED docs check exists to catch. Fix the finding instead of suppressing it."
+            exit 1
+          fi
+          # Same path-character guard as the PR path above (see its full comment):
+          # cli2 (and lychee's --files-from) expand a positional argument as a
+          # globby pattern INCLUDING extglob, so such a path would be linted as a
+          # DIFFERENT file while the count still matches. Allowlist, not denylist.
+          if grep -qvE '^\./[A-Za-z0-9._@/-]+$' "$RUNNER_TEMP/changed-md.txt"; then
+            echo "::error::a changed markdown path contains a character this linter invocation cannot treat literally (cli2 expands every positional arg as a glob, including extglob) — the docs check would report a DIFFERENT file's findings and could pass a real one. Rename the file to letters, digits, and . _ - / @."
+            exit 1
+          fi
           count="$(grep -c . "$RUNNER_TEMP/changed-md.txt" || true)"
           echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (main health, changed files)
@@ -790,8 +946,15 @@ jobs:
           # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for prose);
           # the PR path above is aligned with this invocation (#2386/#5476).
           # NUL-delimited ARGV via xargs — a filename is data, never shell text.
+          # #7435: captured, not adjudicated — the differ below decides. The exit
+          # code is not the verdict (xargs rewrites it).
+          set +e
           xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
-            npx --yes markdownlint-cli2@0.23.3
+            npx --yes markdownlint-cli2@0.23.3 > "$RUNNER_TEMP/mdlint-mh.txt" 2>&1
+          md_rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mdlint-mh.txt"
+          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
@@ -800,7 +963,24 @@ jobs:
           # shell command (#4449). failIfEmpty: a link-free doc is legitimate
           # and must not red the nightly.
           args: --no-progress --files-from ${{ runner.temp }}/changed-md.txt
+          # #7435: pinned to the same linter as the PR path (see its comment) — the
+          # action's own default is not a contract.
+          lycheeVersion: v0.24.2
+          # #7435: captured for the snapshot differ (see the PR path above).
+          format: json
+          output: ${{ runner.temp }}/lychee-mh.json
+          fail: false
           failIfEmpty: false
+      - name: Docs lint baseline (main health)
+        if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
+        env:
+          EXPECTED_MD_FILES: ${{ steps.changed_mh.outputs.count }}
+        run: |
+          python3 tools/docs_lint_baseline.py check \
+            --markdownlint-output "$RUNNER_TEMP/mdlint-mh.txt" \
+            --markdownlint-expected-files "$EXPECTED_MD_FILES" \
+            --lychee-output "$RUNNER_TEMP/lychee-mh.json" \
+            --baseline config/docs-lint-baseline.json
 
   dashboard-js-tests:
     needs: changes
@@ -945,6 +1125,18 @@ jobs:
         # once, comments `Recurrence #N` after that, refuses to file on a failed
         # search, and never adopts a forged/exact-mismatched look-alike title.
         run: bash .github/scripts/auto-file-issue.test.sh
+      - name: Deploy failure alert (#2240)
+        # The out-of-band alert #2240 exists for: per-step attribution from the
+        # workflow's step ids, ONE issue per failing step with `Recurrence #N` on
+        # every later occurrence, the gate's OWN report carried into the body,
+        # fail-closed on a failed search OR the PAT trap, and the nudge sent
+        # only AFTER the record exists.
+        run: bash .github/scripts/deploy-api-alert.test.sh
+      - name: Shared shell Telegram sender (#4574 item 1)
+        # The delivery contract — transport success AND the API's own `ok:true` —
+        # plus the token redaction that keeps the bot token out of a PUBLIC log,
+        # and the caller hooks the watchdog's own logger/redactor ride on.
+        run: bash .github/scripts/telegram-send.test.sh
 
   availability-record:
     needs: changes

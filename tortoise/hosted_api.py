@@ -137,6 +137,7 @@ from tortoise.sdk import (
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
+    _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -13368,6 +13369,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
+    # #5516: the write-time notice that a fact was written against a Source
+    # whose recorded read version is no longer current (shared with the SDK
+    # receipt via the ONE home, so the two cannot drift).
+    _attach_source_change_notices(resp, meta)
     # W5 (#2104): the memory_write_v1 envelope wraps the (additive) legacy
     # response — protocol_version, status, provenance, error; the verb's
     # per-point entries ride the enriched ``resp["points"]`` list (extra
@@ -26316,6 +26321,10 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #5868: a per-route by_stage sub-total that could not represent a charge.
+    # Without this key the disclosure is stripped here — the documented #3359
+    # loss mode — and the row's cost_usd-vs-by_stage gap stays unexplained.
+    "route_cost_overflows",
     # #3359: capture_graph_ops — the per-session physical graph work.
     # NAMESPACED (``graph_ops_*``) so these generic names do not widen the
     # global filter for EVERY event: the flat allowlist has no per-event
@@ -27763,6 +27772,14 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # token can sit beside a valid sibling and a valid charge, so the
         # call is not usage-less.)
         "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
+        # #5868: OVERFLOW EVENTS — per-route/bucket ``by_stage`` cost
+        # sub-totals that could not represent their FINITE sum (one event may
+        # stand for several calls at the merge seams). This asserts that the
+        # ``by_stage`` breakdown is incomplete; it is NOT a statement about
+        # ``cost_usd``'s completeness, which ``calls_without_cost`` owns. The
+        # two answer different questions and a row may legitimately carry both
+        # (an earlier route overflow beside a later session-total overflow).
+        "route_cost_overflows": int(llm.get("route_cost_overflows", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the
