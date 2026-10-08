@@ -16,6 +16,7 @@ exists, and each is chosen so it can FAIL on a regression:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -256,16 +257,58 @@ def test_orphan_report_never_calls_a_conflicted_pr_unclaimed() -> None:
     assert orphans == []
 
 
-def test_orphan_report_without_the_guard_would_misfire() -> None:
-    """Controls the test above: the same input WITHOUT over_claimed misfires.
+def test_resolve_conflicts_pins_the_call_site_wiring() -> None:
+    """The conflict pass MUST run before orphan detection and must feed it.
 
-    This is what makes the assertion able to fail — if the guard were removed,
-    PR 7 would be reported as unclaimed.
+    This exercises ``resolve_conflicts`` — the single place the two passes are
+    wired — so a refactor that drops the ``over_claimed`` kwarg or moves the
+    conflict pass below ``orphan_report`` fails HERE (a unit test on
+    ``orphan_report`` alone would stay green). This is the exact #7750 symptom:
+    a contested PR printed as "no lane claims it".
     """
-    prs = [{"number": 7, "headRefName": "b", "title": "t"}]
-    orphans = fs.orphan_report(prs, {}, {})
-    assert [o["number"] for o in orphans] == [7]
-    assert "no lane claims" in orphans[0]["reason"]
+    def lane(label: str, prs: list[int]) -> dict:
+        return {"identity": {"lane": label}, "claim": {"prs": list(prs)}}
+
+    lanes = [lane("A", [7, 8]), lane("B", [7])]
+    owner_of_pr: dict[int, str | None] = {7: "B", 8: "A"}
+    conflicts, claimants, orphans = fs.resolve_conflicts(
+        lanes, [{"number": 7, "headRefName": "b7", "title": "t7"}],
+        owner_of_pr, {"A": True, "B": True})
+    assert conflicts == [7]
+    assert claimants == {7: ["A", "B"]}
+    assert orphans == []                       # 7 is contested, not ownerless
+    assert 7 not in owner_of_pr                # claimed for nobody
+    assert all(7 not in l_["claim"]["prs"] for l_ in lanes)
+    assert 8 in lanes[0]["claim"]["prs"]       # an uncontested PR is untouched
+
+
+def test_who_names_the_claimants_instead_of_reporting_nobody(
+    monkeypatch, capsys) -> None:
+    """`who <contested PR>` must NOT print "no lane holds it" and exit 1.
+
+    Both lanes asserted the PR; the conflict pass removed it from the index, so
+    without the conflict branch the reader returns the opposite of the truth for
+    the one PR two lanes claim (the reviewer's P2 gap).
+    """
+    fake = {"index": {"prs": {}, "issues": {}},
+            "conflict_claimants": {"7761": ["L-a", "L-b"]}}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    args = argparse.Namespace(number=7761, json=False)
+    rc = fs.cmd_who(args)
+    out = capsys.readouterr().out
+    assert rc == 0, "a contested PR is a definitive answer, not 'not found'"
+    assert "L-a" in out and "L-b" in out
+    assert "CONTESTED" in out
+    assert "no lane holds it" not in out
+
+
+def test_who_still_reports_truly_unowned_as_not_found(monkeypatch, capsys) -> None:
+    """Control for the test above: truly unowned still exits 1 with 'nobody'."""
+    fake = {"index": {"prs": {}, "issues": {}}, "conflict_claimants": {}}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    rc = fs.cmd_who(argparse.Namespace(number=999999, json=False))
+    assert rc == 1
+    assert "no lane holds it" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

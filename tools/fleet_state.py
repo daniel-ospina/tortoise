@@ -77,6 +77,7 @@ USAGE
   fleet_state.py lane <label|workspace> [--json]
   fleet_state.py free [--json]                  # genuinely idle lanes only
   fleet_state.py orphans [--json]               # work with no live owner
+  fleet_state.py conflicts [--json]             # PRs asserted by >1 lane
   fleet_state.py violations [--json]            # session-partition breaks
   fleet_state.py bind [--all | -w WS -s SID] [--dry-run] [--json]
 
@@ -608,6 +609,43 @@ def orphan_report(
                 "reason": f"owner lane `{owner}` has no live pi process",
             })
     return out
+
+
+def resolve_conflicts(
+    lanes: list[dict[str, Any]],
+    prs: Sequence[Mapping[str, Any]],
+    owner_of_pr: dict[int, str | None],
+    lane_live: Mapping[str, bool],
+) -> tuple[list[int], dict[int, list[str]], list[dict[str, Any]]]:
+    """Resolve contested PR claims, then report the PRs left with no live owner.
+
+    A PR claimed by MORE THAN ONE lane is an ownership CONFLICT, not an
+    assignment: a reused workspace can inherit a previous lane's worktree. A
+    conflict is claimed for nobody and is reported by the conflict channel —
+    never as an orphan (``orphan_report`` is told ``over_claimed``) — and its
+    claimants are returned so ``who`` can NAME them instead of printing
+    "no lane holds it", which for the one PR two lanes claim is the opposite of
+    the truth.
+
+    This is the single place the conflict pass and the orphan pass are wired
+    together, so the ordering (conflicts computed BEFORE owners are cleared and
+    ``orphan_report`` is called) is pinned by a pure test.
+
+    Returns ``(conflicts, claimant_of_pr, orphans)``.
+    """
+    pr_claims: dict[int, list[str]] = {}
+    for lane_ in lanes:
+        for n in lane_["claim"]["prs"]:
+            pr_claims.setdefault(n, []).append(lane_["identity"]["lane"])
+    conflicts = sorted(n for n, who in pr_claims.items() if len(who) > 1)
+    claimant_of: dict[int, list[str]] = {n: sorted(pr_claims[n]) for n in conflicts}
+    if conflicts:
+        for lane_ in lanes:
+            lane_["claim"]["prs"] = [n for n in lane_["claim"]["prs"] if n not in conflicts]
+        for n in conflicts:
+            owner_of_pr.pop(n, None)
+    orphans = orphan_report(prs, owner_of_pr, lane_live, over_claimed=conflicts)
+    return conflicts, claimant_of, orphans
 
 
 # ===========================================================================
@@ -1144,20 +1182,6 @@ def build_state(
             "not_free_reasons": reasons,
         })
 
-    # A PR claimed by MORE THAN ONE lane is an ownership CONFLICT, not an assignment:
-    # a reused workspace can inherit a previous lane's worktree. Report it and claim it
-    # for nobody rather than naming whichever lane happened to come first.
-    pr_claims: dict[int, int] = {}
-    for lane_ in lanes:
-        for n in lane_["claim"]["prs"]:
-            pr_claims[n] = pr_claims.get(n, 0) + 1
-    conflicts = sorted(n for n, c in pr_claims.items() if c > 1)
-    if conflicts:
-        for lane_ in lanes:
-            lane_["claim"]["prs"] = [n for n in lane_["claim"]["prs"] if n not in conflicts]
-        for n in conflicts:
-            owner_of_pr.pop(n, None)
-
     # orphans: open PRs with no live owner (the #7746 class)
     # When a lane has NO session record at all, its liveness is UNMEASURED — never
     # "owner lane X has no live pi" (an unmeasured liveness must not manufacture a
@@ -1169,7 +1193,7 @@ def build_state(
         )
         for lane_ in lanes
     }
-    orphans = orphan_report(prs, owner_of_pr, lane_live, over_claimed=conflicts)
+    conflicts, conflict_claimants, orphans = resolve_conflicts(lanes, prs, owner_of_pr, lane_live)
     if not liveness_measured:
         orphans.append({
             "kind": "liveness-unmeasured",
@@ -1207,6 +1231,7 @@ def build_state(
         "violations": violations,
         "orphans": orphans,
         "conflicts": conflicts,
+        "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},
         "index": index,
         "summary": {
             "lanes": len(lanes),
@@ -1217,6 +1242,7 @@ def build_state(
             "free_lanes": free_lanes,
             "violations": len(violations),
             "orphans": len(orphans),
+            "conflicts": len(conflicts),
         },
     }
 
@@ -1308,7 +1334,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"fleet-state -> {out}")
         print(f"  lanes={s['lanes']} bound={s['bound']} unknown_binding={s['unknown_binding']} "
               f"binding_missing_but_live={s['binding_missing_but_live']}")
-        print(f"  genuinely_free={s['genuinely_free']} violations={s['violations']} orphans={s['orphans']}")
+        print(f"  genuinely_free={s['genuinely_free']} violations={s['violations']} "
+              f"orphans={s['orphans']} conflicts={s.get('conflicts', 0)}")
     return 0
 
 
@@ -1326,6 +1353,18 @@ def cmd_who(args: argparse.Namespace) -> int:
                 for lane, why in entry["evidence"].items():
                     print(f"  - {lane}: {why}")
             return 0
+    # A contested PR is NOT "nobody holds it": two lanes asserted it. Name them.
+    who = state.get("conflict_claimants", {}).get(key)
+    if who:
+        out = {"number": args.number, "kind": "PR", "conflict": True,
+               "lanes": who, "evidence": {}}
+        if args.json:
+            print(json.dumps(out, indent=2))
+        else:
+            print(f"#{args.number} is CONTESTED — claimed by: {', '.join(who)}")
+            print("  a reused workspace can inherit the previous lane's worktree; "
+                  "resolve the worktree before assigning")
+        return 0
     if args.json:
         print(json.dumps({"number": args.number, "kind": None, "lanes": [], "evidence": {}}))
     else:
@@ -1333,6 +1372,18 @@ def cmd_who(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_conflicts(args: argparse.Namespace) -> int:
+    state = _load_or_build(args)
+    claimants = state.get("conflict_claimants", {})
+    if args.json:
+        print(json.dumps(claimants, indent=2))
+        return 0
+    if not claimants:
+        print("no ownership conflicts")
+        return 0
+    for num, who in sorted(claimants.items(), key=lambda kv: int(kv[0])):
+        print(f"  PR {num}: {', '.join(who)}")
+    return 0
 def _find_lane(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
     n = needle.lower().strip()
     for lane_ in state["lanes"]:
@@ -1526,6 +1577,10 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("violations")
     v.add_argument("--json", action="store_true")
     v.set_defaults(func=cmd_violations)
+
+    c = sub.add_parser("conflicts")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=cmd_conflicts)
 
     bi = sub.add_parser("bind")
     bi.add_argument("--all", action="store_true")
