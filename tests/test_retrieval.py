@@ -1196,8 +1196,9 @@ def test_retryable_aborted_write_is_scoped_to_the_v6_rust_core():
     the exact failure the predicate exists to prevent. Widening it needs the C
     message's *did-not-land* property established from the engine source first.
     """
-    from tortoise.retry import _ABORTED_WRITE_RE, retryable_aborted_write
     from redis.exceptions import ResponseError
+
+    from tortoise.retry import _ABORTED_WRITE_RE, retryable_aborted_write
 
     # The three v6 clauses DO match — the retry is live on the v6 Rust core.
     for message in (
