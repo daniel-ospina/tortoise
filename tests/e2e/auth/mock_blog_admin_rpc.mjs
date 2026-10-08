@@ -26,7 +26,9 @@
  *                                  arrived. Answers a benign 200.
  *
  * Control endpoints (`/__mock/*`) let the test flip the admin verdict, inject an
- * upstream 5xx, and read what was seen. No route is stubbed in a way that would
+ * upstream 5xx on a chosen surface (`data` or `admin`, so the Token Handler's
+ * two independent fault branches stay independently provable), and read what was
+ * seen. No route is stubbed in a way that would
  * hide the property: the credential really is attached server-side (the test
  * asserts it), and the upstream really does refuse the empty body.
  */
@@ -35,10 +37,16 @@ import http from "node:http";
 const PORT = Number(process.env.MOCK_PORT || 9011);
 
 let admin = true;
-// #4178: a 5xx on the PROXIED DATA endpoints only (never on is_admin), so the
-// Token Handler's "an upstream fault is 503, never a sign-out" branch is
-// reachable and can be asserted.
-let upstreamFault = false;
+// #4178/#3559: a 5xx, injectable per upstream SURFACE. The Token Handler
+// answers a fault with 503 (never a sign-out) at TWO independent places — the
+// `is_admin` membership check (`checkAdmin`) and the proxied DATA call — and a
+// single whole-mock flag would let one test reach the fault through the other's
+// branch, so neither branch would have an independent guard (#3559 review).
+// ONE mechanism (`upstreamFault`), ONE control endpoint, with a target so each
+// branch is provable on its own. `value: true` with no target keeps #4178's
+// meaning and injects on the DATA endpoints only.
+let upstreamFault = null; // null | "data" | "admin" | "all"
+const faulted = (surface) => upstreamFault === surface || upstreamFault === "all";
 const seen = [];
 
 function json(res, status, body) {
@@ -56,6 +64,10 @@ const server = http.createServer((req, res) => {
 
     if (req.method === "POST" && url.pathname === "/rest/v1/rpc/is_admin") {
       seen.push({ kind: "is_admin", auth });
+      // #3559: the gate's OWN upstream is faultable too. `checkAdmin` must turn a
+      // fault into 503 (unavailable), never 403 (not_admin) — conflating a store
+      // fault with a signed-in non-admin is the #3485 class.
+      if (faulted("admin")) return json(res, 500, { error: "upstream_fault" });
       return json(res, 200, admin);
     }
 
@@ -85,7 +97,7 @@ const server = http.createServer((req, res) => {
         contentType: req.headers["content-type"] || "",
         body,
       });
-      if (upstreamFault) return json(res, 500, { error: "upstream_fault" });
+      if (faulted("data")) return json(res, 500, { error: "upstream_fault" });
       return json(res, 200, []);
     }
 
@@ -105,7 +117,7 @@ const server = http.createServer((req, res) => {
         contentType: req.headers["content-type"] || "",
         body,
       });
-      if (upstreamFault) return json(res, 500, { error: "upstream_fault" });
+      if (faulted("data")) return json(res, 500, { error: "upstream_fault" });
       return json(res, 200, { Key: url.pathname.slice(1) });
     }
 
@@ -117,13 +129,15 @@ const server = http.createServer((req, res) => {
       return json(res, 200, { admin });
     }
     if (url.pathname === "/__mock/upstream-fault") {
-      upstreamFault = JSON.parse(body || "{}").value === true;
+      const p = JSON.parse(body || "{}");
+      // No target on an ON call preserves #4178's data-only fault.
+      upstreamFault = p.value === true ? p.target || "data" : null;
       return json(res, 200, { upstreamFault });
     }
     if (url.pathname === "/__mock/reset") {
       seen.length = 0;
       admin = true;
-      upstreamFault = false;
+      upstreamFault = null;
       return json(res, 200, { ok: true });
     }
 

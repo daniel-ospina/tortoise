@@ -241,8 +241,15 @@ def _set_admin(value: bool) -> None:
     _control("/__mock/admin", {"value": value})
 
 
-def _set_upstream_fault(value: bool) -> None:
-    _control("/__mock/upstream-fault", {"value": value})
+def _set_upstream_fault(value: bool, target: str = "data") -> None:
+    """Inject (or clear) an upstream 5xx.
+
+    `target` selects the surface: `"data"` (the proxied call, #4178's default),
+    `"admin"` (the `is_admin` RPC the gate consults) or `"all"`. The two are
+    independently faultable so each of the Token Handler's 503 branches can be
+    proven on its own rather than through the other's (#3559 review).
+    """
+    _control("/__mock/upstream-fault", {"value": value, "target": target})
 
 
 def _seen(*kinds: str) -> list[dict]:
@@ -416,6 +423,49 @@ def test_upstream_5xx_is_503_not_401(stack):
     payload = json.loads(body)
     assert payload["error"] == "upstream_unavailable", body
     assert payload["error"] != "not_signed_in", body
+
+
+def test_admin_check_fault_is_503_not_403(stack):
+    """A fault on the ADMIN CHECK is 503 (retry), never 403 (not an admin).
+
+    This is the branch #3559 fixed: `checkAdmin` treats only a 401/403 from
+    `is_admin()` as an access decision; every other non-ok status — a 5xx, a
+    missing/renamed RPC, a rotated key — is OUR fault and must surface as
+    unavailable. Mapping it to 403 reads as "you are signed in but lack access",
+    which hides a store outage behind an access verdict and costs an hour to
+    debug (#3485).
+
+    This is NOT the data-upstream case above: the fault is injected on the
+    `is_admin` RPC itself, so the gate refuses the request BEFORE the proxied
+    call runs. That is what makes this the `checkAdmin` branch and not a
+    duplicate — the data-branch marker is asserted absent below.
+    """
+    _reset()
+    _set_upstream_fault(True, target="admin")
+    try:
+        status, body, _ = _req(
+            "/api/sb/rest/v1/blog_posts?select=*", cookie=f"__Host-session={HANDLE}"
+        )
+    finally:
+        _set_upstream_fault(False)
+
+    assert status == 503, (
+        f"a fault on the admin check must be 503 (try again), never 403 "
+        f"(signed in but not an admin) — got {status} {body}"
+    )
+    assert status != 403, (
+        f"a store fault must never read as an access decision — got {status} {body}"
+    )
+    payload = json.loads(body)
+    assert payload["error"] == "upstream_unavailable", body
+    assert payload["error"] != "not_admin", body
+    # The DATA branch's marker: its presence would mean this response came from
+    # the proxied call rather than from the gate under test.
+    assert "upstream_status" not in payload, body
+    assert _seen("is_admin"), "the fault was injected on a route the gate never reached"
+    assert not _seen("blog_posts", "storage"), (
+        "the request was proxied despite the admin check failing to resolve"
+    )
 
 
 def test_unknown_handle_is_401(stack):
