@@ -2525,10 +2525,12 @@ from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 # for the vector pair. `tests/test_5407_index_label_parity.py` holds them
 # together.
 
-#: ``Point``'s range indexes are the one ranged set whose label is written at
-#: the DDL site rather than in a ``(label, props)`` pair, so the label is
-#: declared here too — otherwise the coverage assertion would have to supply
-#: the very label it is checking.
+#: ``Point``'s range indexes are the one **served** ranged set whose label is
+#: written at the DDL site rather than in a ``(label, props)`` pair, so the
+#: label is declared here too — otherwise the coverage assertion would have to
+#: supply the very label it is checking. (Other DDL-site labels — ``Session``,
+#: ``Point.lastDreamedAt`` — are not entity labels, so the assertion does not
+#: reach them.)
 _POINT_RANGE_INDEX_LABEL: str = "Point"
 
 _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
