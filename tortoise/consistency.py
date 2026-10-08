@@ -1146,6 +1146,16 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
 #: `_ENTITY_CREATION` above, so adding a row here cannot leave the two folds
 #: disagreeing silently.
 _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
+#: Labels whose graph fold MERGEs the NODE by `name` (`_upsert_object` /
+#: `_upsert_subject`). A second registration of ONE name under a fresh id
+#: therefore COLLAPSES the node onto the LAST id, and a state op naming the
+#: collapsed-away id folds 0 rows there (`MATCH (n:$label {id:$rid})`). An
+#: id-keyed label (`Event`) never collapses, so it is absent. This is the
+#: DECLARATION for the state-op guard below, which is its only reader —
+#: `journal_object_surviving_keys` is deliberately Object-only (it models
+#: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
+#: neither can share this constant without changing what it means.
+_NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
 
 def _creation_entity_id(t: str, ev: dict) -> object:
@@ -1199,6 +1209,25 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # The seq of the last `status`-writing state op per entity, so the
     # trailing sweep honours `rebuild_all`'s #4743 ordering.
     last_status_seq: dict = {}
+    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name-MERGE key, built
+    # as the walk proceeds. Since the graph MERGEs Object/Subject by NAME under
+    # the LAST registration's id, a state op folds there iff its id is a live
+    # carrier AT ITS OWN SEQ — the journal-END `surviving_ids` key set is the
+    # wrong question for an INLINE state op (an id that was the carrier early
+    # and collapsed away later genuinely folded at that earlier point). Keyed by
+    # ``(label, name)`` because Object and Subject MERGE in SEPARATE spaces, so
+    # a shared name must not alias one label's carrier onto the other. The value
+    # is a SET, not a single id: a RENAME `SET`s the name property in place, so
+    # two ids can legitimately share a name (a rename onto an existing name
+    # does NOT MERGE), and BOTH then MATCH by id. Collapsing them to one id
+    # produced a FALSE REFUSAL of a live id in exactly that shape — a
+    # disagreement with the graph fold in the fail-CLOSED direction, the one
+    # error this guard must never make.
+    carriers_by_name: dict[tuple[str, str], set] = {}
+    # #5285 (DEFECT 2): ``name -> [keys]``, populated ONCE after the walk and
+    # read by `_object_target`'s trailing sweep. Declared here so the closure
+    # below resolves it at call time.
+    object_keys_by_name: dict[str, list] = {}
 
     def _object_target(oid, oname):
         """``(target_key, ambiguous_here)`` against the CURRENT index.
@@ -1237,9 +1266,15 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # reads); otherwise fall through to the name branch / miss path.
             return ("Object", oid), False
         if isinstance(oname, str) and oname:
-            carriers = [
-                k for k, r in entities.items()
-                if k[0] == "Object" and r.get("name") == oname]
+            # #5285 (DEFECT 2): read the ONCE-built `name -> [keys]` index
+            # instead of rescanning ALL of `entities` on EVERY call. The scan
+            # was O(len(entities)) PER SUPERSEDE, so a journal of N name-only
+            # supersedes cost O(N^2) (measured: 4000 supersedes = 17.5s, 8000 =
+            # 61.7s) — a denial of service on this very health gate. The index
+            # preserves the scan's EXACT semantics: same membership, same
+            # `entities` insertion order, and it is built only after the walk,
+            # so nothing mutates underneath it.
+            carriers = object_keys_by_name.get(oname, [])
             if len(carriers) == 1:
                 return carriers[0], False
             if len(carriers) > 1:
@@ -1291,6 +1326,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 rec["status"] = status
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
+                # #5285 (DEFECT 1): the graph MERGEs Object/Subject by name, so
+                # the LAST registration of a name OWNS its node id — the MERGE
+                # re-ids the existing node, REMOVING the earlier id. Update the
+                # carriers AT THIS SEQ. A re-creation of the same id under a new
+                # name drops the id from its OLD name's set first.
+                if label in _NAME_MERGE_LABELS:
+                    _old = rec.get("name")
+                    if isinstance(_old, str) and _old and _old != name:
+                        _prev = carriers_by_name.get((label, _old))
+                        if _prev is not None:
+                            _prev.discard(eid)
+                    _live = carriers_by_name.setdefault((label, name), set())
+                    if len(_live) > 1:
+                        # The name ALREADY has >1 live carrier (a rename
+                        # collision). A MERGE re-ids exactly one of them and
+                        # the journal does not say which, so keep them all —
+                        # failing OPEN here is the only choice that cannot
+                        # refuse a node the graph still holds.
+                        _live.add(eid)
+                    else:
+                        _live.clear()
+                        _live.add(eid)
                 rec["name"] = name
         elif t == "EntityMutated":
             label, eid, op = ev.get("label"), ev.get("id"), ev.get("op")
@@ -1349,6 +1406,42 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                                     "entity"),
                         )
                     continue
+                # #5285 (DEFECT 1): the graph fold MATCHes a state op by primary
+                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), but
+                # `_upsert_object`/`_upsert_subject` MERGE the NODE by NAME — so
+                # when ONE name is registered under two ids the node collapses
+                # onto the LAST id and a state op naming the collapsed-away id
+                # folds 0 rows there. `entities` still holds the collapsed-away
+                # id (the reference index is keyed by every id the journal ever
+                # saw), so the `rec is None` gate above does NOT catch it: this
+                # fold used to APPLY state the graph dropped, and
+                # `check_consistency` passed a journal all three replay engines
+                # refuse — the fail-open this lane exists to remove. Refuse with
+                # the SAME `state-op-miss` shape the malformed branch records.
+                # SEQ-AWARE by construction: `carriers_by_name` is the carrier
+                # SET at THIS point in the walk, so an id that WAS the sole
+                # carrier before a later same-name registration still folds here
+                # (a journal-END `surviving_ids` test would wrongly refuse it).
+                # A name the fold never indexed stays fail-OPEN, exactly as
+                # `_object_target` falls through — an unmodelled shape must not
+                # become a false refusal. The guard fires only when the name IS
+                # indexed and this id is NOT among its live carriers (the
+                # collapsed-away case).
+                _carrier_name = rec.get("name")
+                _live_carriers = (
+                    carriers_by_name.get((label, _carrier_name))
+                    if (label in _NAME_MERGE_LABELS
+                        and isinstance(_carrier_name, str) and _carrier_name)
+                    else None)
+                if _live_carriers is not None and eid not in _live_carriers:
+                    record_non_folded(
+                        SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                        event_type="EntityMutated", label=label, id=eid,
+                        op=op, seq=seq,
+                        detail=("reference fold: state op matched no "
+                                "entity"),
+                    )
+                    continue
                 status = state.get("status")
                 if isinstance(status, str) and status:
                     rec["status"] = status
@@ -1359,6 +1452,19 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     last_status_seq[(label, eid)] = seq
                 newname = state.get("name")
                 if isinstance(newname, str) and newname:
+                    # #5285 (DEFECT 1): the graph's rename SETs `name` in place;
+                    # the node KEEPS its id, so `eid` joins the NEW name's live
+                    # carriers (and leaves the old name's). A rename onto a name
+                    # another id already carries does NOT MERGE — both nodes stay
+                    # live under one name — which is why the carrier value is a
+                    # SET, not a single id.
+                    if label in _NAME_MERGE_LABELS:
+                        _prev = carriers_by_name.get(
+                            (label, rec.get("name")))
+                        if _prev is not None:
+                            _prev.discard(eid)
+                        carriers_by_name.setdefault(
+                            (label, newname), set()).add(eid)
                     rec["name"] = newname
         elif t == "ObjectSuperseded":
             # #5285 cycle-4 (FIX 1): defer EVERY supersede to the ONE trailing
@@ -1383,6 +1489,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # at the end unconditionally would clobber it and invent a divergence on a
     # journal the graph folds correctly. A creation's default status is NOT
     # such a write (it precedes the sweep), so it is deliberately not counted.
+    # #5285 (DEFECT 2): build the `name -> [keys]` index ONCE, against the
+    # FINAL `entities` state this sweep resolves against. Built here (not
+    # incrementally) so it mirrors the per-call scan it replaces exactly —
+    # including the `entities` insertion order the ambiguity branch relies on.
+    for _key, _rec in entities.items():
+        _nm = _rec.get("name")
+        if _key[0] == "Object" and isinstance(_nm, str) and _nm:
+            object_keys_by_name.setdefault(_nm, []).append(_key)
     for seq, ev in supersede_events:
         oid, oname = ev.get("id"), ev.get("name")
         target, ambiguous_here = _object_target(oid, oname)
@@ -1729,7 +1843,12 @@ def check_consistency(log_path: str, projection, *,
             "identity": {"Object": "name", "Subject": "name",
                          "Event": "eventId"},
         },
-        "non_folded_events": [str(e) for e in non_folded],
+        # #5285 (DEFECT 3): the COUNT (`non_folded_count` below) is
+        # authoritative; this list is a bounded SAMPLE. An unrecognised-type
+        # journal (the mixed-version case) would otherwise format O(n) strings
+        # into the verdict payload; the cap matches the sibling diagnostic
+        # lists (`_MAX_DIVERGENT_POINTS`).
+        "non_folded_events": [str(e) for e in non_folded[:_MAX_DIVERGENT_POINTS]],
         "non_folded_count": len(non_folded),
         "non_folded_refused_count": len(non_folded_refused),
         "watermark": watermark,
@@ -2130,7 +2249,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 f"resolve to exactly one node (R8/#3585) — the rebuilt graph "
                 f"would be silently incomplete: "
                 + "; ".join(str(e) for e in nf_events[:5])),
-            "non_folded_events": [str(e) for e in _nf_entries],
+            # #5285 (DEFECT 3): a bounded SAMPLE; `reason` carries the true
+            # count, so the cap cannot make a large refusal look small.
+            "non_folded_events": [
+                str(e) for e in _nf_entries[:_MAX_DIVERGENT_POINTS]],
         }
     ok = applied > 0 and after is not None and after > 0
     if refused:
