@@ -233,6 +233,29 @@ SCREEN_LIVE_WITH_UNKNOWN_CONTEXT_FOOTER = SCREEN_IDLE_READY.replace(
     "0.0%/700k", "?/700k"
 )
 
+#: A LIVE pi pane whose footer has been TORN by a banner printed over it: the
+#: context-budget token is gone and only the model badge survives (VERBATIM from
+#: this box's session logs, 2026-09-26). Readiness must say YES — requiring the
+#: token refused a healthy lane (#7158 round 7).
+SCREEN_LIVE_WITH_TORN_FOOTER = (
+    "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 a manual-recovery "
+    "JSONL record was kept at /Users/danielospina/.tortoise/session-events/"
+    "2026-09-26.jsonlepseek) deepseek-flash \u2022 high\n"
+)
+
+#: A DEAD pane whose stale footer carries a ` \u2022 <sessionName>` suffix on the pwd
+#: line (the shape `pi --name` produces). The pwd anchor must still recognise the
+#: footer block, or the stats-mimicking output below re-opens the round-6 bypass
+#: (#7158 round 7).
+SCREEN_STALE_FOOTER_WITH_SESSION_NAME = (
+    "[tortoise-capture] Captured session abc (2 turns)\n"
+    "~/Documents/GitHub/tortoise (main) \u2022 7158-lane\n"
+    "\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+    "                    (deepseek) deepseek-flash \u2022 high\n"
+    "danielospina@Daniels-MacBook-Pro 7158-stale % \n"
+    "42.0%/700k (auto)\ndone\n"
+)
+
 #: A DEAD pane whose stale footer is followed by a shell prompt WITH a typed
 #: command — the line ends in text, not a sigil, so an end-anchored detector misses
 #: it and the brief is EXECUTED (round-3 finding).
@@ -1684,6 +1707,24 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertTrue(cd.shell_prompt_below_footer(screen))
         self.assertFalse(cd.screen_ready(screen))
 
+    def test_a_torn_footer_with_only_the_model_badge_is_still_LIVE(self):
+        """Round-7 finding: a banner printed over the footer removes the
+        context-budget token but leaves the model badge. This fleet's own liveness
+        checks accept the badge; requiring the token refused a healthy lane."""
+        screen = SCREEN_LIVE_WITH_TORN_FOOTER
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_pwd_line_with_a_session_name_still_anchors_the_footer_block(self):
+        """Round-7 finding: a real pwd line can carry ` \u2022 <sessionName>`. If the
+        pwd anchor rejects it the block anchor silently disappears and the
+        stats-mimicking output below re-opens the round-6 bypass."""
+        screen = SCREEN_STALE_FOOTER_WITH_SESSION_NAME
+        self.assertTrue(cd.status_bar_present(screen))
+        self.assertTrue(cd.shell_prompt_below_footer(screen))
+        self.assertFalse(cd.screen_ready(screen))
+
     def test_an_unknown_context_indicator_is_a_LIVE_footer(self):
         """Round-6 finding: pi renders `?/Nk (auto)` after a compaction, so an
         indicator that requires digits refused a healthy lane (#7158)."""
@@ -1753,7 +1794,9 @@ class TestDispatcherRecovery(unittest.TestCase):
                 self.reads += 1
                 if self.reads <= 3:      # gate, baseline, recovery read
                     return cd.CmuxResult(0, SCREEN_IDLE_READY)
-                return cd.CmuxResult(0, SCREEN_DEAD_SHELL_WITH_COMPOSER)
+                # A footer IS present, so the refusal must come from the shell
+                # prompt BELOW it — not from a missing footer (round-7 test gap).
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
 
         fake = DiesBeforeResend()
         result = self._send(fake, consume_timeout=0.0, retries=1)
@@ -1827,7 +1870,9 @@ class TestDispatcherRecovery(unittest.TestCase):
                 if self.phase == "blocked":
                     self.phase = "shell"
                     return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
-                return cd.CmuxResult(0, SCREEN_BARE_SHELL)
+                # A stale footer is still on screen; only the prompt below it
+                # makes the pane unsafe (round-7 test gap).
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
 
             def send_text(self, workspace, text, surface=None):
                 if text != "\\n":

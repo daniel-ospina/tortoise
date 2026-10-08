@@ -177,26 +177,37 @@ from dataclasses import dataclass, field
 #: The exact string pi prints before awaiting a keypress.
 BOOT_BLOCK_MARKER = "Press any key to continue"
 
-#: pi's status bar context-window indicator, e.g. `0.0%/700k (auto)` on a fresh
-#: idle pane and `3.8%/700k (auto)` mid-turn. Its presence is the cheapest
-#: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
-#: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
-#: NO `↑`/`↓` counters — do not key readiness off those. The indicator is `?/Nk`
-#: — not `N.N%/Nk` — whenever `getContextUsage()` returns a null percent (a
-#: compaction that has seen no successful post-compaction assistant usage), which
-#: occurs on healthy live lanes and appears 31× in this box's own session logs;
-#: requiring a digit there refused a live pane (#7158 round 6).
-READY_RE = re.compile(r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b")
+#: pi's footer markers. The canonical one is the context-budget token
+#: (`N.N%/Nk (auto)`, or `?/Nk (auto)` when `getContextUsage()` has a null percent
+#: after a compaction). Its presence is the cheapest reliable "the TUI owns stdin
+#: now" signal: the footer is drawn only after the boot-block prompt has been
+#: satisfied, and a *fresh idle* pane shows NO `↑`/`↓` counters — do not key
+#: readiness off those.
+#:
+#: The token can also be MISSING on a live pane: a banner printed over the footer
+#: tears the line and leaves only the model badge (verbatim capture, 2026-09-26:
+#: `…jsonlepseek) deepseek-flash • high`). This fleet's own liveness checks accept
+#: `• high|medium|low` and `(auto)` for exactly that reason (`orchestrator-heartbeat.sh`
+#: `_pane_has_pi`, `safe-send.sh`), and the badge is what survives a tear, so
+#: requiring the token alone refused a healthy lane (#7158 round 7).
+READY_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b"  # N.N%/Nk or ?/Nk
+    r"|\u2022 (?:high|medium|low)\b"  # model badge (survives a torn footer)
+    r"|\(auto\)"  # auto-compact flag
+)
 
 #: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
 #: line — `FooterComponent.render` builds `[pwdLine, statsLine, ...statuses]` — so
 #: a stats-shaped line with a pwd line above it is a genuine footer BLOCK, while
 #: one without is output that merely LOOKS like a stats line. That distinction is
 #: what keeps shell output which mimics the stats shape from hiding the prompt
-#: ABOVE it (#7158 round 6). `~`/`/` start plus an optional trailing `(branch)`,
-#: and the line must not itself end in a shell sigil (a `%~`-style prompt such as
-#: `/tmp % ` is a prompt, not a pwd line).
-PWD_LINE_RE = re.compile(r"^\s*(?:~|/)\S*(?:\s+\([^)]*\))?\s*$")
+#: ABOVE it (#7158 round 6). The pwd line begins with `~` or `/` and carries
+#: anything after it (a `(branch)`, a trailing ` • <sessionName>`, or a truncated
+#: `(branch`); the check is intentionally loose on the tail because a REAL pwd line
+#: the regex missed silently disables the block anchor — the fail-open direction
+#: (#7158 round 7). Lines that are themselves shell prompts are excluded by the
+#: caller.
+PWD_LINE_RE = re.compile(r"^\s*(?:~|/)\S")
 
 #: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
 #: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
@@ -334,6 +345,11 @@ def _last_status_bar_end(screen: str | None) -> int:
     return matches[-1].end() if matches else -1
 
 
+def _is_pwd_line(line: str) -> bool:
+    """True when a line looks like pi's footer pwd line (not a shell prompt)."""
+    return bool(PWD_LINE_RE.match(line)) and not SHELL_PROMPT_RE.search(line)
+
+
 def _footer_stats_end(screen: str | None) -> int:
     """Offset just past the LAST stats line that belongs to a pi footer BLOCK,
     i.e. is directly preceded (ignoring blank lines) by a pwd line, or -1.
@@ -348,7 +364,7 @@ def _footer_stats_end(screen: str | None) -> int:
     best = -1
     for line in text.split("\n"):
         match = READY_RE.search(line)
-        if match and prev_nonempty is not None and PWD_LINE_RE.match(prev_nonempty):
+        if match and prev_nonempty is not None and _is_pwd_line(prev_nonempty):
             best = pos + match.end()
         if line.strip():
             prev_nonempty = line
