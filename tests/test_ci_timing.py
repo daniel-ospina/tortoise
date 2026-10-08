@@ -747,6 +747,10 @@ def test_refresh_durations_rejects_a_collector_key_absent_from_the_manifest(
 
 
 def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None:
+    # An UNREGISTERED measured path whose basename has two registered owners:
+    # the path is not in the manifest, and the basename cannot say which owner
+    # it belongs to. Refusal, never a guess. (A path that IS registered is not
+    # ambiguous — see test_durations_bridge_resolves_the_registered_path... .)
     text = BRIDGE_MANIFEST.replace(
         "    - test_gamma.py",
         "    - sub/test_gamma.py\n    - test_gamma.py",
@@ -754,7 +758,11 @@ def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None
               "  test_gamma.py: 1.0  # a preserved comment\n  sub/test_gamma.py: 2.0")
     path = _bridge_manifest(tmp_path, text)
     before = path.read_text()
-    assert ci_timing.refresh_durations(path, _bridge_weights(test_gamma=9.0), "T") == 2
+    weights = {"elsewhere/test_gamma.py": 9.0}
+    # the diagnosis is AMBIGUITY (two registered owners), not "unregistered"
+    with pytest.raises(ci_timing.DurationsBridgeError, match="multiple manifest keys"):
+        ci_timing.render_refreshed_manifest(before, weights, "T")
+    assert ci_timing.refresh_durations(path, weights, "T") == 2
     assert path.read_text() == before
 
 
@@ -796,24 +804,22 @@ def test_refresh_durations_writes_the_added_entry_to_disk(tmp_path: Path) -> Non
     assert yaml.safe_load(path.read_text())["durations"]["test_pending.py"] == 7.3
 
 
-def test_refresh_durations_refuses_an_ambiguity_that_spans_the_two_sets(
-    tmp_path: Path,
-) -> None:
-    """Case 4, the shape that resolving against ONE set would have let through.
+def test_refresh_durations_resolves_the_registered_path_despite_a_basename_twin() -> None:
+    """The measured PATH, not the basename, selects the key.
 
-    The basename has one `durations:` candidate (`sub/test_dup.py`) and one
-    classified-only candidate (`test_dup.py`). Resolving against the durations
-    map alone sees a single candidate and silently picks the wrong path; the
-    union sees two and refuses, so widening the domain did not loosen the
-    never-a-guess rule.
+    `test_dup.py` (a `surfaces:` member with no `durations:` row) and
+    `sub/test_dup.py` (a `durations:` key) share a basename. A measurement of
+    `test_dup.py` is unambiguously the top-level file, so it must resolve to
+    that key and be ADDED — the basename-only rule saw two candidates and refused
+    the whole refresh.
     """
     text = "surfaces:\n  core:\n    - test_dup.py\ndurations:\n  sub/test_dup.py: 1.0\n"
-    path = _bridge_manifest(tmp_path, text)
-    before = path.read_text()
-    with pytest.raises(ci_timing.DurationsBridgeError, match="multiple manifest keys"):
-        ci_timing.render_refreshed_manifest(before, {"test_dup.py": 2.0}, "T")
-    assert ci_timing.refresh_durations(path, {"test_dup.py": 2.0}, "T") == 2
-    assert path.read_text() == before
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        text, {"test_dup.py": 2.0}, "T")
+    assert stats["added_keys"] == 1
+    durations = yaml.safe_load(new_text)["durations"]
+    assert durations["test_dup.py"] == 2.0
+    assert durations["sub/test_dup.py"] == 1.0
 
 
 def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
@@ -847,6 +853,131 @@ def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
     assert yaml.safe_load(new_text)["durations"][target] == 4.3
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     assert ci_timing.integrity_problems(new_text) == []
+
+
+# ── #6092 review findings F1/F2/F3 ──────────────────────────────────────────
+
+_SHARED_BASENAME_LOG = (
+    "============================= slowest 2 durations =============================\n"
+    "3.00s call     tests/e2e/test_ship_test_onboarding.py::test_probe\n"
+    "1.00s call     tests/test_ship_test_onboarding.py::test_guard\n"
+    "============================= short test summary info =========================\n"
+)
+
+
+def test_parse_log_exposes_the_tests_relative_path(tmp_path: Path) -> None:
+    """F3 prerequisite: the collector carries the PATH, not only the basename.
+
+    `tests/e2e/x.py` and `tests/x.py` are different files, and the basename view
+    (which the artifact renders) cannot tell them apart.
+    """
+    parsed = ci_timing.parse_log(
+        write_log(tmp_path, "paths.log", _SHARED_BASENAME_LOG))
+    # the artifact's basename view still merges them (unchanged contract)
+    assert set(parsed["files"]) == {"test_ship_test_onboarding.py"}
+    # the resolution view keeps them apart
+    assert set(parsed["file_paths"]) == {
+        "e2e/test_ship_test_onboarding.py", "test_ship_test_onboarding.py"}
+    assert parsed["file_paths"]["e2e/test_ship_test_onboarding.py"]["total_ms"] == pytest.approx(3000.0)
+    assert parsed["file_paths"]["test_ship_test_onboarding.py"]["total_ms"] == pytest.approx(1000.0)
+
+
+def test_collector_file_weights_keys_by_path_not_basename(tmp_path: Path) -> None:
+    """F3: two files sharing a basename are two measurements, never one."""
+    write_log(tmp_path, "pytest.log", _SHARED_BASENAME_LOG)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"e2e/test_ship_test_onboarding.py": 3.0,
+                       "test_ship_test_onboarding.py": 1.0}
+
+
+def test_durations_bridge_refuses_a_measured_subdir_file_that_only_shares_a_basename(
+    tmp_path: Path,
+) -> None:
+    """F3 — the repo's real collision pair, driven through the collector.
+
+    `tests/test_ship_test_onboarding.py` is classified; the e2e twin
+    `tests/e2e/test_ship_test_onboarding.py` is not. Collapsing both to the
+    basename attached the e2e measurement to the top-level key. python-ci does
+    not run the e2e leg today, so this is a guard on the resolution rule, not a
+    live production failure.
+    """
+    write_log(tmp_path, "pytest.log", _SHARED_BASENAME_LOG)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    real = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    domain = ci_timing._classified_test_keys(real)
+    # the top-level file's own measurement still resolves to itself
+    assert ci_timing._resolve_to_manifest_keys(
+        {"test_ship_test_onboarding.py": 1.0}, domain
+    ) == {"test_ship_test_onboarding.py": 1.0}
+    # the e2e file shares only the basename and must be refused, not attached
+    with pytest.raises(ci_timing.DurationsBridgeError, match="different path"):
+        ci_timing._resolve_to_manifest_keys(weights, domain)
+
+
+@pytest.mark.parametrize("leg_list", ["slow_files", "carve_out", "tier1"])
+def test_durations_bridge_resolves_a_subdir_file_registered_only_in_a_leg_list(
+    leg_list: str,
+) -> None:
+    """F3 — a subdir file registered only under a python-ci leg list, sharing a
+    basename with a classified-only surface member. `--integrity` accepts it
+    (basename fallback against `surfaces:`), it runs in a python-ci leg that
+    uploads a pytest log, and its measurement must land on its OWN path instead
+    of on the surface twin."""
+    text = ("surfaces:\n  core:\n    - test_foo.py\n"
+            f"{leg_list}:\n  - sub/test_foo.py\n"
+            "durations:\n  test_foo.py: 1.0\n")
+    domain = ci_timing._classified_test_keys(text)
+    assert "sub/test_foo.py" in domain, (
+        f"{leg_list} members are part of the resolution domain")
+    assert ci_timing._resolve_to_manifest_keys(
+        {"sub/test_foo.py": 4.0}, domain) == {"sub/test_foo.py": 4.0}
+
+
+def test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    """F2 — an existing QUOTED row parses to `test_a.py` but is located under
+    the raw text `'test_a.py'`. Comparing the parsed key against the raw one
+    missed it and appended a second row for the same effective key; PyYAML then
+    silently last-wins, so the map carries a duplicate and one of the two values
+    is discarded.
+    """
+    text = "surfaces:\n  core:\n    - test_a.py\ndurations:\n  'test_a.py': 1.0\n"
+    path = _bridge_manifest(tmp_path, text)
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_a.py": 9.9}, "T")
+    assert stats["added_keys"] == 0
+    rows = [ln for ln in new_text.split("\n")
+            if ci_timing._DURATION_LINE_RE.match(ln)]
+    assert len(rows) == 1, rows
+    # the invariant the renderer now guarantees: one locatable row per parsed key
+    _, located = ci_timing._locate_durations_block(new_text.split("\n"))
+    parsed = yaml.safe_load(new_text)["durations"]
+    assert len(located) == len(parsed) == 1
+    assert parsed == {"test_a.py": 9.9}
+
+
+def test_durations_bridge_render_output_is_always_re_locatable(tmp_path: Path) -> None:
+    """F1's post-condition on a normal render (one ADD, one update): the row
+    count the locator reads back equals the parsed `durations:` key count."""
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    new_text, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_pending.py": 7.34, "test_timed.py": 2.0}, "T")
+    _, located = ci_timing._locate_durations_block(new_text.split("\n"))
+    parsed = yaml.safe_load(new_text)["durations"]
+    assert len(located) == len(parsed) == 2
+    assert set(located) == set(parsed)
+
+
+def test_durations_bridge_refuses_an_append_key_the_locator_cannot_re_read() -> None:
+    """F1 — `a b.py` is a valid YAML surface member (so it resolves and the ADD
+    path is reached) but a key with whitespace cannot be rendered as a locatable
+    `durations:` row. Writing it made the NEXT refresh die on `malformed line
+    inside the durations block` — a write the writer itself could not read."""
+    manifest = "surfaces:\n  core:\n    - a b.py\ndurations:\n  a.py: 1.0\n"
+    assert ci_timing._classified_test_keys(manifest) == {"a b.py", "a.py"}
+    with pytest.raises(ci_timing.DurationsBridgeError, match="a b\\.py"):
+        ci_timing.render_refreshed_manifest(manifest, {"a b.py": 2.0}, "T")
 
 
 def test_refresh_durations_dry_run_does_not_write(tmp_path: Path) -> None:

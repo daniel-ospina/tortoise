@@ -358,9 +358,30 @@ R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
 
+def _tests_relative_path(node_path: str) -> str:
+    """A pytest nodeid's file path as a tests/-relative key.
+
+    The durations block prints rootdir-relative nodeids (`tests/sub/x.py::t`),
+    while the manifest keys on the tests/-relative path (`sub/x.py`). Stripping
+    the `tests/` prefix makes the two comparable. A path without that prefix
+    (a log written from a different rootdir) is returned unchanged, so it fails
+    resolution loudly instead of being silently rewritten.
+    """
+    path = node_path.replace("\\", "/")
+    return path[len("tests/"):] if path.startswith("tests/") else path
+
+
 def parse_log(path: Path) -> dict:
-    """Extract durations block, summary counts, per-test outcomes, watchdog flag."""
+    """Extract durations block, summary counts, per-test outcomes, watchdog flag.
+
+    `files` is keyed by basename — the shape the artifact renders. `file_paths`
+    is the same aggregation keyed by the tests/-relative PATH, which is what
+    the durations bridge resolves against: collapsing to basenames is what let
+    a subdir file's measurement be attached to a top-level key (#6092 review,
+    F3).
+    """
     files: dict[str, dict] = {}
+    file_paths: dict[str, dict] = {}
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
     killed = False
@@ -369,8 +390,8 @@ def parse_log(path: Path) -> dict:
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError as exc:
-        return {"files": {}, "counts": counts, "outcomes": {}, "killed": False,
-                "error": f"unreadable: {exc}"}
+        return {"files": {}, "file_paths": {}, "counts": counts, "outcomes": {},
+                "killed": False, "error": f"unreadable: {exc}"}
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
@@ -416,11 +437,20 @@ def parse_log(path: Path) -> dict:
                 m = DURATION_RE.match(line)
                 if m:
                     ms = float(m.group(1)) * 1000
-                    fname = m.group(3).split("::")[0].split("/")[-1]
-                    entry = files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0})
-                    entry["tests"] += 1
-                    entry["total_ms"] += ms
-                    entry["max_ms"] = max(entry["max_ms"], ms)
+                    node_path = m.group(3).split("::")[0]
+                    fname = node_path.split("/")[-1]
+                    # Two accumulators over the same durations: the basename
+                    # one feeds the rendered artifact, the path one feeds the
+                    # bridge's resolution.
+                    for target in (
+                        files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                        file_paths.setdefault(
+                            _tests_relative_path(node_path),
+                            {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                    ):
+                        target["tests"] += 1
+                        target["total_ms"] += ms
+                        target["max_ms"] = max(target["max_ms"], ms)
         m = V_PROGRESS_RE.match(line)
         if m:
             outcomes[m.group(1)] = m.group(2)
@@ -433,8 +463,8 @@ def parse_log(path: Path) -> dict:
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
-    return {"files": files, "counts": counts, "outcomes": outcomes, "killed": killed,
-            "error": error}
+    return {"files": files, "file_paths": file_paths, "counts": counts,
+            "outcomes": outcomes, "killed": killed, "error": error}
 
 
 # --- durations bridge (#5215 Task 4b / T-B): collector → the map the ---------
@@ -449,14 +479,18 @@ def parse_log(path: Path) -> dict:
 # `manifest_path.write_text` sites, and a safe_dump would strip the
 # hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
 #
-#   * a collector key the manifest classifies in NEITHER its `surfaces:` block
-#     nor its `durations:` map is refused (exit 2) — the bridge never invents a
-#     key. A key the manifest DOES classify but has not yet timed is ADDED: the
+#   * a measured file the manifest registers NOWHERE — not in `surfaces:`, not a
+#     `durations:` key, not a member of a python-ci leg list (`slow_files`,
+#     `carve_out`, `tier1`) — is refused (exit 2): the bridge never invents a
+#     key. A file the manifest DOES register but has not yet timed is ADDED: the
 #     refusal is about REGISTRATION, never about having been timed (see
-#     `_resolve_to_manifest_keys`). Resolving against the `durations:` keys alone
-#     was the bootstrap trap #4364 names — a new test file could only be timed by
-#     a map it had to already appear in — and it made this step, the map's only
-#     writer, refuse a registered-but-untimed file (#6092);
+#     `_resolve_to_manifest_keys`). Resolution is by tests-relative PATH, and a
+#     basename only diagnoses a refusal, so a subdir twin can never receive
+#     another file's measurement (#6092 review, F3). Resolving against the
+#     `durations:` keys alone was the bootstrap trap #4364 names — a new test
+#     file could only be timed by a map it had to already appear in — and it
+#     made this step, the map's only writer, refuse a registered-but-untimed
+#     file (#6092);
 #   * a ZERO-key projection is UNKNOWN (exit 2), never a silent no-op that
 #     writes nothing and reports success;
 #   * un-sampled manifest keys are CARRIED FORWARD (merge, not replace), so
@@ -474,7 +508,10 @@ DURATIONS_CAPTURED_AT = "durations_captured_at"
 DURATIONS_VALUE_FLOOR_S = 0.1
 
 # `  <tests-relative key>: <seconds>[  # comment]` — the map's one line shape.
-# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`).
+# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`). The key
+# class `[^\s:]+` is why a key with whitespace or a colon is REFUSED on the ADD
+# path rather than written: the line would be valid YAML but unlocatable, and
+# the next refresh would refuse the whole block (#6092 review, F1).
 _DURATION_LINE_RE = re.compile(
     r"^(?P<indent>\s{2})(?P<key>[^\s:]+):[ \t]+"
     r"(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<tail>[ \t]*(?:#.*)?)$"
@@ -488,21 +525,57 @@ class DurationsBridgeError(Exception):
 def collector_file_weights(logs_dir: Path) -> dict[str, float]:
     """Per-file seconds from the collector's OWN parser, taking the LARGER
     value across the sampled jobs (the leg that CARRIES the file spends that
-    time). Basenames, exactly as `parse_log` emits them; the manifest key is
-    resolved by :func:`_resolve_to_manifest_keys`.
+    time).
+
+    Keyed by the tests/-relative PATH (`sub/test_x.py`), not the basename: two
+    files that share a basename in different directories are distinct
+    measurements, and collapsing them to one key was how a subdir file's time
+    could be attached to a top-level file (#6092 review, F3). `parse_log`
+    supplies both aggregations — the basename one for the artifact, this path
+    one for resolution.
     """
     weights: dict[str, float] = {}
     for log_path in sorted(Path(logs_dir).rglob("*.log")):
         parsed = parse_log(log_path)
-        for fname, entry in parsed["files"].items():
+        for path, entry in parsed["file_paths"].items():
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
-            if seconds > weights.get(fname, 0.0):
-                weights[fname] = seconds
+            if seconds > weights.get(path, 0.0):
+                weights[path] = seconds
     return weights
 
 
+def _duration_line_key(line: str) -> str:
+    """The effective YAML key a located `durations:` row defines.
+
+    `_DURATION_LINE_RE` captures the RAW key text, which for a quoted key
+    includes its quotes (`'test_a.py'`); the key the map actually carries is
+    what `yaml.safe_load` reads (`test_a.py`). Normalising through the parser
+    here keeps this map's key space identical to `resolved` and to
+    `yaml.safe_load(manifest)["durations"]`, so an existing quoted row is FOUND
+    and updated in place instead of being duplicated (#6092 review, F2).
+    """
+    import yaml
+
+    parsed = yaml.safe_load(line)
+    if not isinstance(parsed, dict) or len(parsed) != 1:
+        raise DurationsBridgeError(f"malformed durations line: {line!r}")
+    key = next(iter(parsed))
+    if not isinstance(key, str):
+        raise DurationsBridgeError(
+            f"durations key is not a string in {line!r} — the map keys test "
+            f"file paths, so a non-string key cannot name one")
+    return key
+
+
 def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int]]:
-    """(index of the top-level `durations:` line, {key: physical line index})."""
+    """(index of the top-level `durations:` line, {parsed key: line index}).
+
+    The keys are YAML-parsed (see :func:`_duration_line_key`), so a quoted row
+    is located under the same key the file carries. Two rows that parse to the
+    SAME key are refused: PyYAML silently last-wins on a duplicate, so allowing
+    one would let the renderer preserve a stale value behind a fresh one and
+    break the "one parsed key per located row" invariant.
+    """
     key_line = next((i for i, ln in enumerate(lines) if ln.startswith("durations:")), None)
     if key_line is None:
         return None, {}
@@ -513,7 +586,13 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
             continue
         match = _DURATION_LINE_RE.match(ln)
         if match:
-            entries[match.group("key")] = j
+            key = _duration_line_key(ln)
+            if key in entries:
+                raise DurationsBridgeError(
+                    f"duplicate `durations:` key {key!r} on lines "
+                    f"{entries[key] + 1} and {j + 1} — refusing a block PyYAML "
+                    f"would silently last-wins")
+            entries[key] = j
             continue
         if not ln[:1].isspace():
             break  # the next top-level key ends the block
@@ -522,8 +601,8 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
 
 
 def _classified_test_keys(manifest_text: str) -> set[str]:
-    """Every test file the manifest CLASSIFIES: the `surfaces:` members plus
-    every `durations:` key.
+    """Every test file the manifest CLASSIFIES: the `surfaces:` members, every
+    `durations:` key, and the members of every list python-ci runs.
 
     This is the resolution domain :func:`_resolve_to_manifest_keys` needs. It is
     deliberately NOT the `durations:` map alone: a file the manifest classifies
@@ -531,19 +610,22 @@ def _classified_test_keys(manifest_text: str) -> set[str]:
     resolving against the map alone made that state indistinguishable from a file
     registered nowhere (#4364's bootstrap trap).
 
-    The `durations:` half is carried explicitly so a map key that is not a
-    surface member still resolves in place, byte-for-byte as it did before the
-    `surfaces:` half existed — the union can only ADD candidates to a basename,
-    and an added candidate can only turn a resolution into a refusal, never into
-    a different key.
+    It is also not the `surfaces:` members alone. A subdir test can be registered
+    ONLY under `slow_files`/`carve_out`/`tier1` and still pass `--integrity`,
+    because `ci_selection.integrity` classifies a subdir file by BASENAME fallback
+    against `surfaces:`. Such a file runs in a python-ci leg that uploads a
+    `pytest-log-*`, so its measurement must resolve to its OWN path. Unioning
+    those lists is what makes the exact-path resolution below possible for it;
+    without them it resolved by basename onto whatever surface member shared its
+    basename (#6092 review, F3).
 
-    `tier1` and `on_demand` are deliberately not unioned in: measured against
-    this repo's manifest every `tier1` member is already a surface member and the
-    sole `on_demand` file is already a `durations:` key, so they add no candidate
-    today; and an `on_demand` file runs only under `evals-on-demand.yml`, so a
-    python-ci collector log cannot carry one. If a future manifest registers a
-    file under `tier1` ALONE, this union would refuse it — extend the union HERE,
-    not at the call site.
+    `on_demand` is deliberately not unioned in: it runs only under
+    `evals-on-demand.yml`, so a python-ci collector log cannot carry one, and
+    treating a stray `on_demand` measurement as registered would hide the drift.
+    `uri_requiring` is not unioned either, because it is not a leg list: every
+    one of its members is an exact `surfaces:` member in this manifest, so
+    listing it would add no candidate. If a future manifest registers a file
+    under one of these lists ALONE, extend the union HERE, not at the call site.
 
     PyYAML is imported here rather than at module scope: this is reached only
     through `render_refreshed_manifest`, whose one production caller is the
@@ -563,52 +645,71 @@ def _classified_test_keys(manifest_text: str) -> set[str]:
     durations = raw.get("durations")
     if isinstance(durations, dict):
         keys.update(k for k in durations if isinstance(k, str))
+    for list_key in ("slow_files", "carve_out", "tier1"):
+        members = raw.get(list_key)
+        if isinstance(members, (list, tuple)):
+            keys.update(m for m in members if isinstance(m, str))
     return keys
 
 
 def _resolve_to_manifest_keys(weights: dict[str, float],
                               classified_keys: set[str]) -> dict[str, float]:
-    """Map the collector's basenames onto manifest keys, fail-closed.
+    """Map the collector's tests-relative paths onto manifest keys, fail-closed.
 
-    The collector keys on the file's basename; the manifest keys on the file's
-    tests/-relative path. `classified_keys` is the manifest's FULL test-file
-    classification — `_classified_test_keys` supplies it — never the `durations:`
-    keys alone.
+    `weights` is keyed by the file's tests/-relative PATH (`collector_file_weights`
+    supplies it), never by basename, and `classified_keys` is the manifest's full
+    test-file classification (`_classified_test_keys` supplies it) — never the
+    `durations:` keys alone.
 
     The rule, in full:
 
-    * exactly ONE candidate key → resolve to it. It does not matter whether that
-      key already has a `durations:` entry (an in-place update) or is classified
-      with none (an ADD — the measured entry the refresh exists to produce);
-    * ZERO candidates → refusal. The file is registered in neither block, so the
-      refresh has nothing to agree with: this is the #2876 manifest-drift class,
-      and registering the file is the fix, not widening the bridge;
-    * TWO OR MORE candidates — whether both are `durations:` keys, both are
-      classified-only, or one is each — refusal. The basename alone cannot say
-      which path the measurement belongs to, and resolving against only one of
-      the two sets was how this rule could be silently bypassed.
+    * the measured path IS a classified key → resolve to it, unchanged. Exact
+      path identity is the only thing that SELECTS a key;
+    * the measured path is NOT classified and NO classified key shares its
+      basename → refusal. The file is registered nowhere: the #2876
+      manifest-drift class, and registering the file is the fix;
+    * the measured path is NOT classified and TWO OR MORE classified keys share
+      its basename → refusal (ambiguous, never a guess);
+    * the measured path is NOT classified and exactly ONE classified key shares
+      its basename → refusal, because the paths DIFFER. This is the case the old
+      basename-only rule got wrong: it attached the measurement to the twin. The
+      repo holds the shape today (`test_ship_test_onboarding.py` is classified;
+      `e2e/test_ship_test_onboarding.py` is not), and while python-ci does not
+      run the e2e leg today, the attachment would be wrong the moment it did.
 
-    "Exactly one" and "two or more" are exhaustive over the candidate list, so
-    those two refusals are the only ones and neither is a guess.
+    A basename therefore never SELECTS a key here; it only distinguishes
+    "unregistered" from "ambiguous" from "a different file". Adding a candidate
+    to `classified_keys` can turn a refusal into an exact self-resolution, or an
+    unambiguous diagnosis into an ambiguous one — it can never attach a
+    measurement to a DIFFERENT path.
     """
     by_basename: dict[str, list[str]] = {}
     for key in sorted(classified_keys):
         by_basename.setdefault(Path(key).name, []).append(key)
     resolved: dict[str, float] = {}
-    for basename, seconds in weights.items():
+    for measured, seconds in weights.items():
+        if measured in classified_keys:
+            resolved[measured] = seconds
+            continue
+        basename = Path(measured).name
         candidates = by_basename.get(basename, [])
         if not candidates:
             raise DurationsBridgeError(
-                f"collector key {basename!r} is classified in neither the "
-                f"manifest's `surfaces:` block nor its `durations:` map — "
-                f"register the test file before refreshing the durations map"
+                f"measured file {measured!r} is not a registered test file — it "
+                f"is absent from the manifest's `surfaces:`, `durations:`, "
+                f"`slow_files`, `carve_out`, and `tier1` — register it before "
+                f"refreshing the durations map"
             )
         if len(candidates) > 1:
             raise DurationsBridgeError(
-                f"collector key {basename!r} matches multiple manifest keys "
-                f"{sorted(candidates)} — refusing to guess"
+                f"measured file {measured!r} shares its basename with multiple "
+                f"manifest keys {sorted(candidates)} — refusing to guess"
             )
-        resolved[candidates[0]] = seconds
+        raise DurationsBridgeError(
+            f"measured file {measured!r} is not registered, and the only key "
+            f"with its basename is {candidates[0]!r} — a different path; "
+            f"refusing to attach the measurement to it"
+        )
     return resolved
 
 
@@ -632,9 +733,16 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                               captured_at: str) -> tuple[str, dict]:
     """Return (new manifest text, stats). Pure: callers own the write.
 
-    A weight whose basename resolves to a key the manifest CLASSIFIES but has not
-    timed yet is ADDED as a new `durations:` row; every other row is carried
-    forward and the `durations_captured_at` stamp is rewritten.
+    A weight whose tests/-relative path resolves to a key the manifest
+    CLASSIFIES but has not timed yet is ADDED as a new `durations:` row; every
+    other row is updated in place and carried forward, and the
+    `durations_captured_at` stamp is rewritten.
+
+    POST-CONDITION: the returned text is one the locator reads back with
+    exactly one locatable row per parsed `durations:` key. A key that cannot be
+    rendered as a locatable row, or a render that would leave a key with two
+    rows, raises :class:`DurationsBridgeError` instead of writing it — see the
+    check at the end.
     """
     lines = manifest_text.split("\n")
     _, entries = _locate_durations_block(lines)
@@ -644,9 +752,10 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         raise DurationsBridgeError(
             "collector produced ZERO measured file durations — UNKNOWN, never 0"
         )
-    # Resolve against what the manifest CLASSIFIES (surfaces + durations), not
-    # against the durations map alone — a classified file with no duration yet is
-    # added below instead of refusing the whole refresh (#4364).
+    # Resolve against what the manifest CLASSIFIES (surfaces + durations + the
+    # python-ci leg lists), not against the durations map alone — a classified
+    # file with no duration yet is added below instead of refusing the whole
+    # refresh (#4364).
     resolved = _resolve_to_manifest_keys(
         weights, _classified_test_keys(manifest_text))
     for key in sorted(resolved):
@@ -661,8 +770,13 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # other trailing comment is preserved verbatim.
         if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
             tail = ""
+        # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
+        # quoted key (`'test_a.py'`) must stay quoted when its value is
+        # rewritten, or a key character that needs quoting would become an
+        # unparseable bare scalar. `entries` is keyed by the PARSED key, so
+        # this lookup finds the quoted row instead of missing it.
         lines[index] = (
-            f"{match.group('indent')}{key}: "
+            f"{match.group('indent')}{match.group('key')}: "
             f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
         )
     # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
@@ -677,11 +791,25 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         assert last is not None  # located by the same regex
         indent = last.group("indent")
         insert_at = max(entries.values()) + 1
-        lines[insert_at:insert_at] = [
-            f"{indent}{key}: "
-            f"{max(float(resolved[key]), DURATIONS_VALUE_FLOOR_S):.1f}"
-            for key in new_keys
-        ]
+        rendered: list[str] = []
+        for key in new_keys:
+            line = (f"{indent}{key}: "
+                    f"{max(float(resolved[key]), DURATIONS_VALUE_FLOOR_S):.1f}")
+            # A key with whitespace or a colon is a valid YAML key, so PyYAML
+            # accepts the row — but `_DURATION_LINE_RE` cannot locate it, so the
+            # NEXT refresh would refuse the block this one wrote. Refuse the
+            # ADD instead of writing a line the locator cannot re-read (#6092
+            # review, F1). Quoting the key is not the fix: it would change the
+            # key's identity against `entries`/`resolved`, which is F2's class.
+            if not _DURATION_LINE_RE.match(line):
+                raise DurationsBridgeError(
+                    f"cannot render manifest key {key!r} as a `durations:` row — "
+                    f"a key with whitespace or a colon is valid YAML but not "
+                    f"locatable by the line parser, so the next refresh could "
+                    f"not read the block back"
+                )
+            rendered.append(line)
+        lines[insert_at:insert_at] = rendered
     _set_captured_at(lines, captured_at)
     stats = {
         "sampled_keys": len(resolved),
@@ -693,7 +821,22 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         "carried_forward": len(entries) - (len(resolved) - len(new_keys)),
         "captured_at": captured_at,
     }
-    return "\n".join(lines), stats
+    text = "\n".join(lines)
+    # POST-CONDITION (#6092 review, F1/F2), checked on the TEXT we are about to
+    # hand back: re-locate it. F1 wrote `  a b.py: 2.0` — valid YAML, but
+    # unlocatable, so the next refresh refused the block this one produced; F2
+    # appended a second row for a quoted key that already existed. The locator
+    # refuses an unlocatable row and a duplicate parsed key, and the count must
+    # equal the input keys plus the appended ones — so a render either satisfies
+    # the invariant or raises here instead of persisting a poisoned map.
+    _, located = _locate_durations_block(text.split("\n"))
+    expected = len(entries) + len(new_keys)
+    if len(located) != expected:
+        raise DurationsBridgeError(
+            f"render produced {len(located)} locatable `durations:` rows for "
+            f"{expected} keys — refusing to write a block it cannot read back"
+        )
+    return text, stats
 
 
 def _manifest_of(manifest_text: str) -> dict:
