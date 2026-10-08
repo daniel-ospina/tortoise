@@ -423,6 +423,11 @@ class TestStateRankerBoost:
 
 
 # ── Integration: real graph, E2E-1 ranking participation (embedded) ───────
+#
+# Leg precondition: the ORDERED claim (contested outranks its twin) is a
+# single-leg claim and is pinned sparse via ``force_sparse_tfidf``.  The other
+# integration tests here assert boost presence/absence, not an order between
+# content-identical twins, and are leg-count-agnostic by construction.
 
 def _wipe(sdk):
     sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
@@ -490,7 +495,27 @@ def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monk
         assert "w4_contested_boost" not in recs[oid]
 
 
-def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypatch):
+def test_integration_conflict_relevant_query_outranks_twin(
+    ranked_sdk, monkeypatch, force_sparse_tfidf,
+):
+    """The contested twin outranks its twin **on a pinned single-leg read**.
+
+    ``force_sparse_tfidf`` (tests/conftest.py, the #2573/#2772 pattern) is
+    NOT cosmetic here — it is the fixture's precondition.  The ordered claim
+    below needs the two content-identical twins to have EXACTLY equal
+    retrieval relevance, so the W4-b boost is the only differentiator.  Only
+    the sparse leg guarantees that.  With a dense leg present the SDK FUSES
+    (``len(raw_results) > 1``, ``match_source="rrf"``); both legs tie,
+    each leg's own ``ORDER BY score, id ASC`` tie-break ranks the lower-ULID
+    twin first, and that one-rank RRF difference is worth MORE than the
+    boost — so the ordering claim is false, not flaky (#7704, measured:
+    fused similarity gap 0.0188 > boost contribution 0.0175).
+
+    The `match_source` assertion below makes the path the test actually
+    measured part of the contract: revert the pin and the fused read FAILS
+    the guard with a message that names the cause, instead of the opaque
+    ``assert 1 < 0`` this test used to emit at the rail (#7629).
+    """
     calm, hot, _cc = _seed_twin_conflict(
         ranked_sdk, "zebra finch flocking behavior is social, not migratory")
     proj = ranked_sdk._get_proj()
@@ -517,22 +542,37 @@ def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypat
         "zebra finch migration", limit=10, order_by="graph")
     ids = [r["id"] for r in results]
     assert hot in ids and calm in ids
-    # Conflict-relevant query (the counter-claim shares "zebra"+"finch") =>
-    # the contested twin OUTRANKS its uncontested twin.
-    assert ids.index(hot) < ids.index(calm)
     by_id = {r["id"]: r for r in results}
     on_hot = by_id[hot]["graph_ranking"]
     on_calm = by_id[calm]["graph_ranking"]
+    # Fixture precondition, ASSERTED (#7629): the pinned embedder-absent lane
+    # yields ONE leg, so the SDK's single-list shortcut (sdk.py:17798)
+    # bypasses rrf_fusion and the twins have exactly equal relevance.  A
+    # fused read (match_source="rrf") would make the ordering claim below
+    # invalid — see the docstring and #7704 — so state which path this test
+    # measured instead of inheriting it from ambient embedder availability.
+    assert {r.get("match_source") for r in results} == {"fts"}, (
+        "fixture precondition changed: the ordered claim below is a "
+        "single-leg (sparse) claim and does NOT hold on a fused read "
+        "(#7704) — see force_sparse_tfidf")
+    # Causal assertions FIRST (they hold on both paths): if this test ever
+    # fails, say whether the boost failed to apply or the order ignored it —
+    # the previous order reported only `assert 1 < 0` for either cause
+    # (#7629).
     assert on_hot["w4_contested_boost"] == W4_CONTESTED_BOOST
     assert on_hot["final_score"] > on_calm["final_score"]
     # Causal delta: flag-on moves the contested twin UP by exactly the
     # boost effect (W4_CONTESTED_BOOST x graph_boost_weight = 0.0175 in
     # final-score space) and leaves the uncontested twin untouched.  If the
-    # boost were inert, hot_final(on) == hot_off and the ordering asserts
-    # above could pass on retrieval noise alone.
+    # boost were inert, hot_final(on) == hot_off and the ordering assert
+    # below could pass on retrieval noise alone.
     assert on_calm["final_score"] == calm_off  # calm never boosted
     assert on_hot["final_score"] - hot_off == pytest.approx(
         W4_CONTESTED_BOOST * 0.35, abs=2e-3)
+    # Conflict-relevant query (the counter-claim shares "zebra"+"finch") =>
+    # the contested twin OUTRANKS its uncontested twin on the pinned
+    # single-leg read.
+    assert ids.index(hot) < ids.index(calm)
 
 
 def _run_fts_graph(sdk, flag_on: bool, monkeypatch=None):
