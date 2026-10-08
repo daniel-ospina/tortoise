@@ -717,7 +717,27 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
     """Set the machine-readable capture-age key. Its ABSENCE is UNKNOWN, so it
     is never inferred from the file's git commit date — any unrelated edit
     would reset that (cycle 7)."""
-    line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
+    # A stamp safe to embed in a double-quoted scalar keeps the line
+    # byte-stable — the text-preservation test pins that, and it is the path
+    # every real stamp takes. Anything else is rendered through the YAML
+    # writer instead of interpolated (#6092 review round 4): this is the only
+    # value the renderer persists without validating, and a stamp containing a
+    # quote produced a document that could not be parsed back, while the
+    # readback that follows the renderer runs outside its handlers — so the
+    # CLI died with a traceback (exit 1) instead of the documented refusal.
+    if re.search(r'["\\\n\r]', captured_at):
+        import yaml
+        rendered = yaml.safe_dump(
+            {DURATIONS_CAPTURED_AT: captured_at}, default_flow_style=False
+        ).strip()
+        if "\n" in rendered:
+            raise DurationsBridgeError(
+                f"cannot render the `{DURATIONS_CAPTURED_AT}` stamp as a single "
+                f"line: {captured_at!r}"
+            )
+        line = rendered
+    else:
+        line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
     for i, ln in enumerate(lines):
         if ln.startswith(f"{DURATIONS_CAPTURED_AT}:"):
             lines[i] = line
@@ -759,7 +779,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         classified_keys = _classified_test_keys(manifest_text)
     except yaml.YAMLError as exc:
         raise DurationsBridgeError(
-            f"the manifest's `durations:` block is not readable as YAML "
+            f"the manifest is not readable as YAML "
             f"({type(exc).__name__}: {exc})"
         ) from exc
     if not weights:
@@ -883,7 +903,18 @@ def _manifest_of(manifest_text: str) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection as cs
 
-    return cs._normalize_surfaces(yaml.safe_load(manifest_text))
+    # A render whose stamp or block cannot be parsed back must be the
+    # documented refusal, not a traceback: this is the readback the bridge's
+    # callers run AFTER the renderer, outside its own handlers (#6092 review
+    # round 4). Both callers map DurationsBridgeError to exit 2.
+    try:
+        parsed = yaml.safe_load(manifest_text)
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"the manifest is not readable as YAML "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
+    return cs._normalize_surfaces(parsed)
 
 
 def validate_refreshed_manifest(manifest_text: str) -> list[str]:

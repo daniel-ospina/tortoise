@@ -2405,3 +2405,40 @@ def test_durations_bridge_refuses_an_unreadable_input_manifest_without_a_traceba
     assert label  # documents which shape the case is
     with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
         ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, "T")
+
+
+@pytest.mark.parametrize("stamp", ['T" x', "T: y", "T' z"])
+def test_the_captured_at_stamp_cannot_make_the_render_unparseable(stamp: str) -> None:
+    """The stamp is the only value the renderer persists without validating
+    (#6092 review round 4).
+
+    It was string-interpolated into a double-quoted scalar, so a stamp
+    containing a quote produced a document that could not be parsed back — and
+    the readback that follows the renderer runs outside its own handlers, so
+    the CLI died with a traceback (exit 1) instead of the documented refusal.
+    A stamp that needs escaping is rendered through the YAML writer; a stamp
+    safe to embed is left byte-identical, which the text-preservation test
+    pins.
+    """
+    manifest = "surfaces:\n  core:\n    - keep.py\ndurations:\n  keep.py: 1.0\n"
+    text, _ = ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, stamp)
+    parsed = yaml.safe_load(text)
+    assert parsed["durations_captured_at"] == stamp
+
+
+def test_a_multiline_captured_at_stamp_is_refused() -> None:
+    """A stamp that cannot be written as ONE line is refused rather than
+    folding the document (#6092 review round 4)."""
+    manifest = "surfaces:\n  core:\n    - keep.py\ndurations:\n  keep.py: 1.0\n"
+    with pytest.raises(ci_timing.DurationsBridgeError, match="as a single line"):
+        ci_timing.render_refreshed_manifest(manifest, {"keep.py": 3.0}, "T\nz")
+
+
+def test_manifest_of_refuses_an_unreadable_manifest_as_the_documented_error() -> None:
+    """`_manifest_of` is the readback the bridge runs AFTER the renderer, outside
+    its handlers; both its callers map DurationsBridgeError to exit 2, so an
+    unreadable document must not escape as a raw yaml error (#6092 review
+    round 4). `--paid-vs-selected` reads its `--manifest` through here too.
+    """
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing._manifest_of("surfaces:\n  core: [\n")
