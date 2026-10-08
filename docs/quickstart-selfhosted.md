@@ -347,10 +347,12 @@ silent failure.
 predates #3585, replaying a journal written by a newer one, cannot fold the new
 record kinds and **drops them silently** (it also reintroduces
 wipe-before-parse, turning one torn line into total loss). Conversely, a binary
-carrying #3585 or later **fails the replay loudly** (R8): the run names the
-first few unfolded records with a total count, and refuses — so you get a
-refusal rather than a silently incomplete graph. Either way the restore path is
-a pre-release backup per the drill above, not a downgrade.
+carrying #3585 or later **fails the replay loudly** (R8) on the graph-backed
+rebuild and recover engines: the run names the first few unfolded records with
+a total count, and refuses — so you get a refusal rather than a silently
+incomplete graph. (The in-memory index opens no run boundary, so it warns
+only.) Either way the restore path is a pre-release backup per the drill above,
+not a downgrade.
 
 ## 8. Expansion packs (optional)
 

@@ -1414,10 +1414,10 @@ jobs:
           #      hand-maintained artifact. The old a/b lists were balanced when
           #      written (#4711) and were never rechecked.
           #
-          # #6137 re-cut the two rows. They are the LPT legs of
-          # `slow_files - carve_out` on the committed `durations` map — 28 and
-          # 34 files at 19.722 / 19.725 min (re-cut by #5285 when an 11.82m file
-          # entered `slow_files`; each row is a partition of the same set),
+          # #5285 re-cut the two rows when its fail-loud suite entered
+          # `slow_files` (#6137's earlier cut was 13.82m). They are the LPT legs
+          # of `slow_files - carve_out` on the committed `durations` map — 28 and
+          # 34 files at 19.722 / 19.725 min; each row is a partition of the set,
           # re-derivable with
           # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
           # (The first cut packed 43 files / 16.21m; eight dual-registered
@@ -1481,12 +1481,16 @@ jobs:
     # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
     # measured from job start. So the cap must clear setup + pre-phase + the
     # watchdog, or the runner kills the step before pytest can print its counts
-    # — exactly the loss the ORDER invariant exists to prevent. Using the fast
-    # job's own figures (`test`, above): ~7m setup + <=10m pre-phase + the 40m
-    # watchdog + ~10s grace = ~57.2m, so 60m. (This job's pre-phase is the
-    # coverage-manifest --collect-only step; it carries no #6142 last-failed
-    # run.) 45m — the value this PR first used, and 40m on main — left 5m for
-    # setup alone, so the watchdog could never fire;
+    # — exactly the loss the ORDER invariant exists to prevent.
+    # The cap is sized to leave the setup + collect-only window well inside the
+    # remainder: 60 - 40 = 20m, against the fast job's own ~7m setup figure
+    # (`test`, above) plus a ~2m collect for 62 files. That window is NOT
+    # derived: this job's pre-phase is the coverage-manifest --collect-only step
+    # and carries no step timeout of its own (the fast job's <=10m bound is
+    # #6142's last-failed run, which this job does not have), so 20m is a budget
+    # with margin rather than a measured bound. 45m — the value this PR first
+    # used, and 40m on main — left 5m for setup alone, so the watchdog could
+    # never fire;
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
     # literals and cannot see the gap.
     timeout-minutes: 60
