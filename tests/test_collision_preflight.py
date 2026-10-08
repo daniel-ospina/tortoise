@@ -2746,21 +2746,80 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
 
-    def test_remote_twin_at_a_different_sha_still_blocks(self):
-        # #7693, the fail-closed half. A REUSED branch has moved, so its remote
-        # tip no longer matches the terminal LOCAL tip: no exact match, no
-        # demotion, and the ref keeps blocking. A name match alone must never
-        # demote — that is the false-CLEAN direction the surface note warns
-        # about, and this is the case that note is protecting.
-        ref = f"fix/{ISSUE}-moved"
-        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
-        local_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
-        _git(self.repo, "commit", "--allow-empty", "-m", "advance")
-        moved_sha = self._git_out("rev-parse", "HEAD")
-        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", moved_sha)
+    def test_remote_twin_of_a_reused_branch_still_blocks(self):
+        # #7693, ⭐ THE test the safety property rests on — and the one whose
+        # ABSENCE round-1 review caught by MUTATION: replacing the `_live != _sha`
+        # half of the guard with `_live is None` restored the original false-CLEAN
+        # and left every other test in this file PASSING. A test that still passes
+        # with the condition removed pins nothing, so it must be this shape.
+        #
+        # The shape that REACHES the comparison is a REUSE, not a moved cache
+        # entry: the local twin and the CACHED remote ref both sit at the terminal
+        # sha S (nothing here fetches — that is the whole hazard), while the
+        # REMOTE has moved to T. Only a live read can tell those apart. (The
+        # previous version of this test set the CACHED ref to the moved sha, so
+        # `local_terminal_shas` missed first and control never reached the live
+        # read at all — measured: ZERO `ls-remote` calls.)
+        ref = f"fix/{ISSUE}-reused"
+        bare = self.tmp / "bare.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        # The branch is REUSED elsewhere and the remote moves on. NOTE: a push
+        # advances the local remote-tracking ref too, so the cache is reset to the
+        # stale sha AFTER the second push — that is what "nobody has fetched since
+        # S" actually looks like, and it is the whole hazard.
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.assertEqual(
+            self._git_out("rev-parse", f"refs/remotes/origin/{ref}"), terminal_sha,
+            "precondition: the local cache must still show the terminal sha",
+        )
         self.gh_fixtures(closed_prs=[{
-            "number": 4244, "title": "land it", "body": "", "state": "closed",
-            "headRefName": ref, "headSha": local_sha,
+            "number": 4246, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+        # ...and it must NOT have been demoted on the cached sha.
+        self.assertNotIn("SAME COMMIT", out)
+
+    def test_remote_ref_in_a_namespace_two_remotes_share_blocks(self):
+        # #7693 P1. `refs/remotes/origin/X` need not cache ORIGIN's branch: with
+        # `remote.fork.fetch=+refs/heads/*:refs/remotes/origin/*` it caches FORK's.
+        # Deriving the remote from the ref's first path segment queried `origin`,
+        # which held that branch at the stale sha, and demoted a LIVE branch —
+        # the wrong-remote false-CLEAN. A namespace owned by two remotes is
+        # AMBIGUOUS, and ambiguity on a blocking surface is not resolved by
+        # guessing: the ref must keep blocking.
+        ref = f"fix/{ISSUE}-shared-ns"
+        bare_origin = self.tmp / "bare-origin.git"
+        bare_fork = self.tmp / "bare-fork.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare_origin))
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare_fork))
+        _git(self.repo, "remote", "set-url", "origin", str(bare_origin))
+        _git(self.repo, "remote", "add", "fork", str(bare_fork))
+        _git(self.repo, "config", "remote.fork.fetch",
+             "+refs/heads/*:refs/remotes/origin/*")
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        # fork holds the same branch LIVE, moved. The cache is reset afterwards for
+        # the same reason as in the reuse test above (a push moves it).
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "fork", f"{moved}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4247, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
             "mergedAt": "2026-09-01T00:00:00Z",
         }])
         rc, out = self.run_tool()
