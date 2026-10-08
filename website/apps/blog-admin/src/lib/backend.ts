@@ -63,8 +63,11 @@ const PROXIED_PREFIXES = ['/rest/v1/', '/storage/v1/'];
  *
  * supabase-js calls its fetch as `(url, init)`; it is also handed a `Request`
  * in some code paths, so both shapes are handled.
+ *
+ * Exported for the unit test (`backend.test.ts`) — a module-internal export; it
+ * is NOT part of any SDK/MCP surface.
  */
-function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   let href: string;
   let options = init;
   if (typeof input === 'string') {

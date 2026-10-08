@@ -3956,9 +3956,8 @@ function claimIntentInFlight() {
     if (response && response.status === 401) {
       // #1511 semantic, ported: the BFF's OWN 401 means — and only ever means —
       // "not signed in", so welcome must never render for unauthenticated
-      // users. Clear the session and go to /auth. (A store fault is 503 and is
+      // users. Leave for /auth. (A store fault is 503 and is
       // deliberately NOT handled here: it shows, it never redirects — #3485.)
-      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
       // #1860 (P3-5): preserve the search params — /auth's OAuth-error
       // banner reads ?error=... #1909: an error FRAGMENT rides along too.
       bounceToAuth(window.location.search, oauthErrorHash())
@@ -4375,7 +4374,6 @@ function claimIntentInFlight() {
       sessionTokenRef.current = null
       setTeams([])
       setAuthed(false)
-      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
       bounceToAuth()
     }
     window.addEventListener('focus', onFocus)
@@ -4746,10 +4744,9 @@ function claimIntentInFlight() {
     // #1511: the key-only card is gone — after signOut the dashboard has NO
     // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
     // the absolute target) so the sign-out lands on the login page instead of
-    // the dead redirect shell. clearStoredSession is belt-and-braces (signOut
-    // already clears the cookie via the adapter; a blocked script is covered
-    // by the mount-effect redirect on next load).
-    if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+    // the dead redirect shell. Sign-out is the server `POST /api/session`
+    // (the fetch above), which clears the HttpOnly `__Host-session` cookie;
+    // there is nothing client-side to clear — the browser holds no session.
     bounceToAuth()
   }
 

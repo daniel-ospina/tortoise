@@ -111,7 +111,6 @@ function sandbox(response) {
     errors: [],
     bounced: false,
     authed: undefined,
-    clearedStored: false,
     API_BASE: 'http://test.local/api',
     fetch: async (url, init) => {
       sb.fetchCalls.push({ url: String(url), method: String((init && init.method) || 'GET') })
@@ -121,7 +120,6 @@ function sandbox(response) {
     setError: (v) => { sb.errors.push(v) },
     setAuthed: (v) => { sb.authed = v },
     bounceToAuth: () => { sb.bounced = true },
-    window: { clearStoredSession: () => { sb.clearedStored = true } },
     localStorage: { removeItem: () => {} },
     sessionStorage: { removeItem: () => {} },
   }
@@ -150,8 +148,6 @@ test('a 503 revoke keeps the user signed in and does NOT navigate', async () => 
 
   assert.equal(sb.bounced, false,
     'a failed revoke navigated to /auth anyway — the still-live session bounces straight back')
-  assert.equal(sb.clearedStored, false,
-    'local session state was cleared despite the session still being live server-side')
   assert.notEqual(sb.authed, false,
     'logout tore down the authed UI even though the server session was NOT revoked')
   assert.ok(sb.errors.some((e) => /Could not sign out/.test(e)),
@@ -165,7 +161,6 @@ test('a transport fault also stays put and surfaces the failure', async () => {
   const sb = await run('throw')
 
   assert.equal(sb.bounced, false, 'a transport fault navigated away')
-  assert.equal(sb.clearedStored, false, 'a transport fault cleared local session state')
   assert.notEqual(sb.authed, false, 'a transport fault tore down the authed UI')
   assert.ok(sb.errors.some((e) => /Could not sign out/.test(e)),
     `the transport failure was not surfaced: ${JSON.stringify(sb.errors)}`)
@@ -175,7 +170,6 @@ test('a 200 revoke tears down local state and navigates to /auth', async () => {
   const sb = await run({ ok: true, status: 200 })
 
   assert.equal(sb.bounced, true, 'a successful revoke must navigate to /auth')
-  assert.equal(sb.clearedStored, true, 'a successful revoke must clear the local session marker')
   assert.equal(sb.authed, false, 'a successful revoke must drop the authed UI')
   // Teardown clears the error banner (`setError('')`), so assert no FAILURE was
   // surfaced rather than that setError was never called.

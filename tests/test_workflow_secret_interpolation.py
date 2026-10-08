@@ -340,7 +340,10 @@ _FIXED_STEPS: dict[tuple[str, str], tuple[str, ...]] = {
     (
         "deploy-pages.yml",
         "Build blog admin SPA (vite) → stage into dist/admin/ (#4171)",
-    ): ("SUPABASE_URL", "SUPABASE_ANON_KEY"),
+        # #4178: the anon key is NO LONGER a blog-admin build input — the console's
+        # data layer rides the same-origin `/api/sb/*` Token Handler, which attaches
+        # the Supabase credential server-side (`backend.ts` passes a placeholder).
+    ): ("SUPABASE_URL",),
     (
         "deploy-pages.yml",
         "Pre-flight — token can see tortoise-dashboard project (P2-1)",
