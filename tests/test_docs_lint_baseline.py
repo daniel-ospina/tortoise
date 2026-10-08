@@ -201,7 +201,7 @@ def test_the_digested_policy_name_set_is_pinned_so_a_name_cannot_vanish():
     #7534 deferral), which is the fail-CLOSED direction: an inert file reds the
     pin, rather than a real one slipping through.
     """
-    assert dlb.LINTER_CONFIG_NAMES == frozenset({
+    assert frozenset({
         ".markdownlint-cli2.jsonc",
         ".markdownlint-cli2.yaml",
         ".markdownlint-cli2.yml",
@@ -217,7 +217,7 @@ def test_the_digested_policy_name_set_is_pinned_so_a_name_cannot_vanish():
         ".markdownlintignore",
         ".lycheeignore",
         "lychee.toml",
-    })
+    }) == dlb.LINTER_CONFIG_NAMES
 
 
 def test_run_lychee_refuses_an_unshaped_document(tmp_path: Path):
