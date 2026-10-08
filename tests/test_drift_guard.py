@@ -43,15 +43,15 @@
     The `behind > max` arm was a proxy for "the green we measured does not
     describe the tree that would land", and it refused branches that were only
     behind: measured 2026-10-07, open PRs sat blocked at 24 and 21 commits
-    behind with no failing code check, while a stale base is made current by the
-    merge rail before it judges the tree. The exit code is now driven by the
+    behind with no failing code check. The exit code is now driven by the
     revert arm alone — the measurement that names a real defect — and the
     distance is annotated `(over N — advisory, not a refusal)`. The tests below
     pin BOTH halves: a distance over the number is green, and a clean two-sided
-    edit is still red. The one case the count covered and the revert arm does
-    not — a stale base whose merge breaks the build without reverting content —
-    is caught by re-running CI on the refreshed tree, which is what the rail
-    does before evaluating it.
+    edit is still red. ⚠️ THE RESIDUAL IS NOT COMPENSATED and must not be read
+    as covered: a stale base whose merge into a GREEN main breaks the build
+    without reverting content is no longer bounded by any distance, because the
+    merge rail re-runs a PR's checks only where it refuses BECAUSE of the lag,
+    which it does only when the base is red.
 
 Every fixture is a self-contained local git repo pair (bare remote + one or
 more clones) using filesystem paths — no network, no DB. The tool under test

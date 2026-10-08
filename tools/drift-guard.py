@@ -101,8 +101,10 @@ from pathlib import Path
 
 DEFAULT_MAX_BEHIND = 20
 # ADVISORY since #4764: the distance is reported against this number and never
-# fails the gate. The count measured stale MEASUREMENT, not a defect, and the
-# merge rail makes a stale base current before it judges the tree.
+# fails the gate. The count measured stale MEASUREMENT, not a defect — and the
+# residual that leaves (a stale base whose merge into a green main breaks the
+# build without reverting content) is stated in the module docstring, NOT
+# compensated here or by the merge rail.
 # Display help for a long revert list; the JSON always carries every path.
 MAX_REPORTED_PATHS = 50
 

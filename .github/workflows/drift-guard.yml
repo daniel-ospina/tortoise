@@ -5,8 +5,8 @@
 # branch is, and since #4764 does NOT fail on that distance: the count was a
 # proxy for a stale measurement, and it reddened branches that were merely
 # behind (measured 2026-10-07: 24 and 21 commits behind, every other check
-# green). The v3 epic's real-backend E2Es all gate on
-# 'worktree == origin/main' — this makes the gate loud. The tool fetches
+# green). The revert arm below is unchanged and is what this gate still refuses:
+# a merge that would not keep main's content. The tool fetches
 # origin/main first and fails closed when freshness cannot be proven, so a
 # never-fetched worktree cannot pass on a stale ref.
 #
