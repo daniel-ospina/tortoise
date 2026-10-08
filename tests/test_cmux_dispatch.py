@@ -1167,15 +1167,19 @@ class FakeCmux:
 
 
 #: A LIVE pane read at the RECOVERY depth (`RECOVERY_SCREEN_LINES`), whose
-#: transcript carries a shell-prompt-shaped line ABOVE the last `DEFAULT_SCREEN_LINES`
-#: and ends in a stats line with NO pwd line above it. Because no footer BLOCK
-#: exists (`_footer_stats_end` == -1), `shell_prompt_below_footer` falls back to
-#: scanning the WHOLE capture and sees that old prompt — so the SAME pane is not
-#: ready at 300 lines and ready at 80. That is what makes the recovery re-send's
-#: window matter: judged unsliced it refuses a pane the gate approved.
+#: transcript carries a shell-prompt-shaped line EXACTLY ONE LINE OUTSIDE the
+#: gate's window (`DEFAULT_SCREEN_LINES`) and ends in a stats line with NO pwd line
+#: above it. Because no footer BLOCK exists (`_footer_stats_end` == -1),
+#: `shell_prompt_below_footer` falls back to scanning the WHOLE capture and sees
+#: that old prompt — so the SAME pane is not ready at 300 lines and ready at 80.
+#:
+#: The one-line-outside placement is load-bearing. With the prompt deeper in the
+#: capture (say 100 lines from the end) the test passes for ANY slice that drops
+#: it, including a wrong 100-line window; here only a slice of `DEFAULT_SCREEN_LINES`
+#: or less drops the prompt, so the test pins the window it claims to pin.
 DEEP_READ_WITH_A_TORN_FOOTER = (
     "$ uv run pytest tests/ -q\n"
-    + ("filler line\n" * 100)
+    + ("filler line\n" * 79)
     + "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 kept a JSONL "
     "record deepseek-flash \u2022 high\n"
 )

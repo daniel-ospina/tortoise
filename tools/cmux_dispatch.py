@@ -495,6 +495,11 @@ def not_ready_reason(screen: str | None) -> str:
     ever drawn — naming a footer that does not exist and sending the reader
     after the wrong failure. Check presence first, then position.
     """
+    if boot_blocked(screen):
+        return (
+            "pi is sitting on its `Press any key to continue...` boot-block "
+            "prompt, which eats what is typed at it"
+        )
     if status_bar_present(screen) and shell_prompt_below_footer(screen):
         return (
             "a shell prompt is drawn BELOW pi's footer, so the pane has "
