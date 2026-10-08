@@ -1604,7 +1604,7 @@ def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
     import tortoise.monitoring as mon
 
     seen: dict = {}
-    ran_on: list[str] = []
+    ran_on: list[threading.Thread] = []
     real = selfhost._probe_worker
 
     def spy(name, workers):
@@ -1613,19 +1613,35 @@ def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
 
     monkeypatch.setattr(selfhost, "_probe_worker", spy)
     selfhost._run_bounded(
-        lambda: ran_on.append(threading.current_thread().name), 1.0)
+        lambda: ran_on.append(threading.current_thread()), 1.0)
 
     assert seen.get("args") == (selfhost._DB_LEG_WORKER,
                                 selfhost._DB_LEG_WORKERS), (
         "the DB leg did not resolve its own named pool")
     pool = real(selfhost._DB_LEG_WORKER, selfhost._DB_LEG_WORKERS)
     assert isinstance(pool, mon._SingleSlotWorker), type(pool)
-    # EXECUTION identity, not resolution: a raw thread that merely WARMS this
-    # pool is the mutation this line exists to catch.
+    # IDENTITY, not the name. Two earlier versions of this assertion compared
+    # thread NAMES, and both were defeated: first by a decoy `pool.submit` with
+    # the leg on a default-named raw thread, then — after the name was recorded
+    # — by a raw thread PER LEG named `selfhost-ready-probe-db-leg-N`, which
+    # passed this entire file (70/70, measured). A raw thread can be given any
+    # name; it cannot BE a pool thread. `is` is the only unfakeable test.
     assert ran_on, "the leg never ran at all"
-    assert ran_on[0] in {t.name for t in pool._threads}, (
-        f"the leg ran on {ran_on[0]!r}, which is not one of the leg pool's own "
-        f"threads — a raw thread per leg reintroduces unbounded thread growth")
+    assert any(t is ran_on[0] for t in pool._threads), (
+        f"the leg ran on {ran_on[0]!r}, which is NOT one of the leg pool's own "
+        f"threads — a raw thread per leg (however it is named) reintroduces "
+        f"unbounded thread growth")
+    # The REALIZED width, not just the constant-vs-constant comparison below.
+    assert pool.workers == selfhost._DB_LEG_WORKERS, (
+        f"the leg pool realized {pool.workers} workers, not "
+        f"{selfhost._DB_LEG_WORKERS}")
+    # The BACKLOG is part of the bound the docs promise (outstanding legs are
+    # width + MAX_BACKLOG), and the readiness lane pins it but the leg pool did
+    # not — a 10**9 backlog left the suite green (measured).
+    assert pool._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+        f"the leg pool's backlog is {pool._max_backlog}, not "
+        f"{mon._SingleSlotWorker.MAX_BACKLOG} — the outstanding-leg bound in "
+        f"the runbook and _run_bounded's docstring is not what the code does")
     # Non-tautological: the width is compared to an INDEPENDENT constant, so a
     # pool widened without limit cannot satisfy it.
     assert selfhost._DB_LEG_WORKERS <= selfhost._READY_PROBE_WORKERS, (
@@ -1635,3 +1651,41 @@ def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
     assert all(t.daemon for t in pool._threads), (
         "leg threads must be daemons — a non-daemon leg eats the graceful-drain "
         "budget #2203 exists to protect")
+
+
+def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
+        selfhost):
+    """The fail-closed refusal must not be replaced by a raw-thread fallback.
+
+    ``_WorkerBacklogFull`` surfacing as a 503 is the documented fail-closed
+    behaviour, and nothing exercised it: a reviewer made ``_run_bounded`` catch
+    a refusal and run the leg on a RAW THREAD instead, and the whole suite
+    stayed green — unbounded thread growth reintroduced exactly when the bound
+    matters most (the pool is saturated). This pins both halves: the pool's
+    backlog is the documented ``MAX_BACKLOG``, and a saturated pool refuses
+    WITHOUT the thread count growing.
+    """
+    import tortoise.monitoring as mon
+
+    pool = selfhost._probe_worker(selfhost._DB_LEG_WORKER,
+                                  selfhost._DB_LEG_WORKERS)
+    assert pool._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+        pool._max_backlog)
+
+    release = threading.Event()
+    try:
+        # Occupy every worker, then fill the backlog, so the pool is genuinely
+        # saturated rather than racing an idle worker for the queue.
+        for _ in range(pool.workers + pool._max_backlog):
+            pool.submit(lambda: release.wait(30))
+
+        threads_before = len(pool._threads)
+        with pytest.raises(Exception) as excinfo:
+            selfhost._run_bounded(lambda: None, 1.0)
+        assert "backlog" in type(excinfo.value).__name__.lower() or (
+            "backlog" in str(excinfo.value).lower()), excinfo.value
+        assert len(pool._threads) == threads_before, (
+            "a REFUSED leg spawned a thread — the refusal is meant to be "
+            "fail-closed, not a silent fallback to unbounded threads")
+    finally:
+        release.set()
