@@ -20,9 +20,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tortoise.sdk import TortoiseSDK
-from tortoise.source_credibility import TIER_PRIORS, register_source_kind_default
+from tortoise.source_credibility import TIER_PRIORS, pc_base, register_source_kind_default
 
 FRESH = "2024-01-01T00:00:00+00:00"
+OLD = "2019-01-01T00:00:00+00:00"  # for merge-order tests: strictly older
 
 
 @contextmanager
@@ -819,3 +820,297 @@ class TestMCPAnnotationsContract:
         b = tools["tortoise_set_source_tier"].annotations
         assert getattr(a, "destructiveHint", getattr(a, "destructive_hint", False)) is True
         assert getattr(b, "destructiveHint", getattr(b, "destructive_hint", False)) is True
+
+
+#: ONE document. NOTE (measured, and it matters): the write path applies S0a and
+#: MERGEs `:Source` on the url, so a spelling variation collapses to ONE node —
+#: using two spellings here would test NOTHING. The shape that CAN reproduce the
+#: fan-in is a bypassing writer, which `_link_duplicate_source` mints below.
+URL_ONE_DOC = "https://fanin.example/one-document"
+
+#: A genuinely different document: different host, so a different S0a identity.
+URL_OTHER_DOC = "https://other.example/other-document"
+
+
+def _link_duplicate_source(
+    sdk, pid: str, raw_url: str, tier: str = "T4",
+    sdate: str = FRESH, ingested: str | None = None,
+) -> None:
+    """Mint a SECOND `:Source` node for ONE document, and link `pid` to it.
+
+    This is the S0b duplicate-node class the issue names: the write path applies
+    S0a and MERGEs on the url, so it cannot produce this; a writer that BYPASSES
+    `normalize_source_url`/`resolve_source_key` can. The new node is given the
+    SAME `canonicalUrl` as the document's original node — that property is the
+    S0a identity. (The node minted HERE has no `id`; the write path's
+    `_upsert_source` does set one, so `id` is not a usable key in general,
+    which is why identity is read from `canonicalUrl`/`url`.)
+    """
+    g = sdk._get_proj().g
+    canon = g.query(
+        "MATCH (s:Source {url:$url}) RETURN s.canonicalUrl",
+        params={"url": URL_ONE_DOC},
+    ).result_set[0][0]
+    g.query(
+        "MERGE (s:Source {url:$url}) SET s.canonicalUrl=$canon, "
+        "s.credibilityTier=$t, s.sourceDate=$sd, s.ingestedAt=$si",
+        params={"url": raw_url, "canon": canon, "t": tier, "sd": sdate,
+                "si": ingested if ingested is not None else sdate},
+    )
+    g.query(
+        "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"pid": pid, "url": raw_url},
+    )
+
+
+def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | None = None,
+                   decay: float = 1.0):
+    """A point whose ONLY evidence is `urls` (plus an optional S0b duplicate of
+    the first, carrying the same canonicalUrl), all at `tier`, fresh date.
+
+    Returns the point's inherited alpha.
+    """
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    p = sdk.create_point("statement", "fan-in claim", extractedFrom=urls[0])
+    if urls[1:]:
+        sdk._get_proj()._link_source(p["id"], urls[1:])
+    for u in urls:
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier=$t, "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": u, "t": tier, "sd": FRESH},
+        )
+    if extra_duplicate is not None:
+        _link_duplicate_source(sdk, p["id"], extra_duplicate, tier)
+    sdk._apply_source_inheritance(recency_decay=decay)
+    alpha = inherited_alpha(sdk, p["id"])
+    try:  # noqa: SIM105
+        sdk.close()
+    except Exception:
+        pass
+    return alpha
+
+
+def _seed_assessment(sdk, target_url: str, score: float = 2.0) -> None:
+    """Create an `assessment` Point targeting `target_url` directly.
+
+    Seeded by raw write because the collapse is under test, not
+    `assess_source`'s url RESOLUTION: `factor_by_source` is keyed on the
+    assessment's `targetSource`, so this pins the factor to the exact url whose
+    collapse behaviour is being checked.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (a:Point {id:$aid, pointKind:'assessment', targetSource:$t, "
+        "assessor:'alice', score:$s, assessorReputation:1.0, createdAt:$sd})",
+        params={"aid": f"assess-{target_url}", "t": target_url, "s": score,
+                "sd": FRESH},
+    )
+
+
+def _assessed_single_ref(score: float = 2.0) -> float:
+    """The prior of ONE source at T4/fresh carrying assessment `score`.
+
+    A formula-free reference: whatever `aggregate_prior` makes of a single
+    assessed source, the collapsed two-node case must reproduce it exactly.
+    """
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    try:
+        p = sdk.create_point("statement", "ref", extractedFrom=URL_OTHER_DOC)
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": URL_OTHER_DOC, "sd": FRESH},
+        )
+        _seed_assessment(sdk, URL_OTHER_DOC, score)
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        alpha = inherited_alpha(sdk, p["id"])
+    finally:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+    return alpha
+
+
+def _collapse_with_assessment_on(assessed_url: str, score: float = 2.0) -> float:
+    """Collapse two `:Source` nodes of ONE document, assessing `assessed_url`.
+
+    BOTH nodes are given the SAME tier and date, so the only difference the
+    merge can make is the factor. (Getting this wrong is how the first attempt
+    at this test went wrong: the original node was left with no
+    `credibilityTier`, so `resolve_tier` returned None and the loop skipped it as
+    NEUTRAL — the assessed row never entered the collapse at all, which looked
+    like a dropped factor but was a malformed fixture.)
+    """
+    dup = "https://mirror.example/one-document"
+    sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+    try:
+        p = sdk.create_point("statement", "assessed", extractedFrom=URL_ONE_DOC)
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+            "s.sourceDate=$sd, s.ingestedAt=$sd",
+            params={"url": URL_ONE_DOC, "sd": FRESH},
+        )
+        _link_duplicate_source(sdk, p["id"], dup, tier="T4", sdate=FRESH)
+        _seed_assessment(sdk, assessed_url, score)
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        alpha = inherited_alpha(sdk, p["id"])
+    finally:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+    return alpha
+
+
+class TestSourceIdentityCollapse:
+    """#5543 — source-fan-in double counting on the `extractedFrom` prior path.
+
+    `aggregate_prior` assumes its `groups` are INDEPENDENT observations, and the
+    `_apply_source_inheritance` call site is the only place that assumption is
+    created. It keyed on the `:Source` NODE, so the model was "how many distinct
+    nodes point at me" — a statement about the database, not about the evidence.
+    Two `:Source` nodes for ONE document each added a term to
+    `log2(N_t+1) * sum(base_pc * factor) / N_t` AND each raised N, so the second
+    channel was invisible to `aggregate_prior`.
+
+    The identity policy was already recorded — `source_identity.py` (S0a): "the
+    registration key is the canonicalised URL" — and the WRITE path applies it.
+    The belief path had simply never called it. These two tests pin BOTH
+    directions: identity collapse must happen, and genuine corroboration must
+    not be collateral damage.
+    """
+
+    def test_one_document_reached_twice_counts_once(self):
+        """TWO `:Source` nodes of ONE document == the one-source prior.
+
+        The duplicate is minted DIRECTLY, because the write path cannot produce
+        it — and that is the point: the guard exists for the writer that BYPASSES
+        S0a, so exercising it through the write path would test nothing (a
+        spelling variation collapses to one node at write time, and the
+        assertion would then hold trivially while proving nothing).
+        """
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        alpha_dup = _one_point_sdk(
+            [URL_ONE_DOC], extra_duplicate="https://mirror.example/one-document"
+        )
+        assert alpha_dup == pytest.approx(alpha_one), (
+            "two :Source nodes carrying the SAME canonicalUrl are ONE document, "
+            "so they must contribute ONE independent source (S0a identity); the "
+            f"second node added no evidence (got {alpha_dup} for two nodes vs "
+            f"{alpha_one} for one)"
+        )
+
+    def test_distinct_documents_still_corroborate(self):
+        """The collapse must not become a blanket 'sources do not add up'."""
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        alpha_two = _one_point_sdk([URL_ONE_DOC, URL_OTHER_DOC])
+        assert alpha_two > alpha_one, (
+            "two genuinely different documents must still corroborate — the "
+            f"identity guard is not a cap on evidence (got {alpha_two} for two "
+            f"documents vs {alpha_one} for one)"
+        )
+
+    def test_collapse_keeps_the_assessment_wherever_it_sits(self):
+        """The merge must carry the assessment across, whichever row it is on.
+
+        `factor_by_source` is keyed on the RESOLVED stored url and the traversal
+        has no `ORDER BY`, so a factor re-looked up AFTER the merge off the
+        surviving row would make the prior depend on row order — the round-1
+        finding. Assessing EACH node in turn is what makes this
+        order-INDEPENDENT: whichever row the merge keeps, one of these two cases
+        has the assessment on the row that was NOT kept, so dropping the fold
+        reddens at least one of them.
+        """
+        expected = _assessed_single_ref(2.0)
+        on_original = _collapse_with_assessment_on(URL_ONE_DOC)
+        on_duplicate = _collapse_with_assessment_on(
+            "https://mirror.example/one-document"
+        )
+        for label, got in (("original", on_original), ("duplicate", on_duplicate)):
+            assert got == pytest.approx(expected), (
+                f"an assessment on the {label} :Source node must survive the "
+                "collapse: one document carrying a 2.0 assessment must score "
+                "exactly like a single source carrying it, whatever row the "
+                f"(unordered) traversal kept (got {got}, expected {expected})"
+            )
+
+    def test_collapse_keeps_the_strongest_tier_and_clock(self):
+        """The merge must keep the STRONGER tier and the NEWER effective clock.
+
+        The duplicate is WORSE than the original on both axes, so a merge that
+        silently kept the first-seen row would be measurably weaker. Asserting
+        equality against an independent one-source reference (rather than a bare
+        inequality) is what makes this catch a merge that picks the wrong row.
+        """
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+        try:
+            p = sdk.create_point("statement", "merged", extractedFrom=URL_ONE_DOC)
+            sdk._get_proj().g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+                "s.sourceDate=$old, s.ingestedAt=$old",
+                params={"url": URL_ONE_DOC, "old": OLD},
+            )
+            _link_duplicate_source(
+                sdk, p["id"], "https://mirror.example/one-document",
+                tier="T1", sdate=FRESH,
+            )
+            sdk._apply_source_inheritance(recency_decay=0.95)
+            alpha = inherited_alpha(sdk, p["id"])
+        finally:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+        alpha_ref = _one_point_sdk([URL_OTHER_DOC], tier="T1", decay=0.95)
+        assert alpha == pytest.approx(alpha_ref), (
+            "both :Source nodes of one document collapse to the STRONGEST "
+            "member (T1, fresh) — a merge that kept the T4/old original would "
+            f"be weaker (got {alpha}, strongest-member prior {alpha_ref})"
+        )
+
+    def test_identity_less_sources_stay_distinct(self):
+        """A `:Source` with neither `canonicalUrl` nor `url` is NOT folded.
+
+        There is no key to collapse on (and `id` is not the S0a identity), so
+        each such node must keep its own identity. Folding them together would
+        WEAKEN evidence — the opposite error from the one this change fixes.
+
+        The assertion pins the COUNT, not monotonicity: with 3 independent
+        sources at T4 (pc 0.1, no decay) the prior is ``1 + log2(4)*0.1``. A
+        fold-to-one gives ``1 + log2(3)*0.1`` instead, which a bare
+        ``> alpha_one`` would NOT catch (measured: that weaker form passes
+        under deletion of the unique-token branch).
+        """
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+        try:
+            p = sdk.create_point("statement", "anon", extractedFrom=URL_ONE_DOC)
+            for _ in range(2):
+                sdk._get_proj().g.query(
+                    "MATCH (n:Point {id:$pid}) "
+                    "CREATE (s:Source {credibilityTier:'T4', sourceDate:$sd, "
+                    "ingestedAt:$sd}) CREATE (n)-[:extractedFrom]->(s)",
+                    params={"pid": p["id"], "sd": FRESH},
+                )
+            sdk._get_proj().g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+                "s.sourceDate=$sd, s.ingestedAt=$sd",
+                params={"url": URL_ONE_DOC, "sd": FRESH},
+            )
+            sdk._apply_source_inheritance(recency_decay=1.0)
+            alpha_anon = inherited_alpha(sdk, p["id"])
+        finally:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+        alpha_one = _one_point_sdk([URL_ONE_DOC])
+        assert alpha_anon == pytest.approx(1.0 + 2 * pc_base("T4")), (
+            "three independent T4 sources must give 1 + log2(4)*pc(T4); if the "
+            "two identity-less nodes were folded into ONE key the point would "
+            "carry only two sources (1 + log2(3)*pc) and evidence would be "
+            f"weaker than the sources justify (got {alpha_anon}, one-source is "
+            f"{alpha_one})"
+        )
+        assert alpha_anon > alpha_one
