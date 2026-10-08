@@ -1294,8 +1294,26 @@ class Dispatcher:
                 f"shell and EXECUTED. Re-dispatch once the pane is readable.",
                 fingerprint=fp,
             )
-        if not screen_ready(before_screen):
-            if shell_prompt_below_footer(before_screen):
+        # Judge readiness on the SAME window depth the gate used. `before_screen`
+        # is deliberately read deeper (`RECOVERY_SCREEN_LINES`) because the
+        # pending-turn baseline below must share the CONFIRMATION read's scope —
+        # but `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        # capture, so a 300-line window can carry an older shell prompt line that
+        # the gate's 80-line window does not. Without this slice the two judgements
+        # disagree about the same pane: the gate declares READY, the deeper
+        # re-assert refuses, and the refusal is reported as "a shell prompt is drawn
+        # BELOW pi's footer" when the truth is that no footer BLOCK was found at all
+        # (the shape `SCREEN_LIVE_WITH_TORN_FOOTER` models). The last
+        # `DEFAULT_SCREEN_LINES` lines are exactly what a `read-screen --lines 80`
+        # returns, so this is the gate's own window. A pane that genuinely died
+        # still draws its prompt in those last lines, so the fail-closed direction
+        # is intact — only the lines BELOW the gate's view stop being able to
+        # over-refuse.
+        gate_window = "\n".join(
+            before_screen.splitlines()[-DEFAULT_SCREEN_LINES:]
+        )
+        if not screen_ready(gate_window):
+            if shell_prompt_below_footer(gate_window):
                 reason = (
                     "a shell prompt is drawn BELOW pi's footer, so the pane has "
                     "returned to a shell"
