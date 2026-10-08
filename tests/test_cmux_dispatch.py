@@ -234,13 +234,30 @@ SCREEN_LIVE_WITH_UNKNOWN_CONTEXT_FOOTER = SCREEN_IDLE_READY.replace(
 )
 
 #: A LIVE pi pane whose footer has been TORN by a banner printed over it: the
-#: context-budget token is gone and only the model badge survives (VERBATIM from
-#: this box's session logs, 2026-09-26). Readiness must say YES — requiring the
-#: token refused a healthy lane (#7158 round 7).
+#: context-budget token is gone and only the model badge survives (banner VERBATIM
+#: from this box's session logs, 2026-09-26; the pwd line above it survives, as a
+#: real capture always has — `[pwdLine, statsLine, ...statuses]`). Readiness must
+#: say YES — requiring the token refused a healthy lane (#7158 round 7).
 SCREEN_LIVE_WITH_TORN_FOOTER = (
+    "~/Documents/GitHub/tortoise (main)\n"
     "[tortoise-capture] Hosted capture FAILED (HTTP 402) \u2014 a manual-recovery "
     "JSONL record was kept at /Users/danielospina/.tortoise/session-events/"
     "2026-09-26.jsonlepseek) deepseek-flash \u2022 high\n"
+)
+
+#: A LIVE pane whose TRANSCRIPT carries lines that look like shell prompts
+#: (`$ \u2026`, `# heading`) above a genuine footer block — routine in agent panes.
+#: The block anchor must keep the prompt scan BELOW the footer; a whole-capture
+#: scan would refuse a healthy lane (#7158 round 9).
+SCREEN_LIVE_WITH_TRANSCRIPT = "$ uv run pytest tests/ -q\n# Findings\nall green\n" + SCREEN_IDLE_READY
+
+#: A LIVE pane whose cwd IS `$HOME`, so `formatCwdForFooter` renders the pwd line as
+#: bare `~` — which a `\S` requirement rejected, losing the block anchor and
+#: refusing a healthy lane (#7158 round 9).
+SCREEN_LIVE_WITH_HOME_PWD = (
+    "$ uv run pytest -q\n# Findings\nall green\n~\n"
+    "\u21911.3M \u2193643k R103M CH99.9% $0.887 3.0%/700k (auto)"
+    "  (deepseek) deepseek-flash \u2022 high\n"
 )
 
 #: A DEAD pane whose stale footer carries a ` \u2022 <sessionName>` suffix on the pwd
@@ -1737,16 +1754,43 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertTrue(cd.screen_ready(off))
 
     def test_a_bare_shell_printing_a_LOOSE_marker_is_still_not_ready(self):
-        """Round-8 finding: without a pwd+stats footer BLOCK the anchor must not be
-        the last marker line — the shell's own output (`(auto)`, `• high` in a
-        markdown bullet) would sit below the prompt and hide it, declaring a bare
-        shell READY. With no block the WHOLE capture is scanned."""
+        """Round-8/9 finding: without a pwd+stats footer BLOCK the anchor must not
+        be the last marker line — the shell's own output (`(auto)`, a markdown
+        bullet) would sit below the prompt and hide it, declaring a bare shell
+        READY. With no block the WHOLE capture is scanned, and the badge level set
+        is enumerated so an arbitrary bullet is not a marker at all."""
         for screen in (
             "Last login: Wed Oct  8 20:58:11 on ttys004\nhost % echo '(auto)'\n(auto)\n",
             "host % cat priorities.md\n\u2022 high \u2014 fix send boundary\n",
+            "host % cat notes.md\n\u2022 item one\n",
         ):
             with self.subTest(screen=screen):
                 self.assertFalse(cd.screen_ready(screen))
+
+    def test_an_arbitrary_bullet_is_not_a_footer_marker(self):
+        """Round-9 finding: a generic `• <word>` badge let ordinary output forge a
+        footer block. The level set is finite, so it is enumerated."""
+        self.assertFalse(cd.status_bar_present("host % cat notes.md\n\u2022 item one\n"))
+        self.assertFalse(cd.status_bar_present("host % ls\n\u2022 item\n"))
+
+    def test_a_LIVE_pane_with_prompt_like_transcript_lines_is_READY(self):
+        """Round-9 finding: the block anchor is what keeps the prompt scan below
+        the footer. Without it (whole-capture fallback) a live pane whose
+        TRANSCRIPT contains `$ \u2026` / `# \u2026` lines is refused. This pins the
+        anchor: mutating `_footer_stats_end` to -1 turns this READY into a refusal."""
+        screen = SCREEN_LIVE_WITH_TRANSCRIPT
+        self.assertGreaterEqual(cd._footer_stats_end(screen), 0)
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
+
+    def test_a_bare_HOME_pwd_line_still_anchors_the_footer_block(self):
+        r"""Round-9 finding: `formatCwdForFooter(HOME)` renders the pwd line as a
+        bare `~`; a `\S` requirement rejected it, disabling the anchor and
+        refusing a healthy lane at $HOME."""
+        screen = SCREEN_LIVE_WITH_HOME_PWD
+        self.assertGreaterEqual(cd._footer_stats_end(screen), 0)
+        self.assertFalse(cd.shell_prompt_below_footer(screen))
+        self.assertTrue(cd.screen_ready(screen))
 
     def test_a_pwd_line_with_a_session_name_still_anchors_the_footer_block(self):
         """Round-7 finding: a real pwd line can carry ` \u2022 <sessionName>`. If the

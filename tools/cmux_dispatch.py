@@ -192,14 +192,17 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 #: round 7).
 #:
 #: The badge is `${modelName} • ${thinkingLevel}` (`footer.js`), and the levels are
-#: `off|minimal|low|medium|high|xhigh|max` (`thinking off` when off) — enumerating
-#: three of them re-broke the live-lane refusal for `• max`/`• xhigh` (#7158 round
-#: 8), so the level is matched, not listed. `(auto)` is deliberately NOT a marker:
-#: it is only ever appended to the budget token (so it adds no coverage), and as a
-#: lone token it is the easiest thing for arbitrary output to hit.
+#: `off|minimal|low|medium|high|xhigh|max` (`thinking off` when off). The level SET
+#: is finite and known, so it is ENUMERATED — a generic `• <word>` let ordinary
+#: output (a markdown bullet) forge a footer block and move the prompt scan anchor
+#: below a live shell prompt (#7158 round 9).
+#:
+#: `(auto)` is deliberately NOT a marker: it is only ever appended to the budget
+#: token (so it adds no coverage), and as a lone token it is the easiest thing for
+#: arbitrary output to hit.
 READY_RE = re.compile(
     r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b"  # N.N%/Nk or ?/Nk
-    r"|\u2022 (?:thinking off|[a-z][a-z0-9-]*)\b"  # model badge (survives a tear)
+    r"|\u2022 (?:thinking off|off|minimal|low|medium|high|xhigh|max)\b"  # model badge
 )
 
 #: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
@@ -207,13 +210,12 @@ READY_RE = re.compile(
 #: a stats-shaped line with a pwd line above it is a genuine footer BLOCK, while
 #: one without is output that merely LOOKS like a stats line. That distinction is
 #: what keeps shell output which mimics the stats shape from hiding the prompt
-#: ABOVE it (#7158 round 6). The pwd line begins with `~` or `/` and carries
-#: anything after it (a `(branch)`, a trailing ` • <sessionName>`, or a truncated
-#: `(branch`); the check is intentionally loose on the tail because a REAL pwd line
-#: the regex missed silently disables the block anchor — the fail-open direction
-#: (#7158 round 7). Lines that are themselves shell prompts are excluded by the
-#: caller.
-PWD_LINE_RE = re.compile(r"^\s*(?:~|/)\S")
+#: ABOVE it (#7158 round 6). `formatCwdForFooter` renders the cwd as an absolute
+#: path or a `~`-relative one and appends `(branch)` and ` • <sessionName>` — so
+#: the pwd line can be BARE `~` (cwd == HOME), which a `\S` requirement rejected,
+#: losing the anchor and refusing a healthy lane (#7158 round 9). Match the
+#: PREFIX only; a missed real pwd line is the fail-open direction.
+PWD_LINE_RE = re.compile(r"^\s*(?:~|/)")
 
 #: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
 #: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
@@ -445,13 +447,17 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     last stats-shaped line, which is the conservative (more-scanning) choice.
 
     RESIDUALS — direction stated honestly:
-    * FAIL-OPEN: a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
+    * FAIL-OPEN (INHERENT to judging liveness from screen content, not fixable by
+      this heuristic): shell output that reproduces an ENTIRE pi footer block — a
+      pwd-shaped line (`~`/`/` prefix) directly above a line carrying a genuine
+      marker (a real budget token, or a real badge level such as `• high`) — moves
+      the anchor down past the prompt. Enumerating the badge levels (round 9) makes
+      an arbitrary bullet like `• item one` no longer a marker, but a shell can
+      still print `• high`. The durable signal is process/session liveness, not
+      screen content (#7159).
+    * FAIL-OPEN (narrow): a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
       indistinguishable from a percentage, and arrow prompts (`❯`, `➜`) are
-      outside the class. Neither is emitted by this fleet's shells. Also, shell
-      output that reproduces an ENTIRE pi footer block (a pwd-shaped line directly
-      above a marker line) moves the anchor down past the prompt — inherent to
-      reading liveness off screen content; the durable signal is process/session
-      liveness (#7159).
+      outside the class. Neither is emitted by this fleet's shells.
     * FAIL-CLOSED: an extension status containing `[#$>]` followed by whitespace
       (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does,
       and when there is no footer block at all the whole capture is scanned (see
