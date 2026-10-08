@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tortoise.sdk import TortoiseSDK
-from tortoise.source_credibility import TIER_PRIORS, register_source_kind_default
+from tortoise.source_credibility import TIER_PRIORS, pc_base, register_source_kind_default
 
 FRESH = "2024-01-01T00:00:00+00:00"
 
@@ -838,8 +838,9 @@ def _link_duplicate_source(sdk, pid: str, raw_url: str, tier: str = "T4") -> Non
     S0a and MERGEs on the url, so it cannot produce this; a writer that BYPASSES
     `normalize_source_url`/`resolve_source_key` can. The new node is given the
     SAME `canonicalUrl` as the document's original node — that property is the
-    S0a identity, materialised on the node (`:Source` carries it; it has no
-    `id` property).
+    S0a identity. (The node minted HERE has no `id`; the write path's
+    `_upsert_source` does set one, so `id` is not a usable key in general,
+    which is why identity is read from `canonicalUrl`/`url`.)
     """
     g = sdk._get_proj().g
     canon = g.query(
@@ -939,6 +940,12 @@ class TestSourceIdentityCollapse:
         There is no key to collapse on (and `id` is not the S0a identity), so
         each such node must keep its own identity. Folding them together would
         WEAKEN evidence — the opposite error from the one this change fixes.
+
+        The assertion pins the COUNT, not monotonicity: with 3 independent
+        sources at T4 (pc 0.1, no decay) the prior is ``1 + log2(4)*0.1``. A
+        fold-to-one gives ``1 + log2(3)*0.1`` instead, which a bare
+        ``> alpha_one`` would NOT catch (measured: that weaker form passes
+        under deletion of the unique-token branch).
         """
         sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
         try:
@@ -963,8 +970,11 @@ class TestSourceIdentityCollapse:
             except Exception:
                 pass
         alpha_one = _one_point_sdk([URL_ONE_DOC])
-        assert alpha_anon > alpha_one, (
-            "two identity-less :Source nodes must NOT be folded into one — with "
-            "no S0a key they are unknown, and collapsing unknowns weakens "
-            f"evidence (got {alpha_anon} for three nodes vs {alpha_one} for one)"
+        assert alpha_anon == pytest.approx(1.0 + 2 * pc_base("T4")), (
+            "three independent T4 sources must give 1 + log2(4)*pc(T4); if the "
+            "two identity-less nodes were folded into ONE key the point would "
+            "carry only two sources (1 + log2(3)*pc) and evidence would be "
+            f"weaker than the sources justify (got {alpha_anon}, one-source is "
+            f"{alpha_one})"
         )
+        assert alpha_anon > alpha_one
