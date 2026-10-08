@@ -187,13 +187,19 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 #: The token can also be MISSING on a live pane: a banner printed over the footer
 #: tears the line and leaves only the model badge (verbatim capture, 2026-09-26:
 #: `…jsonlepseek) deepseek-flash • high`). This fleet's own liveness checks accept
-#: `• high|medium|low` and `(auto)` for exactly that reason (`orchestrator-heartbeat.sh`
-#: `_pane_has_pi`, `safe-send.sh`), and the badge is what survives a tear, so
-#: requiring the token alone refused a healthy lane (#7158 round 7).
+#: the badge for exactly that reason (`orchestrator-heartbeat.sh` `_pane_has_pi`,
+#: `safe-send.sh`), so requiring the token alone refused a healthy lane (#7158
+#: round 7).
+#:
+#: The badge is `${modelName} • ${thinkingLevel}` (`footer.js`), and the levels are
+#: `off|minimal|low|medium|high|xhigh|max` (`thinking off` when off) — enumerating
+#: three of them re-broke the live-lane refusal for `• max`/`• xhigh` (#7158 round
+#: 8), so the level is matched, not listed. `(auto)` is deliberately NOT a marker:
+#: it is only ever appended to the budget token (so it adds no coverage), and as a
+#: lone token it is the easiest thing for arbitrary output to hit.
 READY_RE = re.compile(
     r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b"  # N.N%/Nk or ?/Nk
-    r"|\u2022 (?:high|medium|low)\b"  # model badge (survives a torn footer)
-    r"|\(auto\)"  # auto-compact flag
+    r"|\u2022 (?:thinking off|[a-z][a-z0-9-]*)\b"  # model badge (survives a tear)
 )
 
 #: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
@@ -442,18 +448,29 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     * FAIL-OPEN: a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
       indistinguishable from a percentage, and arrow prompts (`❯`, `➜`) are
       outside the class. Neither is emitted by this fleet's shells. Also, shell
-      output that reproduces an ENTIRE pi footer block (pwd line + stats line)
-      moves the anchor down past the prompt — inherent to reading liveness off
-      screen content; the durable signal is process/session liveness (#7159).
+      output that reproduces an ENTIRE pi footer block (a pwd-shaped line directly
+      above a marker line) moves the anchor down past the prompt — inherent to
+      reading liveness off screen content; the durable signal is process/session
+      liveness (#7159).
     * FAIL-CLOSED: an extension status containing `[#$>]` followed by whitespace
-      (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does.
+      (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does,
+      and when there is no footer block at all the whole capture is scanned (see
+      below), which can only over-refuse.
     """
     text = screen or ""
     end = _footer_stats_end(text)
     if end < 0:
-        end = _last_status_bar_end(text)
-    if end < 0:
-        return False
+        # ⛔ NO TRUSTWORTHY FOOTER BLOCK. Anchor on the last marker alone and the
+        # scan sits BELOW the marker, so a loose marker printed by the shell
+        # (`host % echo '(auto)'` then `(auto)`) hides the prompt ABOVE it and
+        # declares a bare shell READY (#7158 round 8). Without a block, scan the
+        # WHOLE capture — the fail-closed direction. A live pane does not reach
+        # this branch: pi always draws the pwd line above the stats line
+        # (`footer.js` `[pwdLine, statsLine, ...statuses]`).
+        return any(
+            line.strip() and SHELL_PROMPT_RE.search(line)
+            for line in text.splitlines()
+        )
     # Scan the whole tail INCLUDING the remainder of the anchor line, so a prompt
     # appended to a non-newline-terminated footer row is still caught.
     return any(

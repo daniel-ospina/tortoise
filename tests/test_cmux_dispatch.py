@@ -1716,6 +1716,38 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertFalse(cd.shell_prompt_below_footer(screen))
         self.assertTrue(cd.screen_ready(screen))
 
+    def test_every_thinking_level_badge_is_LIVE(self):
+        """Round-8 finding: the badge is `${model} • ${level}` and the levels are
+        off|minimal|low|medium|high|xhigh|max — enumerating three of them refused a
+        torn footer at `• max`/`• xhigh`, shapes this box's models.json produces."""
+        for level in ("max", "xhigh", "minimal", "low", "medium", "high"):
+            screen = (
+                "~/Documents/GitHub/tortoise (main)\n"
+                "↑1.3M ↓643k R103M CH99.9% $0.887 "
+                f"(deepseek) deepseek-flash \u2022 {level}\n"
+            )
+            with self.subTest(level=level):
+                self.assertTrue(cd.status_bar_present(screen))
+                self.assertTrue(cd.screen_ready(screen), level)
+        off = (
+            "~/Documents/GitHub/tortoise (main)\n"
+            "↑1.3M ↓643k (deepseek) deepseek-flash \u2022 thinking off\n"
+        )
+        self.assertTrue(cd.status_bar_present(off))
+        self.assertTrue(cd.screen_ready(off))
+
+    def test_a_bare_shell_printing_a_LOOSE_marker_is_still_not_ready(self):
+        """Round-8 finding: without a pwd+stats footer BLOCK the anchor must not be
+        the last marker line — the shell's own output (`(auto)`, `• high` in a
+        markdown bullet) would sit below the prompt and hide it, declaring a bare
+        shell READY. With no block the WHOLE capture is scanned."""
+        for screen in (
+            "Last login: Wed Oct  8 20:58:11 on ttys004\nhost % echo '(auto)'\n(auto)\n",
+            "host % cat priorities.md\n\u2022 high \u2014 fix send boundary\n",
+        ):
+            with self.subTest(screen=screen):
+                self.assertFalse(cd.screen_ready(screen))
+
     def test_a_pwd_line_with_a_session_name_still_anchors_the_footer_block(self):
         """Round-7 finding: a real pwd line can carry ` \u2022 <sessionName>`. If the
         pwd anchor rejects it the block anchor silently disappears and the
