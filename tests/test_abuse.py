@@ -105,9 +105,13 @@ class TestStaging:
         assert store.org_suspended("t1") is False
         assert not is_suspended_signal("t1")
 
-    def test_boundary_crossing_suspends(self, notified):
+    def test_boundary_crossing_alerts_for_review_and_never_suspends(self, notified):
         """Continuity evidence: events exist on BOTH sides of the window
-        boundary — the breach genuinely persisted across it."""
+        boundary — the breach genuinely persisted across it.
+
+        #5425 owner ruling: a persistent breach raises a human-review alert
+        and NOTHING ELSE. The account is never suspended by the engine.
+        """
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)                      # flag
@@ -119,11 +123,11 @@ class TestStaging:
         # (T0, T0+1800] holds the +30m events AND the current window
         # (T0+1800, T0+5400] still breaches via the fresh 501.
         r = eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
-        assert r == "suspend"
-        assert store.org_suspended("t1") is True
-        assert is_suspended_signal("t1") is True
-        assert "abuse_suspended" in [c[0] for c in notified]
-        assert notified[-1][2]["appeal_url"]
+        assert r == "breach"
+        assert store.org_suspended("t1") is False   # #5425: never auto-suspends
+        assert is_suspended_signal("t1") is False   # no in-process signal either
+        assert "abuse_review_needed" in [c[0] for c in notified]
+        assert "abuse_suspended" not in [c[0] for c in notified]
 
     def test_quiet_after_flag_never_suspends(self, notified):
         store = MemoryAbuseStore()
@@ -152,7 +156,8 @@ class TestStaging:
         assert eng.record_point_create(
             "t1", 501, now=burst + timedelta(minutes=30)) == "breach"
         r = eng.record_point_create("t1", 501, now=burst + timedelta(minutes=90))
-        assert r == "suspend"
+        assert r == "breach"                        # #5425: alert, not suspend
+        assert store.org_suspended("t1") is False
 
     def test_cross_rule_staging_independent(self, notified):
         """Code-review P1 fix: an old R1 flag must not escalate a FIRST R2
@@ -193,7 +198,7 @@ class TestKeyRule:
         self._seed_keys(store, "t1", 1, T0)
         assert eng.evaluate_key_creates("t1", now=T0) == "flag"  # 11 > 10
 
-    def test_r2_suspends_across_boundary(self, notified):
+    def test_r2_alerts_across_boundary_and_never_suspends(self, notified):
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         self._seed_keys(store, "t1", 11, T0)
@@ -202,7 +207,10 @@ class TestKeyRule:
         # persists past flagged_at + 24h
         self._seed_keys(store, "t1", 1, T0 + timedelta(hours=1))
         self._seed_keys(store, "t1", 11, T0 + timedelta(hours=25))
-        assert eng.evaluate_key_creates("t1", now=T0 + timedelta(hours=25)) == "suspend"
+        # #5425: the persistent R2 breach alerts for review; it does not suspend
+        assert eng.evaluate_key_creates(
+            "t1", now=T0 + timedelta(hours=25)) == "breach"
+        assert store.org_suspended("t1") is False
 
     def test_r2_isolated_bursts_re_flag_not_suspend(self, notified):
         """Two separated key-mint bursts are two episodes — the second
@@ -229,16 +237,22 @@ class TestKeyRule:
 
 
 class TestEpisodeLifecycle:
-    def test_recovery_clears_episodes_no_stale_suspend(self, notified):
+    def test_recovery_clears_episodes_no_stale_escalation(self, notified):
         """Confirmation-review P1 regression test: flag → suspend →
-        un-suspend → fresh single-window burst must RE-FLAG, never suspend
-        (the un-suspend ends every flag episode)."""
+        un-suspend → fresh single-window burst must RE-FLAG, never escalate
+        (the un-suspend ends every flag episode).
+
+        #5425: the suspend is deliberately OPERATOR-initiated here — the
+        engine no longer suspends — but the episode-clearing path it
+        triggers is unchanged, which is what this test pins.
+        """
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         assert eng.record_point_create(
-            "t1", 501, now=T0 + timedelta(minutes=90)) == "suspend"
+            "t1", 501, now=T0 + timedelta(minutes=90)) == "breach"
+        store.suspend_org("t1", now=T0 + timedelta(minutes=90))   # operator
         # Pass the simulated clock: the default now=wall-clock would stamp
         # the flag_clear rows AFTER the (simulated) future burst, so
         # latest_flag_at would see the new burst as already cleared.
@@ -298,6 +312,10 @@ class TestEpisodeLifecycle:
         assert ("t1", "flagged_at", (T0.isoformat())) in writes
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
+        # #5425: the engine never writes suspended_at, even at stage 2.
+        assert not any(w[1] == "suspended_at" for w in writes)
+        # An OPERATOR suspend is now the only source of that field.
+        store.suspend_org("t1")
         assert any(w[1] == "suspended_at" and w[2] is not None for w in writes)
         store.unsuspend_org("t1")
         assert ("t1", "suspended_at", None) in writes
@@ -769,19 +787,24 @@ class TestFlagNotificationBudget:
         assert [c[0] for c in notified] == ["abuse_flag"]
         assert store.latest_flag_at("t1", "point_create") is not None
 
-    def test_suspend_alert_not_repeated_each_evaluation(self, notified):
+    def test_review_alert_not_repeated_each_evaluation(self, notified):
         """(a): the stage-2 alert is bounded per window too — a sustained
-        breach re-evaluates on every request."""
+        breach re-evaluates on every request.
+
+        #5425: stage 2 now raises a human-review alert in place of the
+        automatic suspend; the once-per-window budget is unchanged.
+        """
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         assert eng.record_point_create(
-            "t1", 501, now=T0 + timedelta(minutes=90)) == "suspend"
+            "t1", 501, now=T0 + timedelta(minutes=90)) == "breach"
         for i in range(5):
             eng.record_point_create(
                 "t1", 501, now=T0 + timedelta(minutes=91 + i))
-        assert [c[0] for c in notified].count("abuse_suspended") == 1
+        assert [c[0] for c in notified].count("abuse_review_needed") == 1
+        assert [c[0] for c in notified].count("abuse_suspended") == 0
 
 
 class TestAbuseStormDoesNotStarveTransactional:
@@ -1118,14 +1141,15 @@ class TestDecisionPathObservability:
         assert fs._inner.latest_flag_at(
             "org-12", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
         # Independent fact: the surviving anchor is load-bearing — a LATER
-        # over-threshold evaluation on the same rule still reaches suspend.
+        # over-threshold evaluation on the same rule still reaches STAGE 2
+        # (a re-flag would return "flag"). #5425: stage 2 alerts, never suspends.
         fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=501,
                                created_at=T0)
         fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=1,
                                created_at=T0 - timedelta(hours=1))
         assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
-                             500, 3600, T0) == "suspend"
-        assert fs._inner.org_suspended("org-12") is True
+                             500, 3600, T0) == "breach"
+        assert fs._inner.org_suspended("org-12") is False
 
     def test_clean_window_clear_write_fault_leaves_the_episode_armed(
             self, operator_store):
@@ -1154,8 +1178,8 @@ class TestDecisionPathObservability:
         fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=1,
                                created_at=T0 - timedelta(hours=1))
         assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
-                             500, 3600, T0) == "suspend"
-        assert fs._inner.org_suspended("org-13") is True
+                             500, 3600, T0) == "breach"
+        assert fs._inner.org_suspended("org-13") is False
 
     def test_anchor_read_failure_reflags_and_reports(self, operator_store):
         fs, eng = self._engine("latest_flag_at")
@@ -1168,33 +1192,47 @@ class TestDecisionPathObservability:
         assert detail["fallback"] == "reflag"
         assert fs._inner.org_flagged_at("org-3") is not None  # re-flag landed
 
-    def test_continuity_read_failure_still_proceeds_toward_suspend(
+    def test_continuity_read_failure_still_proceeds_to_the_escalation(
             self, operator_store):
-        """The one lane that fails TOWARD the irreversible action."""
+        """The one lane that fails TOWARD the escalation (``continuity_true``).
+
+        #5425: the escalation is now a human-review alert rather than an
+        irreversible suspension, so this lane is no longer "fails toward the
+        irreversible action" — but the fail-DIRECTION is unchanged and is
+        still what the assertion pins.
+        """
         fs, eng = self._engine("rule_event_between")
         _armed_org(fs._inner, "org-4")
         assert eng._evaluate("org-4", abuse.EVENT_POINT_CREATE,
-                             500, 3600, T0) == "suspend"
+                             500, 3600, T0) == "breach"
         _kind, _subject, detail = self._detail(operator_store)
         assert detail["lane"] == "rule_event_between"
         assert detail["fallback"] == "continuity_true"
-        assert fs._inner.org_suspended("org-4") is True
+        assert fs._inner.org_suspended("org-4") is False
+        assert [r for r in fs._inner.rows
+                if r["event_type"] == abuse.EVENT_REVIEW] != []
 
-    def test_suspend_rpc_failure_reports_breach_and_does_not_arm(
-            self, operator_store):
+    def test_stage_two_never_calls_suspend_org(self, operator_store):
+        """#5425: the engine has NO automatic suspension path.
+
+        ``_FaultStore("suspend_org")`` RAISES if the engine ever calls
+        ``store.suspend_org``. An armed org evaluated at stage 2 therefore
+        proves the deletion by ABSENCE: the lane never fires, no fault is
+        reported, and the account is left alone for a human to review.
+        """
         fs, eng = self._engine("suspend_org")
         _armed_org(fs._inner, "org-5")
         assert eng._evaluate("org-5", abuse.EVENT_POINT_CREATE,
                              500, 3600, T0) == "breach"
-        kind, _subject, detail = self._detail(operator_store)
-        assert kind == oa.ABUSE_ENFORCEMENT_FAULT_KIND
-        assert detail["lane"] == "suspend_org"
-        assert detail["fallback"] == "return_breach"
-        # ⛔ NO ARMING: the suspend did not land and the signal was not marked
+        assert operator_store.calls == []        # the suspend lane never fired
+        assert oa.join_operator_alerts() == 0
         assert fs._inner.org_suspended("org-5") is False
         assert is_suspended_signal("org-5") is False
         assert [r for r in fs._inner.rows
                 if r["event_type"] == abuse.EVENT_SUSPEND] == []
+        # ...but the human signal DID fire — that is the whole replacement.
+        assert [r for r in fs._inner.rows
+                if r["event_type"] == abuse.EVENT_REVIEW] != []
 
     def test_flag_write_failure_reports(self, operator_store):
         fs, eng = self._engine("flag_org")
@@ -1222,7 +1260,7 @@ class TestDecisionPathObservability:
 
     def test_report_never_raises_when_the_alert_plane_raises(
             self, monkeypatch):
-        fs, eng = self._engine("suspend_org")
+        fs, eng = self._engine("rule_event_between")
         _armed_org(fs._inner, "org-7")
 
         def raising_operator(*_a, **_k):
@@ -1235,7 +1273,7 @@ class TestDecisionPathObservability:
 
     def test_report_never_raises_when_store_resolution_fails(
             self, monkeypatch):
-        fs, eng = self._engine("suspend_org")
+        fs, eng = self._engine("rule_event_between")
         _armed_org(fs._inner, "org-8")
 
         def raising_store():
@@ -1259,16 +1297,16 @@ class TestDecisionPathObservability:
     def test_error_record_is_the_residual_without_an_alert_channel(
             self, caplog, monkeypatch):
         monkeypatch.setattr(oa, "alert_store", lambda: None)
-        fs, eng = self._engine("suspend_org")
+        fs, eng = self._engine("rule_event_between")
         _armed_org(fs._inner, "org-10")
         with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
             assert eng._evaluate("org-10", abuse.EVENT_POINT_CREATE,
                                  500, 3600, T0) == "breach"
         errors = [r.getMessage() for r in caplog.records
                   if r.levelno == logging.ERROR]
-        assert any("suspend_org" in m and "#4872" in m for m in errors)
+        assert any("rule_event_between" in m and "#4872" in m for m in errors)
         # the record names the RESOLVED kind, not a generic "DECISION FAULT"
-        assert any("kind=ABUSE_ENFORCEMENT_FAULT" in m for m in errors)
+        assert any("kind=ABUSE_DECISION_FAULT" in m for m in errors)
 
     def test_traceback_is_bounded_but_the_record_keeps_firing(
             self, caplog, monkeypatch):
@@ -1303,7 +1341,7 @@ class TestDecisionPathObservability:
                                               now=159.99) is False
             assert abuse._fault_traceback_due("window_sum", now=160.0) is True
             # keyed PER LANE: another lane is not suppressed by this one
-            assert abuse._fault_traceback_due("suspend_org", now=100.5) is True
+            assert abuse._fault_traceback_due("flag_org", now=100.5) is True
         finally:
             abuse._fault_traceback_at.clear()
 
@@ -1701,3 +1739,77 @@ class TestThresholdAsymmetry:
         monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "-1")
         assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 100
 
+
+
+class TestEveryAlertTypeHasACustomerMessage:
+    """#5425 (reviewer C, round 6; strengthened round 7): nothing internal reaches
+    the customer through the Security alerts list.
+
+    WHY THIS EXISTS — the failure it already caused, twice. `recovery_velocity`
+    was in `ALERT_TYPES` (so `recent_alerts` returns it) with no `_alert_dict`
+    message, so the list rendered the bare TOKEN as both the heading and the
+    body: "recovery_velocity — recovery_velocity". Round 6 mapped the message
+    and this test could not see the other half, because (a) it rendered with
+    `details={}`, so `EVENT_FLAG`'s f-string produced the literal placeholder
+    "rule" instead of the real `point_create`, and (b) it only checked
+    `message == type` — not that the token the dashboard prints as the HEADING
+    is human. Round 7 found both: the enum was still the heading, and the flag
+    message still embedded the internal rule name.
+
+    The consumer is the session-authed, membership-gated GET /v1/team/alerts,
+    rendered verbatim as "<label> — <message>". So every name in ALERT_TYPES
+    needs a human label AND a human sentence, and neither may contain an
+    internal token.
+    """
+
+    #: The internal rule names `flag_org` actually writes into `details` —
+    #: realistic values, because the placeholder default hid this defect.
+    INTERNAL_TOKENS = ("point_create", "key_create", "recovery_velocity")
+
+    def _rendered(self):
+        from tortoise import abuse as ab
+
+        # `details` populated the way the real writers populate it: the flag
+        # rows carry `rule`, the signup row carries count/ip.
+        details = {"rule": "point_create", "count": 12, "ip": "203.0.113.7"}
+        return {t: ab._alert_dict({"event_type": t, "details": details})
+                for t in ab.ALERT_TYPES}
+
+    def test_every_alert_type_renders_a_human_label_and_message(self):
+        from tortoise import abuse as ab
+
+        assert len(ab.ALERT_TYPES) >= 5, ab.ALERT_TYPES
+        for expected in (ab.EVENT_FLAG, ab.EVENT_REVIEW, ab.EVENT_SUSPEND):
+            assert expected in ab.ALERT_TYPES, expected
+
+        rendered = self._rendered()
+        token_leaks = []
+        for t, row in rendered.items():
+            assert isinstance(row["message"], str) and row["message"].strip(), t
+            assert isinstance(row["label"], str) and row["label"].strip(), t
+            for field in ("label", "message"):
+                value = row[field]
+                if value == t or any(tok in value for tok in self.INTERNAL_TOKENS):
+                    token_leaks.append(f"{t}.{field}={value!r}")
+            # The label is the HEADING the dashboard prints — an internal token
+            # there is just as visible as one in the body.
+            assert row["label"] != t, f"{t}: the heading renders the raw enum"
+        assert not token_leaks, (
+            "internal tokens reach the customer's Security alerts list: "
+            f"{sorted(token_leaks)}")
+
+    def test_the_render_is_not_vacuous_for_the_flag_rule(self):
+        """The round-6 version passed while `point_create` was on screen.
+
+        This pins the POPULATION that made it pass: `EVENT_FLAG` is rendered
+        from a populated `details`, and the rule it carries is a real one. If a
+        future edit makes the fixture empty again, this fails rather than
+        quietly restoring a vacuous assertion.
+        """
+        from tortoise import abuse as ab
+
+        row = self._rendered()
+        flag = row[ab.EVENT_FLAG]
+        assert flag["label"] != "flag", flag
+        assert "point_create" not in flag["message"], (
+            "the internal rule name is back in a customer-facing message")

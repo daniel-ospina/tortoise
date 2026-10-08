@@ -20,6 +20,8 @@
 
 // The nudge threshold (issue #4331): at/above 80% we tell the user, at 100% the
 // write path is refusing.
+import { withLimitContact } from './limitContact.js'
+
 export const NODE_NUDGE_PCT = 80
 
 // { used, max, pct, level } — or null when either server number is
@@ -51,7 +53,9 @@ export function nodeUsage(team) {
 // blocked condition rather than "0 / 0 nodes used (100%)".
 export function nodeUsageText(u) {
   if (!u) return null
-  if (u.max === 0) return 'Node limit reached — no node allowance on this plan'
+  if (u.max === 0) {
+    return withLimitContact('Node limit reached — no node allowance on this plan')
+  }
   return `${u.used.toLocaleString()} / ${u.max.toLocaleString()} nodes used (${u.pct}%)`
 }
 
@@ -83,10 +87,14 @@ export function nodeNudge(team, hasUpgrade = true) {
   const at = u.level === 'at_limit'
   if (free) {
     const base = at ? "You've reached your node limit." : "You're close to your node limit."
-    return hasUpgrade ? `${base} Upgrade to keep writing.` : base
+    return at
+      ? withLimitContact(hasUpgrade ? `${base} Upgrade to keep writing.` : base)
+      : (hasUpgrade ? `${base} Upgrade to keep writing.` : base)
   }
   const base = at ? "You've reached your node allowance." : "You're near your node allowance."
-  return hasUpgrade ? `${base} Upgrade for a higher allowance.` : base
+  return at
+    ? withLimitContact(hasUpgrade ? `${base} Upgrade for a higher allowance.` : base)
+    : (hasUpgrade ? `${base} Upgrade for a higher allowance.` : base)
 }
 
 // The next plan above `tier` that this deployment can actually check out — a

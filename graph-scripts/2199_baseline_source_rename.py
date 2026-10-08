@@ -20,8 +20,8 @@ graph before deploying the post-#2199 engine.** ``system-default`` is new
 (no deployed data) — nothing to do for it.
 
 Usage:
-  python3 graph-scripts/2199_baseline_source_rename.py --dry-run [--db URI] [--graphs a,b]
-  python3 graph-scripts/2199_baseline_source_rename.py [--db URI] [--graphs a,b]
+  uv run python graph-scripts/2199_baseline_source_rename.py --dry-run [--db URI] [--graphs a,b]
+  uv run python graph-scripts/2199_baseline_source_rename.py [--db URI] [--graphs a,b]
 
 Runs against every graph namespace that could carry Points: the URI-default
 graph (derived exactly as sdk.py does — ``urlparse(uri).path.lstrip('/') or

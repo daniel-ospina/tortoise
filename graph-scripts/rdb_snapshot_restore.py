@@ -35,13 +35,13 @@ restore half and the snapshot↔restore count-reconciliation for #334.
 Usage:
   # Snapshot (safe, read-only apart from BGSAVE + docker cp):
   TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise \
-    python3 graph-scripts/rdb_snapshot_restore.py snapshot --out backups/334
+    uv run python graph-scripts/rdb_snapshot_restore.py snapshot --out backups/334
 
   # Dry-run snapshot (prints the command sequence, no side effects):
-  python3 graph-scripts/rdb_snapshot_restore.py snapshot --dry-run
+  uv run python graph-scripts/rdb_snapshot_restore.py snapshot --dry-run
 
   # Verified restore (DESTRUCTIVE — restarts the container; requires --yes):
-  python3 graph-scripts/rdb_snapshot_restore.py restore \
+  uv run python graph-scripts/rdb_snapshot_restore.py restore \
     --rdb backups/334/pre-migration-<ts>.rdb --yes
 
 Exit codes: 0 = ok, 1 = operational failure, 2 = usage error.

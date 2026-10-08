@@ -12,20 +12,23 @@
 
 **Default: Your job is to keep moving until you hit a real gate.
 
-**Forbidden:** Any question whose answer is trivially "yes" — this means:
-- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?"
-- "On to the next step?" "Does that look right?" "Everything OK so far?"
-- Any handoff where the user has nothing to decide
-
-**Only pause if at least one is true:**
+Real gates are:
 1. A skill explicitly mandates a human gate (sign-off, approval, decision point)
 2. P0 consequence risk (data loss, security, unrecoverable cost >$10/mo)
 3. Genuinely ambiguous — research was inconclusive (<50% confidence) and you need a decision
+4. Another agent is live working on this ("Held" means another agent is live working on something. Previous comments on issues are not enough to conclude something is held)
 
 If none of those apply: **keep going.** The user can interrupt if they disagree.
 
-**Auto-file rule:** When you encounter a bug, workflow gap, missed edge case, or improvement opportunity → check if the root cause and/or symptoms are alreayd covered by another issue and if yes add to it, or otherwise file a new GitHub issue. Never ask "should I file an issue?" — just file it if in doubt.
-Also when you encounter a **pre-existing bug** (not introduced by your current work.
+**Invalid reasons to stop:** Any question whose answer is trivially "yes" e.g.:
+- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?"
+- "On to the next step?" "Does that look right?" "Everything OK so far?"
+- Any handoff where the user has nothing to decide
+- Another issue fixes this (then fix that issue)
+
+
+**Auto-file rule:** When you encounter a bug, workflow gap, missed edge case, or improvement opportunity → check if the root cause and/or symptoms are already covered by another issue and if yes add to it, or otherwise file a new GitHub issue. Never ask "should I file an issue?" — just file it if in doubt.
+Also, when you encounter a **pre-existing bug** (not introduced by your current work).
 ---
 
 ## ⛔ HARD RULE: Process Discipline
@@ -51,6 +54,8 @@ Your role is to work within the skills and processes framework we have explicitl
 ## ⛔ DESIGN PRINCIPLE: Good > Easy
 
 When choosing between two approaches, prefer the one that produces the better outcome (solving root cause) over the one that's easier to implement (band-aids). Quality of result trumps implementation convenience. Easy paths accumulate into brittle systems; good paths cost more upfront but pay back in reliability, extensibility, and user satisfaction.
+
+Avoid bureaucratic bloat (epxnesive/long tests, too many guards, etc.), and instead address root causes and design lean, effective systems. Research best practices often to know what's good (use research skills, even if internal).
 
 ---
 
@@ -78,7 +83,7 @@ Skills that describe review cycles contain **mandatory quality gates**, not sugg
 
 #### Fresh-Context Task Dispatch
 
-Every review cycle MUST re-review in a FRESH context — via `task` where the skill dispatches one, or the skill's mandated mechanism (its MCP wrapper, or its verifier subagent). The reviewer has no memory of prior cycles, no investment in defending prior fixes. This prevents confirmation bias.
+Every review cycle MUST re-review in a FRESH context — via `task` where the skill dispatches one, or the skill's mandated mechanism (its MCP wrapper, or its verifier subagent) and mandate reviewers to use the research skill. The reviewer has no memory of prior cycles, no investment in defending prior fixes. This prevents confirmation bias.
 
 - Same-model self-review in the same conversation degrades without an external signal
 - The model defends prior decisions rather than critically re-evaluating
@@ -229,49 +234,16 @@ When writing or updating any doc in `docs/`, auto-populate entity metadata from 
 - `MEMORY.md` = raw coding gotchas only (things that bite mid-code). Not an implementation log, not a docs index.
 - Format: `[category]: [what broke] → [root cause] → [the fix]`
 
-## Memory Contracts
-
-After key triggers, write back to the correct target. **Verifier-triggered, not agent-triggered.** Append, never rewrite. Contradictions escalate via `⚠️ CONTRADICTION:` prefix. Cross-domain: explicit only.
-
-Format: `[category]: [what broke] → [root cause] → [the fix]`
-
-<!-- REPO-SPECIFIC: Add your repo's triggers/targets here.
-| Trigger | Target |
-|---------|--------|
-| Task complete (code gotcha) | `MEMORY.md` (cap 150 lines) |
-| Task complete (no gotcha) | Plan doc `## Learnings` |
-| Bug fixed | `docs/teams/<team>/domains (S1)/<domain>/gotchas.md` (eldato layout) + `MEMORY.md` |
-| Session complete | Your session postmortem + `MEMORY.md` for friction patterns |
--->
-
-<!-- REPO-SPECIFIC: Add human-gated vs agent-autonomous filing rules here -->
-
----
-
-<!-- 
-REPO-SPECIFIC — Add below this line:
-- Skill compliance table (trigger | skill | consequence)
-- Repo-specific gates (Tortoise, DB migrations, deploys, worktrees)
-- Component catalog references
-- UX design gate
-- Migration conventions
-- CI pipeline references
-- Tool-specific exceptions (design_reviewer, etc.)
-- Memory contracts and filing targets
-- Ponytail mode / session hooks
--->
-
-<!-- AGENTS-BASE-END -->
 
 ## Repo-Specific Conventions — Tortoise
 
 ### Project Identity
 
 Public repository that houses:
-- **Tortoise:** Python graph engine for semantic/epistemic/episodic agent memory (SDK, MCP server, EP belief propagation)
+- **Tortoise:** Python graph engine for semantic/epistemic/episodic agent memory and reasoning (SDK, MCP server, EP belief propagation)
 - **Strategy docs:** product strategy, competitive analysis, pricing research
 - **Internal operations:** agent skills, CI/CD, coordination scripts (shared with premise-labs lineage)
-- **Web presence:** premise-labs / product landing pages under `website/`
+- **Web presence:** company: premiselabs.co , product marketing: tortoise.premiselabs.co , product dashboard: app.premiselabs.co
 
 ### Language & Runtime Conventions
 
@@ -350,55 +322,6 @@ uv run python tools/collision_preflight.py <N> --repo .
 uv run python tools/collision_preflight.py <N> --repo owner/name
 ```
 
-**The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
-the resolved `owner/name` (the two deliberate exceptions are `gh repo view`, which *discovers* the
-slug and so has nothing to send yet, and `gh api user`, which identifies the lane's account and is
-not repository-scoped), and the verdict prints it together with the issue's **full title** — a verdict that
-does not name what it measured cannot be trusted. An issue **absent** from the target repo is
-`exit 2`, not CLEAN ("not found here" is not "no in-flight work"), and an omitted `--repo` whose
-number resolves in **more than one** sibling repo is **refused**, never guessed at. Issue numbers
-collide across the fleet (`#4027` exists in tortoise, eldato and swarm), so pass `--repo` — omitting
-it will refuse more often than not, by design.
-
-It checks open **and** recently-closed PRs (title / headRef; a PR **body** counts only as an
-explicit closing reference — `Closes`/`Fixes`/`Resolves #N` — because cross-reference prose such
-as "restored in #2745" is not work, and matching it fabricated a false COLLISION for #2745 and
-#2751), local **and** remote branches,
-**`git worktree list` untruncated** (no `head`/`tail` — a 300-worktree hub hides matches inside
-a window), and `gh issue view N` (assignee + claim comments), matching the issue number
-boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive title keywords.
-
-- `exit 0` **CLEAN** — every **blocking** surface queried, no in-flight work → proceed. (The
-  closed-PR surface is advisory: exit 0 may mean it was sampled or even unqueried, and the CLEAN
-  line now counts only surfaces actually read and names any advisory shortfall.)
-- `exit 1` **COLLISION** — a hit on a blocking surface; do **not** dispatch, coordinate on the named
-  surface first. An advisory-surface match is reported but never blocks.
-- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (**fix the surface**) **or
-  an open-PR list was truncated at its completeness cap** (**widen with `--pr-limit`**). This is
-  **not** clean; never treat it as a pass.
-  ⛔ **EXIT 2 HAS A THIRD CAUSE WITH NO `VERDICT` LINE, AND ITS REMEDY IS NOT `gh auth/network`:** if
-  the number you passed is an **OPEN PULL REQUEST**, the pre-flight refuses before computing any
-  verdict — it prints only the refusal on stderr and emits **no report at all**. A PR number is not a
-  work item, and an exit 0 there would authorise a dispatch on work that PR already belongs to (#7009,
-  the #7477 case — measured: `collision_preflight.py 7477` read CLEAN while #7455 was held on four
-  surfaces). **The remedy is to re-run with the ISSUE number.** A caller keying its remedy on
-  `VERDICT: INCOMPLETE` misses this cause entirely, and keying on the exit code alone cannot tell it
-  from the surface cause. The `--repo`-omitted ambiguity refusal is a further verdict-less exit 2 whose
-  remedy is `--repo owner/name`.
-
-**OPEN** PR lists are enumerated to completeness (`--pr-limit`, default 1000); a list longer than its
-cap is reported **TRUNCATED** and the run is `exit 2` — a partial list is never CLEAN. The
-**closed-PR** surface is a single bounded **advisory** request (`--closed-pr-limit`, default 100, which
-is now the per-page SAMPLE size rather than a completeness cap): its own `Link` header supplies the
-total, so a partial sample is reported `⚠ PARTIAL` but is **not** `exit 2` — that surface can never
-block a dispatch, so its partiality cannot authorize what a full enumeration would have refused
-(#5251). Every other surface keeps the fail-closed posture.
-
-**Enforcement lives in the agent skills, outside this repo.** The dispatch-path gate is wired
-into `~/.pi/agent/skills/`: `epic-executor` (Step 3 pre-dispatch, fail-closed), `issue-workflow`
-(`## Dispatch` gate), `executing-plans` (Step 0), and `subagent-driven-development` (controller
-step 0 — run before worktree creation). Those files are **not** part of this repository's diff;
-the compliance row above declares the rule, the skills enforce it.
 
 **Consequence of skipping:** a parallel agent duplicates work already in flight — two overlapping
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed

@@ -614,9 +614,12 @@ jobs:
         # validates frontmatter keys anyway). This step is checkout-depth
         # independent. Repo-wide, fail-closed. `=======` is deliberately NOT
         # matched:
-        # 7 equals is a valid setext H1 underline (a real false positive at
-        # website/apps/dashboard/node_modules/js-tokens/README.md:238), and a
-        # real conflict block always carries the <</>> markers anyway.
+        # 7 equals is a valid setext H1 underline, AND it is a routine line in the
+        # repo TODAY: a 7+-rune rune line opens/closes pytest's captured-output
+        # sections, so committed logs under docs/ and the longmem tools match it
+        # live. (It was also a false positive at a vendored dependency README
+        # until #3768 untracked that tree.) A real conflict block always carries
+        # the <</>> markers anyway, which is why the rune can be dropped safely.
         run: |
           set +e
           git grep -nE '^(<{7,}|>{7,}|\|{7,})( |$)' -- .

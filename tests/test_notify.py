@@ -325,3 +325,49 @@ def test_billing_email_refunds_its_slot_on_provider_failure(monkeypatch):
     assert reserved_at_post == [1]  # the send was attempted, and it was counted
     assert email_notify._send_counts_day == 0    # ... then refunded on failure
     assert email_notify._send_counts_month == 0
+
+
+def test_abuse_review_needed_files_a_tracked_incident(monkeypatch):
+    """#5425 owner ruling: a PERSISTENT breach asks a HUMAN for a decision.
+
+    The engine no longer suspends, so ``abuse_review_needed`` is the abuse
+    branch that actually fires. It must reach the ops sink as a tracked
+    incident — the durable, assignable artifact — and under its OWN kind, so an
+    operator can tell "we chose not to enforce automatically" apart from "an
+    operator suspended this org". ``abuse_suspended`` is the operator path and
+    must not be filed on the engine's behalf.
+    """
+    filed, pushed = _install_alert_store(monkeypatch)
+
+    def fake_telegram_send(bot_token, chat_id, text, timeout=15.0):
+        pushed.append(text)
+
+    monkeypatch.setattr(notify, "telegram_send", fake_telegram_send)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "team_123"},
+                        {"rule": "point_create", "count": 501})
+
+    assert len(filed) == 1, filed
+    assert "abuse_review_needed" in filed[0]
+    assert "abuse_suspended" not in filed[0]
+    assert any("review" in p.lower() for p in pushed), pushed
+
+
+def test_operator_suspend_notification_leg_is_still_wired(monkeypatch):
+    """``abuse_suspended`` still reaches the ops sink under its OWN kind.
+
+    Scope note (a reviewer caught the earlier framing as false assurance):
+    this covers the NOTIFICATION LEG only. #5425 removed the engine's call to
+    ``store.suspend_org``, and nothing in this repo calls it since, so an
+    operator suspension happens out-of-band (a ``service_role`` RPC write to
+    ``organizations.suspended_at``) and is enforced by that durable read alone.
+    Nothing in-repo therefore raises this notification automatically; the test
+    pins that the leg remains correct for whoever does.
+    """
+    filed, _pushed = _install_alert_store(monkeypatch)
+    notify.notify_abuse("abuse_suspended", {"org_id": "team_123"},
+                        {"rule": "point_create", "count": 501})
+    assert len(filed) == 1, filed
+    assert "abuse_suspended" in filed[0]

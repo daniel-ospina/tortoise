@@ -20,7 +20,8 @@ data/migrations/
 .env
 .husky/_/
 
-# #1148: dashboard build artifacts (node_modules is huge — still tracked, #3768)
+# #1148: dashboard build artifacts. (#3768: node_modules was TRACKED until it was
+# untracked; it is ignored, not tracked, so a fresh clone installs from the lockfile.)
 website/apps/dashboard/node_modules/
 website/apps/blog-admin/node_modules/
 .venv/

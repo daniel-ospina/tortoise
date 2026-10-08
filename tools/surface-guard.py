@@ -50,7 +50,7 @@ FAIL-CLOSED
              unreadable evidence.
 
 Usage:
-    python3 tools/surface-guard.py [--manifest config/surface-manifest.yml]
+    uv run python tools/surface-guard.py [--manifest config/surface-manifest.yml]
 """
 
 from __future__ import annotations

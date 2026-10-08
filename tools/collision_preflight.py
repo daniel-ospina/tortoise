@@ -200,7 +200,7 @@ on the caller's OWN artifacts is reported as yours and cannot block. Inferring
 
 Usage
 -----
-    python3 tools/collision_preflight.py <issue-number>
+    uv run python tools/collision_preflight.py <issue-number>
         [--repo OWNER/NAME | --repo PATH]
         [--self-branch REF] [--self-worktree PATH]
         [--gh PATH] [--git PATH]
@@ -1610,6 +1610,46 @@ def closing_reference(text: str, issue: int) -> bool:
 # dangerous one.
 
 
+def _refspec_namespace_prefix(dest: str) -> str | None:
+    """The `refs/remotes/…/` PREFIX a fetch-refspec DESTINATION populates, else None.
+
+    ⛔ NON-GLOB DESTINATIONS AND MID-PATH `*` ARE THE TWO TRAPS, AND
+    NEITHER IS EXOTIC.
+
+    (i) NON-GLOB. `git remote set-branches origin main` writes
+    `+refs/heads/main:refs/remotes/origin/main` — no `*` at all. Skipping
+    the non-glob form (the first cut of this fix did exactly that) yields
+    an EMPTY namespace set, and an empty set demotes EVERY `refs/remotes/…`
+    ref — so a configured remote's genuine remote-tracking branch became a
+    false CLEAN. Taking the PARENT errs WIDE (it also covers siblings that
+    refspec does not fetch), and on this surface wide is SAFE.
+
+    (ii) A `*` IS NOT ALWAYS THE LAST SEGMENT. Git accepts
+    `+refs/heads/*:refs/remotes/x/*/y` and creates real tracking refs like
+    `refs/remotes/x/<branch>/y`. A prefix taken as the PARENT of that
+    destination keeps the literal `*` (`refs/remotes/x/*/`), which prefixes
+    NO real ref, so the branch was demoted — a fail-open, and the reason the
+    rule is not simply "parent of the destination".
+
+    The rule that covers both: stop at the FIRST `*` when there is one,
+    else take the parent of the exact target. The two agree on the common
+    forms (`refs/remotes/origin/*` and `refs/remotes/origin/main` both yield
+    `refs/remotes/origin/`) and both err WIDE.
+
+    ⛔ ONE RULE, TWO CALLERS, AND THAT IS THE POINT. `_remote_tracking_namespaces`
+    needs the SET of prefixes; `_remote_tracking_namespace_remotes` needs each
+    prefix's OWNING REMOTE. A second hand-rolled parse would be free to drift
+    from this one, and a drift here is a demotion decision — so the parse lives
+    once. (#7693 review round 2.)
+    """
+    dest = dest.strip().lstrip("+")
+    if not dest.startswith("refs/remotes/"):
+        return None
+    star = dest.find("*")
+    prefix = dest[:star] if star != -1 else dest.rsplit("/", 1)[0] + "/"
+    return prefix if prefix.startswith("refs/remotes/") else None
+
+
 def _remote_tracking_namespaces(
     git_bin: str, repo: str, timeout: float,
 ) -> set[str] | None:
@@ -1675,34 +1715,8 @@ def _remote_tracking_namespaces(
         _src, colon, dest = value.strip().partition(":")
         if not colon:
             continue
-        dest = dest.strip().lstrip("+")
-        if not dest.startswith("refs/remotes/"):
-            continue
-        # ⛔ NON-GLOB DESTINATIONS AND MID-PATH `*` ARE THE TWO TRAPS, AND
-        # NEITHER IS EXOTIC.
-        #
-        # (i) NON-GLOB. `git remote set-branches origin main` writes
-        # `+refs/heads/main:refs/remotes/origin/main` — no `*` at all. Skipping
-        # the non-glob form (the first cut of this fix did exactly that) yields
-        # an EMPTY namespace set, and an empty set demotes EVERY `refs/remotes/…`
-        # ref — so a configured remote's genuine remote-tracking branch became a
-        # false CLEAN. Taking the PARENT errs WIDE (it also covers siblings that
-        # refspec does not fetch), and on this surface wide is SAFE.
-        #
-        # (ii) A `*` IS NOT ALWAYS THE LAST SEGMENT. Git accepts
-        # `+refs/heads/*:refs/remotes/x/*/y` and creates real tracking refs like
-        # `refs/remotes/x/<branch>/y`. A prefix taken as the PARENT of that
-        # destination keeps the literal `*` (`refs/remotes/x/*/`), which prefixes
-        # NO real ref, so the branch was demoted — a fail-open, and the reason the
-        # rule is not simply "parent of the destination".
-        #
-        # The rule that covers both: stop at the FIRST `*` when there is one,
-        # else take the parent of the exact target. The two agree on the common
-        # forms (`refs/remotes/origin/*` and `refs/remotes/origin/main` both yield
-        # `refs/remotes/origin/`) and both err WIDE.
-        star = dest.find("*")
-        prefix = dest[:star] if star != -1 else dest.rsplit("/", 1)[0] + "/"
-        if prefix.startswith("refs/remotes/"):
+        prefix = _refspec_namespace_prefix(dest)
+        if prefix is not None:
             namespaces.add(prefix)
     # ⛔ THE REMOTE NAMES ARE A FAIL-CLOSED ADDITION, NOT A REPLACEMENT. A remote
     # can be configured with NO fetch refspec at all, and its namespace would
@@ -4001,6 +4015,10 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
+    # The LOCAL pass used to record `sha -> (ref, why)` here so the REMOTE pass could
+    # demote a twin caching the same tip. That demotion is gone and the map with it —
+    # see the removal block below, on the `else`-less namespace loop. Dead state and
+    # stale prose both invite re-adding the demotion they described.
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -4049,10 +4067,11 @@ def run_preflight(
                         continue
                     if identity.owns_branch(_ref):
                         continue
-                    if _branch_terminal_state(
+                    _state = _branch_terminal_state(
                         _ref, _sha, merged_head_shas, ancestor_merged, main_tip,
                         first_parent,
-                    ) is not None:
+                    )
+                    if _state is not None:
                         continue
                     try:
                         _reason = _branch_terminal_state_from_prs(
@@ -4065,6 +4084,51 @@ def run_preflight(
                         continue
                     if _reason is not None:
                         targeted_terminal[_ref] = _reason
+            # ⛔ THE #7693 REMOTE-REF DEMOTION WAS HERE, AND IT WAS REMOVED AFTER EIGHT REVIEW
+            # ROUNDS. DO NOT RE-ADD IT WITHOUT READING THIS.
+            #
+            # The idea was simple: when this run proves a tip terminal on the LOCAL
+            # surface, a `refs/remotes/<r>/<b>` ref caching that same tip is the same
+            # immutable history and should not block forever. Seven rounds of fresh
+            # review found SEVEN live false-CLEANs against it — `VERDICT: CLEAN (exit
+            # 0)` while a lane was actively working the branch — and six of those
+            # seven were found INSIDE THE PREVIOUS ROUND'S FIX. In order:
+            #   1. keying on the remote-tracking ref's CACHED sha (a fetch cache this
+            #      tool never refreshes; a merged-then-REUSED branch keeps the stale sha);
+            #   2. deriving the REMOTE from the ref's first path segment (wrong for a
+            #      non-standard refspec and for a slash-named remote);
+            #   3. deriving the BRANCH from the prefix remainder (`set-branches origin
+            #      'fix/*'` makes the remainder `X` while the branch is `fix/X`);
+            #   4. a prefilter that demoted a remote it never READ, plus `ls-remote
+            #      --heads` being blind to a `refs/pull/*` SOURCE;
+            #   5. a SOURCE-narrowed spec passing the prefilter, being read, and still
+            #      demoting;
+            #   6. a PRIOR refspec — a ref cached by a former non-identity spec is mapped
+            #      by NOTHING after the config is corrected, so "no head maps onto this
+            #      ref" read as ABSENCE;
+            #   7. a same-sha DECOY — the positive-same-sha rule proves SOME branch the
+            #      current spec maps onto the ref sits at the cached sha, not that it is
+            #      what the ref caches, so a prior-spec leftover is re-explained by a
+            #      decoy and the true holder stays invisible.
+            #
+            # THE REASON ROUNDS 6-7 COULD NOT BE FIXED is the finding that matters:
+            # the question the demotion asks — "is there a live branch this ref might
+            # represent?" — is about HISTORY the configuration no longer contains.
+            # "No advertised head maps onto this ref" cannot distinguish a branch
+            # DELETED on the remote from a LEFTOVER cached by a prior, different
+            # refspec; they are the same observation. No amount of care recovers
+            # information that is not there.
+            #
+            # SO THE ANSWER IS THE ONE THAT NEEDS NO PROOF: the remote ref BLOCKS, as it
+            # did before #7694. That costs an OVER-BLOCK — a merged branch's remote twin
+            # keeps its issue un-dispatchable — which is an annoyance. A false CLEAN is
+            # not: it sends two lanes into one shared checkout, which is precisely what
+            # this tool exists to prevent. The preflight's other surfaces (local
+            # branches, worktrees, claims, the issue itself) still find real in-flight
+            # work.
+            #
+            # #7693 stays OPEN for the over-block. The evidence lives there and in
+            # PR #7718; a doc line would not have stopped the collision.
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
@@ -4074,9 +4138,14 @@ def run_preflight(
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
                 surface.note += (
-                    "; terminal tests are NOT applied here (a remote-tracking ref "
-                    "is a local fetch cache, so judging it terminal could call a "
-                    "reused live branch merged)"
+                    "; terminal tests are not applied to these refs by name (a "
+                    "remote-tracking ref is a local fetch cache, so judging it "
+                    "terminal on its NAME could call a reused live branch merged), "
+                    "and no remote ref is cleared as the terminal TWIN of a local "
+                    "branch — a local terminal twin does NOT clear its remote "
+                    "counterpart, which blocks by design (#7693, that demotion was "
+                    "removed after eight review rounds found seven live "
+                    "false-CLEANs in it)"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict

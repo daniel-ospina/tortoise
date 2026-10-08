@@ -80,7 +80,7 @@ PRE-REGISTERED DECISION RULE (frozen before the run)
   baseline and this rate may not be compared to it.
 
 Usage:
-  python3 tools/ask_shape_rate.py --pin-sha <sha> [--mode full|live|movement|seed-timing]
+  uv run python tools/ask_shape_rate.py --pin-sha <sha> [--mode full|live|movement|seed-timing]
 """
 from __future__ import annotations
 

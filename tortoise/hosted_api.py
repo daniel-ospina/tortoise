@@ -122,6 +122,7 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
+from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
@@ -5919,7 +5920,8 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
-def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
+def _key_limit_refusal(
+        message: str = (with_limit_contact("Key limit reached — revoke an existing key"))) -> dict:
     """Build the structured 402 `detail` for an api_keys refusal (#4614).
 
     Called at raise sites that supply no count — the mint/rotate
@@ -6127,6 +6129,8 @@ def _suspended_detail() -> dict:
     from tortoise.abuse import appeal_url, suspended_message
     return {"code": "SUSPENDED", "message": suspended_message(),
             "appeal_url": appeal_url()}
+
+
 
 
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
@@ -7073,11 +7077,13 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     an exception from the helper itself (e.g. the strict-mode
     ``UnregisteredTelemetryKey``) still propagates.
 
-    ``pool`` (#3669, #3773) selects the worker pool: ``"auth"`` (default),
-    ``"telemetry"`` for best-effort work, ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane, or ``"graph"`` for the
+    ``pool`` (#3669, #3773, #7678) selects the worker pool: ``"auth"``
+    (default), ``"telemetry"`` for best-effort work, ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the
     DATA-PLANE graph helpers (kept off auth capacity; see
-    ``_graph_offload``, which passes its own ``unavailable`` factory).
+    ``_graph_offload``, which passes its own ``unavailable`` factory), or
+    ``"org"`` (#7678) for the org-create lane's sequential gate reads and
+    provision write.
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -10637,14 +10643,15 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
             # 409 is the C2 policy/concurrency class, NOT a quota refusal —
             # there is no quota category to carry, so the detail stays prose.
             raise HTTPException(
-                status_code=409, detail="API key limit reached.") from None
+                status_code=409,
+                detail=with_limit_contact("API key limit reached.")) from None
         # #4614: the 402 arm IS the api_keys quota (the legacy pre-check's race
         # backstop) — the same category `_check_org_limit` answers, so it
         # carries the same structured shape.
         raise HTTPException(
             status_code=402,
             detail=_key_limit_refusal(
-                "API key limit reached (legacy mint — upgrade or revoke)"),
+                with_limit_contact("API key limit reached (legacy mint — upgrade or revoke)")),
         ) from None
 
     kid = minted["id"]
@@ -10851,7 +10858,8 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     except _KeyCapExceeded:
         raise HTTPException(
             status_code=402,
-            detail=_key_limit_refusal("API key limit reached."),
+            detail=_key_limit_refusal(
+                with_limit_contact("API key limit reached.")),
         ) from None
 
     kid = minted["id"]
@@ -12204,10 +12212,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (count_org_usage(..., "points") — non-episodic Points PLUS
                 # Object + Subject, NULL `is_episodic` counted as non-episodic;
                 # a `NOT n.is_episodic` count drops those NULLs and undercounts
-                # by thousands). `message` is byte-identical to the old prose.
+                # by thousands). `message` is byte-identical to the old prose
+                # PLUS the #5425 contact suffix — the suffix is what makes the
+                # human route reachable from the refusal, so it is part of the
+                # contract now, not an ornament.
                 detail=quota_refusal_payload(QuotaExceededError(
-                    f"Team points limit reached: {count} in use + {est} estimated "
-                    f"for this capture exceeds {max_points}. Upgrade your plan.",
+                    with_limit_contact(f"Team points limit reached: {count} in use + {est} estimated " f"for this capture exceeds {max_points}. Upgrade your plan."),
                     resource="points", used=count, limit=max_points,
                     estimate=est,
                 )),
@@ -15862,9 +15872,13 @@ async def _count_active_free_memberships(user_id: str) -> int:
     return rows[0][0] if rows else 0
 
 
-async def _owned_free_org_ids(user_id: str) -> list[str]:
+async def _owned_free_org_ids(user_id: str, pool: str = "auth") -> list[str]:
     """#2789: the OWNERSHIP-based entitlement twin of
     `_count_active_free_memberships`.
+
+    ``pool`` (#7678) selects the control-plane pool for the Supabase read. The
+    create-org lane passes ``"org"`` so its gate read does not queue behind
+    authentication work; every other caller keeps the default ``"auth"``.
 
     #1877 asked "does this person already have an org without a paid plan?" and
     answered it with MEMBERSHIP, which counts a user who merely accepted an
@@ -15893,7 +15907,7 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
         import asyncio as _asyncio
         ids = await _cp_offload(
             lambda: _sb_ids(get_control_plane(), user_id),
-            op="owned_free_org_ids")
+            op="owned_free_org_ids", pool=pool)
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return ids
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -15929,7 +15943,13 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     not guess when the user is not currently ON that org."""
     return {
         "code": "one_free_org_limit",
-        "message": "You can only have one free organization",
+        # #5425: a customer at a ceiling is told they can talk to us — this is
+        # the free-org ceiling, the sibling of the paid-plan refusal that
+        # already carries the route. Kept as a builder (the dashboard's dialog
+        # is driven by `code`), so the derived guard has to resolve a
+        # detail-BUILDER to see it: a `HTTPException(detail=_builder(...))`
+        # argument subtree holds no string literal of its own.
+        "message": with_limit_contact("You can only have one free organization"),
         "org_id": org_id,
     }
 
@@ -15981,6 +16001,17 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
     # the whole point, and it is the one outcome a read fault cannot fake.
     try:
         _deletion_cp = get_control_plane()
+        # #7678: DELIBERATELY left on the loop's default executor, not moved to
+        # the new ``org`` control-plane pool. This read is the #4029 P2-6 gate
+        # that must refuse a delete-pending user's org create, and its contract
+        # is FAIL-OPEN on a read fault only. A bounded pool introduces a NEW
+        # trigger for that fail-open — a pool refusal (backlog full) or a
+        # bound miss would have to be treated as "no row", disabling a
+        # security gate on a purely local scheduling condition (the default
+        # executor's queue is unbounded, so it can only WAIT, never refuse).
+        # Keeping it here preserves the gate's exact pre-#7678 semantics while
+        # the queueing-behind-auth cost this issue targets is removed from the
+        # other, gate-only ``_cp_offload`` reads and the provision write.
         _pending = await asyncio.to_thread(
             account_deletion_row, _deletion_cp, user["user_id"])
         if _pending is not None:
@@ -16009,7 +16040,8 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
         return await _create_org_registry_lane(sdk, name, user)
 
 
-def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
+def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
+                               prior_org_ids: list[str] | None = None) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
 
@@ -16026,6 +16058,12 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     and a plain CREATE would leave a second, conflicting TeamMeta node. The
     TeamMeta-exists probe is the cheapest form of that guard and costs one
     read on the fresh path (which never has TeamMeta anyway).
+
+    ``prior_org_ids`` (#7678): the caller may pass the creator's active
+    memberships it ALREADY read (off-loop, on the org pool) so this helper
+    does not issue the same control-plane read a second time on the request.
+    ``None`` keeps the legacy behaviour — read it here — for the checkout
+    replay lane, which has no caller-side read to reuse.
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
@@ -16052,8 +16090,9 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     _seen = graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
     if _seen and _seen[0][0]:
         return graph_name  # already initialised — a retry must not duplicate
-    from tortoise.supabase_control import active_membership_org_ids
-    prior_org_ids = active_membership_org_ids(cp, user_id)
+    if prior_org_ids is None:
+        from tortoise.supabase_control import active_membership_org_ids
+        prior_org_ids = active_membership_org_ids(cp, user_id)
     prior_fork = None
     if prior_org_ids:
         try:
@@ -16082,10 +16121,20 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     from datetime import timedelta as _td
 
     from tortoise.supabase_control import (
+        active_membership_org_ids,
         membership_count_since,
         org_by_name,
+        owned_org_replay,
         provision_org,
     )
+
+    # #7678: every control-plane call on this lane rides the DEDICATED org
+    # pool, not the shared ``auth`` pool. The lane issues several SEQUENTIAL
+    # reads plus the provision write; on ``auth`` each one queues behind
+    # concurrent authentication resolutions, so the request's wall clock is
+    # the sum of those waits and a ~9.5 s pass crosses the 10 s transport
+    # bound under load (#4816). This is a pool-isolation change only — no
+    # bound and no exemption is touched (#3834 clear).
 
     # Per-user org-creation rate limit (abuse posture) — the Supabase
     # twin of the registry owner-membership count (#743(b) semantics:
@@ -16094,16 +16143,28 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     recent = await _cp_offload(
         lambda: membership_count_since(
             cp, cutoff=since, user_id=user["user_id"], role="owner"),
-        op="membership_count_since")
+        op="membership_count_since", pool="org")
     if recent >= 3:
         raise HTTPException(status_code=429,
                             detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry org_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-    _dup_org = await _cp_offload(lambda: org_by_name(cp, name), op="org_by_name")
+    # #7677: the wait-bound refusal advertises a retry, and the abandoned-but-
+    # running handler may ALREADY have committed this row — so a retry by the
+    # SAME owner resolves to the org that first attempt created instead of a
+    # 409 for the caller's own organization. Every other duplicate (different
+    # owner, non-owner member, non-active membership, soft-deleted org,
+    # pending_payment org) still 409s — see ``owned_org_replay``.
+    _dup_org = await _cp_offload(lambda: org_by_name(cp, name),
+                                 op="org_by_name", pool="org")
     if _dup_org:
-        raise HTTPException(status_code=409, detail="Organization name already exists")
+        _replay = await _cp_offload(
+            lambda: owned_org_replay(cp, _dup_org["id"], user["user_id"]),
+            op="owned_org_replay", pool="org")
+        if _replay is None:
+            raise HTTPException(status_code=409, detail="Organization name already exists")
+        return {**_replay, "name": name}
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (role='owner'), not membership. Any active owned org without an
     # active paid subscription blocks creating another (the new org would
@@ -16111,7 +16172,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
     # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
     # dashboard renders the three-option dialog from `code`.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"])
+    _free_org_ids = await _owned_free_org_ids(user["user_id"], pool="org")
     if _free_org_ids:
         raise HTTPException(
             status_code=402,
@@ -16125,15 +16186,33 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # the cap with zero usable keys. Mirror create_onboarding_org's #1716
     # fix: the org stays keyless until a session-key mint (POST
     # /v1/session/key writes the api_keys row itself).
+    # #7678: the creator's active memberships are read ONCE here, off-loop on
+    # the org pool, and passed to BOTH the eager graph init and the provision
+    # write. Previously the eager init read them inline (on the event loop) and
+    # ``_ensure_onboarding_node_after_provision`` re-read them after the RPC —
+    # two round-trips for the same value within one locked request. The RPC
+    # inserts exactly one new active owner membership for ``org_id``, so the
+    # post-RPC read (filtered ``!= org_id``) equals this list absent a
+    # concurrent membership mutation: ``_org_create_lock`` serialises the
+    # create-org and invite-accept lanes, but not the account-deletion cascade
+    # or owner-initiated member removal. Only the derived fork/compact choice
+    # could differ; the provision itself is unaffected.
+    prior_org_ids = await _cp_offload(
+        lambda: active_membership_org_ids(cp, user["user_id"]),
+        op="active_membership_org_ids", pool="org")
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
-    graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"])
+    graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],
+                                            prior_org_ids=prior_org_ids)
     try:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
         # mirroring create_onboarding_org's #1716 keyless provision.
+        # #7678: ``prior_org_ids`` is a keyword-only argument of provision_org
+        # (never part of the RPC body) so the post-RPC onboarding init reuses
+        # the list read above instead of issuing a duplicate read.
         await _cp_offload(
-            lambda: provision_org(cp, **{
+            lambda: provision_org(cp, prior_org_ids=prior_org_ids, **{
                 "p_user_id": user["user_id"],
                 "p_identity": None,
                 "p_org_id": org_id,
@@ -16145,7 +16224,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
                 "p_graph_name": graph_name,
                 "p_tier": "free",
             }),
-            op="provision_org")
+            op="provision_org", pool="org")
     except HTTPException:
         raise
     except Exception as e:
@@ -16189,12 +16268,46 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # org_create's exception handler — add a dup-name pre-check BEFORE the
     # 402 so a free-capped user creating a duplicate name gets 409, not 402
     # (pinned 429 → 409 → 402).
-    dup = reg.query(
-        "MATCH (t:Team {name:$name}) RETURN count(t)",
+    # #7677: the registry twin of the Supabase replay — the wait-bound retry
+    # by the SAME owner resolves to the org the abandoned first attempt
+    # created. Exactly one Team + an ACTIVE owner membership + a live,
+    # real org (``deleted_at`` unset and not ``pending_payment`` — parity
+    # with the Supabase lane's explicit guards); every other duplicate
+    # (different owner, non-owner or non-active membership, soft-deleted or
+    # pending_payment org) 409s.
+    dup_rows = reg.query(
+        "MATCH (t:Team {name:$name}) "
+        "RETURN t.id, t.graph_name, t.tier, t.deleted_at, "
+        "t.subscription_status",
         params={"name": name},
-    ).result_set[0][0]
-    if dup:
-        raise HTTPException(status_code=409, detail="Organization name already exists")
+    ).result_set
+    if dup_rows:
+        _replay = None
+        if len(dup_rows) == 1:
+            (_dup_id, _dup_graph, _dup_tier, _dup_deleted,
+             _dup_sub) = dup_rows[0]
+            # #2789: a pending_payment org is not a real org (no graph, hidden
+            # from every surface) and the create lane never mints it — the
+            # same exclusion `_owned_free_org_ids` states. NULL-safe in Python
+            # (a Team with no subscription_status is NOT pending_payment), so
+            # a never-deleted legacy Team still replays.
+            _is_pending = _dup_sub is not None and _dup_sub == "pending_payment"
+            if _dup_deleted is None and not _is_pending:
+                _is_owner = reg.query(
+                    "MATCH (m:Membership {org_id:$oid, user_id:$uid}) "
+                    "WHERE m.status = 'active' AND m.role = 'owner' "
+                    "RETURN count(m) > 0",
+                    params={"oid": _dup_id, "uid": user["user_id"]},
+                ).result_set[0][0]
+                if _is_owner:
+                    _replay = {
+                        "org_id": _dup_id,
+                        "graph_name": _dup_graph or f"org_{name}".replace(" ", "_"),
+                        "tier": _dup_tier or "free",
+                    }
+        if _replay is None:
+            raise HTTPException(status_code=409, detail="Organization name already exists")
+        return {**_replay, "name": name}
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
@@ -16293,8 +16406,7 @@ async def _graph_quota_gate(org: dict) -> None:
         raise HTTPException(
             status_code=409,
             headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
-            detail=("Graph limit reached. Upgrade your plan to create more "
-                    "graphs."),
+            detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create more " "graphs.")),
         )
 
 
@@ -16309,8 +16421,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Builder plan. Upgrade to create "
-                   "multiple graphs.",
+            detail=with_limit_contact("Custom graphs require the Builder plan. Upgrade to create " "multiple graphs."),
             headers={"X-Upgrade-CTA": "pro"},
         )
 
@@ -16382,8 +16493,7 @@ def _provision_graph(org: dict, name: str,
                 raise HTTPException(
                     status_code=409,
                     headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
-                    detail=("Graph limit reached. Upgrade your plan to create "
-                            "more graphs."),
+                    detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create " "more graphs.")),
                 )
 
         # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
@@ -16411,8 +16521,7 @@ def _provision_graph(org: dict, name: str,
         _rollback_graph(org["id"], graph)
         raise HTTPException(
             status_code=409,
-            detail="API key limit reached. Delete a key or upgrade your plan "
-                   "to create more graph keys.",
+            detail=with_limit_contact("API key limit reached. Delete a key or upgrade your plan " "to create more graph keys."),
         ) from None
     except HTTPException:
         raise
@@ -17912,7 +18021,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                    detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -17934,7 +18043,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Member limit reached — upgrade to invite more")
+                                            detail=with_limit_contact("Member limit reached — upgrade to invite more"))
                 inv = await _cp_offload(
                     lambda: invitation_mint(
                         get_control_plane(), org_id, email, role,
@@ -17993,7 +18102,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -18009,7 +18118,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Member limit reached — upgrade to invite more")
+                                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -18305,7 +18414,7 @@ async def accept_invite(body: dict, request: Request,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: per-org lock around the capacity pre-check + consume. The
     # capacity pre-check runs INSIDE the lock BEFORE the accepted_at write
@@ -18331,7 +18440,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -18765,7 +18874,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
     async with _invite_org_lock(org_id):
         _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18780,7 +18889,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -19298,7 +19407,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
         if org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: same per-org lock + capacity pre-check as the TOKEN accept
     # branch — the max_users pre-check runs INSIDE the lock BEFORE the
@@ -19319,7 +19428,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -30087,7 +30196,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Builder feature — upgrade to enable hourly backups",
+            detail=with_limit_contact("Backups are a Builder feature — upgrade to enable hourly backups"),
         )
 
 
@@ -32165,7 +32274,7 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
     if not tier or tier in ("free", "anon"):
         raise HTTPException(
             status_code=400,
-            detail="A paid plan is required to purchase a new organization")
+            detail=with_limit_contact("A paid plan is required to purchase a new organization"))
     if is_supabase_enabled():
         if org_by_name(get_control_plane(), name):
             raise HTTPException(status_code=409, detail="Organization name already exists")

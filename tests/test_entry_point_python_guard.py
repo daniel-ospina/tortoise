@@ -101,6 +101,7 @@ Declared bounds — what this file does NOT verify
 from __future__ import annotations
 
 import ast
+import re
 import shutil
 import subprocess
 import sys
@@ -457,11 +458,18 @@ def test_the_corpus_is_not_vacuously_empty():
 def test_every_corpus_file_is_tracked():
     """The corpus is the SCOPE — an untracked stray must not silently join it.
 
-    Both directions are real assertions now (the old version globbed the
-    filesystem and then asserted those same paths were files — it could never
-    fail). An untracked, non-ignored ``.py`` under the corpus dirs reds by name,
-    and a tracked file that has vanished from disk reds because the corpus can
-    no longer be asserted for it.
+    Three directions, all real assertions (#6937 P2-2 added the third):
+
+    * *untracked -> corpus*: an untracked, non-ignored ``.py`` under the corpus
+      dirs reds by name.
+    * *tracked -> disk*: a tracked file that has vanished reds, because the
+      corpus can no longer be asserted for it.
+    * *tracked -> glob*: a tracked, on-disk file that ``_globbed()`` does not
+      reach drops out of ``_corpus()`` and therefore receives **no guard
+      assertion at all** — silently. Measured ``∅`` when this was added, so it
+      was a LATENT fail-open rather than a live symptom: a symlinked directory
+      or a rename the ``rglob`` cannot follow is the way it triggers, and the
+      file would go unguarded with every test still green.
     """
     strays = [
         rel
@@ -478,6 +486,221 @@ def test_every_corpus_file_is_tracked():
         rel for rel in sorted(_tracked()) if rel.endswith(".py") and not (ROOT / rel).is_file()
     ]
     assert not missing, f"tracked corpus files absent from disk: {missing}"
+    # #6937 P2-2: tracked -> glob. Without this, `_tracked()` is consumed only by
+    # `missing` above and by `_corpus()`, which INTERSECTS it with the glob — so a
+    # tracked file the glob cannot see is silently subtracted from the corpus and
+    # never asserted on.
+    globbed = {_rel(path) for path in _globbed()}
+    unreached = [
+        rel for rel in sorted(_tracked()) if rel.endswith(".py") and rel not in globbed
+    ]
+    assert not unreached, (
+        f"tracked corpus files _globbed() never reaches, so they receive no guard "
+        f"assertion at all: {unreached} — _globbed() expands {CORPUS_DIRS} with "
+        "rglob; a symlinked directory or a rename it cannot follow is the usual "
+        "cause, and the file would otherwise go unguarded with every test green"
+    )
+
+
+#: #6937 P2-1: the guarded form, and the carve-outs where the bare form is the
+#: DOCUMENTED, WORKING invocation (those tools are never guarded, so `python3`
+#: is correct for them — sweeping them would break a scheduled job or a test
+#: that RUNS them under `/usr/bin/python3`).
+#:
+#: Review round 1 widened this from `python3 ` to also catch the absolute-path
+#: (`/usr/bin/python3 `) and `./`-prefixed spellings, which the guard refuses
+#: just as hard. Review round 2 added the ELIDED form (`python3 ...`): a USAGE
+#: block that elides the path still teaches the refused invocation, and it is
+#: exactly how `graph-scripts/2146_falkordb_graph_cleanup.py` kept one after its
+#: siblings were swept. The elided branch has no path, so no carve-out can
+#: exempt it — which is correct, because a reader substitutes a real path.
+_BARE_INVOCATION = re.compile(
+    r"(?<![\w./])(?:/usr/bin/)?python3\s+"
+    r"(?:(?:\./)?(tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)|\.\.\.)"
+)
+_CARVE_OUTS = frozenset(UNGUARDABLE) | frozenset(RUNTIME_39)
+
+#: Text-bearing files a reader copies an invocation FROM.
+_DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
+
+#: SURFACES DELIBERATELY OUT OF SCOPE, with reasons — a declared bound, not an
+#: oversight. Declared as DATA so the bound is greppable and widening the seam
+#: means editing a named thing.
+#:
+#: Review round 4 reviewed this seam as production code and recommended exactly
+#: this: the `.github/workflows` surface had, by then, generated EVERY defect in
+#: rounds 1-4 (the "any `.yml`" sweep, the path-substring predicate, the echo
+#: arm's over-match) while protecting ZERO live lines — its only bare occurrence
+#: was a record already exempted here. A surface whose filter is more fragile
+#: than the class it guards is negative machinery, so it is gone rather than
+#: patched a fifth time.
+_SURFACES_OUT_OF_SCOPE: dict[str, str] = {
+    ".github/": (
+        "a `run:` line executes on the RUNNER's interpreter, and every workflow "
+        "that INVOKES A GUARDED TOOL pins 3.12 via setup-python (measured: all "
+        "11 that do). Bare `python3` on the unpinned runners elsewhere in "
+        "`.github/` does NOT execute a guarded tool, so no conversion is due. "
+        "This also drops `.github/ISSUE_TEMPLATE/*.yml` (human prose; "
+        "`bug_report.yml:97` was fixed to the guarded form in review round 3) "
+        "from the guard — stated explicitly so the gap is a DECISION, not an "
+        "oversight: a future revert there is accepted silently, and that is the "
+        "price of not carrying a workflow-text filter whose fragility cost "
+        "four review rounds."
+    ),
+    "config/": (
+        "its 3 occurrences are DESCRIPTION; `ci-surfaces.yml:1364` quotes the "
+        "bare form as the PROBLEM the guard fixes (\"the documented `python3 "
+        "tools/x.py` invocation otherwise dies with an unattributed INTERNAL "
+        "ERROR\"), so rewriting it would invert the meaning, and the other two "
+        "state what a CI step runs"
+    ),
+    "tests/": "fixtures, not docs; ~85 hits, none instruction-bearing",
+    "root *.md + website/": "measured at 0 hits",
+    ".husky/ + extensionless scripts": (
+        "keyed out by `_DOC_SUFFIXES`; the hook invokes through its `py_tool` "
+        "wrapper, never a bare `python3`, so it carries the guarantee by "
+        "construction"
+    ),
+    "the watched PATH grammar": (
+        "`_BARE_INVOCATION` matches only `tools/` and `graph-scripts/` — "
+        "`CORPUS_DIRS`, which is the set `_corpus()` defines the guard over. A "
+        "GUARDED entry point living outside those two directories would be "
+        "invisible here. None exists today; note that an UNGUARDED script under "
+        "`docs/runbook/` (e.g. `4107_preference_abstention_diagnostic.py`) is "
+        "NOT a miss: with no `sys.version_info` guard there is no contradiction "
+        "for bare `python3` to create, which is the only thing this seam is for."
+    ),
+}
+
+#: Lines where the bare form is DELIBERATELY correct because the text RECORDS or
+#: DESCRIBES what a machine did, rather than instructing a reader to run it:
+#:
+#:   * a verbatim CI log quote — rewriting it makes the receipt describe a
+#:     command the runner never printed;
+#:   * a `$`-prompted terminal transcript with its captured output;
+#:   * a "receipt of record" for a recorded measurement;
+#:   * a comment stating what a CI job runs (`python-ci.yml` really does invoke
+#:     `python3 tools/mergify_config_guard.py --static` on the runner's 3.12).
+#:
+#: THE BOUNDARY (review round 2): a captured machine transcript or log is a
+#: RECORD and keeps the form that ran. A *reproduction instruction* with expected
+#: output — a docs command block, a plan doc's smoke step — is an INSTRUCTION and
+#: takes the guarded form, because its purpose is that a reader re-runs it. That
+#: is why `docs/plans/2026-09-26-5042-…:208` and
+#: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
+#: three entries below do not.
+#:
+#: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
+#: the doc/guard contradiction this test exists to prevent. Keyed by
+#: (path, stripped line) rather than by line NUMBER, so an edit above cannot
+#: silently slide an exemption onto a different line: change the text and the
+#: entry stops matching, re-flagging it.
+_DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "tools/embedder_provision.py",
+            "#     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5",
+        ),
+        (
+            "docs/research/2026-09-25-4503-edge-accounting/measurement.md",
+            "**Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped "
+            "tool's receipt of record, verbatim (`python3 tools/edge_census.py "
+            "probe --n 5000 --json`):",
+        ),
+        (
+            "docs/research/2026-09-25-4503-edge-accounting/measurement.md",
+            "$ python3 tools/edge_census.py census --uri "
+            "'docker://:falkordb@localhost:6379' \\",
+        ),
+    }
+)
+
+
+def test_the_record_exemptions_all_still_match_a_live_line():
+    """Review round 4: `_DELIBERATE_BARE_FORM` is keyed on exact line text, so a
+    reword or reflow of a legitimate record silently DEADENS its exemption — the
+    line is re-flagged, but worse, an entry can also linger for text that no
+    longer exists while the occurrence it was written for is now uncovered.
+    Assert every key still matches a line in its file, so the set cannot rot.
+    """
+    dead: list[str] = []
+    for rel, line in _DELIBERATE_BARE_FORM:
+        path = ROOT / rel
+        if not path.is_file():
+            dead.append(f"{rel} (file gone)")
+            continue
+        if line not in {ln.strip() for ln in path.read_text().splitlines()}:
+            dead.append(f"{rel} :: {line[:70]}")
+    assert not dead, (
+        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, so "
+        f"their exemption is dead and the occurrence may be uncovered: {dead}"
+    )
+
+
+def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
+    """#6937 P2-1 — the RECURRENCE seam, not a re-assertion of the sweep.
+
+    A guarded entry point REFUSES `python3 <path>` on a pre-3.12 ambient
+    interpreter, so any doc or USAGE text advertising that form contradicts the
+    guard: the reader copies it and gets a refusal the docs nowhere predict.
+
+    SCOPE, stated exactly (review round 1: the first draft's walk covered only
+    three roots while the name claimed "any doc or USAGE text" — a name that
+    overclaims its scope is the defect, so the walk was WIDENED to match the
+    name rather than the name narrowed to flatter the walk):
+
+      * `tools/` + `graph-scripts/` + `docs/` in full — every tracked
+        text-bearing file. The walk is intersected with `git ls-files` (review
+        round 4), so a scratch note dropped under a walked root cannot red an
+        unrelated commit — measured when a reviewer's probe did exactly that.
+
+    Surfaces deliberately OUT of scope are declared, with reasons, in
+    `_SURFACES_OUT_OF_SCOPE` — a bound, not an oversight.
+
+    The one-time sweep fixed the occurrences in place. Without this assertion it
+    would simply be a fact about today, re-established by the next person who
+    writes a doc — which is exactly the #5128/#5136 failure the guard was created
+    for. Re-deriving it here makes the drift unrepresentable.
+
+    The `RUNTIME_39`/`UNGUARDABLE` carve-outs are exempt BY DESIGN and asserted
+    as such below: those tools are never guarded, so `python3 <path>` IS their
+    working form, and sweeping one would turn a working scheduled cron job into
+    a refusal (`test_the_runtime_39_exclusion_is_accurate` runs them to prove
+    it).
+    """
+    offenders: list[str] = []
+    tracked = set(_git_lines("ls-files", "--", *CORPUS_DIRS, "docs"))
+    for base in (*CORPUS_DIRS, "docs"):
+        for path in sorted((ROOT / base).rglob("*")):
+            if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
+                continue
+            where = _rel(path)
+            if where not in tracked:
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "python3" not in text:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for match in _BARE_INVOCATION.finditer(line):
+                    # The RECORD exemption is checked FIRST (review round 3): it is
+                    # keyed on the LINE, not on a tool path, so an elided
+                    # `python3 ...` record must be able to use it too. Checking it
+                    # only after the elided branch made it unreachable there.
+                    if (where, line.strip()) in _DELIBERATE_BARE_FORM:
+                        continue
+                    tool, rel = match.group(1), match.group(2)
+                    if tool is not None and f"{tool}/{rel}" in _CARVE_OUTS:
+                        continue
+                    offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
+    assert not offenders, (
+        "these files advertise `python3 <path>`, the form the entry-point guard "
+        "REFUSES on a pre-3.12 interpreter, for a tool that IS guarded. Use "
+        f"`uv run python <path>` (or add the tool to RUNTIME_39 with a reason): "
+        f"{offenders}"
+    )
 
 
 def test_the_runtime_39_exclusion_is_accurate():

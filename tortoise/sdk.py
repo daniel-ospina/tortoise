@@ -12470,7 +12470,25 @@ class TortoiseSDK:
                         "RETURN count(r)",
                         params={"f": src, "t": dsts[0]},
                     ).result_set
-                    ok = proj.create_edge(src, dsts[0], rel)
+                    try:
+                        ok = proj.create_edge(src, dsts[0], rel)
+                    except ValueError as e:
+                        # Only `aboutDocument` has a target contract, so only
+                        # that refusal is re-shaped — `create_edge` raises
+                        # ValueError for other invalid requests too (an unknown
+                        # predicate; the `ownedBy` circular-DAG guard), and
+                        # those must keep propagating unchanged.
+                        if rel != "aboutDocument":
+                            raise
+                        # #5206: the refusal must reach the caller as this
+                        # contract's own Phase2Error, not as a projection
+                        # primitive's ValueError. NB the bundle is NOT rolled
+                        # back: Phase 2 has already written its points and
+                        # sources — the same pre-existing behaviour as the
+                        # `endpoints not found` branch below.
+                        raise Phase2Error(
+                            f"ingest: connections[{i}] could not create "
+                            f"{rel!r} edge — {e}", batch_id=batch_id) from e
                     if not ok:
                         raise Phase2Error(
                             f"ingest: connections[{i}] could not create "
@@ -15404,12 +15422,18 @@ class TortoiseSDK:
         # one knob TORTOISE_EP_REQUIRE_CALIBRATION).
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
-        if require_calibration:
-            self._ensure_calibrated("compute_confidence")
+        # #7739: the gate runs AFTER the selection (below), against the SAME
+        # selection the run consumes — but still fail-closed BEFORE ep.run().
+        # The no-arg (dirty-roots) branch below keeps the whole-graph scope:
+        # it has no selection to derive and its behaviour is unchanged here.
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+            if require_calibration:
+                self._ensure_calibrated(
+                    "compute_confidence",
+                    scope=lambda: self._ep_run_scope(operator_ids, max_hops))
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
         elif anchors is not None:
@@ -15430,9 +15454,25 @@ class TortoiseSDK:
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {},
                         "diagnostic": "no_factors"}
+            if require_calibration:
+                # #7739: scope = the run's consumed set for the selection just
+                # computed. Anchors the run consumes are already in it (they
+                # are operator inputs / direct-edge factor endpoints); an
+                # isolated anchor reaches no factor, so adding it would only
+                # manufacture a false blocker — the gate matches the run.
+                self._ensure_calibrated(
+                    "compute_confidence",
+                    scope=lambda: self._ep_run_scope(operator_ids, max_hops))
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
         else:
+            # #7739: this path has no computed selection (the run set is the
+            # dirty roots), so the gate keeps its pre-#7739 WHOLE-GRAPH scope.
+            # Unchanged here, and gated before _hydrate_dirty_roots so the
+            # raise fires before the no-dirty-roots early return, exactly as
+            # the pre-#7739 gate did.
+            if require_calibration:
+                self._ensure_calibrated("compute_confidence")
             # ── No-arg (#395 AC8 + delta C): LOCAL EP over the affected
             # subgraph — dirty roots seed a max_hops=None run over the exact
             # affected closure; NO global extract_svbp_factors() scan (AC2 —
@@ -15677,6 +15717,15 @@ class TortoiseSDK:
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
             never folds negative pseudo-counts (double-count guard).
+          - Independence model (#5543): the per-point source set is COLLAPSED BY
+            S0a IDENTITY (`:Source.canonicalUrl`, falling back to
+            `normalize_source_url(url)`), so one document reached through several
+            `:Source` nodes contributes ONE source. A source with no identity at
+            all stays DISTINCT (there is no key to collapse on, and folding
+            unknowns would weaken evidence). RESIDUAL, stated not closed: a
+            session `:Source` and the documents it `references` have different
+            identities by design and still count twice — see the INDEPENDENCE
+            MODEL note on `source_credibility.aggregate_prior`.
           - Baseline provenance (2x2 mapping): author-set/system-default
             baselines (baseline_source = 'set-by-author' / 'system-default', or
             legacy baseline_set=true with no token) are NEVER recomputed;
@@ -15697,10 +15746,15 @@ class TortoiseSDK:
         import os  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.source_credibility import (
+            _parse_timestamp,  # ONE parser for this package — never duplicate it
             aggregate_prior,
             assessment_factor,
+            pc_base,
             resolve_tier,
         )
+        # #5543: the S0a identity key. The write path already applies this
+        # decision; the belief path below is the one that had not called it.
+        from tortoise.source_identity import normalize_source_url
 
         if recency_decay is None:
             recency_decay = float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95"))
@@ -15748,21 +15802,98 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
             "RETURN n.id, s.url, s.credibilityTier, s.sourceKind, "
-            "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at",
+            "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at, "
+            "s.canonicalUrl",
             params={},
         ).result_set
 
-        # Collect per-point source evidence
+        # Collect per-point source evidence, COLLAPSED BY SOURCE IDENTITY (#5543).
+        #
+        # `aggregate_prior` assumes its `groups` are INDEPENDENT observations, and
+        # this loop is the only place that assumption is created. Keying on the
+        # `:Source` NODE made the model "how many distinct nodes point at me" — a
+        # statement about our database, not about the evidence. Two `:Source`
+        # nodes for ONE document (a session `:Source` and a document inside it, a
+        # re-registered duplicate, two spellings of one URL) each contributed a
+        # term to `log2(N_t+1) * sum(base_pc * factor) / N_t` AND each raised N,
+        # so the second channel was invisible to `aggregate_prior`.
+        #
+        # The identity policy is ALREADY RECORDED — `source_identity.py` (S0a),
+        # per `EXTRACTOR-V4-ARCHITECTURE.md` §4.2 / `STORAGE-ARCHITECTURE.md`
+        # §9.4: "The registration key is the canonicalised URL." The WRITE path
+        # applies it; this BELIEF path had simply never called it. Applying it
+        # here is not a new policy — it is that same policy on the path that had
+        # missed it. (This is why the correlation guard, not a documented
+        # decision that storage identity IS the proxy: the latter would
+        # contradict the recorded S0a decision the write path already enforces.)
+        #
+        # `normalize_source_url` is PURE (no model call, no graph access, never
+        # raises, documented idempotent), so this adds no query and no failure
+        # mode. A source with NEITHER `canonicalUrl` nor `url` keys on a UNIQUE
+        # per-row token instead, so unknown-identity sources stay DISTINCT;
+        # folding those together would introduce the opposite error.
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
-        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at in rows:  # noqa: B007
+        _identity_slot: dict[tuple[str, str], int] = {}
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl in rows:  # noqa: B007
             tier = resolve_tier(ctier, skind)
             if tier is None:
                 continue  # neutral source — no inheritance contribution
-            point_sources[pid].append({
-                "url": url, "tier": tier, "sourceDate": sdate,
-                "ingestedAt": ingested,
-            })
+            # Identity = the ALREADY-MATERIALISED S0a key. `:Source` carries
+            # `canonicalUrl` (written by the write path), which is precisely the
+            # "registration key" `source_identity.py` records;
+            # `normalize_source_url` is the pure fallback for a node predating
+            # that property. `id` is NOT usable as the key: it is not the S0a
+            # identity (it is the url on create, and is absent entirely on
+            # stub-minted sources — `_upsert_source` sets it, `_mint_source_stub`
+            # does not), so keying on it would split one document again. A source
+            # with no identity at all gets a UNIQUE per-row token: unknown
+            # identity must stay DISTINCT, because folding unknowns together
+            # would weaken evidence — a new error, opposite in direction to this
+            # bug.
+            ident = canonurl or normalize_source_url(url) if (canonurl or url) else None
+            if ident is None:
+                ident = f"\x00row:{pid}:{len(point_sources[pid])}"
+            # Read the assessment factor HERE, per row, BEFORE collapsing.
+            # `assess_source` keys it on the RESOLVED stored url, and two nodes
+            # of one canonical identity can resolve to different urls — so
+            # re-looking it up after the merge off the surviving url would make
+            # the prior depend on row ORDER (the traversal has no ORDER BY).
+            # Keeping the MAX matches the "strongest" rule used for tier and
+            # dates: collapsing must never weaken the evidence it merges.
+            fac = factor_by_source.get(url, 1.0)
+            slot = _identity_slot.get((pid, ident))
+            if slot is None:
+                _identity_slot[(pid, ident)] = len(point_sources[pid])
+                point_sources[pid].append({
+                    "url": url, "tier": tier, "sourceDate": sdate,
+                    "ingestedAt": ingested, "factor": fac,
+                })
+                continue
+            # One document seen twice: keep the STRONGER tier, the BEST clock and
+            # the STRONGEST assessment, so collapsing can never weaken the
+            # evidence it merges. The clock matters because `aggregate_prior`
+            # reads each group's `decay_t` off
+            # `_parse_timestamp(sourceDate) or _parse_timestamp(ingestedAt)` —
+            # i.e. `sourceDate` SHADOWS `ingestedAt`. Maxing the two fields
+            # INDEPENDENTLY would therefore lose the newest clock whenever the
+            # survivor carries an older `sourceDate` and a member has only a
+            # newer `ingestedAt`: the collapsed row would decay as of the older
+            # date, LOWER than the most recent member — the very weakening this
+            # merge exists to prevent. So compare the EFFECTIVE clock and copy
+            # BOTH fields from the winner, so the winner's clock is the one
+            # `aggregate_prior` actually reads.
+            kept = point_sources[pid][slot]
+            if pc_base(tier) > pc_base(kept["tier"]):
+                kept["tier"] = tier
+            if fac > kept["factor"]:
+                kept["factor"] = fac  # strongest assessment wins, not first-seen
+            cand_eff = _parse_timestamp(sdate) or _parse_timestamp(ingested)
+            kept_eff = _parse_timestamp(kept["sourceDate"]) or _parse_timestamp(
+                kept["ingestedAt"]
+            )
+            if cand_eff is not None and (kept_eff is None or cand_eff > kept_eff):
+                kept["sourceDate"], kept["ingestedAt"] = sdate, ingested
 
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
@@ -15843,8 +15974,7 @@ class TortoiseSDK:
             # Per-source assessment factor (clamped [0.1, 2.0]); factor = 1.0
             # when no assessments — exact tier priors preserved.
             groups = [
-                (src["tier"], src["sourceDate"], src["ingestedAt"],
-                 factor_by_source.get(src["url"], 1.0))
+                (src["tier"], src["sourceDate"], src["ingestedAt"], src["factor"])
                 for src in sources
             ]
             alpha, beta = aggregate_prior(
@@ -15896,17 +16026,24 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
-            "n.status, n.baseline_source AS bl_source, "
+            "n.status, "
+            # #7739: the legacy ``outdated=true`` flag is terminal without a
+            # status write (invalidate_point), so the gate needs BOTH halves
+            # of the shared #2498 terminal predicate; expose it here rather
+            # than re-querying per Point.
+            "coalesce(n.outdated, false) AS outdated, "
+            "n.baseline_source AS bl_source, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            (pid, content, pk, calibrated, status,
+            (pid, content, pk, calibrated, status, outdated,
              bl_source, ctier, skind, src_url) = row
             item = {"id": pid, "content": content, "pointKind": pk,
                     "calibrated": calibrated, "status": status,
+                    "outdated": outdated,
                     "baseline_source": bl_source}
             # #2199: every calibrated row routes through the single provenance
             # display map so the copy never drifts per surface. Legacy
@@ -15976,7 +16113,41 @@ class TortoiseSDK:
                 seen[pid] = item
         return deduped
 
-    def _ensure_calibrated(self, surface: str) -> None:
+    def _ep_run_scope(self, seed_ids: list[str],
+                      max_hops: int | None) -> set[str]:
+        """Point ids an EP run seeded by ``seed_ids`` will actually consume.
+
+        #7739: the calibration gate must be evaluated against the SAME
+        selection the run consumes — a gate that disagrees with the run is a
+        defect in its own right. This asks the run's OWN ``_affected_claims``
+        and ``_affected_factors`` rather than inventing a second traversal, so
+        the two cannot drift: ``_affected_claims`` admits a claim only when it
+        forms a factor (#5566), and ``_affected_factors`` names every factor
+        INPUT — its operator inputs and BOTH endpoints of an operator-less
+        direct edge (#888 W5). The gate's own evidence-kind / live filters
+        decide what to demand calibration of.
+
+        Deriving this from the SELECTED operators' immediate endpoints alone
+        is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so
+        an anchored ``max_hops=1`` run on A-op1-B-op2-C consumes C while C is
+        not an endpoint of any SELECTED operator. The union here is exactly
+        the run's consumed set, so an uncalibrated point inside it still
+        raises (#7739: the guard is scoped, never weakened).
+        """
+        if not seed_ids:
+            return set()
+        ep = self._get_ep()
+        affected = ep._affected_claims(list(seed_ids), max_hops,
+                                       include_draft=False)
+        scope = set(affected)
+        for (_src, _rel, inputs, *_rest) in ep._affected_factors(
+                affected, include_draft=False):
+            scope.update(inputs)
+        return scope
+
+    def _ensure_calibrated(self, surface: str, *,
+                           scope: set[str]
+                           | Callable[[], set[str]] | None = None) -> None:
         """#1157: shared calibration gate for EP surfaces.
 
         Raises CalibrationError when evidence-kind Points (statement /
@@ -15989,6 +16160,16 @@ class TortoiseSDK:
         Args:
             surface: human-readable caller name for the error message
                 (e.g. "dream", "get_confidence").
+            scope: #7739 — either the set of Point ids the caller's EP run can
+                actually consume (see ``_ep_run_scope``), or a zero-arg
+                callable returning that set. A CALLABLE is evaluated lazily,
+                only when the graph already has at least one uncalibrated
+                evidence point — so a fully calibrated graph (the common
+                case) pays NOTHING for scoping. ``None`` (default) keeps the
+                whole-graph posture for callers without a computed selection
+                (dream, get_confidence, the no-arg compute_confidence path).
+                An EMPTY set is a real scope (nothing reachable → nothing to
+                gate) and is never treated as ``None``.
         """
         from .exceptions import CalibrationError
         summary = self.calibrate_summary()
@@ -16001,7 +16182,23 @@ class TortoiseSDK:
             # calibration of a draft is noise; the gate only guards live
             # evidence. Status NULL = live, mirroring _live_only.
             and s.get("status") != "draft"
+            # #7739: the same rule extends to TERMINAL points — EP's live set
+            # is ``_live_only`` (live.py) = not draft AND NOT terminal, so a
+            # retracted / superseded / outdated / archived point (or the
+            # legacy ``outdated=true`` flag invalidate_point writes without a
+            # status) is one EP will never consume. Demanding its calibration
+            # is the same noise as demanding a draft's. The shared #2498
+            # Python mirror keeps the vocabulary from drifting; status NULL =
+            # live, mirroring _live_only.
+            and not is_terminal_status(s.get("status"),
+                                       s.get("outdated", False))
         ]
+        # #7739: only now, and only if there is something to scope, ask the
+        # caller for the run's consumed set — an uncalibrated point INSIDE it
+        # still raises; an unrelated lane's point stops freezing this caller.
+        if uncalibrated and scope is not None:
+            scope_set = scope() if callable(scope) else scope
+            uncalibrated = [s for s in uncalibrated if s["id"] in scope_set]
         if uncalibrated:
             ids = [s["id"] for s in uncalibrated[:10]]
             msg = (
@@ -20443,9 +20640,9 @@ class TortoiseSDK:
                 params={"tid": org_id},
             ).result_set[0][0]
             if count >= max_users:
-                raise ControlPlaneError(
-                    f"Team at max users ({max_users}). Upgrade to add more."
-                )
+                from tortoise.quota import with_limit_contact  # #5425
+                raise ControlPlaneError(with_limit_contact(
+                    f"Team at max users ({max_users}). Upgrade to add more."))
 
         mid = ulid()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017

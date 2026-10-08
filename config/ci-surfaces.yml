@@ -55,6 +55,7 @@ carve_shards: 3
 
 surfaces:
   api:
+  - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
   # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
@@ -164,6 +165,12 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #7678: the org-create lane's dedicated control-plane pool + the single
+  # membership read. Same dual registration as the offload guard above and for
+  # the same reason: the files it guards are tortoise/hosted_api.py,
+  # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
+  # `api` surface.
+  - test_org_create_pool_7678.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -1095,6 +1102,7 @@ surfaces:
   - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
@@ -1673,6 +1681,25 @@ surfaces:
   # (the inventory read), which fall to the `core` fallback — same rationale as
   # test_4999_vector_mechanism.py above.
   - test_4997_vector_index_parity.py
+  # #5404: the entity_type -> Cypher-label guard must be ENFORCED, not merely
+  # declared — `tortoise/security.py::validate_entity_type` was inert while the
+  # legs interpolated a caller-controlled string into a Cypher LABEL. Pins the
+  # unpatterned engine module `tortoise/search_engine.py` (the three runners plus
+  # degradation_chain), which falls to the `core` fallback — same rationale as
+  # test_4997_vector_index_parity.py above. DB-free: the guard precedes all
+  # database work, which is what makes the entry placement observable.
+  - test_5404_entity_type_guard.py
+  # #5407: the range/full-text label sets the index sweep creates must not
+  # drift from the labels the VECTOR leg's declared routing resolves to.
+  # `_ensure_indexes` declared its sets as inline literals with nothing tying
+  # them to that routing, so a served label could be added and its
+  # range/full-text index silently never created — it then degrades to
+  # `index_missing`/an empty FTS run, and the structural leg falls back to a
+  # label scan. The labels are now module-level declarations and this pins
+  # their coverage against BOTH the sweep sets and the `_REQUIRED_*`
+  # schema-current gate. The VECTOR index is NOT covered: its labels are still
+  # literals and it needs neither index kind. DB-free: reads declarations only.
+  - test_5407_index_label_parity.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   # #4199: the dense leg's material is judged against the READ's own kind
