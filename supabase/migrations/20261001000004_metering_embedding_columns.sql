@@ -1,5 +1,15 @@
--- Migration 20260925000003: the EMBED lane's encode WORKLOAD on the metering
+-- Migration 20261001000004: the EMBED lane's encode WORKLOAD on the metering
 -- ledger (#4488, lane c7-instrumentation).
+--
+-- RENUMBERED FORWARD from 20260925000003 (#7634). It was authored with a
+-- prefix OLDER than the newest version prod had already applied
+-- (20261001000001), so it sorted before prod's tip and `supabase db push
+-- --include-all` would have landed it ON TOP of its own successor — the state
+-- the drift gate refuses, which was blocking every deploy-api run. It carries
+-- no supabase_migrations.schema_migrations row (the gate listed it repo-ahead).
+-- The DDL below is idempotent (ADD COLUMN IF NOT EXISTS, DROP FUNCTION IF
+-- EXISTS then CREATE), so the forward re-land converges whether or not prod
+-- already has the columns and the RPC.
 --
 -- WHY THIS EXISTS. The cost meter (#3359/#3824) covers LLM PROVIDER calls,
 -- which carry a billable token count. A local ``sentence-transformers`` encode

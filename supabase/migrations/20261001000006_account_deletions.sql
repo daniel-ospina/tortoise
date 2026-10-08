@@ -1,4 +1,14 @@
--- Migration 20260930000001: user-account soft-delete ledger (#4029)
+-- Migration 20261001000006: user-account soft-delete ledger (#4029)
+--
+-- RENUMBERED FORWARD from 20260930000001 (#7634). It was authored with a
+-- prefix OLDER than the newest version prod had already applied
+-- (20261001000001), so it sorted before prod's tip and `supabase db push
+-- --include-all` would have landed it ON TOP of its own successor — the state
+-- the drift gate refuses, which was blocking every deploy-api run. It carries
+-- no supabase_migrations.schema_migrations row (the gate listed it repo-ahead).
+-- The DDL below is idempotent (CREATE TABLE / ADD COLUMN IF NOT EXISTS,
+-- CREATE OR REPLACE FUNCTION), so the forward re-land converges whether or not
+-- prod already has the table and the RPC.
 --
 -- Backs the self-service account-deletion flow. Deleting a personal account is
 -- two-phase, mirroring the team path (#302): the request stamps `deleted_at` +

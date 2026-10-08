@@ -720,9 +720,19 @@ class TestRegistryLane:
 # Supabase lane — migration shape + the seam through the fake plane
 # ════════════════════════════════════════════════════════════════════════════
 
-MIGRATION = (Path(__file__).resolve().parents[1] / "supabase" / "migrations"
-             / "20260925000003_metering_embedding_columns.sql")
-MIGRATIONS_DIR = MIGRATION.parent
+# Resolve by NAME, not a hardcoded version prefix. The re-land policy
+# (#2240/#7634) renumbers this migration forward whenever it lands carrying a
+# prefix older than prod's newest applied version, so a literal path turns that
+# renumber into a FileNotFoundError here — a red caused by the policy rather
+# than by any behaviour under test. Exactly one match, so a duplicate is still
+# caught rather than silently sampled.
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "supabase" / "migrations"
+_EMBED_MIGRATIONS = sorted(MIGRATIONS_DIR.glob("*_metering_embedding_columns.sql"))
+if len(_EMBED_MIGRATIONS) != 1:
+    raise RuntimeError(
+        "expected exactly one embedding-columns migration, found "
+        f"{_EMBED_MIGRATIONS}")
+MIGRATION = _EMBED_MIGRATIONS[0]
 
 
 def _sql_function_bodies(sql: str, name: str) -> list[str]:
