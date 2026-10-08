@@ -719,20 +719,21 @@ def _per_test_timeout_s() -> float:
     stop enforcing the moment the workflow's value moves, which is the exact
     drift it is here to catch.
 
-    Scoped to the SHARD step, not the whole file: `python-ci.yml` also carries a
-    `--timeout=90` for a different job, so a file-wide minimum would compare
-    against a timer this lane never runs under. The shard's own command line is
-    the one that also carries `matrix.watchdog_minutes`.
+    Scoped to actual pytest invocations, not the whole file and not the shard line:
+    the job runs the same tests TWICE under the same per-test timer — the
+    last-failed pre-phase and the shard itself — and only the second carries
+    `matrix.watchdog_minutes`, so keying on that variable would miss the first and
+    let a lowered timer through. Every `--timeout=` this file gives pytest is a
+    bound this lane runs under, so the minimum over them is the safe read.
     """
     import re
     from pathlib import Path
 
     wf = Path(".github/workflows/python-ci.yml").read_text()
-    shard_lines = [ln for ln in wf.splitlines() if "matrix.watchdog_minutes" in ln]
-    vals = [float(v) for ln in shard_lines
+    vals = [float(v) for ln in wf.splitlines() if "pytest" in ln
             for v in re.findall(r"--timeout=(\d+(?:\.\d+)?)\b", ln)]
-    assert vals, ("the shard's per-test --timeout moved or was renamed; it is no "
-                  "longer on the matrix.watchdog_minutes line")
+    assert vals, ("the workflow's per-test --timeout moved or was renamed; no "
+                  "pytest invocation in python-ci.yml carries one")
     return min(vals)
 
 
@@ -748,10 +749,14 @@ def test_the_test_lane_budgets_the_cold_embedder_load_between_two_bounds():
 
     budget = EmbeddingModel._LOAD_TIMEOUT_S
     per_test = _per_test_timeout_s()
-    assert budget > _WORST_OBSERVED_COLD_LOAD_S, (
-        f"a {budget}s budget does not cover the worst cold load this incident "
-        f"actually observed ({_WORST_OBSERVED_COLD_LOAD_S}s) — which is the "
-        f"whole failure: the load is abandoned mid-flight (#6960)"
+    # A MARGIN, not merely "above": 204.64 is the worst load OBSERVED and the
+    # distribution's tail is unbounded, so a budget of 205 would pass a bare `>`
+    # while being rejected by this very change's own reasoning. The margin is the
+    # one the budget was chosen for.
+    assert budget >= _WORST_OBSERVED_COLD_LOAD_S * 1.25, (
+        f"a {budget}s budget leaves under 1.25x over the worst cold load this "
+        f"incident observed ({_WORST_OBSERVED_COLD_LOAD_S}s) — an unobserved "
+        f"slower load would be abandoned mid-flight (#6960)"
     )
     assert budget < per_test, (
         f"a {budget}s budget does not fire before the shard's per-test "
@@ -766,8 +771,11 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
     legitimately grow (its own comment calls 300 a small-machine number), and an
     equality assertion would then be unsatisfiable against the per-test bound
     above. The call is located in the AST and bound to `EmbeddingModel`, so only a
-    real pre-warm call counts: a comment quoting it, an unrelated `x.get(...)`, or
-    an integer literal must not be able to satisfy a budget guard."""
+    real pre-warm call counts: a comment quoting it, a string, a named constant, or
+    an unrelated `x.get(load_timeout=...)` must not be able to satisfy a budget
+    guard. An int literal is accepted deliberately — `300` and `300.0` are the same
+    budget, and rejecting the int would fail on a cosmetic edit rather than a real
+    drift."""
     import ast
     from pathlib import Path
 
