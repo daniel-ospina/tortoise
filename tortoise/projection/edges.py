@@ -250,9 +250,12 @@ def about_document_target_reason(label: str | None,
     it can.
 
     ``aboutDocument``'s target is a DOCUMENT — a ``:Source`` carrying
-    ``documentKind`` and addressable by ``url`` (ONTOLOGY §4.4). The replay
-    resolver applies all three: it matches ``(:Source {url:$url}) WHERE
-    documentKind IS NOT NULL``. Live auto-detect refused a non-document Source
+    ``documentKind`` and addressable by ``url`` (ONTOLOGY §4.4). The replay path
+    enforces all three, but in two places: the resolver matches
+    ``(:Source {url:$url}) WHERE documentKind IS NOT NULL``, and the supersede
+    descriptor is keyed by ``stub_key``, which emits nothing for an empty or
+    non-string key (the ``isinstance(x, str) and x`` rule ``_writable_id``
+    applies). Live auto-detect refused a non-document Source
     and so did replay, but the live producer (``create_edge``) refused nothing —
     an edge created through it was built, transferred at supersede and then
     dropped by ``rebuild_all``, ending on NEITHER node (#5206). ``url`` is part
