@@ -4220,6 +4220,8 @@ def _spool_transcript(args) -> dict:
     machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
     model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
 
+    import time as _time
+
     root = spool_dir()
     written = write_spool_entry(root, Snapshot(
         session_id=session_id,
@@ -4236,6 +4238,14 @@ def _spool_transcript(args) -> dict:
         # the store-sync half posts the same payload and the lane is the only
         # discriminator.
         capture_lane="hook",
+        # #3516 §B / #3515 piece 12: the CLI leg stamps its OWN observation
+        # instant — piece 12's row is "observed at hook fire time, recorded as
+        # 'cli_observed'". This is the floor's INPUT and it must not be the
+        # server's ingest stamp: the pre-existing spool drains AFTER an install,
+        # so an ingest-stamped row would read as freshly captured and the floor
+        # could only ever pass (piece 12's stated reason for the client clock).
+        client_captured_at=_time.time(),
+        client_captured_at_source="cli_observed",
     ))
     return {
         "rc": 0,

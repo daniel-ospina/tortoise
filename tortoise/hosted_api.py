@@ -11492,6 +11492,15 @@ _SESSION_HARNESS_VALUES = frozenset({
 # returns m2/v2) — same word, different meaning; do not merge the two.
 _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 
+# #3516 §B / #3515 piece 12: the provenance of ``client_captured_at``. Closed
+# on purpose — the floor's verdict depends on WHICH clock a timestamp came
+# from, so an unrecognised source must fail the boundary 422 rather than be
+# stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
+# backfill/import lane admits a record with no client timestamp and records
+# this honestly, and the floor treats it as NOT passed.
+_SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
+    {"cli_observed", "file_mtime", "unknown"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11522,6 +11531,15 @@ class SessionRequest(BaseModel):
     # never erases a lane the server already stored. `None` is stored as ABSENT,
     # never as a fabricated lane. Invalid values fail the boundary 422.
     capture_lane: str | None = None
+    # #3516 §B / #3515 piece 12: the CLIENT-recorded capture instant (unix
+    # seconds) and the clock it came from. OPTIONAL for the same reason
+    # ``capture_lane`` is — a pre-installed hook, an SDK caller or a backfill
+    # producer that POSTs without it must never 422, and ``None`` is stored as
+    # ABSENT, never as a fabricated instant. It exists because the server's own
+    # ``capturedAt`` is the INGEST transaction time, so it can never witness
+    # what the floor is about (piece 12).
+    client_captured_at: float | None = None
+    client_captured_at_source: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11552,6 +11570,20 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid capture_lane {v!r} — must be one of "
                 f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
+        return v
+
+    # #3516 §B: an unrecognised source is refused at the boundary (same
+    # contract as harness/lane). A source the floor cannot interpret would be
+    # stored as a provenance no reader can act on — and the floor's whole
+    # falsifiability property is that 'unknown' is EXCLUDABLE, which requires
+    # the value set to be closed rather than free-form.
+    @field_validator("client_captured_at_source")
+    @classmethod
+    def _validate_client_captured_at_source(cls, v):
+        if v is not None and v not in _SESSION_CAPTURED_AT_SOURCE_VALUES:
+            raise ValueError(
+                f"invalid client_captured_at_source {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURED_AT_SOURCE_VALUES)}")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12342,6 +12374,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
         capture_lane=body.capture_lane,
+        client_captured_at=body.client_captured_at,
+        client_captured_at_source=body.client_captured_at_source,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(

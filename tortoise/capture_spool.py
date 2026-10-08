@@ -159,6 +159,14 @@ class Snapshot:
     # is honest — a backfill/import producer has no lane, and the server stores
     # absence, never a fabricated lane.
     capture_lane: str | None = None
+    # #3516 §B / #3515 piece 12: the client's OWN capture instant (unix seconds)
+    # and the clock it came from. The floor compares THIS against the install
+    # time — never the server's ``capturedAt``, which is the ingest transaction
+    # time and so can only ever pass. ``..._source`` values: 'cli_observed'
+    # (stamped at hook fire), 'file_mtime' (the store-sync fallback) or
+    # 'unknown' (an admitted backfill gap, which can never count as a pass).
+    client_captured_at: float | None = None
+    client_captured_at_source: str | None = None
 
 
 @dataclass
@@ -742,11 +750,19 @@ def write_spool_entry(
     # early-return here and the entry would stay lane-less forever, so a
     # genuinely live hook would read as "not confirmed" (#3516 §B review F6).
     lane_upgrade = bool(snapshot.capture_lane) and not (prior or {}).get("capture_lane")
+    # #3516 §B: the SAME rule for the client stamp, and for the same reason —
+    # the stamp is metadata, not content, so a hook re-snapshot of
+    # byte-identical turns would otherwise early-return and the entry would stay
+    # timeless forever. A stamp the floor cannot see is a floor that cannot run.
+    stamp_upgrade = (
+        snapshot.client_captured_at is not None
+        and (prior or {}).get("client_captured_at") is None)
     if (
         prior
         and len(stored) == len(snapshot.turns)
         and prior.get("content_digest") == new_digest
         and not lane_upgrade
+        and not stamp_upgrade
     ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
@@ -805,6 +821,18 @@ def write_spool_entry(
     _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
     if _lane:
         meta["capture_lane"] = _lane
+    # #3516 §B / #3515 piece 12: first-writer-wins (`or`), matching the lane's
+    # rule and the SERVER's coalesce — the spool must not be the odd leg out,
+    # because its stamp is what gets delivered. The source rides with the value,
+    # never alone (a source with no instant would claim a provenance for a
+    # timestamp that does not exist).
+    _cap_at = (prior or {}).get("client_captured_at") or snapshot.client_captured_at
+    if _cap_at is not None:
+        meta["client_captured_at"] = _cap_at
+        _cap_src = ((prior or {}).get("client_captured_at_source")
+                    or snapshot.client_captured_at_source)
+        if _cap_src:
+            meta["client_captured_at_source"] = _cap_src
     if snapshot.model:
         meta["model"] = snapshot.model
     # A re-snapshot whose content is byte-identical to what was already filed
@@ -1205,6 +1233,14 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # has no lane and must POST without the key rather than inventing one.
     if meta.get("capture_lane"):
         payload["capture_lane"] = meta["capture_lane"]
+    # #3516 §B / #3515 piece 12: forward the client stamp ONLY when the entry
+    # carries one (set-only-when-present, like the lane above). A pre-#3516
+    # entry must POST without the keys rather than inventing an instant — a
+    # fabricated floor input would make the floor pass on nothing.
+    if meta.get("client_captured_at") is not None:
+        payload["client_captured_at"] = meta["client_captured_at"]
+        if meta.get("client_captured_at_source"):
+            payload["client_captured_at_source"] = meta["client_captured_at_source"]
     if meta.get("model"):
         payload["model"] = meta["model"]
     # The lane actually put on the wire — part of the CAS identity below.

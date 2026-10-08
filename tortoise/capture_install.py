@@ -275,6 +275,73 @@ LEGACY_PI_DIRNAME = "tortoise-capture"
 #: loader skips it (``entry.name.startsWith(".")``) while its files live on.
 PI_DISABLED_DIRNAME = ".tortoise-capture.disabled"
 
+# ── #3516 §B / #3515 piece 12 — the client-timestamp floor ───────────────
+# The store-proven check pairs with a FLOOR: the matched record's
+# CLIENT-recorded instant must be strictly after the install, less a skew
+# tolerance. The client value is the floor's input, NOT the server's
+# ``capturedAt``: the server stamps the INGEST transaction time, so draining
+# the pre-existing spool after an install would give every stale row
+# ``capturedAt = now > install`` and the floor could only ever pass — it would
+# exclude nothing it is about.
+#
+# The tolerance is ±5 minutes because the two sides are genuinely DIFFERENT
+# CLOCKS (client vs server), and a client clock behind by MORE than the
+# tolerance is rejected WITH A RECORDED REASON — never silently accepted.
+FLOOR_SKEW_TOLERANCE_S = 300.0
+
+#: The only ``client_captured_at_source`` value that can never count as a
+#: floor pass. The backfill/import lane admits a record with no client
+#: timestamp by DISABLING the floor for that turn — an honest gap, not a
+#: silent pass (piece 12).
+FLOOR_SOURCE_UNKNOWN = "unknown"
+
+#: Verdicts. ``DISABLED`` is deliberately NOT a pass: a floor a run cannot
+#: evaluate must never read as a floor that passed, which is the whole
+#: falsifiability property the ``..._source`` sibling exists to preserve.
+VERDICT_PASSED = "passed"
+VERDICT_FAILED = "failed"
+VERDICT_DISABLED = "disabled"
+
+
+def client_capture_floor_verdict(
+    client_captured_at: float | None,
+    client_captured_at_source: str | None,
+    install_at: float | None,
+    *,
+    tolerance: float = FLOOR_SKEW_TOLERANCE_S,
+) -> tuple[str, str]:
+    """The store-proven timestamp floor (#3516 §B, #3515 piece 12).
+
+    Returns ``(verdict, reason)`` with verdict in
+    {``VERDICT_PASSED``, ``VERDICT_FAILED``, ``VERDICT_DISABLED``}. The reason
+    is always a real string so a rejection can never be silent.
+
+    ``client_captured_at`` and ``install_at`` are BOTH unix seconds: the
+    client's own clock and the server-recorded install time (the
+    ``install_probe_{harness}`` instant written by the probe endpoint).
+    """
+    if client_captured_at is None:
+        return VERDICT_DISABLED, (
+            "no client_captured_at recorded — the floor cannot be evaluated")
+    if client_captured_at_source == FLOOR_SOURCE_UNKNOWN:
+        return VERDICT_DISABLED, (
+            "client_captured_at_source is 'unknown' — an admitted backfill gap, "
+            "which can never be counted as a floor pass")
+    if install_at is None:
+        return VERDICT_DISABLED, (
+            "no install probe recorded for this harness — the floor cannot be "
+            "evaluated")
+    floor = install_at - tolerance
+    if client_captured_at > floor:
+        return VERDICT_PASSED, (
+            f"client_captured_at {client_captured_at:.3f} > install "
+            f"{install_at:.3f} − tolerance {tolerance:.0f}")
+    behind = floor - client_captured_at
+    return VERDICT_FAILED, (
+        f"client clock is {behind:.1f}s behind the install floor "
+        f"(client_captured_at {client_captured_at:.3f} <= install "
+        f"{install_at:.3f} − tolerance {tolerance:.0f}) — rejected")
+
 
 @dataclass(frozen=True)
 class InstallResult:

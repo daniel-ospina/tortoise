@@ -2136,6 +2136,8 @@ def _write_session_and_turns(
     now: str,
     harness: str | None = None,
     capture_lane: str | None = None,
+    client_captured_at: float | None = None,
+    client_captured_at_source: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2230,6 +2232,26 @@ def _write_session_and_turns(
         merge_sets.append("s.capture_lane=coalesce(s.capture_lane, $capture_lane)")
         merge_params["capture_lane"] = capture_lane
         session_record["capture_lane"] = capture_lane
+    # #3516 §B / #3515 piece 12: the CLIENT-recorded capture instant and the
+    # source it came from. Same set-only-when-present + coalesce discipline as
+    # the lane above, and for the same reason: the store-sync backstop ships the
+    # SAME session after the hook, so a plain SET would let the later, weaker
+    # source (a file mtime) overwrite the hook's own observation time — and the
+    # floor would then compare an mtime against an install instant it was never
+    # about. Absent never erases a stored value.
+    if client_captured_at is not None:
+        merge_sets.append(
+            "s.client_captured_at=coalesce(s.client_captured_at, $cout)")
+        merge_params["cout"] = client_captured_at
+        session_record["client_captured_at"] = client_captured_at
+    # The source rides WITH the value, never alone: a source with no instant
+    # would let a later reader claim a provenance for a timestamp it does not
+    # have (piece 12 — 'unknown' must be excludable from a pass).
+    if client_captured_at is not None and client_captured_at_source:
+        merge_sets.append(
+            "s.client_captured_at_source=coalesce(s.client_captured_at_source, $cosrc)")
+        merge_params["cosrc"] = client_captured_at_source
+        session_record["client_captured_at_source"] = client_captured_at_source
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
