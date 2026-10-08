@@ -176,6 +176,14 @@ SCATTER_ALLOWLIST: dict[str, str] = {
     "website/apps/dashboard/src/graphsBackupColumnTripwire.test.js": "'retained' in a backup-list assertion — not a window",
     "docs/scoping-432-subscriptions-claim-lifecycle.md": "event-store (30-day) retention — a different axis, not a deletion promise",
     "supabase/migrations/20260906000001_graphs_deleted_at.sql": "additive schema-history migration comment",
+    # #7435: the docs-lint baseline snapshot. Machine-generated data — every
+    # "claim" it appears to make is a linter finding's quoted context, copied
+    # verbatim from whichever file the finding is in (e.g. an MD032 context line
+    # from `docs/scoping-2304-delete-semantics.md`, a file that links the
+    # canonical doc itself). The snapshot states no promise of its own, so there
+    # is nothing to link; exempting the whole file beats allowlisting each
+    # quoted line, which would drift every time the snapshot is regenerated.
+    "config/docs-lint-baseline.json": "generated linter snapshot — its only claims are quotations of other files' findings",
 }
 
 # Files in the canonical-doc link gate (main commit). privacy.html/dpa.html are

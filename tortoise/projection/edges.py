@@ -81,7 +81,15 @@ def stub_key(rel: str, target: dict):
 def _mint_subject_stub(g, name: str) -> None:
     """MERGE the Subject stub live wiring's auto-detect fallback creates
     (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring."""
+    replayed descriptor mints a byte-identical stub to live wiring.
+
+    #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
+    after the wipe. Skip rather than raise.
+    """
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(name):
+        _log_identity_skip("Subject stub", name, "name (MERGE key)")
+        return
     g.query(
         "MERGE (s:Subject {name:$name}) "
         "ON CREATE SET s.id=$name, s.subjectKind='other'",
@@ -89,7 +97,7 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
+def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
@@ -117,6 +125,11 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
     # S0b (#5012): resolve a URL variant to the node its canonical identity
     # already names, so the stub path cannot mint a second :Source either.
     key = resolve_source_key(g, url)
+    # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url:$url})`).
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(key):
+        _log_identity_skip("Source stub", key, "url (MERGE key)")
+        return None
     canonical = normalize_source_url(key)
     params = {"url": key, "raw_url": url, "cu": canonical,
               "sk": source_kind, "now": _now_iso()}
@@ -395,6 +408,107 @@ def _source_version_transit(versions: dict[str, str] | None):
     return [[ref, h] for ref, h in versions.items()]
 
 
+def source_change_notices(g, source_refs, current_versions: dict[str, str] | None):
+    """#5516 — the advisory write-time notice: was this Source read at a version
+    that is no longer current?
+
+    For each ref, compares the Source's CURRENT ``contentHash`` (read by the
+    caller into ``current_versions`` via :func:`resolve_source_versions`) against
+    the versions recorded on the Source's ``extractedFrom`` links (#5256's
+    ``r.sourceVersion``). The Source has changed for the writer iff its current
+    version has **never been recorded as read** — so the decision is
+    order-independent and cannot re-fire once the current version has been read.
+
+    Advisory by construction: it writes nothing, and the caller treats any
+    failure as "no notice" rather than as a write failure. Returns a list of
+    ``{"source", "previousVersion", "currentVersion"}`` dicts — empty when
+    every Source is unchanged, or when nothing comparable was recorded.
+
+    ⚠ It does carry a read's own side effect: :func:`resolve_source_key` performs
+    its documented idempotent adopt-on-touch (it stamps ``canonicalUrl`` /
+    ``urlAliases`` on an existing PRE-canonical node). At the ``create_point``
+    call site the identical resolution has already run inside
+    :func:`resolve_source_versions`, so no NEW write occurs there — but a direct
+    caller on a pre-canonical Source does mutate it, and this docstring will not
+    claim otherwise.
+
+    Blank/absent on EITHER side is honest-absent and produces NO notice: ``''``
+    compares equal to a Source's ``''`` and reads as a false *current* (#5256),
+    and a Source read for the first time has no prior version to compare
+    against. The comparison is exact string equality, exactly as
+    :func:`tortoise.search_engine.currency_status` compares one link's pair —
+    content hashes carry no ordering, so there is no "newer" to infer.
+
+    The fire/silence decision deliberately does NOT order by ``p.createdAt``:
+    that is a CALLER-owned logical date (the ingest path passes document
+    frontmatter dates), so a read recorded later can carry an earlier
+    ``createdAt``. Ordering the decision by it would fire a notice for an
+    UNCHANGED Source whenever a newer read happens to carry an older date.
+    ``createdAt`` orders only which prior version the notice NAMES.
+
+    ⚠ The recorded side is the **Source's** recorded reads, not a per-writer
+    one: the create seam records no writer identity on the ``extractedFrom``
+    link, so a per-writer scoping is not derivable here. On a multi-writer graph
+    it answers "has this Source changed since its last recorded read" — the
+    stronger, still-true statement.
+
+    ``source_refs`` is normalized exactly as :func:`resolve_source_versions`
+    does — a bare ``str`` is ONE ref, never iterated character-wise — and
+    ``current_versions`` is keyed by the RAW ``extractedFrom`` ref (that
+    function's journal-stable key).
+    """
+    refs = [source_refs] if isinstance(source_refs, str) else list(source_refs)
+    versions = current_versions or {}
+    notices: list[dict] = []
+    seen: set[str] = set()
+    for raw_ref in refs:
+        if not raw_ref:
+            continue
+        current = versions.get(raw_ref)
+        if not isinstance(current, str) or not current.strip():
+            continue
+        # Resolve to the ONE Source node identity `resolve_source_versions`
+        # addressed (see the adopt-on-touch note above). Dedup on the RESOLVED
+        # key, not the raw ref: two refs that alias one Source describe ONE
+        # change, and reporting it twice would inflate the notice list.
+        key = resolve_source_key(g, raw_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        # (1) DECISION — order-independent. Has this Source already been read at
+        # its CURRENT version? If so it has not changed since that read and a
+        # notice would be a FALSE change. `LIMIT 1` exits on the first edge that
+        # proves it.
+        hit = g.query(
+            "MATCH (p:Point)-[r:extractedFrom]->(s:Source {url:$url}) "
+            "WHERE r.sourceVersion = $current "
+            "RETURN 1 LIMIT 1",
+            params={"url": key, "current": current}).result_set
+        if hit:
+            continue
+        # (2) LABEL — `previousVersion` names a prior recorded read. When
+        # several exist, `createdAt` picks which (BEST-EFFORT: it is a
+        # caller-owned logical date); the decision above is already made, so a
+        # caller-owned date cannot flip fire/silence.
+        rows = g.query(
+            "MATCH (p:Point)-[r:extractedFrom]->(s:Source {url:$url}) "
+            "WHERE r.sourceVersion IS NOT NULL AND r.sourceVersion <> '' "
+            "AND r.sourceVersion <> $current "
+            "RETURN r.sourceVersion "
+            "ORDER BY p.createdAt DESC, p.id DESC LIMIT 1",
+            params={"url": key, "current": current}).result_set
+        if not rows:
+            continue
+        recorded = rows[0][0]
+        if isinstance(recorded, str) and recorded.strip():
+            notices.append({
+                "source": raw_ref,
+                "previousVersion": recorded,
+                "currentVersion": current,
+            })
+    return notices
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
@@ -424,6 +538,22 @@ class _EdgeHandlers:
             # ponytail: auto-create stub if source endpoint doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect
+                # #7369 review r5 (P1): the stub CREATE below passes `src` as a
+                # plain VALUE position, not a MERGE key, so the parameter
+                # boundary DEGRADES an unwritable id to None and mints
+                # `CREATE (s:Point {id:null})` — a node with no identity that
+                # no later MERGE can ever match, left behind on every replay.
+                # An unwritable id is not a stub worth minting, so skip the
+                # edge exactly as the per-instance cap path below does.
+                from tortoise.projection import _writable_id
+                if not _writable_id(src):
+                    _log.warning(
+                        "input source %r is not a writable identity (empty, "
+                        "or NUL/lone-surrogate bearing) — stub not created, "
+                        "INPUT edge skipped",
+                        src,
+                    )
+                    continue
                 exists = self.g.query(
                     "MATCH (s) WHERE (s:Point OR s:Event) "
                     "AND s.id = $sid RETURN count(s) > 0",
@@ -530,6 +660,14 @@ class _EdgeHandlers:
         keeps a session/connector/provenance Source from ever becoming an
         ``aboutDocument`` target.
         """
+        # #7369: `target_name` rides as a READ parameter here, and the engine
+        # parses every parameter regardless of clause — an unwritable one
+        # aborts the replay after the wipe just as a write would.
+        from tortoise.projection import _log_identity_skip, _writable_id
+        if not _writable_id(target_name):
+            _log_identity_skip(
+                "aboutDocument edge", target_name, "name (read parameter)")
+            return False
         if label == 'Source':
             r = self.g.query(
                 "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "
@@ -735,6 +873,15 @@ class _EdgeHandlers:
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
         key = resolve_source_key(self.g, source_url)
+        # #7369: `key` is the Source MERGE key, and `source_url` is a
+        # first-class JOURNALED field of `DocumentCreated` (sdk.py), forwarded
+        # verbatim by `_upsert_document` — an unwritable one aborts the replay
+        # after the wipe. Same gate as its three siblings (_mint_source_stub,
+        # _materialize_connector_source, _upsert_source).
+        from tortoise.projection import _log_identity_skip, _writable_id
+        if not _writable_id(key):
+            _log_identity_skip("Source link", key, "url (MERGE key)")
+            return
         canonical = normalize_source_url(key)
         self.g.query(
             "MERGE (s:Source {url:$url}) "
