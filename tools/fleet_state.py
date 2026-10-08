@@ -1362,19 +1362,23 @@ def conflict_map(state: Mapping[str, Any]) -> dict[str, list[str]]:
 def lane_live_map(state: Mapping[str, Any]) -> dict[str, bool | None]:
     """lane label -> True (live pi) / False (dead) / None (liveness unmeasured).
 
-    A lane whose liveness WAS measured but that carries no session record is
-    UNMEASURED here, not dead: there is no pid evidence to call dead.
+    A lane with no pid evidence — no session record at all, or an empty one — is
+    UNMEASURED here, not dead: there is nothing to call dead. ``lanes`` is checked
+    for shape, so a malformed cache degrades instead of crashing.
     """
     out: dict[str, bool | None] = {}
-    for lane_ in state.get("lanes") or []:
+    lanes = state.get("lanes")
+    if not isinstance(lanes, (list, tuple)):
+        return out
+    for lane_ in lanes:
         try:
             label = lane_["identity"]["lane"]
             measured = (lane_.get("liveness", {}) or {}).get("liveness_measured")
             s = lane_.get("session")
-            if not measured or not isinstance(s, dict):
+            if not measured or not isinstance(s, dict) or not s.get("pi_pid"):
                 out[label] = None
             else:
-                out[label] = bool(s.get("pi_pid") and s.get("pid_alive"))
+                out[label] = bool(s.get("pid_alive"))
         except Exception:
             continue
     return out
@@ -1428,6 +1432,14 @@ def cmd_who(args: argparse.Namespace) -> int:
     return 1
 
 
+def _conflict_sort_key(kv: tuple[str, list[str]]) -> tuple[int, int, str]:
+    """Numeric PR numbers first, in order; a malformed key sorts last, never crashes."""
+    try:
+        return (0, int(kv[0]), "")
+    except (TypeError, ValueError):
+        return (1, 0, str(kv[0]))
+
+
 def cmd_conflicts(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
     cmap = conflict_map(state)
@@ -1443,7 +1455,7 @@ def cmd_conflicts(args: argparse.Namespace) -> int:
     if not cmap:
         print("no ownership conflicts")
         return 0
-    for num, who in sorted(cmap.items(), key=lambda kv: int(kv[0])):
+    for num, who in sorted(cmap.items(), key=_conflict_sort_key):
         if who:
             print(f"  PR {num}: " + ", ".join(f"{lbl}{_live_tag(live.get(lbl))}" for lbl in who))
         else:

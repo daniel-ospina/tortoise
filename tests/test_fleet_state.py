@@ -431,11 +431,38 @@ def test_lane_live_map_measured_but_sessionless_is_unmeasured() -> None:
     """No session record = no pid evidence; report untagged, never DEAD (finding 4)."""
     state = {"lanes": [
         {"identity": {"lane": "no-session"}, "liveness": {"liveness_measured": True}},
+        {"identity": {"lane": "empty-session"}, "liveness": {"liveness_measured": True},
+         "session": {}},
         {"identity": {"lane": "no-liveness"}},
         {"identity": {"lane": "dead"}, "liveness": {"liveness_measured": True},
          "session": {"pi_pid": 9, "pid_alive": False}},
     ]}
-    assert fs.lane_live_map(state) == {"no-session": None, "no-liveness": None, "dead": False}
+    assert fs.lane_live_map(state) == {
+        "no-session": None, "empty-session": None, "no-liveness": None, "dead": False}
+
+
+def test_lane_live_map_tolerates_a_malformed_lanes_shape() -> None:
+    """A malformed cache must not crash the reader (the 'degrade, never crash' contract)."""
+    assert fs.lane_live_map({"lanes": 3}) == {}
+    assert fs.lane_live_map({}) == {}
+
+
+def test_cmd_conflicts_survives_a_non_numeric_conflict_key(monkeypatch, capsys) -> None:
+    """The union can carry a junk key; the numeric sort must not raise (cycle-4 P3)."""
+    fake = {"conflicts": ["foo"], "conflict_claimants": {"7": ["A"]}, "lanes": []}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_conflicts(argparse.Namespace(json=False)) == 0
+    out = capsys.readouterr().out
+    assert "PR 7" in out and "PR foo" in out          # numeric first, junk last, no crash
+
+
+def test_cmd_conflicts_json_survives_a_malformed_lanes_shape(monkeypatch, capsys) -> None:
+    """`--json` must not crash when `lanes` is malformed (cycle-4 P3)."""
+    fake = {"conflicts": [1], "conflict_claimants": {"1": ["A"]}, "lanes": 3}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_conflicts(argparse.Namespace(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["1"] == {"claimants": ["A"], "live": {"A": None}}
 
 
 def test_who_still_reports_truly_unowned_as_not_found(monkeypatch, capsys) -> None:
