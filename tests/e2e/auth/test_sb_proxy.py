@@ -397,7 +397,7 @@ def test_encoded_separator_is_refused_before_it_reaches_the_upstream(stack):
         "/api/sb/rest/v1%2e%2e%2fadmin",
         "/api/sb/rest/v1/blog_posts%5c..%5cadmin",
     ):
-        status, body, headers = _req(hostile, cookie=f"__Host-session={HANDLE}")
+        status, body, _headers = _req(hostile, cookie=f"__Host-session={HANDLE}")
         assert status == 400, (
             f"{hostile} must be refused with 400 (encoded separator), got {status} {body}"
         )
