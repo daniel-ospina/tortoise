@@ -6,6 +6,7 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import math
 import os
 import re
 import threading
@@ -834,8 +835,9 @@ def run_fts_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. Document FTS searches the _searchText index
     (#125) which concatenates title+summary+topics.
-    Returns n.url for source (canonical key, #448), n.eventId for event,
-    n.id for all other entity types.
+    Returns n.url for source and document (the :Source canonical key, #448 — a
+    document IS a :Source), n.eventId for event, n.id for all other entity
+    types.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at EVERY exit branch (the FTS leg is recorded AT THE SOURCE, never
@@ -883,7 +885,10 @@ def run_fts_query(
                    else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
                 + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
-                "ORDER BY score DESC "
+                # #3019: every row scores a constant 1.0, so this leg is ONE giant
+                # tie and DB row order would otherwise decide each operator's RRF
+                # rank. The secondary key makes the order a function of the data.
+                "ORDER BY score DESC, n.id ASC "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -915,6 +920,14 @@ def run_fts_query(
     label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
+    #
+    # #3019 KNOWN RESIDUAL (sibling gap, NOT a regression): `object` has the
+    # same NULL-key shape and is not closed here. A :Object is merged by its
+    # `name`, and the live write path mints it id-less (`MERGE (o:Object
+    # {name:$name})`, hosted_api), so the `else` below orders those rows on a
+    # NULL `id`. Out of this change's scope: the remedy is a coalesce KEY, not
+    # a field rename, so it changes the ORDER BY expression shape in all three
+    # legs. Evidence recorded on #3019.
     if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
@@ -964,7 +977,9 @@ def run_fts_query(
             "YIELD node, score "
             + status_filter +
             f"RETURN node.{id_field}, score "
-            "ORDER BY score DESC "
+            # #3019: rank alone does not order a tie, and RRF is rank-based — see
+            # the operator path above.
+            f"ORDER BY score DESC, node.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1053,8 +1068,8 @@ def run_vector_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
     matching the entity_type (Event/Subject/Document/Object/...), and results
-    return the entity's id field: url for source (canonical key, #448),
-    eventId for event, id for all other entity types.
+    return the entity's id field: url for source and document (the :Source
+    canonical key, #448), eventId for event, id for all other entity types.
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
@@ -1311,6 +1326,26 @@ def run_vector_query(
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
+            # #3019 KNOWN RESIDUAL: this index-accelerated path preserves the
+            # engine's returned order, so two rows with EQUAL distances keep
+            # whatever order the engine gave them, and rank-based fusion can see
+            # a tie-order flip. Deliberately NOT re-sorted here: signature A's
+            # score IS its row POSITION, so a Python re-sort is not lossless for
+            # it, and that is what
+            # `test_docker_mode_signature_b_scores_clamped_to_non_negative` and
+            # `test_none_api_keeps_probe_behavior` actually pin — the PYTHON
+            # layer's order pass-through (a mock returning [("a", 2.4),
+            # ("b", 0.0)] must come back as [("a", 0.0), ("b", 1.0)]) and the
+            # probe CALL COUNT. Signature B's DISTANCE could be ordered
+            # losslessly in the QUERY, and the same two tests do NOT forbid it:
+            # they drive `MultiCallGraph`, whose `query()` returns canned rows
+            # and never inspects the Cypher. Corrected from an earlier claim that
+            # these tests "pin this path's order-preservation" and therefore
+            # block any fix. The signature-B query fix is still its own unit of
+            # work (both signatures share this function), tracked as a follow-up
+            # rather than papered over by the source pin. That follow-up is
+            # #6214 — cite it rather than saying "a follow-up" and leaving a
+            # reader no way to reach it.
             if sig == "B":
                 # #5583: the engine's value here is a DISTANCE (lower is
                 # better), NOT a similarity. `db.idx.vector.queryNodes`
@@ -1417,7 +1452,9 @@ def run_vector_query(
             "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
-            "ORDER BY score DESC "
+            # #3019: a distance tie (equal values, or repeated rows) must not fall
+            # through to DB row order.
+            f"ORDER BY score DESC, n.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1533,8 +1570,30 @@ def run_structural_query(
     else:
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
-    if entity_type == "source":
-        id_field = "url"  # #149: Source canonical key is url, not id
+    if entity_type in ("source", "document"):
+        # #149: a :Source's canonical key is url, not id. #3019: `document`
+        # belongs in this branch for the same D10 reason the label block above
+        # gives — a document IS a :Source (`_searchText` is indexed on the
+        # Source label), so the ordering key is the :Source key. This leg was
+        # the inconsistent one: the FTS leg's id_field block and the vector
+        # leg's already map document->url.
+        #
+        # The id state on that path, read from the code rather than assumed:
+        # `_mint_source_stub` (projection/edges.py — the stub every provenance
+        # link mints) sets url/sourceKind/contentHash/ingestedAt and never sets
+        # `id`; `_upsert_source` sets `s.id` only in its ON CREATE clause; and a
+        # document write that adopts the stub REPAIRS the id (`_upsert_document`
+        # runs `SET s.id=coalesce(s.id, $id)`, as does the hosted session
+        # commit). So `id` is NULL for the window between minting and adoption,
+        # and ordering on it there resolves NOTHING: the tie fell back to DB row
+        # order — the defect this PR exists to close — and every returned pid
+        # was None. url is the key that is correct in BOTH states.
+        #
+        # `object` is a KNOWN RESIDUAL: its canonical key is `name` and the
+        # live write path mints it id-less, so the `else` below still orders
+        # those rows on NULL — see the same note where the key is first resolved
+        # (the FTS leg's id_field block).
+        id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
     else:
@@ -1585,6 +1644,10 @@ def run_structural_query(
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
             f"RETURN n.{id_field} "
+            # #3019: this leg scores every row a CONSTANT (1.0 / 0.5, below), so
+            # with no secondary key the WHOLE leg is an unordered tie and the
+            # caller's rank — hence the fused top-k — is DB row order.
+            f"ORDER BY n.{id_field} ASC "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -1654,7 +1717,10 @@ def expand_structural_hops(
                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
             + " WITH n, min(length(path)) AS hops "
             "RETURN n.id AS id, hops "
-            "ORDER BY hops ASC "
+            # #3019: `hops ASC` alone leaves equal-hop candidates in engine row
+            # order, so with more candidates than `limit` both MEMBERSHIP and
+            # rank are DB-order dependent.
+            "ORDER BY hops ASC, n.id ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1726,7 +1792,44 @@ def rrf_fusion(
         # (weights defaults to None → all 1.0).
         w = 1.0
         if strategy_names is not None and weights:
+            # PRECONDITION: `strategy_names` must be at least as long as
+            # `ranked_lists` (both call sites build it alongside them). The
+            # lookup below indexes `strategy_names[i]`, so a SHORTER list raises
+            # IndexError here — a dead `... else i` fallback used to sit on the
+            # warning line below, implying a tolerance that never existed
+            # (#3019 review). Deliberately left failing loudly rather than
+            # defaulting to 1.0: a misaligned list would silently misweight a leg.
             w = weights.get(strategy_names[i], 1.0)
+            # #3019 part 2: a NaN weight makes every fused score from that leg
+            # NaN, and tuple comparison against NaN is False in BOTH directions,
+            # so the ``(-score, id)`` key below silently degrades to insertion
+            # order for those candidates — losing the determinism #2952
+            # established. An INFINITE weight does not damage the ORDER
+            # (``inf == inf`` is True) but it does destroy the SCORE signal: one
+            # leg's infinite scores swamp every other leg. The guard below is
+            # therefore ``not isfinite``, deliberately collapsing BOTH NaN and
+            # ±inf to 1.0 — and it warns, rather than substituting silently. A
+            # candidate carried only by
+            # another leg keeps a finite score, so the SCORE damage is per-leg —
+            # but the ORDER damage is global: NaN compares False in BOTH
+            # directions against everything, so the comparator is inconsistent
+            # and the resulting order is arbitrary, not merely the NaN rows.
+            # ``json.loads`` accepts bare ``NaN``/``Infinity``, so
+            # TORTOISE_FUSION_WEIGHTS can carry one, and a kwarg caller can pass
+            # one. Guarded at the ROOT so every entry point is covered, not just
+            # the env parse.
+            if not math.isfinite(w):
+                # #3019: `json.loads` accepts bare NaN/Infinity, and a NaN
+                # weight makes every score from that leg NaN — the
+                # `(-score, id)` tie-break then compares False both ways and
+                # degrades to insertion order. Warn rather than substitute
+                # silently: the recorded default is not equal weighting
+                # (PRODUCTION DEFAULT, tortoise/sdk.py).
+                logger.warning(
+                    "non-finite RRF weight for %r (%r) — using 1.0",
+                    strategy_names[i], w,
+                )
+                w = 1.0
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
@@ -1738,10 +1841,12 @@ def rrf_fusion(
             w = recency_weights.get(pid, 0.0)
             if w > 0:
                 scores[pid] = scores[pid] * (1.0 + recency_boost * w)
-    # #2952: deterministic TOTAL order over ties. RRF scores tie constantly on
-    # real corpora (a doc at the same rank in different legs, or FalkorDBLite's
-    # fulltext scores, which are 0.0 for every doc). A stable sort alone keeps
-    # tie order at the mercy of the order the caller passed ``ranked_lists`` in
+    # #2952: deterministic TOTAL order over ties. RRF is rank-based, so its
+    # scores tie constantly on real corpora (a doc at the same rank in different
+    # legs) — and a leg's OWN ranking, which RRF then consumes, is arbitrary
+    # whenever that leg's rows tie on the leg's own score. A stable sort alone
+    # keeps tie order at the mercy of the order the caller passed
+    # ``ranked_lists`` in
     # — which in the SDK is ``as_completed`` (thread COMPLETION) order, i.e.
     # wall-clock/timing dependent. ``(-score, id)`` makes the fused order a pure
     # function of the leg CONTENTS, so the same (graph, query, params) always

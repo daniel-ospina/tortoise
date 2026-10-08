@@ -102,7 +102,7 @@ def _docker_falkor_reachable() -> bool:
     redislite import availability, not Docker connectivity.
 
     #6673: the port comes from tests/_live_utils.py — the provisioned legacy
-    service is published on an EPHEMERAL host port (docker `-p 0:6379`).
+    service is published on an EPHEMERAL host port (docker `-p 127.0.0.1:0:6379`).
     """
     return _live_utils.legacy_reachable()
 
