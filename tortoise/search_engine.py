@@ -1296,11 +1296,22 @@ def run_vector_query(
                     )
                 # Signature A (RediSearch-style): repo-pinned docker image
                 # falkordb/falkordb-server:v4.16.7.
+                #
+                # #6214: A yields NO score column, and the pre-#6214 code
+                # substituted the row POSITION for one — so ANY re-sort was
+                # unsafe for it (it would have reversed the ranking, not
+                # merely made it deterministic). Obtain the distance from the
+                # yielded node instead, so BOTH signatures hand the ONE
+                # ordering pass below a comparable value: a cosine distance,
+                # the same quantity signature B's engine score carries. If
+                # the engine lacks vec.cosineDistance the query raises and the
+                # outer handler degrades to the brute-force scan as before.
                 return (
                     f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                     "YIELD node "
                     + vec_status_filter +
-                    f"RETURN node.{id_field} "
+                    f"RETURN node.{id_field}, "
+                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score "
                     "LIMIT $limit"
                 )
 
@@ -1331,95 +1342,75 @@ def run_vector_query(
             fallback = "A" if preferred == "B" else "B"
             try:
                 rows = _query_nodes(preferred)
-                sig = preferred
             except Exception as e:
                 if not _signature_failure(str(e).lower()):
                     raise  # non-signature failure → brute-force below
                 rows = _query_nodes(fallback)
-                sig = fallback
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
-            # #3019 KNOWN RESIDUAL: this index-accelerated path preserves the
-            # engine's returned order, so two rows with EQUAL distances keep
-            # whatever order the engine gave them, and rank-based fusion can see
-            # a tie-order flip. Deliberately NOT re-sorted here: signature A's
-            # score IS its row POSITION, so a Python re-sort is not lossless for
-            # it, and that is what
-            # `test_docker_mode_signature_b_scores_clamped_to_non_negative` and
-            # `test_none_api_keeps_probe_behavior` actually pin — the PYTHON
-            # layer's order pass-through (a mock returning [("a", 2.4),
-            # ("b", 0.0)] must come back as [("a", 0.0), ("b", 1.0)]) and the
-            # probe CALL COUNT. Signature B's DISTANCE could be ordered
-            # losslessly in the QUERY, and the same two tests do NOT forbid it:
-            # they drive `MultiCallGraph`, whose `query()` returns canned rows
-            # and never inspects the Cypher. Corrected from an earlier claim that
-            # these tests "pin this path's order-preservation" and therefore
-            # block any fix. The signature-B query fix is still its own unit of
-            # work (both signatures share this function), tracked as a follow-up
-            # rather than papered over by the source pin. That follow-up is
-            # #6214 — cite it rather than saying "a follow-up" and leaving a
-            # reader no way to reach it.
-            if sig == "B":
-                # #5583: the engine's value here is a DISTANCE (lower is
-                # better), NOT a similarity. `db.idx.vector.queryNodes`
-                # returns `1 - cosine` for a
-                # `similarityFunction: 'cosine'` index: a PERFECT match comes
-                # back as 0.0 and an orthogonal one as 1.0. Passing that
-                # through as a similarity inverted this leg exactly — the
-                # WORST row scored highest, and every `min_similarity` floor
-                # discarded the rows it exists to keep. Measured on the
-                # docker lane (falkordb-server, module ver 42004): a query
-                # identical to the stored vector scored 0.0, an orthogonal
-                # one scored 1.0.
-                #
-                # The conversion mirrors this function's own scan fallback
-                # below (`1.0 / (1.0 + distance)`): both branches derive a
-                # similarity from a distance, so they agree on polarity.
-                # Cosine distance lies in [0, 2], so `1 - d` lies in [-1, 1]
-                # and the [0, 1] clamp still maps a perfect match to 1.0.
-                # The engine's row order is ALREADY best-first, so only the
-                # value changes here; the order is passed through untouched.
-                out = []
-                for row in rows:
-                    try:
-                        distance = float(row[1])
-                    except (IndexError, TypeError, ValueError):
-                        distance = None
-                    # An unreadable score carries no evidence of similarity —
-                    # send it to the floor (0.0), never to the ceiling.
-                    score = 0.0 if distance is None else 1.0 - distance
-                    out.append((row[0], max(0.0, min(1.0, score))))
-                if min_similarity is not None and out:
-                    # Score is a true cosine similarity now — filter directly.
-                    # Only claim the FLOOR when there was something to filter: a
-                    # zero-row
-                    # index result is `empty_results`, not a relevance verdict
-                    # (claiming the floor there would suppress the caller's
-                    # legitimate degraded fallback, #4028 review P1).
-                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
-                    if not kept:
-                        _record(ran=True, degraded=False,
-                                reason=BELOW_RELEVANCE_FLOOR, count=0,
-                                mechanism=MECHANISM_INDEX)
-                        return []
-                    out = kept
-                _record(ran=True, degraded=False, reason="ok", count=len(out),
-                        mechanism=MECHANISM_INDEX)
-                return out
-            # Index results are ranked by similarity; assign rank-based scores.
-            # RRF fusion uses rank not absolute scores; single-strategy mode
-            # gets reasonable descending ordering.
-            # #4028: signature A returns NO absolute similarity, only a
-            # rank-ordered id list, so the relevance floor cannot be applied
-            # on this branch (an engine artefact, declared in the PR: the
-            # measured defect is the embedded/brute-force lane).
-            total = len(rows)
-            _record(ran=True, degraded=False, reason="ok", count=total,
+            # #6214: EQUAL-DISTANCE ROWS MUST COME BACK IN ONE ORDER. This
+            # index leg feeds rank-based RRF fusion, so a tie-order flip
+            # changes the fused ranking. Both signatures now RETURN a cosine
+            # DISTANCE — B yields the engine's own score, A computes
+            # vec.cosineDistance over the yielded node (the pre-#6214 A
+            # substituted the row POSITION for a score, so ANY re-sort would
+            # have reversed its ranking) — and the engine's tie order is
+            # replaced here, ONCE, by (distance, id). There is deliberately no
+            # second ordering predicate (no per-signature Cypher ORDER BY):
+            # one sort, over the one shape both signatures now produce, so the
+            # two cannot drift apart.
+            #
+            # #5583: the engine's value is a DISTANCE (lower is better), NOT a
+            # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
+            # `similarityFunction: 'cosine'` index: a PERFECT match comes back
+            # as 0.0 and an orthogonal one as 1.0. Passing that through as a
+            # similarity inverted this leg exactly — the WORST row scored
+            # highest, and every `min_similarity` floor discarded the rows it
+            # exists to keep. Measured on the docker lane (falkordb-server,
+            # module ver 42004): a query identical to the stored vector scored
+            # 0.0, an orthogonal one scored 1.0.
+            #
+            # The conversion mirrors this function's own scan fallback below
+            # (`1.0 / (1.0 + distance)`): both derive a similarity from a
+            # distance, so they agree on polarity. Cosine distance lies in
+            # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
+            # maps a perfect match to 1.0.
+            annotated: list[tuple[float | None, str]] = []
+            for row in rows:
+                try:
+                    distance = float(row[1])
+                except (IndexError, TypeError, ValueError):
+                    distance = None
+                annotated.append((distance, row[0]))
+            # An unreadable distance carries no evidence of similarity — rank
+            # it LAST and id-order it among its peers rather than letting it
+            # win a tie. `inf` is the sort key, not the reported score.
+            annotated.sort(key=lambda item: (
+                item[0] if item[0] is not None else float("inf"), item[1]))
+            out = [
+                (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
+                for dist, pid in annotated
+            ]
+            if min_similarity is not None and out:
+                # Score is a true cosine similarity now, for BOTH signatures —
+                # filter directly. Only claim the FLOOR when there was
+                # something to filter: a zero-row index result is
+                # `empty_results`, not a relevance verdict (claiming the floor
+                # there would suppress the caller's legitimate degraded
+                # fallback, #4028 review P1).
+                kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                if not kept:
+                    _record(ran=True, degraded=False,
+                            reason=BELOW_RELEVANCE_FLOOR, count=0,
+                            mechanism=MECHANISM_INDEX)
+                    return []
+                out = kept
+            _record(ran=True, degraded=False, reason="ok", count=len(out),
                     mechanism=MECHANISM_INDEX)
-            return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
+            return out
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:

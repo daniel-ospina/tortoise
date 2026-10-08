@@ -10862,6 +10862,10 @@ class FalkorProjection(
         params: dict = {"id": pid}
         set_clauses: list[str] = []
         wrote_embedding = False
+        # #4457/#4520: the `REMOVE n.embedding` prefix, spliced ahead of the SET
+        # list in the SAME atomic query when (and only when) a real vector is
+        # being written below. See the embedding block for why.
+        embed_clear = ""
         wrote_content_hash = False
 
         # #4042: `n.content` is written UNCONDITIONALLY by
@@ -10892,7 +10896,32 @@ class FalkorProjection(
                     params["embedding"] = emb  # None = wipe stale embedding for empty content
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
-                set_clauses.append("n.embedding = $embedding")
+                # #4521: cast with `vecf32()` like every other Point embedding
+                # writer. Without it the recomputed vector landed as a plain
+                # Cypher `List`, and `vec.euclideanDistance` — search_engine's
+                # per-row dense leg — raises "Type mismatch: expected Null or
+                # Vectorf32 but was List", aborting the WHOLE query. So ONE
+                # revised node degraded the entire Point dense leg to FTS-only
+                # recall for that graph, not just its own row. The `CASE` keeps
+                # this clause's existing wipe-on-None semantics (`$embedding` is
+                # None for empty content and on encoder failure) while casting
+                # every real vector — `vecf32(NULL)` is not relied upon.
+                #
+                # #4457/#4520: `vecf32()` alone is NOT enough on the embedded
+                # engine, which SILENTLY DISCARDS a `vecf32` overwrite of a
+                # property that already holds a vector unless some component
+                # moves by ~1.0 — which real embedder output never does (#4520,
+                # measured; the server lane lands the same write). So the
+                # property is cleared FIRST in the same atomic query. Emitted
+                # only when a real vector is being written, so the CASE's
+                # wipe-on-None branch is unaffected and a fresh node simply has
+                # nothing to remove. Same workaround as `_upsert_point_props`
+                # (#4457) and the Subject/Object/Document/Event seams (#4524).
+                if params["embedding"] is not None:
+                    embed_clear = "REMOVE n.embedding "
+                set_clauses.append(
+                    "n.embedding = CASE WHEN $embedding IS NULL THEN NULL "
+                    "ELSE vecf32($embedding) END")
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live
@@ -10951,7 +10980,8 @@ class FalkorProjection(
             return False, False
 
         self.g.query(
-            f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
+            f"MATCH (n:Point {{id:$id}}) {embed_clear}"
+            f"SET {', '.join(set_clauses)}",
             params=params,
         )
         return wrote_embedding, wrote_content_hash
