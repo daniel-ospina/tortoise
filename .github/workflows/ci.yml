@@ -817,7 +817,7 @@ jobs:
           # differ was measured returning 0 on a changed file it never linted.
           # The set of glob metacharacters is micromatch's, not ours, so we accept
           # only the characters a tracked markdown path actually needs: letters,
-          # digits, and `._@/-` (every one of the 838 tracked `*.md` paths matches;
+          # digits, and `._@/-` (every one of the 771 tracked `*.md` paths matches;
           # `@` is required by node_modules/@scope names and is inert without a
           # following `(`). Anything else cannot be linted by this invocation, so
           # fail closed rather than lint the wrong file.

@@ -1627,14 +1627,19 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     counts = baseline["snapshot"]["counts"]
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
-    # deliberate append, never noise. The lychee half also checks REMOTE links,
-    # whose occurrence count drifts between RUNS for reasons no author controls,
-    # so it is a SET (deduplicated) and its ceiling is the MAXIMUM OBSERVED set
-    # size across generations (151-160, measured three times) — not a round
-    # number: slack above the observed range is an amnesty window, so it is
-    # bounded at 160 and any re-baseline above it must raise this row out loud.
+    # deliberate append, never noise. It is 3268 after the #7534 autofix: the
+    # whitespace findings went away, and the 5 files the autofix deferred keep
+    # their pre-existing findings RECORDED here (#7692 — the deferral restores
+    # them to the tree, so the snapshot must still cover them or a later PR that
+    # touches one is charged for debt the base snapshot already knew).
+    # The lychee half also checks REMOTE links, whose occurrence count drifts
+    # between RUNS for reasons no author controls, so it is a SET (deduplicated)
+    # and its ceiling is the MAXIMUM OBSERVED set size — 50 after the vendored
+    # population fix (#7534; it was 151-160 across the pre-fix generations). It
+    # is not a round number: slack above the observed range is an amnesty window,
+    # so any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 3220, "lychee": 50}
+    ceilings = {"markdownlint": 3268, "lychee": 50}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1653,7 +1658,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
 
     A PR can delete a legitimate baseline entry and append the finding it
     introduced while keeping `snapshot.counts` constant: the count ceiling
-    (11238 <= 11238) and the counts/lists consistency test both pass, and the
+    (3268 <= 3268) and the counts/lists consistency test both pass, and the
     differ classifies the new finding as KNOWN — it only inspects findings the
     run produces, so a removed entry is never re-checked. Measured end-to-end on
     the previous revision: the differ returned 0 new on a swapped baseline. These
@@ -1672,7 +1677,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "d21042595218c6bd3aef55156179dfb3d5b64cf04d3519dabd4663fc2216e199"
+        "1138387e3d40efd51837c52910683ff885f79d126f7091bb231313d6d4ecc448"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "dd6c71c15e276c0a524731d97ca05638e0759e0a2e4820e1ec1362dd2b9d8714"

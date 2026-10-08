@@ -116,7 +116,7 @@ data, not chosen for convenience.
     change fails whenever it produces MORE occurrences of a key than the
     snapshot recorded. This is safe because a file's markdownlint findings are a
     property of the file ALONE: every file is linted independently, so the count
-    is identical whether the run covers one file or all 838. Fixing one of them
+    is identical whether the run covers one file or all 771. Fixing one of them
     is never a new finding.
 
   * **lychee is a SET of ``(path, target)`` keys.** A link's occurrence count is
