@@ -1337,7 +1337,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     if _drain_at is not None:
         payload["client_captured_at"] = _drain_at
         _drain_src = meta.get("client_captured_at_source")
-        if _drain_src:
+        # `is not None`, NOT truthiness — the same predicate the TS leg uses, and
+        # the same one `_stamp_pair` uses when it WRITES. A truthy guard here
+        # dropped `""`/`0`/`False` that the writer had already normalised to
+        # `unknown`, so the two legs produced OPPOSITE verdicts for the same
+        # on-disk entry: Python omitted the key (an absent source PASSES) while TS
+        # posted `unknown` (which DISABLES).
+        if _drain_src is not None:
             payload["client_captured_at_source"] = (
                 _drain_src
                 if isinstance(_drain_src, str)

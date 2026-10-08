@@ -836,6 +836,86 @@ def test_floor_refuses_a_non_finite_client_instant():
         assert verdict == VERDICT_DISABLED, f"{value!r}: {verdict} / {reason}"
 
 
+def test_floor_refuses_a_non_numeric_or_bool_instant():
+    """The guard must refuse — not crash — for every present-but-not-a-reading
+    shape. A non-numeric string raises `TypeError` from `math.isfinite`, and a
+    `bool` is an `int` subclass so `isfinite` ACCEPTS it and `True` would be
+    compared as the instant `1.0`. Both must be DISABLED.
+
+    MUTATION THAT REDS THIS: catch only `OverflowError`, or drop the bool guard.
+    """
+    for client in ("123", b"123", True, False):
+        verdict, reason = client_capture_floor_verdict(
+            client, "cli_observed", INSTALL)
+        assert verdict == VERDICT_DISABLED, f"{client!r}: {verdict} / {reason}"
+    for install in (True, float("inf")):
+        verdict, reason = client_capture_floor_verdict(
+            INSTALL + 1, "cli_observed", install)
+        assert verdict == VERDICT_DISABLED, f"install={install!r}: {verdict} / {reason}"
+
+
+def test_the_drain_and_the_writer_agree_on_a_falsy_stored_source(tmp_path):
+    """One predicate, one normalisation, on both legs. The writer already turns a
+    falsy source into `unknown`; a truthy guard at the drain then DROPPED it, so
+    the same on-disk entry produced opposite verdicts depending on which leg
+    drained it — Python omitted the key (absent PASSES) while the TS leg posted
+    `unknown` (which DISABLES).
+
+    MUTATION THAT REDS THIS: `if _drain_src:` at the drain.
+    """
+    import json as _json
+
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "3516-falsy-src"
+    turns = [{"role": "user", "content": "hi"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="cli_observed"))
+
+    posted: list[dict] = []
+
+    def _post(payload):
+        posted.append(dict(payload))
+        return spool.PostOutcome(ok=True, status=200)
+
+    for falsy in ("", 0, False):
+        path = spool._meta_path(root, sid)
+        raw = _json.loads(path.read_text())
+        raw["client_captured_at_source"] = falsy
+        raw.pop("filed_key", None)
+        raw.pop("filed_stamp", None)
+        path.write_text(_json.dumps(raw), encoding="utf-8")
+
+        posted.clear()
+        spool.flush_spool(root, _post, only_session_id=sid)
+        assert posted, f"{falsy!r}: nothing was posted"
+        assert posted[0].get("client_captured_at_source") == "unknown", (
+            f"{falsy!r}: the drain dropped a source the writer normalises to "
+            "'unknown' — the two legs would report opposite floor verdicts")
+
+
+def test_the_journal_fold_matches_the_sink_on_a_falsy_source():
+    """The fold must use the same predicate the sink does, or a rebuild disagrees
+    with the thing it rebuilds: the sink stores NULL for `""`/`0`/`False`, so the
+    fold must not keep them.
+
+    MUTATION THAT REDS THIS: `_cap_src is not None` in `_fold_session_recorded`.
+    """
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    sid = "3516-fold-falsy"
+    proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": sid, "harness": "pi",
+        "client_captured_at": INSTALL + 10.0,
+        "client_captured_at_source": ""})
+    assert _stamp(sdk, sid, "client_captured_at") == pytest.approx(INSTALL + 10.0)
+    assert _stamp(sdk, sid, "client_captured_at_source") is None, (
+        "the fold kept a falsy source the live sink stores as NULL")
+
+
 def test_a_refused_stored_instant_does_not_repost_forever(tmp_path):
     """The skip clause and the success CAS must compare the SAME normalisation
     the payload POSTS. `filed_stamp` only ever holds a normalised value, so

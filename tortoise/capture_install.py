@@ -377,10 +377,15 @@ def client_capture_floor_verdict(
     # A non-finite client instant is not a reading either: `inf` would PASS every
     # finite floor and `nan` would fail every one, both on a value that is not a
     # clock. The writers refuse these; a direct caller must not slip past — and
-    # must not crash either, because `math.isfinite(10**400)` RAISES.
+    # must not crash either, because `math.isfinite(10**400)` RAISES and a string
+    # raises TypeError. A `bool` is an `int` subclass, so `isfinite` accepts it and
+    # `True` would be compared as the instant `1.0` — the same trap the boundary
+    # validator refuses.
     try:
-        _client_is_finite = math.isfinite(client_captured_at)
-    except OverflowError:
+        _client_is_finite = (
+            not isinstance(client_captured_at, bool)
+            and math.isfinite(client_captured_at))
+    except (OverflowError, TypeError):
         _client_is_finite = False
     if not _client_is_finite:
         return VERDICT_DISABLED, (
@@ -390,10 +395,20 @@ def client_capture_floor_verdict(
         return VERDICT_DISABLED, (
             "client_captured_at_source is 'unknown' — an admitted backfill gap, "
             "which can never be counted as a floor pass")
-    if install_at is None:
+    if install_at is None or isinstance(install_at, bool):
         return VERDICT_DISABLED, (
             "no install probe recorded for this harness — the floor cannot be "
             "evaluated")
+    # A non-finite install time is not an observation either: `inf` makes the
+    # floor unreachable and `nan` makes every comparison false.
+    try:
+        _install_is_finite = math.isfinite(install_at)
+    except (OverflowError, TypeError):
+        _install_is_finite = False
+    if not _install_is_finite:
+        return VERDICT_DISABLED, (
+            f"install_at {install_at!r} is not a finite instant — the floor "
+            "cannot be evaluated")
     # An install time at or before the epoch is not an observation: it is the
     # ABSENT encoding, and it would yield `floor = -tolerance`, which every client
     # clock passes — a floor-pass on the absence of a floor.

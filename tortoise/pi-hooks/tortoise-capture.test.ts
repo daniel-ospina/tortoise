@@ -492,6 +492,68 @@ test("a refused instant does not repost an already-filed entry", async () => {
   assert.equal(server.posts(), 1, "an already-filed entry was re-POSTed");
 });
 
+test("a refused STORED instant does not repost forever (skip + CAS normalise)", async () => {
+  // A meta on disk carrying a value the guards refuse, while the payload posts the
+  // NORMALISED one. Comparing the raw disk value against the normalised posted one
+  // can never match — and the drain never rewrites the meta, so the entry would
+  // re-POST its whole transcript on EVERY drain, forever (#4714). The two legs
+  // share this directory, so a foreign or hand-edited meta is exactly the input
+  // that reaches it. Python is fixed the same way
+  // (`test_a_refused_stored_instant_does_not_repost_forever`).
+  const spool = tmpSpool();
+  const sid = "sess-refused-stored";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, { ...snapshot(sid, turns), clientCapturedAt: 1700000010 });
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+
+  // Corrupt the STORED instant the way a foreign or hand-edited meta could.
+  const dir = join(spool, "entries");
+  const file = readdirSync(dir).find((f) => f.endsWith(".meta.json"));
+  assert.ok(file, "no meta file was written — the test cannot prove anything");
+  writeFileSync(
+    join(dir, file as string),
+    JSON.stringify({ ...readSpoolEntry(spool, sid), client_captured_at: "1700000000.5" }),
+    "utf-8",
+  );
+
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  const settled = server.posts();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 3 });
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 4 });
+  assert.equal(
+    server.posts(),
+    settled,
+    "a refused stored instant re-POSTed on every drain — it is never marked filed",
+  );
+});
+
+test("a falsy stored source becomes 'unknown', matching the Python drain", () => {
+  // The writer normalises `""`/`0`/`false` to `unknown`; a truthy guard at the
+  // DRAIN would drop them instead, and an absent source PASSES the floor while
+  // `unknown` DISABLES it — so the same on-disk entry would give opposite verdicts
+  // depending on which leg drained it.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  for (const falsy of ["", 0, false]) {
+    assert.equal(
+      buildCapturePayload({
+        ...base,
+        clientCapturedAt: 1000,
+        clientCapturedAtSource: falsy as never,
+      }).client_captured_at_source,
+      "unknown",
+      `${JSON.stringify(falsy)}: a falsy source was dropped instead of normalised`,
+    );
+  }
+});
+
 test("sourceName is a basename only (never a full path)", () => {
   assert.equal(sourceName("/Users/x/.pi/agent/sessions/--p--/s.jsonl"), "s");
   assert.equal(sourceName(undefined), "pi");
