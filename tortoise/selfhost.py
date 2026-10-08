@@ -59,8 +59,11 @@ TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 # NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
 # below wraps ``sdk._get_proj()``, whose DB leg is bounded by
 # ``_ready_probe_inner_bound_s()`` (#3320) — a DERIVED allowance that fires
-# before this bound, so the pool worker returns by itself rather than waiting
-# for the client's socket timeout. That allowance is the inner deadline this
+# inside the client's 10s socket read, so the pool worker returns by itself
+# rather than waiting for the client's socket timeout. It is measured from the
+# leg's own start, NOT from the request, so it can only be said to precede this
+# outer bound once the pre-leg work is discounted — see the constants below,
+# where that qualification is made precisely. That allowance is the inner deadline this
 # outer bound sits above; see the constants below. ``hosted_api._READY_PROBE_TIMEOUT_S``
 # was superseded by the hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT``
 # bounds; this constant is the self-host path's own independent backstop.
@@ -98,14 +101,15 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #: ceiling, so the two CAN and DO diverge: the knob defaults to 20 and ranges
 #: far higher, while this allowance is pinned at 5.5 whenever the knob is at or
 #: above 5.5. Stated precisely, the relationship is: RAISING the knob does not
-#: raise this allowance (the ceiling holds it), while LOWERING it below the
-#: ceiling tightens the leg.
+#: raise this allowance (the ceiling holds it), while LOWERING it between the
+#: floor and the ceiling tightens the leg. At or BELOW the floor it has no
+#: effect at all: the floor is applied as a ``max``, and the knob's own accepted
+#: minimum is 1.5s (``monitoring.PROBE_SETUP_TIMEOUT_MIN``), i.e. already under
+#: this 2.5s floor — so ``TORTOISE_PROBE_SETUP_TIMEOUT=1.5`` yields 2.5s.
 #:
 #: The result is CAPPED at ``outer - margin`` (applied LAST, so the cap wins:
 #: a value above the outer bound is not a bound at all) and otherwise FLOORED at
 #: 2.5s. At the shipped defaults: 6.0 (outer) > 5.5 (inner) > 2.5 (floor).
-# allows ``_ready_probe_inner_bound_s()`` to keep the leg inside the outer
-# bound when the outer bound is sane.
 #: The ordering holds whenever ``outer - margin`` is at or above the floor; if
 #: the outer bound is set BELOW 3.0 — which only the tests do, pinning 0.3, 0.2
 #: and 1.2 — the floor cannot be honoured and the bound tightens to just under
@@ -281,12 +285,13 @@ def _run_bounded(fn, allowance_s: float) -> None:
 
     Its relation to the OUTER bound is not an unconditional ordering: the
     allowance is measured from THIS function's entry, while ``health_ready``
-    builds ``TortoiseSDK(...)`` before it (selfhost.py:878-880) — that
+    builds ``TortoiseSDK(...)`` before it (selfhost.py:893) — that
     construction is charged to the 6.0s outer budget but NOT to this allowance.
     So with a slow constructor the outer bound can fire first and the answer can
     go out while this leg is still running. What the bound guarantees is the
-    thing that matters and is measured in the tests: the leg ends well inside
-    the client's 10s socket read, so the REUSED worker is always released.
+    thing that matters and is measured in the tests: the CALLER returns inside
+    its allowance, well within the client's 10s socket read, so the REUSED worker
+    is always released. (The leg itself is abandoned, not ended — see below.)
 
     The leg runs on ``monitoring``'s process-wide ``daemon_worker`` pool, NOT on
     a raw thread. That is deliberate and it is the whole reason this is sound:

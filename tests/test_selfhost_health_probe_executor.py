@@ -1699,11 +1699,34 @@ def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
         pool._max_backlog)
 
     release = threading.Event()
+    barrier = threading.Barrier(pool.workers + 1)
+
+    def hold():
+        barrier.wait(30)     # signal that this worker is genuinely BUSY
+        release.wait(30)
+
     try:
-        # Occupy every worker, then fill the backlog, so the pool is genuinely
-        # saturated rather than racing an idle worker for the queue.
-        for _ in range(pool.workers + pool._max_backlog):
+        # Occupy every worker, and WAIT until each is inside the blocker, rather
+        # than submitting a count and hoping the pool drains in time. The
+        # count-only version was FLAKY: measured 3 unsaturated runs in 120,
+        # because `submit` does NOT raise on a full queue — it returns a Future
+        # carrying `_WorkerBacklogFull` — so submissions 33-40 were silently
+        # refused, the pool kept a free slot, `_run_bounded` was accepted and
+        # then timed out, and the test failed on a generic TimeoutError. That is
+        # a false RED on a merge gate.
+        for _ in range(pool.workers):
+            pool.submit(hold)
+        barrier.wait(30)     # every worker is now inside `hold`
+        for _ in range(pool._max_backlog):
             pool.submit(lambda: release.wait(30))
+
+        # CONFIRM saturation before relying on it. Inferring it from a submit
+        # count is what made the earlier version flaky.
+        probe = pool.submit(lambda: None)
+        assert isinstance(probe.exception(timeout=5.0), mon._WorkerBacklogFull), (
+            f"the leg pool is not saturated (probe outcome: "
+            f"{probe.exception(timeout=5.0)!r}) — this test would pass for the "
+            f"wrong reason")
 
         threads_before = len(pool._threads)
         ran: list = []
