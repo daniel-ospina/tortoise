@@ -485,6 +485,15 @@ surfaces:
   - test_session_auth.py
   - test_capture_consent.py   # #3615: capture consent predicate + durable migration notice (CLI/parity)
   - test_session_capture_e2e.py
+  # #5498: the session read projection is ONE declaration
+  # (tortoise/session_projection.py) derived from by the hosted read surfaces,
+  # the SDK read and the self-hosted CLI. Registered under `api` because both
+  # `tortoise/__main__.py` and `tortoise/hosted_api.py` (the CLI commands and
+  # the wire dicts this file pins) map to `api` — a named-surface match REPLACES
+  # the `core` fallback, so registering only `core` would stop it running on an
+  # api-only PR. `tortoise/sdk.py` is a SHARED_MODULE, so the re-export identity
+  # assertion runs under the full matrix without a separate registration.
+  - test_session_cli_parity_5498.py
   - test_session_context.py
   - test_session_extraction_modes.py
   - test_session_index_health.py
