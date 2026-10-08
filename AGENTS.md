@@ -16,7 +16,7 @@ Real gates are:
 1. A skill explicitly mandates a human gate (sign-off, approval, decision point)
 2. P0 consequence risk (data loss, security, unrecoverable cost >$10/mo)
 3. Genuinely ambiguous — research was inconclusive (<50% confidence) and you need a decision
-4. Another agent is live working on this
+4. Another agent is live working on this ("Held" means another agent is live working on something. Previous comments on issues are not enough to conclude something is held)
 
 If none of those apply: **keep going.** The user can interrupt if they disagree.
 
