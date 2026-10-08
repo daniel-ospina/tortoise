@@ -638,11 +638,16 @@ class TestPassTwoMintOrderingResidual:
                          "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
     def test_the_pass2_gap_is_loud_not_silent(self, env, caplog):
-        """The residual above must not be a second silent loss: the fold's
-        #3299 non-folded-set contract requires a WARNING when a journaled
-        mutation cannot be replayed. (1) Failing value is an empty warning
-        list; (2) the same stub fixture, rebuilt without the xfail's
-        assertion on the outcome."""
+        """The residual above must not be a second silent loss: the fold emits
+        its ``fold matched no entity`` warning, naming the target, so a
+        journaled mutation the fold could not replay is disclosed, not silent.
+
+        #3585 (P1-2) narrowed the FAIL-CLOSED record to labels the reference
+        fold models. ``Source`` is not one (no ``SourceCreated`` shape in
+        ``_ENTITY_CREATION``), so the graph fold no longer refuses this journal
+        — refusing it made ``rebuild_all`` reject a journal
+        ``check_consistency`` accepts. The warning is now the loud channel, so
+        this pin asserts the warning rather than an exception."""
         sdk, events = env
         url = "https://example.com/report"
         sdk.create_point("statement", "the claim", extractedFrom=url)
@@ -652,6 +657,8 @@ class TestPassTwoMintOrderingResidual:
         with caplog.at_level(logging.WARNING):
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
-        assert _fold_warnings(caplog), (
+        assert "fold matched no entity" in caplog.text, (
             "the pass-2 ordering gap silently dropped a journaled mutation — "
-            "the #3299 non-folded-set contract requires a fold-miss warning")
+            "the fold must name the misfold")
+        assert url in caplog.text, (
+            "the misfold warning must NAME the target it could not replay")

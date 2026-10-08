@@ -12,7 +12,7 @@ Builder detection chain (skips if none available):
   3. skip — the CI publish smoke is the authoritative wheel gate.
 
 Registered under ``slow_files:`` in config/ci-surfaces.yml — runs in the
-test-slow CI job (90m budget), never in the fast gate.
+test-slow CI job (60m budget), never in the fast gate.
 """
 from __future__ import annotations
 
