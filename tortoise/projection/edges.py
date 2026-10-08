@@ -245,24 +245,34 @@ _VALID_EDGE_PREDICATES = frozenset({
 
 
 def about_document_target_reason(label: str | None,
-                                document_kind) -> str | None:
-    """Why `label`/`document_kind` cannot be an ``aboutDocument`` target, or
-    ``None`` when it can.
+                                 properties: dict | None) -> str | None:
+    """Why this node cannot be an ``aboutDocument`` target, or ``None`` when
+    it can.
 
     ``aboutDocument``'s target is a DOCUMENT — a ``:Source`` carrying
-    ``documentKind`` (ONTOLOGY §4.4); a provenance/session/connector Source is
-    an ``aboutSource`` target. Live auto-detect refused the rest, and so did the
-    replay resolver, but the live producer (``create_edge``) did not — an edge
-    created through it was built, transferred at supersede and then dropped by
-    ``rebuild_all``, ending on NEITHER node (#5206). ``create_edge`` now
-    applies this predicate; it is a named helper so the rule is greppable and
-    has one definition.
+    ``documentKind`` and addressable by ``url`` (ONTOLOGY §4.4). The replay
+    resolver applies all three: it matches ``(:Source {url:$url}) WHERE
+    documentKind IS NOT NULL``. Live auto-detect refused a non-document Source
+    and so did replay, but the live producer (``create_edge``) refused nothing —
+    an edge created through it was built, transferred at supersede and then
+    dropped by ``rebuild_all``, ending on NEITHER node (#5206). ``url`` is part
+    of the contract because the supersede descriptor is keyed on it
+    (``stub_key``), so a source with no usable ``url`` is lost the same way.
     """
-    if label == "Source" and document_kind is not None:
-        return None
-    if label == "Source":
+    props = properties or {}
+    if label != "Source":
+        return f"a {label or 'unknown'}-labelled node, not a :Source"
+    if props.get("documentKind") is None:
         return "a :Source without documentKind"
-    return f"a {label or 'unknown'}-labelled node, not a :Source"
+    url = props.get("url")
+    if not (isinstance(url, str) and url):
+        # Parity with `stub_key` and `_writable_id`: an empty (or non-string)
+        # identity is not an identity — `stub_key` emits no DirectEdgeRepoint
+        # descriptor for it, so the edge is un-replayable and dies the same way.
+        return ("a :Source with no usable url — an aboutDocument target is "
+                "addressed by url, and an empty one emits no descriptor")
+    return None
+
 
 # `references` targets whose node is BUILT FROM the source's content, and therefore
 # carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
@@ -1023,7 +1033,7 @@ class _EdgeHandlers:
         if predicate == 'aboutDocument':
             for t in targets:
                 why = about_document_target_reason(
-                    t['label'], (t.get('properties') or {}).get('documentKind'))
+                    t['label'], t.get('properties'))
                 if why is not None:
                     raise ValueError(
                         f"aboutDocument target {target_id!r} is not a "

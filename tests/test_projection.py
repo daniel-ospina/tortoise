@@ -2451,6 +2451,23 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
             sdk.create_edge("aboutDocument", "5206-p", "5206-prov")
         assert "aboutSource" in str(ei.value), ei.value
 
+        # ...and so is a document-bearing :Source with no `url`: replay
+        # addresses the target by url (`MATCH (s:Source {url:$url})`), so live
+        # would otherwise accept an edge that `rebuild_all` drops.
+        g.query("MERGE (s:Source {id:'5206-doc-nourl', "
+                "documentKind:'report'})")
+        with pytest.raises(ValueError) as ei_nourl:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-nourl")
+        assert "url" in str(ei_nourl.value), ei_nourl.value
+
+        # ...and an EMPTY url is no more an identity than a missing one:
+        # `stub_key` emits no descriptor for it, so it is un-replayable too.
+        g.query("MERGE (s:Source {id:'5206-doc-emptyurl', url:'', "
+                "documentKind:'report'})")
+        with pytest.raises(ValueError) as ei_eurl:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-emptyurl")
+        assert "url" in str(ei_eurl.value), ei_eurl.value
+
         # ── 2. Through ingest, that refusal is a Phase2Error. ──
         with pytest.raises(Phase2Error) as ei2:
             sdk.ingest({
@@ -2463,6 +2480,24 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
             })
         msg = str(ei2.value)
         assert "aboutDocument" in msg and "aboutSource" in msg, msg
+
+        # ── 2b. The conversion is NARROW to `aboutDocument`. `create_edge`
+        # raises ValueError for other invalid requests too, and those must
+        # still surface as the primitive's own error. Phase2Error subclasses
+        # ValueError, so the type is checked exactly rather than by isinstance.
+        with pytest.raises(ValueError) as ei_own:
+            sdk.ingest({
+                "points": [{"kind": "statement", "content": "own A",
+                            "ref": "oa"},
+                           {"kind": "statement", "content": "own B",
+                            "ref": "ob"}],
+                "connections": [{"from": "oa", "to": "ob",
+                                 "relation": "ownedBy"},
+                                {"from": "ob", "to": "oa",
+                                 "relation": "ownedBy"}],
+            })
+        assert not isinstance(ei_own.value, Phase2Error), type(ei_own.value)
+        assert "Circular ownership" in str(ei_own.value), ei_own.value
 
         # ── 3. Every legitimate document shape must still ingest. ──
         # (a) the CANONICAL document: a `sources` item with sourceKind=
