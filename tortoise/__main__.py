@@ -5579,12 +5579,16 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         return 1
 
-    print(f"Session: {session_id}")
     # #5498: EVERY declared detail field, derived from the shared declaration —
     # not a hand-picked handful that silently omits the rest. `turns` is the
     # COUNT and the LIST is `turn_points`; reading the count as the list and
     # calling len() on it raised
     # `TypeError: object of type 'int' has no len()` on EVERY session.
+    #
+    # No separate `Session: <id>` header: `id` is the first named line below, so
+    # a header would be both redundant and a second, undeclared way to emit the
+    # id — leaving the rendered NAMES exactly the declared field set, which is
+    # what the parity test asserts in both directions.
     from tortoise.session_projection import SESSION_DETAIL_FIELDS
 
     fields = _session_fields(data, SESSION_DETAIL_FIELDS)

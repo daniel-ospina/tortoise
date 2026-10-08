@@ -138,10 +138,14 @@ def test_session_fields_helper_carries_the_values():
     assert rendered["created_at"] == "2026-09-26T00:00:00"
     assert rendered["turns"] == "2"
     assert rendered["extracted"] == "3"
+    assert rendered["actor_user_id"] == "3326a01e-aaaa-bbbb-cccc-ddddeeeeffff"
     assert rendered["harness"] == "claude-code"
     assert rendered["actor_display"] == "me@example.com"
     assert rendered["machine_id"] == "mbp-14"
     assert rendered["model"] == "claude-sonnet-4"
+    # every declared field is bound by a value assertion above — a regression
+    # that erased one (e.g. rendered `-`) must not be able to ship green
+    assert set(rendered) == set(SESSION_LIST_FIELDS)
 
 
 def test_session_fields_helper_renders_missing_values_as_dash():
@@ -248,17 +252,35 @@ def test_session_list_command_handles_a_session_with_no_actor(capsys):
     assert "None" not in out
 
 
-def test_session_view_command_renders_every_declared_detail_field(capsys):
-    """`session view` printed 5 fields by hand before this — not the other 7."""
+def test_session_view_command_renders_exactly_the_declared_detail_fields(capsys):
+    """`session view` printed 5 fields by hand before this — not the other 7.
+
+    EXACT equality, not a superset: a superset assertion cannot catch a `view`
+    that leaks an undeclared key (e.g. dumping the raw response), while the
+    equivalent `list` leak is caught. Equality checks both directions at once.
+    """
     args = mock.Mock(id="sess-1")
     with mock.patch("urllib.request.urlopen", _fake_urlopen(DETAIL)):
         rc = _cmd_session_view(args, "k", "http://example.invalid")
 
     out = capsys.readouterr().out
     assert rc == 0
-    # every declared detail field, exactly — `id` is a named line too now, so
-    # this is a superset rather than a skip-the-header loop.
-    assert _rendered_names(out) >= set(SESSION_DETAIL_FIELDS)
+    assert _rendered_names(out) == set(SESSION_DETAIL_FIELDS), out
+
+
+def test_session_view_command_renders_nothing_outside_the_declaration(capsys):
+    """The other direction, through the REAL `view` command."""
+    payload = dict(DETAIL)
+    payload["not_a_projection_field"] = "surprise"
+    args = mock.Mock(id="sess-1")
+    with mock.patch("urllib.request.urlopen", _fake_urlopen(payload)):
+        rc = _cmd_session_view(args, "k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not_a_projection_field" not in out
+    assert "surprise" not in out
+    assert _rendered_names(out) == set(SESSION_DETAIL_FIELDS)
 
 
 # ── ONE declaration, not two that must be edited in lockstep ──────────────
