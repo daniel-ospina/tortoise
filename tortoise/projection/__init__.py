@@ -2525,6 +2525,12 @@ from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 # for the vector pair. `tests/test_5407_index_label_parity.py` holds them
 # together.
 
+#: ``Point``'s range indexes are the one ranged set whose label is written at
+#: the DDL site rather than in a ``(label, props)`` pair, so the label is
+#: declared here too — otherwise the coverage assertion would have to supply
+#: the very label it is checking.
+_POINT_RANGE_INDEX_LABEL: str = "Point"
+
 _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
     "id",
     "pointKind",
@@ -2543,9 +2549,14 @@ _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
     ("Point", ["content", "search_keys"]),  # R2 (#1541) D3
+    # #244: AgentSession events populate name (not subject) — index both so
+    # session name matches surface through FTS.
     ("Event", ["subject", "name"]),
     ("Subject", ["name"]),
-    ("Object", ["name"]),  # #1350 S3
+    # #1350 S3: the extractor's entity search (existing items by name) needs
+    # the Object FTS leg — without it S3's entities bucket is dead on the real
+    # backend.
+    ("Object", ["name"]),
     ("Source", ["_searchText"]),  # #125 Document FTS
     # (D10: the doc node is a :Source, so the
     # full-text leg rides the Source label).
@@ -9445,7 +9456,9 @@ class FalkorProjection(
         point_props = _POINT_RANGE_INDEX_PROPS
         for prop in point_props:
             try:
-                self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
+                self.g.query(
+                    f"CREATE INDEX FOR (n:{_POINT_RANGE_INDEX_LABEL}) "
+                    f"ON (n.{prop})")
             except Exception as e:
                 msg = str(e).lower()
                 if "already indexed" in msg or "already exists" in msg:

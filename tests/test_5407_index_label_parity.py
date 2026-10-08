@@ -1,28 +1,36 @@
 """#5407 — the INDEX path and the QUERY path must not disagree about labels.
 
 ``_ensure_indexes`` creates range and full-text indexes for a fixed set of
-labels, and the query legs resolve a caller's ``entity_type`` to a label
-through ``tortoise.security.entity_label``. Nothing tied those two together:
-both index sets were inline literals inside ``_ensure_indexes``, so an entity
-type could be added and its index silently never created — the query leg then
-answers against a label with no index and degrades to an empty run, with no
-error and no red test. #4997 is the measured instance of that shape for the
-vector pair.
+labels, and a query leg resolves a caller's ``entity_type`` to a label. Both
+index sets were inline literals inside ``_ensure_indexes``, so an entity type
+could be added and its index silently never created — the leg then answers
+against a label with no index and degrades to an empty run, with no error and
+no red test. #4997 is the measured instance of that shape for the vector pair.
 
 This is a seam, not a bug fix. Measured when written, the two sets agree
 exactly (5 served labels, 5 full-text labels, 5 range labels), so no live
 query is broken today. The test exists so the next entity type cannot
 silently break one, and so re-inlining the literals cannot go unnoticed.
+
+**Scope note.** ``ENTITY_TYPE_LABELS`` is the declared routing for the vector
+leg. ``run_fts_query``, ``run_structural_query`` and the SDK's post-retrieval
+Cypher each still keep their own equivalent derivation (``security.py`` says so
+at its ``entity_label`` docstring); migrating those onto the declaration is
+#5407's remainder, not this change's.
 """
 
+import ast
 import inspect
+import textwrap
 
 import pytest
 
 from tortoise.projection import (
     _FULLTEXT_INDEX_LABEL_FIELDS,
+    _POINT_RANGE_INDEX_LABEL,
     _POINT_RANGE_INDEX_PROPS,
     _RANGE_INDEX_LABEL_PROPS,
+    FalkorProjection,
 )
 from tortoise.security import (
     ENTITY_TYPE_LABELS,
@@ -42,10 +50,8 @@ def _fulltext_labels() -> frozenset:
 
 
 def _range_labels() -> frozenset:
-    # ``Point``'s range indexes are declared by ``_POINT_RANGE_INDEX_PROPS``,
-    # which is a prop list rather than a ``(label, props)`` pair, so the label
-    # is added here; ``test_point_range_indexes_are_declared`` pins that.
-    return frozenset(label for label, _ in _RANGE_INDEX_LABEL_PROPS) | {"Point"}
+    return (frozenset(label for label, _ in _RANGE_INDEX_LABEL_PROPS)
+            | {_POINT_RANGE_INDEX_LABEL})
 
 
 def _assert_covered(served, indexed, kind: str) -> None:
@@ -72,7 +78,7 @@ def test_every_served_label_has_a_range_index() -> None:
 
 
 def test_every_entity_type_resolves_to_an_indexed_label() -> None:
-    """Per-leg form: the derivation each query leg applies is itself covered.
+    """Per-leg form: the derivation the query legs apply is itself covered.
 
     Enumerates ``VALID_ENTITY_TYPES`` rather than ``ENTITY_TYPE_LABELS`` so a
     *new* entity type that nobody added to the mapping is caught too.
@@ -90,33 +96,62 @@ def test_every_entity_type_resolves_to_an_indexed_label() -> None:
 
 
 def test_point_range_indexes_are_declared() -> None:
-    """``Point``'s range props are a separate declaration from the pairs."""
+    """``Point``'s ranged set is declared as a label plus props."""
+    assert _POINT_RANGE_INDEX_LABEL == "Point"
     assert _POINT_RANGE_INDEX_PROPS == ("id", "pointKind", "content_hash")
 
 
-def test_the_coverage_assertion_fails_when_a_label_is_missing() -> None:
-    """Mutation check: proves the assertion shape in 2/3 is not vacuous."""
-    with pytest.raises(AssertionError):
-        _assert_covered(frozenset({"Brand"}), _fulltext_labels(), "fulltext")
+@pytest.mark.parametrize("kind", ["fulltext", "range"])
+def test_coverage_reddens_when_a_served_label_loses_its_index(kind) -> None:
+    """Mutation check against the REAL sets, not a synthetic literal.
 
-
-def test_ensure_indexes_no_longer_declares_labels_inline() -> None:
-    """Structural: the seam holds only while the literals live in one place.
-
-    If a label list is re-inlined into ``_ensure_indexes``, that copy is again
-    invisible to the coverage assertions above.
+    Drops a label that genuinely is served from the index set the production
+    declarations produce, and requires the same assertion the coverage tests
+    use to fail. Without this, a green coverage test could mean only that the
+    assertion never fires.
     """
-    from tortoise.projection import FalkorProjection
+    indexed = _fulltext_labels() if kind == "fulltext" else _range_labels()
+    victim = "Source"
+    assert victim in SERVED_LABELS and victim in indexed, (
+        "fixture assumption: Source is served and indexed in both kinds"
+    )
+    with pytest.raises(AssertionError):
+        _assert_covered(SERVED_LABELS, indexed - {victim}, kind)
 
+
+def _iterable_names_in_ensure_indexes() -> set:
+    """Names that ``_ensure_indexes`` iterates over, via the AST.
+
+    A substring scan is not a provenance test: appending a comment naming the
+    constant defeats it while the literal is fully re-inlined.
+    """
     source = inspect.getsource(FalkorProjection._ensure_indexes)
-    assert "_FULLTEXT_INDEX_LABEL_FIELDS" in source, (
-        "the full-text label set is not read from the module-level "
-        "declaration — a re-inlined copy would drift unnoticed"
+    tree = ast.parse(textwrap.dedent(source))
+    return {node.iter.id for node in ast.walk(tree)
+            if isinstance(node, ast.For) and isinstance(node.iter, ast.Name)}
+
+
+def _loaded_names_in_ensure_indexes() -> set:
+    source = inspect.getsource(FalkorProjection._ensure_indexes)
+    tree = ast.parse(textwrap.dedent(source))
+    return {node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+
+
+def test_ensure_indexes_iterates_the_declarations_not_literals() -> None:
+    """The label sets must be *read from* the declarations, not re-inlined."""
+    iterated = _iterable_names_in_ensure_indexes()
+    assert "_FULLTEXT_INDEX_LABEL_FIELDS" in iterated, (
+        "the full-text loop no longer iterates the module-level declaration — "
+        "a re-inlined copy would drift unnoticed"
     )
-    assert "_RANGE_INDEX_LABEL_PROPS" in source, (
-        "the range label set is not read from the module-level "
-        "declaration — a re-inlined copy would drift unnoticed"
+    assert "_RANGE_INDEX_LABEL_PROPS" in iterated, (
+        "the range loop no longer iterates the module-level declaration — "
+        "a re-inlined copy would drift unnoticed"
     )
-    assert "_POINT_RANGE_INDEX_PROPS" in source, (
+    assert "_POINT_RANGE_INDEX_PROPS" in _loaded_names_in_ensure_indexes(), (
         "the Point range props are not read from the module-level declaration"
+    )
+    assert "_POINT_RANGE_INDEX_LABEL" in _loaded_names_in_ensure_indexes(), (
+        "the Point label is not read from its declaration at the DDL site"
     )
