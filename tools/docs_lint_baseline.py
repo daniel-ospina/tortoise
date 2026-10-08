@@ -1157,7 +1157,7 @@ def run_update(args: argparse.Namespace) -> int:
             "generated_at_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "markdownlint": MARKDOWNLINT_VERSION,
             "lychee": f"lychee {LYCHEE_PIN}",
-            "population": f"git ls-files '*.md' — {len(files)} files",
+            "population": f"git ls-files '*.md' (minus vendored) — {len(files)} files",
             "counts": {"markdownlint": len(markdownlint), "lychee": len(lychee)},
             "variance": (
                 "markdownlint findings are deterministic and occurrence-counted. The "
@@ -1165,8 +1165,9 @@ def run_update(args: argparse.Namespace) -> int:
                 "between RUNS for reasons no author controls (rate limits, transient "
                 "network, TLS, run population), so it is a SET of `(path, target)` "
                 "keys, not a count — its pinned ceiling in "
-                "tests/test_docs_lint_baseline.py has headroom while the markdownlint "
-                "one is exact. Regenerate with `update`; never hand-edit."
+                "tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size "
+                "(a re-baseline above it must raise that row out loud) while the "
+                "markdownlint one is exact. Regenerate with `update`; never hand-edit."
             ),
         },
         "markdownlint": markdownlint,

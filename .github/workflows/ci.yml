@@ -718,14 +718,17 @@ jobs:
           # three-dot diff fails HERE and the REQUIRED check goes red instead of
           # skipping both lint steps and reporting green.
           #
-          # #7534: the `:(exclude)**/node_modules/**` pathspec removes VENDORED
-          # markdown from the population. A re-install rewrites those files, so a
-          # finding there cannot be fixed by hand, and the baseline generator
-          # (`_population`) and the cli2 config `ignores` apply the SAME glob. The
-          # differ's `Linting: N` == changed-set count check makes a mismatch
-          # fail CLOSED, so the three must agree.
+          # #7534: the `:(exclude,glob)**/node_modules/**` pathspec removes VENDORED
+          # markdown from the population. `glob` magic is required: without it git's
+          # `**/` does NOT match zero directories, so a root-level `node_modules/`
+          # survived while `_population` (a path-component match) and cli2's
+          # micromatch `**/node_modules/**` both drop it. A re-install rewrites those
+          # files, so a finding there cannot be fixed by hand, and the baseline
+          # generator (`_population`) and the cli2 config `ignores` apply the SAME
+          # glob. The differ's `Linting: N` == changed-set count check makes a
+          # mismatch fail CLOSED, so the three must agree.
           git diff --no-renames --diff-filter ACMR -z --name-only \
-            "${BASE_SHA}...HEAD" -- '*.md' ':(exclude)**/node_modules/**' \
+            "${BASE_SHA}...HEAD" -- '*.md' ':(exclude,glob)**/node_modules/**' \
             > "$RUNNER_TEMP/pr-md.raw.nul"
           # `./`-prefix every entry so no path can be read as an OPTION by
           # xargs (argument injection) and lychee's --files-from never treats
@@ -793,7 +796,7 @@ jobs:
           # (measured): without this flag the guard was blind and the suppression
           # silent.
           if ! git diff --find-renames -U0 --text "${BASE_SHA}...HEAD" -- '*.md' \
-              ':(exclude)**/node_modules/**' \
+              ':(exclude,glob)**/node_modules/**' \
               > "$RUNNER_TEMP/added-md.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1
@@ -917,7 +920,7 @@ jobs:
           # it, so it cannot be fixed by hand). The differ requires
           # `Linting: N` == this count, so a mismatch fails closed.
           git diff --no-renames --diff-filter ACMR -z --name-only HEAD^ HEAD \
-            -- '*.md' ':(exclude)**/node_modules/**' \
+            -- '*.md' ':(exclude,glob)**/node_modules/**' \
             > "$RUNNER_TEMP/changed-md.raw.nul"
           # `./`-prefix every entry so no path can be read as an OPTION by
           # xargs (argument injection) and lychee's --files-from never treats
@@ -935,7 +938,7 @@ jobs:
           # added file; and `--text` keeps a NUL-bearing `.md` from reading as a
           # binary diff with no `+` lines to grep.
           if ! git diff --find-renames -U0 --text HEAD^ HEAD -- '*.md' \
-              ':(exclude)**/node_modules/**' \
+              ':(exclude,glob)**/node_modules/**' \
               > "$RUNNER_TEMP/added-md-mh.txt"; then
             echo "::error::could not read the changed-markdown diff to check for suppression directives"
             exit 1

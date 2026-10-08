@@ -26,7 +26,7 @@
   // suppressed finding-by-finding. The SAME glob is applied by
   // `tools/docs_lint_baseline.py::_population` (the baseline generator) and by
   // the `docs` job's changed-set diffs, so the generator, the job and the differ
-  // all describe one population; a mismatch them is a fail-closed error.
+  // all describe one population; a mismatch between them is a fail-closed error.
   // Measured #7534: 1,422 of the 11,238 baseline findings lived in 41 tracked
   // files under `website/apps/dashboard/node_modules`.
   "ignores": ["**/node_modules/**"]

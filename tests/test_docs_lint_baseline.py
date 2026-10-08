@@ -872,12 +872,15 @@ def test_vendored_markdown_is_excluded_from_the_population_everywhere():
         "Get changed markdown files (main health)",
     ):
         run = _by_name(name)["run"]
-        assert ":(exclude)**/node_modules/**" in run, name
-        # BOTH `'*.md'` diffs in the step carry it: the population diff that
-        # decides what is linted AND the suppression-directive guard. A
+        # `glob` magic is required on the pathspec: without it git's `**/` does not
+        # match zero directories and a root-level `node_modules/` survives while
+        # `_population` (a path-component match) and cli2's micromatch glob both
+        # drop it. BOTH `'*.md'` diffs in the step carry it: the population diff
+        # that decides what is linted AND the suppression-directive guard. A
         # vendored-only change must not red the check for files excluded from
         # linting — a suppression there hides nothing.
-        assert run.count(":(exclude)**/node_modules/**") >= 2, (
+        assert ":(exclude,glob)**/node_modules/**" in run, name
+        assert run.count(":(exclude,glob)**/node_modules/**") >= 2, (
             f"{name}: the suppression-directive diff must use the same "
             "vendored-excluded population as the lint diff"
         )
@@ -1638,7 +1641,7 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
     # deliberate append, never noise. It is 3268 after the #7534 autofix: the
     # whitespace findings went away, and the 5 files the autofix deferred keep
-    # their pre-existing findings RECORDED here (#7692 — the deferral restores
+    # their pre-existing findings RECORDED here (#7534 — the deferral restores
     # them to the tree, so the snapshot must still cover them or a later PR that
     # touches one is charged for debt the base snapshot already knew).
     # The lychee half also checks REMOTE links, whose occurrence count drifts
@@ -1693,7 +1696,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
     assert hashlib.sha256(
         json.dumps(baseline["linter_config"], sort_keys=True).encode("utf-8")
-    ).hexdigest() == "530d55e6a390f4ff76191f50a21ca4d4c8646ac593cd0bd24fb7931ca4979717", (
+    ).hexdigest() == "bf9d46866af0dff458c4e13cfddefe1e031d1a9389650e9feeae2f722f4922e2", (
         "the pinned linter-policy map changed — turning a rule off in any "
         ".markdownlint* config (or adding one, or adding a [tool.lychee] section) "
         "suppresses the very findings the required `docs` check exists to catch, so "
