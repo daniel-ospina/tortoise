@@ -2525,12 +2525,12 @@ from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 # for the vector pair. `tests/test_5407_index_label_parity.py` holds them
 # together.
 
-#: ``Point``'s range indexes are the one **served** ranged set whose label is
-#: written at the DDL site rather than in a ``(label, props)`` pair, so the
-#: label is declared here too — otherwise the coverage assertion would have to
-#: supply the very label it is checking. (Other DDL-site labels — ``Session``,
-#: ``Point.lastDreamedAt`` — are not entity labels, so the assertion does not
-#: reach them.)
+#: ``Point``'s range indexes are the one ranged set this declaration owns.
+#: Its label is written at the DDL site rather than in a ``(label, props)``
+#: pair, so the label is declared here too — otherwise the coverage assertion
+#: would have to supply the very label it is checking. (Separate DDL sites —
+#: ``Point.lastDreamedAt``, ``Session`` — carry their own labels and are not
+#: part of this declaration.)
 _POINT_RANGE_INDEX_LABEL: str = "Point"
 
 _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
@@ -9455,8 +9455,7 @@ class FalkorProjection(
         # see the boolean-index policy in the docstring and the #3154 purge
         # below. The epic-903 staleness ordering rides on the plain
         # lastDreamedAt index.
-        point_props = _POINT_RANGE_INDEX_PROPS
-        for prop in point_props:
+        for prop in _POINT_RANGE_INDEX_PROPS:
             try:
                 self.g.query(
                     f"CREATE INDEX FOR (n:{_POINT_RANGE_INDEX_LABEL}) "

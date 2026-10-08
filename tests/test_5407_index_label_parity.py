@@ -11,15 +11,19 @@ This is a seam, not a bug fix. Measured when written, the two sets agree
 exactly (5 served labels, 5 full-text labels, 5 range labels), so no live
 query is broken today. The test exists so the next entity type cannot
 silently break one, and so re-inlining the literals cannot go unnoticed.
+Coverage is asserted against **both** pairs of declarations the index path
+uses: the sets the DDL sweep iterates, and the required sets that gate whether
+the sweep runs at all — a label absent from the latter is never indexed, and
+an already-indexed graph reports current and skips the sweep entirely.
 
 **Scope — read this before trusting the assertions.** ``ENTITY_TYPE_LABELS``
 is read by the **vector** leg only. ``run_fts_query``, ``run_structural_query``
 and the SDK's post-retrieval Cypher each still keep their own equivalent
 derivation, so a drift in *those* legs would leave these tests green while the
 leg answered against an unindexed label — the same class of defect, not yet
-covered. The remainder is stated in the comment above ``ENTITY_TYPE_LABELS``
-in ``tortoise/security.py``; migrating the legs onto the declaration is
-#5407's remaining scope, not this change's.
+covered. Migrating the legs onto the declaration is part of #5407's remaining
+scope; the note above ``ENTITY_TYPE_LABELS`` in ``tortoise/security.py`` is
+its fullest statement, though it is itself incomplete.
 """
 
 import ast
@@ -151,6 +155,28 @@ def _loaded_names() -> set:
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
 
 
+def _required_labels(indexes) -> frozenset:
+    """Labels named by a ``(label, prop, kind)`` required-index declaration."""
+    return frozenset(label for label, _prop, _kind in indexes)
+
+
+def test_the_required_index_sets_also_cover_every_served_label() -> None:
+    """The gate that decides whether the DDL sweep runs at all.
+
+    ``_ensure_indexes`` returns early when ``_schema_is_current()`` is True,
+    and that gate is built from ``_REQUIRED_RANGE_INDEXES`` /
+    ``_REQUIRED_FULLTEXT_INDEXES`` — a third and fourth declaration of the same
+    label sets, independent of the two the sweep itself iterates. Adding a
+    served label to the sweep declarations alone leaves an already-indexed
+    graph reporting current, so the new index is never created: the #4997
+    shape, reachable while every other assertion here is green.
+    """
+    for kind, indexes in (
+            ("range", FalkorProjection._REQUIRED_RANGE_INDEXES),
+            ("fulltext", FalkorProjection._REQUIRED_FULLTEXT_INDEXES)):
+        _assert_covered(SERVED_LABELS, _required_labels(indexes), kind)
+
+
 def test_ensure_indexes_iterates_the_declarations_not_literals() -> None:
     """The label sets must be *read from* the declarations, not re-inlined."""
     iterated = _iterated_names()
@@ -162,8 +188,10 @@ def test_ensure_indexes_iterates_the_declarations_not_literals() -> None:
         "the range loop no longer iterates the module-level declaration — "
         "a re-inlined copy would drift unnoticed"
     )
-    assert "_POINT_RANGE_INDEX_PROPS" in _loaded_names(), (
-        "the Point range props are not read from the module-level declaration"
+    assert "_POINT_RANGE_INDEX_PROPS" in iterated, (
+        "the Point range props are not iterated from the module-level "
+        "declaration — a dead reference elsewhere in the body would keep this "
+        "green while the literal was re-inlined"
     )
 
 
