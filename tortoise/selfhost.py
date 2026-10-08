@@ -286,10 +286,19 @@ def _run_bounded(fn, allowance_s: float) -> None:
     REUSED pool worker is always released; an abandoned leg thread is bounded in
     number and dies when its own socket timeout fires.
 
-    Since a readiness worker can submit at most one leg at a time, at most
-    ``_READY_PROBE_WORKERS`` legs are ever in flight, and ``_DB_LEG_WORKERS`` is
-    set to that same number — so in practice the pool never queues and never
-    refuses.
+    BOUNDED, BUT NOT A GUARANTEE OF NEVER QUEUEING. ``_run_bounded`` returns as
+    soon as the allowance fires while the leg keeps running, so "one leg per
+    readiness worker" holds only INSTANTANEOUSLY: with leg lifetime L and
+    allowance A, concurrent legs are about ``_READY_PROBE_WORKERS x L / A``,
+    which exceeds the pool's width for any L > A — and the host read timeout is
+    10s against a 5.5s allowance, so that is the ORDINARY failure case, not an
+    exotic one. The pool therefore queues, and past
+    ``_SingleSlotWorker.MAX_BACKLOG`` it REFUSES with ``_WorkerBacklogFull``,
+    which surfaces as a 503: fail-closed and correct, but indistinguishable at
+    the endpoint from a genuine DB failure. What the pool DOES guarantee is the
+    thing that matters here — the number of THREADS is exactly
+    ``_DB_LEG_WORKERS`` no matter how many legs hang, so abandoned legs cannot
+    accumulate without bound the way a thread-per-probe would.
 
     Contextvars are copied for the same reason ``_submit_probe`` copies them:
     the SDK/projection layer reads them, and a pool thread does not inherit them

@@ -1558,8 +1558,14 @@ def test_a_readiness_probe_past_the_inner_bound_answers_503_PROMPTLY(
     """
     monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(30))
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)
+    # WIDEN THE WINDOW; do not lean on the tolerance. The distinguishing gap is
+    # normally only outer - inner = 0.5s, and a 0.4s tolerance spends 80% of it —
+    # measured headroom was 0.131s on an idle box, which flakes under CI load.
+    # Pinning a large margin makes the allowance 0.1s, so the two bounds sit
+    # ~2.9s apart and the assertion has room to see WHICH one fired.
+    monkeypatch.setattr(selfhost, "_READY_PROBE_INNER_MARGIN_S", 2.9)
     inner = selfhost._ready_probe_inner_bound_s()
-    assert inner < 3.0, inner
+    assert inner < 0.5, inner
 
     async def scenario():
         began = time.monotonic()
@@ -1569,7 +1575,43 @@ def test_a_readiness_probe_past_the_inner_bound_answers_503_PROMPTLY(
 
     r, elapsed = asyncio.run(scenario())
     assert r.status_code == 503, r.status_code
-    assert elapsed < inner + 0.4, (
+    assert elapsed < 1.5, (
         f"the readiness answer took {elapsed:.1f}s but the inner allowance is "
         f"{inner:.1f}s — the OUTER bound fired instead, i.e. the worker was "
         f"still parked when the answer went out (the pre-#3320 failure)")
+
+
+def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
+    """The DB leg must be on the bounded pool, not a raw thread (#3320).
+
+    THIS TEST PINS BOUNDEDNESS, and it exists because nothing else did. Measured
+    on d2d339a7e: replacing the pool submit with a raw ``threading.Thread`` left
+    every test in this file GREEN — the only thing the suite noticed was the
+    thread's NAME, so a one-word rename would have reintroduced the round-1
+    defect. An unbounded thread-per-leg makes live threads scale with
+    ``arrival_rate × socket_timeout`` on an endpoint that is deliberately
+    un-throttled and un-authenticated, i.e. strictly worse than the pool it
+    replaced. Asserting the POOL (not the name) is what makes that irreversible.
+    """
+    import tortoise.monitoring as mon
+
+    seen: dict = {}
+    real = selfhost._probe_worker
+
+    def spy(name, workers):
+        seen["args"] = (name, workers)
+        return real(name, workers)
+
+    monkeypatch.setattr(selfhost, "_probe_worker", spy)
+    selfhost._run_bounded(lambda: None, 1.0)
+
+    assert seen.get("args") == (selfhost._DB_LEG_WORKER,
+                                selfhost._DB_LEG_WORKERS), (
+        "the DB leg did not resolve its own named pool — a raw thread (or an "
+        "arbitrary pool) would pass every other test in this file")
+    pool = real(selfhost._DB_LEG_WORKER, selfhost._DB_LEG_WORKERS)
+    assert isinstance(pool, mon._SingleSlotWorker), type(pool)
+    assert pool.workers == selfhost._DB_LEG_WORKERS, pool.workers
+    assert all(t.daemon for t in pool._threads), (
+        "leg threads must be daemons — a non-daemon leg eats the graceful-drain "
+        "budget #2203 exists to protect")
