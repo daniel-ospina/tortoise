@@ -181,8 +181,22 @@ BOOT_BLOCK_MARKER = "Press any key to continue"
 #: idle pane and `3.8%/700k (auto)` mid-turn. Its presence is the cheapest
 #: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
 #: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
-#: NO `↑`/`↓` counters — do not key readiness off those.
-READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
+#: NO `↑`/`↓` counters — do not key readiness off those. The indicator is `?/Nk`
+#: — not `N.N%/Nk` — whenever `getContextUsage()` returns a null percent (a
+#: compaction that has seen no successful post-compaction assistant usage), which
+#: occurs on healthy live lanes and appears 31× in this box's own session logs;
+#: requiring a digit there refused a live pane (#7158 round 6).
+READY_RE = re.compile(r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b")
+
+#: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
+#: line — `FooterComponent.render` builds `[pwdLine, statsLine, ...statuses]` — so
+#: a stats-shaped line with a pwd line above it is a genuine footer BLOCK, while
+#: one without is output that merely LOOKS like a stats line. That distinction is
+#: what keeps shell output which mimics the stats shape from hiding the prompt
+#: ABOVE it (#7158 round 6). `~`/`/` start plus an optional trailing `(branch)`,
+#: and the line must not itself end in a shell sigil (a `%~`-style prompt such as
+#: `/tmp % ` is a prompt, not a pwd line).
+PWD_LINE_RE = re.compile(r"^\s*(?:~|/)\S*(?:\s+\([^)]*\))?\s*$")
 
 #: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
 #: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
@@ -320,6 +334,28 @@ def _last_status_bar_end(screen: str | None) -> int:
     return matches[-1].end() if matches else -1
 
 
+def _footer_stats_end(screen: str | None) -> int:
+    """Offset just past the LAST stats line that belongs to a pi footer BLOCK,
+    i.e. is directly preceded (ignoring blank lines) by a pwd line, or -1.
+
+    This is the anchor `shell_prompt_below_footer` scans from: a stats-shaped
+    line WITHOUT a pwd line above it is not a footer — it is output. See
+    `PWD_LINE_RE`.
+    """
+    text = screen or ""
+    prev_nonempty: str | None = None
+    pos = 0
+    best = -1
+    for line in text.split("\n"):
+        match = READY_RE.search(line)
+        if match and prev_nonempty is not None and PWD_LINE_RE.match(prev_nonempty):
+            best = pos + match.end()
+        if line.strip():
+            prev_nonempty = line
+        pos += len(line) + 1
+    return best
+
+
 def status_bar_present(screen: str | None) -> bool:
     """pi's TUI status bar appears somewhere in the capture."""
     return _last_status_bar_end(screen) >= 0
@@ -376,32 +412,38 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     installed renderer: `modes/interactive/components/footer.js`), so "the footer
     must be the literal last line" would refuse healthy lanes.
 
-    The scan is taken AFTER the last status bar, PLUS the last two non-empty
-    lines of the whole capture: anchoring on the last status bar alone is
-    bypassable when shell OUTPUT below the prompt itself matches the stats shape
-    (`host % ` then `42.0%/700k (auto)`) or when the footer row is not
-    newline-terminated. A live pi's last two lines are always footer lines, so
-    the extra window cannot flag a healthy pane.
+    The scan starts just past the last FOOTER BLOCK — the last stats line with a
+    pwd line above it (`_footer_stats_end`) — and covers every line after it, plus
+    the remainder of the anchor line itself (a crash mid-render leaves the prompt
+    appended to the footer's own row). Anchoring on "the last stats-shaped line"
+    alone is bypassable: shell OUTPUT below the prompt which mimics the stats shape
+    (`host % ` then a line reading `42.0%/700k (auto)`) would place the prompt ABOVE
+    the anchor and hide it. Requiring a real footer block (a pwd line above the
+    stats) rejects that; when no block exists at all the anchor falls back to the
+    last stats-shaped line, which is the conservative (more-scanning) choice.
 
     RESIDUALS — direction stated honestly:
     * FAIL-OPEN: a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
       indistinguishable from a percentage, and arrow prompts (`❯`, `➜`) are
-      outside the class. Neither is emitted by this fleet's shells.
+      outside the class. Neither is emitted by this fleet's shells. Also, shell
+      output that reproduces an ENTIRE pi footer block (pwd line + stats line)
+      moves the anchor down past the prompt — inherent to reading liveness off
+      screen content; the durable signal is process/session liveness (#7159).
     * FAIL-CLOSED: an extension status containing `[#$>]` followed by whitespace
       (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does.
     """
     text = screen or ""
-    end = _last_status_bar_end(text)
+    end = _footer_stats_end(text)
+    if end < 0:
+        end = _last_status_bar_end(text)
     if end < 0:
         return False
-    after = text[end:]
-    newline = after.find("\n")
-    candidates = after[newline + 1 :].splitlines() if newline >= 0 else []
-    # The last two non-empty lines of the capture, regardless of the anchor (see
-    # the docstring's bypass note).
-    nonempty = [line for line in text.splitlines() if line.strip()]
-    candidates += nonempty[-2:]
-    return any(line.strip() and SHELL_PROMPT_RE.search(line) for line in candidates)
+    # Scan the whole tail INCLUDING the remainder of the anchor line, so a prompt
+    # appended to a non-newline-terminated footer row is still caught.
+    return any(
+        line.strip() and SHELL_PROMPT_RE.search(line)
+        for line in text[end:].splitlines()
+    )
 
 
 def screen_ready(screen: str | None) -> bool:
@@ -1191,23 +1233,29 @@ class Dispatcher:
         # novel.
         before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
         if before_screen is None:
-            # A transient `read-screen` failure is recoverable — retry once before
-            # giving up the `queued` verdict for this send.
+            # A transient `read-screen` failure is recoverable — retry once.
             before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
-            if before_screen is None:
-                self.log(
-                    f"{tag}no readable pre-send baseline — the queued verdict "
-                    f"will fail closed for this attempt"
-                )
 
         # ⛔ RE-ASSERT READINESS ON THE FRESH READ (#7158, TOCTOU). The gate
         # (`wait_until_safe_to_send`) was ready, but the pane can die in the gap
         # before this read — the window is one `read-screen`, which is not bounded
         # under fleet load. Writing on a stale `ready` is how the brief lands in a
-        # bare shell; judge the read we already hold instead. `None` is NOT a
-        # refusal: the gate was ready and a transient read failure is not evidence
-        # the pane died (the post-send confirmation still gates success).
-        if before_screen is not None and not screen_ready(before_screen):
+        # bare shell; judge the read we already hold instead. An UNREADABLE read is
+        # a refusal too, not a licence to write blind: with the pane state unknown,
+        # a dead pane would EXECUTE the brief, and a refusal is recoverable while an
+        # executed brief is not. This mirrors the resend path, which already
+        # refuses when its fresh read is unreadable (`screen_ready(None)` is False).
+        if before_screen is None:
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: the pre-send read failed twice, so readiness "
+                f"could not be re-checked — refusing to write blind: had the pane "
+                f"died after the gate passed, the bytes would be typed into a bare "
+                f"shell and EXECUTED. Re-dispatch once the pane is readable.",
+                fingerprint=fp,
+            )
+        if not screen_ready(before_screen):
             if shell_prompt_below_footer(before_screen):
                 reason = (
                     "a shell prompt is drawn BELOW pi's footer, so the pane has "
