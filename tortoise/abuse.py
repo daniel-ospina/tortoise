@@ -745,9 +745,17 @@ def _alert_dict(row: dict) -> dict:
         # must read as something an org member can act on, NOT as an operator
         # instruction. The operator wording ("review and reach out", the rule,
         # the issue id) travels separately on the notify/incident path.
+        #
+        # Round 6: the promise "and will be in touch" was removed. Delivery of
+        # the operator signal is BEST-EFFORT — the durable dashboard row is
+        # written first, but the ops notification depends on channel config and
+        # the tracked ops incident is sweep-gated (#4778). A customer-facing
+        # string must not promise a human follow-up the plumbing cannot
+        # guarantee; it now states what IS true (nothing was disabled) and
+        # leaves the route where the customer can reach us.
         EVENT_REVIEW: ("Unusually high activity on this team. Nothing has been "
-                       "disabled — our team is reviewing it and will be in "
-                       "touch."),
+                       "disabled, and our team is reviewing it. If you need a "
+                       "higher limit, contact support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",

@@ -36,7 +36,13 @@ test('#5425: withLimitContact terminates the sentence and appends the route', ()
   assert.equal(withLimitContact(null), LIMIT_CONTACT.trimStart())
 })
 
-test('#5425: every dashboard limit notice carries the human route', () => {
+test('#5425: every dashboard limit-notice BUILDER carries the human route', () => {
+  // SCOPE, stated so the name cannot over-claim again: this exercises the
+  // exported builders in keyAllowance.js / nodeUsage.js — the ones that DERIVE a
+  // notice. Static JSX ceilings in main.jsx are outside it (they are rendered
+  // text, not functions); rounds 5-6 each found un-routed ones there. See #7711:
+  // a factory cannot cover them either, because the dashboard replaces the
+  // server's detail — the structural fix is to RENDER the server's message.
   const notices = {
     'create notice': upgradeNoticeFrom(
       "You've reached your plan's limit of 2 API keys", { max_api_keys: 2 }),

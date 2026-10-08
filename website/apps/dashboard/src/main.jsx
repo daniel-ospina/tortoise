@@ -4,7 +4,7 @@ import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
-import { withLimitContact } from './limitContact.js'
+import { LIMIT_CONTACT, withLimitContact } from './limitContact.js'
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
@@ -8912,7 +8912,7 @@ function claimIntentInFlight() {
                       accessible NAME (aria-labelledby) — a screen reader must
                       hear the gate, not a generic "Create a new organization". */}
                   <h3 id="create-org-title-limit">You can only have one free organization</h3>
-                  <p className="dim" id="create-org-desc-limit">Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.</p>
+                  <p className="dim" id="create-org-desc-limit">{withLimitContact("Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.")}</p>
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     {/* #2392 (a11y): autoFocus moves focus INTO the dialog on
@@ -9666,7 +9666,8 @@ function claimIntentInFlight() {
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
-                    <button className="ghost" onClick={upgrade}>Upgrade to add more</button>
+                    <button className="ghost" onClick={upgrade}>Upgrade to add more.</button>
+                    {LIMIT_CONTACT}
                   </span>
                 ) : (
                   <div className="inline-form">
@@ -10132,7 +10133,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.{LIMIT_CONTACT}</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
