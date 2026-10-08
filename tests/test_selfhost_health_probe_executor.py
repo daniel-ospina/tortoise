@@ -1161,8 +1161,10 @@ def test_submit_probe_propagates_contextvars(selfhost, monkeypatch):
 def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
     """The readiness pool must not be NARROWER than the executor it replaced.
 
-    ``/health/ready``'s worker parks for the whole of ``_get_proj()`` (no inner
-    bound — see the module comment in selfhost.py), and the OUTER
+    ``/health/ready``'s worker parks for the whole of ``_get_proj()`` when the
+    DB accepts the connection and then goes quiet (#3320 gave the DB leg its own
+    allowance, so this is now bounded — see the module comment in selfhost.py),
+    and the OUTER
     ``_READY_PROBE_TIMEOUT_S`` cancels the await WITHOUT freeing it. So a pool of
     width W serves only W concurrent probes: request W+1 waits for a worker,
     burns its entire bound queueing, and is answered 503 for a HEALTHY database —
@@ -1348,3 +1350,410 @@ def test_hung_db_still_fails_closed_within_the_bound(selfhost, monkeypatch):
         f"the endpoint waited {elapsed:.2f}s for a hung probe — the answer must arrive "
         "promptly, not after the 30 s hang"
     )
+
+
+# ── #3320: the readiness probe's DB leg needs its own bound ──────────────────
+#
+# The outer ``asyncio.wait_for`` cancels the AWAIT, not the worker (CPython
+# #87185 — ``monitoring`` documents the same rule for its own phases). The
+# FalkorDB client's read timeout (10s by default) sits ABOVE the outer bound
+# (6.0s), so for a black-holed DB the outer bound always loses the race and the
+# POOL WORKER stays parked in a socket read. The pool is the scarce, reused
+# resource — a parked worker cannot serve the next request — so the fix is an
+# allowance on the DB leg that always fires first.
+
+
+def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, monkeypatch):
+    """The ordering IS the fix: outer > inner > the client's connect timeout.
+
+    A value above the outer bound is not a bound at all (the outer would win the
+    race and park the worker), and a value below the client's connect timeout
+    would abort an ordinary connect before it starts (host lane, 2.0s; the
+    embedded UDS lane keeps redis-py's own 5s default and is NOT covered by the
+    floor).
+
+    ``outer`` is read from the MODULE ATTRIBUTE, not the source literal: the
+    literal is always the shipped 6.0, so a bound checked against it cannot see
+    how the floor behaves at any OTHER outer bound — which is exactly the hole
+    that let the floor defeat the cap.
+    """
+    outer = selfhost._READY_PROBE_TIMEOUT_S
+    floor = _module_literal("_READY_PROBE_INNER_FLOOR_S")
+    margin = _module_literal("_READY_PROBE_INNER_MARGIN_S")
+    inner = selfhost._ready_probe_inner_bound_s()
+    assert floor < inner < outer, (floor, inner, outer)
+    assert inner == outer - margin, (inner, outer, margin)
+    # The floor's STATED REASON is that an ordinary connect must not be aborted
+    # before it starts (host lane). Nothing else pinned that, so lowering the
+    # floor below the connect cost would have kept every test green.
+    from tortoise import projection as _projection
+    assert inner > _projection._DB_CONNECT_TIMEOUT_DEFAULT, (
+        f"the inner allowance {inner} is at or below the host connect default "
+        f"{_projection._DB_CONNECT_TIMEOUT_DEFAULT} — an ordinary connect would "
+        f"be aborted before it starts")
+
+    # The operator knob TIGHTENS this leg, and can never push it through the
+    # outer bound — that is what makes the ordering unconditional rather than a
+    # property of the shipped defaults.
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "1.6")
+    assert selfhost._ready_probe_inner_bound_s() == floor, (
+        "an allowance below the floor must clamp UP to the floor, so an "
+        "ordinary connect is never aborted before it starts")
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "300")
+    assert selfhost._ready_probe_inner_bound_s() < outer, (
+        "a raised cold-start allowance must clamp BELOW the outer bound — "
+        "otherwise the outer bound wins the race and the worker parks again")
+
+    # The FLOOR must never DEFEAT THE CAP. With the outer bound below
+    # ``floor + margin``, evaluating the floor last returns the floor — which is
+    # ABOVE the outer bound, i.e. not a bound at all, and the worker parks
+    # exactly as it did before #3320. Three tests in this file pin the outer bound
+    # below 3.0, so this is a reachable state, not a hypothetical one.
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 1.2)
+    assert selfhost._ready_probe_inner_bound_s() < 1.2, (
+        "the floor defeated the cap: the inner bound is at or above the outer "
+        "bound, so the outer wins the race and the pool worker parks again")
+
+
+def test_the_bound_FIRES_at_the_production_allowance(selfhost):
+    """The bound's firing at PRODUCTION scale, which nothing exercised (#3320).
+
+    Every other hang test pins ``_READY_PROBE_TIMEOUT_S`` low (0.2-3.0) for
+    speed, so the allowance under test was never the production one (5.5s). A
+    reviewer made ``_run_bounded`` skip the bound for any ``allowance_s >= 3.0``
+    — i.e. UNBOUNDED at production scale, bounded only in the tests — and the
+    whole file stayed green while the readiness worker was measurably parked
+    again. The allowance is read from the code, never a literal, so this test
+    keeps tracking whatever production actually uses.
+    """
+    allowance = selfhost._ready_probe_inner_bound_s()
+    assert allowance >= 3.0, (
+        f"this test exists to exercise the PRODUCTION allowance, but it is "
+        f"{allowance}s — the test is no longer doing its job")
+
+    began = time.monotonic()
+    with pytest.raises(TimeoutError):
+        selfhost._run_bounded(lambda: time.sleep(30), allowance)
+    elapsed = time.monotonic() - began
+    assert elapsed < allowance + 1.0, (
+        f"_run_bounded returned after {elapsed:.1f}s for an allowance of "
+        f"{allowance:.1f}s — the bound did NOT fire at the production value, so "
+        f"the readiness worker is still parked in the socket read")
+
+
+def test_run_bounded_returns_the_caller_when_the_leg_overruns(selfhost):
+    """The caller is released; only the socket thread is abandoned.
+
+    This is the property the pool depends on: the WORKER must return by itself,
+    within its allowance, even though the leg it started is still running.
+    """
+    started = threading.Event()
+
+    def _wedged() -> None:
+        started.set()
+        time.sleep(30)          # far beyond the allowance and the test's patience
+
+    began = time.monotonic()
+    with pytest.raises(TimeoutError):
+        selfhost._run_bounded(_wedged, 0.2)
+    elapsed = time.monotonic() - began
+    assert started.is_set(), "the leg never started — the bound is vacuous"
+    assert elapsed < 5.0, (
+        f"the caller was held {elapsed:.1f}s for a 0.2s allowance — the bound "
+        "did not fire and the pool worker would still be parked")
+
+
+def test_run_bounded_propagates_success_failure_and_context(selfhost):
+    """A failure is re-raised in the CALLER, and contextvars ride along.
+
+    Re-raising matters because a swallowed failure would report "ready" for a
+    database that refused the connection — the false-green direction. The
+    contextvar propagation matters because the SDK/projection layer reads them
+    and a bare thread does not inherit them (cpython#78195) — the same reason
+    ``_submit_probe`` copies the context.
+    """
+    selfhost._run_bounded(lambda: None, 5.0)          # success returns quietly
+
+    def _boom() -> None:
+        raise RuntimeError("db refused")
+
+    with pytest.raises(RuntimeError, match="db refused"):
+        selfhost._run_bounded(_boom, 5.0)
+
+    probe_var = contextvars.ContextVar("probe_var", default="unset")
+    probe_var.set("from-the-caller")
+    seen: list[str] = []
+    selfhost._run_bounded(lambda: seen.append(probe_var.get()), 5.0)
+    assert seen == ["from-the-caller"], seen
+
+
+def test_a_parked_readiness_probe_frees_its_pool_worker(selfhost, monkeypatch):
+    """ACCEPTANCE (#3320): a timed-out probe must not consume the pool.
+
+    The measured defect: readiness probes parked BOTH workers, so a later,
+    healthy request queued behind them and was answered 503 for a working
+    database. Now the DB leg's allowance fires first and the worker returns.
+
+    WIDTH IS PINNED TO 1, deliberately. With the production width (8) a single
+    parked worker does not exhaust the pool, so a "the pool still answers"
+    assertion passes with the fix REVERTED — measured: it did. One worker makes
+    the parked worker the whole capacity, which is the property under test: the
+    probe must return WITHOUT the client's socket timeout (30s here) having to
+    fire.
+    """
+    monkeypatch.setattr(
+        selfhost, "_READY_PROBE_WORKER", "selfhost-ready-probe-acceptance")
+    monkeypatch.setattr(selfhost, "_READY_PROBE_WORKERS", 1)
+    monkeypatch.setattr(_StubSDK, "_get_proj",
+                        lambda self: time.sleep(30))     # black-holed DB
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)
+
+    # A DEDICATED pool NAME plus a tripwire, not the module constant alone. The
+    # daemon registry is process-wide and keyed by name, and ``workers`` applies
+    # only at FIRST creation — so patching ``_READY_PROBE_WORKERS`` by itself is
+    # INERT once any earlier test in this file has created
+    # ``selfhost-ready-probe`` at width 8, and a request is then served by one of
+    # the other seven workers. Measured on bc9740673: with the constant pinned
+    # and the name left alone, a full-file run reported 35 passed with the
+    # pre-fix ``sdk._get_proj()`` restored — this assertion was satisfied by the
+    # free members of the width-8 pool. The assert below turns that silent
+    # vacuity into a loud failure the next time the pin stops taking.
+    pool = selfhost._probe_worker("selfhost-ready-probe-acceptance", 1)
+    assert pool.workers == 1, (
+        "the width pin did NOT take — falling back to a wider pool makes this "
+        "assertion vacuous")
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            return await ac.get("/health/ready")
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 503, response.status_code
+
+    # The ONLY worker must be back. Without the inner bound it is still parked
+    # in the 30s socket read, so this blocks until the 5s timeout and fails.
+    began = time.monotonic()
+    assert pool.submit(lambda: "free").result(timeout=5.0) == "free", (
+        "the readiness worker was NOT released — a timed-out probe still holds "
+        "the pool worker, which is the defect this bound exists to remove")
+    assert time.monotonic() - began < 5.0
+
+
+def test_a_readiness_cold_start_under_the_inner_bound_reports_ready(
+        selfhost, monkeypatch):
+    """#3320 acceptance bullet 3: do not regress #3143/#3243's cold start.
+
+    The inner bound narrows the effective readiness budget from 6.0 to 5.5s, so
+    the claim that needs proving is not "a bound exists" but "an ordinary slow
+    start still PASSES". #3320's own acceptance requires this for the readiness
+    endpoint, and until now only the LIVENESS coordinator had a cold-start test
+    (`/health`), which does not exercise this path at all.
+
+    A probe needing 1.0s of setup is well inside the 2.5s inner allowance, so it
+    must report READY. If the inner bound were ever set below the connect cost,
+    this is the test that would say so.
+    """
+    class _Graph:
+        def query(self, *a, **k):  # pragma: no cover - shape only
+            return [[1]]
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    def _cold(self):
+        time.sleep(1.0)
+        return _Proj()
+
+    monkeypatch.setattr(_StubSDK, "_get_proj", _cold)
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)  # inner -> 2.5
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            return await ac.get("/health/ready")
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200, (
+        f"a cold start well inside the inner allowance was reported not-ready — "
+        f"this is the false-503 class #3320/#3243 exist to remove: {r.text}")
+
+
+def test_a_readiness_probe_past_the_inner_bound_answers_503_PROMPTLY(
+        selfhost, monkeypatch):
+    """The other direction: past the allowance the answer is prompt, not waited out.
+
+    The measured property is WHICH bound fired. The assertion is therefore
+    against the INNER allowance, not a round number: with the outer bound pinned
+    to 3.0 (inner 2.5) a prompt 503 arrives at ~2.5s, whereas without the inner
+    bound the OUTER one fires at ~3.0s. An earlier version of this test asserted
+    ``elapsed < 5.0``, which the outer bound satisfies on its own — it passed
+    with the fix REVERTED (measured). That is the same vacuity this PR exists to
+    remove, so the bound is read from the code rather than guessed.
+    """
+    monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(30))
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 3.0)
+    # WIDEN THE WINDOW; do not lean on the tolerance. The distinguishing gap is
+    # normally only outer - inner = 0.5s, and a 0.4s tolerance spends 80% of it —
+    # measured headroom was 0.131s on an idle box, which flakes under CI load.
+    # Pinning a large margin makes the allowance 0.1s, so the two bounds sit
+    # ~2.9s apart and the assertion has room to see WHICH one fired.
+    monkeypatch.setattr(selfhost, "_READY_PROBE_INNER_MARGIN_S", 2.9)
+    inner = selfhost._ready_probe_inner_bound_s()
+    assert inner < 0.5, inner
+
+    async def scenario():
+        began = time.monotonic()
+        async with _client(selfhost) as ac:
+            r = await ac.get("/health/ready")
+        return r, time.monotonic() - began
+
+    r, elapsed = asyncio.run(scenario())
+    assert r.status_code == 503, r.status_code
+    assert elapsed < 1.5, (
+        f"the readiness answer took {elapsed:.1f}s but the inner allowance is "
+        f"{inner:.1f}s — the OUTER bound fired instead, i.e. the worker was "
+        f"still parked when the answer went out (the pre-#3320 failure)")
+
+
+def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
+    """The DB leg must be on the bounded pool, not a raw thread (#3320).
+
+    THAT THE LEG RAN, not just that the pool was resolved. An earlier version of
+    this test only asserted ``_probe_worker`` had been CALLED, and a reviewer
+    defeated it: keeping the call as a decoy while running ``fn`` on a raw
+    ``threading.Thread`` left the whole file GREEN (measured), as did widening
+    ``_DB_LEG_WORKERS`` to 64x the readiness width. So this asserts the two
+    things that mutation could not satisfy — the leg executes ON one of the
+    pool's own threads, and the width is not free-form — and the docstring no
+    longer claims more than that.
+    """
+    import tortoise.monitoring as mon
+
+    seen: dict = {}
+    ran_on: list[threading.Thread] = []
+    real = selfhost._probe_worker
+
+    def spy(name, workers):
+        seen["args"] = (name, workers)
+        return real(name, workers)
+
+    monkeypatch.setattr(selfhost, "_probe_worker", spy)
+    selfhost._run_bounded(
+        lambda: ran_on.append(threading.current_thread()), 1.0)
+
+    assert seen.get("args") == (selfhost._DB_LEG_WORKER,
+                                selfhost._DB_LEG_WORKERS), (
+        "the DB leg did not resolve its own named pool")
+    pool = real(selfhost._DB_LEG_WORKER, selfhost._DB_LEG_WORKERS)
+    assert isinstance(pool, mon._SingleSlotWorker), type(pool)
+    # IDENTITY, not the name. Two earlier versions of this assertion compared
+    # thread NAMES, and both were defeated: first by a decoy `pool.submit` with
+    # the leg on a default-named raw thread, then — after the name was recorded
+    # — by a raw thread PER LEG named `selfhost-ready-probe-db-leg-N`, which
+    # passed this entire file (70/70, measured). A raw thread can be given any
+    # name; it cannot BE a pool thread. `is` is the only unfakeable test.
+    assert ran_on, "the leg never ran at all"
+    assert any(t is ran_on[0] for t in pool._threads), (
+        f"the leg ran on {ran_on[0]!r}, which is NOT one of the leg pool's own "
+        f"threads — a raw thread per leg (however it is named) reintroduces "
+        f"unbounded thread growth")
+    # The REALIZED width, not just the constant-vs-constant comparison below.
+    assert pool.workers == selfhost._DB_LEG_WORKERS, (
+        f"the leg pool realized {pool.workers} workers, not "
+        f"{selfhost._DB_LEG_WORKERS}")
+    # The BACKLOG is part of the bound the docs promise (outstanding legs are
+    # width + MAX_BACKLOG), and the readiness lane pins it but the leg pool did
+    # not — a 10**9 backlog left the suite green (measured).
+    assert pool._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+        f"the leg pool's backlog is {pool._max_backlog}, not "
+        f"{mon._SingleSlotWorker.MAX_BACKLOG} — the outstanding-leg bound in "
+        f"the runbook and _run_bounded's docstring is not what the code does")
+    # Non-tautological: the width is compared to an INDEPENDENT constant, so a
+    # pool widened without limit cannot satisfy it.
+    assert selfhost._DB_LEG_WORKERS <= selfhost._READY_PROBE_WORKERS, (
+        f"the leg pool is wider than the readiness lane "
+        f"({selfhost._DB_LEG_WORKERS} > {selfhost._READY_PROBE_WORKERS}), which "
+        f"breaks the sizing argument in _run_bounded")
+    assert all(t.daemon for t in pool._threads), (
+        "leg threads must be daemons — a non-daemon leg eats the graceful-drain "
+        "budget #2203 exists to protect")
+
+
+def test_a_saturated_leg_pool_REFUSES_and_does_not_fall_back_to_a_thread(
+        selfhost, monkeypatch):
+    """The fail-closed refusal must not be replaced by a raw-thread fallback.
+
+    ``_WorkerBacklogFull`` surfacing as a 503 is the documented fail-closed
+    behaviour, and nothing exercised it: a reviewer made ``_run_bounded`` catch
+    a refusal and run the leg on a RAW THREAD instead, and the whole suite
+    stayed green — unbounded thread growth reintroduced exactly when the bound
+    matters most (the pool is saturated). This pins both halves: the pool's
+    backlog is the documented ``MAX_BACKLOG``, and a saturated pool refuses
+    WITHOUT the thread count growing.
+    """
+    import tortoise.monitoring as mon
+
+    # A DEDICATED pool name, for the same reason the acceptance test uses one:
+    # the daemon registry is process-wide and keyed by NAME, and four earlier
+    # tests in this file leave `time.sleep(30)` legs parked on the shared pool.
+    # Sharing it makes this test's barrier WAIT OUT those parked legs — measured
+    # at ~29.9s against the 30s timeout, a 0.10s margin, so a sleep overshoot on
+    # a loaded runner raises BrokenBarrierError. That is a FALSE RED on a merge
+    # gate, i.e. the exact class this test was de-flaked to remove.
+    monkeypatch.setattr(
+        selfhost, "_DB_LEG_WORKER", "selfhost-ready-probe-db-leg-saturation")
+    pool = selfhost._probe_worker(selfhost._DB_LEG_WORKER,
+                                  selfhost._DB_LEG_WORKERS)
+    assert pool._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+        pool._max_backlog)
+
+    release = threading.Event()
+    barrier = threading.Barrier(pool.workers + 1)
+
+    def hold():
+        barrier.wait(30)     # signal that this worker is genuinely BUSY
+        release.wait(30)
+
+    try:
+        # Occupy every worker, and WAIT until each is inside the blocker, rather
+        # than submitting a count and hoping the pool drains in time. The
+        # count-only version was FLAKY: measured 3 unsaturated runs in 120,
+        # because `submit` does NOT raise on a full queue — it returns a Future
+        # carrying `_WorkerBacklogFull` — so submissions 33-40 were silently
+        # refused, the pool kept a free slot, `_run_bounded` was accepted and
+        # then timed out, and the test failed on a generic TimeoutError. That is
+        # a false RED on a merge gate.
+        for _ in range(pool.workers):
+            pool.submit(hold)
+        barrier.wait(30)     # every worker is now inside `hold`
+        for _ in range(pool._max_backlog):
+            pool.submit(lambda: release.wait(30))
+
+        # CONFIRM saturation before relying on it. Inferring it from a submit
+        # count is what made the earlier version flaky.
+        probe = pool.submit(lambda: None)
+        assert isinstance(probe.exception(timeout=5.0), mon._WorkerBacklogFull), (
+            f"the leg pool is not saturated (probe outcome: "
+            f"{probe.exception(timeout=5.0)!r}) — this test would pass for the "
+            f"wrong reason")
+
+        threads_before = len(pool._threads)
+        ran: list = []
+        with pytest.raises(Exception) as excinfo:
+            selfhost._run_bounded(
+                lambda: ran.append(threading.current_thread()), 1.0)
+        assert "backlog" in type(excinfo.value).__name__.lower() or (
+            "backlog" in str(excinfo.value).lower()), excinfo.value
+        # THE callable must not run. This is the unfakeable half: a raw-thread
+        # fallback runs `fn`, whatever else it does. (The thread-count assert
+        # below is kept only as documentation of intent — `_SingleSlotWorker`
+        # builds `_threads` once in `__init__` and never appends, so its LENGTH
+        # can never change and a fallback was measured to stay green against it.)
+        assert ran == [], (
+            f"a REFUSED leg still ran the callable (on {ran[0]!r}) — the refusal "
+            f"is meant to be fail-closed, not a fallback to unbounded threads")
+        assert len(pool._threads) == threads_before, (
+            "a REFUSED leg spawned a pool thread — the refusal is meant to be "
+            "fail-closed, not a silent fallback to unbounded threads")
+    finally:
+        release.set()
