@@ -1167,3 +1167,55 @@ def test_retry_import_identity():
     assert eval_retrieve._is_raw_chunk is is_raw_chunk
     assert eval_retrieve.render_context is render_context
     assert eval_retrieve.DEFAULT_POOL_SIZE is DEFAULT_POOL_SIZE
+
+
+def test_retryable_aborted_write_is_scoped_to_the_v6_rust_core():
+    """#7405 follow-up: pin WHICH engine's literals the predicate actually matches.
+
+    Measured 2026-10-08 by reading the shipped binaries (``MODULE LIST`` for the
+    module version, ``grep -a`` on ``/var/lib/falkordb/bin/falkordb.so`` for the
+    literals): all three clauses of ``_ABORTED_WRITE_RE`` are **v6 Rust-core**
+    literals. Three of the four engine images this repo actually runs are the C
+    core and contain none of them:
+
+    ==========================================  ======  ===========  =========
+    image                                        module  v6 clauses  C message
+    ==========================================  ======  ===========  =========
+    ``falkordb/falkordb:6.0.1`` (the v6 lane)    60001         1 and 3          0
+    ``falkordb/falkordb:latest``                 42004         0 and 0          1
+    ``falkordb/falkordb:v4.22.0``                42004         0 and 0          1
+    ``falkordb-server:v4.20.4`` (self-host pin)  C core       0 and 0          1
+    ==========================================  ======  ===========  =========
+
+    This test does not assert the gap is *desirable* — it asserts the gap is
+    *known*, so the docstring can never drift back into claiming the pinned
+    self-host engine is covered (which is what it said before this change).
+
+    ⛔ The C-core clause is deliberately NOT added here. A false positive
+    re-issues a bare, non-idempotent ``CREATE`` and mints a duplicate point —
+    the exact failure the predicate exists to prevent. Widening it needs the C
+    message's *did-not-land* property established from the engine source first.
+    """
+    from tortoise.retry import _ABORTED_WRITE_RE, retryable_aborted_write
+    from redis.exceptions import ResponseError
+
+    # The three v6 clauses DO match — the retry is live on the v6 Rust core.
+    for message in (
+        "graph was deleted or replaced while the query was running, aborting",
+        "Write query aborted: another write is in progress",
+        "ERR another write is in progress, retry the query",
+    ):
+        assert _ABORTED_WRITE_RE.search(message), message
+        assert retryable_aborted_write(ResponseError(message)), message
+
+    # The C core's message does NOT — so on every C-core image the retry is
+    # inert. Pinned as a KNOWN GAP; if this ever starts returning True, the
+    # duplicate-point hazard above must have been resolved deliberately, and
+    # this assertion should be removed in the same change.
+    c_core = (
+        "ERR Encountered different graph value when opened key tortoise"
+    )
+    assert not _ABORTED_WRITE_RE.search(c_core), (
+        "the C-core literal now matches: confirm its did-not-land property is "
+        "established before removing this pin (duplicate-point hazard)")
+    assert not retryable_aborted_write(ResponseError(c_core))

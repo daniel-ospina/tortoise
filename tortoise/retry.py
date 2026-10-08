@@ -62,12 +62,33 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #:     path, so without this clause a contended ``create_point`` write is
 #:     raised instead of retried (the #7405 loss). Version scope: all three
 #:     clauses are v6 literals, and the repo's pinned
-#:     ``falkordb-server:v4.20.4`` is the older **C** core, which emits
+#:     ``falkordb-server:v4.20.4`` is the older **C** core, which reports
 #:     ``Encountered different graph value when opened key <name>`` for the same
-#:     race. Same *did-not-land* semantics as the other two: the engine's own
-#:     concurrency test documents the message as retryable, and the message
-#:     itself instructs a retry.
-#: All three are **retryable**, but ONLY on the write path — see
+#:     race.
+#:
+#:     ⛔ THAT CORE MESSAGE IS **NOT** MATCHED BY ``_ABORTED_WRITE_RE``, so on the
+#:     C core :func:`retryable_aborted_write` returns False and this retry is
+#:     INERT. Measured 2026-10-08 by reading the shipped binaries
+#:     (``MODULE LIST`` for the version, ``grep -a`` on
+#:     ``/var/lib/falkordb/bin/falkordb.so`` for the literals): all three clauses
+#:     below are **v6 Rust-core** literals, present only in
+#:     ``falkordb/falkordb:6.0.1`` (module version 60001). Three of the four
+#:     engine images this repo actually runs are the C core and contain **none**
+#:     of them — ``falkordb/falkordb:latest`` (the image ``tools/test_lane.py``
+#:     mints), ``falkordb-server:v4.20.4`` (the self-host pin) and
+#:     ``falkordb/falkordb:v4.22.0`` (module version 42004) each score 0 on the
+#:     clauses and 1 on the C string.
+#:
+#:     ⛔ Do NOT "fix" the gap by adding the C literal to the regex on the
+#:     strength of this comment. A FALSE POSITIVE here re-issues a bare,
+#:     non-idempotent ``CREATE`` and mints a duplicate point — precisely the
+#:     failure :func:`retryable_aborted_write` exists to prevent. Widening the
+#:     clause requires establishing the C message's *did-not-land* property
+#:     from the engine source; note that in the binary its neighbours are
+#:     ``REPLICAOF`` / "Forced full resync" / "Replica diverged from master",
+#:     which raises the question of whether it is replication-scoped rather
+#:     than a general write abort.
+#: All three clauses are **retryable**, but ONLY on the write path — see
 #: :func:`retryable_aborted_write` for the layering, and
 #: :func:`retryable_transient` for why they are deliberately NOT in the
 #: transport predicate (putting them there made one error retryable at two
