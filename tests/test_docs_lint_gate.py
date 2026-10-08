@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -417,8 +418,11 @@ def _run_base_tip(
 
 def _git_shim_failing(tmp_path: Path, subcommand: str) -> Path:
     """A PATH shim whose `git <subcommand>` exits 1 and delegates everything else."""
-    real = subprocess.run(["command", "-v", "git"], shell=False, capture_output=True, text=True)
-    resolved = real.stdout.strip() or "git"
+    # `shutil.which`, NOT `subprocess.run(["command", "-v", "git"])`. `command` is a
+    # SHELL BUILTIN: macOS happens to ship a real `/usr/bin/command` so the subprocess
+    # form works there, but the Linux CI runner has no such binary and it raised
+    # `FileNotFoundError: 'command'` — a macOS-only pass that failed on GitHub-hosted.
+    resolved = shutil.which("git") or "git"
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     shim = shim_dir / "git"
