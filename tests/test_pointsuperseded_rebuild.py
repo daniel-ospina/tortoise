@@ -1075,8 +1075,9 @@ def test_apply_replay_refuses_when_a_fold_matches_no_point(sup, caplog):
 
     FAILS IF: the run passes on this journal (the pre-#7719 disagreement), or
     the one-record warning the branch also serves is dropped.
-    REACHABLE: a hand-written journal is the only way to reach the shape —
-    every public writer guards its target.
+    REACHABLE: not through a public writer — every public writer guards its
+    target — but a legacy pre-journaling graph or an unjournaled producer can
+    still produce the shape.
     """
     import logging
 

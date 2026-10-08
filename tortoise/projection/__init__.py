@@ -4190,19 +4190,17 @@ def journal_object_surviving_keys(
 
 
 def journal_object_hard_deleted_ids(events) -> frozenset[str]:
-    """Ids of every Object the journal HARD-DELETES.
+    """SUPERSEDED (#7719) — a delegating wrapper, so no caller can reach the
+    UNGATED reader.
 
-    The named `supersede-target-deleted` exemption: a supersede whose target
-    the journal removed can legitimately fold 0 rows in `rebuild_all`'s
-    deferred sweep, so the apply()-based engines must not refuse it either.
-    Derived from `journal_hard_delete_seqs` (the same per-``(id, label)``
-    reader the `EntityLinked` sweep uses), scoped to the ``Object`` label.
+    This used to derive the Object id set from `journal_hard_delete_seqs`,
+    which records every delete's seq with NO re-creation anchor. That is the
+    divergence #7719 closed: a delete the journal superseded by a same-``(kind,
+    id)`` re-creation never removed the node, yet the ungated reader still
+    reported it and exempted the supersede. Use
+    :func:`_object_hard_deleted_ids` (:func:`hard_deleted_pairs`) instead.
     """
-    out: set[str] = set()
-    for rid, by_label in journal_hard_delete_seqs(events).items():
-        if "Object" in by_label:
-            out.add(rid)
-    return frozenset(out)
+    return _object_hard_deleted_ids(hard_deleted_pairs(events))
 
 
 def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
@@ -4210,11 +4208,16 @@ def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
     the SHARED :func:`_hard_deleted_any` predicate.
 
     ``apply()``'s ``ObjectSuperseded`` refusal gate takes an id SET as
-    ``journal_object_deleted``, so this is the GATED replacement for
-    ``journal_object_hard_deleted_ids``: derived from the anchor-gated pair
-    map, an id whose delete a same-kind re-creation anchor suppressed no
-    longer exempts the supersede — exactly the verdict ``rebuild_all``'s
-    deferred sweep reaches (#7719).
+    ``journal_object_deleted``, so this is the replacement for
+    ``journal_object_hard_deleted_ids``: it reads the SAME map
+    ``rebuild_all``'s Object arm reads, so the two reach one verdict (#7719).
+
+    ⚠️ The anchor gate bites only for a delete under a NON-CANONICAL label
+    whose bare id a later Point/Operator creation re-anchored: the anchors are
+    seeded from Point/Operator creations only, so for a canonical
+    ``label="Object"`` delete the anchor lookup is always empty and this is
+    id-set-equal to the ungated reader. The split is real for the Point kind
+    and for the id-wide fallback; it is not for Objects.
     """
     return frozenset(
         rid for _kind, rid in hard_deleted
@@ -4750,6 +4753,12 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     ``_hard_delete_suppresses`` is literally "is there a hard delete AFTER seq
     L that can remove THIS label?" — ``entry.get(label) > L``.
 
+    ⛔ This is NOT the terminalizer exemption predicate: it is UNGATED (a
+    delete a same-kind re-creation superseded is still recorded, and it fans a
+    non-canonical label out to every label). For "did the journal hard-delete
+    this id, never re-created", use :func:`hard_deleted_pairs` with
+    :func:`_hard_deleted_any` (#7719).
+
     The hard-delete EVENT TYPES are the same ones ``_journal_hard_deleted_ids``
     derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
     merged-away ids replay through ``_delete``) — but the ID SETS can differ:
@@ -4869,8 +4878,9 @@ def hard_deleted_pairs(events) -> dict[tuple[str | None, str], int]:
     for its ``del_seq >= seq`` re-creation gate). It is NOT usable for
     :func:`_hard_delete_suppresses` either: that needs the MAX delete seq for
     ``(id, label)`` REGARDLESS of any re-creation anchor, which this map —
-    deliberately anchor-gated — does not carry. Its ONLY consumer is
-    :func:`_hard_deleted_any`.
+    deliberately anchor-gated — does not carry. Its only PREDICATE reader is
+    :func:`_hard_deleted_any`; :func:`_object_hard_deleted_ids` and the engines
+    also carry the map itself.
     """
     # Pass 1 — the re-creation anchors, over the WHOLE journal (a delete is
     # judged against the id's LAST creation, including one that follows the
@@ -5739,10 +5749,14 @@ class FalkorProjection(
         # supplied by the whole-journal apply()-based engines (`rebuild`,
         # `recover_from_log`) and default to None for the one-record LIVE path
         # (which has no journal to consult and must record nothing).
-        # #7719: `journal_object_deleted` is derived from the ANCHOR-GATED
+        # #7719: `journal_object_deleted` is derived from the shared
         # `hard_deleted_pairs` map (via `_object_hard_deleted_ids` /
-        # `_hard_deleted_any`), so an id whose delete a same-kind re-creation
-        # suppressed no longer exempts the supersede here either.
+        # `_hard_deleted_any`), so this gate and `rebuild_all`'s Object arm
+        # reach one verdict. NOTE this is not the ANCHOR-GATED case the Point
+        # kind gets: the re-creation anchors are seeded from Point/Operator
+        # creations only, so for a canonical `label="Object"` delete the two
+        # readers agree — the split matters for Point and for the id-wide
+        # fallback.
         #
         # #3585 (P1-1): `journal_first_materialized` is the whole-journal
         # EXISTENCE map (`journal_first_materialization`) and `journal_seq`

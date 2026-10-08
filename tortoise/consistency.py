@@ -84,6 +84,7 @@ from .projection.entities import (
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_OBJECT_SUPERSEDED_MISS,
+    SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
     SHAPE_STATE_OP_MISS,
     classify_terminalizer_miss,
     collect_non_folded,
@@ -961,7 +962,8 @@ def _fold_journal(events: list[dict]) -> dict:
                 # new_id-less supersede as a documented no-op, so the
                 # reference fold mirrors it. Recorded, not fatal.
                 record_non_folded(
-                    "point-superseded-no-new-id", event_id=ev.get("event_id"),
+                    SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
+                    event_id=ev.get("event_id"),
                     event_type=t, seq=seq,
                     detail="reference fold: supersede with no new_id is a no-op",
                 )
@@ -2310,6 +2312,26 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # in the journal cannot be merged chronologically (see
         # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
         # sweep resolves it, so the engines would disagree.
+        # #7719 (E7): validate the consumer's contract ONCE, before the loop.
+        # A missing/renamed kwarg must fail LOUD — the per-record
+        # `except Exception` below would otherwise count it as crash damage
+        # (`torn`) and the function would return `recovered=True` over a journal
+        # whose terminalizers were never folded (the exact false PASS this
+        # change closes). Probing the signature is the same idiom `apply`'s
+        # kwargs use above, and it keeps the per-record handler free to count
+        # REAL fold failures.
+        try:
+            _restamp_params = inspect.signature(
+                projection.apply_journal_point_restamp).parameters
+        except (TypeError, ValueError):
+            _restamp_params = {}
+        if "hard_deleted" not in _restamp_params and not any(
+                _p.kind is inspect.Parameter.VAR_KEYWORD
+                for _p in _restamp_params.values()):
+            raise _RestampSignatureError(
+                "recover_from_log: the projection's "
+                "apply_journal_point_restamp does not accept hard_deleted=...; "
+                "refusing rather than reporting a false recovery (#7719)")
         deferred_corrects: list[tuple[int, str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
@@ -2329,15 +2351,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     # false PASS this change closes. Re-raise it out of the
                     # per-record guard; only applies to the restamp call, so an
                     # unrelated ``apply()`` failure is still counted torn.
-                    try:
-                        edge = projection.apply_journal_point_restamp(
-                            ev, seq, restamp_plan, hard_deleted=hard_deleted)
-                    except TypeError as exc:
-                        # #7719 (E7): re-raise as the DEDICATED type — the
-                        # generic ``except Exception`` below would otherwise
-                        # swallow this as crash damage and leave
-                        # ``recovered=True`` standing.
-                        raise _RestampSignatureError(str(exc)) from None
+                    # #7719 (E7): the consumer's contract was validated ONCE
+                    # before this loop, so a genuine fold failure inside this
+                    # call is NOT reclassified as a signature error — it stays a
+                    # per-record failure the `except Exception` below counts as
+                    # `torn`, exactly as before this change.
+                    edge = projection.apply_journal_point_restamp(
+                        ev, seq, restamp_plan, hard_deleted=hard_deleted)
                     if edge is not None:
                         deferred_corrects.append(edge)
                 else:

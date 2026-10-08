@@ -1825,8 +1825,9 @@ class TestApplyPathTerminalizerMissIsRecorded:
             self, env, tmp_path, kind, const):
         """FAILS IF: any replay engine accepts the journal — pre-#7719
         `rebuild` and `recover_from_log` merely warned while `rebuild_all`
-        raised. REACHABLE: a hand-written journal is the only way to reach the
-        shape (every public writer guards its target)."""
+        raised. REACHABLE: not through a public writer — every public writer
+        guards its target — but a legacy pre-journaling graph or an unjournaled
+        producer can still produce the shape."""
         import tortoise.projection.nonfolded as nf
 
         shape = getattr(nf, const)

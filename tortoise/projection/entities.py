@@ -1979,13 +1979,17 @@ class _EntityHandlers:
             # sweep and `check_consistency`'s reference fold record for this
             # journal — and it is now RECORDED, so a whole-journal run through
             # this consumer fails closed (R8) instead of passing on a merely
-            # loud warning. KEEP the warning too: a one-record `apply()` has no
-            # run boundary, so the log line is its only signal.
+            # loud warning. KEEP the warning: the #3299 contract is that a
+            # dropped fold must be AUDIBLE, and a caller reached outside a
+            # `collect_non_folded` boundary (a bare or test call) still needs
+            # the log line — the record fails the RUN, the warning names it.
             # `target_deleted` reads the anchor-gated map; `has_successor`
             # (`new_id`, NEVER `corrected_by`) is REQUIRED at this
             # PointSuperseded site — the classifier's False default would
             # mislabel a target-miss as the EXEMPT
             # `point-superseded-no-new-id`.
+            # Function-local on purpose: `projection/__init__` imports this
+            # module, so a module-top import of `_hard_deleted_any` would cycle.
             from tortoise.projection import _hard_deleted_any
             record_non_folded(
                 classify_terminalizer_miss(
