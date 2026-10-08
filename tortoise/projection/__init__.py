@@ -10266,8 +10266,12 @@ class FalkorProjection(
                 # deleted raw on every rebuild. That is the silent loss this
                 # issue exists to prevent, on the one path whose comment already
                 # says a live-writer fix cannot retire the bytes.
-                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here, although
-                # `entities._SOURCE_IDENTITY_PROPS`' docstring says it is. Making
+                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here. (This NOTE
+                # used to continue "although `entities._SOURCE_IDENTITY_PROPS`'
+                # docstring says it is" — #5196 removed that claim from the
+                # docstring, so the NOTE was citing text that no longer exists. It
+                # is corrected rather than left pointing at a vanished claim.)
+                # Making
                 # the code match that comment would change what an
                 # `EntityMutated` replay does with `url`/`canonicalUrl`/
                 # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
