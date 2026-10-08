@@ -1315,6 +1315,53 @@ def _sweep_oauth_retention() -> None:
         _logger.warning("oauth retention sweep failed: %s", exc)
 
 
+def _reconcile_metering_periods() -> None:
+    """#4241: give the period-bound repair a PERIODIC caller.
+
+    ``public.metering_repair_period_bounds()`` (#4216) is idempotent and
+    bounded, but it shipped with exactly ONE caller — the ``SELECT`` at the
+    end of its own migration. So the deploy-time repair ran once and never
+    again: a subscription org whose anchor became unusable AFTER that deploy
+    was never repaired by it, and stayed unmeterable (increments dropped, the
+    cohort cap unenforceable) until a later ``customer.subscription.updated``
+    happened to supply both bounds. #3981's runtime alert made that state
+    visible; nothing made it self-healing.
+
+    Scheduled, not operator-run — the same seam as the other sweeps: armed by
+    ``_run_boot_sweeps`` at boot and by ``_event_retention_loop`` on the
+    periodic interval (hourly by default), so the anchor is repaired on the
+    next cycle rather than waiting for an unrelated webhook.
+
+    The function itself is NOT touched, and no anchor semantics change: this
+    only supplies the missing caller. It is the repair that is idempotent, so
+    re-running it every cycle is a no-op when there is nothing to repair.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs a
+    WARNING and never kills the loop. Deliberately NOT silent — #4872 is the
+    standing precedent that an enforcement-adjacent failure routed at debug
+    is indistinguishable from "nothing to do".
+    """
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return
+        # ``representation=True``: the function RETURNS TABLE (org_id, reason),
+        # and the default ``return=minimal`` suppresses that body (#3665), which
+        # would leave us unable to say whether anything was repaired.
+        repaired = get_control_plane().rpc(
+            "metering_repair_period_bounds", {}, representation=True)
+        count = len(repaired) if isinstance(repaired, list) else 0
+        if count:
+            _logger.info(
+                "metering period reconciliation repaired %s org anchor(s): %s",
+                count, repaired)
+    except Exception as exc:  # a reconciliation sweep must never crash the loop
+        _logger.warning("metering period reconciliation failed: %s", exc)
+
+
 def _measured_write_ops_basis(orgs: list[str]) -> dict[str, int] | None:
     """Measured per-org write-ops for the PROPORTIONAL allocation lines (#4493).
 
@@ -1432,6 +1479,13 @@ async def _event_retention_loop(interval: float) -> None:
             "oauth retention",
             functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
                               name="tortoise-boot-sweep"))
+        # #4241: repair subscription orgs whose period anchor is unusable.
+        # Before this, the idempotent repair had exactly one caller — its own
+        # migration — so an org broken after that deploy never healed.
+        await _guarded_step(
+            "metering period reconciliation",
+            functools.partial(run_on_daemon_worker, _reconcile_metering_periods,
+                              name="tortoise-boot-sweep"))
         # #4493: allocated fixed/shared SaaS cost per org — the production write
         # path for tortoise_team_cost_cents. It already swallows internally (see
         # _refresh_cost_allocation); the guard is what makes that belt-and-braces
@@ -1467,7 +1521,12 @@ async def _run_boot_sweeps() -> None:
     for label, fn in (("event retention", _sweep_events),
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("deleted-account purge", _purge_deleted_accounts),
-                      ("oauth retention", _sweep_oauth_retention)):
+                      ("oauth retention", _sweep_oauth_retention),
+                      # #4241: the SAME runner as the periodic loop, so the
+                      # boot and periodic paths for the anchor repair cannot
+                      # drift apart — the property _guarded_step exists for.
+                      ("metering period reconciliation",
+                       _reconcile_metering_periods)):
         # #5381: the same guard the periodic loop uses — one runner, so the
         # boot and periodic paths cannot drift apart.
         await _guarded_step(

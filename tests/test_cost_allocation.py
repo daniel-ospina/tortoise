@@ -1206,6 +1206,11 @@ _BOOT_SWEEPS = (
     ("purge", "_purge_deleted_orgs", "boot deleted-team purge sweep"),
     ("account", "_purge_deleted_accounts", "boot deleted-account purge sweep"),
     ("oauth", "_sweep_oauth_retention", "boot oauth retention sweep"),
+    # #4241: the period-anchor repair. Declared HERE so the parametrization
+    # below covers it too — an unguarded call site for it would otherwise let
+    # its raise abandon every sweep after it.
+    ("metering", "_reconcile_metering_periods",
+     "boot metering period reconciliation sweep"),
 )
 
 
