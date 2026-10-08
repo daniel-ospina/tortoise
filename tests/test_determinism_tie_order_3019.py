@@ -280,16 +280,15 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     cannot see a NEW leg added later without one — it pins only what it is told
     to pin, and a fixed number silently certifies an omission.
 
-    KNOWN RESIDUAL: the index-accelerated vector path preserves the engine's
-    returned order, so two rows with EQUAL distances keep the engine's order and
-    rank-based fusion can see a tie-order flip. A PYTHON re-sort cannot fix it
-    (signature A's score IS its row position, so a re-sort is not lossless for
-    it), which is what the two tests named in the engine comment actually pin —
-    the PYTHON layer's pass-through, not the Cypher. The genuinely fixable half
-    is a QUERY-level ORDER BY for signature B alone, measured to be compatible
-    with those mock-graph tests; it is its own unit of work because both
-    signatures share the function, so it is tracked as **#6214** rather than
-    asserted away by this pin.
+    KNOWN RESIDUAL (CLOSED): the index-accelerated vector path used to
+    preserve the engine's returned order, so two rows with EQUAL distances
+    kept the engine's order. A PYTHON re-sort could not fix it then because
+    signature A's score WAS its row position (a re-sort was not lossless for
+    it). #6214 closed that: both signatures now RETURN a cosine distance
+    (signature A computes one over the yielded node) and the index path makes
+    ONE ``(distance, id)`` ordering pass; the behaviour is pinned by
+    ``tests/test_search_engine_gaps.py::test_docker_mode_signature_a_carries_a_distance_and_ties_by_id``
+    and the live index-path test ``test_6214_index_vector_leg_orders_equal_distance_rows_by_id``.
     """
     src = inspect.getsource(search_engine)
     assert "ORDER BY score DESC, n.id ASC" in src, "operator leg lost its tie key"

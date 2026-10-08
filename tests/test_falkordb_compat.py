@@ -70,7 +70,11 @@ class _EngineGraph:
             if self.vector_api == "none":
                 raise Exception(
                     "Procedure `db.idx.vector.queryNodes` is not registered")
-            if "vecf32($query_vec)" in cypher:
+            # #6214: discriminate by the CALL's argument ORDER, not by the
+            # presence of vecf32($query_vec) — signature A now carries that
+            # wrapper too, for the vec.cosineDistance() it RETURNs, so the old
+            # substring test would misclassify an A query as B.
+            if "'embedding', $limit, vecf32($query_vec))" in cypher:
                 # Signature B: (label, attr, k, vecf32(vec)) → node, score
                 return _ResultSet([("near-1", 0.95), ("near-2", 0.8)])
             # Signature A: (label, attr, vec, k) → node
@@ -321,7 +325,11 @@ class TestVectorIndexApiConsumption:
         hits = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="cypher")
-        assert [h[0] for h in hits] == ["near-1", "near-2"]
+        # #6214: the fixture returns near-1 at distance 0.95 and near-2 at 0.8,
+        # i.e. NOT in distance order. The leg must reorder by distance, so
+        # near-2 (closer) ranks first — the pre-#6214 pass-through returned
+        # the engine's near-1 first.
+        assert [h[0] for h in hits] == ["near-2", "near-1"]
         qn = [c for c in graph.calls if "querynodes" in c.lower()]
         assert len(qn) == 1
         assert "vecf32($query_vec)" in qn[0]        # sig B form only
@@ -336,8 +344,11 @@ class TestVectorIndexApiConsumption:
         assert [h[0] for h in hits] == ["near-1", "near-2"]
         qn = [c for c in graph.calls if "querynodes" in c.lower()]
         assert len(qn) == 1
-        assert "$query_vec, $limit" in qn[0]
-        assert "vecf32($query_vec)" not in qn[0]
+        # #6214: sig A now also carries vecf32($query_vec) — for the
+        # vec.cosineDistance() it RETURNs. The A/B distinction is the CALL's
+        # argument ORDER, so pin that instead of the absence of the wrapper.
+        assert "'embedding', $query_vec, $limit)" in qn[0]
+        assert "'embedding', $limit, vecf32($query_vec))" not in qn[0]
 
     def test_degradation_chain_threads_vector_index_api(self):
         """degradation_chain forwards vector_index_api → the vector runner
@@ -351,7 +362,7 @@ class TestVectorIndexApiConsumption:
             vector_index_api="cypher",
         )
         assert "vector" in results
-        assert [h[0] for h in results["vector"]] == ["near-1", "near-2"]
+        assert [h[0] for h in results["vector"]] == ["near-2", "near-1"]
         qn = [c for c in graph.calls if "querynodes" in c.lower()]
         assert len(qn) == 1
         assert "vecf32($query_vec)" in qn[0]
