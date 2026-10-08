@@ -1804,8 +1804,12 @@ def rrf_fusion(
             # NaN, and tuple comparison against NaN is False in BOTH directions,
             # so the ``(-score, id)`` key below silently degrades to insertion
             # order for those candidates — losing the determinism #2952
-            # established. An INFINITE weight is different: ``inf == inf`` is
-            # True, so the order stays deterministic. A candidate carried only by
+            # established. An INFINITE weight does not damage the ORDER
+            # (``inf == inf`` is True) but it does destroy the SCORE signal: one
+            # leg's infinite scores swamp every other leg. The guard below is
+            # therefore ``not isfinite``, deliberately collapsing BOTH NaN and
+            # ±inf to 1.0 — and it warns, rather than substituting silently. A
+            # candidate carried only by
             # another leg keeps a finite score, so the SCORE damage is per-leg —
             # but the ORDER damage is global: NaN compares False in BOTH
             # directions against everything, so the comparator is inconsistent
