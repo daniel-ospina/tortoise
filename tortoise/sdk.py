@@ -4523,7 +4523,12 @@ class TortoiseSDK:
         for a genuine deletion — into a fresh EMPTY graph (#6666 class). The
         predicate is therefore state-gated: the graph-abort family is retried
         ONLY while the graph key is present (``_graph_exists``), and a deletion
-        raises LOUD. This also fixes the C core (the documented default lane and
+        raises LOUD. **Scope of that guarantee:** it covers a deletion that lands
+        while the write is IN FLIGHT (the abort path). A deletion that completes
+        BEFORE the write is issued produces no engine error at all — there is
+        nothing for a predicate to see — and the write auto-creates the graph;
+        that interleaving is not this retry's to guard (#7685). This also fixes
+        the C core (the documented default lane and
         the image the CI docker lane provisions), whose rebuild literal the #7615
         predicate did not match at all — for a rebuild whose recreate has landed
         before the abort is classified. A slower C-core rebuild, still inside its
@@ -4540,7 +4545,8 @@ class TortoiseSDK:
         predicate BEFORE it sleeps, so the backoff is 1-8 s — so the re-issue is
         probed AGAIN immediately before the write (``_issue`` raises the captured
         abort when the key is absent). That shrinks the exposed window from the
-        backoff to the probe→``GRAPH.QUERY`` round trip on one client connection.
+        backoff to the probe→``GRAPH.QUERY`` round trip (the ``falkordb`` client
+        pools connections, so the two probes may not share one).
         Closing it completely would need an identity token for the graph that the
         engine does not expose — an engine-side change, out of scope here
         (#7685's escalation line).

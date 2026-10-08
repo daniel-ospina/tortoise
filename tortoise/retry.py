@@ -147,7 +147,7 @@ def _abort_arm(exc: BaseException) -> str | None:
     it on ``EXISTS``, refusing a legitimate contended/persistence write whenever
     the key was missing (#7685 review round 2).
 
-    Precedence: the ``\A``-ANCHORED arm is decided FIRST. A match at the message
+    Precedence: the ``\\A``-ANCHORED arm is decided FIRST. A match at the message
     start is the strongest signal available — the message IS that abort — while
     ``_MISCONF_RE`` is an unanchored search. On a message that carries both, the
     unanchored MISCONF must therefore NOT win: that would send a genuine
@@ -269,10 +269,12 @@ def graph_abort_family(exc: BaseException) -> bool:
     re-issue-time probe was applied to every arm, which turned a contended or
     persistence-refused write into a hard failure whenever the key was missing.)
 
-    Reads :func:`_abort_arm`, the same classifier the predicate uses, so a
-    message that carries BOTH an unconditional clause and a graph-abort clause is
-    classified state-independent by both — never authorized as one and gated as
-    the other (#7685 review round 3).
+    Reads :func:`_abort_arm`, the same classifier the predicate uses, so the
+    authorization and the gating can never disagree. On a message that carries
+    BOTH clauses the ``\\A``-anchored graph-abort arm wins when it LEADS the
+    message — and the family then reports True — because that anchored match
+    means the message IS that abort; the unanchored MISCONF arm is the
+    fallback for a message that merely mentions persistence.
     """
     return _abort_arm(exc) == _ARM_GRAPH_ABORT
 
