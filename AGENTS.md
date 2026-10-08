@@ -22,7 +22,7 @@ If none of those apply: **keep going.** The user can interrupt if they disagree.
 
 **Invalid reasons to stop:** Any question whose answer is trivially "yes" e.g.:
 - "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?" (waste of user time; you should continue)
-- "On to the next step?" "Does that look right?" "Everything OK so far?" (unless P0 risk, continue or double-check and then continue)
+- "On to the next step?" "Does that look right?" "Everything OK so far?" (unless P0 consequence risk — that is a real gate, so stop — otherwise double-check and continue)
 - Any handoff where the user has nothing to decide (no reason to stop)
 - Another issue fixes this (then fix that issue)
 - context is almost exhausted (context auto-compacts)
@@ -31,8 +31,6 @@ If none of those apply: **keep going.** The user can interrupt if they disagree.
 Also, when you encounter a **pre-existing bug** (not introduced by your current work).
 
 ---
-
-Context auto-compacts
 
 ## ⛔ HARD RULE: Process Discipline
 
