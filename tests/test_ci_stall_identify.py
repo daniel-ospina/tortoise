@@ -52,11 +52,15 @@ def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
     )
     # `faulthandler_timeout` is global, so every workflow's pytest leg must be
     # checked — a shorter `--timeout` added to any of them would silently make
-    # the dump timer a no-op on that leg (a commented-out line is inert).
+    # the dump timer a no-op on that leg. Backslash continuations are folded
+    # first, or a flag on a continuation line has no `pytest` beside it.
+    text = "\n".join(
+        path.read_text(encoding="utf-8").replace("\\\n", " ")
+        for path in sorted(WORKFLOWS_DIR.glob("*.yml"))
+    )
     budgets = [
         int(m)
-        for path in sorted(WORKFLOWS_DIR.glob("*.yml"))
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if not line.lstrip().startswith("#") and "pytest" in line
         for m in re.findall(r"--timeout[= ](\d+)", line)
     ]
