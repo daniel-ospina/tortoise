@@ -2940,10 +2940,12 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     retry re-enters ``create_org`` where ``org_by_name`` now finds the row the
     FIRST attempt created — a 409 for the caller's own organization.
 
-    This resolves that retry WITHOUT weakening the refusal: it returns the
-    create response ONLY when the existing org is unambiguously the caller's
-    own org, and every other duplicate is still a 409. The safe rule,
-    established from the data:
+    This resolves the advertised retry ONLY on the observation that the
+    abandoned FIRST attempt has ALREADY COMMITTED — which is the case a
+    retry that observes the collision is in by definition. It refuses nothing
+    that should still refuse: it returns the create response ONLY when the
+    existing org is unambiguously the caller's own org, and every other
+    duplicate is still a 409. The safe rule, established from the data:
 
     - the caller must be an ACTIVE **owner** of the org (``role='owner'``,
       ``status='active'``). An active member/admin of someone else's org owns
@@ -2959,6 +2961,18 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     Returns ``{"org_id", "graph_name", "tier"}`` (the create response minus
     ``name``, which the caller already holds) or None (→ the caller's 409).
     The caller has already resolved ``org_id`` from ``org_by_name``.
+
+    DECLARED RESIDUAL (not closed here, recorded on #7677): while the abandoned
+    first attempt is STILL RUNNING and has not yet committed, ``org_by_name``
+    returns None, so the retry proceeds as a fresh create, mints a new
+    ``org_id`` (materialising an orphan ``org_<id>`` graph) and only then loses
+    the name race to the 0011 unique violation — the same 409. On the current
+    single-process topology the per-user in-process ``_org_create_lock`` makes
+    the retry queue behind the abandoned handler and then reach this replay, so
+    that window is not reachable; it IS reachable where more than one process
+    or instance serves the caller (the registry lane's own documented
+    multi-process selfhost shape). Closing it needs a client-supplied
+    idempotency key or a cross-process interlock, not a name lookup.
     """
     row = org_by_id(cp, org_id)
     if row is None:

@@ -362,3 +362,20 @@ class TestRegistryLaneIdempotentRetry:
             params={"u": _USER1})
         r = registry_client.post("/v1/organizations", json={"name": "Acme"})
         assert r.status_code == 409, r.text
+
+    def test_pending_payment_org_still_refused(self, registry_client):
+        """#2789 parity: a not-yet-real org (``pending_payment``) is not the
+        org the create lane produces, in the registry lane too. The owner
+        membership is left ACTIVE on purpose."""
+        reg = _registry()
+        reg.query(
+            "CREATE (t:Team {id:'pp-1', name:'Acme', "
+            "graph_name:'org_pp_1', tier:'free', "
+            "subscription_status:'pending_payment'})")
+        reg.query(
+            "MATCH (t:Team {id:'pp-1'}) "
+            "CREATE (m:Membership {id:'m-pp', user_id:$u, org_id:'pp-1', "
+            "role:'owner', status:'active'})",
+            params={"u": _USER1})
+        r = registry_client.post("/v1/organizations", json={"name": "Acme"})
+        assert r.status_code == 409, r.text

@@ -16270,20 +16270,29 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # (pinned 429 → 409 → 402).
     # #7677: the registry twin of the Supabase replay — the wait-bound retry
     # by the SAME owner resolves to the org the abandoned first attempt
-    # created. Exactly one Team + an ACTIVE owner membership + a live org
-    # (``deleted_at`` unset, parity with the Supabase lane's explicit
-    # soft-delete guard); every other duplicate (different owner, non-owner or
-    # non-active membership, soft-deleted org) 409s.
+    # created. Exactly one Team + an ACTIVE owner membership + a live,
+    # real org (``deleted_at`` unset and not ``pending_payment`` — parity
+    # with the Supabase lane's explicit guards); every other duplicate
+    # (different owner, non-owner or non-active membership, soft-deleted or
+    # pending_payment org) 409s.
     dup_rows = reg.query(
         "MATCH (t:Team {name:$name}) "
-        "RETURN t.id, t.graph_name, t.tier, t.deleted_at",
+        "RETURN t.id, t.graph_name, t.tier, t.deleted_at, "
+        "t.subscription_status",
         params={"name": name},
     ).result_set
     if dup_rows:
         _replay = None
         if len(dup_rows) == 1:
-            _dup_id, _dup_graph, _dup_tier, _dup_deleted = dup_rows[0]
-            if _dup_deleted is None:
+            (_dup_id, _dup_graph, _dup_tier, _dup_deleted,
+             _dup_sub) = dup_rows[0]
+            # #2789: a pending_payment org is not a real org (no graph, hidden
+            # from every surface) and the create lane never mints it — the
+            # same exclusion `_owned_free_org_ids` states. NULL-safe in Python
+            # (a Team with no subscription_status is NOT pending_payment), so
+            # a never-deleted legacy Team still replays.
+            _is_pending = _dup_sub is not None and _dup_sub == "pending_payment"
+            if _dup_deleted is None and not _is_pending:
                 _is_owner = reg.query(
                     "MATCH (m:Membership {org_id:$oid, user_id:$uid}) "
                     "WHERE m.status = 'active' AND m.role = 'owner' "
