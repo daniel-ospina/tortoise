@@ -93,23 +93,49 @@ def test_session_view_renders_turn_points_without_crashing(capsys):
     assert "[2] ASSISTANT: hi" in out
 
 
-def test_turns_is_a_count_and_turn_points_is_the_list():
-    """The distinction the old CLI got wrong — pinned so it cannot come back."""
-    assert isinstance(DETAIL["turns"], int)
-    assert isinstance(DETAIL["turn_points"], list)
-    assert DETAIL["turns"] == len(DETAIL["turn_points"])
+def test_turns_is_a_count_and_turn_points_is_the_list(capsys):
+    """The distinction the old CLI got wrong, pinned through the REAL command.
+
+    Asserted on the command's OUTPUT, not on the module-level fixture: the
+    fixture lives in this file, so asserting on it is true by construction and
+    would pass even if `_cmd_session_view` were reverted to `len(data["turns"])`.
+    """
+    args = mock.Mock(id="sess-1")
+    with mock.patch("urllib.request.urlopen", _fake_urlopen(DETAIL)):
+        rc = _cmd_session_view(args, "k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    # a COUNT of 2 AND exactly 2 rendered turns
+    assert re.search(r"^turns\s+2$", out, re.M), out
+    assert re.search(r"^turn_points\s+2$", out, re.M), out
+    assert out.count("] USER:") + out.count("] ASSISTANT:") == DETAIL["turns"]
 
 
 # ── parity: iterate the SHARED declaration, never a local subset ──────────
 
 
-def test_cli_renders_every_field_of_the_shared_projection():
-    """Every declared field must be visible — the six-field gap this fixes."""
+def _rendered_names(out: str) -> set[str]:
+    """Field names rendered as `name value` lines, anchored at line start.
+
+    Anchored deliberately: a bare `field in out` substring check lets
+    `actor_user_id` satisfy a check for `id`, and `extracted_points` satisfy one
+    for `extracted` — a test that passes for the wrong reason.
+    """
+    return {m.group(1) for m in re.finditer(r"^(\w+)\s", out, re.M)}
+
+
+def test_session_fields_helper_carries_the_values():
+    """`_session_fields` renders the VALUES, not merely the labels.
+
+    Values are the part not guaranteed by construction — an error in the
+    rendering branches changes them. (That the helper RETURNS every declared
+    KEY is true by construction, since it iterates the declared tuple; the
+    key-name coverage that matters is asserted on the commands, below.)
+    """
     rendered = _session_fields(DETAIL)
-    missing = [f for f in SESSION_LIST_FIELDS if f not in rendered]
-    assert not missing, f"CLI drops declared projection field(s): {missing}"
-    # and the values are actually carried, not blanked
     assert rendered["id"] == "sess-1"
+    assert rendered["created_at"] == "2026-09-26T00:00:00"
     assert rendered["turns"] == "2"
     assert rendered["extracted"] == "3"
     assert rendered["harness"] == "claude-code"
@@ -118,11 +144,16 @@ def test_cli_renders_every_field_of_the_shared_projection():
     assert rendered["model"] == "claude-sonnet-4"
 
 
-def test_cli_renders_nothing_outside_the_declaration():
-    """The other direction: the CLI must not invent fields of its own."""
-    payload = dict(DETAIL)
-    payload["not_a_projection_field"] = "surprise"
-    assert set(_session_fields(payload)) == set(SESSION_LIST_FIELDS)
+def test_session_fields_helper_renders_missing_values_as_dash():
+    """Absent fields render `-`; a zero COUNT renders `0`, not `-`."""
+    rendered = _session_fields(
+        {"id": "s", "created_at": None, "turns": 0, "extracted": None,
+         "actor_user_id": None, "harness": None, "actor_display": None,
+         "machine_id": None, "model": None}
+    )
+    assert rendered["harness"] == "-"
+    assert rendered["turns"] == "0"
+    assert "None" not in set(rendered.values())
 
 
 def test_api_row_dict_serves_exactly_the_shared_projection():
@@ -169,13 +200,35 @@ def test_session_list_command_renders_every_declared_field(capsys):
 
     out = capsys.readouterr().out
     assert rc == 0
-    for field in SESSION_LIST_FIELDS:
-        assert field in out, f"`session list` drops declared field {field!r}"
+    # anchored, exact: NOT a substring test — `actor_user_id` would satisfy a
+    # substring check for `id`, so the field set is compared whole.
+    assert _rendered_names(out) == set(SESSION_LIST_FIELDS)
     # the VALUES, not merely the labels
     assert "claude-code" in out
     assert "mbp-14" in out
     assert "claude-sonnet-4" in out
     assert "me@example.com" in out
+
+
+def test_session_list_command_renders_nothing_outside_the_declaration(capsys):
+    """The other direction, through the REAL command.
+
+    Asserted on the command's output because the helper builds its result by
+    iterating the declared tuple — an assertion there is true by construction
+    and can never fail, however the renderer is changed.
+    """
+    payload = dict(DETAIL)
+    payload["not_a_projection_field"] = "surprise"
+    with mock.patch(
+        "urllib.request.urlopen", _fake_urlopen({"sessions": [payload]})
+    ):
+        rc = _cmd_session_list("k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not_a_projection_field" not in out
+    assert "surprise" not in out
+    assert _rendered_names(out) == set(SESSION_LIST_FIELDS)
 
 
 def test_session_list_command_handles_a_session_with_no_actor(capsys):
@@ -196,17 +249,16 @@ def test_session_list_command_handles_a_session_with_no_actor(capsys):
 
 
 def test_session_view_command_renders_every_declared_detail_field(capsys):
-    """`session view` prints 5 fields by hand before this — not the other 4."""
+    """`session view` printed 5 fields by hand before this — not the other 7."""
     args = mock.Mock(id="sess-1")
     with mock.patch("urllib.request.urlopen", _fake_urlopen(DETAIL)):
         rc = _cmd_session_view(args, "k", "http://example.invalid")
 
     out = capsys.readouterr().out
     assert rc == 0
-    for field in SESSION_DETAIL_FIELDS:
-        if field == "id":  # rendered as the `Session:` header
-            continue
-        assert field in out, f"`session view` drops declared field {field!r}"
+    # every declared detail field, exactly — `id` is a named line too now, so
+    # this is a superset rather than a skip-the-header loop.
+    assert _rendered_names(out) >= set(SESSION_DETAIL_FIELDS)
 
 
 # ── ONE declaration, not two that must be edited in lockstep ──────────────

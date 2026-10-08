@@ -5547,13 +5547,13 @@ def _cmd_session_list(api_key: str, api_url: str) -> int:
         return 0
 
     # #5498: every field of the shared projection, not the ID/Turns/Created
-    # subset this used to hardcode.
+    # subset this used to hardcode. Uniform `name value` lines keep the
+    # projection self-describing — a field the API serves is visible BY NAME,
+    # so a parity check can be exact rather than a substring guess.
     for s in sessions:
-        fields = _session_fields(s)
-        sid = fields.pop("id", "?")
-        print(sid)
-        for key, val in fields.items():
-            print(f"  {key:<13} {val}")
+        for key, val in _session_fields(s).items():
+            print(f"{key:<17} {val}")
+        print()
     return 0
 
 
