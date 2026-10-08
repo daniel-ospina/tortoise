@@ -436,6 +436,12 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_4241_metering_period_reconciliation.py
+  # #5388: org-enumeration completeness as a SERVER-READ property. Registered on
+  # `api` and NOT dual-registered: the file pins tortoise/hosted_api.py (the
+  # page-walk and its `order="id"` contract) and tortoise/supabase_control.py
+  # (the Content-Range total) — BOTH are SOURCE_PATTERNS["api"], and it pins no
+  # core module, so an api-only PR is exactly the case it must run on.
+  - test_5388_org_enumeration_completeness.py
   # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
   # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
   # SOURCE_PATTERN) while the metric family/writer/reader live in
