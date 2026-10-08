@@ -719,18 +719,20 @@ def _per_test_timeout_s() -> float:
     stop enforcing the moment the workflow's value moves, which is the exact
     drift it is here to catch.
 
-    Scoped to actual pytest invocations, not the whole file and not the shard line:
-    the job runs the same tests TWICE under the same per-test timer — the
-    last-failed pre-phase and the shard itself — and only the second carries
-    `matrix.watchdog_minutes`, so keying on that variable would miss the first and
-    let a lowered timer through. Every `--timeout=` this file gives pytest is a
-    bound this lane runs under, so the minimum over them is the safe read.
+    Scoped to actual pytest invocations, and read from LOGICAL lines: the workflow
+    wraps long commands with a trailing backslash, so a `--timeout=` can sit on a
+    continuation line that never mentions pytest — `python-ci.yml:2126` is exactly
+    that shape and was invisible to a physical-line scan. Comments are stripped
+    too, because the prose in this file discusses `--timeout=90`, and a comment
+    must not be able to move a budget guard in either direction.
     """
     import re
     from pathlib import Path
 
     wf = Path(".github/workflows/python-ci.yml").read_text()
-    vals = [float(v) for ln in wf.splitlines() if "pytest" in ln
+    logical = re.sub(r"\\\n\s*", " ", wf).splitlines()
+    code = [re.split(r"(?:^|\s)#", ln, maxsplit=1)[0] for ln in logical]
+    vals = [float(v) for ln in code if "pytest" in ln
             for v in re.findall(r"--timeout=(\d+(?:\.\d+)?)\b", ln)]
     assert vals, ("the workflow's per-test --timeout moved or was renamed; no "
                   "pytest invocation in python-ci.yml carries one")
