@@ -76,9 +76,13 @@ def gh_api(repo: str, url: str) -> dict:
     proc = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError, not just JSONDecodeError: the decoder also raises a plain
+        # ValueError for an integer past the int-string digit limit. A
+        # pathologically nested document raises RecursionError. Both are "this
+        # body is not a usable JSON mapping" (#6092 review round 8).
         raise DurationsBridgeError(
-            f"gh api {url} returned a body that is not JSON: {exc}"
+            f"gh api {url} returned a body that is not usable JSON: {exc}"
         ) from exc
     if not isinstance(data, dict):
         raise DurationsBridgeError(
@@ -96,8 +100,22 @@ def fetch_jobs(repo: str, run_id: str) -> list[dict]:
     page = 1
     while True:
         data = gh_api(repo, f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&page={page}")
-        jobs.extend(data.get("jobs", []))
-        if len(jobs) >= data.get("total_count", 0) or not data.get("jobs"):
+        page_jobs = data.get("jobs")
+        # `gh_api` validates the ENVELOPE is a mapping; the values it hands back
+        # are still whatever the API said. `{"jobs": null}` raised TypeError and
+        # `{"jobs": "x"}` an AttributeError in the caller (#6092 review round 8).
+        if not isinstance(page_jobs, list):
+            raise DurationsBridgeError(
+                f"gh api returned a non-list `jobs` ({type(page_jobs).__name__}) "
+                f"for run {run_id} page {page}"
+            )
+        jobs.extend(j for j in page_jobs if isinstance(j, dict))
+        total = data.get("total_count")
+        if not isinstance(total, int):
+            raise DurationsBridgeError(
+                f"gh api returned a non-integer `total_count` ({type(total).__name__})"
+            )
+        if len(jobs) >= total or not page_jobs:
             break
         page += 1
     return jobs
@@ -137,13 +155,24 @@ def pick_run(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str | None:
     """
     try:
         data = gh_api(repo, pick_run_query(repo, per_page))
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, DurationsBridgeError) as exc:
         # Behaviour parity with the old inline shell: an API failure is not fatal
         # (measurement-only workflow) — warn and let the step report "none found".
+        #
+        # This catches DurationsBridgeError too, and not merely for symmetry:
+        # ci-timing.yml runs this under `bash -e`, so an uncaught refusal would
+        # redden the weekly measurement job instead of reporting no candidate.
+        # A malformed body is the same class of event as a non-zero exit here —
+        # the fetch failed (#6092 review round 8).
         print(f"::warning::gh api run-list failed: {exc}", file=sys.stderr)
         return None
-    for run in data.get("workflow_runs", []):
-        if run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
+    workflow_runs = data.get("workflow_runs")
+    if not isinstance(workflow_runs, list):
+        print(f"::warning::gh api run-list returned a non-list `workflow_runs` "
+              f"({type(workflow_runs).__name__})", file=sys.stderr)
+        return None
+    for run in workflow_runs:
+        if isinstance(run, dict) and run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
             return str(run["id"])
     return None
 
@@ -950,6 +979,18 @@ def _manifest_of(manifest_text: str) -> dict:
             f"the manifest's `surfaces:` block is not a YAML mapping "
             f"(got {type(surfaces).__name__}) — every consumer indexes it as one"
         )
+    # Same reasoning one level down: the leg lists are `set()`-ed and iterated by
+    # the full-selection branch and by `ci_selection`, so a scalar or an explicit
+    # null there raised a bare TypeError inside the selection code (#6092 review
+    # round 8). Absent/null is allowed — those keys are optional; a wrong TYPE is
+    # not.
+    for key in ("slow_files", "carve_out", "tier1", "push_extra"):
+        if key in parsed and not isinstance(parsed[key], list):
+            value = parsed[key]
+            raise DurationsBridgeError(
+                f"the manifest's `{key}:` is not a list "
+                f"(got {type(value).__name__}) — it is iterated as one"
+            )
     return cs._normalize_surfaces(parsed)
 
 
@@ -1150,13 +1191,33 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
 # --- history / flakes -------------------------------------------------------
 
 def load_history(json_path: Path) -> list[dict]:
+    """Prior samples from the tool's OWN artifact, or [] if it is unusable.
+
+    That file is committed to this repo, so it can be hand-edited, truncated by
+    a partial write, or mangled by a merge. Only `(OSError, JSONDecodeError)`
+    used to be handled, so valid JSON of the wrong SHAPE — `[]`, `null`, a
+    `"history"` that is not a list — escaped as AttributeError/TypeError, and a
+    row missing `counts` as a KeyError from the renderer (#6092 review round 8).
+    A history seed is a nice-to-have: an unusable one degrades to no history
+    rather than failing the measurement.
+    """
     if not json_path.exists():
         return []
     try:
         data = json.loads(json_path.read_text())
-        return data.get("history", [])
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers JSONDecodeError plus the decoder's other parse
+        # failures (e.g. an integer past the int-string digit limit);
+        # RecursionError covers a pathologically nested document.
         return []
+    if not isinstance(data, dict):
+        return []
+    history = data.get("history")
+    if not isinstance(history, list):
+        return []
+    return [row for row in history if isinstance(row, dict)
+            and isinstance(row.get("counts"), dict)
+            and all(k in row["counts"] for k in COUNT_KEYS)]
 
 
 def candidate_flakes(history: list[dict]) -> list[dict]:
@@ -1247,8 +1308,14 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         "",
     ]
     if flakes:
-        lines.append("| Test | Failed (run) | Passed again (sample) |",
-                     "|---|---|---|")
+        # This call had the closing paren in the wrong place — `append(table,
+        # separator)` — so the markdown renderer raised TypeError the moment
+        # `candidate_flakes` returned anything. The flake table has therefore
+        # never rendered; the path is only reachable once two consecutive
+        # committed samples exist, which is why it survived (#6092 review round
+        # 8, found because the round-8 history tests reach it).
+        lines.append("| Test | Failed (run) | Passed again (sample) |")
+        lines.append("|---|---|---|")
         for f in flakes:
             lines.append(f"| `{f['test']}` | `{f['run_id']}` | {f['passed_at']} |")
     else:
@@ -1262,9 +1329,15 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     ]
     for row in history:
         c = row["counts"]
-        lines.append(f"| {row['sample_time']} | {row.get('run_id') or '-'} | {row.get('conclusion') or '-'} "
+        # `.get` with a default, not indexing: these rows are read back from
+        # this tool's OWN committed artifact, which can be hand-edited or
+        # mangled by a merge, and an old sample written before a column existed
+        # had no `steps_max_job_ms` at all — so the renderer raised KeyError on
+        # its own history (#6092 review round 8).
+        lines.append(f"| {row.get('sample_time') or '-'} | {row.get('run_id') or '-'} "
+                     f"| {row.get('conclusion') or '-'} "
                      f"| {c['passed']} | {c['failed']} | {c['error']} | {c['skipped']} "
-                     f"| {row['steps_max_job_ms'] / 1000:.0f} |")
+                     f"| {(row.get('steps_max_job_ms') or 0) / 1000:.0f} |")
     if not history:
         lines.append("| _no history yet_ | | | | | | | |")
     lines.append("")
@@ -1488,19 +1561,24 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # A BACKSTOP for this module's own refusal class, not the sole owner of the
-    # exit-code contract (#6092 review round 7): the translation is still
-    # applied where each failure is raised, and this catches anything that
-    # reaches the boundary as a DurationsBridgeError.
+    # The boundary is TOTAL. Eight review rounds each found the next input that
+    # escaped as a traceback with rc=1: an unreadable manifest, a non-mapping
+    # body, an unusable --out-dir, a malformed leg list, a corrupt history
+    # artifact, and finally documents built to defeat the parser. The class has
+    # no natural bottom — "never traceback on any input" is an obligation over
+    # an unbounded input space — so every round of translating one more call
+    # site found the next one.
     #
-    # It cannot claim more than that. An early version of this comment said the
-    # boundary meant "no path can reach the user as a traceback with rc=1",
-    # which was false — OSError, JSONDecodeError and AttributeError still
-    # escape from I/O and parse paths that were never translated. A comment
-    # promising more than the code delivers is this repo's most serious defect
-    # class, so the claim is scoped to what is enforced.
+    # The contract is therefore enforced where it is TOTAL rather than where
+    # somebody remembered to apply it: any exception reaching this point is
+    # reported as the module's documented 2 (UNKNOWN — I could not do the job),
+    # with its type named so it stays diagnosable. The specific translations
+    # above still run first and give the useful message; this is what makes the
+    # promise hold for the inputs nobody thought of.
+    #
+    # `BaseException` is deliberately NOT caught: an interrupt is not a refusal.
     try:
         sys.exit(main())
-    except DurationsBridgeError as exc:
-        print(f"2: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"2: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(2)

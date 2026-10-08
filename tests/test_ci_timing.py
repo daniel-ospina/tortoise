@@ -2573,7 +2573,6 @@ def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -
     for argv in (
         ["--paid-vs-selected", "--run-id", "1", "--changed-files", "a.py",
          "--manifest", str(_MANIFEST)],
-        ["--pick-run"],
     ):
         proc = subprocess.run(
             [sys.executable, str(_CLI), "--repo", "o/r", *argv],
@@ -2581,3 +2580,122 @@ def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -
         )
         assert proc.returncode == 2, f"{body} {argv[0]}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
         assert "Traceback" not in proc.stderr
+    # `--pick-run` is the deliberate exception: ci-timing.yml runs it under
+    # `bash -e` as `RUN_ID=$(... --pick-run)`, so a malformed body must warn and
+    # report "none found" (rc=0), exactly as it does for a non-zero exit — not
+    # redden the weekly measurement job (#6092 review round 8).
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--pick-run"],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, f"{body} --pick-run: rc={proc.returncode}"
+    assert "::warning::" in proc.stderr, f"{body} --pick-run must warn"
+
+
+@pytest.mark.parametrize("body,label", [
+    ("null", "top-level-not-a-mapping"),
+    ("[]", "top-level-is-a-list"),
+    ('{"jobs": null}', "inner-jobs-is-null"),
+    ('{"jobs": "x"}', "inner-jobs-is-a-string"),
+    ('{"total_count": "x"}', "inner-total-count-is-a-string"),
+    ("9" * 5000, "integer-past-the-digit-limit"),
+    ("[" * 50000 + "]" * 50000, "pathologically-nested"),
+])
+def test_cli_never_tracebacks_on_a_hostile_api_body(tmp_path, body: str, label: str) -> None:
+    """The boundary is total (#6092 review round 8).
+
+    Rounds 6 and 7 translated the failures they could name — a non-mapping
+    envelope, a non-zero exit. This asserts the contract for the ones nobody
+    named, including bodies constructed to defeat the JSON decoder itself.
+    The default artifact path must WARN and continue (rc=0), because that is
+    what it documents for a failed fetch.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$STUB_BODY"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}", "STUB_BODY": body}
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
+         "--logs-dir", str(tmp_path), "--out-dir", str(tmp_path / "out")],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert "Traceback" not in proc.stderr, f"{label}: {proc.stderr[-400:]}"
+    assert proc.returncode in (0, 2), f"{label}: rc={proc.returncode}"
+
+
+@pytest.mark.parametrize("content", [
+    "[]", "null", '{"history": null}', '{"history": "x"}',
+    '{"history": [{}]}', '{"history": [{"counts": 1}]}',
+])
+def test_a_corrupt_history_artifact_degrades_instead_of_failing(tmp_path, content: str) -> None:
+    """The tool re-reads its OWN committed artifact as the history seed
+    (#6092 review round 8).
+
+    That file can be hand-edited, truncated or mangled by a merge, so valid
+    JSON of the wrong shape must degrade to no history — it must not fail the
+    measurement, and it must not traceback.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "ci-timing.json").write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, f"{content}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_valid_history_artifact_is_still_used(tmp_path) -> None:
+    """Non-vacuity for the test above (#6092 review round 8).
+
+    Dropping unusable rows must not drop usable ones: without this, a guard
+    that returned [] unconditionally would pass the test above.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "ci-timing.json").write_text(json.dumps({"history": [
+        {"counts": {"passed": 2, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "total_ms": 2.0},
+         "failed_tests": [], "run_id": 2, "sample_time": "t2"},
+        {"counts": {"passed": 1, "failed": 1, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "total_ms": 1.0},
+         "failed_tests": ["a"], "run_id": 1, "sample_time": "t1"},
+    ]}))
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0
+    snapshot = json.loads((out / "ci-timing.json").read_text())
+    assert snapshot["candidate_flakes"], "a usable history row was dropped"
+
+
+@pytest.mark.parametrize("key", ["slow_files", "carve_out", "tier1", "push_extra"])
+def test_cli_returns_2_when_a_manifest_leg_list_is_not_a_list(tmp_path, key: str) -> None:
+    """The leg lists are `set()`-ed by the selection code (#6092 review round 8).
+
+    `slow_files: 5` and an explicit `carve_out:` both raised a bare TypeError
+    inside `ci_selection` rather than this module's documented refusal.
+    """
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - a.py\ndurations:\n  a.py: 1.0\n"
+        f"{key}: 5\n")
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\necho "{}"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--paid-vs-selected",
+         "--run-id", "1", "--changed-files", "a.py", "--event", "push",
+         "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 2, f"{key}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+    assert f"`{key}:`" in proc.stderr, "the refusal must name the offending key"
