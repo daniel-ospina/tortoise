@@ -395,9 +395,18 @@ def client_capture_floor_verdict(
         return VERDICT_DISABLED, (
             "client_captured_at_source is 'unknown' — an admitted backfill gap, "
             "which can never be counted as a floor pass")
-    if install_at is None or isinstance(install_at, bool):
+    if install_at is None:
         return VERDICT_DISABLED, (
             "no install probe recorded for this harness — the floor cannot be "
+            "evaluated")
+    # A recorded-but-UNUSABLE probe is not an ABSENT one. The reason string is the
+    # only signal a refused capture carries, so misattributing the cause here (the
+    # round-5 review caught it) would send a reader looking for a missing probe
+    # when the probe exists and is malformed.
+    if isinstance(install_at, bool):
+        return VERDICT_DISABLED, (
+            f"install_at is a {type(install_at).__name__}, not a unix timestamp "
+            "— the recorded probe value is unusable, so the floor cannot be "
             "evaluated")
     # A non-finite install time is not an observation either: `inf` makes the
     # floor unreachable and `nan` makes every comparison false.

@@ -848,7 +848,7 @@ def test_floor_refuses_a_non_numeric_or_bool_instant():
         verdict, reason = client_capture_floor_verdict(
             client, "cli_observed", INSTALL)
         assert verdict == VERDICT_DISABLED, f"{client!r}: {verdict} / {reason}"
-    for install in (True, float("inf")):
+    for install in (True, float("inf"), "123", b"123", 10 ** 400):
         verdict, reason = client_capture_floor_verdict(
             INSTALL + 1, "cli_observed", install)
         assert verdict == VERDICT_DISABLED, f"install={install!r}: {verdict} / {reason}"
