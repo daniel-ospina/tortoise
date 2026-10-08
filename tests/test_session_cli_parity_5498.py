@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from unittest import mock
 
-from tortoise.__main__ import _cmd_session_view, _session_fields
+from tortoise.__main__ import (
+    _cmd_session_list,
+    _cmd_session_view,
+    _session_fields,
+)
 from tortoise.hosted_api import _session_row_dict
 from tortoise.session_projection import (
     SESSION_DETAIL_FIELDS,
@@ -83,9 +88,9 @@ def test_session_view_renders_turn_points_without_crashing(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     # the count comes from `turns`, the rendered turns come from `turn_points`
-    assert "Turns:   2" in out
-    assert "hello" in out
-    assert "hi" in out
+    assert re.search(r"^turns\s+2$", out, re.M), out
+    assert "[1] USER: hello" in out
+    assert "[2] ASSISTANT: hi" in out
 
 
 def test_turns_is_a_count_and_turn_points_is_the_list():
@@ -145,3 +150,77 @@ def test_detail_projection_is_the_shared_list_plus_detail_only_fields():
     assert extras == {"turn_points", "extracted_points", "source"}
     missing = [f for f in SESSION_DETAIL_FIELDS if f not in DETAIL]
     assert not missing, f"detail fixture is missing declared field(s): {missing}"
+
+
+# ── the renderers themselves, not just the helper they share ──────────────
+#
+# `_session_fields` being correct does NOT prove the commands use it. A test
+# that only exercises the helper stays green if `_cmd_session_list` is reverted
+# to its old hardcoded `ID / Turns / Created` table — which is the very
+# regression this change fixes. So drive the REAL command bodies.
+
+
+def test_session_list_command_renders_every_declared_field(capsys):
+    """The regression: `session list` dropped 6 of the 9 declared fields."""
+    with mock.patch(
+        "urllib.request.urlopen", _fake_urlopen({"sessions": [DETAIL]})
+    ):
+        rc = _cmd_session_list("k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    for field in SESSION_LIST_FIELDS:
+        assert field in out, f"`session list` drops declared field {field!r}"
+    # the VALUES, not merely the labels
+    assert "claude-code" in out
+    assert "mbp-14" in out
+    assert "claude-sonnet-4" in out
+    assert "me@example.com" in out
+
+
+def test_session_list_command_handles_a_session_with_no_actor(capsys):
+    """A legacy row must render `-`, never the string `None`."""
+    legacy = dict(DETAIL)
+    legacy["actor_user_id"] = None
+    legacy["actor_display"] = None
+    legacy["machine_id"] = None
+    legacy["model"] = None
+    with mock.patch(
+        "urllib.request.urlopen", _fake_urlopen({"sessions": [legacy]})
+    ):
+        rc = _cmd_session_list("k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "None" not in out
+
+
+def test_session_view_command_renders_every_declared_detail_field(capsys):
+    """`session view` prints 5 fields by hand before this — not the other 4."""
+    args = mock.Mock(id="sess-1")
+    with mock.patch("urllib.request.urlopen", _fake_urlopen(DETAIL)):
+        rc = _cmd_session_view(args, "k", "http://example.invalid")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    for field in SESSION_DETAIL_FIELDS:
+        if field == "id":  # rendered as the `Session:` header
+            continue
+        assert field in out, f"`session view` drops declared field {field!r}"
+
+
+# ── ONE declaration, not two that must be edited in lockstep ──────────────
+
+
+def test_the_sdk_read_tuple_is_the_same_object_as_the_shared_declaration():
+    """#3557 declared these in `sdk.py`; #5498 hoisted them into one module.
+
+    Identity, not equality: an equal-but-separate tuple in `sdk.py` would be a
+    second copy that has to be edited in lockstep — the drift class this change
+    removes. `tests/test_hosted_api.py` binds whichever object `tortoise.sdk`
+    exposes, so that assertion only means something if it IS this one.
+    """
+    from tortoise.sdk import SESSION_READ_FIELDS as SDK_READ_FIELDS
+    from tortoise.session_projection import SESSION_READ_FIELDS
+
+    assert SDK_READ_FIELDS is SESSION_READ_FIELDS

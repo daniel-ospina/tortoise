@@ -57,6 +57,10 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
+# #5498: the session read projection lives in ONE dependency-free module so the
+# self-hosted CLI can derive from it too; re-exported here because the SDK read
+# and `tests/test_hosted_api.py` bind it under this name.
+from .session_projection import SESSION_READ_FIELDS  # noqa: F401
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
@@ -1616,31 +1620,13 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
     return match.group(1), stored[match.end():]
 
 
-#: The durable-session read projection (#3557): the field list the hosted
-#: read surfaces (`GET /v1/sessions` and `GET /v1/sessions/{id}`) both serve,
-#: and the subset `TortoiseSDK.get_session` returns for a captured `:Session`.
-#: The hosted handlers spell these column names inline — the shared surface is
-#: the declared NAMES, not a shared import — so this tuple is the SDK-side
-#: declaration and the parity test BINDS the two in BOTH directions: it
-#: iterates this tuple (a field dropped from or renamed on the SDK read
-#: reddens it) AND pins the detail response's key SET to this tuple plus the
-#: detail endpoint's known extras — `actor_display`, `turn_points`,
-#: `extracted_points`, `source` — so a column ADDED to the hosted detail
-#: handler reddens it too, the direction the inline columns would otherwise
-#: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
-#: way (this tuple plus `actor_display`); its `extracted` COUNT is pinned too
-#: — the list counts with the same non-turn predicate as the detail endpoint
-#: and the SDK read, so all three agree (#3555).
-#: Ordered as the hosted handlers append their
-#: columns: existing positions are stable and new columns go at the END, so
-#: a consumer reading positionally never shifts.
-#: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
-#: additionally serves `actor_display`, the point lists and `source`; those
-#: are derived per-request and are deliberately not part of this shared list.)
-SESSION_READ_FIELDS: tuple[str, ...] = (
-    "id", "created_at", "turns", "extracted",
-    "actor_user_id", "harness", "machine_id", "model",
-)
+#: The durable-session read projection (#3557) — see
+#: `tortoise/session_projection.py` for the declaration and the binding notes.
+#:
+#: ⛔ Do NOT reintroduce a literal tuple at this site. The field list used to be
+#: spelled here AND in the hosted handlers' inline columns, which is how
+#: `session list` came to drop six of nine fields while its own API served
+#: them (#5498). Name bound by the import at the top of this module.
 
 
 def _capture_turn_embeddings(

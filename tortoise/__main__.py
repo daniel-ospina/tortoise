@@ -5492,20 +5492,26 @@ def _cmd_sessions_import(args) -> int:
     return 0
 
 
-def _session_fields(s: dict) -> dict[str, str]:
-    """Render one session's FULL shared projection as label -> display value.
+def _session_fields(s: dict, fields: tuple[str, ...] | None = None) -> dict[str, str]:
+    """Render a session's FULL projection as label -> display value.
 
-    Driven by `SESSION_LIST_FIELDS` (#5498): a field the API serves cannot be
-    silently absent from the CLI, because this iterates the shared declaration
+    Driven by the shared declaration (#5498): a field the API serves cannot be
+    silently absent from the CLI, because this iterates the declaration
     instead of holding a local copy of it. That local copy is exactly how
     `session list` came to drop six of the nine fields it was meant to show.
     """
     from tortoise.session_projection import SESSION_LIST_FIELDS
 
+    if fields is None:
+        fields = SESSION_LIST_FIELDS
+
     out: dict[str, str] = {}
-    for field in SESSION_LIST_FIELDS:
+    for field in fields:
         val = s.get(field)
-        if val is None or val == "":
+        if field in ("turn_points", "extracted_points"):
+            # the point LISTS render as their own section / a count
+            out[field] = str(len(val)) if isinstance(val, list) else "0"
+        elif val is None or val == "":
             out[field] = "-"
         elif field == "created_at" and isinstance(val, str):
             out[field] = val[:19]
@@ -5574,18 +5580,18 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
         return 1
 
     print(f"Session: {session_id}")
-    print(f"Created: {data.get('created_at', data.get('created', '?'))}")
-    # #5498: `turns` is the COUNT and `turn_points` is the LIST. Reading the
-    # count as the list and calling len() on it raised
+    # #5498: EVERY declared detail field, derived from the shared declaration —
+    # not a hand-picked handful that silently omits the rest. `turns` is the
+    # COUNT and the LIST is `turn_points`; reading the count as the list and
+    # calling len() on it raised
     # `TypeError: object of type 'int' has no len()` on EVERY session.
+    from tortoise.session_projection import SESSION_DETAIL_FIELDS
+
+    fields = _session_fields(data, SESSION_DETAIL_FIELDS)
     turn_points = data.get("turn_points") or []
-    print(f"Turns:   {data.get('turns', len(turn_points))}")
-    if data.get("extracted") is not None:
-        print(f"Extracted: {data.get('extracted')}")
-    if data.get("harness"):
-        print(f"Harness: {data.get('harness')}")
-    if data.get("actor_display") or data.get("actor_user_id"):
-        print(f"Actor:   {data.get('actor_display') or data.get('actor_user_id')}")
+
+    for key in SESSION_DETAIL_FIELDS:
+        print(f"{key:<17} {fields[key]}")
     print()
     for i, t in enumerate(turn_points):
         role = t.get("role", "?").upper()
