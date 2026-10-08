@@ -2517,6 +2517,70 @@ from tortoise.live import (  # noqa: E402
 )
 from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
+# #5407 - the RANGE and FULL-TEXT label sets the INDEX path creates, as data, so
+# a test can compare them with the set the vector leg's declared routing
+# (`ENTITY_TYPE_LABELS.values()`) resolves to. Both were inline literals inside
+# `_ensure_indexes` with nothing tying them to that routing. `tests/
+# test_5407_index_label_parity.py` holds them together.
+#
+# NOT covered here, and deliberately not claimed: the VECTOR index. Its labels
+# are still literals (`_ensure_vector_index_api`) and it needs no range or
+# full-text index, so a served label with no vector index passes every
+# assertion below. See #5407 for that remainder.
+
+#: ``Point``'s range indexes are the one ranged set this declaration owns.
+#: Its label is written at the DDL site rather than in a ``(label, props)``
+#: pair, so the label is declared here too — otherwise the coverage assertion
+#: would have to supply the very label it is checking. (Separate DDL sites —
+#: ``Point.lastDreamedAt``, ``Session`` — carry their own labels and are not
+#: part of this declaration.)
+_POINT_RANGE_INDEX_LABEL: str = "Point"
+
+_POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
+    "id",
+    "pointKind",
+    "content_hash",
+)
+
+_RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Subject", ("id", "name")),
+    ("Object", ("id", "name")),
+    ("Event", ("eventId",)),
+    # canonicalUrl (#5012 S0b): the S0a canonical
+    # identity S0b resolves against, so the resolver
+    # is an index seek, not a label scan.
+    ("Source", ("id", "url", "canonicalUrl")),
+)
+
+_FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
+    ("Point", ["content", "search_keys"]),  # R2 (#1541) D3
+    # #244: AgentSession events populate name (not subject) — index both so
+    # session name matches surface through FTS.
+    ("Event", ["subject", "name"]),
+    ("Subject", ["name"]),
+    # #1350 S3: the extractor's entity search (existing items by name) needs
+    # the Object FTS leg — without it S3's entities bucket is dead on the real
+    # backend.
+    ("Object", ["name"]),
+    ("Source", ["_searchText"]),  # #125 Document FTS
+    # (D10: the doc node is a :Source, so the
+    # full-text leg rides the Source label).
+    # #3518: a captured session's :Source carried
+    # NO searchable text field, so
+    # `tortoise_fts_query(entity_type='source')`
+    # never resolved against this label (it
+    # degraded to `index_missing` / an empty run)
+    # and the captured session was unfindable.
+    # `_searchText` is the ONE searchable field
+    # and BOTH Source writers populate it through
+    # `sdk._source_search_text` — the indexer
+    # (`_upsert_source`, title) and the capture
+    # path (`_materialize_session_source`,
+    # title-else-summary). `summary`/`topics` are
+    # deliberately NOT indexed: a second
+    # vocabulary the FTS surface does not read.
+)
+
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
 # `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
 # text is the only signal that separates "full" from "corrupt", so it is
@@ -9394,10 +9458,11 @@ class FalkorProjection(
         # see the boolean-index policy in the docstring and the #3154 purge
         # below. The epic-903 staleness ordering rides on the plain
         # lastDreamedAt index.
-        point_props = ("id", "pointKind", "content_hash")
-        for prop in point_props:
+        for prop in _POINT_RANGE_INDEX_PROPS:
             try:
-                self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
+                self.g.query(
+                    f"CREATE INDEX FOR (n:{_POINT_RANGE_INDEX_LABEL}) "
+                    f"ON (n.{prop})")
             except Exception as e:
                 msg = str(e).lower()
                 if "already indexed" in msg or "already exists" in msg:
@@ -9512,13 +9577,7 @@ class FalkorProjection(
         # upserts. Deliberately NO status/op_type/kind-field indexes — a
         # measured 3.15x write slowdown on Point upserts with status/op_type
         # outweighs the batch-read benefit (see issue #522).
-        for label, props in (("Subject", ("id", "name")),
-                             ("Object", ("id", "name")),
-                             ("Event", ("eventId",)),
-                             # canonicalUrl (#5012 S0b): the S0a canonical
-                             # identity S0b resolves against, so the resolver
-                             # is an index seek, not a label scan.
-                             ("Source", ("id", "url", "canonicalUrl"))):
+        for label, props in _RANGE_INDEX_LABEL_PROPS:
             for prop in props:
                 try:
                     self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
@@ -9568,34 +9627,7 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, fields in [("Point", ["content", "search_keys"]),  # R2 (#1541) D3
-                                  # #244: AgentSession events populate name
-                                  # (not subject) — index both so session name
-                                  # matches surface through FTS.
-                                  ("Event", ["subject", "name"]),
-                                  ("Subject", ["name"]),
-                                  ("Object", ["name"]),  # #1350 S3: the
-                                  # extractor's entity search (existing items
-                                  # by name) needs the Object FTS leg —
-                                  # without it S3's entities bucket is dead
-                                  # on the real backend.
-                                  ("Source", ["_searchText"])]:  # #125 Document FTS
-                                  # (D10: the doc node is a :Source, so the
-                                  # full-text leg rides the Source label).
-                                  # #3518: a captured session's :Source carried
-                                  # NO searchable text field, so
-                                  # `tortoise_fts_query(entity_type='source')`
-                                  # never resolved against this label (it
-                                  # degraded to `index_missing` / an empty run)
-                                  # and the captured session was unfindable.
-                                  # `_searchText` is the ONE searchable field
-                                  # and BOTH Source writers populate it through
-                                  # `sdk._source_search_text` — the indexer
-                                  # (`_upsert_source`, title) and the capture
-                                  # path (`_materialize_session_source`,
-                                  # title-else-summary). `summary`/`topics` are
-                                  # deliberately NOT indexed: a second
-                                  # vocabulary the FTS surface does not read.
+            for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:
                 try:
                     # #H05: the creation FORM is version-dependent -- the
                     # historical multi-field procedure is rejected by FalkorDB
@@ -10266,8 +10298,12 @@ class FalkorProjection(
                 # deleted raw on every rebuild. That is the silent loss this
                 # issue exists to prevent, on the one path whose comment already
                 # says a live-writer fix cannot retire the bytes.
-                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here, although
-                # `entities._SOURCE_IDENTITY_PROPS`' docstring says it is. Making
+                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here. (This NOTE
+                # used to continue "although `entities._SOURCE_IDENTITY_PROPS`'
+                # docstring says it is" — #5196 removed that claim from the
+                # docstring, so the NOTE was citing text that no longer exists. It
+                # is corrected rather than left pointing at a vanished claim.)
+                # Making
                 # the code match that comment would change what an
                 # `EntityMutated` replay does with `url`/`canonicalUrl`/
                 # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
