@@ -2667,7 +2667,12 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
-        self.assertIn("terminal tests are NOT applied here", remote_row)
+        # #7693 narrowed the claim: the terminal tests still do not run on a
+        # remote ref's NAME, but an EXACT tip match against a local ref this run
+        # proved terminal now IS demoted. The load-bearing half is unchanged —
+        # the row still reports no merged COUNT for this namespace.
+        self.assertIn("terminal tests are not applied to these refs by name", remote_row)
+        self.assertIn("#7693", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
     def test_remote_tracking_ref_is_not_judged_terminal(self):
@@ -2693,6 +2698,50 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
         self.assertNotIn("squash-merged", out)
+
+    def test_remote_twin_of_a_terminal_local_branch_is_demoted(self):
+        # #7693. `refs/remotes/origin/x` and `refs/heads/x` at ONE sha are the
+        # same immutable commit, so when the local surface has already PROVEN
+        # that tip terminal the remote twin is the same history, not a holder.
+        # Without this the merged branch's remote copy refused every dispatch
+        # for good while the local copy was correctly demoted in the row above
+        # it — the defect this test pins.
+        ref = f"fix/{ISSUE}-landed"
+        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4243, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        # The demotion must SAY why — an exact tip match, not the name.
+        self.assertIn("SAME COMMIT", out)
+
+    def test_remote_twin_at_a_different_sha_still_blocks(self):
+        # #7693, the fail-closed half. A REUSED branch has moved, so its remote
+        # tip no longer matches the terminal LOCAL tip: no exact match, no
+        # demotion, and the ref keeps blocking. A name match alone must never
+        # demote — that is the false-CLEAN direction the surface note warns
+        # about, and this is the case that note is protecting.
+        ref = f"fix/{ISSUE}-moved"
+        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
+        local_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "commit", "--allow-empty", "-m", "advance")
+        moved_sha = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", moved_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4244, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": local_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
 
     def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
         # C2-2. The absent-field contract is applied PER ELEMENT too. A field

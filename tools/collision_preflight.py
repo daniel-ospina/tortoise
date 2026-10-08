@@ -4001,6 +4001,16 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
+    # #7693: sha -> (local ref, why) for LOCAL refs this run has PROVEN terminal.
+    # The local namespace is scanned first, so this is populated before the
+    # remote pass reads it. It exists because the terminal tests cannot run on a
+    # remote-tracking ref (`_branch_terminal_state` refuses to judge one) while
+    # the ref's NAME still matches the issue number and so still blocks — so a
+    # merged branch's remote twin refused every dispatch for good. An EXACT tip
+    # match is safe where a name match is not: `refs/remotes/o/x` and
+    # `refs/heads/x` at one sha are the same immutable commit, whereas a REUSED
+    # branch has moved and its tip no longer matches, so it still blocks.
+    local_terminal_shas: dict[str, tuple[str, str]] = {}
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -4049,10 +4059,15 @@ def run_preflight(
                         continue
                     if identity.owns_branch(_ref):
                         continue
-                    if _branch_terminal_state(
+                    _state = _branch_terminal_state(
                         _ref, _sha, merged_head_shas, ancestor_merged, main_tip,
                         first_parent,
-                    ) is not None:
+                    )
+                    if _state is not None:
+                        if _sha:
+                            local_terminal_shas[_sha] = (
+                                _ref, f"branch is {_state}"
+                            )
                         continue
                     try:
                         _reason = _branch_terminal_state_from_prs(
@@ -4065,6 +4080,30 @@ def run_preflight(
                         continue
                     if _reason is not None:
                         targeted_terminal[_ref] = _reason
+                        if _sha:
+                            local_terminal_shas[_sha] = (_ref, _reason)
+            else:
+                # #7693: the remote twin of a branch this run proved terminal on
+                # the LOCAL surface. Demote it ONLY on an EXACT tip match against
+                # a tip already proven terminal — never on the name alone, which
+                # is the false-CLEAN direction the surface note warns about. A
+                # reused branch has moved, so its tip differs and it still
+                # blocks; a ref whose terminal witness could not be read simply
+                # finds no entry here and also still blocks.
+                for _ref, _sha in refs:
+                    if _sha is None or not number_present(_ref, issue):
+                        continue
+                    if _is_generated_branch(_ref):
+                        continue
+                    _witness = local_terminal_shas.get(_sha)
+                    if _witness is None:
+                        continue
+                    _local_ref, _why = _witness
+                    targeted_terminal[_ref] = (
+                        f"its tip {_sha[:12]} is the SAME COMMIT as {_local_ref}, which "
+                        f"this run proved terminal ({_why}) — an exact tip match, so "
+                        "this is the same immutable history and not a live holder"
+                    )
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
@@ -4074,9 +4113,11 @@ def run_preflight(
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
                 surface.note += (
-                    "; terminal tests are NOT applied here (a remote-tracking ref "
-                    "is a local fetch cache, so judging it terminal could call a "
-                    "reused live branch merged)"
+                    "; terminal tests are not applied to these refs by name (a "
+                    "remote-tracking ref is a local fetch cache, so judging it "
+                    "terminal on its NAME could call a reused live branch merged) — "
+                    "but a ref whose tip is an EXACT match for a local ref this run "
+                    "proved terminal IS demoted (#7693)"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict
