@@ -3515,7 +3515,8 @@ _APPLY_WARN_ONLY_TYPES: frozenset[str] = frozenset({
 # every recognized non-point record is a no-op there as well: the non-point
 # entities and the flat edge descriptor have no representation in that index.
 # Union with ``_NO_PROJECTION_FOLD`` so this dispatcher's warning, like the
-# Falkor ones, fires only for a type outside the projection vocabulary.
+# Falkor ones, does not fire for a recognized record this index only defers
+# (the non-point entities and the flat edge descriptor).
 # NOTE: the point-lifecycle types folded by ``apply``/``rebuild_all``
 # (PointPromoted / OperatorPromoted / PointSuperseded / PointInvalidated) are
 # deliberately NOT listed — this index has no fold for them, so the warning is
@@ -3537,8 +3538,9 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     # ``{id: point}`` index (a Session node is not a Point; the about* edge
     # is a flat descriptor) — so without them every replayed record logged
     # the ``unrecognized event type`` warning, contradicting the set's
-    # documented contract that the warning is reserved for a type OUTSIDE
-    # the vocabulary.
+    # documented contract that a record folded by both graph engines must not
+    # reach that warning (the four point-lifecycle types are the deliberate
+    # exception — see the NOTE above).
     "EntityLinked",
     "SessionRecorded",
 })
@@ -4313,9 +4315,10 @@ def _apply_one(points: dict[str, dict], ev: dict,
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
-        # and the non-point/edge records with no ``{id: point}`` entry. This
-        # warning is reserved for a type OUTSIDE the vocabulary (see the
-        # ``_NO_PROJECTION_FOLD`` / ``_NO_POINT_FOLD`` rationale above).
+        # and the non-point/edge records with no ``{id: point}`` entry. The
+        # warning below therefore fires either for a type outside the
+        # vocabulary or for the four point-lifecycle types ``_NO_POINT_FOLD``
+        # deliberately omits (see its NOTE above).
         pass
     else:
         # P2-1 (#3299): a record type outside the recognized vocabulary must
@@ -4325,7 +4328,7 @@ def _apply_one(points: dict[str, dict], ev: dict,
             SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
             event_type=str(t), detail="in-memory fold: unrecognized type",
         )
-        logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
+        logger.warning("unrecognized event type %r — not folded by this index", t)
 
 
 def fold(events: list[dict]) -> dict[str, dict]:

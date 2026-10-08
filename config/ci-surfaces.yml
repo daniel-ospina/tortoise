@@ -2431,7 +2431,7 @@ slow_files:
 # The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
 # job's own drift-guard step fails closed if the union stops matching this list.
-# Both legs are budgeted from that weight (a 40m watchdog under a 45m cap for
+# Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
 # 19.722m / 19.725m legs), pinned by
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
