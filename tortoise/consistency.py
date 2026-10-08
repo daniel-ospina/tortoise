@@ -1234,6 +1234,15 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # engines fold (review round 6, P1). An id with no merge key recorded here
     # has no graph node this fold can model, so the guard stays fail-OPEN for it.
     merge_key_by_id: dict[tuple[str, str], str] = {}
+    # #5285 cycle-7: ids whose journal CREATION produced NO graph node at all,
+    # because `_writable_id` skips an empty / non-writable MERGE key. The graph's
+    # state-op fold is `MATCH (n:$label {id:$rid})`, so for these ids it is a
+    # 0-row miss and every replay engine refuses `state-op-miss`. "No merge key"
+    # is therefore DECIDABLE here (`rec` exists, so the journal DID create the
+    # id) and must not be treated as unmodelled: review round 7 found 12 journals
+    # the three replay engines refuse while this fold accepted them, in the
+    # fail-OPEN direction, on the previous head.
+    no_node_ids: set[tuple[str, str]] = set()
     # #5285 (DEFECT 2): ``name -> [keys]``, populated ONCE after the walk and
     # read by `_object_target`'s trailing sweep. Declared here so the closure
     # below resolves it at call time.
@@ -1342,18 +1351,19 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             _merge_key = (_merge_key if isinstance(_merge_key, str) and _merge_key
                           else None)
             if label in _NAME_MERGE_LABELS:
-                # The graph MERGEs Object/Subject by name, so the LAST
-                # registration of a merge key OWNS its node id — the MERGE
-                # re-ids the existing node, REMOVING the earlier id. Update the
-                # carriers AT THIS SEQ; a re-creation of the same id under a new
-                # key drops the id from its OLD key's set first.
-                _old = merge_key_by_id.pop((label, eid), None)
-                if _old is not None:
-                    _prev = carriers_by_name.get((label, _old))
-                    if _prev is not None:
-                        _prev.discard(eid)
                 if _merge_key is not None:
+                    # The graph MERGEs Object/Subject by name, so the LAST
+                    # registration of a merge key OWNS its node id — the MERGE
+                    # re-ids the existing node, REMOVING the earlier id. Update
+                    # the carriers AT THIS SEQ; a re-creation of the same id
+                    # under a new key drops the id from its OLD key's set first.
+                    _old = merge_key_by_id.pop((label, eid), None)
+                    if _old is not None:
+                        _prev = carriers_by_name.get((label, _old))
+                        if _prev is not None:
+                            _prev.discard(eid)
                     merge_key_by_id[(label, eid)] = _merge_key
+                    no_node_ids.discard((label, eid))
                     _live = carriers_by_name.setdefault(
                         (label, _merge_key), set())
                     if len(_live) > 1:
@@ -1366,6 +1376,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     else:
                         _live.clear()
                         _live.add(eid)
+                elif (label, eid) not in merge_key_by_id:
+                    # #5285 cycle-7: the graph writes NOTHING for this creation —
+                    # no node exists for the id, so a state op on it is refused
+                    # `state-op-miss` exactly as the graph's 0-row MATCH is.
+                    no_node_ids.add((label, eid))
+                # else: an UNUSABLE name on an id that ALREADY has a merge key is
+                # a graph NO-OP — `MERGE` on the unchanged key keeps the node and
+                # its id. The existing key and carriers are therefore PRESERVED;
+                # popping them hid the later collapse from the guard (review
+                # round 7, P1).
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
@@ -1447,6 +1467,20 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # become a false refusal. The guard fires only when the name IS
                 # indexed and this id is NOT among its live carriers (the
                 # collapsed-away case).
+                # #5285 cycle-7 (P1): an id whose CREATION produced no graph node
+                # (an empty / non-writable merge key) is a 0-row miss there, so
+                # the reference fold must refuse it too. This check sits BEFORE
+                # the fold, so it covers the rename arm as well.
+                if (label in _NAME_MERGE_LABELS
+                        and (label, eid) in no_node_ids):
+                    record_non_folded(
+                        SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                        event_type="EntityMutated", label=label, id=eid,
+                        op=op, seq=seq,
+                        detail=("reference fold: state op matched no "
+                                "entity"),
+                    )
+                    continue
                 # #5285 cycle-6 (P1): read the id's GRAPH merge key, never the
                 # display name — see `merge_key_by_id`. An id with no merge key
                 # has no node this fold models, so the guard stays fail-open.

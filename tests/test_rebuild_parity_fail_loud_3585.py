@@ -1465,6 +1465,53 @@ class TestNameMergeCarrierKeying:
     (whose empty `name` creates no graph node), one for a falsy
     `state["name"]` rename (which `SET n += $s` still applies)."""
 
+    def test_a_state_op_on_an_id_whose_creation_made_no_node_refuses(
+            self, env, tmp_path):
+        """FAILS IF: the carrier guard treats "this id has no MERGE key" as an
+        unmodelled shape and fails open. Review round 7, P1 — a fail-OPEN
+        regression, in which the reference fold accepted a `state-op-miss` all
+        three replay engines refuse (these journals AGREED before it).
+
+        `_writable_id` skips an empty / non-writable merge key, so the graph
+        creates NO node for these ids and its state-op `MATCH (n:$label
+        {id:$rid})` is a 0-row miss."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-n1", name="",
+             title="NODE1", status="live", event_id="e-n1-0")
+        _raw(events, type="ObjectRegistered", id="obj-5285-n2", name="",
+             title="NODE1", status="live", event_id="e-n1-1")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-n1",
+             op="restatus", state={"status": "superseded"}, event_id="e-n1-2")
+        _expect_refusal("rebuild_all", tmp_path, events, "n1-ra",
+                        "state-op-miss")
+        _expect_refusal("rebuild", tmp_path, events, "n1-rb", "state-op-miss")
+        _expect_recovery_refusal(tmp_path, events, "n1-rec", "state-op-miss")
+        _expect_check_refusal(env[0], events, "state-op-miss")
+
+    def test_an_unusable_name_recreation_preserves_the_merge_key(
+            self, env, tmp_path):
+        """FAILS IF: a re-CREATION of a live id with an unusable name pops the
+        merge key. Review round 7, P1 (mechanism 2).
+
+        Such a record is a graph NO-OP — `MERGE` on the unchanged key keeps the
+        node AND its id — so the id stays live. Popping the key hid the later
+        collapse from the guard, and the reference fold accepted a state op on
+        the collapsed-away id that every replay engine refuses."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-m1", name="MERGE1",
+             status="live", event_id="e-m1-0")
+        _raw(events, type="ObjectRegistered", id="obj-5285-m1", name="",
+             status="live", event_id="e-m1-1")
+        _raw(events, type="ObjectRegistered", id="obj-5285-m2", name="MERGE1",
+             status="live", event_id="e-m1-2")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-m1",
+             op="restatus", state={"status": "superseded"}, event_id="e-m1-3")
+        _expect_refusal("rebuild_all", tmp_path, events, "m1-ra",
+                        "state-op-miss")
+        _expect_refusal("rebuild", tmp_path, events, "m1-rb", "state-op-miss")
+        _expect_recovery_refusal(tmp_path, events, "m1-rec", "state-op-miss")
+        _expect_check_refusal(env[0], events, "state-op-miss")
+
     def test_a_title_only_registration_does_not_evict_a_live_carrier(
             self, env, tmp_path):
         """FAILS IF: the carrier index is keyed on the fold's DISPLAY name
