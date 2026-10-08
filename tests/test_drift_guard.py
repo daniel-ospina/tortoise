@@ -50,7 +50,7 @@
     edit is still red. ⚠️ THE RESIDUAL IS NOT COMPENSATED and must not be read
     as covered: a stale base whose merge into a GREEN main breaks the build
     without reverting content is no longer bounded by any distance, because the
-    merge rail re-runs a PR's checks only where it refuses BECAUSE of the lag,
+    merge rail re-measures a PR's checks only where it refuses BECAUSE of the lag,
     which it does only when the base is red.
 
 Every fixture is a self-contained local git repo pair (bare remote + one or

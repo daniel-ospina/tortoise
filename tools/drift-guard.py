@@ -18,8 +18,8 @@ distance alone (24 and 21 commits) with no failing code check.
 case the revert arm does not: a stale base whose merge into a GREEN main breaks
 the build WITHOUT reverting content — a semantic or API conflict, a removed
 symbol, fixture drift. GitHub recomputes the merge ref when the base moves but
-does NOT re-run the PR's checks, and the merge rail re-runs them only where it
-refuses BECAUSE of the lag, which it does only when the base is RED. So a branch
+does NOT re-run the PR's checks, and the merge rail re-measures them only where
+it refuses BECAUSE of the lag, which it does only when the base is RED. So a branch
 far behind a green main is no longer bounded by any distance. That residual is
 UNMEASURED here — no instance of it has been observed, which is why the arm is
 reported rather than gating — but it is a real widening and NOT a compensated
