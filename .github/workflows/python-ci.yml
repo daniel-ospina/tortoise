@@ -1475,10 +1475,11 @@ jobs:
     # into these legs, taking their committed `durations` weight from 2.84m to
     # 16.21m (13.82m after the eight dual-registered files returned to the
     # fast pool), so
-    # the #3239 literal budget no longer clears the work: #5285 then added the
-    # fail-loud rebuild suite to `slow_files` and re-cut BOTH rows by LPT off
-    # the committed map — balanced at 14.192m / 14.188m, so the watchdog holds
-    # at 40m (2.82x the heavier leg) against a 28.38m floor.
+    # the #3239 literal budget no longer cleared the work: #6137 raised the
+    # watchdog to 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x).
+    # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
+    # BOTH rows by LPT off the committed map — balanced at 14.192m / 14.188m, so
+    # the watchdog holds at 40m (2.82x the heavier leg) against a 28.38m floor.
     #
     # #798 is an ORDER constraint, not just a magnitude: the in-step watchdog is
     # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
@@ -1490,15 +1491,17 @@ jobs:
     # unstated slack: the ONLY pre-pytest step in this job carrying its own
     # `timeout-minutes` is `Embedding model REQUIRED` (10m) — checkout, the CPU
     # install, the drift guard, the FalkorDB provision and the coverage-manifest
-    # `--collect-only` step are all UNBOUNDED. So of the 60 - 40 = 20m remainder,
-    # the fast job's own ~7m setup figure plus a <=10m embedder leaves ~3m for
-    # the collect-only step (both legs hold 31 files), and the ORDER invariant
-    # holds only while collect-only stays inside that. No gate enforces it —
+    # `--collect-only` step are all UNBOUNDED. Taking the `test` job's own stated
+    # `~7m setup` constant (see above) as the setup floor, the BOUNDED components
+    # alone already need ~57m — 7 + 10 + the 40m watchdog + the ~10s grace the
+    # job's SIGINT tail is written for — so 60m is the smallest literal that
+    # clears them and still leaves the unbounded collect-only step any room at
+    # all. No gate enforces that:
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
-    # literals and cannot see the pre-phase at all. The clearance being slack
-    # rather than proven is why the cap is 60 and not the minimal 52.
-    # 45m — the value this PR first used, and 40m on main — left 5m for setup
-    # alone, so the watchdog could never fire.
+    # literals and cannot see the pre-phase at all. The clearance is therefore
+    # slack, not proven — which is the opposite of a licence to lower the number.
+    # 45m — the value this PR first used — and 40m on main both left 5m for
+    # setup alone, so the watchdog could never fire.
     timeout-minutes: 60
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
