@@ -608,15 +608,21 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     name rather than the name narrowed to flatter the walk):
 
       * `tools/` + `graph-scripts/` + `docs/` in full — every text-bearing file;
-      * `.github/` ALSO, but only its HUMAN-FACING text (comments and
-        `::error::`-style annotations). A `run:` line executes on the runner's
-        3.12, where the bare form is correct, so flagging it would be
-        over-reach. See `_HUMAN_TEXT_IN_YAML`.
+      * `.github/` ALSO. Only `.github/workflows/*.yml` gets the
+        `_HUMAN_TEXT_IN_YAML` filter, because a `run:` line THERE executes on the
+        runner's pinned 3.12, where the bare form is correct, and flagging it
+        would be the over-reach this seam exists to avoid. Everything else under
+        `.github/` — issue templates, composite `action.yml`, `settings.yml` — is
+        HUMAN-FACING prose and is therefore checked IN FULL. (Review round 3: the
+        first draft filtered on "any `.yml`", which silently skipped
+        `.github/ISSUE_TEMPLATE/*.yml` — a `description:`/`value:` scalar carries
+        exactly this instruction, for real users, and a revert there went
+        undetected.)
 
-    The one-time sweep fixed the 152 occurrences in place. Without this
-    assertion it would simply be a fact about today, re-established by the next
-    person who writes a doc — which is exactly the #5128/#5136 failure the guard
-    was created for. Re-deriving it here makes the drift unrepresentable.
+    The one-time sweep fixed the occurrences in place. Without this assertion it
+    would simply be a fact about today, re-established by the next person who
+    writes a doc — which is exactly the #5128/#5136 failure the guard was created
+    for. Re-deriving it here makes the drift unrepresentable.
 
     The `RUNTIME_39`/`UNGUARDABLE` carve-outs are exempt BY DESIGN and asserted
     as such below: those tools are never guarded, so `python3 <path>` IS their
@@ -635,20 +641,20 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
                 continue
             if "python3" not in text:
                 continue
-            in_workflow = path.suffix in (".yml", ".yaml")
+            in_workflow = ".github/workflows" in path.as_posix()
             where = _rel(path)
             for lineno, line in enumerate(text.splitlines(), 1):
                 if in_workflow and not _HUMAN_TEXT_IN_YAML.search(line):
                     continue
                 for match in _BARE_INVOCATION.finditer(line):
-                    tool, rel = match.group(1), match.group(2)
-                    if tool is None:  # the elided `python3 ...` form
-                        offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
-                        continue
-                    target = f"{tool}/{rel}"
-                    if target in _CARVE_OUTS:
-                        continue
+                    # The RECORD exemption is checked FIRST (review round 3): it is
+                    # keyed on the LINE, not on a tool path, so an elided
+                    # `python3 ...` record must be able to use it too. Checking it
+                    # only after the elided branch made it unreachable there.
                     if (where, line.strip()) in _DELIBERATE_BARE_FORM:
+                        continue
+                    tool, rel = match.group(1), match.group(2)
+                    if tool is not None and f"{tool}/{rel}" in _CARVE_OUTS:
                         continue
                     offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
     assert not offenders, (
