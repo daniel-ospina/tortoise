@@ -2337,9 +2337,19 @@ def main():
     # after it below.) Idempotent.
     from tortoise.embedded_lifecycle import (
         close_embedded_clients,
+        embedded_clients_snapshot,
         install_embedded_signal_cleanup,
     )
     install_embedded_signal_cleanup()
+    # #7728: this entrypoint owns only the embedded servers IT opens. Snapshot
+    # the process's live embedded clients BEFORE `_get_sdk()` below opens
+    # this server's, so the normal-return teardown closes ours and leaves a
+    # co-tenant's running (e.g. the session-scoped `shared_proj` fixture in an
+    # in-process pytest run, whose later tests would otherwise connect to a
+    # socket dir we just rmtree'd). The terminating-signal path still closes
+    # everything — there the process is dying, so every child must go. In a
+    # real stdio process the snapshot is empty, so this is a no-op there.
+    _clients_before_main = embedded_clients_snapshot()
     # #2204: announce dev mode (no auth) at the actual serve start, NOT at
     # module import — incidental importers (hosted_api, doctor, tests) must
     # stay quiet. Stdio is the only path that cannot carry auth headers, so
@@ -2380,10 +2390,11 @@ def main():
     finally:
         # #2203: deterministic teardown when the stdio session ends (client
         # disconnect / stdin EOF / abnormal session end) — close every
-        # embedded server this process opened NOW instead of relying on
+        # embedded server THIS main() opened NOW instead of relying on
         # atexit ordering; a no-op when nothing was opened (docker-URI
-        # mode), idempotent (already-closed clients skip).
-        close_embedded_clients()
+        # mode), idempotent (already-closed clients skip). #7728: scoped by
+        # the pre-`_get_sdk()` snapshot so a co-tenant's server survives.
+        close_embedded_clients(exclude=_clients_before_main)
 
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
