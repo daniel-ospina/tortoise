@@ -16161,7 +16161,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     if _dup_org:
         _replay = await _cp_offload(
             lambda: owned_org_replay(cp, _dup_org["id"], user["user_id"]),
-            op="owned_org_replay")
+            op="owned_org_replay", pool="org")
         if _replay is None:
             raise HTTPException(status_code=409, detail="Organization name already exists")
         return {**_replay, "name": name}

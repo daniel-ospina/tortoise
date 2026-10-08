@@ -2940,9 +2940,14 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     retry re-enters ``create_org`` where ``org_by_name`` now finds the row the
     FIRST attempt created — a 409 for the caller's own organization.
 
-    This resolves the advertised retry ONLY on the observation that the
-    abandoned FIRST attempt has ALREADY COMMITTED — which is the case a
-    retry that observes the collision is in by definition. It refuses nothing
+    This resolves the advertised retry on the same (owner, name) identity, not
+    on any observation about the abandoned first attempt: the code can see only
+    that the name is taken by a live, non-pending org the caller actively owns,
+    never WHEN or BY WHICH attempt that row was committed. So an org the same
+    owner created months ago under the same name replays identically — the rule
+    is "create is idempotent on (owner, name)", which is broader than "resolve
+    the abandoned first attempt" and is safe because ownership is verified and
+    the unique index keeps it one row. It refuses nothing
     that should still refuse: it returns the create response ONLY when the
     existing org is unambiguously the caller's own org, and every other
     duplicate is still a 409. The safe rule, established from the data:

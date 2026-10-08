@@ -379,3 +379,36 @@ class TestRegistryLaneIdempotentRetry:
             params={"u": _USER1})
         r = registry_client.post("/v1/organizations", json={"name": "Acme"})
         assert r.status_code == 409, r.text
+
+
+class TestReplayRidesTheOrgPool:
+    """#7677 P1: the replay's extra control-plane read must ride `org`, not `auth`.
+
+    `tests/test_org_create_pool_7678.py::test_create_org_supabase_lane_routes_every_call_to_the_org_pool`
+    asserts the same invariant, but only enumerates the FRESH-create path, so it
+    stays green when the replay leg is added without `pool="org"`. This test
+    forces a duplicate name — the only way to reach `owned_org_replay` — and
+    fails if any call on that leg is offloaded to the shared `auth` pool.
+    """
+
+    def test_every_call_on_the_duplicate_name_leg_rides_the_org_pool(self, fake, monkeypatch):
+        import tortoise.hosted_api as ha
+
+        _seed_owned_org(fake, "org-existing", "Acme")
+
+        seen: list[tuple[str, str]] = []
+        real_offload = ha._cp_offload
+
+        async def _record(fn, *, op, pool="auth", **kwargs):
+            seen.append((op, pool))
+            return await real_offload(fn, op=op, pool=pool, **kwargs)
+
+        monkeypatch.setattr(ha, "_cp_offload", _record)
+
+        out = _create_supabase(fake, "Acme")
+
+        # the replay was actually exercised (not the fresh-create path)
+        assert out["org_id"] == "org-existing", out
+        assert "owned_org_replay" in [op for op, _pool in seen], seen
+        # and NOTHING on this leg rode the shared auth pool
+        assert all(pool == "org" for _op, pool in seen), seen
