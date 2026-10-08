@@ -1304,6 +1304,24 @@ jobs:
             echo "no hygiene log at $LOG (end-sweep logger did not write)"
           fi
 
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (verified under this job's own flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path,
+        # because with `-n 4` every xdist worker runs its own session teardown
+        # against this one file. Informational: the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest

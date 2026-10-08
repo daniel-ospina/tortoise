@@ -23,6 +23,7 @@ from tests._tmpdir_hygiene import (
     ROOT_BASE,
     SharedTmpdirScanError,
     TrackedTempfileArtifacts,
+    _discard_tolerated_leaks,
     _is_shared_temp_scope,
     _live_server_in_root,
     _marker_owner_provably_dead,
@@ -32,7 +33,9 @@ from tests._tmpdir_hygiene import (
     scan_root,
     session_tmpdir,
     sweep_stale_session_roots,
+    tolerated_cleanup_leaks,
     uninstall_scan_guard,
+    write_tolerated_cleanup_report,
 )
 
 
@@ -489,8 +492,10 @@ def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
     # `shutil.rmtree` is patched GLOBALLY, so it is restored in a `finally`
     # BEFORE the test returns — otherwise pytest's own `tmp_path` teardown would
     # hit the stub and ERROR the test that just passed.
+    import json
     import tempfile
 
+    victim = None
     real = shutil.rmtree
     shutil.rmtree = _boom_with(errno.ENOTEMPTY)
     try:
@@ -499,10 +504,105 @@ def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
         with caplog.at_level(logging.WARNING):  # must NOT raise
             d.cleanup()
         assert os.path.isdir(victim), "the directory is left for the reaper"
+        # CHANNEL 1 (interactive): the log record is useful when running one test.
         assert "#7735" in caplog.text, "REPORTED, not swallowed"
         assert victim in caplog.text, "the report must name the directory"
+        # CHANNEL 2 (CI): capture DISCARDS the record above for a PASSING test
+        # (measured: 0 occurrences in the log and 0 in the junit XML under the
+        # CI flags), so visibility is pinned on the artifact the workflow dumps.
+        assert victim in [e["path"] for e in tolerated_cleanup_leaks()]
+        report = write_tolerated_cleanup_report(log_dir=str(tmp_path))
+        assert report is not None, "a tolerated leak must write the artifact"
+        payload = json.loads(Path(report).read_text())
+        assert victim in [
+            e["path"] for e in payload["tolerated_cleanup_leaks"]], (
+            "the CI-visible artifact must name the tolerated directory")
     finally:
         shutil.rmtree = real
+        if victim is not None:
+            # This test is a deliberate probe; keep it out of the session
+            # artifact, or every CI run would report a synthetic leak.
+            _discard_tolerated_leaks([victim])
+
+
+def test_write_tolerated_cleanup_report_is_silent_when_nothing_leaked(tmp_path):
+    """No tolerated leak → no artifact, so the CI dump step carries signal.
+
+    Order-independent: it seeds nothing, and the writer's guard is on the
+    global list, which the ENOTEMPTY test above also drains.
+    """
+    from tests import _tmpdir_hygiene as hygiene
+
+    saved = list(hygiene._TOLERATED_CLEANUP_LEAKS)
+    hygiene._TOLERATED_CLEANUP_LEAKS[:] = []
+    try:
+        assert write_tolerated_cleanup_report(log_dir=str(tmp_path)) is None
+        assert not (tmp_path / "tempdir-hygiene-end.json").exists()
+    finally:
+        hygiene._TOLERATED_CLEANUP_LEAKS[:] = saved
+
+
+def test_tolerated_leak_report_merges_a_peer_workers_record(tmp_path):
+    """xdist: every worker writes the SAME artifact path at its own teardown.
+
+    CI runs ``-n 4``, so a plain overwrite would let the last worker to finish
+    discard a peer's tolerated leak — the invisibility F1 names. The writer
+    must union by path rather than truncate.
+    """
+    import json as _json
+
+    from tests import _tmpdir_hygiene as hygiene
+
+    saved = list(hygiene._TOLERATED_CLEANUP_LEAKS)
+    hygiene._TOLERATED_CLEANUP_LEAKS[:] = [{
+        "path": "/tmp/tortoise_peer_worker_leak",
+        "errno": errno.ENOTEMPTY,
+        "reason": "Directory not empty",
+    }]
+    try:
+        artifact = tmp_path / "tempdir-hygiene-end.json"
+        artifact.write_text(_json.dumps({"tolerated_cleanup_leaks": [{
+            "path": "/tmp/tortoise_earlier_worker_leak",
+            "errno": errno.ENOTEMPTY,
+            "reason": "Directory not empty",
+            "pid": 111,
+        }]}))
+        report = write_tolerated_cleanup_report(log_dir=str(tmp_path))
+        assert report is not None
+        payload = _json.loads(Path(report).read_text())
+        paths = [e["path"] for e in payload["tolerated_cleanup_leaks"]]
+        assert paths == [
+            "/tmp/tortoise_earlier_worker_leak",
+            "/tmp/tortoise_peer_worker_leak",
+        ], paths
+    finally:
+        hygiene._TOLERATED_CLEANUP_LEAKS[:] = saved
+
+
+def test_the_tolerated_leak_artifact_is_wired_into_session_teardown():
+    """#7735 visibility, WIRED: conftest must actually call the writer.
+
+    The tests above prove the writer works; a writer nobody calls is the very
+    failure F1 names (a report no CI surface ever sees). Pin the call inside
+    the session fixture's own statements, not merely somewhere in the file.
+    """
+    import ast
+
+    tree = ast.parse((Path(__file__).resolve().parent / "conftest.py").read_text())
+    fixture = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_redislite_hygiene")
+    calls: list[ast.Call] = []
+    for stmt in fixture.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue  # the atexit path is not the session teardown
+        calls.extend(n for n in ast.walk(stmt) if isinstance(n, ast.Call))
+    called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
+    assert "write_tolerated_cleanup_report" in called, (
+        "tests/conftest.py::_redislite_hygiene must call "
+        "write_tolerated_cleanup_report() at session end, or the tolerated "
+        "leak reaches no CI surface (#7735 review, F1)")
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])
