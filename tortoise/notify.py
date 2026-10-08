@@ -301,7 +301,12 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
             cfg = _ha._backup_config_safe()
             if cfg is not None:
                 store = _ha._alert_store_from(cfg)
-                what = ("Auto-suspended" if kind == "abuse_suspended"
+                # Round 7: this branch is the OPERATOR-initiated path now — the
+                # engine never suspends (that is what #5425 deleted), so
+                # "Auto-suspended" misattributed an out-of-band decision and read
+                # as the very behaviour this change removed.
+                what = ("Suspended by an operator"
+                        if kind == "abuse_suspended"
                         else "Human review needed — rate-limit, do not suspend")
                 store.open_incident(
                     kind, org.get("org_id") or "_",

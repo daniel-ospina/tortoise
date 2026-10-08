@@ -1742,35 +1742,74 @@ class TestThresholdAsymmetry:
 
 
 class TestEveryAlertTypeHasACustomerMessage:
-    """#5425 (reviewer C, round 6): ALERT_TYPES ⊆ _alert_dict's message map.
+    """#5425 (reviewer C, round 6; strengthened round 7): nothing internal reaches
+    the customer through the Security alerts list.
 
-    WHY THIS EXISTS — the failure it already caused: `recovery_velocity` was a
-    member of `ALERT_TYPES` (so it IS returned by `recent_alerts`) with no entry
-    in `_alert_dict`'s message map, so it fell through to
-    `messages.get(etype, etype)` and the customer's session-authed Security
-    alerts list rendered the bare TOKEN twice over — "recovery_velocity —
-    recovery_velocity". It survived six review rounds because nothing related
-    the two tuples; the two lists are edited together by exactly the kind of
-    change this PR is, which is what makes a silent member HERE a real
-    customer-visible defect rather than a tidy-up.
+    WHY THIS EXISTS — the failure it already caused, twice. `recovery_velocity`
+    was in `ALERT_TYPES` (so `recent_alerts` returns it) with no `_alert_dict`
+    message, so the list rendered the bare TOKEN as both the heading and the
+    body: "recovery_velocity — recovery_velocity". Round 6 mapped the message
+    and this test could not see the other half, because (a) it rendered with
+    `details={}`, so `EVENT_FLAG`'s f-string produced the literal placeholder
+    "rule" instead of the real `point_create`, and (b) it only checked
+    `message == type` — not that the token the dashboard prints as the HEADING
+    is human. Round 7 found both: the enum was still the heading, and the flag
+    message still embedded the internal rule name.
+
+    The consumer is the session-authed, membership-gated GET /v1/team/alerts,
+    rendered verbatim as "<label> — <message>". So every name in ALERT_TYPES
+    needs a human label AND a human sentence, and neither may contain an
+    internal token.
     """
 
-    def test_every_alert_type_maps_to_a_customer_sentence(self):
+    #: The internal rule names `flag_org` actually writes into `details` —
+    #: realistic values, because the placeholder default hid this defect.
+    INTERNAL_TOKENS = ("point_create", "key_create", "recovery_velocity")
+
+    def _rendered(self):
         from tortoise import abuse as ab
 
-        # Non-vacuity: the universe must be non-empty and must still contain the
-        # kinds whose wording this PR reasoned about.
+        # `details` populated the way the real writers populate it: the flag
+        # rows carry `rule`, the signup row carries count/ip.
+        details = {"rule": "point_create", "count": 12, "ip": "203.0.113.7"}
+        return {t: ab._alert_dict({"event_type": t, "details": details})
+                for t in ab.ALERT_TYPES}
+
+    def test_every_alert_type_renders_a_human_label_and_message(self):
+        from tortoise import abuse as ab
+
         assert len(ab.ALERT_TYPES) >= 5, ab.ALERT_TYPES
         for expected in (ab.EVENT_FLAG, ab.EVENT_REVIEW, ab.EVENT_SUSPEND):
             assert expected in ab.ALERT_TYPES, expected
 
-        rendered = {t: ab._alert_dict({"event_type": t, "details": {}})["message"]
-                    for t in ab.ALERT_TYPES}
-        # The defect signature: the message IS the token.
-        leaked = sorted(t for t, m in rendered.items() if m == t)
-        assert not leaked, (
-            "these alert types render their raw TOKEN to the customer in the "
-            f"Security alerts list (no _alert_dict message): {leaked}")
-        # …and a genuine sentence, not an empty string.
-        for t, m in rendered.items():
-            assert isinstance(m, str) and m.strip(), t
+        rendered = self._rendered()
+        token_leaks = []
+        for t, row in rendered.items():
+            assert isinstance(row["message"], str) and row["message"].strip(), t
+            assert isinstance(row["label"], str) and row["label"].strip(), t
+            for field in ("label", "message"):
+                value = row[field]
+                if value == t or any(tok in value for tok in self.INTERNAL_TOKENS):
+                    token_leaks.append(f"{t}.{field}={value!r}")
+            # The label is the HEADING the dashboard prints — an internal token
+            # there is just as visible as one in the body.
+            assert row["label"] != t, f"{t}: the heading renders the raw enum"
+        assert not token_leaks, (
+            "internal tokens reach the customer's Security alerts list: "
+            f"{sorted(token_leaks)}")
+
+    def test_the_render_is_not_vacuous_for_the_flag_rule(self):
+        """The round-6 version passed while `point_create` was on screen.
+
+        This pins the POPULATION that made it pass: `EVENT_FLAG` is rendered
+        from a populated `details`, and the rule it carries is a real one. If a
+        future edit makes the fixture empty again, this fails rather than
+        quietly restoring a vacuous assertion.
+        """
+        from tortoise import abuse as ab
+
+        row = self._rendered()
+        flag = row[ab.EVENT_FLAG]
+        assert flag["label"] != "flag", flag
+        assert "point_create" not in flag["message"], (
+            "the internal rule name is back in a customer-facing message")

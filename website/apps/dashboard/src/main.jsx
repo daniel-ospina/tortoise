@@ -9065,7 +9065,9 @@ function claimIntentInFlight() {
             <ul>
               {alerts.map((a, i) => (
                 <li key={i}>
-                  <strong>{a.type}</strong> — {a.message}{' '}
+                  {/* #5425/round 7: `type` is our internal enum (recovery_velocity,
+                      flag, read_velocity) — the customer reads the human LABEL. */}
+                  <strong>{a.label || a.type}</strong> — {a.message}{' '}
                   <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
                 </li>
               ))}

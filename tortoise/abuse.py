@@ -545,7 +545,7 @@ class MemoryAbuseStore:
         self.flags.pop(org_id, None)
         self._append(org_id, EVENT_UNSUSPEND, created_at=now)
         # end every flag episode — a recovered org starts clean, so its
-        # first post-recovery burst re-flags instead of auto-suspending
+        # first post-recovery burst re-flags instead of escalating to review
         for rule in (EVENT_POINT_CREATE, EVENT_KEY_CREATE):
             self._append(org_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
         self._durable(org_id, "suspended_at", None)
@@ -737,8 +737,28 @@ class SupabaseAbuseStore:
 def _alert_dict(row: dict) -> dict:
     etype = row.get("event_type")
     details = row.get("details") or {}
+    # A human LABEL per type. The dashboard renders "<label> — <message>" in the
+    # session-authed Security-alerts list, and it previously rendered the raw
+    # `event_type` there — so the customer read "recovery_velocity — Unusual
+    # account-recovery…", "flag — …", i.e. our internal enum leaked as the
+    # heading even after round 6 fixed the message half (round 7). The label is
+    # part of the response, so a client that wants the machine token still has
+    # `type`.
+    labels = {
+        EVENT_FLAG: "Suspicious activity",
+        EVENT_REVIEW: "Activity under review",
+        EVENT_SUSPEND: "Organization suspended",
+        EVENT_AUTH_IP: "New location",
+        EVENT_READ_VELOCITY: "Unusual API activity",
+        EVENT_SIGNUP_VELOCITY: "Unusual signup activity",
+        EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity",
+    }
     messages = {
-        EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
+        # No `details['rule']` token here either: `point_create` / `key_create`
+        # are internal rule names, and the EVENT_REVIEW comment below states the
+        # rule travels on the operator path only. The customer is told what
+        # happened, not which rule fired.
+        EVENT_FLAG: "Suspicious activity flagged on this team",
         # #5425: this dict is CUSTOMER-FACING. Its one consumer is the
         # session-authed, membership-gated ``GET /v1/team/alerts``, rendered
         # verbatim in the dashboard's "Security alerts" list — so the message
@@ -772,6 +792,9 @@ def _alert_dict(row: dict) -> dict:
     at = row.get("created_at")
     return {
         "type": etype,
+        # Fall back to the token only for a type outside ALERT_TYPES (which
+        # `recent_alerts` filters out, so unreachable from this seam).
+        "label": labels.get(etype, etype),
         "at": at.isoformat() if isinstance(at, datetime) else at,
         "message": messages.get(etype, etype),
     }
