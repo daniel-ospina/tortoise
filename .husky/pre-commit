@@ -93,8 +93,22 @@ if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
     exit 1
   fi
   if printf '%s\n' "$DRY_RUN" | grep -q "would register"; then
-    py_tool tools/ci_selection.py --register
-    git add config/ci-surfaces.yml
+    # #6937 P2-3 (review round 1): the dry-run was only HALF the hole. The real
+    # registration and its staging sat unguarded in this same block, so a
+    # `--register` failure (or a failed `git add`) still let the commit through
+    # with the #1429 surface half-written or un-staged — the SAME swallow, one
+    # line lower. `py_tool` is not `set -e`-protected here, so both are checked.
+    if ! py_tool tools/ci_selection.py --register; then
+      echo "⛔ [hooks] tools/ci_selection.py --register FAILED — config/ci-surfaces.yml" >&2
+      echo "   was NOT updated (or was left half-written). Committing now would ship a" >&2
+      echo "   test surface that disagrees with the tests on disk (#1429)." >&2
+      exit 1
+    fi
+    if ! git add config/ci-surfaces.yml; then
+      echo "⛔ [hooks] could not stage config/ci-surfaces.yml after --register; the" >&2
+      echo "   registration exists on disk but not in this commit (#1429)." >&2
+      exit 1
+    fi
   fi
 fi
 

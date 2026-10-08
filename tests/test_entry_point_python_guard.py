@@ -506,13 +506,67 @@ def test_every_corpus_file_is_tracked():
 #: DOCUMENTED, WORKING invocation (those tools are never guarded, so `python3`
 #: is correct for them — sweeping them would break a scheduled job or a test
 #: that RUNS them under `/usr/bin/python3`).
+#:
+#: Review round 1 widened this from `python3 ` to also catch the absolute-path
+#: (`/usr/bin/python3 `) and `./`-prefixed spellings, which the guard refuses
+#: just as hard.
 _BARE_INVOCATION = re.compile(
-    r"(?<![\w./])python3 (tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)"
+    r"(?<![\w./])(?:/usr/bin/)?python3\s+(?:\./)?(tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)"
 )
 _CARVE_OUTS = frozenset(UNGUARDABLE) | frozenset(RUNTIME_39)
 
 #: Text-bearing files a reader copies an invocation FROM.
 _DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
+
+#: Review round 1: a shell line inside a CI JOB runs on the RUNNER's interpreter
+#: (every workflow here pins 3.12 via setup-python), so a bare `python3` there is
+#: CORRECT and must not be flagged — flagging it would be the over-reach this
+#: seam exists to avoid. What a workflow file exposes to a HUMAN is its comments
+#: and its `::error::`/`::warning::` ANNOTATIONS: text a reader copies onto their
+#: own machine, where the guard does bite.
+#: `.github/workflows/mergify-guard-recut.yml` carried exactly one such
+#: instruction and it named the refused form.
+_HUMAN_TEXT_IN_YAML = re.compile(r"(^\s*#)|(::(?:error|warning|notice)::)")
+
+#: Lines where the bare form is DELIBERATELY correct because the text RECORDS or
+#: DESCRIBES what a machine did, rather than instructing a reader to run it:
+#:
+#:   * a verbatim CI log quote — rewriting it makes the receipt describe a
+#:     command the runner never printed;
+#:   * a `$`-prompted terminal transcript with its captured output;
+#:   * a "receipt of record" for a recorded measurement;
+#:   * a comment stating what a CI job runs (`python-ci.yml` really does invoke
+#:     `python3 tools/mergify_config_guard.py --static` on the runner's 3.12).
+#:
+#: Rewriting one FALSIFIES evidence provenance, which is strictly worse than the
+#: doc/guard contradiction this test exists to prevent. Review round 1 caught the
+#: sweep doing exactly that to three sites. Keyed by (path, stripped line) rather
+#: than by line NUMBER, so an edit above cannot silently slide an exemption onto
+#: a different line: change the text and the entry stops matching, re-flagging it.
+_DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "tools/embedder_provision.py",
+            "#     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5",
+        ),
+        (
+            "docs/research/2026-09-25-4503-edge-accounting/measurement.md",
+            "**Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped "
+            "tool's receipt of record, verbatim (`python3 tools/edge_census.py "
+            "probe --n 5000 --json`):",
+        ),
+        (
+            "docs/research/2026-09-25-4503-edge-accounting/measurement.md",
+            "$ python3 tools/edge_census.py census --uri "
+            "'docker://:falkordb@localhost:6379' \\",
+        ),
+        (
+            ".github/workflows/ai-review-gate.yml",
+            "# and `python3 tools/mergify_config_guard.py --static` passes. The "
+            "STATIC tie is",
+        ),
+    }
+)
 
 
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
@@ -521,6 +575,17 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     A guarded entry point REFUSES `python3 <path>` on a pre-3.12 ambient
     interpreter, so any doc or USAGE text advertising that form contradicts the
     guard: the reader copies it and gets a refusal the docs nowhere predict.
+
+    SCOPE, stated exactly (review round 1: the first draft's walk covered only
+    three roots while the name claimed "any doc or USAGE text" — a name that
+    overclaims its scope is the defect, so the walk was WIDENED to match the
+    name rather than the name narrowed to flatter the walk):
+
+      * `tools/` + `graph-scripts/` + `docs/` in full — every text-bearing file;
+      * `.github/` ALSO, but only its HUMAN-FACING text (comments and
+        `::error::`-style annotations). A `run:` line executes on the runner's
+        3.12, where the bare form is correct, so flagging it would be
+        over-reach. See `_HUMAN_TEXT_IN_YAML`.
 
     The one-time sweep fixed the 152 occurrences in place. Without this
     assertion it would simply be a fact about today, re-established by the next
@@ -534,7 +599,7 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     it).
     """
     offenders: list[str] = []
-    for base in (*CORPUS_DIRS, "docs"):
+    for base in (*CORPUS_DIRS, "docs", ".github"):
         for path in sorted((ROOT / base).rglob("*")):
             if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
                 continue
@@ -542,13 +607,18 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
                 text = path.read_text()
             except (UnicodeDecodeError, OSError):
                 continue
-            if "python3 tools/" not in text and "python3 graph-scripts/" not in text:
+            if "python3" not in text:
                 continue
+            in_workflow = path.suffix in (".yml", ".yaml")
             where = _rel(path)
             for lineno, line in enumerate(text.splitlines(), 1):
+                if in_workflow and not _HUMAN_TEXT_IN_YAML.search(line):
+                    continue
                 for match in _BARE_INVOCATION.finditer(line):
                     target = f"{match.group(1)}/{match.group(2)}"
                     if target in _CARVE_OUTS:
+                        continue
+                    if (where, line.strip()) in _DELIBERATE_BARE_FORM:
                         continue
                     offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
     assert not offenders, (
