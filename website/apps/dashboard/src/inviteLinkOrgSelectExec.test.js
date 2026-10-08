@@ -323,3 +323,25 @@ test('#5254: an unreadable accept body falls back to the first-healthy pin witho
   assert.equal(env.orgIdRef.current, ORG_A, 'the first-healthy pin is the fallback')
   assert.deepStrictEqual(env.removed, ['tortoise.inviteToken'], 'the token is still consumed')
 })
+
+test('#5254: an unreadable MEMBERSHIP ROSTER selects nothing — the fail-safe fallback', async () => {
+  // The invited org is known, but `loadTeams()` returned null (a transient
+  // roster fault, or the Round-12 sign-out guard). Suspension is only knowable
+  // from the roster, so the invited org cannot be verified PRESENT-and-HEALTHY
+  // — and a switch to an unverifiable org could select a suspended one
+  // (#1912). The deliberate fail-safe is therefore to select NOTHING and let
+  // the mount's own #1912 pin stand. This is the account-menu path's one
+  // remaining divergence and it is intentional: at mount `prevOrgId` is null,
+  // so an unconditional switch would have no team to revert to and would land
+  // the suspended-org case on the error card.
+  const env = environment({ listFails: true })
+  const { error } = await run(REAL_TEXT, env)
+  assert.equal(error, null,
+    `a roster failure must not throw — got ${error && error.name}: ${error && error.message}`)
+  assert.equal(env.loadTeamsCalls, 1, 'the roster read is still attempted (the #2538 propagation)')
+  assert.deepStrictEqual(env.switchCalls, [],
+    'an unverifiable invited org is not selected — the fail-safe fallback')
+  assert.equal(env.orgIdRef.current, null,
+    'this function pins nothing; the mount #1912 first-healthy pin owns the selection next')
+  assert.deepStrictEqual(env.removed, ['tortoise.inviteToken'], 'the token is still consumed')
+})

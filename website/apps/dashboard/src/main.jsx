@@ -4040,7 +4040,12 @@ function claimIntentInFlight() {
               // membership never becomes the default). Skipped when the pin
               // already landed on it (the single-membership invitee, which
               // worked before this fix): switching then would only repeat the
-              // mount's own loads.
+              // mount's own loads. When the roster read itself fails
+              // (`loadTeams` returns null — a transient fault, or a Round-12
+              // sign-out) the invited org cannot be checked at all, so nothing
+              // is selected and the mount's own pin stands: the fail-safe
+              // direction, since a switch to an unverifiable org could select
+              // a suspended one.
               const invited = Array.isArray(acceptedTeams)
                 ? acceptedTeams.find((t) => t.org_id === invitedOrgId)
                 : null
