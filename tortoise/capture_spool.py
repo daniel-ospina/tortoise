@@ -710,6 +710,65 @@ def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
     return metas, discards
 
 
+# #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
+# here as well as at the server (`hosted_api._SESSION_CAPTURED_AT_SOURCE_VALUES`)
+# because the spool is the leg that can lose the user's conversation: a source
+# the server refuses is a 422, and a 422 is classified PERMANENT, so the drain
+# would unlink the entry's turn log — the only copy. Normalising here makes that
+# refusal unreachable from either spool leg.
+CLIENT_CAPTURED_AT_SOURCES = frozenset({"cli_observed", "file_mtime", "unknown"})
+
+
+def _finite_instant(value: object) -> float | None:
+    """A usable client capture instant, or `None`.
+
+    `bool` is refused first: it is an `int` subclass, and `True` is not a clock.
+    Non-finite values are refused because they do NOT round-trip: `json.dumps`
+    emits the non-standard tokens `NaN`/`Infinity`, and the TypeScript leg reads
+    meta with a raw `JSON.parse`, which throws on them — so a `NaN` written here
+    makes the OTHER leg class this entry `corrupt_entry` and delete its turn log.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _stamp_pair(prior: dict | None, snapshot: Snapshot) -> tuple[float | None, str | None]:
+    """Resolve the client stamp as a PAIR: the instant with ITS OWN clock.
+
+    The instant and its source are resolved together, never independently. A
+    source names the clock that PRODUCED the instant, so pairing a stored
+    instant with a later writer's source relabels a real observation with a
+    clock that did not make it — and because `unknown` DISABLES the floor while
+    an absent source PASSES it, that relabelling flips a verifiable session to
+    unverifiable (#3516 §B review: reproduced PASSED -> DISABLED).
+
+    Precedence is first-writer-wins on the INSTANT (matching the lane's monotone
+    rule and the server's `coalesce`), and the source is taken from the SAME
+    writer. Falsiness is not absence: `0.0` is the epoch, which
+    `install_at_unix` deliberately returns as a real value, so it must survive.
+    """
+    for instant, source in (
+        ((prior or {}).get("client_captured_at"),
+         (prior or {}).get("client_captured_at_source")),
+        (snapshot.client_captured_at, snapshot.client_captured_at_source),
+    ):
+        at = _finite_instant(instant)
+        if at is None:
+            continue
+        if source is None:
+            # piece 12 row 1: the Pi recorder always has a clock and claims NO
+            # source, and an absent source PASSES the floor. Absent stays
+            # absent — never filled in from the other writer.
+            return at, None
+        # An unrecognised token becomes `unknown`, which DISABLES the floor:
+        # dropping it instead would leave the source absent, PASSING a session
+        # whose clock we demonstrably cannot name.
+        return at, (source if source in CLIENT_CAPTURED_AT_SOURCES else "unknown")
+    return None, None
+
+
 def write_spool_entry(
     root: Path,
     snapshot: Snapshot,
@@ -821,18 +880,15 @@ def write_spool_entry(
     _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
     if _lane:
         meta["capture_lane"] = _lane
-    # #3516 §B / #3515 piece 12: first-writer-wins (`or`), matching the lane's
-    # rule and the SERVER's coalesce — the spool must not be the odd leg out,
-    # because its stamp is what gets delivered. The source rides with the value,
-    # never alone (a source with no instant would claim a provenance for a
-    # timestamp that does not exist).
-    _cap_at = (prior or {}).get("client_captured_at") or snapshot.client_captured_at
+    # #3516 §B / #3515 piece 12: the stamp and its clock resolve as a PAIR, so a
+    # later writer can never relabel an earlier writer's instant with its own
+    # clock. The lane's rule is mirrored: the prior value wins, so a snapshot can
+    # only FILL IN an absent stamp, never replace a stored one.
+    _cap_at, _cap_src = _stamp_pair(prior, snapshot)
     if _cap_at is not None:
         meta["client_captured_at"] = _cap_at
-        _cap_src = ((prior or {}).get("client_captured_at_source")
-                    or snapshot.client_captured_at_source)
-        if _cap_src:
-            meta["client_captured_at_source"] = _cap_src
+    if _cap_src:
+        meta["client_captured_at_source"] = _cap_src
     if snapshot.model:
         meta["model"] = snapshot.model
     # A re-snapshot whose content is byte-identical to what was already filed
@@ -851,6 +907,17 @@ def write_spool_entry(
         prior_lane_delivered = prior.get("filed_lane")
         if prior_lane_delivered:
             meta["filed_lane"] = prior_lane_delivered
+        # #3516 §B: the STAMP the 2xx actually carried survives the same way the
+        # lane does, and for the same reason. `filed_key` is CONTENT-derived and
+        # the stamp is METADATA, so a rewrite that dropped the stamp (a torn
+        # turn log, a turn-count shift) would leave `_flush_one`'s skip clause
+        # seeing `filed_stamp != client_captured_at` and re-POST a
+        # byte-identical, ALREADY-FILED entry — the upload-amplification class
+        # #4714 guards against. The TS leg already carries it; this is the
+        # mirror.
+        prior_stamp_delivered = prior.get("filed_stamp")
+        if prior_stamp_delivered is not None:
+            meta["filed_stamp"] = prior_stamp_delivered
         meta["filed_at"] = prior.get("filed_at")
 
     meta_text = json.dumps(meta, ensure_ascii=False, indent=2) + "\n"

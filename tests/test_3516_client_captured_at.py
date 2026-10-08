@@ -198,8 +198,14 @@ def test_spool_entry_keeps_the_stamp_and_a_restamp_free_re_snapshot(tmp_path):
     assert meta["client_captured_at"] == pytest.approx(1234.5)
     assert meta["client_captured_at_source"] == "cli_observed"
 
+    # An EXTRA turn, deliberately: a byte-identical re-snapshot takes the dedup
+    # early-return ABOVE the merge, so it would exercise nothing here — proved by
+    # mutation, nulling the first-writer-wins rule left this file green. The grow
+    # path is what actually runs the merge.
     write_spool_entry(root, Snapshot(
-        session_id=sid, turns=[{"role": "user", "content": "hi"}],
+        session_id=sid,
+        turns=[{"role": "user", "content": "hi"},
+               {"role": "assistant", "content": "hello"}],
         source="t", machine_id="m", harness="claude", capture_lane="hook"))
     assert read_spool_meta(root, sid)["client_captured_at"] == pytest.approx(1234.5), (
         "a stamp-less re-snapshot erased the client stamp")
@@ -308,3 +314,311 @@ def test_install_probe_iso_string_is_coerced_not_passed_raw():
     assert client_capture_floor_verdict(
         INSTALL + 1, "cli_observed", install_at_unix(iso))[0] in (
             VERDICT_PASSED, VERDICT_FAILED)
+
+
+# ── the stamp is a PAIR: an instant WITH its own clock ────────────────────
+
+
+def test_spool_never_relabels_an_instant_with_another_writers_clock(tmp_path):
+    """The instant and its source resolve TOGETHER, never independently.
+
+    A source names the clock that PRODUCED the instant. Resolved separately, a
+    later writer attaches its own clock to an earlier writer's instant — and
+    because `unknown` DISABLES the floor while an absent source PASSES it, that
+    relabelling flips a verifiable session to unverifiable. Reproduced case: the
+    Pi recorder's own clock (no source — piece 12 row 1) followed by a backfill
+    that admits `unknown`.
+
+    MUTATION THAT REDS THIS: resolve the source with its own `or`/`||`.
+    """
+    from tortoise.capture_spool import Snapshot, read_spool_meta, write_spool_entry
+
+    root = tmp_path / "spool"
+    sid = "3516-spool-pair"
+    # (1) the Pi recorder: its own clock, NO source (piece 12 row 1).
+    write_spool_entry(root, Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "hi"}],
+        source="t", machine_id="m", harness="pi", capture_lane="hook",
+        client_captured_at=INSTALL + 10.0))
+    # (2) a later backfill ships the SAME session, admitting `unknown`.
+    write_spool_entry(root, Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "hi"},
+               {"role": "assistant", "content": "hello"}],
+        source="t", machine_id="m", harness="pi", capture_lane="store_sync",
+        client_captured_at=INSTALL + 20.0, client_captured_at_source="unknown"))
+
+    meta = read_spool_meta(root, sid)
+    assert meta["client_captured_at"] == pytest.approx(INSTALL + 10.0), (
+        "the hook's instant was replaced by the later writer's")
+    assert meta.get("client_captured_at_source") is None, (
+        "the backfill's clock was attached to the hook's instant")
+    verdict, reason = client_capture_floor_verdict(
+        meta["client_captured_at"], meta.get("client_captured_at_source"), INSTALL)
+    assert verdict == VERDICT_PASSED, (
+        f"a real hook observation became unverifiable: {verdict} / {reason}")
+
+
+def test_an_epoch_instant_is_a_value_not_an_absence(tmp_path):
+    """`install_at_unix` deliberately returns `0.0` for the epoch, so `0.0` is a
+    real reading the floor must see. Truthiness (`or`) calls it absent, and a
+    later stamp-less snapshot then ERASES it — flipping an evaluable FAILED into
+    a DISABLED.
+
+    MUTATION THAT REDS THIS: `prior.get(k) or snapshot.k`.
+    """
+    from tortoise.capture_spool import Snapshot, read_spool_meta, write_spool_entry
+
+    root = tmp_path / "spool"
+    sid = "3516-spool-epoch"
+    write_spool_entry(root, Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "hi"}],
+        source="t", machine_id="m", harness="pi",
+        client_captured_at=0.0, client_captured_at_source="cli_observed"))
+    assert read_spool_meta(root, sid)["client_captured_at"] == pytest.approx(0.0)
+
+    write_spool_entry(root, Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "hi"},
+               {"role": "assistant", "content": "hello"}],
+        source="t", machine_id="m", harness="pi"))
+    assert read_spool_meta(root, sid)["client_captured_at"] == pytest.approx(0.0), (
+        "the epoch stamp was read as an absence and erased")
+
+
+def test_a_non_finite_instant_is_never_written_to_the_spool(tmp_path):
+    """`json.dumps` emits the NON-STANDARD tokens `NaN`/`Infinity`, and the
+    TypeScript leg reads meta with a raw `JSON.parse` — which THROWS on them. So
+    a non-finite instant written here makes the other leg classify this entry
+    `corrupt_entry` and delete its turn log.
+
+    MUTATION THAT REDS THIS: drop the `math.isfinite` guard in `_finite_instant`.
+    """
+    from tortoise.capture_spool import Snapshot, read_spool_meta, write_spool_entry
+
+    root = tmp_path / "spool"
+    for sid, value in (("3516-nan", float("nan")),
+                       ("3516-inf", float("inf")),
+                       ("3516-ninf", float("-inf"))):
+        write_spool_entry(root, Snapshot(
+            session_id=sid, turns=[{"role": "user", "content": "hi"}],
+            source="t", machine_id="m", harness="pi",
+            client_captured_at=value,
+            client_captured_at_source="cli_observed"))
+        assert read_spool_meta(root, sid).get("client_captured_at") is None, (
+            f"{value} was stored as a clock reading")
+
+    # The artifact the OTHER leg actually parses: no non-standard token on disk.
+    raw = "\n".join(p.read_text() for p in root.rglob("*") if p.is_file())
+    assert "NaN" not in raw and "Infinity" not in raw, (
+        "a non-standard JSON token reached the shared spool directory")
+
+
+def test_an_unrecognised_clock_is_normalised_not_forwarded(tmp_path):
+    """A source the server refuses is a 422, and the drain classifies a 422 as
+    PERMANENT — it then unlinks the entry's turn log, which is the only copy on
+    this machine. So the spool normalises an unrecognised token to `unknown`
+    (which DISABLES the floor) instead of forwarding it. Proved end to end: the
+    capture still reaches the wire and the transcript survives.
+
+    MUTATION THAT REDS THIS: forward `snapshot.client_captured_at_source`
+    verbatim.
+    """
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "3516-spool-badclock"
+    turns = [{"role": "user", "content": "hi"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="wall_clock"))
+
+    meta = spool.read_spool_meta(root, sid)
+    assert meta["client_captured_at_source"] == "unknown", (
+        "an unrecognised clock was forwarded — that is a 422, and a 422 makes "
+        "the drain discard the user's transcript")
+
+    posted: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (posted.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted and posted[0]["client_captured_at_source"] == "unknown"
+    assert spool.read_spool_turns(root, sid) == turns, (
+        "the drain deleted the user's transcript")
+
+
+def test_the_delivered_stamp_survives_a_rewrite_of_a_filed_entry(tmp_path):
+    """The filing marker is CONTENT-derived; the stamp is METADATA. If a REWRITE
+    of an already-filed entry drops `filed_stamp`, the skip clause sees
+    `filed_stamp != client_captured_at` and re-POSTs a byte-identical,
+    already-filed entry — the upload amplification #4714 guards against.
+
+    The rewrite is reached with a TORN log: the stored turns no longer match the
+    digest the meta recorded, so the entry is rewritten from the same snapshot.
+
+    MUTATION THAT REDS THIS: drop the `prior_stamp_delivered` carry.
+    """
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "3516-spool-carry"
+    turns = [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "hello"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="cli_observed"))
+
+    posts: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (posts.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posts and spool.read_spool_meta(root, sid).get("filed_stamp") is not None, (
+        "the first filing did not record the delivered stamp — nothing to prove")
+
+    # Tear the log mid-record, then re-snapshot the identical turns.
+    log = spool._log_path(root, sid)
+    text = log.read_text()
+    log.write_text(text[: max(1, int(len(text) * 0.6))], encoding="utf-8")
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="cli_observed"))
+
+    meta = spool.read_spool_meta(root, sid)
+    assert meta.get("filed_stamp") == pytest.approx(INSTALL + 10.0), (
+        "the rewrite dropped the delivered stamp, so the entry re-POSTs forever")
+    second: list[dict] = []
+    spool.flush_spool(
+        root,
+        lambda p: (second.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert not second, "an already-filed entry was re-POSTed"
+
+
+# ── the producer legs: the stamp must be STAMPED, not merely carried ──────
+
+
+def test_cli_hook_leg_stamps_its_own_clock_on_the_wire(tmp_path, monkeypatch):
+    """The shipped Claude CLI leg (`session capture`) claims `cli_observed` and
+    an instant of its OWN observation — piece 12's row, and the floor's input.
+    The server's ingest time is NOT it: the pre-existing spool drains after an
+    install, so an ingest-stamped row would read as freshly captured and the
+    floor could only ever pass.
+
+    MUTATION THAT REDS THIS: delete either keyword in `_spool_transcript`.
+    """
+    from types import SimpleNamespace
+
+    import tortoise.capture_spool as spool
+    from tortoise import __main__ as cli
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    transcript = tmp_path / "transcript.txt"
+    transcript.write_text("User: hello\nAssistant: hi\n", encoding="utf-8")
+    args = SimpleNamespace(file=str(transcript), harness="claude",
+                           session_id="3516-cli-stamp", model=None)
+
+    before = datetime.now().timestamp()
+    prep = cli._spool_transcript(args)
+    assert prep["rc"] == 0, "the hook leg failed to spool the transcript"
+
+    meta = spool.read_spool_meta(prep["root"], "3516-cli-stamp") or {}
+    assert meta.get("client_captured_at_source") == "cli_observed"
+    assert meta.get("client_captured_at") == pytest.approx(before, abs=120.0)
+
+    posted: list[dict] = []
+    spool.flush_spool(
+        prep["root"],
+        lambda p: (posted.append(dict(p)),
+                   spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id="3516-cli-stamp")
+    assert posted, "the spooled hook capture was never posted"
+    assert posted[0].get("client_captured_at_source") == "cli_observed"
+    assert posted[0].get("client_captured_at") == pytest.approx(before, abs=120.0)
+
+
+def test_journal_fold_keeps_the_stamp_and_a_replay_recovers_it():
+    """The journal fold must carry the stamp, or a journal-only replay loses it
+    and the floor reads DISABLED for a session that WAS stamped. Drives both
+    ends directly, because the fold is otherwise unreachable in tests.
+
+    MUTATION THAT REDS THIS: drop the coalesce arms in `_fold_session_recorded`.
+    """
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    sid = "3516-journal-stamp"
+    emitted: list[dict] = []
+    _write_session_and_turns(
+        proj, sdk, sid, [{"role": "user", "content": "hi"}],
+        now="2026-10-04T00:00:00Z", harness="pi",
+        client_captured_at=INSTALL + 10.0,
+        client_captured_at_source="cli_observed",
+        on_session_merged=emitted.append)
+    assert any(ev.get("client_captured_at") == pytest.approx(INSTALL + 10.0)
+               for ev in emitted), (
+        "the writer dropped the stamp from its journal carrier")
+
+    # Simulate a journal-only REPLAY: wipe the live node, then fold the journal.
+    proj.g.query("MATCH (s:Session {id:$sid}) DELETE s", params={"sid": sid})
+    for ev in emitted:
+        proj._fold_session_recorded({"type": "SessionRecorded", **ev})
+    assert _stamp(sdk, sid, "client_captured_at") == pytest.approx(INSTALL + 10.0)
+    assert _stamp(sdk, sid, "client_captured_at_source") == "cli_observed"
+
+
+# ── values that are PRESENT but are not readings ──────────────────────────
+
+
+def test_install_at_unix_refuses_a_value_that_is_not_a_reading():
+    """The one coercion the floor's setup depends on. A value that is present
+    but is NOT a reading must come back `None` (DISABLED), never a number the
+    floor compares: `inf` PASSED, `-inf` passed any negative floor, and a NAIVE
+    datetime was read as LOCAL time — 5 h here, 60x the 300 s tolerance.
+
+    MUTATION THAT REDS THIS: return `float(value)` for a non-finite number, or
+    skip the `tzinfo is None` refusal.
+    """
+    from tortoise.capture_install import install_at_unix
+
+    assert install_at_unix(float("nan")) is None
+    assert install_at_unix(float("inf")) is None
+    assert install_at_unix(float("-inf")) is None
+    assert install_at_unix("2026-10-08T00:00:00") is None, (
+        "a naive datetime is read as LOCAL time, which shifts the floor past "
+        "the tolerance and silently flips the verdict")
+    assert install_at_unix(True) is None
+
+
+def test_floor_is_disabled_when_install_at_is_not_an_observation():
+    """A zero install time yields `floor = -tolerance`, which EVERY client
+    clock passes — a floor-pass on the absence of a floor.
+
+    MUTATION THAT REDS THIS: drop the `install_at <= 0` refusal.
+    """
+    for value in (0.0, -1.0):
+        verdict, reason = client_capture_floor_verdict(
+            INSTALL, "cli_observed", value)
+        assert verdict == VERDICT_DISABLED, reason
+
+
+def test_boundary_refuses_a_bool_instant():
+    """Pydantic coerces `true` to `1.0` (a bool is an `int` subclass), storing a
+    clock reading that is not one.
+
+    MUTATION THAT REDS THIS: drop the `isinstance(v, bool)` guard.
+    """
+    from tortoise.hosted_api import SessionRequest
+
+    with pytest.raises(ValidationError):
+        SessionRequest(conversation=[{"role": "user", "content": "x"}],
+                       client_captured_at=True)

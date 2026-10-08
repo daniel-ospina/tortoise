@@ -327,6 +327,64 @@ export function modelLabel(model: unknown): string | undefined {
   return clean ? clean.slice(0, 128) : undefined;
 }
 
+/** #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
+ *  here as well as at the server (`_SESSION_CAPTURED_AT_SOURCE_VALUES`) because
+ *  the spool is the leg that can lose the conversation: a source the server
+ *  refuses is a 422, a 422 is classified PERMANENT, and the drain then unlinks
+ *  the entry's turn log — the only copy. Normalising here makes that refusal
+ *  unreachable from either spool leg. */
+const CLIENT_CAPTURED_AT_SOURCES = new Set(["cli_observed", "file_mtime", "unknown"]);
+
+/** A usable client capture instant, or `undefined`.
+ *
+ *  `typeof !== "number"` already refuses `true`/`false` (a JSON bool is not a
+ *  clock), and `Number.isFinite` refuses `NaN`/`Infinity` — which do NOT
+ *  round-trip: `JSON.stringify` emits `null` for them, so the Python leg would
+ *  read a stamp of `null` where this leg wrote a number. */
+function finiteInstant(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Resolve the client stamp as a PAIR: the instant with ITS OWN clock.
+ *
+ *  Never resolved independently. A source names the clock that PRODUCED the
+ *  instant, so pairing a stored instant with a later writer's source relabels a
+ *  real observation with a clock that did not make it — and because `unknown`
+ *  DISABLES the floor while an absent source PASSES it, that relabelling flips
+ *  a verifiable session to unverifiable (#3516 §B review: reproduced PASSED ->
+ *  DISABLED).
+ *
+ *  Precedence is first-writer-wins on the INSTANT (matching the lane's monotone
+ *  rule and the server's `coalesce`), with the source taken from the SAME
+ *  writer. Falsiness is not absence: `0.0` is the epoch and is a real value. */
+function stampPair(
+  prior: SpoolMeta | undefined,
+  snapshot: { clientCapturedAt?: number; clientCapturedAtSource?: string },
+): [number | undefined, string | undefined] {
+  const candidates: Array<[unknown, unknown]> = [
+    [prior?.client_captured_at, prior?.client_captured_at_source],
+    [snapshot.clientCapturedAt, snapshot.clientCapturedAtSource],
+  ];
+  for (const [instant, source] of candidates) {
+    const at = finiteInstant(instant);
+    if (at === undefined) continue;
+    // piece 12 row 1: the Pi recorder always has a clock and claims NO source,
+    // and an absent source PASSES the floor. Absent stays absent — never filled
+    // in from the other writer.
+    if (source === undefined || source === null) return [at, undefined];
+    // An unrecognised token becomes `unknown`, which DISABLES the floor:
+    // dropping it instead would leave the source absent, PASSING a session
+    // whose clock we demonstrably cannot name.
+    return [
+      at,
+      typeof source === "string" && CLIENT_CAPTURED_AT_SOURCES.has(source)
+        ? source
+        : "unknown",
+    ];
+  }
+  return [undefined, undefined];
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -934,13 +992,11 @@ export function writeSpoolEntry(
   // then OMITS the key. (A stored empty lane is reachable only from a crafted
   // or corrupt meta — which is why it has its own test.)
   const lane = prior?.capture_lane || snapshot.captureLane;
-  // #3516 §B / piece 12: the same first-writer-wins rule (`||`) for the client
-  // stamp, and for the same reason — the store-sync backstop ships the SAME
-  // session after this leg, and a later, weaker clock must not replace the
-  // hook's own observation.
-  const clientCapturedAt = prior?.client_captured_at || snapshot.clientCapturedAt;
-  const clientCapturedAtSource =
-    prior?.client_captured_at_source || snapshot.clientCapturedAtSource;
+  // #3516 §B / piece 12: the stamp and its clock resolve as a PAIR, so a later
+  // writer can never relabel an earlier writer's instant with its own clock.
+  // The store-sync backstop ships the SAME session after this leg, and a later,
+  // weaker clock must not replace the hook's own observation.
+  const [clientCapturedAt, clientCapturedAtSource] = stampPair(prior, snapshot);
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the
   // content, so without this bypass an entry first written lane-less (a
@@ -953,8 +1009,8 @@ export function writeSpoolEntry(
   // byte-identical re-snapshot that newly carries one must not be deduped away
   // — the entry would stay timeless forever and the floor could never run.
   const stampUpgrade =
-    snapshot.clientCapturedAt !== undefined &&
-    prior?.client_captured_at === undefined;
+    finiteInstant(snapshot.clientCapturedAt) !== undefined &&
+    finiteInstant(prior?.client_captured_at) === undefined;
 
   // Dedup: a snapshot that is byte-identical to what is stored already is a
   // no-op — no rewrite, no re-upload (incremental capture must not amplify

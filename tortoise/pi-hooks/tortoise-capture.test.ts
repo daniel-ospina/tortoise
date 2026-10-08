@@ -365,6 +365,72 @@ test("the spooled stamp survives a drain, and a LATE stamp is re-delivered", asy
   assert.equal(server.posts(), 2);
 });
 
+test("the spool never relabels an instant with another writer's clock", () => {
+  // #3516 §B: the instant and its source are ONE pair. A source names the clock
+  // that PRODUCED the instant, so resolving them independently lets a later
+  // writer hang its own clock on an earlier writer's reading. The victim is a
+  // real observation: an absent source PASSES the floor, an explicit 'unknown'
+  // DISABLES it — so the relabelling makes a verifiable session unverifiable.
+  const spool = tmpSpool();
+  const sid = "sess-pair";
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+    clientCapturedAt: 1000,
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]),
+    captureLane: "store_sync",
+    clientCapturedAt: 2000,
+    clientCapturedAtSource: "unknown",
+  });
+
+  const meta = readSpoolEntry(spool, sid);
+  assert.equal(meta?.client_captured_at, 1000, "the hook's instant was replaced");
+  assert.equal(
+    meta?.client_captured_at_source,
+    undefined,
+    "the backfill's clock was attached to the hook's instant",
+  );
+});
+
+test("an unrecognised clock is normalised to 'unknown', never forwarded", () => {
+  // A source the server refuses is a 422, a 422 is classified PERMANENT, and the
+  // drain then unlinks the entry's turn log — the only copy. Normalising at the
+  // writer makes that refusal unreachable from this leg.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-badclock", [{ role: "user", content: "hi" }]),
+    clientCapturedAt: 1000,
+    clientCapturedAtSource: "wall_clock",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-badclock")?.client_captured_at_source,
+    "unknown",
+    "an unrecognised clock was forwarded to the server",
+  );
+});
+
+test("a non-finite instant is never written into the shared spool", () => {
+  // The two legs share one directory. `JSON.stringify` turns NaN/Infinity into
+  // `null`, so this leg must refuse them at the source rather than emit a `null`
+  // instant the Python leg would read as an absent stamp.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-nonfinite", [{ role: "user", content: "hi" }]),
+    clientCapturedAt: Number.NaN,
+    clientCapturedAtSource: "cli_observed",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-nonfinite")?.client_captured_at,
+    undefined,
+    "a NaN was stored as a clock reading",
+  );
+});
+
 test("sourceName is a basename only (never a full path)", () => {
   assert.equal(sourceName("/Users/x/.pi/agent/sessions/--p--/s.jsonl"), "s");
   assert.equal(sourceName(undefined), "pi");
@@ -676,6 +742,21 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   // this assertion, deleting `captureLane: "hook"` from `spoolSnapshot` leaves
   // the whole suite green while a WORKING hook files as not-live.
   assert.equal(spooled.capture_lane, "hook", "the hook's spool entry lost its lane");
+  // #3516 §B / piece 12 row 1: the in-process recorder stamps its OWN clock and
+  // claims NO source. Without these two assertions, deleting
+  // `clientCapturedAt: Date.now() / 1000` from `spoolSnapshot` leaves the whole
+  // suite green while every Pi session files TIMELESS — and the floor then reads
+  // DISABLED for exactly the sessions it exists for.
+  assert.ok(
+    typeof spooled.client_captured_at === "number" &&
+      Number.isFinite(spooled.client_captured_at),
+    "the hook's spool entry lost its client capture instant",
+  );
+  assert.equal(
+    spooled.client_captured_at_source,
+    undefined,
+    "the recorder must claim NO clock source — its instant is its own (piece 12 row 1)",
+  );
   assert.deepEqual(readSpoolTurns(spool, "sess-A"), SPOOL_TURNS);
 
   // Session B (a later Pi run) starts: the replay opportunity.
@@ -690,6 +771,15 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   assert.equal(filed[0].body.session_id, "sess-A");
   assert.equal(filed[0].body.harness, "pi");
   assert.deepEqual(filed[0].body.conversation, SPOOL_TURNS);
+  // The stamp must survive to the WIRE, not merely to the spool's meta file.
+  assert.ok(
+    typeof filed[0].body.client_captured_at === "number",
+    "the recorder's instant never reached the wire — the floor sees DISABLED",
+  );
+  assert.ok(
+    !("client_captured_at_source" in filed[0].body),
+    "the recorder has no clock to name — it must post NO source",
+  );
 });
 
 // ── (2) Replaying a spooled session twice produces ONE session ─────────────

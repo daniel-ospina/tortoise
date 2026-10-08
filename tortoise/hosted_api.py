@@ -11592,13 +11592,29 @@ class SessionRequest(BaseModel):
     # reading, exactly the falsifiability the closed source set exists to
     # protect. It is also uninterpretable once stored (`json.dumps` emits
     # non-standard `Infinity`, which a strict reader rejects).
-    @field_validator("client_captured_at")
+    @field_validator("client_captured_at", mode="before")
     @classmethod
     def _validate_client_captured_at(cls, v):
-        if v is not None and not math.isfinite(v):
+        # `mode="before"` is load-bearing: an AFTER validator sees the value
+        # pydantic has ALREADY coerced, and by then `True` is the float `1.0`, so
+        # the bool guard below could never match.
+        # `bool` FIRST: it is an `int` subclass, so pydantic silently coerces
+        # `true` to `1.0` and the field stores a clock reading that is not one.
+        # The coercion is invisible, so the guard has to be explicit.
+        if isinstance(v, bool):
             raise ValueError(
-                f"client_captured_at must be a finite unix timestamp, got {v!r} "
-                "— an inf/nan instant is not a clock reading")
+                "client_captured_at must be a unix timestamp, got a bool — "
+                "`true` coerces to 1.0 and would be stored as a clock reading")
+        if v is not None:
+            try:
+                number = float(v)
+            except (TypeError, ValueError):
+                # Not numeric at all: leave it to pydantic to report.
+                return v
+            if not math.isfinite(number):
+                raise ValueError(
+                    f"client_captured_at must be a finite unix timestamp, got "
+                    f"{v!r} — an inf/nan instant is not a clock reading")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline

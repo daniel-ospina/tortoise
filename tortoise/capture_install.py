@@ -163,6 +163,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -313,19 +314,34 @@ def install_at_unix(value) -> float | None:
     ``TypeError: unsupported operand type(s) for -: 'str' and 'float'``.
 
     An absent or unparseable value returns ``None``, which the floor reports as
-    DISABLED — never as a FAILURE, and never as a pass.
+    DISABLED — never as a FAILURE, and never as a pass. A value that is present
+    but is not a reading must therefore also return ``None``, which is why a
+    non-finite number and a NAIVE datetime are both refused below.
     """
     if value is None:
         return None
     if isinstance(value, bool):
+        # `bool` first: it is an `int` subclass, so `True` would coerce to the
+        # epoch-adjacent instant `1.0` — a clock reading that is not one.
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        # `json`/pydantic both admit `inf`/`nan`. Returning them would let the
+        # floor compare them (`nan` FAILS, `inf` PASSES, `-inf` PASSES on a
+        # negative floor) — a verdict computed from a non-reading. Absent is the
+        # honest answer.
+        return number if math.isfinite(number) else None
     try:
         from datetime import datetime
 
-        return datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # A NAIVE datetime is read as LOCAL time by `.timestamp()`, shifting the
+        # floor by this box's UTC offset — measured 5 h here, two orders of
+        # magnitude past the 300 s tolerance, so it silently flips the verdict.
+        # The probe always writes an aware value (`datetime.now(UTC).isoformat()`).
+        if parsed.tzinfo is None:
+            return None
+        return parsed.timestamp()
     except (TypeError, ValueError):
         return None
 
@@ -362,6 +378,13 @@ def client_capture_floor_verdict(
         return VERDICT_DISABLED, (
             "no install probe recorded for this harness — the floor cannot be "
             "evaluated")
+    # An install time at or before the epoch is not an observation. It would
+    # otherwise yield `floor = -tolerance`, which EVERY client clock passes — a
+    # floor-pass on the absence of a floor.
+    if install_at <= 0:
+        return VERDICT_DISABLED, (
+            f"install_at {install_at:.3f} is at or before the epoch — not a "
+            "recorded install time, so the floor cannot be evaluated")
     floor = install_at - tolerance
     if client_captured_at > floor:
         return VERDICT_PASSED, (
