@@ -23,13 +23,15 @@ If none of those apply: **keep going.** The user can interrupt if they disagree.
 
 **Invalid reasons to stop:** Any question whose answer is trivially "yes" e.g.:
 
-- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?"
-- "On to the next step?" "Does that look right?" "Everything OK so far?"
-- Any handoff where the user has nothing to decide
+- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?" (waste of user time; you should continue)
+- "On to the next step?" "Does that look right?" "Everything OK so far?" (unless P0 consequence risk — that is a real gate, so stop — otherwise double-check and continue)
+- Any handoff where the user has nothing to decide (no reason to stop)
 - Another issue fixes this (then fix that issue)
+- context is almost exhausted (context auto-compacts)
 
 **Auto-file rule:** When you encounter a bug, workflow gap, missed edge case, or improvement opportunity → check if the root cause and/or symptoms are already covered by another issue and if yes add to it, or otherwise file a new GitHub issue. Never ask "should I file an issue?" — just file it if in doubt.
-Also, when you encounter a **pre-existing bug** (not introduced by your current work)
+Also, when you encounter a **pre-existing bug** (not introduced by your current work).
+
 ---
 
 ## ⛔ HARD RULE: Process Discipline

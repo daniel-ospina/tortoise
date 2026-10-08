@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3303,
+      "markdownlint": 3302,
       "lychee": 52
     },
     "variance": "markdownlint findings are deterministic and occurrence-counted. The lychee half also checks REMOTE links, whose occurrence count varies between RUNS for reasons no author controls (rate limits, transient network, TLS, run population), so it is a SET of `(path, target)` keys, not a count \u2014 its pinned ceiling in tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size (a re-baseline above it must raise that row out loud) while the markdownlint one is exact. Regenerate with `update`; never hand-edit."
@@ -31,7 +31,6 @@
     ".scope-1894.md|MD029|1|Ordered list item prefix [Expected: 2; Actual: 7; Style: 1/2/3]",
     ".scope-1894.md|MD029|1|Ordered list item prefix [Expected: 3; Actual: 8; Style: 1/2/3]",
     ".scope-1894.md|MD029|1|Ordered list item prefix [Expected: 4; Actual: 9; Style: 1/2/3]",
-    "AGENTS.md|MD003|1|Heading style [Expected: atx; Actual: setext]",
     "AGENTS.md|MD028|1|Blank line inside blockquote",
     "CHANGELOG.md|MD036|1|Emphasis used instead of a heading [Context: \"Lifecycle hardening\"]",
     "CHANGELOG.md|MD036|1|Emphasis used instead of a heading [Context: \"Migration CLI\"]",

@@ -343,3 +343,137 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
     # Explicit False is still the documented escape hatch on dream
     result = sdk.dream(require_calibration=False)
     assert result["converged"] is True
+
+
+# ── #7739: the gate is scoped to the run's selection ────────────
+#
+# One uncalibrated point ANYWHERE used to freeze every caller because the
+# gate was graph-wide. The gate must instead be evaluated against the SAME
+# selection the run consumes, and only for points EP can actually consume
+# (not draft AND not terminal, EP's ``_live_only`` set).
+
+def _anchored_subgraph(sdk, *, calibrated_target=True):
+    """Anchor A <-(op)- target B, both live; B calibrated unless told not to."""
+    p1 = sdk.create_point("statement", "Anchor A", credibility="gold",
+                          status="live")
+    p2 = sdk.create_point(
+        "statement", "Target B",
+        credibility="gold" if calibrated_target else None,
+        status="live")
+    op = sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+    return p1, p2, op
+
+
+def test_foreign_uncalibrated_point_does_not_block_anchored_run(sdk):
+    """#7739 (required): an uncalibrated point OUTSIDE the selection is not a blocker.
+
+    The anchored subgraph is fully calibrated; the foreign live point is
+    reachable from NOTHING. Before #7739 the whole-graph gate raised for
+    this caller; now it runs the selection it was asked for.
+    """
+    p1, _p2, _op = _anchored_subgraph(sdk)
+    sdk.create_point("statement", "Foreign uncalibrated", status="live")
+
+    result = sdk.compute_confidence(anchors=[p1["id"]],
+                                    require_calibration=True)
+    assert result["converged"] is True
+    assert p1["id"] in result["confidences"]
+
+
+def test_uncalibrated_point_inside_selection_still_blocks(sdk):
+    """#7739 (required): the guard is NOT weakened — an in-scope point raises.
+
+    Target B is a factor participant of the selected operator and is
+    uncalibrated, so the gate must still fail closed (#7478/#1157);
+    ``require_calibration=False`` remains the only bypass.
+    """
+    p1, p2, _op = _anchored_subgraph(sdk, calibrated_target=False)
+
+    with pytest.raises(CalibrationError, match="uncalibrated") as exc:
+        sdk.compute_confidence(anchors=[p1["id"]], require_calibration=True)
+    assert p2["id"] in str(exc.value)
+
+    # The explicit opt-out is untouched.
+    result = sdk.compute_confidence(anchors=[p1["id"]],
+                                    require_calibration=False)
+    assert result["converged"] is True
+
+
+def test_uncalibrated_point_beyond_the_selected_operators_still_blocks(sdk):
+    """#7739: an uncalibrated point the RUN reaches still raises.
+
+    The gate is scoped to the run's consumed set, not merely to the selected
+    operators' immediate endpoints. ``ep.run`` re-expands ``max_hops`` from
+    the selection's seeds, so an anchored ``max_hops=1`` run on
+    A-op1-B-op2-C consumes C — C is an endpoint of no SELECTED operator — and
+    an uncalibrated C must still fail closed. Deriving the scope from
+    ``_select_subgraph``'s operators alone misses C; this test pins the exact
+    scope, so it fails if the gate is narrowed to those endpoints.
+    """
+    a = sdk.create_point("statement", "A", credibility="gold", status="live")
+    b = sdk.create_point("statement", "B", credibility="gold", status="live")
+    c = sdk.create_point("statement", "C", status="live")  # uncalibrated
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk.create_operator("IMPL", b["id"], [c["id"]])
+
+    with pytest.raises(CalibrationError, match="uncalibrated") as exc:
+        sdk.compute_confidence(anchors=[a["id"]], max_hops=1,
+                               require_calibration=True)
+    assert c["id"] in str(exc.value)
+
+
+def test_terminal_uncalibrated_point_does_not_block(sdk):
+    """#7739: a TERMINAL point is never an EP blocker (whole-graph surfaces too).
+
+    EP's live set is ``_live_only`` = not draft AND NOT terminal, so a
+    superseded/retracted/outdated point is one EP will never consume.
+    Pre-#7739 only drafts were excused, so an uncalibrated ``superseded``
+    point froze every caller (the measured ``1a10706a0-1884perSuite``).
+
+    This drives the WHOLE-GRAPH scope (no-arg compute_confidence), where
+    ``calibrate_summary()`` DOES return the dead point — so the
+    ``is_terminal_status`` clause is what excuses it (stub that clause to
+    always-False and this test fails; a scoped run would not exercise it,
+    because the run's own consumed set already strips terminal points).
+    """
+    sdk.create_point("statement", "Live calibrated", credibility="gold",
+                     status="live")
+    sdk.create_point("statement", "Dead uncalibrated", status="superseded")
+
+    result = sdk.compute_confidence(require_calibration=True)
+    assert isinstance(result, dict)
+
+
+def test_outdated_flag_point_does_not_block(sdk):
+    """#7739: the legacy ``outdated=true`` flag is terminal too.
+
+    ``invalidate_point`` sets the flag WITHOUT touching status, so status-only
+    terminal detection would keep a dead point as a whole-graph blocker. This
+    pins both the ``outdated`` column ``calibrate_summary`` now returns and
+    the shared ``is_terminal_status`` mirror honouring its second argument.
+    """
+    sdk.create_point("statement", "Live calibrated", credibility="gold",
+                     status="live")
+    dead = sdk.create_point("statement", "Flagged uncalibrated",
+                            status="live")
+    corrector = sdk.create_point("statement", "Corrector", credibility="gold",
+                                 status="live")
+    sdk.invalidate_point(dead["id"], corrector["id"])
+    assert sdk.get_point(dead["id"])["outdated"] is True
+
+    result = sdk.compute_confidence(require_calibration=True)
+    assert isinstance(result, dict)
+
+
+def test_no_arg_gate_keeps_whole_graph_scope(sdk):
+    """#7739 regression pin: the no-arg (dirty-roots) path stays graph-wide.
+
+    It has no computed selection to derive, so its pre-#7739 posture is
+    unchanged — a foreign uncalibrated point still raises THERE. This PR
+    scopes only the selections it can actually derive.
+    """
+    _anchored_subgraph(sdk)
+    sdk.create_point("statement", "Foreign uncalibrated", status="live")
+
+    with pytest.raises(CalibrationError, match="uncalibrated"):
+        sdk.compute_confidence(require_calibration=True)
