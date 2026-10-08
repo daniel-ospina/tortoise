@@ -66,9 +66,25 @@ subjects.team: epistemic-team
 # --- GitHub API (via `gh` CLI, pre-installed + authed on runners) ----------
 
 def gh_api(repo: str, url: str) -> dict:
-    """Call `gh api <url>` and parse JSON. Raises on non-zero exit."""
+    """Call `gh api <url>` and parse a JSON **mapping**.
+
+    A non-zero exit raises `CalledProcessError`; a body that is not a JSON
+    mapping raises `DurationsBridgeError`. Both are fetch failures — the
+    callers decide whether one is fatal — so a caller tests "did the fetch
+    fail", not which way (#6092 review round 7).
+    """
     proc = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
-    return json.loads(proc.stdout)
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise DurationsBridgeError(
+            f"gh api {url} returned a body that is not JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise DurationsBridgeError(
+            f"gh api {url} returned {type(data).__name__}, not a mapping"
+        )
+    return data
 
 
 def fetch_run(repo: str, run_id: str) -> dict:
@@ -1371,7 +1387,14 @@ def main() -> int:
 
     run_id = args.run_id.strip()
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # A path that is an existing file, has a file in its parent chain, sits
+        # under an unwritable parent, or is a symlink loop all escaped as a
+        # traceback with rc=1 (#6092 review round 7).
+        print(f"2: artifact directory not usable: {exc}", file=sys.stderr)
+        return 2
     json_path = out_dir / "ci-timing.json"
 
     run: dict = {}
@@ -1380,7 +1403,11 @@ def main() -> int:
         try:
             run = fetch_run(args.repo, run_id)
             steps = steps_by_job(fetch_jobs(args.repo, run_id))
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, DurationsBridgeError) as exc:
+            # This path deliberately downgrades a failed fetch to a warning; a
+            # body that is not a JSON mapping is the same kind of failure, so
+            # it must not abort a path that tolerates the rc!=0 form (#6092
+            # review round 7).
             print(f"::warning::gh api failed for run {run_id}: {exc}", file=sys.stderr)
 
     files: dict[str, dict] = {}
@@ -1443,8 +1470,15 @@ def main() -> int:
     }
 
     md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes)
-    (out_dir / "ci-timing.md").write_text(md)
-    (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    try:
+        (out_dir / "ci-timing.md").write_text(md)
+        (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        # The directory was creatable but the write is not (a full disk, or a
+        # pre-existing file where an artifact should go) — same refusal shape
+        # as the mkdir above (#6092 review round 7).
+        print(f"2: artifact not writable: {exc}", file=sys.stderr)
+        return 2
 
     print(f"wrote {out_dir / 'ci-timing.md'} + {out_dir / 'ci-timing.json'}")
     print(f"sampled run {run_id or '(none)'}: {total_counts['passed']} passed, "

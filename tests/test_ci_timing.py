@@ -2528,3 +2528,56 @@ def test_cli_returns_2_when_the_manifest_path_cannot_be_read(tmp_path, label: st
     )
     assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_CLI = _REPO_ROOT / "tools" / "ci_timing.py"
+_MANIFEST = _REPO_ROOT / "config" / "ci-surfaces.yml"
+
+
+@pytest.mark.parametrize("label", ["existing-file", "file-as-parent"])
+def test_cli_returns_2_when_the_artifact_directory_is_unusable(tmp_path, label: str) -> None:
+    """`--out-dir` escaped as a traceback with rc=1 (#6092 review round 7).
+
+    `mkdir(parents=True, exist_ok=True)` raises `FileExistsError` when the
+    target is an existing file and `NotADirectoryError` when a component of the
+    parent chain is one; both used to reach the boundary uncaught.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    target = blocker if label == "existing-file" else blocker / "sub"
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r",
+         "--logs-dir", str(tmp_path), "--out-dir", str(target)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("body", ["null", "[]", "not json"])
+def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -> None:
+    """`gh_api` was annotated `-> dict` but never validated what it parsed
+    (#6092 review round 7).
+
+    A `gh` call that exits 0 with valid-but-non-mapping JSON, or with a body
+    that is not JSON at all, escaped from every gh entry point.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "gh"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$STUB_BODY"\n')
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+           "STUB_BODY": body}
+    for argv in (
+        ["--paid-vs-selected", "--run-id", "1", "--changed-files", "a.py",
+         "--manifest", str(_MANIFEST)],
+        ["--pick-run"],
+    ):
+        proc = subprocess.run(
+            [sys.executable, str(_CLI), "--repo", "o/r", *argv],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        assert proc.returncode == 2, f"{body} {argv[0]}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+        assert "Traceback" not in proc.stderr
