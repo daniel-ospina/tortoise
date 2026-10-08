@@ -4141,10 +4141,11 @@ def run_preflight(
                     "; terminal tests are not applied to these refs by name (a "
                     "remote-tracking ref is a local fetch cache, so judging it "
                     "terminal on its NAME could call a reused live branch merged), "
-                    "and NO remote ref is demoted here — a local terminal twin "
-                    "does NOT clear its remote counterpart, which blocks by design "
-                    "(#7693, the demotion was removed after eight review rounds "
-                    "found seven live false-CLEANs in it)"
+                    "and no remote ref is cleared as the terminal TWIN of a local "
+                    "branch — a local terminal twin does NOT clear its remote "
+                    "counterpart, which blocks by design (#7693, that demotion was "
+                    "removed after eight review rounds found seven live "
+                    "false-CLEANs in it)"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict

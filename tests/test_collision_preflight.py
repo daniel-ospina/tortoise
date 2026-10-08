@@ -2675,7 +2675,7 @@ class CollisionPreflightTest(unittest.TestCase):
         # from being restored (the previous assertion here matched `#7693` and so
         # passed against BOTH the demoting and the non-demoting tool — vacuous).
         self.assertIn("terminal tests are not applied to these refs by name", remote_row)
-        self.assertIn("NO remote ref is demoted here", remote_row)
+        self.assertIn("no remote ref is cleared as the terminal TWIN", remote_row)
         self.assertNotIn("IS demoted", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
@@ -2703,7 +2703,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertNotIn("squash-merged", out)
 
-    def test_remote_twin_of_a_terminal_local_branch_is_demoted_when_live(self):
+    def test_remote_twin_of_a_terminal_local_branch_is_not_demoted(self):
         # #7693. The remote twin of a branch this run PROVED terminal is the same
         # immutable commit — but only once the remote itself confirms the sha,
         # because `refs/remotes/…` is a fetch cache. `origin` here is a REAL bare
@@ -2734,12 +2734,13 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
 
     def test_remote_twin_with_no_confirmable_live_tip_still_blocks(self):
-        # #7693, the fail-closed half — and the one that matters, because this is
-        # how a REUSED branch is caught. `refs/remotes/…` holds the last FETCH, so
-        # a branch reused since then carries the same stale sha as its local twin
-        # while the remote has moved. Here `origin` cannot be read at all, so the
-        # confirmation fails; the ref must keep blocking rather than be called
-        # merged on the cache alone.
+        # #7693. A remote ref that cannot be READ keeps blocking. This was the
+        # fail-closed half of a demotion that had a live-tip confirmation; the
+        # demotion is GONE (see the removal block in `run_preflight`), so the
+        # assertion now holds for a simpler reason — nothing clears a remote ref.
+        # Kept because it is the cheapest test that a remote ref still blocks, and
+        # it is what would fail if the demotion were re-added returning on an
+        # unreadable remote.
         ref = f"fix/{ISSUE}-unverifiable"
         _git(self.repo, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
         _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
@@ -2756,19 +2757,14 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
 
     def test_remote_twin_of_a_reused_branch_still_blocks(self):
-        # #7693, ⭐ THE test the safety property rests on — and the one whose
-        # ABSENCE round-1 review caught by MUTATION: replacing the `_live != _sha`
-        # half of the guard with `_live is None` restored the original false-CLEAN
-        # and left every other test in this file PASSING. A test that still passes
-        # with the condition removed pins nothing, so it must be this shape.
-        #
-        # The shape that REACHES the comparison is a REUSE, not a moved cache
-        # entry: the local twin and the CACHED remote ref both sit at the terminal
-        # sha S (nothing here fetches — that is the whole hazard), while the
-        # REMOTE has moved to T. Only a live read can tell those apart. (The
-        # previous version of this test set the CACHED ref to the moved sha, so
-        # `local_terminal_shas` missed first and control never reached the live
-        # read at all — measured: ZERO `ls-remote` calls.)
+        # #7693, the SHARPEST test in this file, and the reverse-pin for the
+        # removed demotion. It was written to kill the live false-CLEAN a REUSE
+        # produces — the local twin and the CACHED remote ref both sit at the
+        # terminal sha S (nothing here fetches; that is the whole hazard) while the
+        # REMOTE has moved to T, so only a live read could tell them apart. The
+        # live read is GONE, so this now asserts the simpler truth — a remote ref
+        # whose branch moved on must BLOCK — and it is the test that fails if
+        # anyone re-adds a demotion that reads the cache instead of the remote.
         ref = f"fix/{ISSUE}-reused"
         bare = self.tmp / "bare.git"
         _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
