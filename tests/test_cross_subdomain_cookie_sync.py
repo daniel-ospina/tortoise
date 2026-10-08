@@ -299,6 +299,51 @@ def test_the_signup_marker_writer_is_actually_called() -> None:
     )
 
 
+def test_dashboard_marker_writers_are_host_conditional() -> None:
+    """#1857: main.jsx's `tt_claim_pending` marker writers must stay
+    host-conditional.
+
+    The dashboard's SESSION adapter is deleted (#4054), but these two writers
+    survive because the marker is a NON-SECRET claim-intent signal the welcome
+    page and the signin/signup routing read. They must build the cookie through
+    the shared `domainAttr()`/`secureAttr()` helpers — a revert to a hardcoded
+    `; Domain=.premiselabs.co; Secure` would drop the marker on
+    localhost/preview origins (the #1857 bug class) and break cross-origin claim
+    routing. This is the last subject of that invariant.
+    """
+    text = _read(DASHBOARD)
+    for name in ("setClaimPendingMarker", "clearClaimPendingMarker"):
+        body = _extract_fn_body(text, name)
+        assert "domainAttr()" in body, (
+            f"{name} no longer builds its Domain attribute through domainAttr() "
+            "— a hardcoded Domain is rejected on localhost/preview origins"
+        )
+        assert "secureAttr()" in body, (
+            f"{name} no longer builds its Secure attribute through secureAttr() "
+            "— a hardcoded Secure is rejected over http (localhost/previews)"
+        )
+        assert "'; Domain=" not in body, (
+            f"{name} hardcodes a Domain attribute (#1857): the host-conditional "
+            "helper is what keeps the marker working off premiselabs.co"
+        )
+        assert "'; Secure" not in body, (
+            f"{name} hardcodes a Secure attribute (#1857): the https-conditional "
+            "helper is what keeps the marker working over http"
+        )
+
+    # Non-vacuity: the helpers the bodies delegate to must still be the
+    # host-conditional definitions — asserting only on the bodies would stay
+    # green if a helper itself were changed to a hardcoded attribute.
+    norm = _strip_js_comments(text)
+    assert (
+        "const domainAttr = () => (isPremiselabsHost() && !isLocal() ? '; Domain=' + COOKIE_DOMAIN : '')"
+        in norm
+    ), "domainAttr must stay host-conditional (#1857)"
+    assert "const secureAttr = () => (isLocal() ? '' : '; Secure')" in norm, (
+        "secureAttr must stay https-conditional (#1857)"
+    )
+
+
 def test_auth_bounce_preserves_search_params() -> None:
     """#1860 (P3-5): the auth bounce must preserve the search params — /auth's
     OAuth-error banner reads ?error=... — plus the #1909 error fragment.

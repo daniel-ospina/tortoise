@@ -104,9 +104,11 @@ the token regardless of which subdomain presented it.
   other key, in whatever shape, to an origin-scoped aux chain (`sessionStorage` first,
   `localStorage` second, and a fail-closed refusal if neither accepts the write). The PKCE
   `code_verifier` is one of those other keys, so it never enters the legacy JS-readable jar. That
-  routing contract is deliberately SHARED with the blog-admin console's adapter
-  (`website/apps/blog-admin/src/lib/supabase.ts`, `authStorage`), which routes on
-  `key === STORAGE_KEY`. The **destination** deliberately differs — the console uses
+  routing contract was deliberately SHARED with the blog-admin console's adapter
+  (`website/apps/blog-admin/src/lib/supabase.ts`, `authStorage`), which routed on
+  `key === STORAGE_KEY`; that adapter was DELETED in **#4178 / #3559**, so the
+  contract now survives only here in `tortoise/oauth.py`. The **destination**
+  deliberately differs — the console used
   `localStorage` only; the consent page prefers `sessionStorage` — because a verifier is a
   single-use credential that must not outlive the tab that began the flow (RFC 10017 §8.5). That
   is a recorded `keep separate` on the destination, while the routing itself is

@@ -111,7 +111,10 @@ function isAllowed(path: string): boolean {
  * service-role key, so the SECURITY DEFINER `public.is_admin()` resolves
  * `auth.uid()` from the bearer token we minted. `unavailable` and `not_admin`
  * stay distinct so a fault is a 503, never a 403 that reads as an access
- * decision.
+ * decision. Only a 401/403 (the presented USER token was rejected) is the
+ * access-decision branch; every other non-ok status — a missing/renamed RPC, a
+ * misconfigured URL, a PostgREST fault, a 5xx/429 — is OUR problem and is
+ * `unavailable`, exactly as the sibling classifies it.
  */
 async function checkAdmin(
   env: SupabaseProxyEnv,
@@ -129,8 +132,14 @@ async function checkAdmin(
       body: "{}",
       signal: AbortSignal.timeout(5000),
     });
-    if (res.status >= 500 || res.status === 429) return "unavailable";
-    if (!res.ok) return "not_admin";
+    if (!res.ok) {
+      // A rejected USER token IS an access decision. Anything else (a missing
+      // RPC, a rotated key, a PostgREST fault, a 5xx/429) is OUR problem and
+      // must be 503 — showing "not an admin" would be a lie that costs an hour
+      // to debug. Mirrors `admin/[[path]].ts::isAdmin`.
+      if (res.status === 401 || res.status === 403) return "not_admin";
+      return "unavailable";
+    }
     return (await res.json()) === true ? "admin" : "not_admin";
   } catch {
     return "unavailable";
