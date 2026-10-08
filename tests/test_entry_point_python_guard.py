@@ -523,28 +523,38 @@ _CARVE_OUTS = frozenset(UNGUARDABLE) | frozenset(RUNTIME_39)
 #: Text-bearing files a reader copies an invocation FROM.
 _DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
 
-#: Review round 1: a shell line inside a CI JOB that EXECUTES a tool runs on the
-#: RUNNER's interpreter (every workflow here pins 3.12 via setup-python), so a
-#: bare `python3` there is CORRECT and must not be flagged — flagging it would be
-#: the over-reach this seam exists to avoid.
+#: SURFACES DELIBERATELY OUT OF SCOPE, with reasons — a declared bound, not an
+#: oversight. Declared as DATA so the bound is greppable and widening the seam
+#: means editing a named thing.
 #:
-#: What a workflow file exposes to a HUMAN is its comments, its
-#: `::error::`/`::warning::` ANNOTATIONS, and an ECHO whose argument IS the
-#: command text — because printed text is read (and, in
-#: `.github/workflows/finding-provenance.yml`, POSTED as a GitHub comment for a
-#: finding author to copy) rather than executed.
-#:
-#: The echo arm is deliberately narrow: it requires the quoted argument to START
-#: with the invocation. `echo '$ python3 tools/x.py'` is human text and is
-#: flagged; `echo x | python3 tools/x.py` and `printf '%s' "$V" | python3
-#: tools/x.py` are PIPELINES that execute on the runner and are not — round 2
-#: found the echo case, then found this arm's first draft over-matching those two
-#: real statements in `python-ci.yml`.
-_HUMAN_TEXT_IN_YAML = re.compile(
-    r"(^\s*#)"
-    r"|(::(?:error|warning|notice)::)"
-    r"|(\b(?:echo|printf)\b[^\n]*['\"]\s*\$?\s*(?:/usr/bin/)?python3\b)"
-)
+#: Review round 4 reviewed this seam as production code and recommended exactly
+#: this: the `.github/workflows` surface had, by then, generated EVERY defect in
+#: rounds 1-4 (the "any `.yml`" sweep, the path-substring predicate, the echo
+#: arm's over-match) while protecting ZERO live lines — its only bare occurrence
+#: was a record already exempted here. A surface whose filter is more fragile
+#: than the class it guards is negative machinery, so it is gone rather than
+#: patched a fifth time.
+_SURFACES_OUT_OF_SCOPE: dict[str, str] = {
+    ".github/": (
+        "a `run:` line executes on the RUNNER's 3.12 (every workflow pins it via "
+        "setup-python), where the bare form is correct; the human-text filter "
+        "this replaced was measured at 0 live offenders"
+    ),
+    "config/": (
+        "its 3 occurrences are DESCRIPTION; `ci-surfaces.yml:1364` quotes the "
+        "bare form as the PROBLEM the guard fixes (\"the documented `python3 "
+        "tools/x.py` invocation otherwise dies with an unattributed INTERNAL "
+        "ERROR\"), so rewriting it would invert the meaning, and the other two "
+        "state what a CI step runs"
+    ),
+    "tests/": "fixtures, not docs; ~85 hits, none instruction-bearing",
+    "root *.md + website/": "measured at 0 hits",
+    ".husky/ + extensionless scripts": (
+        "keyed out by `_DOC_SUFFIXES`; the hook invokes through its `py_tool` "
+        "wrapper, never a bare `python3`, so it carries the guarantee by "
+        "construction"
+    ),
+}
 
 #: Lines where the bare form is DELIBERATELY correct because the text RECORDS or
 #: DESCRIBES what a machine did, rather than instructing a reader to run it:
@@ -562,7 +572,7 @@ _HUMAN_TEXT_IN_YAML = re.compile(
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: four entries below do not.
+#: three entries below do not.
 #:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
@@ -586,13 +596,29 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        (
-            ".github/workflows/ai-review-gate.yml",
-            "# and `python3 tools/mergify_config_guard.py --static` passes. The "
-            "STATIC tie is",
-        ),
     }
 )
+
+
+def test_the_record_exemptions_all_still_match_a_live_line():
+    """Review round 4: `_DELIBERATE_BARE_FORM` is keyed on exact line text, so a
+    reword or reflow of a legitimate record silently DEADENS its exemption — the
+    line is re-flagged, but worse, an entry can also linger for text that no
+    longer exists while the occurrence it was written for is now uncovered.
+    Assert every key still matches a line in its file, so the set cannot rot.
+    """
+    dead: list[str] = []
+    for rel, line in _DELIBERATE_BARE_FORM:
+        path = ROOT / rel
+        if not path.is_file():
+            dead.append(f"{rel} (file gone)")
+            continue
+        if line not in {ln.strip() for ln in path.read_text().splitlines()}:
+            dead.append(f"{rel} :: {line[:70]}")
+    assert not dead, (
+        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, so "
+        f"their exemption is dead and the occurrence may be uncovered: {dead}"
+    )
 
 
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
@@ -607,17 +633,13 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     overclaims its scope is the defect, so the walk was WIDENED to match the
     name rather than the name narrowed to flatter the walk):
 
-      * `tools/` + `graph-scripts/` + `docs/` in full — every text-bearing file;
-      * `.github/` ALSO. Only `.github/workflows/*.yml` gets the
-        `_HUMAN_TEXT_IN_YAML` filter, because a `run:` line THERE executes on the
-        runner's pinned 3.12, where the bare form is correct, and flagging it
-        would be the over-reach this seam exists to avoid. Everything else under
-        `.github/` — issue templates, composite `action.yml`, `settings.yml` — is
-        HUMAN-FACING prose and is therefore checked IN FULL. (Review round 3: the
-        first draft filtered on "any `.yml`", which silently skipped
-        `.github/ISSUE_TEMPLATE/*.yml` — a `description:`/`value:` scalar carries
-        exactly this instruction, for real users, and a revert there went
-        undetected.)
+      * `tools/` + `graph-scripts/` + `docs/` in full — every tracked
+        text-bearing file. The walk is intersected with `git ls-files` (review
+        round 4), so a scratch note dropped under a walked root cannot red an
+        unrelated commit — measured when a reviewer's probe did exactly that.
+
+    Surfaces deliberately OUT of scope are declared, with reasons, in
+    `_SURFACES_OUT_OF_SCOPE` — a bound, not an oversight.
 
     The one-time sweep fixed the occurrences in place. Without this assertion it
     would simply be a fact about today, re-established by the next person who
@@ -631,9 +653,13 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     it).
     """
     offenders: list[str] = []
-    for base in (*CORPUS_DIRS, "docs", ".github"):
+    tracked = set(_git_lines("ls-files", "--", *CORPUS_DIRS, "docs"))
+    for base in (*CORPUS_DIRS, "docs"):
         for path in sorted((ROOT / base).rglob("*")):
             if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
+                continue
+            where = _rel(path)
+            if where not in tracked:
                 continue
             try:
                 text = path.read_text()
@@ -641,11 +667,7 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
                 continue
             if "python3" not in text:
                 continue
-            in_workflow = ".github/workflows" in path.as_posix()
-            where = _rel(path)
             for lineno, line in enumerate(text.splitlines(), 1):
-                if in_workflow and not _HUMAN_TEXT_IN_YAML.search(line):
-                    continue
                 for match in _BARE_INVOCATION.finditer(line):
                     # The RECORD exemption is checked FIRST (review round 3): it is
                     # keyed on the LINE, not on a tool path, so an elided
