@@ -54,6 +54,7 @@ So this is a real extension of existing machinery — not greenfield, not redund
    Rejected. Pushing cost into the query path makes the hot path slower and still never refreshes regions nobody queries — the rot is unchanged, it's just delayed. Dreaming's whole design point (#85) is the off-hot-path tier. Deepening the fast path complements (deeper fast path = smaller freshness debt), but does not replace the scheduler.
 
 **Anti-post-rationalization — strongest reasons NOT to build this:**
+
 - **Sparse-connectivity waste:** if the graph is mostly disconnected regions, most of the graph doesn't change when one region changes — full-graph dreaming recomputes unaffected regions. Counter: the epic's freshness tracking + expanding window is precisely the mechanism that limits recompute to regions that are *stale* (not merely *changed*).
 - **Convergence risk:** loopy BP on a growing graph can oscillate; more regions recomputed = more chances for non-convergence. Existing `TortoiseEP.run` has convergence handling; expanding windows need convergence-aware stopping — a real engineering cost, not free.
 - **Complexity budget:** freshness tracking + selectable modes + consolidation interplay is significant machinery for a non-urgent improvement. Counter: it is on the roadmap (workflows doc), is directly load-bearing for the core product hypothesis, and the O/I/T is measurable — this is not scope creep.
@@ -73,6 +74,7 @@ So this is a real extension of existing machinery — not greenfield, not redund
 | **Not Important** | — | — |
 
 **Placement: Important / Not Urgent → Schedule.**
+
 - Important: core product hypothesis (graph as memory; confidence engine maintains the record); explicit roadmap item; without it, graph-wide beliefs rot.
 - Not urgent: no active incident; fast-path EP keeps the hot path working; this is a quality/consistency improvement to schedule deliberately.
 - Not a "Do now" because nothing is on fire and full depth (this epic = full pipeline with review gates) benefits from being scheduled, not rushed.
@@ -97,6 +99,7 @@ So this is a real extension of existing machinery — not greenfield, not redund
 **Decision:** PROCEED
 
 **Alternatives considered:**
+
 1. Do nothing (fast-path only) — rejected: rest of graph rots; the epic's entire premise.
 2. Run `dream_all` more often — rejected: O(whole graph) cost, fails Indicators 2–3, blows #329 budget.
 3. Streaming/event-driven EP — complementary, not a substitute (BP needs a fixed-point schedule).
@@ -107,6 +110,7 @@ So this is a real extension of existing machinery — not greenfield, not redund
 **Eisenhower placement:** Important / Not Urgent → **Schedule** (roadmap item; no active incident; benefits from full-depth pipeline).
 
 **Key assumptions:**
+
 - Graph regions are meaningfully separable for windowed recompute (influence boundary can be approximated) — confidence: **medium** (depends on graph density; sparse = easy, dense = window ≈ whole graph).
 - EP convergence handling scales to windowed recompute without oscillation — confidence: **medium** (existing run() converges on subgraphs today).
 - Freshness metadata (region → lastDreamedAt) is queryable without schema-breaking changes — confidence: **high** (node property pattern already used: `confidence`, `updatedAt`).

@@ -216,6 +216,7 @@ No new API contracts. Existing endpoints reused:
 ## 7. Detailed E2E Test Cases
 
 ### TC1: New user completes 4-step wizard
+
 1. OAuth sign-in → lands on welcome mode
 2. Step 0 shows org-create input
 3. Type name → Create → org created
@@ -225,6 +226,7 @@ No new API contracts. Existing endpoints reused:
 7. Click "Open my dashboard →" → dashboard renders
 
 ### TC2: Invited user via invite link
+
 1. Navigate to `app.premiselabs.co/?invite_token=XYZ` (no session)
 2. Bounce to `/auth` → OAuth → return to `/?invite_token=XYZ#access_token=...`
 3. Invite auto-accepted → `loadTeams()` fires
@@ -232,17 +234,20 @@ No new API contracts. Existing endpoints reused:
 5. Continue to Step 1
 
 ### TC3: User with pending invites
+
 1. OAuth sign-in (no `?invite_token=`)
 2. User has pending invite on server
 3. Step 0 shows invite card alongside name input
 4. Click Accept → org loads → auto-advance to Step 1
 
 ### TC4: Orientation step removed — no regression
+
 1. Existing `wizardArchived.test.js` updated to reflect 4 steps
 2. Progress bar shows 4 dots (was 5)
 3. Renumbered step labels match wizardFlow.js
 
 ### TC5: Returning user skips wizard
+
 1. Session exists, org exists
 2. Load `app.premiselabs.co/`
 3. No welcome mode — dashboard renders directly

@@ -254,9 +254,11 @@ must appear in every published report).
 ## Adopt / Adapt / Skip map per workstream
 
 ### W1 — Learnings map doc
+
 - **ADOPT** (this brief + raw-notes). Verdicts above + licensing note.
 
 ### W2 — Write-path eval (Cat 35 port)
+
 - **ADOPT** planted-gold shape: items with `kind ∈ {fact, idea, decision,
   vibe, entity}`, `verbatim_anchor`, `notability`, `depth_bucket`;
   distractors (true-but-routine) + hazards (attribution traps); sealed gold
@@ -283,6 +285,7 @@ must appear in every published report).
   emitting = 100%, quote fidelity ≥80%.
 
 ### W3 — Volunteering-memory harness (Cat 34 port) + why-layer
+
 - **ADOPT** fixture/gold schema shapes, sealed-gold discipline (gold dir,
   `gold` key in fixture = validation error), `fixtures_hash` covering both,
   holdout split (~15%), one-DB-per-run hermetic replay, deterministic seed.
@@ -320,6 +323,7 @@ must appear in every published report).
   slugs don't count).
 
 ### W4 — Why-aware recall (HEADLINE, existing surfaces only)
+
 - **ADAPT** the reflex skeleton (when to inject, pointer budget, re-mention
   suppression) as the pushed channel — but the salience DECISION becomes EP
   support+contentiousness scoring, and the injected CONTENT becomes
@@ -366,6 +370,7 @@ must appear in every published report).
   a highly contended point is exactly when why-context matters most).
 
 ### W5 — Automatic memory ingestion
+
 - **ADAPT** gbrain's write-path mechanics: content-hash dedup keys
   (extract-atoms), provenance REQUIRED + `source_session` stamping
   (MEMORY_VERBS `remember`), facts-fence reconciliation (extract-facts
@@ -380,6 +385,7 @@ must appear in every published report).
   W6 toggle placement; gbrain contributes nothing new.
 
 ### W6 — Onboarding + Settings toggles
+
 - **SKIP gbrain entirely** (no product onboarding precedent; single-user
   CLI). #1976 is the governing dependency: build W6 against its output
   (Settings → Memory sources, agent just-in-time proposals, disclosure
@@ -387,6 +393,7 @@ must appear in every published report).
   is clearly blocked (epic constraint re-confirmed).
 
 ### W7 — Public benchmark discipline
+
 - **ADOPT wholesale** the receipts/baselines/errata/comparison machinery:
   validated receipts naming the commit + pinned judge version + corpus hash;
   sealed answer keys at the boundary; `recall_all@5` official semantics
@@ -422,6 +429,7 @@ must appear in every published report).
 | A12 | Tortoise's ask surface gating (#2013) will resolve in favor of exposure (or W4 can route through search/analyze meanwhile) | **low (unverified)** | sdk.py:10505 "do not build production features on it until the reader-model decision is made" | W4 scoping: confirm the ask exposure decision; search/analyze surfaces are the unblocked path |
 
 **Top 3 assumptions/risks for the epic:**
+
 1. **A3/A4 (the W4 thesis is unverified and gbrain has no precedent)** — EP
    scoring the reflex + contentiousness-driven recall is the novel half; it
    needs its own eval before it can be claimed (that's exactly the W3 why
@@ -441,4 +449,5 @@ must appear in every published report).
 
 See `raw-notes.md` in this directory — the append-only codebase walkthrough
 with file paths, line refs, quotes, and the line-ref quick index.
+
 - **2026-09-01T09:31:08** [competitor] AXIS NOTE (W4 contention-driven recall): no shipping product found that surfaces belief conflicts/why at recall time (matches brief A4 low-confidence hypothesis). BUT academic precedent EXISTS for conflict-aware memory and controversy-aware retrieval: (1) Conflict-Aware Memory Primitive (arXiv 2608.08236) marks incompatible claims SUPERSEDED/CONTESTED with provenance at write time; (2) Graph-Native Cognitive Memory with formal belief revision (arXiv 2603.17244) surfaces current AND superseded beliefs at retrieval; (3) Belief Memory under partial observability (arXiv 2605.05583) keeps multiple candidate conclusions with probabilities surfaced together; (4) controversy-aware retrieval/reranking literature (CEUR-WS Vol-2936 paper-210, Webis axiomatic argument re-ranking, ACL 2024 indexical bias) boosts stance-labeled pro/con docs. Implication for scope: the W4 thesis is academically grounded (mechanism exists in IR literature) but remains novel as a shipped agent-memory product feature; the conflict-surfacing E2E is implementable (precedent), the why-layer product claim is still the differentiator. See scope doc ### Axis Research Notes.

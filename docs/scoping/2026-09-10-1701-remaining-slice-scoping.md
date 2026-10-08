@@ -21,6 +21,7 @@ A ChatGPT user must be able to (a) complete the OAuth connector flow to the host
 ## Why This Framing (evidence; rejected framings)
 
 Rejected framings (from 2 adversarial problem-diverge agents + audit):
+
 1. "Server complete; only the wizard tab remains" — **wrong**: live-verified `400 invalid_resource` for multi-team × resource-less on both `/oauth/consent/preview` and `/oauth/consent`. Indicator 4 ("token binds to the user's team") is unreachable for ChatGPT on multi-team accounts without a team choice.
 2. "Defer everything; close on server completeness" — wrong: Indicator 5 (wizard ChatGPT tab) is entirely unshipped and is the user-visible acceptance criterion; ChatGPT remains the wizard's "dead end" the issue exists to remove.
 3. "The ChatGPT tab is an epic-scale cross-surface vocabulary refactor" (devil's advocate) — **partially true and absorbed**: adding `chatgpt` to `HARNESS_ORDER` ripples to `harnesses.test.js` exactness arrays, the MemorySources capture panel (needs capture `false` + reason), and the archived A0 wizard path (needs total maps). The scope below treats this as a first-class constraint (vocabulary stays *total* everywhere), but the *server* session-capture/analytics vocabularies do **not** need widening — ChatGPT never files sessions and the wizard's harness name only lands in onboarding jsonb.
@@ -29,6 +30,7 @@ Rejected framings (from 2 adversarial problem-diverge agents + audit):
 Unverifiable-external risks are documented, not silently ignored: OpenAI plan entitlement (Pro read/write variance), DCR shared-egress per-IP limiter (20/h/IP → all ChatGPT DCRs share OpenAI egress), ChatGPT's exact `resource` string behavior, consent-page rendering inside ChatGPT's OAuth webview. Each is addressed by (a) a server tolerance where cheap and safe, (b) R3's recorded human E2E which names what to observe, (c) an ops note in the PR body.
 
 ### Falsification
+
 Evidence that would prove this framing wrong: if a multi-team account completed ChatGPT OAuth today (no picker, no resource) — falsified live on 2026-09-10 (both endpoints 400). If the wizard's 6 tabs already included ChatGPT — falsified by read (HARNESS_ORDER has 6 entries, no chatgpt anywhere in src).
 
 **Confidence:** 88/100 (only the OpenAI-external behaviors remain uncertain, and the scope degrades gracefully for each).
@@ -36,7 +38,9 @@ Evidence that would prove this framing wrong: if a multi-team account completed 
 ## Scope (remaining slice)
 
 ### R1 — Consent page: team choice for resource-less OAuth clients (multi-team)
+
 Server/UX additive; no schema change. Token stays (user, team)-bound; D4's client-declared resource path is unchanged for clients that declare one. **Branch key is "no team-scoped resource"** (covers both `resource` omitted AND an origin-root echo), never `resource is None`.
+
 - `oauth.py`: `consent_preview` returns the user's **active** memberships (id + name + per-team scoped resource URL), **excluding suspended teams** (`teams.suspended_at` set — a suspended pick must fail cleanly at preview, not mid-authorize), with `org_id: null` instead of raising when the request resolves to **no team-scoped resource and >1 team**; zero-team still 403s; single-team shape unchanged.
 - `oauth.py`: `parse_resource` tolerates the **origin root by exact equality** (`{base}` / `{base}/` after the existing `rstrip("/")`) as equivalent to the bare MCP resource — an OAuth client that echoes `resource={origin}` (OpenAI-docs pattern) maps to the default-team path instead of 400. NOT a prefix rule (`{base}/v1/keys` and any foreign origin stay 400). Tokens are only ever minted for a team the user belongs to.
 - `hosted_api.py` `/oauth/consent/preview`: no logic change (returns the new shape).
@@ -46,7 +50,9 @@ Server/UX additive; no schema change. Token stays (user, team)-bound; D4's clien
 - Tests: update `test_multi_team_default_requires_declaration` to the new contract (preview 200 + memberships; consent POST with a member team-scoped resource binds that team; non-member team 403s; suspended team excluded from preview + its consent POST 403s cleanly; no-resource multi-team consent POST still 400). Add a static consent-page-JS test in the `node --test` pattern: server-render `consent_page_html`, assert the memberships branch emits the select + placeholder and the Authorize body uses the selected team's resource, and single/auto-bound team pages keep the select hidden (`display:none`) and non-actionable.
 
 ### R2 — Wizard ChatGPT harness tab (Indicator 5)
+
 Additive entry to the 7-harness vocabulary + live connect-step branch. 6 existing harnesses byte-identical.
+
 - `harnesses.js`: add `chatgpt` to `HARNESS_NAMES`, `HARNESS_ORDER` (last), `HARNESS_INTRO`, `HARNESS_STEPS` (Developer-mode steps w/ URL copy), `HARNESS_INSTALL` (skills-as-prompt payload — no local skills, Claude Web pattern), `HARNESS_SKILLLESS`, `HARNESS_COPY_LABEL` ('Copy prompt'), `HARNESS_CONTINUE_LABEL`, `HARNESS_CAPTURE_SUPPORT=false` + `HARNESS_CAPTURE_REASON`; `UNIVERSAL_COMMAND.chatgpt` (prompt payload; classed **teach-human** — user completes manual steps, then verifies in-chat). New no-key classifier `HARNESS_OAUTH = ['chatgpt']`; teach-human union becomes 3 (desktop/web/chatgpt). ChatGPT connector URL = a NEW `CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'` constant **without** the trailing slash (OpenAI's connector validates an `/mcp` suffix; verified server-side that bare `POST /mcp` dispatches directly into the mounted MCP app — no 307).
 - **Server vocab decision (P1 resolution):** `_SESSION_HARNESS_VALUES` / `_HARNESS_ANALYTICS_VALUES` (capture + copy-attribution Literals) are NOT widened — chatgpt never files sessions. The wizard's copy beacon PATCHes `{harness:'chatgpt', section:'config'}`; the server POPS harness/section before the state merge — it never lands in onboarding jsonb and, being outside the analytics enum, emits no `artifact_copied` event (inert, no error). Amend `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract` to subset semantics: server vocab stays the pinned 6 capture-capable values; `frontend ⊇ server`; `frontend - server == {'chatgpt'}` with a wizard-only comment. Do NOT "fix" the missing beacon by widening a Literal.
 - `main.jsx` live connect step (self-fork, wizardStep 2): **invariant — the chatgpt connect branch renders for `wizardHarness === 'chatgpt'` UNCONDITIONALLY, above the `!harnessKey` gate**, regardless of `harnessKey`, `isOwnerAdmin`, or `wizardCopied` state. Members never see the owner/admin mint/paste gate; owners never mint a useless key; a key minted on an earlier claude-tab visit never leaks into chatgpt copy. Renders: steps list (`harness-steps` ol with per-step copy via the existing `wizardCopyStep`/`copiedStep`), intro, prompt snippet, Copy prompt (reuses `wizardCopy` → sticky label + copy beacon), Continue → `wizardHarnessContinue` (harness-connected checkpoint). Own Back/Skip chrome. The "shown once" key paragraph and the "Run the command… tell your agent" fragment (exclusion list) are unreachable for chatgpt by construction.
@@ -57,9 +63,11 @@ Additive entry to the 7-harness vocabulary + live connect-step branch. 6 existin
 - Rebuild `website/apps/dashboard/dist` (hashed bundle + index.html) in the same commit (repo convention).
 
 ### R3 — ChatGPT human E2E script + evidence template (Indicator 2)
+
 OpenAI's connector creation is human-in-the-loop. Deliverable = a precise recorded script (docs/research/2026-09-10-1701-chatgpt-e2e-script.md) + evidence template; the merge is NOT blocked on the human click — the PR body marks it as the manual verification step with what to record (plan tier, tool scan result, a graph write round-trip, URL form used, any redirects, refresh behaviour after 24 h).
 
 ## Rejected Alternatives
+
 | Alternative | Why rejected |
 |---|---|
 | GitHub-model: user-bound token, org as per-request tool param | Rejects #524's team-bound boundary; refactor across every MCP tool and the graph namespace — P0 scope. Account-chooser-at-consent (Cloudflare/Zapier pattern) reaches the same user outcome at ~5% of the cost. |
@@ -71,6 +79,7 @@ OpenAI's connector creation is human-in-the-loop. Deliverable = a precise record
 | DCR per-IP limiter raise/whitelist for OpenAI egress | Weakens an abuse control without evidence of pressure; flagged as an ops note + monitor point in R3, not a code change. |
 
 ## Verification Checklist (populated fractal fields)
+
 | #1701 indicator | Surface | Test layer | Verification |
 |---|---|---|---|
 | 1/3/4 (already shipped) | discovery/PKCE/mcp | existing suite | regression: full oauth + hosted-auth + mcp-auth suites green |
@@ -81,6 +90,7 @@ OpenAI's connector creation is human-in-the-loop. Deliverable = a precise record
 | 2 (R3) | ChatGPT E2E | e2e (human, recorded) | recorded script + evidence; PR-body manual step |
 
 ## Wiring Check
+
 | Touch point | Type | Covered by |
 |---|---|---|
 | `tortoise/oauth.py` (consent_preview memberships, parse_resource origin-root) | server | R1 |
@@ -98,6 +108,7 @@ OpenAI's connector creation is human-in-the-loop. Deliverable = a precise record
 | E2E evidence doc + PR-body manual step | docs | R3 |
 
 ### Verification-gate resolutions (problem+solution verify, 2+2 verifier agents)
+
 - P1 (wiring): server pytest `test_cross_surface_harness_vocab_contract` parses `HARNESS_ORDER` and asserts frontend==server==6 → amended to subset semantics (chatgpt wizard-only carve-out). Server Literals stay 6.
 - P1 (wording fix): wizardCopy does NOT persist harness to onboarding jsonb and chatgpt emits no analytics beacon — copy beacon is inert by design; no Literal widening.
 - P2 (consent JS): onAuthStateChange auto-advance, 401-with-session retry, Authorize disabled until team resolved, preview-failure Retry, static page-JS tests.
@@ -108,6 +119,7 @@ OpenAI's connector creation is human-in-the-loop. Deliverable = a precise record
 - P4 (URL): no 307 for bare `/mcp` (verified empirically) — no follow-up needed; R3 evidence records the URL form.
 
 ## Complexity (remaining slice)
+
 | Domain | Rating | Rationale |
 |---|---|---|
 | UX | standard | Existing claude-web tab pattern; key-less branch is new but bounded; copy follows proven structure |
@@ -116,6 +128,7 @@ OpenAI's connector creation is human-in-the-loop. Deliverable = a precise record
 | Ontology | low | No schema changes |
 
 ## Notes for the plan
+
 - Open external risks to verify in the human E2E (not merge-blocking): OpenAI plan entitlement, DCR egress limiter pressure, consent page inside ChatGPT webview, exact URL/redirect behaviour.
 - Ops note for PR body: DCR `TORTOISE_OAUTH_DCR_PER_HOUR` (20/h/IP) is shared across OpenAI egress — watch on launch.
 - Adjacent product gap (NOT absorbed): org admins have no inventory/revocation surface for members' OAuth connections. Filed separately.

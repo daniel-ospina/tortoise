@@ -49,6 +49,7 @@ Epic #2083 child C6 (standard). Depends: #2110 (C1 — `graphs.recording` column
 ## Design decisions
 
 ### D-C6-1 — recording storage (registry default node + supabase default row)
+
 Registry: `recording` prop on the Graph node (MATCH (g:Graph {id,org_id})
 SET g.recording = $v; FalkorDB SET null removes the prop = inherit). Default
 graph node (kind='default', random gid) IS settable — same MATCH. Supabase:
@@ -64,6 +65,7 @@ or kind='default' upsert). `graph_metadata` default dict reads the
 kind='default' row's recording when present (fallback None).
 
 ### D-C6-2 — PATCH auth + contract (epic §6.3 verbatim)
+
 `PATCH /v1/graphs/{graph_id}?org_id=…` body `{recording: bool|null}`.
 Dual-auth `get_current_org_session`: key face → `team:manage` scope OR
 legacy_full_access (owner-minted deleg-NULL) — child policy never mints
@@ -76,8 +78,10 @@ Errors: 401/403 scope · 404 unknown · 422 missing/invalid recording field
 (Pydantic model, bool | None coercion — reject strings).
 
 ### D-C6-3 — recording gate resolution (`_session_recording_for(team)`)
+
 New helper in hosted_api: given the auth team dict, resolve the EFFECTIVE
 recording for the graph the key targets:
+
 - graph-bound key (`team["graph_id"]`) → that graph's override (registry
   Graph node prop / supabase row; FAIL-CLOSED on vanished graph → 403
   GRAPH_NOT_FOUND, mirroring `_data_sdk`'s vanish semantics — never
@@ -93,6 +97,7 @@ True/None-default-ON → proceed. Resolution stays FIRST in the gate stack
 (before provider/quota — no quota work for disabled graphs).
 
 ### D-C6-4 — MCP capture carries the graph ContextVars (C5 residual close)
+
 `tortoise_session_capture`'s synthetic team dict gains the C5 ContextVar
 fields (`_current_graph_id`, `_current_graph_namespace`, `_current_scopes`,
 `_current_legacy_full_access`, `_current_key_id` if present) so
@@ -103,6 +108,7 @@ shape); graph-bound keys carry scopes+legacy so `_require_scope` and
 the key's graph override on MCP too.
 
 ### D-C6-5 — install probe + team toggle unchanged (round-1 decisions)
+
 `session_install_probe` stays team-level (probe reports provider/hook state —
 recording-independent by design, #1927 comment). `set_session_recording`
 (REST) + `tortoise_onboarding_session_recording` (MCP toggle) continue to
@@ -123,6 +129,7 @@ explicit commits not) — do not re-flag in future reviews.
 (c) the supabase kind='default' upsert carries the TEAM graph name as its
 namespace (graphs.namespace is NOT NULL — 20260901000001; a null would 500
 the PostgREST INSERT) and converges on a concurrent duplicate POST (re-read
+
 + PATCH the winner — no duplicate-key 500).
 (c2, round 1b) #1927 master kill: the team OFF toggle is the user's explicit
 opt-out — a per-graph override (graph 0 OR custom) NEVER re-enables it (R9).

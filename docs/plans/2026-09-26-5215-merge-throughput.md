@@ -95,6 +95,7 @@ described as 3× before M3 — and the same caution applies to this plan's own "
 ceiling-at-default, not a measurement (S13).**
 
 **⟨C2⟩ The durations map exists; the *collector* has never run — and two artifacts have no bridge.**
+
 - The fast split reads **`config/ci-surfaces.yml`** (`ci_selection.py:51 MANIFEST`), which declares
   `durations:` with **688 entries**; `ci_selection.py --integrity` reports **"halves consistent"**.
 - `config/ci-surfaces.yml:1682` records that those durations came from a **one-off sweep** of
@@ -216,6 +217,7 @@ marked **ABSENT**.
 | **I11** | **The required-set declaration home is not silently divergent.** `.github/settings.yml` — the one machine-readable home #3467 designated — declares `contexts: [redis-guard]` while the live set is the six bare names (`pricing-artifact, docs, test-isolation, license-surface, legal-e2e, python-ci-gate`, verified live 2026-09-26), and **no workflow or test reads the file**. The **artifact** (`docs/ci/required-contexts.json`) is the committed home; the file's reconciliation is **D9**, which lands **#3467's own fix** — resolve its **Open Question 3** (live or vestigial), a **named write step** to the intended set, and a **consistency test** asserting file == artifact == live read-back (none exists today) | Task 4 static clause **(viii)(b)** + **D9** (owner Daniel, by 2026-10-10). **Deliberately NOT a TH6 detector** (cycle 6: attaching the file's equality assertion to TH6 made it unsatisfiable until the write lands — it is a declaration-home item) |
 
 **Duplication discipline (Reviewer #5).** Consume, do not re-implement:
+
 - **Check-run polarity/grouping** — the rule lives in the rail (`admin-merge.sh:1762` `NON_RED_CONC`)
   and `scripts/ci-failure-set.sh`; AGENTS.md names the rail as the merge-gate authority. **⛔ THE RAIL IS
   AUTHORITATIVE; the instrument's `main_gate` is an OBSERVATION that never overrides it** (cycle 4: the plan
@@ -301,6 +303,7 @@ Task 5 is *eligibility triage*. Five sites in the first draft attributed the gua
 
 **D1 — #5433: the review attestation is read by NO server-side step.** *(The one genuine safety gap —
 promoted out of the table.)*
+
 - **Context:** Mergify merges server-side; `review-enforcer` / `atomic-land.sh` are local. Cutting CI
   time must not be funded by this.
 - **Option A — enforce server-side.** Publish a signed check-run or PR-comment marker + a required check
@@ -429,6 +432,7 @@ invocation**, and can delete the assertion that pins either — in the same comm
 `python-ci-gate` still green. Only a server-side rule could close it, and that mechanism family is
 **rejected by the owner**. Filed as **#5649**, with an owner, **not claimed covered**. What the plan does
 instead is raise the bar and keep the guard fixable:
+
 - **The pin is an INVENTORY + BASE-SELF-CONSISTENCY check — it does not execute the base guard against the
   head config.** The pinned step runs the BASE guard against the **base** config and asserts the head
   guard's clause **inventory** is a superset of the base's, so a PR cannot **delete or rename** a clause.
@@ -453,6 +457,7 @@ instead is raise the bar and keep the guard fixable:
   to fix.)
 
 **TH4 — FAIL-OPEN REGISTRY UNION: COVERED at this plan's boundary.** Split by vector:
+
 - **(a) a `merge=union` landing with no *fail-propagating* validator invocation inside the gate — COVERED,
   fail-closed.** Clause (vii) is a **hard exit 1**: whenever `.gitattributes` carries `merge=union`, a
   validator invocation must run inside a job in `python-ci-gate.needs` **as a fail-propagating step** — no
@@ -528,6 +533,7 @@ merge_throughput.py --triage [--emit rows] # never issues a mutating request
 merge_throughput.py --watch-queue | --observe-capacity   # Task 3 additions
 merge_throughput.py --sweep-concurrency N  # bounded merge-tree sweep (Step 3)
 ```
+
 **Cycle 7:** the synopsis enumerates **every** flag the semantics table defines; `--json`'s argument is a
 **check name or a dotted field path** (e.g. `.gap`).
 exits **0** only on a real, numeric, threshold-satisfying value; **1** on a threshold miss; **2** when
@@ -645,14 +651,17 @@ alone is never reported as the effective value. Time-bounded fallback so T-F can
 
 **Intent:** Make §3 mechanical; reuse existing assertions instead of duplicating them.
 **Interface (cycle 4: S12 cited `--static`/`--live`/`DIVERGED` which task 4 never defined — the same contract gap fixed for Task 1, relocated to the guard):**
+
 ```
 mergify_config_guard.py --static    # exit 0 = all static clauses pass; 1 = a clause violated; 2 = unparseable/absent config
 mergify_config_guard.py --live      # admin credential; exit 0 = I1 SATISFIED; 1 = DIVERGED; 2 = UNAVAILABLE
                                     # (I4 is the instrument's: check assert-queue-head-checks)
 ```
+
 **Result tokens: `SATISFIED` / `DIVERGED` / `UNAVAILABLE`** — a fixture test per token, and `UNAVAILABLE` must be distinguishable from `DIVERGED` (S12).
 
 **Acceptance:**
+
 - **Static clause (CI, fail-closed), with NUMBERED sub-clauses** (E1 cites "clause (iv)"; the first draft
   never numbered them): **(i)** I2 structural well-formedness — no check named twice *within one list* **and `python-ci-gate ∈ merge_conditions`** (the conjunct I1's `∅ == ∅` escape depends on); fixture: a `merge_conditions` list lacking `python-ci-gate` ⇒ **1**;
   **(ii)** I2 mode-aware subset/disjointness, **fixtures for BOTH config states**, keyed on
@@ -746,6 +755,7 @@ The green-on-landing proof is a required deliverable of Task 4 Step 1: `mergify_
 against the committed `.mergify.yml` and against the base ref's version, both `0`, via the same fixtures the
 clauses carry. `continue-on-error` at the **job** level remains forbidden (it violates the pinned #2656
 property in `test_drift_gate_cannot_skip_the_test_matrix`).
+
 1. **One PR:** land the tool + its required `manifest-integrity` invocation + the inventory/self-consistency
    pin (TH7 above).
 2. **A wrong clause is fixed by an ordinary PR** — edit the clause body, inventory unchanged — not by a
@@ -768,6 +778,7 @@ no bridge, no signal on divergence. And `shard_imbalance_minutes` must measure *
 not the map — otherwise it reports ≤3 min forever while the 10-minute split persists.
 **Acceptance — ONE named writer, fail-closed (cycle 3: the first draft left the writer optional and made
 key agreement a fail-OPEN disjunction):**
+
 - **`tools/ci_timing.py` is the sole writer of the `durations` KEY.** The one-off 2026-09-22 manual sweep is
   **retired**: `--refresh-durations` is the only path that may emit into `config/ci-surfaces.yml:durations`,
   and `.github/workflows/ci-timing.yml` is its only scheduler. **⚠️ The FILE has a second writer**
@@ -886,6 +897,7 @@ Modify `tests/test_merge_throughput.py`.
 ## 11. Measurable success criteria — exit codes, not pipelines
 
 ### 11.1 Why not `jq`
+
 The first draft's criteria were `| jq -e` pipelines and were **vacuous**: in jq `"UNKNOWN" >= 12` is
 **true** (strings order above numbers), `null <= 120` is **true**, `{} | .conflicts.total != "UNKNOWN"`
 is **true** (a missing key is `null`), `jq '.gap'` exits **0** always, and without `pipefail` the tool's
@@ -927,6 +939,7 @@ commands. The rest are metrics the lever PRs are judged against.
 `docs.mergify.com/merge-queue/{queue-modes,lifecycle,batches,rules,performance}`, `mergify.com/pricing`.
 
 **Library version & API surface** — 3 framings
+
 - *Canonical:* `mode` ∈ {serial (default), parallel, isolated}; serial = one batch **merges** at a time,
   cumulative, **but parallel checks still run**; `max_parallel_checks` default **5**; `batch_size`
   default **1**; dynamic `batch_size: {min, max}` supported.
@@ -942,6 +955,7 @@ commands. The rest are metrics the lever PRs are judged against.
 - *Plan tiers:* parallel checks are **not** plan-gated.
 
 **Idiomatic usage patterns** — 3 framings
+
 - *Canonical:* `batch_size` + `batch_max_wait_time` trade latency against CI cost; dynamic sizing spreads
   queued PRs across available parallel checks.
 - *Competitor variance:* GitHub removes the culprit; Trunk/Mergify bisect into up to
@@ -949,6 +963,7 @@ commands. The rest are metrics the lever PRs are judged against.
 - *Known pitfall:* batching's value is a function of the red rate (⟨C3⟩).
 
 **Library/framework pitfalls** — 3 framings
+
 - *Canonical:* `pytest-xdist` runs one session per worker, so session-scoped fixtures execute once per
   worker.
 - *Competitor variance:* per-worker DB/schema, or `--dist loadscope` to keep conflicting tests together.

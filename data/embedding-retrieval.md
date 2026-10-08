@@ -116,6 +116,7 @@ Where `graph_connectivity` is the number of `[:EXTRACTED_FROM]` or `[:INPUT]` ed
 | `speaker` not `team` | Attribution is personal (who said it), affiliation is organizational (on whose behalf) |
 | `type` field on Source deferred | Agent infers retrieval tool from locator structure. Add `type` when ambiguity demands it |
 | 384-dim (not larger) | Matches MemPalace + Graphiti embedder. Sufficient for semantic matching; larger dims increase cost without proportional gain at our scale |
+
 ## 6. Doc ingestion strategy
 
 ### Source format
@@ -136,6 +137,7 @@ Doc metadata is extracted from Schema B frontmatter — deployed across all 877 
 Markdown file -> parse YAML frontmatter -> populate Doc node, then concatenate title+summary+tags, run through fastembed (384-dim), store vector on Doc node.
 
 **Key properties:**
+
 - **Zero-LLM** — frontmatter is structured, no extraction needed
 - **Idempotent** — re-running on the same file overwrites its node (keyed by locator)
 - **Stateless** — reads frontmatter, not git state or timestamps
@@ -145,10 +147,7 @@ Markdown file -> parse YAML frontmatter -> populate Doc node, then concatenate t
 
 For production use (not first-time seeding), store a content hash alongside each Doc node to skip unchanged files on re-ingestion:
 
-
-
 This turns a full re-ingestion (877 docs, ~30s) into a delta-only pass (3 changed docs, <1s). The hash is stored as a node property, not embedded — it is a dedup key, not searchable content.
-
 
 ### Relationship to tortoise
 

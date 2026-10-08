@@ -14,7 +14,8 @@
 
 **Intent:** Sync the React `tab` state to the URL hash and vice versa, enabling deep-linking and browser navigation.
 
-**Acceptance:** 
+**Acceptance:**
+
 - Tab switches update the URL hash via `history.pushState`
 - Browser back/forward navigates between tabs via `popstate` listener
 - Direct URL entry with `#/keys` loads the Keys tab
@@ -22,6 +23,7 @@
 - React strict-mode double-effect does not create duplicate history entries
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (around line 1232)
 
 **Step 1: Replace the useState initial value with a hash-aware init**
@@ -29,16 +31,20 @@
 Replace line 1232 (and add KNOWN_TABS at module scope near line 687):
 
 Near line 687, add KNOWN_TABS:
+
 ```javascript
 // #2509: known dashboard tab names for URL↔hash sync.
 const KNOWN_TABS = ['overview', 'keys', 'graphs', 'members', 'billing', 'settings', 'profile']
 ```
 
 Then replace line 1232:
+
 ```javascript
 const [tab, setTab] = React.useState('overview')
 ```
+
 with:
+
 ```javascript
 const initialTab = (() => {
   // Use landingHash (captured at module scope before supabase.js init) to
@@ -141,15 +147,19 @@ cd website/apps/dashboard && npx vite build 2>&1 | tail -5
 **Acceptance:** After navigating from welcome wizard to dashboard, the URL shows `/#keys` instead of bare `/`.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` (6 sites)
 
 **Step 1: Update finishWelcomeLoads (line ~2466)**
 
 Find:
+
 ```javascript
 window.history.replaceState({}, '', '/')
 ```
+
 Replace with `'#/' + tab`:
+
 ```javascript
 window.history.replaceState({}, '', '#/' + tab)
 ```
@@ -157,10 +167,13 @@ window.history.replaceState({}, '', '#/' + tab)
 **Step 2: Update welcome→API Keys buttons (lines ~5473, ~5728, ~5943)**
 
 Find each instance of:
+
 ```javascript
 window.history.replaceState({}, '', '/')
 ```
+
 These fire BEFORE `setTab('keys')` in the same expression, so `tab` is still the previous value. Use a literal:
+
 ```javascript
 window.history.replaceState({}, '', '#/keys')
 ```
@@ -170,6 +183,7 @@ window.history.replaceState({}, '', '#/keys')
 Find and update the `replaceState` calls at lines 1790, 1799, and 1697 that construct URLs with `window.location.pathname + ...`.
 
 The pattern needs to append `+ window.location.hash`:
+
 ```javascript
 window.history.replaceState({}, '', window.location.pathname + (params.toString() ? `?${params}` : '') + window.location.hash)
 ```
@@ -177,10 +191,13 @@ window.history.replaceState({}, '', window.location.pathname + (params.toString(
 **Step 4: Update invite token cleanup (line ~2618)**
 
 Find:
+
 ```javascript
 window.history.replaceState({}, '', window.location.pathname)
 ```
+
 Replace with:
+
 ```javascript
 window.history.replaceState({}, '', window.location.pathname + window.location.hash)
 ```
@@ -196,6 +213,7 @@ Same commands as Task 1 Steps 4-5.
 **Intent:** Confirm the feature works end-to-end.
 
 **Steps:**
+
 1. Start dev server: `cd website/apps/dashboard && npx vite --port 3000`
 2. Open browser to `http://localhost:3000/`
 3. Click each tab — verify URL changes to `#/keys`, `#/graphs`, etc.

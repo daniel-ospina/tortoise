@@ -37,6 +37,7 @@ created: 2026-08-13
 ## Scope Boundaries
 
 ### In Scope
+
 1. **Freshness metadata** — every Point records when its confidence was last recomputed (`lastDreamedAt`), and that timestamp is exposed on read surfaces so anyone can see how fresh a belief is — and which areas were recomputed when.
 2. **One dream call, sane defaults** — `dream()` keeps working as-is; internally it picks the right strategy (writes → fix the neighborhood; background schedule → stale-first; small graph/first run → full). A `mode` override exists for operators with a compute budget but is hidden by default — users never need to think about it.
 3. **Stale-first refresh** — each background pass refreshes the stalest chunk of the graph first; every pass costs the same bounded amount (a fixed "budget" of work, not "however big the graph is"); several passes eventually refresh the whole graph. No single pass ever costs O(whole graph).
@@ -49,6 +50,7 @@ created: 2026-08-13
 10. **Graph-scale diagnostics** — a small metrics task (graph size, how connected it is, how big a typical neighborhood is) to answer the open question from research: does stale-first refresh actually beat a full refresh at *our* scale, or is the graph small enough that full refresh is simpler? We don't build the machine until we know the answer.
 
 ### Out of Scope
+
 - **Community-detection regions** — rejected in research (workload imbalance, cost); BFS neighborhoods are the primitive. Defer: no future epic needed unless graph topology proves pathological.
 - **UI surfaces** — engine epic; no product UI. Staleness is exposed via SDK/MCP data contracts only.
 - **Fast-path deepening** (raising `compute_confidence` max_hops 2→4+) — complementary, not required (Align alternative 5). Defer to a follow-up issue if freshness debt proves large.
@@ -57,6 +59,7 @@ created: 2026-08-13
 - **`recency_decay` activation** on reads — orthogonal freshness signal; not part of recompute scheduling. Defer.
 
 ### Boundary Rationale
+
 The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps to at least one indicator (1 = expanding coverage, 2 = selectable strategy, 3 = fresh graph-wide confidence + queryable freshness, 4 = bounded cost). The two rejected mechanisms (graph clustering, fancier in-pass ordering) are *optimizations that could be layered on later without rework*; the deferred complements (deeper per-query refresh, streaming updates) are *independent workstreams* whose absence does not block this epic's delivery. Carry-over is included because it is the single largest cost saver and has a theoretical safety license — but it is **gated** so the epic cannot be blocked by it.
 
 ---
@@ -92,6 +95,7 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 ## High-Level E2E Test Cases
 
 ### E2E-1: Full-graph mode refreshes every reachable claim
+
 **Given:** a graph with live Points across multiple disconnected regions, some never dreamed (fixture regions each contain ≥1 operator, so every claim is EP-reachable)
 **When:** `dream(full)` completes
 **Then:** every non-operator Point reachable via operators has a fresh `lastDreamedAt` set to this pass
@@ -99,6 +103,7 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 **And (semantics decision):** operator-less/isolated claims are marked trivially fresh on the scan (nothing can change their confidence — no message path exists), so full mode still reports full coverage
 
 ### E2E-2: Stale-first refresh covers the graph across passes at a bounded cost
+
 **Given:** a large graph with areas of varying staleness
 **When:** `dream()` (stale-first strategy) runs repeatedly until coverage is complete
 **Then:** each pass does ≤ a fixed budget of work — cost does not grow with graph size (incremental, not O(whole graph))
@@ -107,53 +112,62 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 **And:** passes that touch the same area do that work once, not twice
 
 ### E2E-3: Write-triggered refresh preserves existing behavior and isolation
+
 **Given:** a post-write graph with dirty areas marked
 **When:** `dream()` (default) runs
 **Then:** affected claims' confidence is refreshed and `lastDreamedAt` updated
 **And:** unrelated claims' confidence changes by ≤ 0.01 (existing grounding gate holds — no regression)
 
 ### E2E-4: Freshness tracking is queryable
+
 **Given:** regions dreamed at different times (some just now, some long ago)
 **When:** a staleness report / read surface is queried
 **Then:** each Point reports `lastDreamedAt` (and `staleAfter` where applicable)
 **And:** the report lists regions ranked by staleness, matching which regions the last pass actually touched
 
 ### E2E-5: Consolidation events absorb into dreaming
+
 **Given:** a supersede/invalidate/merge on a Point
 **When:** the next dream (any mode) runs
 **Then:** the surviving node's confidence is re-derived from the post-event graph (its region was scheduled)
 **And:** lifecycle-write → dirty-set → dream chain is observable in the dream log
 
 ### E2E-6a: Carry-over correctness (hard gate)
+
 **Given:** the standard test corpus with known ground truth
 **When:** a carried-over refresh is compared to a from-scratch refresh on identical input
 **Then:** the two produce the same beliefs within tolerance (the theory's bounded-error guarantee, verified empirically)
 **And:** this equivalence MUST hold — if it fails, the carry-over work is not shipped (documented fallback: ship the simpler version; the epic's targets are still met without carry-over)
 
 ### E2E-6b: Carry-over cost (measured, not asserted)
+
 **Given:** the same corpus
 **When:** the carried-over refresh runs
 **Then:** the run records cost deltas (fewer updates / lower wall time vs from-scratch) as a measurement in the dream health metrics — recorded, not gated; if the savings are nil, that is data for the graph-scale diagnostics decision, not a test failure
 
 ### E2E-7: Non-converged regions are retained and retried
+
 **Given:** a region whose EP run does not converge within max_iter (oscillating subgraph)
 **When:** the dream completes with `converged=False` for that region
 **Then:** the region's roots remain in the dirty set (retention fix, A2)
 **And:** a later dream retries them (and converges after the conflicting evidence is resolved)
 
 ### E2E-8: Dream health is observable and silent-death is detectable
+
 **Given:** a running dreamer with a non-empty dirty backlog
 **When:** dream health metrics are inspected
 **Then:** last-pass timestamp, per-region coverage, failure rate, and operator counts are surfaced
 **And:** the zero-output-when-backlog-exists alarm condition triggers when dreaming produces no output for a stale region (silent-death, A8)
 
 ### E2E-9: Freshness reduces staleness error (Indicator 3 acceptance)
+
 **Given:** a graph whose "true" belief state is known (ground truth frozen)
 **When:** some evidence changes (so some beliefs become wrong) and a stale-belief error is measured: mean |Δ| of confidence vs ground truth
 **Then:** after successive stale-first refresh passes, the measured error shrinks (monotonically or below a threshold) as refresh coverage grows
 **And:** the error-reduction curve is recorded in the dream health metrics — this is the epic's Indicator 3 acceptance, and the basis for the staleness-error eval added to the eval spec
 
 ### E2E-10: Graph-scale diagnostics gate
+
 **Given:** a production-scale graph snapshot (or representative fixture)
 **When:** the diagnostics task runs
 **Then:** it reports graph size, connectivity (how many areas, how big a typical neighborhood is), and a recorded decision: stale-first refresh vs full refresh at this scale

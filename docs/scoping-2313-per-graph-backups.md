@@ -27,12 +27,14 @@ aboutObjects:
 ### Why It Is Broken — code evidence (current main)
 
 **1. The sweep enumerates TEAMS, then resolves ONE graph per team.**
+
 - `tortoise/backup_sweep.py:141` `enumerate_orgs` — Supabase mode reads only `teams` (`select=["id","graph_name"]`, :156); registry mode `MATCH (t:Team) RETURN t.id` (:158). `enumerate_eligible_orgs` (:164) adds tier/backup_enabled filters on `teams` (:178-179, :183). **Zero references to the `graphs` seam** (`graph_list`/`graph_metadata`) anywhere in backup_sweep.py (grep-verified).
 - `org_graph_name` (backup_sweep.py:190) resolves **one** graph name per team: Supabase `teams.graph_name` (:208-221), registry deterministic `org_{org_id}` (:221). Docstring (:18-19) states the model: one graph per team.
 - `run_backup_sweep` (:423) loops team ids → resolves one `graph_name` (:511-517) → `_backup_team` (:254) → one `create_backup` (:303). Per-team serialization via the caller's lock factory; per-team state at `ops/teams/{org_id}/state.json` (`_TEAM_STATE_PREFIX`, :50; write at :391).
 - Consequence: the drift guards (empty-content transition, >50% drop, per-label #661) run **only inside `_backup_team` on the single resolved graph**. A wiped custom graph fires nothing — no dump is attempted, no state exists to compare, no incident.
 
 **2. Every backup primitive is team-keyed; nothing downstream is graph-aware.**
+
 - `tortoise/hosted_backup.py:540` `create_backup` — `backup_id = f"{org_id}/{ts}_{rnd}"` (:563); objects at `backups/{backup_id}/dump.enc|manifest.json` (:576-587). The **only** graph reference is manifest content (`graph_name` in the manifest dict, :568).
 - `list_backups(storage, org_id)` (:599) lists the team prefix `backups/{org_id}/` (:603).
 - `prune_backups(storage, org_id, keep_daily/weekly/hourly)` (:932) walks the team prefix (:966) and parses the flat 4-part key `backups/{org_id}/{ts}_{rnd}/manifest.json` (:976-986). **Retention math is per-POOL, not per-graph.**
@@ -40,32 +42,39 @@ aboutObjects:
 - Registry stamps are team-row stamps: `_stamp_backup_latest` PATCHes the `teams` row / SETs the Team node (:500-538). There is no per-graph stamp surface.
 
 **3. Hosted endpoints: list/restore are default-graph-only; only the C5 on-demand dump is graph-aware.**
+
 - `tortoise/hosted_api.py:16377` `GET /backups` (backups_list) → `list_backups(..., org_id)` — team-wide, default-keyed.
 - `POST /backups` (backups_create, :16442) — team-wide keys/session back up the **default** via `org_graph_name` (:16493); a **graph-bound key (C5 #2114)** backs up ITS OWN graph (`graph_namespace`, fail-closed `GRAPH_NOT_FOUND` 403 when vanished, :16489-16500) — **the only graph-aware backup path that exists**. Its artifacts still land in the shared team-keyed pool and share the default graph's prune pool (prune at :16517 with no graph dimension).
 - `POST /backups/restore` (backups_restore, :16553) — resolves `org_graph_name` (default only, :16594-16599) and **rejects graph-bound keys** via `_reject_graph_bound_team_surface` (:16563). Restoring a custom graph's backup into itself is impossible through this endpoint today.
 - Internal sweep driver: `POST /v1/internal/backups/sweep` (:16746) → `run_backup_sweep` (:16769); driven hourly by GitHub cron (`registry-backup-cron.yml` → `.github/scripts/registry-cron.sh`). Re-baseline endpoint (:16901) is team-keyed (`ops/teams/{org_id}/state.json`, :16920-16924). Drill endpoint (:16932) hardcodes `graph_name=f"org_{org_id}"` (:16957).
 
 **4. The graphs enumeration seam exists — the sweep just never uses it.**
+
 - `tortoise/supabase_control.py:2240` `graph_metadata(cp, org_id)` returns the derived default (`graph_id:"default"`, `kind:"default"`, namespace = `teams.graph_name`; :2255-2280) **plus** `graphs` rows with `kind='custom' AND status='active'` (:2282-2300); a missing graphs table degrades to default-only (logged, :2305-2311).
 - `tortoise/sdk.py:12839` `graph_list(org_id)` — Supabase mode delegates to `graph_metadata` (:12853); registry mode `MATCH (g:Graph {org_id}) RETURN properties(g) ORDER BY kind…` (:12861-12872), where `status` coalesces `"active"` for pre-C1 nodes (:12875-12877) and **deleted nodes are returned but not filtered** — callers filter (e.g. GET /v1/graphs skips `status=="deleted"`, hosted_api.py:8910-8912).
 - Schema: `supabase/migrations/20260901000001_graphs_and_key_scopes.sql` — `graphs(id text PK, org_id FK, name, kind 'default'|'custom' NOT NULL DEFAULT 'custom', namespace NOT NULL, status 'active'|'deleted' NOT NULL DEFAULT 'active', recording bool, created_at)`; partial unique index on (org_id, name) WHERE status <> 'deleted'; RLS + service-role grants. `teams.graph_name` exists alongside (`0006_teams.sql:41`).
 - Graph lifecycle today: `DELETE /v1/graphs/{graph_id}` (hosted_api.py:8766) soft-tombstones (`status='deleted'`, :8832-8833) + revokes keys + drops ACL user + frees the quota slot — the stored namespace is **never dropped** and **no sweep covers custom graphs** (the #2304 hook).
 
 **5. The exact "broken" claim.**
+
 - A Pro team with N active custom graphs has backup artifacts for **1 graph (the default)** — verifiable in R2: `backups/{org_id}/` contains only default-graph manifests (plus any ad-hoc C5 dumps). Custom graphs receive **zero automated artifacts**, zero state.json, zero drift guards, zero retention. If the team's customer data lives in custom graphs and the default is unused (steady-0), the sweep "succeeds" every run on an empty default while the real data is unprotected — the #101 empty-team signal is a chronic no-op by design (`empty_skipped`, backup_sweep.py:375-379), and the operator-facing watcher reports the team `ok`.
 - The C5 per-graph on-demand POST is the ONLY graph-aware backup path (create with a graph-bound key resolves `graph_namespace`). Confirmed.
 
 ### Adjacent finding (same root cause family, do NOT absorb)
+
 - **Pool-level retention competition is latent today:** `prune_backups` retention is computed on the shared team pool. In hourly-bounded mode (production defaults `retention_hourly=24`/`daily=7`/`weekly=4`, backup_config.py:62-64) the hour-bucket/weekly anchors are **per pool**, so when two graphs' dumps share an hour bucket or ISO week, only the newest survives (prune_backups:966-1026). A C5 custom-graph on-demand dump landing in the same hour bucket as a default-graph dump is silently deleted after the hourly window. Per-graph pruning (Approach A below) fixes this structurally; the C5-only path remains a blind spot until then.
 
 ### Falsification Check
+
 This definition is wrong if any of:
+
 1. The sweep enumerates graph rows anywhere — **false**: grep of `graph_list|graph_metadata|graphs` in backup_sweep.py has zero hits (verified).
 2. Some other scheduler backs up custom namespaces — **false**: the only production sweep callers are the hourly internal endpoint (hosted_api.py:16746) driving `run_backup_sweep`, and the event-retention sweep (hosted_api.py:511, event logs only, not graph dumps).
 3. Custom graphs cannot exist on backup-eligible teams — **false**: free=1 graph/solo=2/pro+team=unlimited (`max_graphs_per_team` null in product/pricing.json:68,92); solo can hold 1 custom graph; pro/team unlimited. Solo teams are not backup-eligible (`daily_backups=false`, pricing.json:58) — the fix inherits team eligibility, so the affected population is pro/team custom graphs, which is exactly the developer-customer case.
 4. The C5 path already covers custom graphs on the sweep schedule — **false**: it is on-demand only (POST /backups), requires a caller, and is not scheduled.
 
 ### Confidence: 88
+
 Every link in the chain is code-verified with file:line citations. Residual uncertainty: exact production graph counts (no DB read in this session) and the degree to which graph-bound C5 keys exist in the wild (`per_graph_keys` pricing strings still read "planned" — pricing.json _comment 2026-09-01); neither affects the root-cause verdict.
 
 ---
@@ -116,9 +125,11 @@ Cleanest names, worst blast radius: breaks the team-prefix continuity that the c
 Treats custom-graph coverage as opt-in per deployment. Rejected: the issue is that high-value data is unprotected **by default**; a default-off flag creates two incident-response regimes and delays protection without reducing implementation risk (the flag gates enumeration only). *When it would win:* if the sweep's runtime budget or storage cost were the binding constraint — they are not at current scale, and the cost model (A) bounds it.
 
 ### Convergence rationale (quality over convenience)
+
 Option A is chosen because it fixes the **root cause** (graph identity absent from every backup artifact and every downstream consumer) rather than papering over it, and because the issue's Indicator 2 (list/prune/restore per graph) and the #2304 long-tail-recovery assumption are only *durably* satisfiable when artifacts structurally know their graph. B's manifest-grouping keeps the ambiguity that produced this bug class in the first place (team-keyed pool with graph as manifest metadata was exactly what made C5 dumps invisible to the sweep) and pushes per-graph visibility cost into every poll. A's one-time migration cost is repaid by per-graph prefix scans that B would re-pay as R2 GETs forever.
 
 ### Implementation step sketch (feeds writing-plans; NOT the plan)
+
 1. Enumeration: `enumerate_org_graphs(source, org_id)` seam (both lanes) + tests (fake + registry), reusing `graph_metadata`/`graph_list`. Registry lane: filter `status == 'deleted'`; map kind default → `"default"`.
 2. `hosted_backup`: `create_backup(..., graph_id=)` (key segment + manifest field); `_validate_graph_id`; `list_backups(..., graph_id=None)`; per-graph `prune_backups(..., graph_id=...)` prefix math; restore: graph segment parse + legacy-flat fallback + tombstone guard (graphs seam status read) + namespace resolution.
 3. `backup_sweep`: per-team graphs loop; per-graph state keys `ops/teams/{tid}/graphs/{gid}/state.json`; drift incidents carry graph_id; per-graph prune; ops-state unchanged (team-level). Legacy state key `ops/teams/{tid}/state.json` read as the default graph's state (one-time baseline carry-over).
@@ -143,6 +154,7 @@ Option A is chosen because it fixes the **root cause** (graph identity absent fr
 Net: **all per-graph concerns (enumeration, keys, state, prune, restore-target, tombstone, watcher freshness) are NOT COVERED today** — mapped exhaustively by three parallel review passes; every existing test pins single-graph semantics that must survive additively.
 
 ### Axis Research (Phase 1.5)
+>
 > Trigger: Architecture axis high (complex), Research standard — fired. Axes rated: retention-per-key/prune (architecture), deleted-entity backup-artifact posture (research). Findings feed Option A's prune/tombstone design.
 
 - **Per-tenant logical backups with per-key retention are the canonical pattern** for pooled multi-tenant SaaS: nightly logical exports per tenant, restore into staging before swap, frequency matched to RPO, per-tenant retention policies (multi-tenant-saas.com hybrid-isolation per-tenant backup/restore guide; Grasp multi-tenant DR module: "per-tenant backups, per-tenant retention"); AWS managed-backup SaaS post: segregate tenant data during backup and store independently. *Canonical → validates per-graph objects + per-graph retention buckets (Option A over B).*
@@ -199,16 +211,18 @@ Net: **all per-graph concerns (enumeration, keys, state, prune, restore-target, 
 | UX | low | Backups surface per graph (minimal; Q3) |
 
 ## Discovery: Adjacent Issues to File (do NOT absorb)
+
 - **Pool-level retention competition on the C5 on-demand path** (hourly/weekly anchors shared across graphs delete custom-graph dumps) — structurally fixed for sweep artifacts by per-graph prune; the C5 on-demand path should file its own guard once per-graph keys land (or absorb into this issue's prune work as a one-line key-scope change — owner call).
 - **Test debt:** test_backup_sweep.py:429 title claims prune coverage but asserts no deletion; `graph_metadata` exception→default fallback path and fake `order`/`limit` kwargs untested (test_supabase_control.py) — fold into this issue's test work where touched.
 
 ## Review Cycle Log (front-half deliverable)
+
 - problem diamond: verified via 3 parallel codebase passes + external research; converge confidence 88.
 - solution diamond: 4 options diverged; A recommended on outcome quality (structural graph identity + per-graph retention correctness), B/C/D rejected with when-each-would-win.
 - Remaining pipeline (parent session): problem-verify (2 verifiers) → solution-verify (2 verifiers) → second-model coherence → wiring gate → Phase 8 post to #2313. This file is the review artifact.
 
-
 ## Owner Decisions (2026-09-06 — Q1–Q6 approved as recommended; deltas folded)
+
 - **Q1 (#2304 coordination):** prune backup artifacts at purge time AND keep the restore-time tombstone guard (both). Never rely on artifact absence alone.
 - **Q2:** during the trash grace window, a deleted graph's pre-delete backups are reachable ONLY via #2304's trash full-restore mode; refused everywhere else.
 - **Q3:** dashboard = keep the summary Backups card + enrich GET /backups response with per-graph metadata; per-graph UI rows are a follow-up issue (not absorbed).
@@ -218,4 +232,3 @@ Net: **all per-graph concerns (enumeration, keys, state, prune, restore-target, 
 - **Cadence framing (research verifier):** hosted sweep is HOURLY (RPO ≤1h typical / ≤2h worst, #596 §3.4/§3.8 post-#669), NOT nightly — this doc's cadence wording was corrected to match. Custom graphs today = effectively infinite RPO (never swept).
 - **Folded delta (research benchmark):** per-graph ACL-user rebuild/verification on full-platform restore is IN SCOPE for this issue's restore/DR work (tombstone guard + restore completeness; drill remains scratch-only — live-ACL verification added to the DR runbook task).
 - **Out of scope (separate follow-ups filed):** scheduled restore drills + explicit RTO; KMS/rotation for backup keys; R2 bucket-lock immutability + geo-region decision; cadence-label truthfulness + dead-knob cleanup (BACKUP_SKIP_FRESH_MIN).
-

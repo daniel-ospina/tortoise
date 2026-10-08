@@ -43,6 +43,7 @@ The daemon is NOT a FastAPI/FastMCP server — it doesn't run Tortoise tools. It
 | Key storage | Python `str` attribute on the daemon class | OS keyring (password-store, Secret Service); encrypted file; hardware TPM |
 
 **Rationale:** The key enters the process via `TORTOISE_API_KEY` env var at startup. It's already in plaintext in the environment. Moving it to the OS keyring adds a native-code dependency (`keyring` library) and a runtime component (keyring daemon must be running, dbus session on Linux). For v1, the simpler approach is:
+
 1. Read `TORTOISE_API_KEY` from env.
 2. `os.unsetenv("TORTOISE_API_KEY")` immediately.
 3. Store as `self._api_key: str`.
@@ -66,6 +67,7 @@ The key is never written to disk by the daemon. The keyring integration is a pot
 | Config format | TOML (non-secret config only) | YAML (less strict); JSON (less human-editable); INI (no nested support) |
 
 **Rationale:** TOML is Python's stdlib (3.11+ `tomllib`) and the project's convention (existing configs use TOML). The config stores only non-secret settings:
+
 ```toml
 [daemon]
 port = 9784
@@ -118,6 +120,7 @@ Commands:
 ```
 
 Example output for `tortoise agent status`:
+
 ```
 tortoise-agent: RUNNING
   PID:    88421
@@ -136,6 +139,7 @@ tortoise-agent: RUNNING
 **Intent:** Create the minimal HTTP proxy daemon that listens on localhost and forwards MCP requests.
 
 **Acceptance:**
+
 - `AgentDaemon` class with `start()`, `stop()`, and `async _proxy_request()` methods.
 - Listens on `127.0.0.1:9784` (configurable via `--port`).
 - `POST /mcp` forwards all request headers (except `Authorization` which it overrides) + body to `https://api.premiselabs.co/mcp`.
@@ -145,16 +149,19 @@ tortoise-agent: RUNNING
 - On shutdown (SIGTERM), completes in-flight requests with a 3-second timeout, then exits.
 
 **Edge cases:**
+
 - **API unreachable:** Returns HTTP 502 Bad Gateway with `{"error": "upstream unreachable"}`.
 - **No key loaded:** Returns HTTP 503 Service Unavailable with `{"error": "no API key"}`.
 - **Connection timeout:** 10-second default timeout on upstream requests, configurable.
 - **SSE stream interrupted:** If the upstream SSE stream drops mid-response, the proxy drops the client connection too.
 
 **Files:**
+
 - Create: `tortoise/agent_daemon.py`
 - Modify: None yet (CLI integration in Task 3)
 
 **Test:**
+
 - `tests/test_agent_daemon.py` (new) — unit tests with mock upstream server (aiohttp test client). Tests: proxy forwarding, header injection, SSE streaming, error handling, health endpoint.
 
 ```python
@@ -192,6 +199,7 @@ class AgentDaemon:
 **Intent:** The daemon reads the API key from environment, validates it, and holds it in memory.
 
 **Acceptance:**
+
 - `TORTOISE_API_KEY` env var is read on daemon startup.
 - `os.unsetenv("TORTOISE_API_KEY")` called immediately after reading.
 - Key is stored as `self._api_key: str` — never written to disk.
@@ -204,9 +212,11 @@ class AgentDaemon:
 The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, the validation step is deferred — the daemon trusts the key at startup and validates on first proxy error.
 
 **Files:**
+
 - Modify: `tortoise/agent_daemon.py` (add `_load_key()`, `_validate_key()`, `_sanitize_memory()`)
 
 **Tests:**
+
 - Unit: key read from env, unsetenv verified, failed validation → exit
 - Integration: daemon starts with valid key; daemon exits with invalid key
 
@@ -215,6 +225,7 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 **Intent:** Add `agent` subcommand to the existing `tortoise` CLI (`__main__.py`).
 
 **Acceptance:**
+
 - `tortoise agent start` launches the daemon process as a subprocess (daemon mode).
 - `tortoise agent stop` sends SIGTERM to the PID in `~/.tortoise/agent.pid`.
 - `tortoise agent status` checks PID file, `kill -0`, port liveness (`GET http://localhost:9784/health`).
@@ -223,15 +234,18 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 - `tortoise agent --help` shows the command reference.
 
 **CLI architecture:**
+
 - New `AgentParser` in `__main__.py` or `tortoise/cli_agent.py` (to keep `__main__.py` manageable).
 - Daemon launched as subprocess: `Popen([sys.executable, "-m", "tortoise", "agent", "_daemon", "--port", str(port)], env={"TORTOISE_API_KEY": key})`.
 - The `_daemon` hidden subcommand runs `AgentDaemon().run_forever()`.
 
 **Files:**
+
 - Create: `tortoise/cli_agent.py` (agent CLI handler)
 - Modify: `tortoise/__main__.py` (register `agent` subcommand, add `_daemon` hidden subcommand)
 
 **Tests:**
+
 - `tests/test_cli_agent.py` (new) — unit tests for PID management, signal handling, status parsing.
 - Integration: start daemon → status shows running → stop → status shows stopped.
 
@@ -240,6 +254,7 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 **Intent:** The daemon auto-starts on login, restarts on crash, and is managed by the OS service manager.
 
 **Acceptance:**
+
 - macOS: `~/Library/LaunchAgents/co.premiselabs.tortoise-agent.plist` installed by `tortoise agent start` and removed by `tortoise agent stop`.
 - Plist includes `KeepAlive=true`, `ThrottleInterval=5`, `RunAtLoad=true`.
 - macOS: `launchctl bootstrap` / `launchctl bootout` used for install/uninstall.
@@ -249,12 +264,14 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 - `tortoise agent start --no-service` skips service manager install (for CI/containers).
 
 **Files:**
+
 - Create: `tortoise/templates/launchd/co.premiselabs.tortoise-agent.plist` (macOS plist template)
 - Create: `tortoise/templates/systemd/tortoise-agent.service` (Linux systemd unit)
 - Modify: `tortoise/cli_agent.py` (service install/uninstall logic)
 - Modify: `scripts/install-launchd.sh` (optionally register the Tortoise daemon plist)
 
 **Tests:**
+
 - Unit: plist/service file rendering with correct paths.
 - Integration (manual/CI): install → daemon starts → kill → daemon restarts → uninstall → daemon stops.
 
@@ -263,6 +280,7 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 **Intent:** The existing `curl ... | bash` installer (`install-tortoise-skills.sh`) also installs and starts the daemon.
 
 **Acceptance:**
+
 - Installer detects `--harness` flag and, for any harness that supports MCP HTTP (all), installs the daemon.
 - Installer reads `TORTOISE_API_KEY` from environment or prompts for it (fallback — ideally the key is already set).
 - Installer calls `tortoise agent start` with the key.
@@ -271,6 +289,7 @@ The `/v1/me` endpoint (or equivalent) must exist on the API. If it doesn't yet, 
 - Idempotent: re-installing updates the daemon binary, restarts the service.
 
 **Key injection flow:**
+
 ```bash
 # Inside install-tortoise-skills.sh, after skills are installed:
 if command -v tortoise &>/dev/null; then
@@ -286,10 +305,12 @@ fi
 ```
 
 **Files:**
+
 - Modify: `scripts/install-tortoise-skills.sh` (add daemon install step, key injection)
 - Modify: `scripts/install-launchd.sh` (add Tortoise daemon plist to managed templates)
 
 **Tests:**
+
 - Manual: run installer → verify daemon running → check key loaded → stop daemon.
 
 ### Task 6: Verification pass — typecheck, unit tests, integration
@@ -297,6 +318,7 @@ fi
 **Intent:** Full verification before committing Phase 1.
 
 **Acceptance:**
+
 - `mypy tortoise/agent_daemon.py tortoise/cli_agent.py` passes.
 - `uv run pytest tests/test_agent_daemon.py tests/test_cli_agent.py -v` passes.
 - Manual: daemon starts, proxies a real MCP call, stops cleanly.
@@ -306,6 +328,7 @@ fi
 ### Task 6a: Subagent dispatch
 
 Tasks 1–5 can be dispatched in dependency order:
+
 1. Task 1 (core proxy) + Task 2 (key management) → independent, can be parallel
 2. Task 3 (CLI) → depends on Task 1 + 2
 3. Task 4 (lifecycle) → depends on Task 3

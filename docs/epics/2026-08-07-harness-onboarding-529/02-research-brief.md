@@ -44,30 +44,35 @@ Inherited from #235 (CLOSED, shipped): the hosted platform is the monetization p
 > Verified by research sub-agents against official docs/source with citations; machine-verified where possible. See `01-align.md` AL-1..AL-8.
 
 ### Claude Code
+
 - **Config (action 1):** `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp --header "Authorization: Bearer tt_KEY"` — syntax verified against official docs (`--transport http` current; SSE deprecated; `--header`/`-H` supported). Scopes: `local` (default, `~/.claude.json` per-project), `project` (`.mcp.json`, VCS-shared, one-time approval), `user` (all projects).
 - **File alternative:** `.mcp.json` entry with `"type": "http"` (alias `"streamable-http"` accepted), `url`, `headers`; **`${VAR}` env expansion supported in `url` and `headers`**. A `url` without `type` is a config error (server skipped).
 - **Instruction (action 2):** paste prompt in chat. Persistent alternative: `CLAUDE.md` auto-loads at session start (project root + upward walk; **Claude Code reads CLAUDE.md, NOT AGENTS.md** — official bridge is an `@AGENTS.md` import line).
 - Current welcome-page gap: shows a raw `mcpServers` JSON blob (user must hand-merge into `.mcp.json`); no CLI one-liner; no instruction surface.
 
 ### Codex CLI
+
 - **Config (action 1):** `codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY` — verified in `openai/codex` source (`codex-rs/cli/src/mcp_cmd.rs`). Writes `[mcp_servers.tortoise]` to `~/.codex/config.toml`; stores the env-var NAME, user must `export TORTOISE_API_KEY=tt_KEY`.
 - **File alternative:** `~/.codex/config.toml` snippet `[mcp_servers.tortoise] url = "…" bearer_token_env_var = "TORTOISE_API_KEY"` (also `http_headers`, `env_http_headers` available).
 - **Instruction (action 2):** paste prompt in chat. Persistent alternative: Codex auto-reads `AGENTS.md` ("Codex reads AGENTS.md files before doing any work": global `~/.codex/AGENTS.md`, then project root→cwd walk, 32 KiB combined cap).
 - Current welcome-page gap: shows export + CLI pair — shape is right but untested as a paste path.
 
 ### Cursor
+
 - **Config (action 1):** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global). Remote server shape: `{"mcpServers": {"tortoise": {"url": "…", "headers": {"Authorization": "Bearer …"}}}}` — NO `type` field for url servers; `headers` supported.
 - **Env expansion:** YES but **`${env:NAME}` syntax** (not `${VAR}`) — resolved in `command`, `args`, `env`, `url`, `headers`. Docs' canonical example is exactly Bearer-auth-on-url-server with `${env:…}`. → Cursor variant can avoid literal key on disk (AL-3 resolved YES).
 - **Instruction (action 2):** `.cursor/rules/tortoise-onboarding.mdc` with frontmatter `alwaysApply: true` → injected at the start of EVERY chat session (exactly the onboarding trigger needed). Must be `.mdc` (plain `.md` ignored). Best-practice <500 lines. Simpler alternative: project-root `AGENTS.md` (also supported).
 - Current welcome-page gap: only the `mcpServers` JSON shown; NO instruction surface at all — the Cursor agent is never told to run onboarding. **This is the biggest gap in the shipped surface.**
 
 ### Pi
+
 - **Config (action 1):** pi core has no MCP support; the agent-infra `mcp-client` extension (this org's standard) resolves `.mcp.json` — upward walk cwd→git-toplevel, first hit wins, fallback `~/.pi/agent/.mcp.json`. Shape: `{"mcpServers": {"tortoise": {"url": "…", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}}}`. **`${VAR}` and `${VAR:-default}` expansion verified in extension source** (`expandExpr`; applied to `env`, `headers`, `cwd`) — no literal key needed.
 - **Instruction (action 2):** `AGENTS.md` auto-loads (global `~/.pi/agent/AGENTS.md`, parent-walk, cwd) — standing instructions; or a skill for a gated flow.
 - Current welcome-page gap: only the `mcpServers` JSON shown; no instruction surface.
 - ⚠️ Flag: pi MCP is extension-provided and undocumented in official pi docs; two alternative community extensions use different file names (`mcp.json`, no dot). The variant doc names the agent-infra `mcp-client` convention explicitly.
 
 ### Cross-harness notes
+
 - Root-level `.mcp.json` is read by pi's extension and Claude Code (project scope uses the same file name) but **invisible to Cursor** (`.cursor/mcp.json`) and Codex (`config.toml`). One shared repo file cannot serve all four — per-harness artifacts are required (confirms #235 A10).
 - All four harnesses support Bearer auth on Streamable HTTP: Claude/Pi/Cursor via `headers`, Codex via `bearer_token_env_var`.
 

@@ -60,6 +60,7 @@ Mid-sweep test: reaper subprocess in own group; poll stdout for sweep-start
 marker; SIGKILL the group; second run; delta-scoped final assert.
 
 **Risks.**
+
 - `test` (tier-2 fast leg) and `test-slow` run the SAME file concurrently in
   CI today (line 127 + tier-2 leak). A concurrent run's orphan can land
   between snapshot and spawn → pollutes the delta. Mitigate with (C) or
@@ -115,6 +116,7 @@ failures. This is the fix that makes ambient-state assertions *safe to
 believe* rather than merely removing them.
 
 **Risks.**
+
 - Blast radius: `discover()`/`reap()` are load-bearing for the sweep path and
   the `only_safe` concurrency guard (#1005, #1115). Reclassifying dead-pid
   dirs changes CLI output and what `reap()` rmtree's — a server mid-restart
@@ -161,6 +163,7 @@ tests passed in test-slow in the same failing run). Flake becomes
 unreachable in the leg where it manifests; the file stays covered.
 
 **Risks.**
+
 - Masking: "second test flakes standalone" — if the standalone flake has a
   real root cause (probe path / phantom candidates), (C) hides it; it can
   still flake test-slow (lower load, maxfail=20 tolerance) or local runs.
@@ -204,6 +207,7 @@ suites, because the ambient state the tests collide over (shared /tmp,
 pgrep-visible processes) is partitioned per test.
 
 **Risks.**
+
 - Complexity/cost: namespaces are Linux-only (CI-only guarantee; macOS dev
   behaves differently → CI-only test divergence), `unshare -Urm` can be
   blocked by runner seccomp profiles, slower test startup, hard to debug

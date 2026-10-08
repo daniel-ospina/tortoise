@@ -32,6 +32,7 @@ product: cross-team
 ## What We Have Internally
 
 **Epistemic Graph — Phase 1 (shipped):**
+
 - Claim model: kind (policy/evidence/value), confidence (-1 to 1), status (draft/live/superseded)
 - Operator model: supports, contradicts, derivesFrom, supersedes, assumes
 - Taxonomy: liveness, grounding, track record
@@ -69,6 +70,7 @@ Store outcomes as `<prompt, outcome, context>` triplets. At generation time, inj
 ### 4. AI Feedback Loop
 
 Two maturity levels:
+
 - **Prompt injection** (now): zero cost, corpus grows with use
 - **DPO fine-tuning** (later): needs 500+ pairs, contextualizes when prompt windows overflow
 

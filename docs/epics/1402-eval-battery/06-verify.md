@@ -48,6 +48,7 @@ extends: 01-align.md, 02-research-brief.md, 03-scope.md, 04-plan.md, 05-decompos
 ```
 Scope E2E-1…7 → Plan E2E-1.1…7.2 (25 detailed) → Issue E2E refs (#1406…#1416, #1419)
 ```
+
 Each link verified: every high-level E2E has detailed counterparts; every detailed E2E referenced by ≥1 issue (per-issue review verified test alignment per issue); every issue touching a tested workflow references its E2Es.
 
 ## Step 4 — Review Gate Audit
@@ -69,6 +70,7 @@ Each link verified: every high-level E2E has detailed counterparts; every detail
 **Decision:** PROCEED to implementation. Issues #1406–#1416 route through issue-workflow in dependency order (roots #1406/#1407 first); #1419 (capstone) gates epic completion per the Capstone Verification Gate. External dependencies tracked: #1350 (extractor v2 — hard edge to #1416), #1144 (eval infra — hard edge to #1414/#1416), #1369 (LongMemEval ingestion wiring — **non-blocking relevance to #1414**: the parity leg can run on the existing deterministic LongMemEval ingestion; the production-extractor ingestion is an enhancement, not a prerequisite).
 
 **Known post-implementation obligations:**
+
 1. Capstone #1419 must PASS before the epic is marked complete.
 2. [cal] thresholds re-locked on the shipped engine (scope deliverable 8) before any verdict ships.
 3. The claim doc (docs/) filed per the pre-committed falsification branch; positioning changes gated by the reclassification trigger (align fix-4).

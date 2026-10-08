@@ -10,9 +10,11 @@
 **Architecture:** supersede_point 2b MERGE+DELETEs structural edges with no event → rebuild pass-2 resurrects them at OLD from its immutable snapshot while the successor loses them (verified by live repro). Fix = emit flat descriptors {event_type, src, tgt=<key>, target_label=<label>} at 2b BEFORE the transfer (per-rel key extraction, never target.id), plus a pass-2b structural replay branch that routes on edge_type BEFORE the Point→Point MERGE, _final()s only src, resolves tgt with a SHARED label-scoped resolver (projection/edges.py — home of the rel→(label,key)+stub map, imported by both sdk.py emission and projection replay; never auto-detect `_create_about_edges`), and deletes the pass-2-resurrected edge at old via constrained re-query.
 
 ### Pattern Research
+
 Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery (collector 1435-1445, consumer 1688-1727, operator leg 1680-1686).
 
 ### Integration Surface Map
+
 | Surface | Layer | Notes |
 |---|---|---|
 | supersede_point 2b transfer (sdk.py:4479-4505) | unit | descriptor emission + no-self-edge guard |
@@ -25,6 +27,7 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Tech Stack:** Python 3.12, FalkorDB/Cypher.
 
 ---
+
 ## Tasks
 
 ### Task 0: Shared rel→(label,key)+stub resolver in projection/edges.py
@@ -32,9 +35,11 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Intent:** One home for the key map used by emission (sdk.py), replay, and the delete-leg — two divergent copies would drift; `_create_about_edges` auto-detect (Subject-first order) cannot mint a specific aboutObject/aboutEvent/aboutDocument edge for an absent node (would attach the descriptor's rel to a wrong-label node).
 **Acceptance:** Resolver exposed from projection/edges.py; sdk.py and projection both import it; no duplicate key map remains.
 **Files:**
+
 - Modify: `tortoise/projection/edges.py` (near `_create_about_edges` :114-215)
 
 **Steps:**
+
 1. Add label-scoped resolver: `resolve_structural_target(tx, label, key, rel) -> node_id_or_None` + `stub_key(rel, target) -> (label, key)`. Key map: aboutSubject/aboutObject/aboutEvent/aboutPoint → `name`; aboutDocument → `coalesce(title, name)`; extractedFrom → `url`. Create-if-missing semantics: Subject/Source stubs MERGE by key (live wiring precedent); **never** auto-detect labels and **never** mint Point stubs by name (absent Point target ⇒ skip).
 2. `_create_about_edges` stays the live auto-detect label-discoverer (actual detect order per edges.py: Subject→Object→Action→Event→Document→Point — **do NOT pin a truncated order that drops Action**; Document name-OR-title matching; fallback Subject stub at s.id=$name). Action is snapshot-eligible via aboutEntities matching an Action node, but aboutAction edges are NOT in the derivable emission set (Action was dissolved in Ontology v3.0) — note this boundary explicitly. **Route only stub/edge CREATION through the resolver** (one create path for both live and replay); pin detect-order/coalesce/fallback with an equivalence test asserting live-vs-resolver edges match for the derivable rel set. **Equivalence cases to enumerate:** Document-by-name, Document-by-title-only (coalesce order), absent-name → Subject stub, absent-URL → Source stub (extractedFrom). Acceptance: no duplicate key map; resolver owns the create path; auto-detect remains the label-discoverer.
 3. Run: `TORTOISE_TEST_CARVE_OUT=1 PYTHONPATH=$PWD .venv/bin/python -m pytest tests/ -q -k "about or source"` — expect PASS.
@@ -45,9 +50,11 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Intent:** Journal what 2b transfers so rebuild can replay it. Includes the missing no-self-edge guard.
 **Acceptance:** 2b emits one flat descriptor per (old)-[rel]->(target) BEFORE transferring, for the snapshot-derivable rel set only; phantom (Y)-[:aboutPoint]->(Y) self-edge no longer mints when target == successor.
 **Files:**
+
 - Modify: `tortoise/sdk.py:4479-4505` (2b transfer)
 
 **Steps:**
+
 1. Extend the 2b SELECT (sdk.py:4488) to RETURN the key columns (target name / title / url per rel) — current query returns only id, target.id, labels(target). **Journal the target's LOGICAL id (`target.id`), never FalkorDB `ID(new)`/`id(target)`** — logical ids survive rebuild, internal ids die; the guard's node-identity compare uses `ID(new)` (runtime only, never journaled).
 2. Per-rel key extraction via the shared resolver's `stub_key` (Task 0) — **never target.id** (Subjects MERGE by name, webhook stub ids random ulids #1918; Sources by url; Documents by name-or-title).
 3. SKIP any target with an unresolvable key (name-less Point from id-targeted create_about_edge; extractedFrom target lacking url) — null-key descriptors are un-replayable; those edges die at rebuild today anyway (zero regression).
@@ -62,9 +69,11 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Intent:** Rebuild replays the descriptors: edge lands at the final successor; the pass-2 resurrection at old is deleted.
 **Acceptance:** Post-rebuild, structural edges exist at the final successor and NOT at old; dedupe keyed on RESOLVED TARGET NODE IDENTITY (never descriptor id, never name/key — Objects/Events/Documents are id-keyed, two distinct same-name targets must not collapse); double-rebuild idempotent; old-side delete-leg always runs even on a dedupe-skip.
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` (DirectEdgeRepoint consumer ~1688-1727)
 
 **Steps:**
+
 1. At the consumer loop top, handle `delete_only` descriptors BEFORE the malformed-isinstance guard (consumer ~1693 currently drops any event whose src/tgt/etype isn't str — the delete_only event carries a literal logical tgt id so it survives, but recognition must be explicit). **Delete-leg keys the DIRECT successor (the descriptor's literal logical tgt), NOT `_final(src)`** — in a chain (guard fires supersede(X→Y), then Y→Z superseded before rebuild), pass-2 resurrects the phantom at old from src's snapshot to the DIRECT successor Y, while `_final(X)=Z`; a final-keyed delete misses and old X keeps its phantom. Resolve the literal tgt through the succ map only if that node id was itself superseded (then follow to its successor — direct node may be gone). **Chain-mechanism pin:** resurrection is name-based (`_create_about_edges`/`_link_source`, entities.py:225-248 — `_try_about_edge` has no status filter), so in X→Y→Z the phantom may attach to dead Y while the delete-leg targets Z — delete BOTH the literal node and the succ-resolved node (or pin the test to assert both are clean; Task 3 step 5 protects it). Use `_final` solely for the create-skip. Run the resurrection-delete `(old:Point{id:src})-[r:edge_type]->(<direct successor node>)` with fresh ID(r) capture, skip create, continue through dedupe/terminal-guard. Never graph-wide.
 2. Discriminate structural edge_type ∈ derivable set BEFORE validate_rel_type/Point→Point MERGE/_final(tgt) (a bare entity key run through _final would corrupt on superseded-point-id collisions). Keep a single validation point: still call `validate_rel_type` inside the branch (fixed-set discriminator is an allowlist, not a substitute).
 3. Route: `_final()` only src. Resolve tgt via the shared resolver (Task 0) with label-scoped semantics — **never auto-detect `_create_about_edges`** (Subject-first auto-detect would attach an aboutObject descriptor to a same-name Subject; the delete-leg's rel-constrained re-query `(old)-[:rel]->` then misses the drifted resurrection and old keeps a phantom edge). Create-if-missing: Subject/Source stubs MERGE by key; **never** mint Point stubs by name — absent Point target ⇒ skip.
@@ -82,9 +91,11 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Intent:** Pin parity end-to-end + the edge cases verified at scope time.
 **Acceptance:** listed cases green; old-side zero-incident; phantom self-edge guard + 2nd-rebuild delete verified; id-reuse dedupe; mixed 2a+2b; collision.
 **Files:**
+
 - Modify: `tests/test_pointsuperseded_rebuild.py`
 
 **Steps:**
+
 1. `_struct_edges` helper (query structural edges from a point).
 2. Parity via extractedFrom: A→B→C chain — post-rebuild successor has {extractedFrom}, old has {} (old-side zero-incident, E2E-11.6 mirror).
 3. REBUILD→supersede→REBUILD lane (only lane where 2b sees live about edges): assert about edges follow the successor post-2nd-rebuild AND old carries no about edge after the 2nd rebuild.
@@ -107,9 +118,11 @@ Skipped — zero third-party deps. Precedent: #2423 DirectEdgeRepoint machinery 
 **Intent:** Document that 2b is journaled/replayable + the derivable-set boundary.
 **Acceptance:** ONTOLOGY §3.1 note + INGEST_CONTRACT supersede row updated.
 **Files:**
+
 - Modify: `docs/ONTOLOGY.md`, `docs/INGEST_CONTRACT.md`
 
 **Steps:**
+
 1. ONTOLOGY §3.1: structural-edge transfer is journaled (DirectEdgeRepoint) and replayable; derivable-rel set + #2501 dependency noted. **Pre-fix journal boundary stated**: descriptors exist only for supersedes journaled post-deploy; a pre-fix journal rebuild replays with no delete-leg → old's resurrection persists (rebuild does NOT repair pre-existing graphs; backfill out of scope).
 2. INGEST_CONTRACT supersede row: 2b journaled/replayable.
 3. Commit: `git add -A && git commit -m "docs: supersede 2b structural transfer journaled"`

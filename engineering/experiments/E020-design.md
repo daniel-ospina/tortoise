@@ -5,15 +5,18 @@
 **Pre-registration:** [E020-preregistration.md](./E020-preregistration.md)
 
 ## 1. Experiment Type
+
 Mathematical validation — measures IMPL edge transmission strength and evaluates whether phi_impl is too conservative.
 
 ## 2. Independent Variables
+
 - IMPL phi function strength (current vs stronger variant)
 - Chain length (1, 2, 3 hops)
 - Source count on root (1, 2, 5)
 - Topology (chain, mutual IMPL loop)
 
 ## 3. Dependent Variable
+
 B and C confidence after EP convergence. Measured at each hop.
 
 ## 4. Test Cases
@@ -39,4 +42,5 @@ B and C confidence after EP convergence. Measured at each hop.
 | A↔B both T0 | A,B ≈ ? | > single-source |
 
 ## 6. Phi Investigation
+
 Read and analyze `phi_impl` in `tortoise/ep.py`. Determine what parameters control transmission strength. The current transmission of ~5% per hop is extremely weak — a gold source implying a claim should carry more weight.

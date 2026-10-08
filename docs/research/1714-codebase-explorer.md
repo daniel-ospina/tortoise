@@ -43,10 +43,12 @@ All paths relative to worktree root; line refs approximate (re-anchor at plan ti
 - tortoise/quota.py: MAX_SESSION_TURNS 500 `:94`, DEFAULT_MAX_SESSIONS 1000 `:118`, count_org_usage `:267` (points = non-episodic only `:394-401`), enforce_org_limit `:381`. hosted_api.py `_check_team_limit` `:1487-1520` (402). Sessions gated `:4029-4039`; index ungated `:8116-8155` (the asymmetry).
 
 ## Patterns
+
 - Quota-gate an endpoint: _check_team_limit (request-time). Index job is a BACKGROUND task — needs explicit limit resolution before first create_point.
 - Tests: tests/test_github_indexer.py FakeSDK masking `:38-52` (DELETE the fake; use real _embedded SDK per test_github_connector.py); TORTOISE_SESSION_LLM_MOCK=1 seam (test_capture_session.py); test_onboarding_endpoints.py PATCH pattern; test_lme_ingest_v2_supersession.py (supersession model).
 
 ## Dependencies
+
 - #909 OPEN — /v1/sessions contract partially moving; consume as black box.
 - LLM provider required for /v1/sessions (503 otherwise) — surfaced honestly in the ask.
 - GITHUB_CLIENT_ID/SECRET env; token scope repo.

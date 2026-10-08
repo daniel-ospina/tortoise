@@ -17,6 +17,7 @@
 **Library docs (preflight)** — no third-party deps in plan (Python stdlib urllib/json/tomllib only; Python 3.11+ ships `tomllib`; ubuntu-latest runners ship Python 3.12). Skipped.
 
 **Fly Machines API surface** — verified live this session against the running fleet (`flyctl machines list -a tortoise-y4mjjq --json`) + flyctl source (master):
+
 - Canonical: `GET https://api.machines.dev/v1/apps/{app}/machines` with `Authorization: Bearer <token>` returns the machines array (no pagination on the list endpoint). Each machine carries `config.metadata.fly_process_group` (the Launch process group), `state` (started/stopped/destroyed/destroying), `image_ref`, and an `events` array (newest-first).
 - flyctl's `ProcessGroup()` (fly-go `machine_types.go`): `config.metadata["fly_process_group"]` → `config.metadata["process_group"]` → `""` (empty = "Found machines that aren't part of Fly Launch"). Group `app` is the default when `fly.toml` has no `[processes]` section (verified: our `fly.toml` has no `[processes]`).
 - flyctl's `isConstantlyRestarting()` (internal/machine/leasable_machine.go:293-311, source-verified this session): take the FIRST `type == "exit"` event in `machine.Events` (newest-first → most recent exit); flag iff `request.restart_count > 1 && request.exit_event.exit_code != 0 && !request.exit_event.requested_stop && request.exit_event.restarting`. JSON field names (fly-go struct tags): `exit_event`, `exit_code`, `requested_stop`, `restarting`, `restart_count`.
@@ -45,6 +46,7 @@ Python 3.11+ stdlib (`urllib.request`, `json`, `tomllib`), GitHub Actions, pytes
 **Intent:** The incident root cause is eliminated BEFORE the guard ships; the guard's job is preventing recurrence, not fixing the fleet (which is already clean).
 **Acceptance:** `flyctl machines list -a tortoise-y4mjjq` shows zero machines with empty process group.
 **Files:**
+
 - None (verification only)
 
 **Step 1:** Verify the fleet: `flyctl machines list -a tortoise-y4mjjq` → **confirmed this session**: only `8654509b634758` (process group `app`, state `started`). The orphan `080d6e1a0d2928` is gone (`fly machines destroy 080d6e1a0d2928 -a tortoise-y4mjjq` was executed in the prior session).
@@ -58,6 +60,7 @@ Python 3.11+ stdlib (`urllib.request`, `json`, `tomllib`), GitHub Actions, pytes
 **Intent:** The load-bearing fail-closed fleet detector — one script both the CI gate and the operator's live dry-run call.
 **Acceptance:** Script exits 0 (clean), 1 (orphan or traffic-group crash-loop, naming each violating machine + remediation), 2 (could-not-determine: missing token / API error / unparseable response / malformed machine / missing fly.toml); tested hermetically via `FLY_MACHINES_FILE`/`FLY_TOML`/`FLY_API_URL`/`FLY_API_TOKEN` env seams.
 **Files:**
+
 - Create: `.github/scripts/check-fly-machines-guard.py`
 - Create: `tests/test_fly_machines_guard.py`
 
@@ -98,6 +101,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 **Step 2: Run to verify they fail** — `uv run pytest tests/test_fly_machines_guard.py -v` → FAIL (script absent).
 
 **Step 3: Implement the script** (key logic):
+
 - Config: `tomllib.load(fly.toml)` → app name (env override `FLY_APP`); allowed process groups = `[processes]` keys, or default `{'app'}` when no `[processes]` section, **always unioned** with Fly-internal groups `{'fly_app_release_command', 'fly_app_console', 'fly_app_test_machine_command'}`. **Traffic groups** (crash-loop check scope) = the `[processes]` keys or `{'app'}` default — internal groups are orphan-checked only.
 - `FLY_TOML` default resolved from the script location (`REPO_ROOT = Path(__file__).resolve().parent.parent.parent` — the check-migration-drift precedent), so the operator's live dry-run works from any CWD.
 - Machines source: `FLY_MACHINES_FILE` env seam (test) → else `GET {FLY_API_URL}/apps/{app}/machines` with `Authorization: Bearer {FLY_API_TOKEN}` (default `FLY_API_URL=https://api.machines.dev/v1`; `timeout=30` per attempt, **5 attempts with 4s/8s/16s/32s exponential backoff** (`2^(attempt+2)`, overridable via `FLY_GUARD_MAX_ATTEMPTS`) — the retry budget roughly matches the deploy step's 5×45s tolerance for transient Fly API races (the #1346 class: a gate must not hold deploys on a transient blip the deploy would have survived); fail-closed exit 2 after exhaustion). Type-assert the response is a JSON array.
@@ -119,6 +123,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 **Intent:** Every app deploy is gated on fleet health before code ships — the guard is the recurrence-prevention half of #1896.
 **Acceptance:** Gate step runs after the migration-drift gate (#1095 precedent), strictly before `flyctl deploy`; FAIL-CLOSED (missing token / API error → exit 2 → deploy fails); incident-fix bypass mirrors the `skip-db-health-gate` (#1719) / `skip-pack-smoke` (#1929) convention — `skip-fly-machines-guard` workflow_dispatch input + `vars.SKIP_FLY_MACHINES_GUARD` lane, `::warning::` emitted. The gate step ALWAYS runs; the skip translates ONLY exit-1 (violations) — exit-2 (could-not-determine: API error, malformed shape, missing token) can NEVER be bypassed.
 **Files:**
+
 - Modify: `.github/workflows/deploy-hosted.yml`
 
 **Step 1:** Add `FLY_API_TOKEN` to the "Verify secrets exist" step's hard-required checks (mirroring the `SUPABASE_ACCESS_TOKEN` gate precedent — a deploy must never ship with the guard silently unarmed because the token is missing).
@@ -173,6 +178,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 **Intent:** Prove the guard passes on today's (clean) fleet and catches the incident replay; confirm the hermetic suite is green.
 **Acceptance:** All hermetic tests pass (64 at final review — the plan.s 28-test list is the initial sketch; test-review + code-review cycles extended it with type-drift, shape-validation, retry-seam, and sanitization coverage); live dry-run of the script against the real fleet exits 0; `tests/` suite green (docker lane or carve-out lane per AGENTS.md).
 **Files:**
+
 - Test: `tests/test_fly_machines_guard.py` (incident fixture)
 
 **Step 1:** Live dry-run: `FLY_API_TOKEN=... python3 .github/scripts/check-fly-machines-guard.py` → **expect exit 0** (only Launch-managed `app` machine, no crash-loop).
@@ -188,6 +194,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 **Intent:** The standard-tier review gates (2 parallel plan verifiers; commit-workflow code-review gate) validate the design and the diff before merge.
 **Acceptance:** Both plan verifiers return NO ISSUES FOUND; PR reviewed and merged via commit-workflow.
 **Files:**
+
 - None
 
 **Step 1:** Dispatch 2 parallel plan verifiers (task sub-agents) against this plan doc + the issue body; fix-and-reverify loop until both return NO ISSUES FOUND.

@@ -1265,7 +1265,6 @@ The 9 slices decompose into issues with these boundaries (each slice = 1-3 issue
 
 Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 11 reviewer rounds (plan 6 + decompose 3 + verify 2) + 1 mechanical arithmetic fix, ~151 findings (116 + 22 + 13).
 
-
 ## 9. State-centric alignment (2026-08-12 — post-verify deltas, supersede the earlier write mappings)
 
 > Filed as critical across all related issues (32 comments). Sources: ONTOLOGY v3.7 (#1017),

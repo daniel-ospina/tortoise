@@ -77,6 +77,7 @@ Likewise `claim_status` (~5210, claimability probe) restores from fail-closed `{
 **Acceptance:** `FakeControlPlane(missing_columns={"teams": {"suspended_at"}})` raises `RuntimeError` (message `Supabase control-plane query failed (teams): HTTP 400`) for a GET whose select includes a drifted column, and behaves exactly as today with the default (no drift). All existing tests still pass.
 
 **Files:**
+
 - Modify: `tests/fake_control_plane.py` (constructor + `query` GET branch), `tests/test_supabase_control.py` (new `test_fake_filter_column_drift_raises` pin, Step 3)
 
 **Step 1:** Extend `FakeControlPlane.__init__` to accept `missing_columns: dict[str, set[str]] | None = None` and store it (default `None`).
@@ -118,6 +119,7 @@ def test_fake_filter_column_drift_raises():
 **Acceptance:** With drift on `suspended_at`/`flagged_at` (but `email` present — it is a 0006 base column), `resolve_api_key` returns the team dict with `suspended_at`/`flagged_at`/`email` keys present (`None`/real value) and correct identity + quota fields; with no drift, the query count is unchanged (2 queries/auth: api_keys + teams) and behavior is byte-identical to today.
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py` (`_QUOTA_SELECT` split → `_TEAM_BASE_SELECT` + `_TEAM_ADDITIVE_SELECT`; new `_orgs_row_fail_soft`; `resolve_api_key` step 3)
 
 **Step 1 (constants):** Replace `_QUOTA_SELECT` with:
@@ -237,6 +239,7 @@ def _orgs_row_fail_soft(cp, org_id: str, *, select: list[str],
 ```
 
 Also qualify the seam-level fail-closed docstrings that the new behavior contradicts:
+
 - Module docstring of `tortoise/supabase_control.py` (the "Fail-closed contract (backup-seam P1-3 pattern): every query error raises ``RuntimeError`` — auth never falls back to the registry and never authenticates on error. ``update_last_used`` is the one best-effort exception" paragraph) → append the #1096 exception: additive-teams-read failures (0015) degrade to safe defaults at WARNING; base/deletion reads still raise.
 - `_get_current_team_supabase` (hosted_api.py ~1056): "never 200" claim → append "EXCEPTION (#1096): an additive-teams-read failure (0015) degrades to a 200 with safe defaults (un-suspended/un-flagged), logged at WARNING".
 - `SupabaseControlPlane` class docstring: qualify the fail-closed sentence as **seam-level** behavior (the resolve caller may intentionally swallow an additive-read failure per #1096).
@@ -254,6 +257,7 @@ All are docstring-only edits. **Code changes in this task (from the code-review 
 **Acceptance:** With 0015 drift (`suspended_at`/`flagged_at` missing), `org_by_id` returns the team with those keys `None`; with 20260813000001 drift it raises RuntimeError (fail-closed); no drift → identical to today.
 
 **Files:**
+
 - Modify: `tortoise/supabase_control.py` (`org_by_id`)
 
 **Step 1:** Rewrite `org_by_id` (additive set = 0015 `suspended_at`/`flagged_at` + 20260813000005 `dashboard_key_login` — seam-uniformity; `deleted_at`/`grace_hours` stay in the select so the base retry keeps them — their absence fails the retry closed):
@@ -290,6 +294,7 @@ def org_by_id(cp, org_id: str) -> dict | None:
 **Acceptance:** New tests below pass; existing `test_abuse_integration.py` 403/MCP tests still pass (proves no enforcement regression). **Stated decision:** the MCP +60s cache-hold consequence is **documented only, intentionally unpinned** — its mechanism (middleware 60s TTL + signal-based invalidation) is pre-existing unchanged code whose drift-affected inputs (resolve dict + signal set) ARE pinned (seam tests + REST signal-teardown); the +60s hold is arithmetic on that, and a middleware-level time-travel test would verify unchanged cache semantics (see the MCP note below). The other three accepted-risk consequences (mint grant, claim-write, REST signal-teardown) are pinned.
 
 **Files:**
+
 - Modify: `tests/test_supabase_control.py` (new `TestResolveApiKeyFailSoft` + `TestTeamByID` classes), `tests/test_abuse_integration.py` (mint-under-drift + signal-teardown pins), `tests/test_claim_endpoints.py` (claim-write pin)
 
 **Step 1 (fail-soft + diagnosability, resolve):**
@@ -525,6 +530,7 @@ Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abu
 **Acceptance:** Hermetic suite green; diff contains only the planned files.
 
 **Files:**
+
 - Run: full suite
 
 **Step 1:** `./.venv/bin/python -m pytest tests/ -q` → green (hermetic suite, FalkorDBLite).

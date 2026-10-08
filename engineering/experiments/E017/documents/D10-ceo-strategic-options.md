@@ -20,6 +20,7 @@ I have two real options. There are infinite variations, but they converge into t
 ## Option A: Persevere — Double Down on Mid-Market PLG
 
 **What it looks like:**
+
 - Keep our current ICP (mid-market, approximately $18K ACV)
 - Invest in marketing efficiency to bring CAC back under control
 - Ship the guided onboarding program to reduce time-to-value
@@ -37,6 +38,7 @@ The unit economics math doesn't work. At 2.8:1 LTV:CAC, 4% monthly MRR growth, a
 ## Option B: Pivot — Enterprise Analytics
 
 **What it looks like:**
+
 - Accept the $5M extension from StrategicCo — conditional on both an enterprise pivot AND the CTO committing to stay for at least 18 months
 - Hire 2 enterprise AEs and 1 security engineer immediately
 - Build SSO, audit logging, and SOC 2 infrastructure

@@ -57,6 +57,7 @@ Domain: **code** (Python, no migrations/auth/UI/content). Complexity: standard (
 **Intent:** Split the conflated probe verdicts (ECONNREFUSED "dead" vs FileNotFoundError "missing" vs timeout) so the stale action can fail closed on mid-startup dirs, and make `_pid_alive` treat zombies as dead (the in-repo #1365 precedent), before any destructive action depends on them.
 **Acceptance:** `_probe_socket` returns exactly one of `"dead"|"missing"|"alive"|"undetermined"`; `_pid_alive` returns False for a Linux zombie; existing tests pass unchanged (no direct `_probe_socket` test callers exist — verified).
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (`_probe_socket` ~392-413, `_pid_alive` ~260-268)
 - Test: `tests/test_reaper.py`
 
@@ -187,6 +188,7 @@ def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
 **Intent:** Make `discover()` output honest (indicator a): a dead authoritative pid classifies `stale_socket`, never the phantom `candidate`; LIVE pass-1 servers must be immune to stale registry pidfiles; probe-failed client counts record None, not a false 0.
 **Acceptance:** `_cooldown_check(registry, pid=None)` returns `"stale_socket"` when the authoritative pid is dead (Z-aware); `_classify_dir(dbdir, socket_path, known_pid=None)` uses `known_pid` when provided; `_classify_live` passes the pgrep pid so live servers never classify stale_socket; `_classify_dir` sets `client_count=None` on probe failure; existing discover tests green.
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (`_cooldown_check` ~871-884, `_classify` ~803-869, `_classify_dir` ~764-801, `_classify_live` ~686-712, `_discover_from_live`)
 - Test: `tests/test_reaper.py`
 
@@ -344,6 +346,7 @@ def _classify_live(pid: int) -> dict | None:
 **Intent:** Give `stale_socket` records the reap action the 2026-08-06 plan promised and reap() never wired — a 9-guard guarded rmtree that can never delete a live server's data — while keeping the candidate kill path byte-for-byte equivalent in semantics and fixing the misleading liveness-gate log.
 **Acceptance:** `reap()` processes `stale_socket` records via `_remove_stale_socket_dir`; every guard aborts without partial delete (the stat-OSError paths at guard 5 return silently; guard 1 returns acted at INFO — the WARNING convention covers the probe/pid/age abort paths); stale removals don't consume the kill `batch_size` and are capped by `STALE_SWEEP_BUDGET`; `only_safe` admits stale removal (guards are the safety); budget exhaustion stops candidate kills but not stale cleanup; dry-run reports without mutating; log says "dead pid, skipping".
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (constants ~38-67; `reap` ~925-1006; new `_remove_stale_socket_dir`; `_cleanup_tempdir` reuse)
 - Test: `tests/test_reaper.py`
 
@@ -797,6 +800,7 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
 **Intent:** Wire the stale action into the sweep: `phase1_probe` resolves stale-pid records (dead→stale_socket, alive→candidate with real pid, missing/undetermined→undetermined) and reap() receives both classes; partial-rmtree quarantine leftovers converge on later sweeps.
 **Acceptance:** `_run_sweep` reaps stale_socket records end-to-end; `_sweep_quarantine_dirs` removes dead quarantine leftovers and WARNs on live ones; `phase1_probe("missing")` → undetermined (not stale_socket); existing `test_run_sweep_includes_stale_pid_files` green.
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (`phase1_probe` ~897-923, `_run_sweep` ~1161-1188, new `_sweep_quarantine_dirs`)
 - Test: `tests/test_reaper.py`
 
@@ -1242,6 +1246,7 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 **Intent:** Stop the load-sensitive fail-closed skip (indicator b): a single 0.5s timeout must not strand a live orphan — one bounded retry (2×0.5s) before the fail-closed None, while reliable verdicts (refused/missing) never retry. ("Read-timeout-only" in the scoping was refined to read-OR-connect timeout at plan-review: a full connect backlog is equally load-sensitive.)
 **Acceptance:** `_raw_resp_client_list` retries exactly once on a `socket.timeout` in the read or connect phase; `ConnectionRefusedError`/`FileNotFoundError`/other OSErrors return immediately; exhausted retries return None; existing fail-closed tests green.
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (`_raw_resp_client_list` ~449-474, new `_raw_resp_probe_once`)
 - Test: `tests/test_reaper.py`
 
@@ -1445,20 +1450,24 @@ def _raw_resp_probe_once(socket_path: str) -> tuple[list[dict] | None, str]:
 **Intent:** Keep the module's documented contract truthful (module docstring, `reap()` docstring, cron doc) and record the `--json` output-shape change for operators; run the mandated verification suites to green.
 **Acceptance:** `docs/infra/embedded-reaper-cron.md` documents the age-gated stale-dir removal (fires in all modes incl. `--only-safe`); module + reap docstrings updated; CHANGELOG notes `--json` may emit `classification: "stale_socket"` (dead/None pid); `tests/test_reaper.py` and `tests/test_embedded_concurrency.py -k chaos` green.
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (module docstring ~3-30, reap docstring ~925-946), `docs/infra/embedded-reaper-cron.md`, `CHANGELOG.md` (if present)
 - Test: full suites below
 
 **Step 1: Update docs**
+
 - Module docstring: add `- registry pidfile pid dead -> stale_socket (dead-pid leftover dir — guarded rmtree; never a killable 'candidate')` to the classification list, and note stale_socket removal happens without CLIENT LIST (no server exists to list).
 - `reap()` docstring: document the stale_socket branch (guarded rmtree, quarantine rename-aside, mode-independent, only_safe-admitted).
 - `docs/infra/embedded-reaper-cron.md` Safety section: one bullet — `--no-dry-run` also rmtrees age-gated (≥30s, ECONNREFUSED-verified, rename-aside quarantined) dead-pid leftover dirs, in all modes including `--only-safe`; dry-run reports them; `--json` now carries `dbdir`/`quarantine_dir` keys.
 - CHANGELOG: `--json` may emit `"classification": "stale_socket"` (dead or None pid; `dbdir` stays the original path, `removed_dir` carries the renamed/quarantined path) and `"stale_quarantine"` entries (with `quarantine_dir`); the emitter gains `removed_dir`/`dbdir`/`quarantine_dir` keys.
 
 **Step 2: Run verification**
+
 ```bash
 uv run pytest tests/test_reaper.py -q -p no:cacheprovider --timeout=300
 uv run pytest tests/test_embedded_concurrency.py -q -p no:cacheprovider --timeout=300 -k chaos
 ```
+
 Expected: all green. (Environment: heavy load + possible `~/.tortoise/.reaper.lock` contention → "reaper already running" failures are environmental; retry.)
 
 **Step 3: Commit** — message: `docs(1383): reaper stale_socket semantics — cron safety, module docstring, changelog`.

@@ -29,6 +29,7 @@
 If not built now, the alternatives for the same epistemic-team capacity: **#2083** (multi-graph pro-tier — the direct revenue path, already `implementing`), **#2082** (auth architecture — unblocks the enterprise-governance story, research-only, NOT frozen), **#1976** (onboarding, close to shipping), or user-acquisition work. The tension is real and this gate does not wave it away: eval infrastructure + why-recall is *not* obviously higher-leverage than multi-graph revenue work *in isolation*.
 
 The resolution is that they are complements, not substitutes, and the leverage is in the **sequence**:
+
 1. **Contract-first:** #2083's per-graph-key tenancy must satisfy #2080's `/v1/context` contract — the contract must exist before the wall is built.
 2. **The eval suite is a conversion prerequisite for the developer-customer path (#2083's whole point).** A developer choosing a memory backend for their app's customers will benchmark. gbrain-evals' adapter interface means they can run Cat 34/35 against *any* system — including Tortoise — and publish the number *uncontrolled*. The uncontrolled-eval risk is **bounded by the same integration friction used to reject the adapter as a replacement** (Alternative 3) — a casual third party must invest real adapter work (stack + pipeline-unit mismatch) to benchmark us, so an imminent number from a hobbyist is unlikely. The residual risk is a **motivated actor** (gbrain-evals maintainers, a competitor) investing in the adapter; our own W7 adapter scorecard preempts it. Running the evals first = controlling the narrative, with the residual risk being narrative-timing, not narrative-loss.
 3. **The category window is open now and closing.** Nobody ships why-aware recall; gbrain structurally can't (declarative graph, no belief semantics); but gbrain's velocity is extreme (637 changelog entries in 5 months) and its watch-items (confidence/contradiction-edge language) are exactly the gap-closing move. The why-layer moat has a shelf life.
@@ -57,6 +58,7 @@ This is NOT a convenience classification: the counter-case (Important/Urgent —
 3. **Write-path quality → retention.** Memory that silently loses ~40–50% of salient units (the Mem0/Supermemory measured norm) is a churn driver for agent-users; memory that builds itself correctly, with provenance + EP updates + disclosure-visible opt-in, is a compounding-retention driver. W5 already exists as a feature — the quality work is what makes it keepable.
 
 **Falsification / leading indicators (before user-facing trust is spent):**
+
 - W2 first baseline publishes and is BAD but bounded; the CI-gated baseline can FAIL; the fix-wave improves it on the same frozen corpus + pinned judge (gbrain pattern 61.5% → 88.1%). If the pipeline can't be measured, the epic's premise fails internally.
 - W3 why-layer suite: conflict-surfacing ≥ 0.95 from surfaced context alone (A11). If the surfaced context can't answer the three why-questions, W4's assembly changes — *before* any user sees it.
 - A4 A/B (contentiousness-boosted vs confidence-only ranking) as an eval-phase artifact: if contentiousness doesn't help, the W4 headline thesis is falsified internally, at eval cost, not user cost.
@@ -78,6 +80,7 @@ This is NOT a convenience classification: the counter-case (Important/Urgent —
 **Decision:** PROCEED — **APPROVE with a mandatory sequencing gate + one conditional scope-cut option** (not a wholesale cut: all six in-scope workstreams W1/W2/W3/W4/W5/W7 stay; the scope doc's out-of-scope cuts — W6 → #1976, phase-2 → #2081, tenancy → #2083, no new retrieval tool — are endorsed)
 
 **Alternatives considered:**
+
 1. #2083-first (multi-graph revenue before evals/why-layer) — rejected as replacement: contract-coupled, not competing; #2080's `/v1/context` tenancy contract is what #2083's per-graph-key wall must satisfy (contract-first sequencing).
 2. Read-path-only (W4 now, evals later) — rejected: W2 is a *prerequisite* for W4's value (why-context on a silently-losing write path is confident garbage); the O/I/T is "provably better, publicly."
 3. Adopt gbrain-evals' adapter instead of building W2/W3 — rejected as replacement (stack + pipeline-unit mismatch; why-layer suite has no gbrain analogue), **kept as an addition** for W7's comparison scorecard.
@@ -88,6 +91,7 @@ This is NOT a convenience classification: the counter-case (Important/Urgent —
 **Eisenhower placement:** Important / Not-Urgent → **SCHEDULE** (in parallel with #2083, sequenced contract-first). Time-sensitivity is urgency-of-opportunity (unclaimed why-recall category frame; uncontrolled-eval risk), not urgency-of-pain.
 
 **Key assumptions:**
+
 - A4 — contentiousness-driven recall improves user-visible quality (the W4 headline thesis) — confidence: **LOW** (no product precedent; academic precedent exists; de-risked internally by W3 why-suite + A/B before user exposure)
 - A1 — gbrain's write-path measurement pattern transfers to Tortoise's session→graph pipeline (point-level survival, REPHRASE-linked dedup) — confidence: **MEDIUM** (W2 pilot is the validation)
 - A3 — EP support+contentiousness can score the "when to volunteer" reflex at least as well as gbrain's arm table (0.000 kta baseline) — confidence: **MEDIUM** (unverified)

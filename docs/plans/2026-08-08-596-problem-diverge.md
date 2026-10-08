@@ -22,6 +22,7 @@
 | E10 | **pricing.json promises**: `daily_backups: "planned"` on pro (L81) and team (L104). The checkbox is real; the entitlement path to *become* Pro does not exist. | product/pricing.json |
 
 **External research (3 adversarial queries, sonar):**
+
 - Silent-failure class is documented and common: "script succeeds but backs up nothing", exit 0 + empty files for 23 days; fix = heartbeat + anomaly alerting + restore tests, not just job success. (actsupport.com, poppaping.com, oneuptime.com, LinkedIn cronzy case)
 - Count-only restore verification is a known weakness: RESTORE VERIFYONLY "does not verify the structure of the data"; count checks miss wrong values / missing relationships that preserve totals. (Microsoft docs, red-gate, mssqltips)
 - "A backup you've never restored isn't a backup": restore drills in isolated environments are the industry-standard proof of recovery; cadence ≠ recoverability. (fluentorbit, monpg, acronis, momentslog)
@@ -31,22 +32,30 @@
 ## Alternative Problem Framings
 
 ### Framing 1 — "Nothing invokes it" is a symptom; the deliverable chain is broken at the *entitlement* link (there are no Pro teams to back up)
+
 The scheduler as specced enumerates `tier != 'free' AND backup_enabled` — which today is **the empty set** (E2). The first scheduled run will therefore *trivially succeed while backing up nothing*, which is precisely the silent no-op class the issue wants to alert on. The problem is the delivery chain *promise → entitlement → scheduler → verification → tenant visibility*, and scheduling is one of five missing links. Pricing integrity (the stated revenue goal) cannot be delivered by a driver alone — a tenant must be able to become Pro, or the daily-backups checkbox stays fictional.
+
 - **Strength:** Explains why the feature as specced would be a silent no-op even after shipping; forces the enumeration + "backed up ≥1 team" assertion into scope; surfaces the sequencing dependency on the billing work #296.
 - **Weakness:** Billing may be deliberately deferred by the operator; risks scope-creep into product work. The scheduler can still ship *if* it includes the no-op detector (see Framing 2).
 
 ### Framing 2 — The real failure class is silent operation; the gap is observability + verification, not a driver
+
 Two silent modes exist: (a) the #101 class — nothing runs; now *detectable* but unwatched: stamps + R2 listings exist, no heartbeat reads them (E6); (b) the newer class — job ran, exited 0, backed up nothing or backed up a degraded graph (external evidence; GH Actions cron is documented jittery/skippable). The problem is not "add a driver" — it is "make backup health a first-class observable": heartbeat (stamp age vs cadence), per-run assertions (teams enumerated > 0, node-count deltas vs baseline), and an alert channel with a human at the end. Note the chosen GitHub-issue channel only fires when someone *looks* at the repo — it is the repo's own convention, but as an alert medium it lacks push, dedup, and severity.
+
 - **Strength:** Names the failure class the E2E "failure raises an alert" actually guards; subsumes the driver question as a mechanism; survives the Framing-1 objection (a no-op run becomes loud).
 - **Weakness:** Could balloon into a monitoring project; still needs *something* to trigger the checks (driver choice returns in scope).
 
 ### Framing 3 — The gap is restore confidence, not backup cadence ("backups that are never restored are not backups")
+
 Verification is count-only (E5); nothing has exercised restore against production data (E8); the registry — the actual platform DR surface — has no defined restore path at all. A daily cadence producing R2 objects proves *writes*, not *recovery*. The E2E "scheduled backup produces R2 objects" tests the wrong end of the pipeline. The 2026-08-05 lesson (E9) was about empty-state re-save, which count-verification only partially addresses (an empty backup over an empty graph verifies clean).
+
 - **Strength:** Matches the strongest external literature; is the only framing that de-risks the actual failure the customer experiences (restore moment); exposes that the registry "restorable" E2E is currently **not executable via any shipped surface**.
 - **Weakness:** Drills cost real engineering and read as "nice-to-have" against the shipping promise; risks demoting the scheduler the pricing checkbox needs.
 
 ### Framing 4 — The registry/control-plane graph is the actual DR gap; team backups are a billing checkbox with zero beneficiaries today
+
 Every team backup depends on the registry to even be meaningful: without `Team` nodes there is no enumeration, no `graph_name` mapping, no keys — intact R2 archives become orphaned bytes. The registry half of this issue is tier-independent, buildable today, and has the most extreme failure impact; it is also the only half that does not depend on the broken entitlement path. The issue lists it as scope item 3, but the problem definition should lead with it.
+
 - **Strength:** Prioritizes what is buildable now and protects the platform; no dependency on billing; works even in Framing 1's empty-Pro-world.
 - **Weakness:** Alone it does not close the stated pricing gap — the customer-facing promise needs the team-backup half too.
 
@@ -76,6 +85,7 @@ Every team backup depends on the registry to even be meaningful: without `Team` 
 ## Boundary & Stakeholders
 
 **Out of scope (explicitly or by omission):**
+
 - **Billing / tier-upgrade path** — Stripe checkout/webhook, `PATCH /v1/organizations/{id}`, `backup_enabled` flip. The issue silently presumes this exists (it does not); without it, scope item 1 has a population of zero (A5).
 - **Reconcile scheduling** — the sibling uninvoked job (expired bootstrap keys, orphaned keys). Same "nothing runs it" class, different domain (A3).
 - **Tenant-facing backup health** — no public signal of `backup_latest_at`; `/backups` list is Pro-only and behind auth. Tenants cannot see their backup is healthy/stale.
@@ -87,6 +97,7 @@ Every team backup depends on the registry to even be meaningful: without `Team` 
 - **FalkorDB Cloud vendor relationship** — managed snapshots, restore SLA, cross-region placement are outside this repo.
 
 **Affected but unmentioned:**
+
 - **Tenants (Pro/Team)** — hold the daily-backup promise; today: zero health signal, cannot trigger anything (402), a stale/never-verified archive only surfaces at *their* restore moment.
 - **Support** — Pro = "standard" support (pricing.json); they field "restore failed"/"data gone" tickets; no registry-restore runbook exists for them.
 - **Supabase Edge Function owners (`tenant-provision`)** — provision writes `backup_enabled:false`; any entitlement flip touches their contract; `waitlist-subscribe` hints at the future upgrade path.

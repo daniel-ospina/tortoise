@@ -31,6 +31,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 > A Tortoise Pro team owner/admin trying to answer *"is each of my graphs protected, and can I get my data back?"* but the dashboard shows a **single pool-wide count rendered as the literal string `none` when zero**, on the **API Keys** tab, with **no graph identity, no freshness, no entitlement state, and no restore affordance** — which results in **false confidence** (a number must mean something) or **false alarm** (`none` even though a custom graph was swept).
 
 **5 Whys:**
+
 1. Why relocate it? It is a leftover sitting on API Keys.
 2. Why is it on API Keys? #2000 (W4) decluttered the Overview to exactly 3 elements; the card was moved "so the count stays reachable" (`docs/plans/2026-09-02-2000-W4-onboarding-plan.md:24`).
 3. Why was "reachable" the only requirement? The Overview simplification shipped without designing a replacement home.
@@ -38,6 +39,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 5. Why does the unit matter? Because #2313 made the artifact model and `GET /backups` per-graph, but the UI never caught up; the only per-graph backup UI today is the **trash Inspect panel** for *deleted* graphs (`main.jsx:7566-7615`).
 
 **How Might We:**
+
 - HMW surface per-graph backup health **inside the Graphs tab** without adding a tab or a bulk count?
 - HMW make "am I protected?" answerable **at a glance** from where graphs are managed?
 - HMW keep the surface **honest** across never-backed-up / healthy / failing / stale / not-entitled states?
@@ -77,6 +79,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 ### 1.2 Backup API surface — exact field semantics
 
 **`GET /backups`** — `hosted_api.py:19186-19248`
+
 - Auth: `get_current_org_session_ungated` (`:19187`) — session JWT **or** `tt_` key; **no tier gate**. Team-scoped by `team["org_id"]` only.
 - Body: `{"backups": [ <manifest>, … ]}` (`:19241-19244`), newest-first (`hosted_backup.py:958`).
 - Each manifest is the raw `create_backup` payload (`hosted_backup.py:894-909`) **enriched** by `_manifest_graph` (`hosted_api.py:19116-19135`) with:
@@ -138,6 +141,7 @@ Backup tooling dashboards consistently surface **resources without snapshots / s
 UX Patterns Guide ("Restore from trash") recommends a durable deleted-items surface supporting restore-to-original or to-a-chosen-location and destructive confirmation before purge. LogRocket's reversible-actions framework distinguishes low-friction undo from critical system-level recovery (confirmation/rollback by impact). SQL Server / Autobase PITR is a *separate* workflow with an explicit time selection. Restore-into-new is a common safety variant (also AWS multi-tenant sample: restore a tenant backup into a fresh tenant).
 
 **Theme E — Adversarial: "backup count" is a misleading primary metric. [MEDIUM] ⚠️ emerging** (3 graded sources; 2 further UX anecdotes not counted toward the tier)
+
 - Backups must be **tested/verified**; an untested backup may be corrupt/partial — a count says nothing about recoverability (CDW "10 common mistakes"; "7 deadly sins of backup and recovery").
 - The real unit of recovery is the **application/service**, defined operationally, not the backup job (rack2cloud "Restore Design Failure").
 - **Corroborating UX anecdotes (not graded sources):** backup tools mislead when *setup context ≠ restore-time reality* (Duplicati forum); users need *what is recoverable now and how safely* (uxdesign.cc forgiveness framing).

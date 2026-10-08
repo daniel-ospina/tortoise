@@ -32,6 +32,7 @@ Stored in: `../E017/convergence.py` (ENRICHED_CLAIMS dict).
 ## Fidelity
 
 Verified via 4-reviewer convergence loop (deepseek-pro × 3 + claude-sonnet):
+
 - 630 claim-document pairs all present
 - Zero novel facts
 - Zero contradictions

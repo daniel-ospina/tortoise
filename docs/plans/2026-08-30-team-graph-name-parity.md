@@ -57,15 +57,18 @@ Bug pattern flags: graph-name drift (stored name ≠ data-plane name); orphaned 
 **Acceptance:** `graph_name = f"org_{org_id}"` minted in `_create_team_supabase_lane` and `_create_onboarding_team_lane` (Supabase branch); stale `# sdk.team_create parity` comments updated to describe the new convention; no other production code changed.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (:6170 mint site, :10632 mint site)
 
 **Step 1:** Edit `_create_team_supabase_lane` (hosted_api.py:6170):
+
 ```python
 org_id = str(_uuid.uuid4().hex[:26])
 graph_name = f"org_{org_id}"  # stored name == data-plane namespace (org_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (sdk.team_create keeps org_{name}; registry lane tracked in #2023)
 ```
 
 **Step 2:** Edit `_create_onboarding_team_lane` Supabase branch (hosted_api.py:10632):
+
 ```python
 org_id = str(_uuid.uuid4().hex[:26])
 graph_name = f"org_{org_id}"  # stored name == data-plane namespace — parity with create_team/register_user/agent_signup
@@ -82,6 +85,7 @@ graph_name = f"org_{org_id}"  # stored name == data-plane namespace — parity w
 **Acceptance:** `test_create_team_user_path` and `test_subteam_provisions_via_rpc` assert `f"org_{body['org_id']}"` and the `p_graph_name` RPC param.
 
 **Files:**
+
 - Modify: `tests/test_writer_inventory.py` (:469, :799)
 
 **Step 1:** `test_create_team_user_path` (:469): `assert body["graph_name"] == "team_acme"` → `assert body["graph_name"] == f"org_{body['org_id']}"` (parity with `test_register_provisions_with_email` :418); add `assert p["p_graph_name"] == f"org_{body['org_id']}"` next to the existing p_* asserts.
@@ -95,9 +99,11 @@ graph_name = f"org_{org_id}"  # stored name == data-plane namespace — parity w
 **Acceptance:** New test POSTs /v1/organizations, seeds a point via the team data plane (namespace=org_id), exports, and asserts the point is present; also asserts the response `graph_name == f"org_{org_id}"` (Indicator 1).
 
 **Files:**
+
 - Modify: `tests/test_export_delete.py`
 
 **Step 1:** Add `TestDashboardCreatedTeamRoundTrip` (Supabase mode, `sb_client` + `as_user` fixtures) with `test_dashboard_created_team_export_returns_points`:
+
 ```python
 def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
     tc, fake, db_path = sb_client
@@ -114,6 +120,7 @@ def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
     assert r2.status_code == 200, r2.text
     assert r2.json()["summary"]["points"] == 1  # Indicator 2
 ```
+
 (Keep `seed_sdk` alive until the export read — the #1475 close-on-GC flake class.)
 
 ## Task 4: Add delete round-trip test (dashboard-created team)
@@ -123,9 +130,11 @@ def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
 **Acceptance:** New test deletes a dashboard-created team, fast-forwards the 24h grace (env `TORTOISE_TEAM_DELETE_GRACE_HOURS=0` + direct `_purge_deleted_teams()` call), and asserts `_drop_team_graph_strict` was called with `(org_id, f"org_{org_id}")` and the control-plane row is purged. (Embedded FalkorDBLite has no `delete_graph` — the correct-target assertion is the mechanism proof.)
 
 **Files:**
+
 - Modify: `tests/test_export_delete.py`
 
 **Step 1:** Add `test_dashboard_created_team_delete_drops_org_id_graph`:
+
 ```python
 def test_dashboard_created_team_delete_drops_org_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
     tc, fake, _ = sb_client
@@ -149,6 +158,7 @@ def test_dashboard_created_team_delete_drops_org_id_graph(self, sb_client, as_us
     ops = [e["operation"] for e in capture_audit]
     assert "team_delete_purged" in ops
 ```
+
 (The `_drop_team_graph_strict` spy is the mechanism proof — embedded FalkorDBLite has no `delete_graph`, so the assertion is on the CORRECT TARGET passed to the drop.)
 
 ## Task 5: Add backup round-trip test (dashboard-created team)
@@ -158,9 +168,11 @@ def test_dashboard_created_team_delete_drops_org_id_graph(self, sb_client, as_us
 **Acceptance:** New test creates a dashboard team via POST /v1/organizations, sets tier='pro' via the `get_current_org` dependency override (mirroring `pro_backup_client`), seeds a point in org_{org_id}, POSTs /backups, and asserts `manifest["graph_name"] == f"org_{org_id}"` + `manifest["node_count"] == 1`, and the dump captured the point (restore round-trip returns the node).
 
 **Files:**
+
 - Modify: `tests/test_writer_inventory.py`
 
 **Step 1:** Add to `TestCreateTeam` (uses `user_client` fixture; mirrors the `pro_backup_client` setup at :1006-1031 — BACKUP_KEY + MemoryStorage + `get_current_org` override, since POST /backups is key-auth (`get_current_org`) and tier comes from the dependency dict, not the fake row):
+
 ```python
 def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch):
     import base64 as _b64
@@ -210,16 +222,20 @@ def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch
 **Acceptance:** All tests below pass against the docker FalkorDB lane (embedded carve-out not needed — these files run in the docker lane).
 
 **Step 1:** Run:
+
 ```bash
 export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/test_writer_inventory.py tests/test_export_delete.py -x -q
 ```
+
 Expected: PASS (including the 2 updated + 3 new tests).
 
 **Step 2:** Regression slice:
+
 ```bash
 uv run pytest tests/test_hosted_auth.py tests/test_supabase_control.py tests/test_email_signup.py tests/test_dr_endpoints.py -q
 ```
+
 Expected: PASS (no org_{name} assertions touched).
 
 ## Task 7: Commit-workflow gate

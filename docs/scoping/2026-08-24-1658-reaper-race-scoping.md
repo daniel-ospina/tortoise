@@ -125,10 +125,12 @@ must be made stale-proof. If a sweep-start timestamp is wanted later, C is a
 ### Fix design (A, concrete)
 
 1. `tortoise/embedded_reaper.py:1749-1750`:
+
    ```python
    _LOCK_PATH = os.path.join(
        os.path.realpath(tempfile.gettempdir()), ".tortoise", ".reaper.lock")
    ```
+
    (use `os.path.realpath(tempfile.gettempdir())` — identical to
    `ACTIVE_SUITES_DIR`'s base, embedded_reaper.py:110).
 2. No change to `_ReaperLock`, `main()`, or conftest `_sweep()` — they inherit

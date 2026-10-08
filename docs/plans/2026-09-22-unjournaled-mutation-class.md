@@ -624,6 +624,7 @@ def classify_entity_mutation_op(props: dict) -> str:
 replacing `self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, id=id_val, op="delete", label=label)`.
 
 **Step 4: the derivation tests** (in the new test file) — see Task 1's `TestOpVocabulary`. Three assertions carry the unification:
+
 - the partition is **total and hand-maintained** (so an unclassified addition REDs);
 - the classifier's return set is **AST-scanned** against `_ENTITY_MUTATION_STATE_OPS` (so an *added* branch REDs, not just a replaced fallthrough);
 - `_ENTITY_MUTATION_RECORD_TYPE` appears in **exactly one** `_emit_event` call across `tortoise/` (so a future second builder REDs).
@@ -703,6 +704,7 @@ replacing `self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, id=id_val, op="delete"
 **Acceptance:** all Task 1 tests pass; every engine sees a state-op fold-miss; the delete warning behaviour is byte-identical to today.
 
 **⚠️ Policy (a scope-recorded decision — do not reverse it as v1 did).** The scope's §2 rule: the fold-miss warning fires **only for the three state ops**. `op="delete"` matching 0 rows is **legitimately idempotent** (a retried `delete_point`; `restore`'s JSONL fallback replaying onto a non-empty graph) and **must not warn** — otherwise the lane's headline evidence (`_fold_warnings == []`) becomes a false positive on legitimate replays. Consequences:
+
 - the delete warning **stays where it is** (pass-1b's call site) and is **not** moved or duplicated;
 - the state-op warning goes inside `_fold_entity_mutation` (because `apply()` discards the returned count, so a call-site-only warning would be vacuous on `rebuild(log)` / `recover_from_log` / `restore`);
 - the unknown-op warning goes inside `_fold_entity_mutation` (and in `_apply_one`), because an unknown op is a *loss*, not an idempotent no-op;
@@ -943,6 +945,7 @@ class TestDeletePointDurability:
 **Files:** the new test file
 
 **Step 1: engine parity.** For `{status, name, objectKind}`, assert live == replay **and** `_fold_warnings == []` on:
+
 - `rebuild_all` (inline pass-1b),
 - `rebuild(log)` / `FalkorProjection.apply(ev)` per record,
 - `recover_from_log(...)`.
@@ -1102,6 +1105,7 @@ class TestWriteDoorCoverage:
 **Files:** Modify `tortoise/sdk.py` (`delete()` docstring `~5011`; the `#548` comment `~5184-5187`), `tests/test_pointinvalidated_rebuild.py` (`~364`), **`docs/event-catalog.md`**
 
 **Step 1: the three comments + two FALSE INVARIANT sites.** The two sites below are in files this diff already modifies, and they sit directly above the table the new code now relies on — leaving a known-false invariant there is the A6 failure the review flagged:
+
 - `tortoise/projection/__init__.py:1376-1380` — *"This table is the ONLY source of the label→id-property mapping … Mirrored by the live writer `sdk._delete_entity`."* Falsified by `_RESOLVE_BRANCHES` (`:4818-4829`, a deliberate superset adding `("Source","url")`) and `navigation._ROOT_BRANCHES` (`navigation.py:20`). Reword to: *"the canonical MUTATION/DELETE map; the resolve paths declare their own OR-sets at `_RESOLVE_BRANCHES`."*
 - `tortoise/sdk.py:17434-17436` — *"the ONE label→id-property table … so the producer and the fold cannot drift."* Same fix: the table is shared for the **delete/mutation** path; resolution uses its own tables. (The `Source`/url write no-op itself is **#4649** — the comment, not the bug, is fixed here.)
 

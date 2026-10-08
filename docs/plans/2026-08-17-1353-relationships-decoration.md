@@ -46,10 +46,12 @@
 **Acceptance:** New function in `tortoise/search_engine.py`; bounded entries (per-point cap 10, global budget 140 — **both caps govern IMPL support-mass only; critical classes are exempt from both**); critical classes (NAND, contested, superseded/retracted, mitigated_by, CORRECTS) always survive; peer state (variance/contested) derived from coalesced `posterior_alpha/ep_alpha/beta` in Python (annotate_ep_batch parity — never NULL α/β); mitigation points excluded from IMPL endpoint list (direction-agnostic, via Q2b id set) and surfaced as `mitigated_by` entries; retracted operators excluded; self-peers (`other == n`) excluded in assembly; legacy keys preserved; `get_relationships` untouched.
 
 **Files:**
+
 - Modify: `tortoise/search_engine.py` (after `get_relationships`, ~line 901)
 - Test: `tests/test_relationships_bounded.py` (new)
 
 **Steps:**
+
 1. Write failing tests in `tests/test_relationships_bounded.py` (embedded graph fixtures): empty ids; cap respected (1 point, 1 op, 30 endpoints → ≤10 support-mass entries + family_size=30); NAND always survives (10 NAND + 30 IMPL); contested peer always survives (α/β → variance > threshold); superseded/retracted peer always survives; **12 NAND on one point → all kept (cap waived for criticals)**; **>140 critical entries → all kept (global budget governs support-mass only)**; mitigation surfaced as `mitigated_by` entry and excluded from IMPL endpoints (**both directions — legacy inbound graphs**); role/direction from idx; legacy keys present; `related_content` absent in list view; **operator with 0 non-operator endpoints (Q2 empty → no entry, family 0)**; **self-edge (`other==n`) excluded**; **retracted operator edges excluded**; global budget exhaustion → structure counts for tail (support-mass only); `get_relationships` regression (full content intact).
 2. Run tests — expect FAIL (function not defined).
 3. Implement `get_relationships_bounded(graph, point_ids, per_point_cap=10, global_budget=140, raw_cap=3000)`:
@@ -69,10 +71,12 @@
 **Acceptance:** `fetch_point_epistemic_state(graph, point_ids)` returns {pid: {status, superseded_by: {id, content_snippet, created_at}|None, supersedes: [{id, content_snippet, created_at}], subject: {id, name, kind}|None}}; subject ≤1 hop only (own `aboutSubject` or event's — fail-closed, no chains, **explicitly None when a subject is reachable only via operator 2-hop**); CORRECTS entry shape: {mechanism: "CORRECTS", direction: outgoing|incoming (arrow direction), related_id, related_kind: "point", peer{...}, created_at} — no operator_id/family_size (direct edge); `SearchResult` gains the four fields with safe defaults; `to_dict` emits them additively.
 
 **Files:**
+
 - Modify: `tortoise/search_engine.py` (new `fetch_point_epistemic_state`; `SearchResult` dataclass ~line 171)
 - Test: `tests/test_relationships_bounded.py`
 
 **Steps:**
+
 1. Write failing tests: promoted fields shape; subject from own `aboutSubject`; subject from event's `aboutSubject`; **chain-reachable subject (operator 2-hop, no direct/event aboutSubject) → None**; superseded_by from incoming CORRECTS with content snippet; supersedes list from outgoing CORRECTS; CORRECTS entry shape (no operator_id); `to_dict` additive.
 2. Run — FAIL. 3. Implement. 4. Run — PASS. 5. Commit: `feat(retrieval): promoted epistemic state fields on SearchResult (T2 #1353)`.
 
@@ -83,10 +87,12 @@
 **Acceptance:** `tortoise_fts_query` (point) calls `get_relationships_bounded` + `fetch_point_epistemic_state`; entity fetch for points includes `status`; `SearchResult` populated with promoted fields; legacy search tests (tests/test_tortoise_search.py, tests/test_search_engine.py) still pass; unbounded `get_relationships` import removed from the sdk call site.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (~8949-9027: import line, entity fetch, decoration site, SearchResult construction)
 - Test: `tests/test_search_promoted_fields.py` (new, embedded SDK: build points+operators+CORRECTS+aboutSubject, search, assert bounded + promoted; assert legacy keys)
 
 **Steps:**
+
 1. Write failing sdk-level tests — **including the retrieval-identity guardrail: `test_retrieval_ranking_unchanged` — same query with decoration swapped (monkeypatch `get_relationships_bounded` → `{}` vs real) returns the identical result-id sequence/order** (proves decoration never reorders). 2. Run — FAIL. 3. Implement (swap call, extend point entity fetch with `n.status`, populate fields). 4. Run — PASS. 5. Commit: `feat(retrieval): bounded decoration + promoted fields in tortoise_fts_query (T3 #1353)`.
 
 ### Task 4: `expand_relationships` SDK method + MCP tool
@@ -96,6 +102,7 @@
 **Acceptance:** `TortoiseSDK.expand_relationships(point_id)` returns the full unbounded relationship payload (incl. `related_content`); `tortoise_expand_relationships(point_id)` MCP tool registered and routed; MCP tool-registration test passes.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (new method near the search API), `tortoise/mcp_server.py` (new tool)
 - Test: `tests/test_search_promoted_fields.py` + MCP registration test (pattern: tests/test_mcp_server.py)
 
@@ -108,11 +115,13 @@
 **Acceptance:** `uv run pytest tests/test_relationships_bounded.py tests/test_search_promoted_fields.py tests/test_tortoise_search.py tests/test_search_engine.py tests/test_topic_summarization.py -v` all green; embedded bench smoke runs without error; dense-corpus preservation fuzz test passes (NAND/contested/superseded/mitigated survive cap); payload-budget assertion passes; note #316 Docker verdict as the official ≤50ms verification.
 
 **Files:**
+
 - Test: `tests/test_relationships_bounded.py` (fuzz preservation + budget), `tests/bench/test_bench_core.py` untouched
 
 **Steps:** 1. Run the targeted suite. 2. Fix any failures. 3. **Fuzz preservation test on the dense synthetic corpus: random result sets → NAND/contested/superseded/mitigated/**CORRECTS** edges survive the cap**; **payload-budget assertion at search level (entries ≤ budget formula; >140-critical-entries case keeps all criticals)**; boundary fixtures (0-endpoint operator, 12-NAND cap-waiver, self-edge). 4. Run embedded bench smoke (`python -m benchmarks.run_report --corpus-size 200 --samples 5 --warmup-iters 2`). 5. Record results in the issue comment. 6. Commit: `test(retrieval): #1353 guardrail verification (T5 #1353)`.
 
 ### Failure Modes
+
 - Mitigation points leak as IMPL endpoints in Q2 → excluded via `NOT (op)-[:mitigated_by]->(other)`; surfaced once as `mitigated_by` entry. **Expected:** no dupes; test asserts absence in endpoint list.
 - Cartesian blowup from chained OPTIONAL MATCH (Q1b) → separate queries + Python dedup. **Expected:** row count ≤ edges; test asserts no dupes.
 - Peer EP cost over thousands of Q2 peers → state derived in-query, no second `annotate_ep_batch`. **Expected:** decoration cost ∝ Q2 rows; budget test asserts bounded time on dense fixture.

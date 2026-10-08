@@ -14,6 +14,7 @@ aboutObjects: Source, Point, Operator
 ---
 
 ---
+
 title: "Tortoise EP Source Credibility Validation — Experiment Design"
 aboutSubjects: epistemic-team
 aboutObjects: Source, Point, Operator
@@ -120,29 +121,35 @@ forming arbitrary factor graphs.
 ## 2. Graph Scenarios
 
 ### Scenario A: Linear Chain
+
 ```
 Source(s) ──[extractedFrom]──> Point_A ──[IMPL]──> Claim_B
 ```
+
 - Sources only on Point_A. Claim_B receives belief only via the IMPL edge.
 - Tests: belief propagation along a single edge, attenuation.
 
 ### Scenario B: Loopy Cluster (Single-Source)
+
 ```
 Point_A ──[IMPL]──> Point_B
    ^                  |
    |                  v
 Point_C <──[IMPL]───
 ```
+
 - Sources only on Point_A. All three nodes form a directed cycle.
 - Tests: EP convergence with feedback loops, no inflation explosion.
 
 ### Scenario C: Loopy Cluster (Multi-Source)
+
 ```
 Point_A ──[IMPL]──> Point_B
    ^                  |
    |                  v
 Point_C <──[IMPL]───
 ```
+
 - Sources on Point_A AND Point_B. Tests: multi-source reinforcement in loopy graphs.
 
 ---
@@ -165,6 +172,7 @@ Point_C <──[IMPL]───
 **Setup:** Scenario A. Point_A baseline → add 1×T4 → re-run EP.
 
 **Predicted values:**
+
 | State              | Prior on A      | conf(A)      |
 |--------------------|-----------------|--------------|
 | No source          | Beta(1, 1)      | 0.5000       |
@@ -172,6 +180,7 @@ Point_C <──[IMPL]───
 | Δ                  | —               | +0.0238      |
 
 **Assertions:**
+
 ```python
 # S1.1: T4 increases confidence above baseline
 assert conf_A_with_T4 > conf_A_baseline
@@ -195,6 +204,7 @@ assert conf_B_with_T4 >= conf_B_baseline - ε
 **Setup:** Scenario A. Test each tier independently (fresh graph per tier).
 
 **Predicted values:**
+
 | Source | Prior          | conf(A) pred. |
 |--------|----------------|---------------|
 | None   | Beta(1, 1)     | 0.5000        |
@@ -205,6 +215,7 @@ assert conf_B_with_T4 >= conf_B_baseline - ε
 | 1×T0   | Beta(10, 1)    | 0.9091        |
 
 **Assertions:**
+
 ```python
 confs = [conf_none, conf_T4, conf_T3, conf_T2, conf_T1, conf_T0]
 
@@ -236,6 +247,7 @@ for c in confs:
 **Setup:** Scenario A. Add T4 sources incrementally to Point_A.
 
 **Predicted values:**
+
 | N  | log₂(N+1) | eff. pc  | mean(A) pred. | Δ from N−1 |
 |----|-----------|----------|---------------|------------|
 | 1  | 1.000     | 0.100    | 0.5238        | —          |
@@ -246,6 +258,7 @@ for c in confs:
 | 10 | 3.459     | 0.346    | 0.5737        | —          |
 
 **Assertions:**
+
 ```python
 # S3.1: Monotonic increase
 assert conf_10 > conf_5 > conf_4 > conf_3 > conf_2 > conf_1
@@ -275,10 +288,12 @@ assert 0.55 < conf_10 < 0.60
 matching higher-tier credibility.
 
 **Setup:** Scenario A. Two independent graphs:
+
 - Graph X: 10×T4 sources on Point_A → compute conf(A)
 - Graph Y: 1×T2 source on Point_A → compute conf(A)
 
 **Predicted values:**
+
 | Case       | eff. pc | mean(A) pred. |
 |------------|---------|---------------|
 | 10×T4      | 0.346   | 0.5737        |
@@ -286,6 +301,7 @@ matching higher-tier credibility.
 | Difference | —       | 0.1763        |
 
 **Assertions:**
+
 ```python
 # S4.1: Quality beats quantity — 1×T2 > 10×T4
 assert conf_1xT2 > conf_10xT4
@@ -319,11 +335,13 @@ assert abs(conf_1000xT4 - conf_1xT3) < 0.05
 produces negligible change (ceiling/saturation).
 
 **Setup:** Scenario A.
+
 1. 2×T0 sources on Point_A → run EP → measure
 2. Add 1×T4 → run EP → measure
 3. Compare
 
 **Predicted values:**
+
 | State     | eff. pc      | mean(A)  |
 |-----------|--------------|----------|
 | 2×T0      | 9×1.585=14.27| 0.9345   |
@@ -331,6 +349,7 @@ produces negligible change (ceiling/saturation).
 | Δ         | —            | +0.0004  |
 
 **Assertions:**
+
 ```python
 delta = conf_with_T4 - conf_2xT0
 
@@ -348,17 +367,20 @@ assert delta < 0.005
 **Goal:** Verify monotonicity — adding evidence NEVER decreases confidence.
 
 **Setup:** Scenario A.
+
 1. 5×T0 sources on Point_A → run EP
 2. Add 1×T4 → run EP
 3. Assert conf does NOT decrease
 
 **Predicted values:**
+
 | State     | eff. pc      | mean(A)  |
 |-----------|--------------|----------|
 | 5×T0      | 9×2.585=23.27| 0.9588   |
 | 5×T0+1×T4| 23.37        | 0.9590   |
 
 **Assertions:**
+
 ```python
 # S6.1: Strict non-regression (with floating-point tolerance)
 assert conf_with_T4 >= conf_5xT0 - δ
@@ -375,12 +397,14 @@ assert (conf_with_T4 - conf_5xT0) < 0.005
 The system must be deterministic and source-removal must be reversible.
 
 **Setup:** Scenario A.
+
 1. Baseline: 1×T2 source on Point_A → run EP → conf_baseline
 2. Add 1×T4 source → run EP → conf_with_T4
 3. Remove the T4 source → run EP → conf_removed
 4. Compare conf_removed vs conf_baseline
 
 **Assertions:**
+
 ```python
 # S7.1: Return to baseline within EP tolerance
 assert abs(conf_removed - conf_baseline) < ε
@@ -408,12 +432,14 @@ assert conf_with_T4 > conf_baseline
 confidence.
 
 **Setup:** Scenario A extended with NAND:
+
 - Source_T0 →[extractedFrom]→ Point_A (positive, pc_pos=9)
 - Source_T4 →[extractedFrom]→ Point_A_NAND →[NAND]→ Point_A (contradictory, pc_neg=0.1)
 
 The NAND source contributes negative pseudo-count to Point_A.
 
 **Sub-case 8a: T4 NAND (weak contradiction)**
+
 | State            | pc_pos | pc_neg | Prior           | mean   |
 |------------------|--------|--------|-----------------|--------|
 | T0 alone         | 9.0    | 0      | Beta(10, 1)     | 0.9091 |
@@ -422,11 +448,13 @@ The NAND source contributes negative pseudo-count to Point_A.
 | Δ from T0 alone  | —      | —      | —               | −0.0082|
 
 **Sub-case 8b: T0 NAND (equal-tier contradiction)**
+
 | State            | pc_pos | pc_neg | Prior           | mean   |
 |------------------|--------|--------|-----------------|--------|
 | T0 + T0 NAND     | 9.0    | 9.0    | Beta(10, 10)    | 0.5000 |
 
 **Assertions:**
+
 ```python
 # S8.1: NAND reduces confidence (T4 NAND, sub-case 8a)
 assert conf_T0_alone > conf_T0_plus_T4_NAND
@@ -457,12 +485,14 @@ assert conf_T4_NAND_alone < 0.50
 going below the no-information baseline.
 
 **Setup:** Scenario A with mitigated extractedFrom edge.
+
 1. No source baseline
 2. 1×T4 source (unmitigated)
 3. 1×T4 source with edge mitigation at 0.5 strength
 4. 1×T4 source with edge fully neutralized (mitigation 0.0)
 
 **Predicted values** (mitigation linearly scales effective pc):
+
 | State               | eff. pc | mean(A) |
 |---------------------|---------|---------|
 | No source           | 0.000   | 0.5000  |
@@ -471,6 +501,7 @@ going below the no-information baseline.
 | T4 (mitigation 0.0) | 0.000   | 0.5000  |
 
 **Assertions:**
+
 ```python
 # S9.1: Mitigation reduces confidence
 assert conf_unmitigated > conf_mitigated_50
@@ -498,23 +529,27 @@ preservation and attenuation.
 **Setup:** Scenario A. Source on Point_A. Measure both Point_A and Claim_B.
 
 **Sub-case 10a: T0 source on A**
+
 | Node | Expected behavior |
 |------|-------------------|
 | A    | ≈ 0.909 (directly sourced) |
 | B    | 0.50 < conf(B) < 0.909 (attenuated from A) |
 
 **Sub-case 10b: T4 source on A**
+
 | Node | Expected behavior |
 |------|-------------------|
 | A    | ≈ 0.524 (weak source) |
 | B    | 0.50 < conf(B) < 0.524 (weakly influenced) |
 
 **Sub-case 10c: No source (baseline)**
+
 | Node | Expected behavior |
 |------|-------------------|
 | A, B | Both ≈ 0.500 (uniform prior) |
 
 **Assertions:**
+
 ```python
 # S10.1: Direction preservation — B moves in same direction as A
 delta_A_T0 = conf_A_T0 - conf_A_baseline
@@ -543,30 +578,36 @@ assert abs(conf_B_baseline - 0.50) < ε
 These validate the mathematical correctness of `effective_pc = base_pc × log₂(N + 1)`.
 
 ### 4.1 Base Case: N=1
+
 ```
 effective_pc = base_pc × log₂(2) = base_pc × 1.0 = base_pc
 ```
+
 A single source has unchanged credibility. **Assert:** conf(1×T) == base_conf(T).
 
 ### 4.2 Growth Factor: N=3 vs N=4
+
 - log₂(4) = 2.000, log₂(5) ≈ 2.322
 - Ratio = 2.322/2.000 = 1.161
 - The 4th source adds only 16% more credibility than the 3rd.
 - **Assert:** (conf_4 − conf_3) / (conf_3 − conf_2) < 0.8
 
 ### 4.3 Scalability: N=10 vs N=100
+
 - log₂(11) ≈ 3.459, log₂(101) ≈ 6.658
 - Ratio = 1.925
 - 10× more sources → less than 2× more credibility.
 - **Assert:** (conf_100 − conf_baseline) / (conf_10 − conf_baseline) < 3.0
 
 ### 4.4 Extreme Anti-Sybil: 1000 T4 vs 1 T3
+
 - 1000×T4: pc = 0.1 × 9.966 = 0.997
 - 1×T3: pc = 1.0
 - 1000 trash sources just barely reach 1 low-tier source.
 - **Assert:** |conf_1000xT4 − conf_1xT3| < 0.05
 
 ### 4.5 T0 Saturation Curve
+
 | N T0 | pc      | mean   | Δ from N−1 |
 |------|---------|--------|------------|
 | 1    | 9.00    | 0.9091 | —          |
@@ -587,6 +628,7 @@ A single source has unchanged credibility. **Assert:** conf(1×T) == base_conf(T
 **Setup:** Three Points (A, B, C) in a cycle: A→B→C→A (all IMPL). T0 source on A only.
 
 **Predictions:**
+
 - conf(A) ≈ 0.909 (directly sourced)
 - conf(B) < conf(A) (attenuated by 1 hop)
 - conf(C) < conf(A) (attenuated by 2 hops)
@@ -594,6 +636,7 @@ A single source has unchanged credibility. **Assert:** conf(1×T) == base_conf(T
 - Loop may create 2–5% inflation vs. equivalent linear chain due to feedback
 
 **Assertions:**
+
 ```python
 # SCB.1: Directly sourced node is highest
 assert conf_A > conf_B
@@ -620,12 +663,14 @@ assert ep_result["converged"] == True
 **Setup:** Same cycle. T0 source on A, T1 source on B.
 
 **Predictions:**
+
 - conf(A) ≈ 0.909 (T0 directly, + some loop feedback from B)
 - conf(B) ≈ 0.833+ (T1 directly, boosted by loop from A)
 - conf(C) elevated by both A and B through the loop
 - conf(C) in Scenario C > conf(C) in Scenario B (two sources > one)
 
 **Assertions:**
+
 ```python
 # SCC.1: Both sourced nodes at or above their tier level
 assert conf_A >= 0.90

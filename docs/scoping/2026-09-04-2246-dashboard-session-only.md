@@ -41,6 +41,7 @@ account-less users. Server, selfhost/registry lanes, and the `POST /v1/session/k
 endpoint (bootstrap/recovery purposes for non-dashboard consumers) are untouched.
 
 ### Why not alternative framings
+
 - **Uniform-rows UX only** (symptom): leaves the probe + XSS surface + complexity in
   place; rows become uniform while adoption still runs.
 - **XSS-hardening framing**: the driver, not the scope — doesn't decide table/connect UX.
@@ -48,6 +49,7 @@ endpoint (bootstrap/recovery purposes for non-dashboard consumers) are untouched
   endgame (separate issue).
 
 ### Falsification
+
 Wrong if: any dashboard action in session mode requires key auth (no — #1828/#2167
 moved reads to the JWT; `mintKey` rides the session); rows ever carry derivable
 plaintext (no — server keeps hashes only); the anon/key-login carve-out regresses; the
@@ -96,6 +98,7 @@ render-level early returns ~L4596-4710 already isolate the carve-out; better onl
 planes interleaved mid-session).
 
 ### Session-authed predicate
+
 The codebase's real signal: `sessionTokenRef.current` present + `authMode === 'session'`
 (api() L1177 rides the JWT whenever the ref is set). `authMode` starts `'session'` and
 flips to `'apikey'` ONLY in the sessionless claim-intent branch (L2409), so the two
@@ -103,6 +106,7 @@ coincide in every reachable state. All removed code sits in session-gated flows;
 anon claim/Protect surface is gated by early returns before the removed regions.
 
 ### Change map (main.jsx — current line anchors)
+
 1. **Import L26** → `{ isManagedKey, durableConnectKey }`.
 2. **`apiKey` state initializer L694** → `''` (no localStorage read; the claim-paste
    box no longer prefills legacy residue — the anon flow pastes deliberately, same as
@@ -221,9 +225,11 @@ anon claim/Protect surface is gated by early returns before the removed regions.
     the stale '/v1/session/key' mention in the Session-auth header comment ~L1557-1562.
 
 ### sessionKey.js (pure module)
+>
 > Deleted exports note: `isActiveKey` appears in the main.jsx L24-25 import-header
 > comment after deletion — the tripwire greps run against comment-stripped or updated
 > source; the comment is rewritten (item 18) so a plain grep stays valid.
+
 - **Deleted exports**: `isSessionKey`, `isActiveKey`, `classifyHeldKey`,
   `heldKeyClearState`, `nextRegenInstallState`, `probeClassifyStoredKey` (+ internal
   `rowTruthBad`/`prefixOf`). Verified: no consumer outside main.jsx + sessionKey.test.js;
@@ -243,6 +249,7 @@ anon claim/Protect surface is gated by early returns before the removed regions.
     class stays closed.
 
 ### Tests
+
 - **mintTripwire.test.js** — extend static guards (CI dashboard-js-tests): main.jsx
   must contain zero `probeClassifyStoredKey` / `classifyHeldKey` / `heldKeyClearState` /
   `nextRegenInstallState` / `isActiveKey` / `recoverKey` references, zero
@@ -275,12 +282,14 @@ anon claim/Protect surface is gated by early returns before the removed regions.
   tracked files; CI serves the committed dist — stale dist fails the job red).
 
 ### Docs
+
 - ADR-010 needs front-matter (`title/type/domain/doc_status/subjects.team/created`) to
   pass the pre-flight doc-affiliation check (defaults: type `decisions`, domain
   `platform`, doc_status `live`). Front-matter only — content unchanged.
 - docs/00_index.md: add ADR-010 row + this scoping doc row.
 
 ## 3. Acceptance criteria (mapped to issue Indicators + ADR)
+
 1. **I1 (uniform rows)**: every durable key row shows identical owner actions
    (rotate + toggle + trash); no "in use by this dashboard" note; no rotate-only /
    delete-suppressed row (e2e + unit; grep `isActiveKey` → 0 in main.jsx).
@@ -303,6 +312,7 @@ anon claim/Protect surface is gated by early returns before the removed regions.
    committed; docs (ADR front-matter + index rows + this doc) committed.
 
 ## 4. Verification plan
+
 `node --test website/apps/dashboard/src/*.test.js` green · `py_compile` on reworked
 e2e · `npm run build` + dist committed · grep audits (no probe/isActiveKey/recoverKey/
 KEY_STORAGE get/set in main.jsx; no key-authed Authorization in session code) ·
@@ -310,6 +320,7 @@ RUN_DASHBOARD_E2E suite reworked for CI (keys-table module is CI-run; gate modul
 opt-in — reworked, locally validated shape) · zero tortoise/*.py diff.
 
 ## 5. Known limitations (state in PR + issue)
+
 - Cross-reload key reuse dies for returning users (wizard re-entry gates to mint/paste;
   free tier cap = 2 → 402 escape = regenerate-in-tab + paste). Same-session smoothness
   is preserved; ADR accepts shown-once fragility.
@@ -326,6 +337,7 @@ opt-in — reworked, locally validated shape) · zero tortoise/*.py diff.
 - e2e gate.py probe tests are opt-in (not CI-run); reworked + locally shape-checked.
 
 ## 6. Files touched (complete)
+
 `website/apps/dashboard/src/main.jsx` | `sessionKey.js` | `sessionKey.test.js` |
 `mintTripwire.test.js` | `website/apps/dashboard/src/index.css` (keys-table wrap) |
 `tests/e2e/test_keys_table_mixed.py` | `tests/e2e/test_dashboard_gate.py`
@@ -336,6 +348,7 @@ ZERO-CHANGE: tortoise/*.py · website/signin.html · welcome.html · supabase-se
 claim/Protect flows · POST /v1/session/key endpoint · registry/selfhost lanes.
 
 ## 7. Wiring
+
 | Surface | Touch | Coverage |
 |---|---|---|
 | Data stores | none (no migration) | — |

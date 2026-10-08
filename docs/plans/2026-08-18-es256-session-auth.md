@@ -28,6 +28,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 ### Pattern Research
 
 **Library-docs preflight:** verified against the **installed source** (`pyjwt 2.13.0`, `cryptography 50.0.0`) by solution-verify + plan-review cycles, not web docs:
+
 - `PyJWKClient.from_keys` does not exist in 2.13 → use `PyJWK.from_dict(jwk)`; `jwt.decode` accepts `AllowedPublicKeys | PyJWK | str | bytes`.
 - `InvalidKeyError`, `PyJWKError`, `PyJWKSetError`, `PyJWKClientError`, `MissingCryptographyError` subclass `PyJWTError` directly (NOT `InvalidTokenError`).
 - **`PyJWK.from_dict` failure modes are NOT all PyJWTError**: oct JWK → `KeyError('k')`; bad EC point → `ValueError`; non-base64url `x` → `binascii.Error`; wrong-typed `x` → `TypeError`. Wrong-typed `exp`/`iat`/`nbf` claims also raise `TypeError`. **All five caught → 401.**
@@ -77,17 +78,20 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Acceptance:** `verify_session_jwt` verifies real ES256 **and** RS256 tokens and returns `{user_id, email, app_metadata}` (shape-guarded); every negative case → HTTPException 401/503, **never** a raw 500; `_JWKSCache` stale-serves on fetch failure AND empty-key responses, never evicts last-good keys on failed refetch (incl. R16 force path), coalesces concurrent fetches (single-flight, in-lock failure cooldown) on success and failure paths; RS256 regression green.
 
 **Files:**
+
 - Modify: `tortoise/session_auth.py`
 - Create: `tests/_session_jwt_utils.py` (shared mint helper)
 - Test: `tests/test_session_auth.py`
 
 **Step 1: Write the shared mint helper** — `tests/_session_jwt_utils.py`:
+
 - **Import contract:** `tests/`, `tests/e2e/`, `tests/e2e/hosted/` have no `__init__.py` — the unit side resolves via pytest basedir insertion; the hosted e2e modules resolve via **namespace-package** (`from tests._session_jwt_utils import ...`), relying on `tests/conftest.py:29`'s `sys.path.insert` having already run (order-dependent; breaks under `--import-mode=importlib` — accepted, documented; do not add `__init__.py`).
 - `make_ec_keypair()` / `make_rsa_keypair()`.
 - `build_ec_jwks(public_key, kid)` → `{keys: [{kty: EC, crv: P-256, kid, alg: ES256, x, y}]}`; `build_rsa_jwks(public_key, kid)` → `{keys: [{kty: RSA, kid, alg: RS256, n, e}]}`.
 - `mint_es256_token(private_key, kid, payload, iss=None)` / `mint_rs256_token(..., iss=None)` → `jwt.encode(payload, private_key, algorithm=..., headers={"kid": kid})` — **PyJWT encodes DER→raw internally** (do NOT sign with `cryptography` `ec.ECDSA()` directly: it returns 72-byte DER, which PyJWT rejects). **`iss` is an explicit parameter; when omitted it defaults to `sa._SUPABASE_URL.rstrip("/") + "/auth/v1"`** (unit-test call site — can never drift from the module). **The e2e harness MUST pass the mock JWKS URL as `iss`** (`iss=jwks_url + "/auth/v1"`) — the server subprocess boots with `SUPABASE_URL = jwks_url`, the new verifier does EXACT issuer match, and the test process's `sa._SUPABASE_URL` is the real URL; without the override every e2e session request 401s.
 
 **Step 2: Write the failing tests** — `tests/test_session_auth.py`:
+
 - **Happy paths:** ES256 token verifies → `{user_id, email, app_metadata}`; **RS256 token verifies → same shape** (regression green — shared RSA helper).
 - **Negative matrix (all → HTTPException 401, never 500):** wrong signature; short-`x` JWK; oct-kty JWK; non-base64url `x`; wrong-typed `x` (`123`); bad EC point; alg=ES256 vs RSA JWK; alg=RS256 vs EC JWK; alg `none`/unknown; **EdDSA/OKP + future-curve family: OKP JWK + EdDSA-signed token → 401; OKP JWK missing `x` → 401; JWKS with valid EC + sibling OKP → EC token for the EC kid still verifies 200 (no poisoning); JWKS with valid P-256 + sibling P-384/ES384 → P-256 token 200, ES384-signed token 401, ES256 token presented with the P-384 kid → 401; unknown kty (`X25519`) → 401**; expired (`exp = now - 61` → 401; `exp = now - 20` → 200; **`exp = now - 30` exact → 401, pinned**); future `iat` (`now + 3600` → 401; `now + 10` → 200; **`iat == now + 30` exact → 200**); future `nbf` (`now + 3600` → 401; `now - 10` → 200; **`nbf == now + 30` exact → 200**); **missing `exp` → 401 (require); missing `iat` → 401 (require)**; wrong-typed `exp`/`iat` (`[9999999999]`, `{"a":1}`) → 401 not 500; wrong issuer; missing issuer; trailing-slash issuer; wrong audience; missing aud; **list-form aud (`["authenticated","evil"]`) → 401 (strict_aud)**; missing sub; empty/non-string sub (`""`, `" "`, `0`, `123`, `["abc"]`) → 401; **wrong-typed claims from a VALID token (`app_metadata: "x"`, `email: 123`) → 401 (shape guards incl. email); missing email → 200 with `email: None`**; **malformed-RSA-JWK regression pin (the #1460 incident class): JWKS RSA entry with kid present but missing `n`/`e` → token with that kid → 401 never 500; `n` wrong-typed (`123`) → 401 never 500**; **out-of-range numeric time claims (`exp`/`iat`/`nbf` = `float("inf")`/`-inf`) → 401 (OverflowError caught)**; oversized token — **exact boundary: 16,000-byte token → 200, 16,001-byte → 401 (repo guard BELOW the server's ~16KB header cap; assert `warnings.catch_warnings` shows no DeprecationWarning from decode — no unsupported kwargs)**; malformed token `"not-a-jwt"`; non-dict header/payload segments (`WzEsMl0`, `MTIz`, `Ingi` → 401, never AttributeError); **no-kid header → 401 with ZERO `_jwks.get` calls (stub-counted); whitespace-only kid (`"  "`) and truthy non-string kid (`123`, `true`) → 401 with ZERO `_jwks.get` calls (guard is `isinstance(kid, str) and kid.strip()`), incl. cold-start variant → 401 not 503**; kid-miss → refetch (stubbed) → 401 "Unknown signing key".
 - **Cache hardening:** fetch-failure with warm cache → 200 (stale-serve); fetch-failure with `_keys = None` → 503 (not raw 500); **cooldown-skipped fetch with `_keys = None` → 503 (never a None-crash)**; first-fetch 200-empty → 401 (never 500); kid-miss + failing refetch → 401 AND last-good `_keys` preserved; **positive R16 rotation: warm cache old kid, token with new kid, stubbed refetch returns new kid → 200 + cache updated**; removed-kid-after-successful-refetch → 401; rotation-under-outage: warm K1, upstream removes K1 + fetch fails → K1 token still verifies 200 (documented bounded-revocation-window tradeoff); after successful refetch → 401; 200-`{keys: []}` on warm cache → old keys served (stale-on-empty); duplicate-kid JWKS → first-wins pinned; kid-less keys dropped; malformed key entry (string in `keys`) fails fetch closed; **JWKS body >64KB → fetch-failure semantics (cold → 503, warm → stale-serve), zero body parse** — **note: the cap is post-buffer (httpx fully materializes the body before the `len(resp.content)` check); documented as post-buffer defense-in-depth, pinned with a test asserting the cap applies to the decompressed content length before `.json()` (incremental/streaming download is out of scope)**; **HTTP 200 garbage bodies (HTML, top-level `[]`, `{"keys": null}`) → cold 503 / warm stale-serve / zero eviction**; **post-200-empty: first-fetch 200-empty → 401, immediate second kid-miss → ZERO additional fetches (200-empty records cooldown); after cooldown with healthy upstream → token verifies 200 (recovery via force path — the named mechanism)**; **non-string kid VALUE in JWKS (`{"kid": 123}`): treated as zero-usable → failure cooldown recorded, N sequential kid-miss requests → exactly ONE fetch, all 401 (never 503), recovery after cooldown**; **success does not re-arm cooldown: force-refetch succeeds (returns {K1,K2}) → K2 verifies 200; immediately force-refetch K3 → a NEW fetch occurs (stub-count 2) and K3 honored**; **pristine-state cold-start (unset `_last_failure_at` sentinel, `_keys = None`) → force-refetch fires exactly ONE fetch and succeeds (fetch-count 1, result 200) — an unarmed cooldown never blocks a legitimate first fetch**; **hand-encoded ~1,200-deep nested payload segment (bypasses `json.dumps`; ~2-3KB, under the 16KB guard) → 401 never 500 — pins the fail-closed boundary for adversarial nesting on C-json (DecodeError path) AND pure-python-json runtimes (RecursionError path)**; **concurrency (failure, non-force): warm cache, TTL expired, failing fetch, 20 concurrent → exactly ONE fetch, all stale-served, no 5s serialization; concurrency (failure, force): warm cache K1, 20 concurrent kid-miss K2, failing upstream → exactly ONE fetch, all 401, wall-clock << 100s; concurrency (success, force): warm cache K1, 20 concurrent kid-miss K2, upstream returns {K1,K2} → exactly ONE fetch, all 200 (kid-aware single-flight: `get(force=True, kid=K2)` re-checks `K2 in self._keys` after lock acquisition); **concurrency (unknown-kid miss, healthy upstream): warm cache K1, upstream healthy but returns {K1} only (never K2), 20 concurrent forged-kid K2 requests → exactly ONE fetch, all 401 (miss arms cooldown — no per-request amplification); sequential variant: 50 unknown-kid tokens → fetch-count ≤ 1 (bounded, not 50)**; **TTL-refresh + miss-refetch double-fetch bound: warm cache K1 with `_fetched_at` backdated past TTL, ONE unknown-kid token → stub fetch-count == 2 (TTL refresh + miss refetch), then a second unknown-kid token → 0 additional fetches (cooldown armed); mixed burst: warm K1, TTL expired, 10 valid K1 + 10 forged K2 concurrent, upstream returns {K1} only → all valid 200, all forged 401, total fetch-count ≤ 2 (one TTL-refresh + one miss-refetch per window, then cooldown-bounded)**; **concurrency (success, non-force TTL): warm `_keys` K1, TTL expired, healthy upstream, 20 concurrent valid K1 tokens → exactly ONE fetch, all 200 (double-checked-TTL success-path coalescing)**; cold-start: `_keys=None`, failing fetch, 20 concurrent → all 503, one fetch**; kid-miss refetch within cooldown window → zero fetch attempts.
@@ -97,6 +101,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Step 3: Run — expect FAIL** on ES256/RS256 happy paths + cache cases.
 
 **Step 4: Implement** — `tortoise/session_auth.py`:
+
 - Module top-level: `from cryptography.exceptions import UnsupportedAlgorithm` (⛔ NOT inside the except body — see the tuple comment; except-clause names evaluate before the body runs); **`import logging` + `logger = logging.getLogger(__name__)`; `_COOLDOWN_S = float(os.environ.get("TORTOISE_JWKS_COOLDOWN", "30"))`** (matches the `TORTOISE_JWKS_TTL`/`TORTOISE_JWKS_TIMEOUT` env pattern).
 - Remove `_verify_rs256`, `_public_key_der`, **dead `_PROJECT_REF`, and unused `urllib.request` import**.
 - `_decode_header` (was `_decode_jwt`): parse the **header only** (PyJWT owns payload parse + shape check internally — manual payload `json.loads` is dead work per request); add shape check (header must be `dict` → else 401); add the **repo-enforced token length guard** (token bytes > 16KB → 401) BEFORE decode — defense-in-depth (effective HTTP cap is the server's ~16KB header-line limit; unit boundary test validates the guard itself).
@@ -106,6 +111,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
   - First-fetch semantics: fetch success with zero usable keys → `self._keys = {}` (kid-miss → 401 "Unknown signing key", never a None-attribute crash); fetch failure with no last-good → 503. **200-with-zero-usable-keys is a FAILURE: `_fetched_at` is NOT refreshed** (last-good TTL preserved — consistent with never-evict) and `_last_failure_at` IS recorded; recovery happens via the force path after the cooldown lapses, or via TTL expiry.
   - Usable-keys filter: keep only entries with a **string** `kid` (`isinstance(k.get("kid"), str)` — kid-less entries are DROPPED, fetch still succeeds); keys with wrong-typed kid VALUES (`123`, `true`, `123.5`) are dropped — a JWKS whose usable keys are zero records the failure cooldown (prevents the per-request refetch storm on a degraded-but-200 upstream). Duplicate kids: **first-wins via an explicit loop** (`if kid not in result: result[kid] = k` — note the current comprehension `{k["kid"]: k ...}` is LAST-wins and must be replaced). **The filter + first-wins loop run INSIDE the fetch try** (a string-in-`keys` entry raising TypeError on `isinstance` shares the stale-serve/503 failure semantics — never a raw 500).
 - `verify_session_jwt`:
+
   ```python
   import jwt as pyjwt
   import binascii
@@ -167,6 +173,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
   return {"user_id": user_id, "email": email,
           "app_metadata": app_metadata or {}}
   ```
+
 - Update stale references: module docstring ("verify RS256 signature" → "verify RS256/ES256 via JWKS"), `oauth.py:15` comment, **`hosted_api.py:8650` OAuth-consent comment** — then **re-grep "RS256" repo-wide, EXCLUDING the e2e harness files (`tests/e2e/hosted/conftest.py`, `test_13_claim.py`, `README.md` — those are Task 3's, still legitimately RS256 at this point)** and fix any remaining stale references.
 - **Documented behavior deltas** (comment + issue note): aud REQUIRED + strict (list-form rejected; was: missing aud passed, non-string aud rejected anyway); issuer exact-match (was: substring); `verify_iat` + `verify_nbf` ON (was: both ignored); `exp`/`iat` presence REQUIRED (was: missing exp passed); `exp` leeway inclusive (`exp == now-30` → 401); token size cap 16KB repo-enforced. All intended hardening; Supabase always sets aud/iss/iat/exp and never `nbf`.
 
@@ -183,6 +190,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Acceptance:** `pyjwt[crypto]` in pyproject `dependencies`; uv.lock updated; requirements.txt regenerated without drift; `uv lock --check` clean.
 
 **Files:**
+
 - Modify: `pyproject.toml`, `requirements.txt`
 
 **Step 1:** Add `pyjwt[crypto]>=2.13,<3` to `[project] dependencies` (alphabetical per existing style).
@@ -202,6 +210,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Acceptance:** `tests/e2e/hosted/conftest.py::_JWKSKeys` and `tests/e2e/hosted/test_13_claim.py::_JWKS` mint EC P-256 keys + sign ES256 via the shared helper; e2e claim flow passes; constructor/API shape used by callers (conftest `session_jwt` fixture, test_06/08/12, claim tests) unchanged.
 
 **Files:**
+
 - Modify: `tests/e2e/hosted/conftest.py`, `tests/e2e/hosted/test_13_claim.py`, `tests/e2e/hosted/README.md` (stale "minted RS256 JWTs" line)
 
 **Step 1:** Replace RSA keypair + RS256 signing with the shared `tests/_session_jwt_utils.py` helper (EC keypair, `build_ec_jwks`, `mint_es256_token` — PyJWT-encoded, so raw r‖s is correct). Update the JWT header `alg` to ES256 and any `alg` assertions. Keep `_JWKSKeys`/`_JWKS` class APIs intact.
@@ -215,17 +224,20 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Acceptance:** The live dashboard login completes end-to-end.
 
 **Steps:**
+
 1. Local: `uv run pytest tests/test_session_auth.py -v` green.
 2. PR: code-review gate + CI (fast suite incl. new unit tests).
 3. Post-deploy: with a real Supabase session token (dashboard login via GitHub OAuth), confirm `/v1/organizations` returns 200 and the dashboard no longer shows the login wall.
 
 ### Rejected Alternatives
+
 - **A (in-place `_verify_es256`)**: bespoke raw r‖s→DER ECDSA owned in-house — the incident class; every future alg is new bespoke code.
 - **C (GoTrue `/auth/v1/user` per request)**: per-request RTT + availability coupling + selfhost regression; contradicts Supabase JWKS guidance for asymmetric projects.
 - **PyJWKClient-native fetch**: sync urllib on the async path + no stale-serve.
 - **Dropping RS256 from the allowlist**: would orphan older RS256 Supabase projects/selfhost installs; dual-alg + an RS256 positive test is the better outcome at negligible cost.
 
 ### Deferred (explicit, not absorbed)
+
 - **ACAO-on-unhandled-500 hygiene** (stamp CORS headers on the server's unhandled-exception path so future raw 500s are visible as 500s): separate follow-up issue — the verify-path fix converts this bug class to clean HTTPExceptions, but OTHER routes can still produce raw 500s the browser keeps misreading as CORS failures.
 - **Bounded revocation window**: a rotated-away key keeps verifying until TTL + cooldown + refetch timeout during an upstream outage (availability-vs-security tradeoff, asserted by test + comment). No separate issue — deliberate, documented.
 

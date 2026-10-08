@@ -33,6 +33,7 @@ The shipped claim direction — **topic-scoped epistemic retrieval that classifi
 Every individual element has known prior art. The combination — specifically **second-order (variance) classification of a topic neighborhood over EP-propagated Beta posteriors in an operator-typed knowledge graph, exposed as a retrieval primitive** — was **not found in any single prior work** in this screening.
 
 **Strongest overlaps to address in any filing:**
+
 - **Hunter, Polberg, Thimm, Potyka — "Epistemic Graphs"** (AIJ 2020; KR 2018; IJAR 2019): degrees of belief over argument graphs with support+attack constraints — overlaps elements 2–3 semantically.
 - **Nikooroo & Engel — "Belief Graphs with Reasoning Zones"** (arXiv 2510.10042): confidence-thresholded balanced subgraphs = a settled-zone concept — overlaps element 4 conceptually, different mechanism.
 - **IRCDL 2022 "Expressing Without Asserting"**: explicit undisputed/disputed/settled claim tri-classification (static RDF) — overlaps the *terminology and task*, not the mechanism.
@@ -46,6 +47,7 @@ Every individual element has known prior art. The combination — specifically *
 > **Daniel (Premise Labs)** is trying to establish whether Tortoise's shipped topic-scoped settled/contested retrieval (#592) is novel enough to support follow-on patent claims, **but** the field spans multiple disconnected literatures (probabilistic argumentation, subjective logic, belief revision, KG reasoning, NLP controversy/stance detection, agent memory), which results in the risk of either filing claims that read on prior art or under-claiming the strongest position.
 
 **Alternative framings considered:**
+
 - *"How might we verify novelty of the mechanism (propagated variance) rather than the task (contested classification)?"* → The task framing is crowded (controversy detection, EWA, stance); the mechanism framing is where the white space lives.
 - *"What if the defensible position is not the engine but the retrieval surface?"* → Topic-scoped epistemic structure as a query primitive (`GET /v1/topics/{topic}/summary`) is not found anywhere in the agent-memory product landscape (Mem0/Zep/Letta/Cognee) — a product-level differentiator even if mechanism claims are narrow.
 - *Reverse:* "What if we assume prior art exists and identify the minimal claim that survives?" → Variance-threshold zone classification over EP Beta posteriors with has_ep gating survives (see §7).
@@ -81,7 +83,7 @@ Verified by reading the shipped code on origin/main (bb585bb):
 
 - **Epistemic approach to probabilistic argumentation** (Hunter & Thimm, DARe@ECAI 2014, arXiv:1405.3376): probabilities as *degrees of belief* in arguments; an epistemic extension = arguments with P(A) > 0.5; rationality constraints — e.g. if (a,b) is an attack and P(a) > 0.5 then P(b) ≤ 0.5 — a constraint semantically equivalent to a NAND factor.
 - **Probabilities on extensions** (Thimm, Baroni, Giacomin & Vicig, TAFA 2017, Springer LNCS); the constellations-vs-epistemic taxonomy is from Hunter & Thimm's "Probabilistic Argumentation" chapter (Handbook of Formal Argumentation, 2018).
-- **Overlap:** graph-propagated belief over attack/support relations; threshold-based classification (P > 0.5). 
+- **Overlap:** graph-propagated belief over attack/support relations; threshold-based classification (P > 0.5).
 - **Gap:** scalar probabilities (point beliefs), **no Beta distributions, no variance (second-order uncertainty), no EP**, no per-claim settled/contested *zones*, no retrieval/topic scoping.
 
 ### 4.2 Epistemic Graphs (Hunter, Polberg, Thimm, Potyka) — STRONGEST SINGLE-WORK OVERLAP **[HIGH — arXiv 1802.07489 + AIJ 2020 + KR 2018 + IJAR 2019, verified via Exa primary sources]**
@@ -228,6 +230,7 @@ This screening is **not** a patent search. Run before drafting:
 | Espacenet | Same CPC codes; CL (classification) search with G06N5/022 AND G06N7/00 |
 
 **CPC codes:**
+
 - `G06N5/022` — knowledge representation / engineering of knowledge graphs
 - `G06N7/00` (incl. `G06N7/01` probabilistic graphical models) — probabilistic computing
 - `G06F16/36` — semantic graphs / KG querying

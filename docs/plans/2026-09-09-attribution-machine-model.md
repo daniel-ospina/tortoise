@@ -15,6 +15,7 @@
 3. **API/filter exposure:** Dashboard row display only (+ read path detail). No API query filter for machine_id or model (trivial to add later if needed; not needed for v1 display). Decision: **read-only display on `GET /v1/sessions` list and `GET /v1/sessions/{id}` detail. No `?machine_id=` or `?model=` filter params.** Rationale: mirroring Phase 1's actor_user_id filter was considered but rejected — actor filtering supports a real use case (find my sessions), while machine/model filtering has no v1 use case and would add complexity without demand.
 
 **Implementation Pattern (follows #2600 additive property convention):**
+
 - `SessionRequest` gains `machine_id: str | None` and `model: str | None` — optional, client-supplied, length-capped, charset-sanitized
 - `_capture_session_impl` writes them conditionally (like `harness` clause — set only when present, coalesce for first-writer-wins on idempotent re-POST)
 - `tortoise_session_capture` MCP tool passes them through to `SessionRequest`

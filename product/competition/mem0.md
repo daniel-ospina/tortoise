@@ -145,6 +145,7 @@ Mem0's own pages **disagree** about whether Graph Memory is Pro-gated:
 In **April 2026** Mem0 replaced its algorithm. The old pipeline was extract → **compare/UPDATE/DELETE** (the "2-call" loop). It is now:
 
 **Extraction (write path) — six stages:**
+
 1. **Store New Memories** — conversation enters async, after the agent responds
 2. **Context Lookup** — find related existing memories (dedup context)
 3. **Distill Memories** — **single-pass ADD-only LLM extraction** (one call; no UPDATE, no DELETE)
@@ -153,6 +154,7 @@ In **April 2026** Mem0 replaced its algorithm. The old pipeline was extract → 
 6. **Temporal Reasoning** — separate pass reads each memory + source conversation date → stores temporal metadata: when the event occurred, ongoing/completed, timing precision, and memory type (event, state, plan, preference, relationship, absence)
 
 **Retrieval (read path) — four signals fused by rank scoring:**
+
 - **Semantic** (vector similarity)
 - **BM25 keyword** (verb-form lemmatization)
 - **Entity search** (graph co-occurrence boost)
@@ -202,12 +204,15 @@ Verbatim from docs: *"Graph Memory captures which entities your memories are abo
 Read flags: default returns active + superseded; `latest_only=true` returns "the current truth" only.
 
 ### Memory types & categorization
+
 User / Session / Agent scoping (`user_id`, `agent_id`, `app_id`, `run_id`); temporal memory types (event, state, plan, preference, relationship, absence); custom categories.
 
 ### Defaults & tech stack
+
 Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`. Hybrid search requires `pip install mem0ai[nlp]` + spaCy `en_core_web_sm`; recommends ≥ Qwen 600M-class embeddings for entity/hybrid quality. Supports many LLM providers (per docs "Supported LLMs").
 
 ### Notable gaps (product-level)
+
 - **No typed relationship model** — explicitly co-occurrence only; no ontology to define
 - **No explicit fact validity intervals** — temporal reasoning is a retrieval *boost* + write-time metadata, not `valid_from`/`valid_to` edges; no "what did the agent believe on date X?" as-of query
 - **No belief propagation / confidence recomputation** exposed — ranking is a fused retrieval score, not a belief (§11 flags the undocumented "confidence" claim)
@@ -311,6 +316,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 | YouTube / demo | Repo links a demo | — |
 
 **Community mechanics:**
+
 - **OSS → Platform flywheel:** free library, Discord support, community tier on pricing page
 - **Agent-plugin distribution:** Mem0 ships Claude Code / Codex / Cursor / Windsurf / OpenCode / Kimi plugins + a skills catalog, meeting developers inside their coding assistants
 - **Agent-native signup:** `mem0 init --agent` lowers the join cost for autonomous agents
@@ -330,6 +336,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 **Sources checked:** Zep's benchmark rebuttal blog, Atlan "Mem0 alternatives" (third-party, competitor-adjacent), Medium hands-on critique, askonoma review, Mem0 docs self-admissions, GitHub repo (issues/PR counts).
 
 **What users/developers praise:**
+
 - **Time-to-value:** 3-line drop-in API; broadest framework integration matrix in the category (~25 integrations)
 - **Token efficiency:** ~6.9K tokens/retrieval vs 25K+ full-context — directly costs less per query
 - **History preservation:** ADD-only means nothing is silently destroyed; superseded facts are retained and badged, not deleted
@@ -337,6 +344,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 - **Release velocity:** algorithm rewritten and re-benchmarked within a year (LoCoMo 71.4→92.5; LongMemEval 67.8→94.4)
 
 **What users/developers complain about:**
+
 - **Pricing cliff for graph/consolidation:** the $19 → $249 jump for Pro-tier graph/analytics is described as *"the most-cited community frustration across developer forums and Hacker News discussions"* and *"the top reason developers switch away from Mem0"* (Atlan, Apr 2026) ⚠️ third-party source
 - **Benchmark credibility dispute:** Zep's public rebuttal *"Lies, Damn Lies, & Statistics: Is Mem0 Really SOTA in Agent Memory?"* (May 2025, updated Jun 2026) claims Mem0's LoCoMo comparison mis-implemented Zep (wrong user model, timestamps appended to messages, sequential searches) and that "a simple full-context baseline" beat Mem0's best score (~73% vs ~68%); Zep reports 75.14% ± 0.17 when correctly implemented. It also calls LoCoMo itself a flawed benchmark (unusable category 5, multimodal errors, wrong speaker attribution) ⚠️ competitor-authored rebuttal — but the critique points are specific and falsifiable
 - **Self-reported vs. competitor-run gap:** Mem0 self-reports **94.4%** on LongMemEval; a competitor-run comparison (vectorize.io — Vectorize AI Inc. is the vendor of Hindsight, on its own comparison page) reports **49.0%** (vs Zep 63.8%, GPT-4o) — a ~45-point discrepancy. Mem0 disputes the competitor-run number. ⚠️ The **~26%** figure cited in the research brief could NOT be traced to a third-party comparison; the only verifiable "26%" is Mem0's own paper claim of *"26% relative improvements in the LLM-as-a-Judge metric over OpenAI"* on LoCoMo (arXiv 2504.19413). Treat 26% as an unverified/conflated figure — **do not repeat it as an independent benchmark result.**
@@ -358,6 +366,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 ## Notes & Sources
 
 ### Primary sources fetched (live, 2026-09-11)
+
 - **Homepage:** [mem0.ai](https://mem0.ai/) — tagline, 150,000+ developers, 62,590 star widget, compliance badges (SOC 2 Type I / HIPAA / GDPR)
 - **Pricing:** [mem0.ai/pricing](https://mem0.ai/pricing) — full tier table (Hobby $0 / Starter $19 / Pro $249 / Enterprise custom), add-vs-retrieval request metering
 - **About:** [mem0.ai/about-us](https://mem0.ai/about-us) — 160,000+ developers, $24M raised, 58,000+ stars, 486+ citations, founder bios
@@ -372,6 +381,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 - **arXiv:** [2504.19413](https://arxiv.org/abs/2504.19413) — "Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory" (submitted 2025-04-28); claims 26% relative improvement over OpenAI on LLM-as-a-Judge; graph variant ~2% above base; 91% lower p95 latency, 90%+ token savings
 
 ### Secondary / third-party sources
+
 - **Y Combinator:** [ycombinator.com/companies/mem0](https://www.ycombinator.com/companies/mem0) — founded 2023, SF, 10 employees, $24M
 - **TechCrunch (2025-10-28):** [mem0-raises-24m…](https://techcrunch.com/2025/10/28/mem0-raises-24m-from-yc-peak-xv-and-basis-set-to-build-the-memory-layer-for-ai-apps/) — 41K stars, 13M+ Python downloads, 80,000+ cloud signups
 - **PR Newswire:** $24M led by Basis Set Ventures, with Peak XV, GitHub Fund, Y Combinator
@@ -384,6 +394,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 - **Forecast Desk tracker:** ⚠️ "59k+ stars, 186M API calls (Q3)" — third-party, aspirational caching
 
 ### Documented gaps (NOT fabricated)
+
 - ⚠️ **Discord member count** — requires joining; not retrieved
 - ⚠️ **LinkedIn follower count** — not verified in this pass
 - ⚠️ **X/Twitter follower count** — ~20.1K reported by search, snippet ambiguous; unverified against live profile
@@ -395,6 +406,7 @@ Default LLM: `gpt-5-mini` (OpenAI). Default embeddings: `text-embedding-3-small`
 - ⚠️ **Graph-memory plan gating** — Mem0's own pricing page and docs contradict each other (documented in §5)
 
 ### 🔄 Draft corrections (what the prior stub got wrong)
+
 1. **"Free tier: 1000 memories. Pro: usage-based."** → Wrong. Free = 10,000 add + 1,000 retrieval **requests**/mo; $19 Starter; $249 Pro; usage-based is a separate sales path.
 2. **"Vector store + optional graph (Pro tier)"** → Outdated. Graph Memory is native and always-on (co-occurrence entity linking); the old external graph-store integration (Neo4j/Memgraph/Kuzu/AGE/Neptune) was **replaced**. Only the Graph *view* + Dream *Synthesis* are Pro+ per docs (pricing page is inconsistent).
 3. **"2-call LLM extraction loop (extract facts → store)"** → Outdated. April 2026 algorithm: **single-pass, ADD-only extraction** (one call, no UPDATE/DELETE).

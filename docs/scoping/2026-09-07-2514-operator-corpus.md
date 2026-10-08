@@ -12,6 +12,7 @@
 The write-path bench grades CONTENT survival + leakage only — zero gold
 assertions exist for the operator edges the product ontology says the
 extractor must wire (SUPERSEDE, NEGATE/counter-claim, MITIGATES, SUPPORTS,
+
 + object/subject structure). `runner.snapshot_session` already computes
 `operator_counts` per session, but they are **empty on every real run**
 (receipts w2b-phaseg-llm-*, w2b-m2-lane-* all show `{}`): reified operator
@@ -82,6 +83,7 @@ semantics the llm lane will follow).
 | op_04 | wp07 → wp06 (cross-session) | D1 (wp06 turn ~15): "we ship the lease fix all-at-once behind a single global kill flag" (decision). D2 (wp07 turn ~19): "reverse that call — per-service rollout flags instead of one global flag" (overturns D1). | SUPERSEDE: D2 (new) → D1 (superseded) | `CORRECTS` edge D2→D1 (old marked outdated/superseded) via the supersessions channel → `sdk.supersede` | ONTOLOGY §3.1 `CORRECTS` "New point corrects/replaces an outdated point … Created by `supersede_point` / `invalidate_point`" + supersession semantics; §10.5 cascading invalidation (`supersede_point` → CORRECTS → dirty → EP). | **FLAGGED (ontology finding):** the point-level CORRECTS path exists (§3.1) but the v2 EXTRACTOR's supersession model is STATE/ENTITY-centric (S2 rules: emit NEW entity + ONE statement point "B supersedes A"; ObjectSuperseded event + Object fold — §2 "decisions are NOT first-class Points"); within a single fresh session a decision reversal does NOT today produce a point→point CORRECTS — the extractor forms pt-level supersessions only when its S3 search resolves the superseded claim already in-graph (cross-capture, real backend). Planted cross-session so the current mechanism CAN produce the edge on the real lane; whether the ontology REQUIRES point-level CORRECTS for in-session reversals is left to the ontology owner. |
 
 **Findings for the ontology owner (#2514):**
+
 - F1 (op_03): no point→point "action reduces/mitigates risk" operator in the
   core vocabulary — only operator-edge relevance modulation (`mitigated_by`).
   "Risk reduced by an action" currently has no unambiguous core edge.

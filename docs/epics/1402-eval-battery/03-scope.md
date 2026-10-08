@@ -25,6 +25,7 @@ extends: 01-align.md (decision), 02-research-brief.md (research), docs/agent-rea
 ## Scope Boundaries
 
 ### In Scope
+
 1. **Battery harness extension** — a runner (extending `tools/longmem_eval/` patterns) that executes Tier-1 probes, Tier-2 streams, and Tier-3 sweeps with pinned seeds, trajectory logging (steps, tokens, re-derivations), and JSON report emission per scenario.
 2. **Tier-1 reasoning probes (R1–R5)** — five single-session probes with pre-registered rubrics + calibrated thresholds: contradiction surfacing, adversarial coverage, epistemic calibration (Brier), defeat conditions, belief-update responsiveness.
 3. **Judge validation gate** — per-rubric LLM-judge validation before any scoring (AB+BA position-bias tests, chance-corrected reliability, IRT diagnosis, stress tests per brief §UX), plus the kappa/min-signal tooling already in `tools/`.
@@ -36,6 +37,7 @@ extends: 01-align.md (decision), 02-research-brief.md (research), docs/agent-rea
 9. **Weakness-mitigation re-run loop** — for each load-bearing WEAK with a mitigation path, the battery is re-runnable after mitigation so "improve enough that weaknesses are not serious" is measured, not asserted.
 
 ### Out of Scope
+
 - **Adaptive/evolving test generator** (SEAL-style) — the pattern is researched; the generator is deferred to a follow-up issue/phase AFTER the battery produces a stable verdict (running the generator before the battery is validated risks confounding the verdict).
 - **Public/commercial benchmark product** — no packaging of the battery for external sale (align alt-5).
 - **New extraction work** — graph input quality is #1350/#909's domain; the battery consumes the product pipeline as-is (epic dependencies).
@@ -43,6 +45,7 @@ extends: 01-align.md (decision), 02-research-brief.md (research), docs/agent-rea
 - **Marketing/positioning changes** — the claim goes public only per the reclassification trigger, after the verdict (align fix-4).
 
 ### Boundary Rationale
+
 The cut is **claim-gated**: everything needed to produce a falsifiable verdict on the uniqueness claim is in scope; everything that depends on or extends that verdict (adaptive generator, public benchmark, positioning) is out. Harness work reuses existing eval infra rather than building new — the battery is an extension of #1144's runner, not a parallel system.
 
 ## Customer Value Map
@@ -69,18 +72,21 @@ The cut is **claim-gated**: everything needed to produce a falsifiable verdict o
 ## High-Level E2E Test Cases
 
 ### E2E-1: Tier-1 probe battery produces verdicts
+
 **Given:** a calibrated scenario corpus and the five probe protocols (R1–R5) with pre-registered rubrics
 **When:** the harness runs the battery on the Tortoise arm and the plain-agent arm (matched pairs, pinned seeds)
 **Then:** each probe emits a per-scenario result with the AC-R1…AC-R5 metric values
 **And:** thresholds are [cal]-locked and printed, not silently tuned
 
 ### E2E-2: Longitudinal stream detects genuine vs pseudo-evolution
+
 **Given:** a sequential task stream of repeated families (5–8 families × 3+ reps, held-out family reserved)
 **When:** the stream runs across sessions with fresh context and the graph as the only difference
 **Then:** token/step trajectories are emitted per family (SR + tokens + strategy-reuse)
 **And:** the pseudo-evolution gate fires (flat tokens while graph grows = FAIL, ⚠️ provisional label)
 
 ### E2E-3: Differential sweep renders the differentiation profile
+
 **Given:** six arms (A0/A1/A2/A2b/A3/A4) and the matched-recall protocol (top-K factual F1 K=5, symmetric trigger)
 **When:** recall is matched ex-ante and the same battery runs on every arm
 **Then:** every probe (R1–R5, L1–L6, D2–D4) is scored for all arms with no exclusions
@@ -89,24 +95,28 @@ The cut is **claim-gated**: everything needed to produce a falsifiable verdict o
 > **Trigger population (amended 2026-09-12, #3327):** the symmetric trigger is defined over the retrieval-capable comparators `{a1, a2, a2b, a3, a4}` — `a0` is excluded from the trigger and retained as its positive control; the battery spec cited above (`docs/agent-reasoning-eval-battery.md`) carries the same amendment; decision record: `docs/research/2026-09-12-matched-recall-a0-control.md` (§3.2.1/§7 of `docs/benchmarks/comparison-systems.md`).
 
 ### E2E-4: Benchmark parity leg runs on released benchmarks
+
 **Given:** LongMemEval, LoCoMo, MemoryArena, MemoryAgentBench runners and the arm adapters
 **When:** the parity leg executes per arm
 **Then:** recall/staleness results are emitted per benchmark with methodology unchanged
 **And:** results are cross-referenced against published baselines (saturation context shown)
 
 ### E2E-5: Judge validation precedes scoring
+
 **Given:** the judge validation gate (AB+BA position-bias, chance-corrected reliability, IRT, stress tests)
 **When:** any rubric is about to be used for scoring
 **Then:** the rubric is either validated (passes reliability thresholds) or blocked from scoring
 **And:** validation results are recorded in the run artifact
 
 ### E2E-6: Verdict report is a full profile, falsification-accepting, and filed
+
 **Given:** all tiers executed and recorded
 **When:** the report is assembled
 **Then:** the AC table (AC-R1…AC-D4) is populated with measured values for every metric on every arm
 **And:** the verdict outcome (UNIQUE / MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE) is stated with per-weakness mitigation paths and the artifacts-changed list, filed to docs/
 
 ### E2E-7: Runs are deterministic and re-runnable
+
 **Given:** pinned seeds and fixed scenario builders
 **When:** the same battery run is repeated
 **Then:** results reproduce within tolerance (no seed drift)
@@ -137,10 +147,12 @@ Review the scope boundaries, customer value map, and E2E test cases. Reply "proc
 | S8 | Harness config: scenario corpus, thresholds, arms, budgets | Config | In | Unit (schema) | scenario JSON schema; [cal] threshold table; cost budget guard | threshold tuning post-hoc (Goodhart); corpus leakage across waves |
 
 ### Bug Pattern Flags
+
 - **Silent function skips (critical):** any LLM error path (rate limit, timeout) that falls back to a cached/empty result would poison the battery's deltas — every episode must record model-call outcomes; cached/fallback episodes are flagged, not silently included. Required verification: episode trace shows the real model call.
 - **Race conditions:** parallel arm runs must not share memory state — arm isolation is enforced at the harness level (per-arm DB/namespace) and verified per run.
 - **N+1 queries:** episode loops must batch scenario setup (graph writes, corpus loads); per-scenario DB round-trips at 500–1,000 episodes are a cost/latency risk — flag with batch verification.
 - **Conditional guards:** [cal] threshold locking and the judge-validation gate are guards — both sides tested (gate passes / gate blocks scoring).
 
 ### Checklist Notes
+
 - Failure modes to test explicitly per surface: S3 timeout/429/503 → episode flagged not silently retried; S4 arm isolation breach → contamination detection test; S6 judge drift → periodic re-validation during long streams; S1 EP non-convergence → honest UNDEC not confident number.

@@ -98,6 +98,7 @@ seed-hold list (Hold), shared `_patch_tortoise_sdk_init` helper name vs inline `
 Wave 1 = 2 (export_delete, suspension_parity) · wave 1b = 14 shared-helper + 3
 patch-only = 17 (onboarding_endpoints struck — moved to wave 2) · wave 2 = 5
 migrate + 4 verify/migrate + pack_state = 10. Churn-action universe: 2 + 17 + 5
+
 + pack_state = 25 files needing action; + verify-only (capture_session,
 dr_endpoints, free_team_entitlement, onboarding_endpoints) ≈ the issue's "~24".
 Full patch-universe accounting: hosted_api (canonical) + 2 + 17 + 10 = 30 files
@@ -165,6 +166,7 @@ the file keeps ALL of its counter/seed-hold/wiring additions. Rationale:
    local helpers.
 
 **Wave-1 scope (this run):** helper module + test_export_delete full composition
+
 + test_suspension_parity migration. `test_suspension_parity` is the simplest
 shared-helper user (patch+clear only, no pin, no anchor-close at restore, module
 `_SEED_SDKS` hold retained as-is).
@@ -192,6 +194,7 @@ lesson applied to enter; the precedents' plain-clear-at-enter was safe only
 because their teardowns drained the dict). Zero cost on the empty-dict common
 path; the exception-safe close makes the cross-file pollution run (gate 6)
 strictly safer.
+
 - `__enter__`: snapshot + patch `tortoise.hosted_api.TortoiseSDK.__init__` →
   force `db_path`; set `os.environ["TORTOISE_DB_PATH"] = db_path` (the #1950 pin,
   `tests/test_hosted_api.py:174-202` rationale); `ha_mod._FALLBACK_KEEPALIVE.clear()`.
@@ -219,6 +222,7 @@ from a migrated file; docstring source-pins present.
 **Files:** tests/test_export_delete.py (modify).
 
 Deltas:
+
 - Remove local `_close_keepalive_anchors` (both duplicate defs :221/:269),
   `_patch_tortoise_sdk_init` (:237), `_restore_sdk_init` (:259) — superseded by
   the shared helper.
@@ -265,6 +269,7 @@ pair green; ruff clean.
 **Files:** tests/test_suspension_parity.py (modify).
 
 Deltas:
+
 - Remove local `_patch_tortoise_sdk_init` (:75) + `_restore_sdk_init` (:88).
 - `sb_client`/`reg_client` bodies → `with patched_tortoise_sdk(db_path):`
   wrapping the yield; keep the file's module `_SEED_SDKS` hold + append in
@@ -350,6 +355,7 @@ standalone both lanes as the wave-1 exposed set.)
 ## Review cycle log
 
 ### scope-verify — Cycle 1
+
 - Verifier A (scope check): **VERIFIED — no P0/P1/P2.** P3s: body_cap_sweep Close marker/line cite; import_endpoint close overstated; onboarding_endpoints not a named-helper file. P4s: ordering-invariant wording; "masked-pin" terminology; SHARED_MODULES mechanism phrasing; #1502 gate strength (add cross-file pollution run).
 - Verifier B (devil's advocate): P0=0, **P1=1**, P2=4, P3=4, P4=1.
   - P1-1 drain-linchpin: under counter composition the helper's `__exit__` anchor-close is a SILENT NO-OP on the restored empty real dict — the fixture MUST own the deterministic close via a verbatim drain loop (today the close happens implicitly via `_restore_sdk_init` closing the counter). If omitted → #1950/#2090 nondeterministic leak class returns, and a single green run cannot catch it.
@@ -361,6 +367,7 @@ standalone both lanes as the wave-1 exposed set.)
 - Controller action: **ACCEPTED P1-1 + all P2s + all actionable P3s** (controller-confirmed both reclassifications against code: pack_state fixtures @432-477 restore-only-no-close; onboarding_endpoints fixtures @43-122 already pin+close, pass-through variants @272/:309). Amended the doc: drain-linchpin verbatim + `assert not counter` guard + sb_client explicit body + import purity in Task 1 acceptance + corrected wave tables (body_cap_sweep, import_endpoint, capture_session, onboarding_endpoints→wave 2, pack_state→wave 2) + ×10 embedded streak + cross-file pollution run + child-issue content corrections. Re-dispatching both verifiers (cycle 2)…
 
 ### scope-verify — Cycle 2 (on the amended scope)
+
 - Verifier A: **no P0/P1** — P1 fix CLOSED (drain-linchpin); assert-before-disable PRESERVED; wave-table corrections code-accurate; ×10 streak + cross-file pollution run feasible. P2-1: the (a)-(f) flat list doesn't pin the exception-safe NESTING — an (a)/(d) assert RED would skip (b)-(f) (enabled counter stranded as module attr, real dict unrestored, seeds unclosed). P3s: stale 15/18 count after the onboarding_endpoints strike; masked-pin cite :552-556 is wrong (real assert :794-795); drain rendered as a ruff-violating one-liner.
 - Verifier B (devil's advocate): **no P0/P1** — Q1 pre-mortem: M2/M3/M4/M5 RULED OUT structurally; M1 = the same nesting gap (F1, P2). Q2 assert placement sound on pass/failure/setup-failure paths. Q3 both orderings deterministic-SAVE-safe. Q4 reclassifications code-verified. Q5 bounded. P3s: onboarding :309 q3/wizard pass-through block leaks a SHARED-default-path anchor (restore lacks close — pre-existing, must be named in the wave-2 audit); helper `__enter__` plain clear() is the one remaining clear-without-close site (make it close-then-clear). P4: citation drift.
 - Controller: incorporated ALL P2s/P3s (nesting pinned — inner-try/finally verbatim :341-355 shape; counts corrected to 14+3=17 wave 1b / 30-file full universe; masked-pin cite fixed to :794-795; drain specified as multi-line verbatim copy of :164-170 with noqa; helper `__enter__` changed to close-then-clear; onboarding :309 block named explicitly in the wave-2 child content; body_cap_sweep cite :75-81).

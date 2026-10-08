@@ -21,6 +21,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 ## Confirmed Problem (two-tier theorem)
 
 **T1 — Exact prior-level monotonicity theorem** (provable, tolerance-free): `aggregate_prior` (tortoise/source_credibility.py:169-221) is strictly monotone non-decreasing in source addition under **uniform weight + decay=1.0**:
+
 - Per-tier `pc_t = log2(N_t+1) · decay_t · mean(factor_i) · base_pc(tier)` — log2(N+1) strictly increasing, all terms nonnegative → adding any source strictly increases total pc.
 - Per-source marginal decreases (log2 concavity): 1→2 adds 0.585·base vs 10→11 adds 0.126·base.
 - Targets (pre-verified): 1M T4 pc≈1.99 < 2 T0 pc≈14.26; 10 T4 (0.346) > 1 T4 (0.1); 1000 T4 (0.997) < 1 T2 (2.0).
@@ -32,6 +33,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 **NAND/mitigation (situations 8-10) — DOCUMENTED AUDIT, not encoded expectations:** phi_nand expected-vs-actual artifact + separate bug issue to EP-propagation owner.
 
 ## Files Touched
+
 | File | Action |
 |---|---|
 | `tests/test_ep_sources.py` | REWRITE: embedded real-path suite (T1 + T2a + T2b). Preserve pure-math helpers (TIER_MAP, TIER_PC, log_aggregate_pc, log_aggregate_prior, beta_mean). Remove Docker `fresh_sdk`, `set_source_evidence`/`set_aggregated_evidence` (set_point_baseline bypass), `log_aggregate_prior_mixed` (fictional NAND→beta), and all set_point_baseline-based tests. |
@@ -43,10 +45,12 @@ aboutObjects: Point, Operator, Mitigation, Source
 ## Implementation Steps (TDD)
 
 ### Step 1 — Carry-forward regression fix (test-side)
+
 `tests/test_ep_nary_falsification.py`: override `_clear_caches` in `_RecordingEP` to snapshot `self._node_cache`/`self._msg_cache` into `self._final_node_cache` before calling super. Change `test_run_converges_with_gentle_factor` (l.333) to read `ep._final_node_cache["a"]`.
 **Verify:** `python -m pytest tests/test_ep_nary_falsification.py -q` → all pass.
 
 ### Step 2 — Rewrite `tests/test_ep_sources.py`: harness + helpers
+
 - Embedded `fresh_sdk()` (tempfile db_path — copy test_source_inheritance_own.py pattern).
 - `tier_source(sdk, url, tier, source_date=FRESH)` — create_point(extractedFrom=url) + raw query SET credibilityTier/sourceDate/ingestedAt.
 - `link_tiered_source(sdk, pid, url, tier)` — `_get_proj()._link_source(pid, url)` + raw tier SET.
@@ -55,6 +59,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 - `inherited_alpha(sdk, pid)` → `get_point(pid)["ep_alpha"]`.
 
 ### Step 3 — T1 theorem tests (pure function)
+
 - `test_log2_increasing`: log2(N+1) strictly increasing for N=1..10^6.
 - `test_per_source_marginal_decreases`: pc(10)−pc(9) < pc(1)−pc(0) for each tier (log concavity).
 - `test_anti_sybil_1m_t4_lt_2_t0`: aggregate_prior-style formula: 0.1·log2(1+1e6) < 9·log2(3).
@@ -64,6 +69,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 - `test_alpha_beta_reparameterization_identity`: mean·(pc+2) ≡ 1+pc, (1−mean)·(pc+2) ≡ 1 (the issue's formula == implementation).
 
 ### Step 4 — T2a real-path tests (situations 1-7)
+
 - `test_s1_no_source_to_t4_above_baseline`: ep_alpha(1 T4) > 1.0 (Beta(1,1) baseline).
 - `test_s2_tier_proportional`: alpha order T4 < T3 < T2 < T1 < T0 with exact TIER_PRIORS.
 - `test_s3_cumulative_weak_sources`: 1→2→3→10 T4 each addition strictly increases ep_alpha; exact 0.1·log2(n+1).
@@ -74,6 +80,7 @@ aboutObjects: Point, Operator, Mitigation, Source
 - `test_log_targets_feasible_n`: 10 T4 real path > 1 T4; 100 T4 < 1 T2; 1000 T4 < 1 T2.
 
 ### Step 5 — T2b EP directional tests (topologies A/B/C)
+
 - `test_scenario_a_linear_chain`: source T0 → A, A IMPL B. B's confidence mean > 0.5 and rises with more/tier sources on A.
 - `test_scenario_b_loopy_single_entry`: A→B→C→A all IMPL, sources on A only. All three means rise above no-source baseline.
 - `test_scenario_c_loopy_multi_entry`: sources on A AND B. Cluster means ≥ single-entry case (loose ≥0.02 margins).
@@ -84,15 +91,18 @@ aboutObjects: Point, Operator, Mitigation, Source
 - `test_edge_case_determinism`: with random.seed() pinned, same config → same confidence (replaces old determinism test, which was trivially deterministic on a 1-factor graph).
 
 ### Step 6 — NAND/mitigation audit (situations 8-10) — documentation + bug issue
+
 - `test_s8_gold_plus_nand_audit` / `test_s9_mitigation_audit`: run real path, capture observed confidences, assert NOTHING about NAND direction (document behavior). Assert only: gold source alone anchors high (>= 0.8).
 - Compute + document phi_nand table: docstring claims 0.637@(0.91,0.91)/0.064@(0.5,0.5); actual 0.519/0.135; phi_nand max at (1,1)/(0,0)=1.0, min at (1,0)/(0,1)=0.018.
 - File bug issue: "NAND factor phi_nand is agreement-potential not contradiction" with expected-vs-actual + minimal 2-point repro, routed to EP-propagation owner.
 - Audit finding (S9): real mitigation mechanism is `compute_operator_weight` (weights.py:9) — w *= 2.0 when an operator targets another operator (input_ops > 0). The issue's mental model (mitigation reduces pseudo-count, e.g. pc × 0.5) is NOT how the real path works; the old set_point_baseline test modeled a fictional pc×0.5 mitigation. The real-path S9 directional claim "mitigated < unmitigated, both > no-source" depends on the EP weight mechanism and is audit-documented, not asserted.
 
 ### Step 7 — Proof writeup `docs/plans/2026-08-08-ep-source-validation-proof.md`
+
 Formal T1 derivation + scoping statement (uniform weight, decay=1.0) + audit findings + spec corrections (log-flatten misstatement, 10 T4 ≈ 1 T2 misstatement, NAND→beta fictional model).
 
 ## Test Matrix (issue → test)
+
 | Issue requirement | Test |
 |---|---|
 | S1: no source → T4 above 50% | test_s1_no_source_to_t4_above_baseline |
@@ -117,6 +127,7 @@ Formal T1 derivation + scoping statement (uniform weight, decay=1.0) + audit fin
 | Edge: determinism | test_edge_case_determinism |
 
 ## Acceptance Criteria
+
 1. `python -m pytest tests/test_ep_sources.py tests/test_ep_nary_falsification.py tests/test_source_inheritance_own.py -q` → all pass (embedded, no Docker).
 2. Full suite: `python -m pytest tests/ -q` → no NEW failures vs baseline (baseline: 1 pre-existing fail `test_run_converges_with_gentle_factor` — now FIXED).
 3. T1 theorem documented in proof writeup with derivation.
@@ -124,6 +135,7 @@ Formal T1 derivation + scoping statement (uniform weight, decay=1.0) + audit fin
 5. Issue label: implementing → implemented; PR via commit-workflow.
 
 ## Spec Corrections (issue body vs implementation — documented in proof writeup)
+
 1. **calibrate_summary does NOT apply inheritance** — it's audit-only (sdk.py:2021). Inheritance happens in `compute_confidence()` → `_apply_source_inheritance` (sdk.py:1834). The plan's T2a drives `_apply_source_inheritance` directly; `calibrate_summary` is not required for the tests (issue body's "run calibrate_summary" is a mental-model error, corrected).
 2. **"log curve flattens (10→100 adds less than 1→10)" is numerically false** for decade totals (log2(101)−log2(11)=3.199 > log2(11)−log2(2)=2.459). True only per-source (1→2: 0.585·base vs 10→11: 0.126·base). Tests assert per-source marginal.
 3. **"10 T4 ≈ 1 T2" is a 5.8× gap** (0.346 vs 2.0 pc) — assert ordering, not equality.
@@ -131,9 +143,11 @@ Formal T1 derivation + scoping statement (uniform weight, decay=1.0) + audit fin
 5. **Mitigation ≠ pc×0.5** — real mechanism is `compute_operator_weight` (weights.py:9): w×2 when an operator targets another operator (audit finding).
 
 ## Runtime Prerequisites
+
 - Python 3.11+, embedded falkordblite (no Docker). `uv pip install -e .` + pytest.
 
 ## Risks & Mitigations
+
 | Risk | Mitigation |
 |---|---|
 | EP nondeterminism (random.shuffle) | random.seed() fixture; directional-only assertions; loose margins |
@@ -145,6 +159,7 @@ Formal T1 derivation + scoping statement (uniform weight, decay=1.0) + audit fin
 | Sub-agent timeouts | controller-run verification; fresh verifier dispatch per gate |
 
 ## Rejected Alternatives
+
 - **Approach B (extend test_source_inheritance_own.py):** issue body names tests/test_ep_sources.py; would bloat 817-line file; mixes concerns. Rejected.
 - **Approach C (proof-doc only):** under-delivers executable proof; no regression protection. Rejected.
 - **Fix NAND inside #341:** ep.py owned by parallel agent (feat/326-ep-propagation); behavior change risk; silent fix violates audit boundary. Rejected → bug issue.

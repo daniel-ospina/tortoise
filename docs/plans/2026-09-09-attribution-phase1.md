@@ -10,6 +10,7 @@
 **Role:** product-implementer
 
 **Architecture:** Resolver threading + ContextVar backstop + additive stamps, all fail-soft:
+
 - **Resolvers return RAW actor data** (oauth `user_id`; key lanes `created_by` — already returned by `resolve_api_key` AND already carried as `"created_by": created_by` on the registry branch dict at hosted_api.py:1830, missing only from `apikey_verify`); a **single UUID-gated normalization seam** produces the canonical `actor_user_id` dict key on both transport planes (§2.1 of the issue-scoping doc): `mcp_auth.TeamResolutionMiddleware` (after resolution, all 3 MCP lanes) and the hosted REST DI chain at its **three terminal dict-BUILD sites** (code-verified): (1) `get_current_org` registry branch (~1830 — dict built inline with `created_by`), (2) `_get_current_team_supabase` (wraps `resolve_api_key`), (3) the session branch of `get_current_org_session`/`_ungated` (~2432), where `user["user_id"]` is attached as `session_user_id` AFTER `_session_user_org` returns a dict carrying neither `user_id` nor `created_by` (the key branches of `get_current_org_session` DELEGATE to `get_current_org` → sites 1/2 already; the DI-override seam and the SKIP_AUTH return are NOT normalized — test seam + no-GraphEvent surface). Non-UUID `created_by` shapes (`"api"`, `'st_'||hash`, EMAIL) gate to ABSENT → unattributed, never a fabricated actor.
 - **ContextVar `_current_actor_user_id`** (module-level in `sdk.py`, neutral home — no mcp_auth↔sdk cycle) is SET at two data-plane set sites — MCP: `TeamResolutionMiddleware` dispatch ContextVar block (AFTER the cache-hit/cache-miss if/else, so warm-cache hits also set — verified mcp_auth.py:355-365 is the converged block after the branch); REST: inside `_data_sdk(team)` (hosted_api.py:2254) **CONDITIONALLY — only when the dict carries `actor_user_id`, never erasing a value the auth seams set** (cycle-2 P0: the MCP capture tool hand-builds an actor-less team dict, so an unconditional set would wipe the middleware-set actor before the Session MERGE/emits; the tool also threads `team["actor_user_id"] = _current_actor_user_id.get()` per Task 1 (b)). READ at `TortoiseSDK._emit_event` (the journaled 10-type store funnel) + `capture_session` (SDK mirror). asyncio.to_thread caveat documented (hosted writes run in the request task; display-name lookups use to_thread safely because they read rows, not the request actor).
 - **Session stamp:** both `_capture_session_impl` (hosted REST + MCP capture) and the SDK-mirror `capture_session` append `s.actor_user_id=coalesce(s.actor_user_id,$uid)` **conditionally** (coalesce = first-writer-wins on idempotent replay; conditional binding preserves the docker/embedded no-unused-param contract — mirrors the `harness` clause pattern). Plus `Session.actor_user_id` CREATE INDEX in `projection._ensure_indexes` (both lanes) + `test_indexes.py` EXPECTED_RANGE set extension.
@@ -57,6 +58,7 @@
 ## Task 1: Resolver RAW actor returns + UUID-gate normalization seams + ContextVar
 
 **Files:**
+
 - Modify: `tortoise/oauth.py:722` (`resolve_oauth_access_token`)
 - Modify: `tortoise/sdk.py:14766` (`apikey_verify`)
 - Modify: `tortoise/mcp_server.py:2949-2960` (`tortoise_session_capture` — thread `team["actor_user_id"] = _current_actor_user_id.get()`; Task 1 Step 4(b) OWNS this edit, its test lands in Task 2)
@@ -204,6 +206,7 @@ Applies to ALL three MCP lanes (oat_ via resolve_oauth_access_token, supabase vi
 ## Task 2: Session stamp + Session.actor_user_id index
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:6795` (`_capture_session_impl` Session MERGE)
 - Modify: `tortoise/mcp_server.py:2949-2960` (**no code change in Task 2 — Task 1 Step 4(b) owns the threading edit; Task 2 tests the MCP capture lane only**)
 - Modify: `tortoise/sdk.py:2957` (SDK mirror `capture_session` MERGE)
@@ -281,6 +284,7 @@ Post-capture auth reality (verified): POST /v1/sessions depends on `get_current_
 ## Task 3: Event backstop at _emit_event + EventAPI._emit optional actor
 
 **Files:**
+
 - Modify: `tortoise/sdk.py:2147` (`_emit_event`)
 - Modify: `tortoise/api.py:42` (`EventAPI._emit`)
 - Modify: extraction/mine construction sites (`tortoise/sdk.py:3379`, `tortoise/mcp_server.py:2617` — only if threading actor)
@@ -325,6 +329,7 @@ E2E-4(a) = the OAuth lane, and `oat_` is accepted ONLY on /mcp (the REST /v1/* s
 ## Task 4: Forged-claim strip-and-ignore (never reject)
 
 **Files:**
+
 - Modify: `tortoise/sdk.py:785` (`_sanitize_props`)
 - Modify: `tortoise/mcp_server.py:717` (`_reject_server_managed_props` / strip helper)
 - Test: unit
@@ -382,6 +387,7 @@ Do NOT add per-tool strip calls (the (b) alternative is rejected — 11 miss-ris
 ## Task 5: Read path — actor fields + filter + display resolution
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:8297` (`list_sessions`), `:8333` (`get_session_detail`)
 - Modify: `website/apps/dashboard/src/capturedSessions.js`, `website/apps/dashboard/src/main.jsx:463-491`
 - Test: integration in `tests/test_hosted_api.py`; node --test `website/apps/dashboard/src/capturedSessions.test.js`
@@ -496,6 +502,7 @@ export function transcriptModel(detail) {
 ## Task 6: E2E integration cases (docker lane) — E2E-3/4(b1,b2)/5/6/10
 
 **Files:**
+
 - Test: `tests/test_hosted_api.py` (or a dedicated module following repo naming, e.g. extending `tests/test_hosted_api.py` with docker-lane tests)
 - Test: `tests/test_capture_session.py`
 
@@ -624,6 +631,7 @@ Architecture standard · Ontology low · UX low · Accessibility low (server res
 🔍 Final verification: found 2 P1s + 6 P2s — resolved in 1 fix pass (controller-verified against code).
 
 ### Convergence confirmation (final gate)
+
 - Convergence-confirmation reviewer: P0=0, P1=1 (dangling cross-ref — Task 2 Step 5 shape (i) event leg referenced "Task 6" with no such test present). Fixed: Task 2 cross-ref now names "Task 6 Step 2 (shape-(i) event-leg variant)" and that bullet EXISTS (asserts re-minted claims' PointAdded carry uuidB via direct :GraphEvent read; contrasts with shape (ii) replay zero-events).
 - Re-dispatch: **NO ISSUES FOUND** — all verification points confirmed (cross-ref resolves, bullet satisfiable post-Task-3, no contradiction, Session-side assert stays in Task 2).
 

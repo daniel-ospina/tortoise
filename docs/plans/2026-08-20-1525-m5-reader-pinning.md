@@ -67,6 +67,7 @@ Replace `DEFAULT_READER_MODEL` with `READER_MODEL = "openrouter:deepseek/deepsee
 ### D2 — Reader carries its resolved identity; methodology records it
 
 `LLMReader` gains three attributes set by `build_reader`:
+
 - `model_spec` — the full `<provider>:<model>` spec actually used (post env/CLI resolution)
 - `provider` — the **resolved endpoint provider name** (the truth about where the call goes)
 - `pinned` — `bool` (spec == `READER_MODEL`), computed in `build_reader`
@@ -99,6 +100,7 @@ M5 = constants + verbatim recording + loud warning on drift. Rejecting a run who
 **Intent:** Close the v2 confound (code default == run constant) and make the resolved provider/endpoint visible in the report.
 **Acceptance:** `build_reader()` with no env/spec returns a reader whose `model_spec == READER_MODEL`, `provider == "openrouter"`, `pinned is True`; an override returns `pinned is False` with a stderr warning; report methodology carries `reader_model_spec`/`reader_provider`/`reader_pinned`.
 **Files:**
+
 - Modify: `tools/longmem_eval/reader.py`
 - Modify: `tools/longmem_eval/run.py`
 - Modify: `tools/longmem_eval/report.py`
@@ -151,6 +153,7 @@ Expected: FAIL — `READER_MODEL` undefined, `LLMReader` lacks `model_spec/provi
 **Step 3: Implement**
 
 `tools/longmem_eval/reader.py`:
+
 - Replace the constant (line 35) and update the module docstring default (line ~12):
 
 ```python
@@ -277,6 +280,7 @@ Expected: PASS (new) + PASS (no regression — existing methodology assertions l
 **Intent:** The report must carry the actual prompt, not a prose description, so cross-cell prompt drift is auditable (M7 self-explanatory report).
 **Acceptance:** A mock `run_evaluation` report's methodology has `reader_system_prompt == _SYSTEM_PROMPT` and `reader_type_fragments == _TYPE_FRAGMENTS`; `reader_prompt_source()`/`reader_prompt_hash` unchanged.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py`
 - Test: `tests/test_longmem_reader_pinning.py`
 
@@ -317,6 +321,7 @@ Expected: PASS.
 **Intent:** Make the recorded provider truthful (D4) and lock the multi-key routing behavior.
 **Acceptance:** With both OPENROUTER + DEEPSEEK keys set: `build_reader("deepseek:...")` → `provider == "deepseek"`; bare spec → `provider == "openrouter"` (priority order); existing no-key RuntimeError and unknown-provider ValueError behavior unchanged.
 **Files:**
+
 - Modify: `tools/longmem_eval/reader.py` (done in Task 1)
 - Test: `tests/test_longmem_reader_pinning.py`
 
@@ -359,6 +364,7 @@ Expected: PASS.
 **Intent:** Prove the pin is stable across run cells and document the run-time checks for the phased protocol.
 **Acceptance:** Two identical mock runs produce identical reader methodology; a drift report records the divergent spec with `pinned=false`; README/CLI help describe the pin and the run-time verification.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (help text, line ~405)
 - Modify: `tools/longmem_eval/README.md` (defaults table + methodology notes)
 - Test: `tests/test_longmem_reader_pinning.py`
@@ -402,6 +408,7 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
 Expected: FAIL — `outcomes_to_report` lacks the new kwargs.
 
 **Step 3: Implement**
+
 - `run.py` `--reader-model` help text (line ~405): default mention → `openrouter:deepseek/deepseek-v4-flash (pinned — M5 #1525; override records reader_pinned=false + warns)`.
 - `tools/longmem_eval/README.md` line 29 default → `openrouter:deepseek/deepseek-v4-flash`; add a short "Reader pinning (M5)" note: constants live in `reader.py` (`READER_MODEL`, `_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`); run cells must not override `TORTOISE_LME_READER_MODEL`; verify after each cell: `jq '.methodology | {reader_model_spec, reader_pinned, reader_system_prompt, reader_type_fragments}' <report>` shows `reader_pinned: true` and identical values across the three cell reports.
 
@@ -422,6 +429,7 @@ Expected: PASS. Run once more with `-m "not slow"` if Docker is absent — longm
 | `test_cross_cell_reader_pin_is_stable` | integration | cell A == cell B; drift recorded with real spec |
 
 **Run commands:**
+
 ```bash
 uv run pytest tests/test_longmem_reader_pinning.py -v
 uv run pytest tests/test_longmem_runner.py tests/test_longmem_reader_prompting.py -v   # no-regression

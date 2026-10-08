@@ -22,9 +22,11 @@ aboutObjects: eval dataset construction, owner-in-the-loop review, integration s
 ## 1. The two rulings this formalises (unchanged, verbatim in force)
 
 ### METHODOLOGY 1 — evidence first, verdict second
+
 Any claim about a **class** of data must be preceded by **10–20 real instances from the actual artefact**, shown *before* the verdict. Where a line is being drawn, **the borderline cases must be in the sample — a clean sample hides the boundary by construction.** Claims about a future rule must show the rows it **would keep** and the rows it **would drop**.
 
 ### METHODOLOGY 2 — small sample first, then build
+
 **Stage 1:** take a small sample, apply the proposed rule **by hand**, show the owner the **input rows and the output rows — including the ones that behaved unexpectedly**. The owner corrects the rule here, where a correction costs a sentence. **Nothing is implemented before the owner has reviewed real output.**
 **Stage 2:** implement it, re-run, and confirm the output matches the sample the owner reviewed. A Stage-1/Stage-2 mismatch is an **implementation defect**, not grounds to reopen the rule.
 
@@ -87,6 +89,7 @@ This is the existing `labeled_pairs.jsonl` shape (`{content_a, content_b, label,
 The owner's flow is *repeat 1–3 more times*, and each repetition is a chance for the rule to move underneath the labels — after which round-1 and round-3 labels mean different things and any score computed across them is meaningless.
 
 **Mechanisms, in order of preference:**
+
 1. **The rule is versioned** and every row records which version labelled it.
 2. **When the rule changes, earlier rows are re-labelled or explicitly marked stale** — never silently blended.
 3. **Scores are reported per band, never as one blended number.** A single percentage over 20 rows across four bands is a number that measures nothing.

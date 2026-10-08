@@ -24,15 +24,18 @@ aboutObjects: tortoise
 ## Research findings (condensed)
 
 ### Dominant model: container hierarchy with permission inheritance
+
 Notion (workspace → teamspace → page → row), Confluence (global → space → page), Obsidian (vault) all partition by container with permissions inherited down the tree — a **single access axis** ("who can see/edit this container and everything under it"). Agent-memory products (Mem0, Letta, Zep, Fabric, MemFabric) scope by **identity fields** (user/agent/app/session) at the storage layer — Mem0 is explicit that "scoping ≠ permissions; role logic lives in the app layer."
 
 ### Notable exceptions (closest to the user's question)
+
 - **Confluence spaces**: every space carries an independent permission set — effectively per-subgraph ACLs in a mainstream product.
 - **Dust**: two-layer model — agents get their OWN data-access scope (per space) independent of human access; "each agent belongs to exactly one space and can only access data from that space." The sharpest articulation of agent-vs-human access divergence (HR-agent case: agent may legitimately exceed user access).
 - **Mem (two philosophies)**: mem.ai keeps the entity graph GLOBAL by design, spaces are *retrieval lanes* (focus, not isolation); Mem[v] gives each space its own fully-isolated graph. Directly relevant: two viable answers to "subgraph with its own access axis."
 - **Letta**: shared memory blocks are block-level read-only, NOT per-agent ("can't make a block read-only for some agents and writable for others") — a cautionary gap.
 
 ### Agent-specific access
+
 - **Mem0**: four orthogonal scoping dimensions (user_id, agent_id, app_id, run_id) enforced at storage layer; graph entities built *within* a scope.
 - **Dust principle**: "a user should never retrieve through an agent what they couldn't access directly" — yet agents may legitimately exceed user access (HR case).
 - **Letta Code**: cross-agent memory guard (hard-denies access to another agent's memory unless scope allows).
@@ -40,12 +43,14 @@ Notion (workspace → teamspace → page → row), Confluence (global → space 
 - **MemFabric**: (scope, scope_id) pairs with recall allowlists; explicit "Scopes are not security — your application decides which scopes a caller may pass."
 
 ### Schema/implementation patterns (graph DBs)
+
 - **Named graphs** (FalkorDB SELECT GRAPH, GRAPH.LIST): cheap physical partitions — BUT relationships cannot span graphs (Neo4j), so split-by-graph only works for DISJOINT subgraphs. Tortoise's EP propagation must not cross subgraph boundaries within one graph.
 - **Property/label partitioning**: tenant-by-label in a shared graph + query-time filtering (Mem0 identity fields, Graphiti group_id, MemFabric scope allowlist).
 - **Node/edge ACLs**: Neo4j offers label/rel-type/property combos (DENY READ/TRAVERSE) but warns **property-based access control adds significant performance overhead**; ACL-relationship patterns have traversal bottlenecks at scale.
 - **Provenance-based access**: Zep projects source metadata onto facts (ABAC); Collaborative Memory paper gives every fragment immutable provenance (creator, agents, resources, timestamps) for retrospective permission checks — matches Tortoise's existing authoredBy/event-log design.
 
 ### The "axes" concept
+
 - **Orthogonal axes per subgraph is RARE.** Closest: Collaborative Memory paper (arXiv 2505.18279) — read AND write policies independently configurable at system/agent/user scope over two bipartite permission graphs (user↔agent, agent↔resource) — visibility axis + agent-access axis, time-varying. ABAC (Cerbos, arc42) allows multi-attribute rules incl. time windows.
 - **Retention axis**: no mainstream product does per-subgraph retention (Slack/GWorkspace are org-level). Would be a Tortoise differentiator; must be stored as metadata (Graphiti bi-temporal valid_at/invalid_at).
 
@@ -72,13 +77,16 @@ Notion (workspace → teamspace → page → row), Confluence (global → space 
 6. Rejects permission-by-topology (semantic edges never grant access) — consistent with uniform actor model + set-once fork.
 
 **Two refinements adopted (note the wording):**
+
 - **R1 (adopted into pin #3):** provenance on EVERY node; security scope on GOVERNING CONTAINERS (inheritance down) with node-level overrides only for exceptions. Not scope-on-every-node.
 - **R2 (recorded for W10/RBAC):** deny-wins + default-inheritance + explicit-grants is the leading candidate policy model; pin #5 left additive-vs-deny open — this is the recommendation to adopt at the RBAC phase.
 
 **One genuine tension (future phase, NOT an epic conflict):**
+
 - FalkorDB named graphs for COARSE isolation (company_graph / team_graph / agent_graph_001) vs property-based scoping in the one org graph. Named graphs sever cross-subgraph edges + EP propagation → one-graph-per-org stays correct for this epic; named graphs only if true physical isolation needed later (e.g. agent-private sandbox where cross-edges are semantically forbidden anyway). Record as a conscious W10 decision.
 
 **Conceptual payoff (answers "different subgraphs might have different axes"):**
+
 - `EffectiveGraph(agent) = CanonicalGraph ∩ ReadPolicy` — subgraph axes are LOGICAL VIEWS over one canonical graph, not physical partitions. Four orthogonal capability axes: READ / TRAVERSE / COMPUTE / WRITE. Same underlying fact, different agents compute over entitled subsets (incl. different confidences — "permission-aware epistemic computation"). Aligns with the epic's one-graph-per-org decision and the actor model.
 
 ## What this means for the epic (scope guard)

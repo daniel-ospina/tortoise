@@ -11,9 +11,11 @@
 **Architecture:** Two-layer prevention. (1) Deploy-time gate: before `flyctl deploy` in `deploy-hosted.yml`, compare repo migration version prefixes against the remote `supabase_migrations.schema_migrations` table. **Data source: Supabase Management API** `POST /v1/projects/ybetwichurajbfswfeqa/database/query` with the existing `SUPABASE_ACCESS_TOKEN` repo secret (curl + jq — verified working this session; no new secret needed, resolves the P0 from review; token-based auth is the same proven path supabase-deploy used since #883). Block on repo-ahead table/column/function/unique-index migrations; warn on index-only and remote-ahead. Fail-closed (exit 0/1/2, verify-cutover contract). (2) PR CI: secret-free unique-prefix check (the 0012×2/0015×2 class) + append-only content-immutability check (reject edits/renames/deletions of migration files in the base; allow same-PR-added edits). Migration apply stays dispatch-only (#771); the gate's remediation message is the coupling that forces apply-before-deploy.
 
 ### Pattern Research
+
 Skipped — plan touches zero third-party deps (curl + jq are preinstalled on ubuntu-latest runners; `jq` verified present). Supabase CLI source-verified during scoping: `migrateFilePattern = ^([0-9]+)_(.*)\.sql$` → version = prefix before first `_`; `schema_migrations.version` stores that same prefix (byte-identical keys on both sides); `--include-all` covers repo-ahead only. Management API query endpoint: `POST /v1/projects/{ref}/database/query` body `{"query": "..."}`, Bearer token auth, JSON response array (verified live this session — returns `[{"version": ...}]`).
 
 ### Integration Surface Map
+
 | Surface | Test Layer | Expected Verification |
 |---------|-----------|----------------------|
 | `.github/scripts/check-migration-drift` (new) | unit (pytest) | exit 0 clean / 1 drift / 2 error; real-corpus fixtures via `DRIFT_API_URL`/`DRIFT_TOKEN` env seam |
@@ -23,6 +25,7 @@ Skipped — plan touches zero third-party deps (curl + jq are preinstalled on ub
 | 9 stale 03→04 comments | static sweep | grep clean |
 
 ### Tech Stack
+
 Bash (script, `set -euo pipefail`), curl, jq, GitHub Actions, pytest (script tests).
 
 ---
@@ -32,6 +35,7 @@ Bash (script, `set -euo pipefail`), curl, jq, GitHub Actions, pytest (script tes
 **Intent:** Remove the P0 from review (SUPABASE_DB_URL does not exist) — the gate uses the EXISTING SUPABASE_ACCESS_TOKEN via the Management API, so no new secret is provisioned. This task verifies the prerequisites are real.
 **Acceptance:** `SUPABASE_ACCESS_TOKEN` present in repo secrets; Management API query endpoint returns `schema_migrations` rows for ybetwichurajbfswfeqa.
 **Files:**
+
 - None (verification only)
 
 **Step 1:** Confirm secret: `gh secret list | grep SUPABASE_ACCESS_TOKEN` → present (verified 2026-08-13).
@@ -49,6 +53,7 @@ Bash (script, `set -euo pipefail`), curl, jq, GitHub Actions, pytest (script tes
 **Intent:** The load-bearing drift detector — one fail-closed script both workflows call.
 **Acceptance:** Script exits 0 (clean/remote-ahead/index-only), 1 (repo-ahead blocking migration), 2 (missing token/API error/parse failure); tested against fixture corpora via `DRIFT_API_URL`/`DRIFT_TOKEN`/`DRIFT_CURL`/`DRIFT_MIGRATIONS_DIR` env seams (curl command + migrations dir overridable for hermetic tests).
 **Files:**
+
 - Create: `.github/scripts/check-migration-drift`
 - Create: `tests/test_migration_drift_gate.py`
 
@@ -73,6 +78,7 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Step 2: Run to verify they fail** — `python3 -m pytest tests/test_migration_drift_gate.py -v` → FAIL (script absent).
 
 **Step 3: Implement the script** (key logic):
+
 - Version-key extraction: `ls "$DRIFT_MIGRATIONS_DIR"/*.sql | sed -nE 's#.*/([0-9]+)_.*#\1#p'` (matches CLI `^([0-9]+)_` filter; the `-n` + `p` drops non-conforming files — fixes reviewer P2-1). Non-conforming `.sql` filenames are also reported (applied by NOBODY — reviewer P2-5).
 - Remote set: `curl -s -X POST "$DRIFT_API_URL/v1/projects/ybetwichurajbfswfeqa/database/query" -H "Authorization: Bearer $DRIFT_TOKEN" -H "Content-Type: application/json" -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version"}'` then **type-assert** `jq -e 'type == "array"'` before `jq -r '.[].version'` (error responses are objects — assert first for a clear diagnostic; reviewer P2-3).
 - **Fail-closed error handling** (reviewer P1-1): check curl exit code, HTTP status (jq `-e` / grep for error), and JSON validity; any failure → `echo "cannot determine migration state" >&2; exit 2`. Missing `DRIFT_TOKEN`/`SUPABASE_ACCESS_TOKEN` → exit 2. `set -euo pipefail`.
@@ -91,6 +97,7 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Intent:** Every app deploy to prod is gated on schema parity before code ships.
 **Acceptance:** Gate step runs after checkout, before the "Verify secrets exist" step (strictly before `flyctl deploy`), is FAIL-CLOSED (missing token → deploy fails), and blocks on repo-ahead. No `if:` guard on the gate step.
 **Files:**
+
 - Modify: `.github/workflows/deploy-hosted.yml`
 
 **Step 1:** Add `SUPABASE_ACCESS_TOKEN` to the deploy job's env + the existing "Verify secrets exist" step (the gate needs it; fail-closed if absent).
@@ -115,11 +122,13 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Intent:** Pure-migration PRs (no app code) still get drift visibility; apply stays dispatch-only.
 **Acceptance:** Push to `supabase/**` runs a WARN-only gate job in its OWN concurrency group with a remediation banner; the apply job is dispatch-gated at JOB level; the stale "Note when push runs no-op" step is removed (its function moves to the gate job banner).
 **Files:**
+
 - Modify: `.github/workflows/supabase-deploy.yml`
 
 **Step 1:** Add job-level `if: github.event_name == 'workflow_dispatch'` to the existing `deploy` job (reviewer P1-6/P2-1: job-level, since workflow-level concurrency is claimed per-run — a push run would still hold the shared group). Move the concurrency group to job level on `deploy`; give the new gate job its own group or none.
 
 **Step 2:** Add a new `check-drift` job — **push-only** (`if: github.event_name == 'push'`; on dispatch the apply job IS the operator's action, a parallel gate would warn while apply fixes — reviewer P2-5):
+
 - `bash .github/scripts/check-migration-drift` with `SUPABASE_ACCESS_TOKEN`.
 - On exit 1 → `::warning::Migrations pending — dispatch Deploy Supabase to apply` and exit 0 (WARN-only; the BLOCK lives at deploy-hosted where it means something; repo-ahead on a supabase/** push is the expected state). This replaces the removed "Note when push runs no-op" step.
 - On exit 2 → **fail red with the error** (missing token/config is a real problem, not a warning — reviewer P1-7).
@@ -139,16 +148,19 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Intent:** Catch the duplicate-prefix and content-edit classes at review time, secret-free. The check logic lives in a SHARED script so the hermetic test exercises the shipped logic, not a Python copy (reviewer P1-2).
 **Acceptance:** PR CI rejects duplicate prefixes, rejects edits/renames/deletions of base-branch migration files, allows same-PR-added edits. Hermetically tested via the shared script against a fixture git repo (observable in THIS PR, not only on a future one).
 **Files:**
+
 - Create: `.github/scripts/check-migration-append-only` (prefix mode + diff mode; seams `DRIFT_REPO`/`DRIFT_BASE_SHA`)
 - Modify: `.github/workflows/ci.yml`
 - Create: `tests/test_migration_append_only.py`
 
 **Step 1:** Implement `.github/scripts/check-migration-append-only` (single script, two modes via arg):
+
 - `prefix`: `ls "$DRIFT_REPO/supabase/migrations"/*.sql | sed -nE 's#.*/([0-9]+)_.*#\1#p' | sort | uniq -d` → non-empty = exit 1. Also fail on any `.sql` filename not matching `^[0-9]+_.*\.sql$` (CLI-non-conforming = applied by nobody — reviewer P2-5).
 - `diff`: `git -C "$DRIFT_REPO" diff --find-renames=20% "$DRIFT_BASE_SHA"...HEAD --name-status -- supabase/migrations/` — status `M`/`R`/`D` on a path present in the base tree → exit 1 ("migrations are append-only — add a new timestamp file"); status `A` (genuinely new path) → allowed. Deletions (`D`) explicitly rejected (reviewer P1-3); rename threshold 20% so content-drift renames aren't emitted as D+A.
 - Historical violations would be rejected (e9711813 edited applied 0015, 98e466b3 ported a DROP into applied 20260813000002) — correct.
 
 **Step 2:** ci.yml jobs (named **`migration-unique-prefix`** and **`migration-append-only`** — reviewer P2-4) call the shared script:
+
 - Both jobs: checkout with **`fetch-depth: 0`** (reviewer P1-4/integration P1-1: default fetch-depth:1 means the base SHA isn't available; the existing docs job's `|| true` swallow is the proof).
 - `migration-unique-prefix`: `bash .github/scripts/check-migration-append-only prefix`
 - `migration-append-only`: `bash .github/scripts/check-migration-append-only diff` with `DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}`
@@ -166,6 +178,7 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Intent:** Remove stale migration-ID references that would miswire the gate's remediation guidance.
 **Acceptance:** Grep for "20260813000003" in live code/docs returns only historical plan docs (correction-note only).
 **Files:**
+
 - Modify: `tortoise/supabase_control.py:1099,1125,1139`; `tortoise/hosted_api.py:602,5198`; `tortoise/audit_events.py:101`; `tests/test_supabase_control.py:1341`; `tests/fake_control_plane.py:96`; `tests/test_claim_endpoints.py:251`
 - Modify: `supabase/README.md` (deploy section — gate uses Management API + ACCESS_TOKEN; correct stale DB_URL claims; flip-sequence now apply-before-deploy)
 
@@ -186,6 +199,7 @@ def test_unparseable_migration_blocks():  # fixture: unclassifiable statement �
 **Intent:** Prove the gate would have blocked today's incident; confirm prod is current.
 **Acceptance:** Incident fixture test passes; remote schema_migrations shows 03/04 applied; full test suite green.
 **Files:**
+
 - Test: `tests/test_migration_drift_gate.py` (incident fixture)
 
 **Step 1:** Incident fixture: repo has 20260813000004, remote set lacks it → script exits 1 naming 04 (replays the 14:41→14:58 window).

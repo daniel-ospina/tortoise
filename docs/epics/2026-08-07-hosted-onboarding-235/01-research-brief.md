@@ -10,9 +10,11 @@
 ## 1. Strategy Context
 
 ### Market Position
+
 Tortoise sits at the intersection of agent memory and epistemic graphs. The hosted platform (api.premiselabs.co) is live as of #236 (2026-08-07), exposing 58 MCP tools over Streamable HTTP with tenant-scoped Bearer `tt_` keys. The self-hosted OSS alternative remains available for developers who want local FalkorDB.
 
 **Competitive landscape (agent memory):**
+
 - **Agent Memory (agent-memory.dev):** Persistent memory for coding agents. Setup flow: install → start server → connect agent → verify status. No epistemic graph, no belief propagation. Simpler but thinner.
 - **Mem0:** Embedding-based memory. Different paradigm (no graph, no EP).
 - **Claude Code native memory:** Project-level .claude/ memory files. File-based, no graph, no cross-session belief tracking.
@@ -20,9 +22,11 @@ Tortoise sits at the intersection of agent memory and epistemic graphs. The host
 **Key insight:** No competitor offers an epistemic graph with belief propagation. Tortoise's differentiator is structure, not just recall. But this means onboarding has to explain value, not just connection.
 
 ### Business Model
+
 No pricing or paid tier exists yet. Revenue path: hosted subscriptions (team-managed memory) → enterprise. The hosted platform IS the monetization path; self-hosted is free/OSS. Onboarding is the conversion lever — users who don't connect never see value, never convert.
 
 ### User Profile (inferred)
+
 - Technical users who configure MCP servers in Claude Code, Codex, or Cursor
 - Already comfortable with terminal, config files, API keys
 - Likely evaluating multiple agent memory solutions
@@ -35,15 +39,19 @@ No pricing or paid tier exists yet. Revenue path: hosted subscriptions (team-man
 ### MCP Onboarding Patterns (industry)
 
 **Claude Code standard flow:**
+
 ```
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp
 ```
+
 This is the canonical "copy-paste" onboarding for MCP. The user runs one command, the agent discovers tools. No guided flow exists beyond this.
 
 **Codex flow:**
+
 ```
 codex mcp add tortoise https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY
 ```
+
 Same pattern — one command, agent discovers tools.
 
 **Cursor flow:** Manual `.mcp.json` or `cursor mcp add` equivalent.
@@ -138,6 +146,7 @@ tortoise onboard:
 ```
 
 Key properties:
+
 - **Non-interactive:** `--yes` flag skips prompts, idempotent
 - **5 banners:** Clean progress display
 - **Auto-detection:** Git repo, .md files, Docker vs embedded
@@ -160,16 +169,19 @@ Key properties:
 The agent needs to run the onboarding workflow. Options:
 
 **Option A: MCP tool (`tortoise_onboard_hosted`)**
+
 - One tool call triggers the entire yes/no flow
 - Pros: Simple, one surface, works across harnesses
 - Cons: MCP tools can't ask questions interactively (they return results, not prompt users). The agent would need to orchestrate the Q&A using the tool's output.
 
 **Option B: Agent skill/prompt**
+
 - A CLAUDE.md block or agent prompt that the agent follows
 - Pros: Natural agent interaction, no new tool needed
 - Cons: Fragile — agent may skip steps, hallucinate, or deviate
 
 **Option C: Hybrid (MCP tool + agent prompt)**
+
 - MCP tool does the heavy lifting (GitHub connect, indexing, demo creation)
 - Agent prompt provides the conversational flow (asking yes/no, interpreting answers)
 - Pros: Best of both — reliable backend + natural UX

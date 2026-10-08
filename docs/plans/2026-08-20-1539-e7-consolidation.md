@@ -62,12 +62,14 @@ Constants (module-level, tunable via the run protocol): `REVISES_MIN_OVERLAP = 0
 ### D2 — Entity identity = resolved-entity mention OR `aboutObject` link; attribute identity = `search_keys` OR value-signature
 
 The "same entity+attribute" gate needs data S3 does not return today. Two additive inputs:
+
 - **Entity:** the prior point's `aboutObject` Object names (production graph) **or** the resolved entity name appearing in the prior's content (eval graph, which today writes no `aboutObject` edges — see D7). Either suffices.
 - **Attribute:** `search_keys` on the prior (E3) overlap with the candidate's `search_keys`; for Tier-A state-value points (E2), the master-list vocabulary anchors the attribute and the value-signature (`_value_signature`: normalized numeric/time tokens — "6pm"/"six pm", "27:12" → canonical form) decides NOOP-vs-UPDATE: **equal signature → NOOP, differing signature → UPDATE (later date)**.
 
 ### D3 — Entity resolution: two-phase, LLM-bounded, degrade-to-ADD
 
 New `resolve_entities(entity_refs, search, model=None) -> ResolutionMap` in `extractor_v2.py`:
+
 - **Phase 1 (deterministic):** the existing `_find_existing_entity` (exact → bare → ambiguous) for every embed entity.
 - **Phase 2 (LLM fallback):** fires ONLY when `model is not None` AND `search` has entity candidates AND at least one embed entity is unmatched/ambiguous. One `_complete` call (existing 600s wall-clock-bounded thread pattern, temperature 0.0 via the `MODELS` seam), JSON contract `{"resolutions":[{"name","resolves_to"}]}` where `resolves_to` is an existing id or name. Every resolution is validated against the candidate list (id or normalized-name match) — invalid/ambiguous → dropped with a warning, never guessed.
 - **Failure/timeout → degrade:** `warnings.append(...)`, empty phase-2 map, pipeline proceeds with phase-1 results (i.e., unresolved entities keep their names → ADD semantics). **Never blocks capture** (P1 invariant).
@@ -85,6 +87,7 @@ The embed list gains an **additive `retractions` field** in the S2/S4 `OUTPUT_CO
 ### D6 — Verify-gate fix: batch `_point_exists` (surface 12 N+1)
 
 New `_existing_point_ids(proj, ids) -> set[str]` in `tools/longmem_eval/ingest.py` — one `MATCH (n:Point) WHERE n.id IN $ids RETURN n.id` (mirrors `point_props_for_hits`). Refactor all N+1 loops:
+
 - `ingest_haystack` (deterministic leg): per-session, one call for the session's turn ids + raw id.
 - `ingest_haystack_v2`: per-session raw id; `_write_payload` computes one set over payload point ids + operator src/dst ids (Point-node semantics preserved exactly — the current per-call check matches `:Point` only, so event-endpoint operators keep today's behavior).
 Re-run idempotency semantics unchanged (the batch is just the existence probe). A query-count spy test pins ≤1 existence query per session.
@@ -109,6 +112,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** The decision core of E7 — one function that maps (candidate point + S3 priors + entity/attribute context) to ADD/UPDATE/NOOP/DELETE, replacing the 2-way `_find_point_match`.
 **Acceptance:** `classify_consolidation` returns a `DecisionRecord` with `decision` ∈ {ADD, UPDATE, NOOP, DELETE}, `prior_id`, `overlap`, `reason`, `evidence`. Exact-content → NOOP(identical) with the prior id; length-guarded overlap ≥ 0.6 + value-differs + later-date → UPDATE; Tier-A equal value-signature OR band [0.45, 0.6) with entity+attribute gate → NOOP(paraphrase); otherwise ADD. Ambiguous → NOOP only when overlap ≥ NOOP band, else ADD — never UPDATE. Short-point guard (a 5-token point sharing 3 tokens with a 50-token point is neither REVISES nor NOOP) inherited from E5's `_token_overlap` length guard (consume it; if E5 has not landed, add the guard here with the same constant and a TODO cross-ref — see Open Questions Q1).
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (replace `_find_point_match` at ~:777; add `classify_consolidation`, `_value_signature`, `DecisionRecord`, constants `REVISES_MIN_OVERLAP`/`NOOP_MIN_OVERLAP`)
 - Test: `tests/test_consolidation_4way.py` (new)
 
@@ -123,6 +127,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** `execute_embed` uses the 4-way decision; DELETE-soft gains its explicit trigger; NOOP/DELETE records are emitted at the result level.
 **Acceptance:** For each embed point, ADD/UPDATE paths produce payload points exactly as today (reason NEW/REVISES); NOOP produces **no payload point** and appends `{"point_id", "session_ref", "overlap", "evidence", "reason": "identical"|"paraphrase"}` to `result["noops"]`; the embed list's additive `retractions` resolve via the never-guess discipline to `result["deletions"] = [{point_id, evidence}]` (unresolvable/ambiguous → warning, fail-open). `stats` gains `noops`/`deletions` counts. Existing tests `test_exact_point_match_dedups` (tests/test_extractor_v2.py:333) and `test_point_supersession_revises` (:321) are **deliberately updated**: exact-match now asserts the NOOP record (id preserved, no payload point) — the E2E-11 MECE boundary (identical-value re-assertion → NOOP, per E5's MECE fix); REVISES stays a payload point.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (execute_embed points loop ~:1086–1125 — the loop body that calls `_find_point_match`; payload assembly ~:1240; `__all__`), `tests/test_extractor_v2.py` (2 assertions), `tests/test_consolidation_4way.py`
 - Test: extend `tests/test_consolidation_4way.py` with execute_embed-level cases
 
@@ -137,6 +142,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** Link "Joe"/"Joseph" at write time — the entity alignment the 4-way needs to match facts across sessions.
 **Acceptance:** `resolve_entities(entity_refs, search, model=None) -> ResolutionMap` (map: name → `{"id", "name"}`): phase 1 = `_find_existing_entity` on every ref; phase 2 = ONE `_complete` call (temperature 0.0) only when `model` set + real-candidate search + unmatched/ambiguous refs remain, with a strict JSON contract; every resolution validated against candidates; model failure/timeout → warning + phase-1-only map (degrade to ADD), never raises. `extract_session_v2` runs it between S4 and S5 and rewrites the complete embed list's entity names + `about_entities` refs to canonical names. The resolution evidence lands in `link_before_create` notes + a `resolution` list in the result.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (new `resolve_entities` + `_resolution_prompt`, `extract_session_v2` orchestration)
 - Test: `tests/test_consolidation_4way.py` (resolution section)
 
@@ -151,6 +157,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** Give the classifier and resolver their inputs — prior points must carry entity links and dates.
 **Acceptance:** `search_graph` merges, per candidate point id, `about_entities` (Object names via aboutObject) + `when`/`created_at` from **one batched** Cypher (no per-point queries). Row shape gains `about_entities: [...]`, `when`/`created_at`. Degraded-mode unchanged. `_index_search` preserves the new fields.
 **Files:**
+
 - Modify: `tortoise/extractor_v2.py` (`search_graph`, `_fts_rows`, `_index_search`)
 - Test: `tests/test_extractor_v2.py` (search-section) + `tests/test_consolidation_4way.py`
 
@@ -165,6 +172,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** The consolidated decisions become graph state in the eval graph, without double-counting or resurrect.
 **Acceptance:** `_write_payload` (ingest_v2) applies `result["noops"]` — for each record, one read-modify-write stamping `duplicates = set-merge(existing ∪ [session_ref])` on the canonical point (idempotent: re-run appends nothing) + `(s_node)-[:CONTAINS]->(point)` link + `has_answer` OR-in when the folded session had evidence turns. `ingest_haystack_v2` applies `result["deletions"]` — `sdk.retract_point(pid)` wrapped best-effort (ValueError → warning, run continues). Payload points now write `aboutObject` edges to their entities (canonical predicate; makes the classifier's entity gate real in the eval). Stats gain `noops_applied`/`deletions_applied`.
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest_v2.py` (`_write_payload`, `ingest_haystack_v2`)
 - Test: `tests/test_ingest_v2_consolidation.py` (new)
 
@@ -179,6 +187,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** Kill the per-turn/per-point existence probes the 500-Q run would multiply (surface 12 bug-pattern flag).
 **Acceptance:** `_existing_point_ids(proj, ids) -> set[str]` in `ingest.py` (one `WHERE n.id IN $ids RETURN n.id` query). All call sites refactored: `ingest_haystack` (per-session turn + raw ids), `ingest_haystack_v2` (raw + `_write_payload` point/operator ids — operator checks preserve today's Point-only semantics). A query-count spy asserts ≤1 existence query per session. Idempotency unchanged (re-run no-op).
 **Files:**
+
 - Modify: `tools/longmem_eval/ingest.py`, `tools/longmem_eval/ingest_v2.py`
 - Test: `tests/test_ingest_v2_consolidation.py` (+ the existing ingest idempotency tests must stay green)
 
@@ -193,6 +202,7 @@ NOOP/DELETE-soft records live in `result["noops"]` / `result["deletions"]` (extr
 **Intent:** Prove the epic's E2E-11 end-to-end on the eval graph — the issue's acceptance surface (S17).
 **Acceptance:** A 3-session fixture (duplicate paraphrase / contradiction update / withdrawal retraction) ingested via `ingest_haystack_v2` produces: NOOP link (one point, `duplicates` stamped, both sessions linked, aggregation count 1); UPDATE (supersession chain, newer value live, E2E-6 assertions hold); DELETE-soft (retracted, no resurrect); and the owned negatives — ambiguous entity → NOOP never UPDATE, identical-value no-op → count unchanged, self-supersede → guarded. Real-mode smoke (docker FalkorDB, `TORTOISE_DB_URI` set) runs the same fixture and asserts graph state parity.
 **Files:**
+
 - Create: `tests/test_ingest_v2_consolidation.py` (E2E-11 section)
 - Modify: (none beyond Tasks 1–6)
 
