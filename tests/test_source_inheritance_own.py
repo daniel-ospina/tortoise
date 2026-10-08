@@ -23,6 +23,7 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.source_credibility import TIER_PRIORS, pc_base, register_source_kind_default
 
 FRESH = "2024-01-01T00:00:00+00:00"
+OLD = "2019-01-01T00:00:00+00:00"  # for merge-order tests: strictly older
 
 
 @contextmanager
@@ -831,7 +832,10 @@ URL_ONE_DOC = "https://fanin.example/one-document"
 URL_OTHER_DOC = "https://other.example/other-document"
 
 
-def _link_duplicate_source(sdk, pid: str, raw_url: str, tier: str = "T4") -> None:
+def _link_duplicate_source(
+    sdk, pid: str, raw_url: str, tier: str = "T4",
+    sdate: str = FRESH, ingested: str | None = None,
+) -> None:
     """Mint a SECOND `:Source` node for ONE document, and link `pid` to it.
 
     This is the S0b duplicate-node class the issue names: the write path applies
@@ -849,8 +853,9 @@ def _link_duplicate_source(sdk, pid: str, raw_url: str, tier: str = "T4") -> Non
     ).result_set[0][0]
     g.query(
         "MERGE (s:Source {url:$url}) SET s.canonicalUrl=$canon, "
-        "s.credibilityTier=$t, s.sourceDate=$sd, s.ingestedAt=$sd",
-        params={"url": raw_url, "canon": canon, "t": tier, "sd": FRESH},
+        "s.credibilityTier=$t, s.sourceDate=$sd, s.ingestedAt=$si",
+        params={"url": raw_url, "canon": canon, "t": tier, "sd": sdate,
+                "si": ingested if ingested is not None else sdate},
     )
     g.query(
         "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
@@ -859,7 +864,8 @@ def _link_duplicate_source(sdk, pid: str, raw_url: str, tier: str = "T4") -> Non
     )
 
 
-def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | None = None):
+def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | None = None,
+                   decay: float = 1.0):
     """A point whose ONLY evidence is `urls` (plus an optional S0b duplicate of
     the first, carrying the same canonicalUrl), all at `tier`, fresh date.
 
@@ -877,7 +883,7 @@ def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | Non
         )
     if extra_duplicate is not None:
         _link_duplicate_source(sdk, p["id"], extra_duplicate, tier)
-    sdk._apply_source_inheritance(recency_decay=1.0)
+    sdk._apply_source_inheritance(recency_decay=decay)
     alpha = inherited_alpha(sdk, p["id"])
     try:  # noqa: SIM105
         sdk.close()
@@ -932,6 +938,40 @@ class TestSourceIdentityCollapse:
             "two genuinely different documents must still corroborate — the "
             f"identity guard is not a cap on evidence (got {alpha_two} for two "
             f"documents vs {alpha_one} for one)"
+        )
+
+    def test_collapse_keeps_the_strongest_tier_and_clock(self):
+        """The merge must keep the STRONGER tier and the NEWER effective clock.
+
+        The duplicate is WORSE than the original on both axes, so a merge that
+        silently kept the first-seen row would be measurably weaker. Asserting
+        equality against an independent one-source reference (rather than a bare
+        inequality) is what makes this catch a merge that picks the wrong row.
+        """
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
+        try:
+            p = sdk.create_point("statement", "merged", extractedFrom=URL_ONE_DOC)
+            sdk._get_proj().g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
+                "s.sourceDate=$old, s.ingestedAt=$old",
+                params={"url": URL_ONE_DOC, "old": OLD},
+            )
+            _link_duplicate_source(
+                sdk, p["id"], "https://mirror.example/one-document",
+                tier="T1", sdate=FRESH,
+            )
+            sdk._apply_source_inheritance(recency_decay=0.95)
+            alpha = inherited_alpha(sdk, p["id"])
+        finally:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+        alpha_ref = _one_point_sdk([URL_OTHER_DOC], tier="T1", decay=0.95)
+        assert alpha == pytest.approx(alpha_ref), (
+            "both :Source nodes of one document collapse to the STRONGEST "
+            "member (T1, fresh) — a merge that kept the T4/old original would "
+            f"be weaker (got {alpha}, strongest-member prior {alpha_ref})"
         )
 
     def test_identity_less_sources_stay_distinct(self):

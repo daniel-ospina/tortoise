@@ -15830,19 +15830,30 @@ class TortoiseSDK:
                     "ingestedAt": ingested, "factor": fac,
                 })
                 continue
-            # One document seen twice: keep the STRONGER tier and the MOST RECENT
-            # stamps, so collapsing can never weaken the evidence it merges. The
-            # dates matter because the tier's `decay_t` keys on its MOST-RECENT
-            # source — keeping an older one would lower the decay.
+            # One document seen twice: keep the STRONGER tier, the BEST clock and
+            # the STRONGEST assessment, so collapsing can never weaken the
+            # evidence it merges. The clock matters because `aggregate_prior`
+            # reads each group's `decay_t` off
+            # `_parse_timestamp(sourceDate) or _parse_timestamp(ingestedAt)` —
+            # i.e. `sourceDate` SHADOWS `ingestedAt`. Maxing the two fields
+            # INDEPENDENTLY would therefore lose the newest clock whenever the
+            # survivor carries an older `sourceDate` and a member has only a
+            # newer `ingestedAt`: the collapsed row would decay as of the older
+            # date, LOWER than the most recent member — the very weakening this
+            # merge exists to prevent. So compare the EFFECTIVE clock and copy
+            # BOTH fields from the winner, so the winner's clock is the one
+            # `aggregate_prior` actually reads.
             kept = point_sources[pid][slot]
             if pc_base(tier) > pc_base(kept["tier"]):
                 kept["tier"] = tier
             if fac > kept["factor"]:
                 kept["factor"] = fac  # strongest assessment wins, not first-seen
-            for field, cand_raw in (("sourceDate", sdate), ("ingestedAt", ingested)):
-                cand, cur = _parse_timestamp(cand_raw), _parse_timestamp(kept[field])
-                if cand is not None and (cur is None or cand > cur):
-                    kept[field] = cand_raw
+            cand_eff = _parse_timestamp(sdate) or _parse_timestamp(ingested)
+            kept_eff = _parse_timestamp(kept["sourceDate"]) or _parse_timestamp(
+                kept["ingestedAt"]
+            )
+            if cand_eff is not None and (kept_eff is None or cand_eff > kept_eff):
+                kept["sourceDate"], kept["ingestedAt"] = sdate, ingested
 
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
