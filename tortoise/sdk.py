@@ -2660,6 +2660,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # MCP set alone left the OPEN document passthrough writable
     # (`_upsert_document` passes no `allow_keys`, #228), and it was measured:
     # `create_document(__runId="DOC_FORGED")` persisted the forged token.
+    # #5196 round 5/6: on this route `_merge_run_id` does NOT reproduce the
+    # `__runId` write — only the SourceCreated projection branch pops it into the
+    # run token; DocumentCreated goes to `_upsert_document`, which would persist
+    # it as a LITERAL undeclared node property (measured). So the guard here stops
+    # an undeclared server-ish key landing on a `:Source`, while the `__runId`
+    # write is only reachable through `_upsert_source` (i.e. `create_source`).
     if "__runId" in props or "_merge_run_id" in props:
         raise ValueError(
             "'__runId'/'_merge_run_id' is a server-managed field and cannot be "

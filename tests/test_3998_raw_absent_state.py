@@ -1162,6 +1162,12 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     # items are splatted into `create_document(**item)`.
     with pytest.raises(ValueError, match="server-managed"):
         s.create_document("doc-forge-5196", "note", __runId="DOC_FORGED")
+    # The same guard on the document route covers the PARAMETER spelling too —
+    # there it does not write `__runId`, but `_upsert_document` would persist it
+    # as a literal undeclared node property (round 6, P2).
+    with pytest.raises(ValueError, match="server-managed"):
+        s.create_document("doc-forge-5196b", "note",
+                          props={"_merge_run_id": "DOC_MID"})
     from tortoise.exceptions import BundleValidationError
 
     with pytest.raises(BundleValidationError) as exc:
@@ -1186,8 +1192,8 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
                                "sourceKind": "document"}],
                   "entities": [{"type": "document", "name": "ie-nested-5196",
                                 "documentKind": "note",
-                                "props": {"__runId": "PARTIAL_NESTED"}}]})
-    assert any("__runId" in v["message"] for v in exc2.value.violations), (
+                                "props": {"_merge_run_id": "PARTIAL_NESTED"}}]})
+    assert any("_merge_run_id" in v["message"] for v in exc2.value.violations), (
         exc2.value.violations)
     committed = s._get_proj().g.query(
         "MATCH (n:Source {url:$u}) RETURN count(n)",
@@ -1205,6 +1211,28 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     # The contrast: the route still accepts a DECLARED property.
     s.update_entity(RAW_URL, format="transcript")
     assert _source_props(s)["format"] == "transcript"
+
+
+def test_the_mcp_boundary_refuses_both_merge_token_spellings():
+    """#5196 round 6, P2: the MCP `_SERVER_MANAGED_PROPS` entry is LOAD-BEARING
+    and was untested. The MCP tools splat caller `props` into
+    `create_source(**props)`, where `_merge_run_id` BINDS the parameter instead of
+    landing in `**props` — so the SDK guard cannot see it and this boundary is the
+    only guard on that route. Measured: removing the entry broke no test and let
+    the call through.
+
+    (1) FAILS if either spelling leaves the set, or if the boundary stops
+        rejecting it.
+    (2) REACHABLE: the assertion reads the real set and calls the real boundary.
+    """
+    from tortoise import mcp_server
+
+    for key in ("__runId", "_merge_run_id"):
+        assert key in mcp_server._SERVER_MANAGED_PROPS, (
+            f"{key} left the MCP server-managed boundary — the splat route binds "
+            f"the keyword and the SDK guard cannot see it")
+        assert mcp_server._reject_server_managed_props({key: "X"}), (
+            f"{key} was not rejected at the MCP boundary")
 
 
 def test_a_same_state_recheck_does_not_move_the_stamp_live(sdk):
