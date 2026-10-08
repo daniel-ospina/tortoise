@@ -536,9 +536,16 @@ _DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
 #: patched a fifth time.
 _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
     ".github/": (
-        "a `run:` line executes on the RUNNER's 3.12 (every workflow pins it via "
-        "setup-python), where the bare form is correct; the human-text filter "
-        "this replaced was measured at 0 live offenders"
+        "a `run:` line executes on the RUNNER's interpreter, and every workflow "
+        "that INVOKES A GUARDED TOOL pins 3.12 via setup-python (measured: all "
+        "11 that do). Bare `python3` on the unpinned runners elsewhere in "
+        "`.github/` does NOT execute a guarded tool, so no conversion is due. "
+        "This also drops `.github/ISSUE_TEMPLATE/*.yml` (human prose; "
+        "`bug_report.yml:97` was fixed to the guarded form in review round 3) "
+        "from the guard — stated explicitly so the gap is a DECISION, not an "
+        "oversight: a future revert there is accepted silently, and that is the "
+        "price of not carrying a workflow-text filter whose fragility cost "
+        "four review rounds."
     ),
     "config/": (
         "its 3 occurrences are DESCRIPTION; `ci-surfaces.yml:1364` quotes the "
