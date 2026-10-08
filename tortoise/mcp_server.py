@@ -1416,17 +1416,18 @@ def tortoise_create_point(kind: str, content: str,
     # #3926: gate on the typed failure result, never on key presence — a user
     # prop named "error" must not suppress the onboarding observation.
     if not isinstance(result, _SafeError):
-        # #3784: only a decision-shaped write observes the decision step —
-        # `decision` is the pointKind the documented EP decide protocol
-        # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
-        # creates. Read the PERSISTED pointKind when the write returned one
-        # (the server must observe what was recorded, not what was asked
-        # for); any other kind observes no decision.
+        # #3784/#3916: only a decision-shaped write observes the decision
+        # step. Read the PERSISTED pointKind when the write returned one (the
+        # server must observe what was recorded, not what was asked for), then
+        # match the set BOTH documented decide protocols file — `decision` or
+        # `option` (see DECISION_SHAPED_POINT_KINDS). Any other kind observes
+        # no decision: `criterion`/`evidence` are reasons for the choice, not
+        # the choice, and a plain `statement` is the setup prompt (#3784).
         _recorded_kind = (result.get("pointKind") if isinstance(result, dict)
                           else kind)
         _maybe_onboarding_auto_complete(
             decision_observed=(str(_recorded_kind or kind).strip().lower()
-                               == "decision"))
+                               in DECISION_SHAPED_POINT_KINDS))
     return result
 
 
@@ -3522,6 +3523,25 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
 _onboarding_state_cache: dict[str, tuple[float, bool]] = {}
 _ONBOARDING_STATE_TTL = 60.0
 
+# #3916: the two documented decide protocols file the SAME node (the option
+# set) under two different labels, so the `decide-completed` observation must
+# accept BOTH or it reports "not decided" for a decision that WAS recorded:
+#   * `tortoise/onboarding/SKILL.md` §5 — the generic MCP-tool protocol — files
+#     one `decision` point per option; that is also the kind
+#     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
+#     and the label the #3784 observation originally keyed on;
+#   * the shipped `tortoise-decide` skill (and `graph-scripts/decide.py`, the
+#     self-host variant) files each option as `option` — a kind the SDK
+#     registers (`tortoise/sdk.py`: `register_kind("option")` for #133) and
+#     lists in `DECIDE_PART_KINDS`, and whose anti-pattern list forbids storing
+#     the decision ITSELF as a Point (the decision is the decision-as-Event
+#     timeline), so that protocol writes no `decision` point at all.
+# Both file the option set at the SAME refinement step, so neither label is a
+# stronger observation than the other; observing only one is an artifact of the
+# label, not of the evidence. `criterion`/`evidence` are deliberately NOT in the
+# set: both protocols file them as REASONS, and a bare reason is no decision.
+DECISION_SHAPED_POINT_KINDS = frozenset({"decision", "option"})
+
 #: In-flight gate resolutions, keyed by org (#2924 review). The gate now AWAITS
 #: between the cache lookup and the fill, so without this N concurrent
 #: ``tools/list`` requests for ONE org all miss and each submits its own
@@ -3801,13 +3821,16 @@ def _maybe_onboarding_auto_complete(*,
       server, and the two triggering tools file points (label: "Seed your
       first memory").
     - ``decide-completed`` (label: "Make your first decision"): filed ONLY
-      when the caller observed a decision — ``tortoise_file_decision``
-      succeeded, or ``tortoise_create_point(kind="decision")`` (the
-      documented EP decide protocol, ``tortoise/onboarding/SKILL.md`` §5).
-      A plain point write observes no decision and must not claim one.
-      (``skills/tortoise-decide/SKILL.md``'s option/criterion/evidence flow
-      is a DELIBERATE false negative — claiming a decision at the refinement
-      step would be the same unobserved fact, inverted. See #3916.)
+      when the caller observed a decision-shaped write —
+      ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
+      PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
+      or ``option``). BOTH documented decide protocols are observed: the
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §5) files
+      one ``decision`` point per option, and the ``tortoise-decide`` skill
+      files each option as ``option`` — the same node under two labels
+      (#3916). A plain point write (e.g. the setup prompt's ``statement``)
+      observes no decision and must not claim one; ``criterion``/``evidence``
+      alone observe none either (a reason is not a decision).
     - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
       from a write. Its presentation is observed by the agent catalog
       checkpoint (``hosted_api._CHECKPOINT_STEPS``), or asserted by an
