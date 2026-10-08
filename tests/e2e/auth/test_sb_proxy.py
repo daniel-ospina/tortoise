@@ -241,15 +241,17 @@ def _set_admin(value: bool) -> None:
     _control("/__mock/admin", {"value": value})
 
 
-def _set_upstream_fault(value: bool, target: str = "data") -> None:
-    """Inject (or clear) an upstream 5xx.
+def _set_upstream_fault(value: bool, target: str = "data", status: int = 500) -> None:
+    """Inject (or clear) an upstream fault.
 
     `target` selects the surface: `"data"` (the proxied call, #4178's default),
     `"admin"` (the `is_admin` RPC the gate consults) or `"all"`. The two are
     independently faultable so each of the Token Handler's 503 branches can be
-    proven on its own rather than through the other's (#3559 review).
+    proven on its own rather than through the other's (#3559 review). `status`
+    selects the injected status (default 500) so the 5xx and the non-5xx
+    classification branches can each be exercised.
     """
-    _control("/__mock/upstream-fault", {"value": value, "target": target})
+    _control("/__mock/upstream-fault", {"value": value, "target": target, "status": status})
 
 
 def _seen(*kinds: str) -> list[dict]:
@@ -425,15 +427,27 @@ def test_upstream_5xx_is_503_not_401(stack):
     assert payload["error"] != "not_signed_in", body
 
 
-def test_admin_check_fault_is_503_not_403(stack):
+@pytest.mark.parametrize(
+    "fault_status",
+    [500, 404],
+    ids=["5xx", "non-5xx"],
+)
+def test_admin_check_fault_is_503_not_403(stack, fault_status):
     """A fault on the ADMIN CHECK is 503 (retry), never 403 (not an admin).
 
-    This is the branch #3559 fixed: `checkAdmin` treats only a 401/403 from
-    `is_admin()` as an access decision; every other non-ok status — a 5xx, a
-    missing/renamed RPC, a rotated key — is OUR fault and must surface as
-    unavailable. Mapping it to 403 reads as "you are signed in but lack access",
-    which hides a store outage behind an access verdict and costs an hour to
-    debug (#3485).
+    This is the branch #3559 fixed. The pre-fix `checkAdmin` already mapped a
+    5xx/429 to `unavailable`; what #3559 broadened is the OTHER non-ok class —
+    everything that is neither ok, nor 5xx/429, nor an access decision (401/403)
+    is now `unavailable` too. That is the missing/renamed RPC (404), the rotated
+    key, the PostgREST fault: a store misconfiguration that the pre-fix handler
+    collapsed to `not_admin`, so it read as "you are signed in but lack access"
+    and hid a store fault behind an access verdict, costing an hour to debug
+    (#3485).
+
+    BOTH status classes are asserted on purpose, and the non-5xx one is the
+    discriminating case: the 5xx case passes against the pre-fix handler and so
+    guards nothing (it would have passed before #3559 shipped), while the
+    non-5xx case fails without the fix. Dropping either would lose coverage.
 
     This is NOT the data-upstream case above: the fault is injected on the
     `is_admin` RPC itself, so the gate refuses the request BEFORE the proxied
@@ -441,7 +455,7 @@ def test_admin_check_fault_is_503_not_403(stack):
     duplicate — the data-branch marker is asserted absent below.
     """
     _reset()
-    _set_upstream_fault(True, target="admin")
+    _set_upstream_fault(True, target="admin", status=fault_status)
     try:
         status, body, _ = _req(
             "/api/sb/rest/v1/blog_posts?select=*", cookie=f"__Host-session={HANDLE}"
@@ -450,8 +464,8 @@ def test_admin_check_fault_is_503_not_403(stack):
         _set_upstream_fault(False)
 
     assert status == 503, (
-        f"a fault on the admin check must be 503 (try again), never 403 "
-        f"(signed in but not an admin) — got {status} {body}"
+        f"a {fault_status} fault on the admin check must be 503 (try again), never "
+        f"403 (signed in but not an admin) — got {status} {body}"
     )
     assert status != 403, (
         f"a store fault must never read as an access decision — got {status} {body}"
