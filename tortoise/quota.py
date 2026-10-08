@@ -200,6 +200,28 @@ QUOTA_REFUSAL_CODE = "quota_exceeded"
 LIMIT_CONTACT = " Need more? Contact support@premiselabs.co."
 
 
+def with_limit_contact(message: str) -> str:
+    """Terminate ``message`` as a sentence and append the #5425 contact path.
+
+    The seam exists because appending a fragment by hand gets the PUNCTUATION
+    wrong: a message that does not end a sentence renders as
+    ``"...upgrade to invite more Need more? Contact support@premiselabs.co."``
+    — malformed customer-facing prose that the source guard cannot see, because
+    the guard can only check that the constant was *mentioned*. 15 of the 22
+    call sites were in exactly that state. Making the join impossible to get
+    wrong by hand is cheaper than fixing 15 strings and hoping the 16th is not
+    added by hand later.
+    """
+    text = (message or "").rstrip()
+    if text and text[-1] not in ".!?":
+        text += "."
+    # NB: the one place in this module that must NOT route through the seam it
+    # defines — the source-rewrite that introduced the seam rewrote it into a
+    # recursive call, which is exactly why the guard below asserts the seam is
+    # a terminal append and not a self-call.
+    return text + LIMIT_CONTACT
+
+
 class RefusalPayload(dict):
     """The structured 402 ``detail`` — a dict that STRINGIFIES to its message.
 
@@ -813,8 +835,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         count = _count_resource(org_id, "documents", sdk=sdk)
         if count >= limit:
             raise QuotaExceededError(
-                f"Team documents limit reached ({limit}). Upgrade your plan "
-                f"to increase it." + LIMIT_CONTACT,
+                with_limit_contact(
+                    f"Team documents limit reached ({limit}). Upgrade your plan "
+                    f"to increase it."),
                 resource="documents", used=count, limit=limit,
             )
         return
@@ -842,8 +865,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     used = count - slot_credit
     if used >= limit:
         raise QuotaExceededError(
-            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase"
-            f" it." + LIMIT_CONTACT,
+            with_limit_contact(
+                f"Team {resource} limit reached ({limit}). Upgrade your plan "
+                f"to increase it."),
             resource=resource, used=used, limit=limit,
         )
 

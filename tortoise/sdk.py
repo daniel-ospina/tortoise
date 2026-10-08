@@ -20134,9 +20134,9 @@ class TortoiseSDK:
                 params={"tid": org_id},
             ).result_set[0][0]
             if count >= max_users:
-                raise ControlPlaneError(
-                    f"Team at max users ({max_users}). Upgrade to add more."
-                )
+                from tortoise.quota import with_limit_contact  # #5425
+                raise ControlPlaneError(with_limit_contact(
+                    f"Team at max users ({max_users}). Upgrade to add more."))
 
         mid = ulid()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017

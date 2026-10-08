@@ -49,14 +49,8 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
-from tortoise import quota as _quota  # #5425 LIMIT_CONTACT (leaf; no cycle)
-
-#: #5425: the contact path every over-limit refusal carries. Defined in the LEAF
-#: module `quota` (which by contract must not import this one) so the shared
-#: quota gate and the REST surfaces read the SAME string. It MUST be bound
-#: before `_key_limit_refusal`'s default argument, which is evaluated at def
-#: time — hence its place here and not beside its callers.
-_LIMIT_CONTACT = _quota.LIMIT_CONTACT
+from tortoise import quota as _quota  # #5425 (leaf module; no cycle)
+from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import (
     _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -5924,8 +5918,7 @@ async def get_current_org_session_ungated(request: Request) -> dict:
 
 
 def _key_limit_refusal(
-        message: str = ("Key limit reached — revoke an existing key"
-                        + _LIMIT_CONTACT)) -> dict:
+        message: str = (with_limit_contact("Key limit reached — revoke an existing key"))) -> dict:
     """Build the structured 402 `detail` for an api_keys refusal (#4614).
 
     Called at raise sites that supply no count — the mint/rotate
@@ -10646,15 +10639,14 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
             # there is no quota category to carry, so the detail stays prose.
             raise HTTPException(
                 status_code=409,
-                detail="API key limit reached." + _LIMIT_CONTACT) from None
+                detail=with_limit_contact("API key limit reached.")) from None
         # #4614: the 402 arm IS the api_keys quota (the legacy pre-check's race
         # backstop) — the same category `_check_org_limit` answers, so it
         # carries the same structured shape.
         raise HTTPException(
             status_code=402,
             detail=_key_limit_refusal(
-                "API key limit reached (legacy mint — upgrade or revoke)"
-                + _LIMIT_CONTACT),
+                with_limit_contact("API key limit reached (legacy mint — upgrade or revoke)")),
         ) from None
 
     kid = minted["id"]
@@ -10862,7 +10854,7 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
         raise HTTPException(
             status_code=402,
             detail=_key_limit_refusal(
-                "API key limit reached." + _LIMIT_CONTACT),
+                with_limit_contact("API key limit reached.")),
         ) from None
 
     kid = minted["id"]
@@ -12149,9 +12141,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # human route reachable from the refusal, so it is part of the
                 # contract now, not an ornament.
                 detail=quota_refusal_payload(QuotaExceededError(
-                    f"Team points limit reached: {count} in use + {est} estimated "
-                    f"for this capture exceeds {max_points}. Upgrade your plan."
-                    + _LIMIT_CONTACT,
+                    with_limit_contact(f"Team points limit reached: {count} in use + {est} estimated " f"for this capture exceeds {max_points}. Upgrade your plan."),
                     resource="points", used=count, limit=max_points,
                     estimate=est,
                 )),
@@ -16206,8 +16196,7 @@ async def _graph_quota_gate(org: dict) -> None:
         raise HTTPException(
             status_code=409,
             headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
-            detail=("Graph limit reached. Upgrade your plan to create more "
-                    "graphs." + _LIMIT_CONTACT),
+            detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create more " "graphs.")),
         )
 
 
@@ -16222,8 +16211,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Builder plan. Upgrade to create "
-                   "multiple graphs." + _LIMIT_CONTACT,
+            detail=with_limit_contact("Custom graphs require the Builder plan. Upgrade to create " "multiple graphs."),
             headers={"X-Upgrade-CTA": "pro"},
         )
 
@@ -16295,8 +16283,7 @@ def _provision_graph(org: dict, name: str,
                 raise HTTPException(
                     status_code=409,
                     headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
-                    detail=("Graph limit reached. Upgrade your plan to create "
-                            "more graphs." + _LIMIT_CONTACT),
+                    detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create " "more graphs.")),
                 )
 
         # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
@@ -16324,8 +16311,7 @@ def _provision_graph(org: dict, name: str,
         _rollback_graph(org["id"], graph)
         raise HTTPException(
             status_code=409,
-            detail="API key limit reached. Delete a key or upgrade your plan "
-                   "to create more graph keys." + _LIMIT_CONTACT,
+            detail=with_limit_contact("API key limit reached. Delete a key or upgrade your plan " "to create more graph keys."),
         ) from None
     except HTTPException:
         raise
@@ -17825,8 +17811,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Builder or Team tier — upgrade to invite members"
-                                              + _LIMIT_CONTACT)
+                                    detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -17848,8 +17833,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Member limit reached — upgrade to invite more"
-                                              + _LIMIT_CONTACT)
+                                            detail=with_limit_contact("Member limit reached — upgrade to invite more"))
                 inv = await _cp_offload(
                     lambda: invitation_mint(
                         get_control_plane(), org_id, email, role,
@@ -17908,8 +17892,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Builder or Team tier — upgrade to invite members"
-                                              + _LIMIT_CONTACT)
+                                detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -17925,8 +17908,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Member limit reached — upgrade to invite more"
-                                              + _LIMIT_CONTACT)
+                                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -18222,8 +18204,7 @@ async def accept_invite(body: dict, request: Request,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan"
-                       " to join" + _LIMIT_CONTACT)
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: per-org lock around the capacity pre-check + consume. The
     # capacity pre-check runs INSIDE the lock BEFORE the accepted_at write
@@ -18249,8 +18230,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more"
-                                              + _LIMIT_CONTACT)
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -18684,8 +18664,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan"
-                       " to join" + _LIMIT_CONTACT)
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
     async with _invite_org_lock(org_id):
         _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18700,8 +18679,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more"
-                                              + _LIMIT_CONTACT)
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -19219,8 +19197,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
         if org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan"
-                       " to join" + _LIMIT_CONTACT)
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: same per-org lock + capacity pre-check as the TOKEN accept
     # branch — the max_users pre-check runs INSIDE the lock BEFORE the
@@ -19241,8 +19218,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more"
-                                              + _LIMIT_CONTACT)
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -30010,8 +29986,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Builder feature — upgrade to enable hourly backups"
-                   + _LIMIT_CONTACT,
+            detail=with_limit_contact("Backups are a Builder feature — upgrade to enable hourly backups"),
         )
 
 
@@ -32089,8 +32064,7 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
     if not tier or tier in ("free", "anon"):
         raise HTTPException(
             status_code=400,
-            detail="A paid plan is required to purchase a new organization"
-                   + _LIMIT_CONTACT)
+            detail=with_limit_contact("A paid plan is required to purchase a new organization"))
     if is_supabase_enabled():
         if org_by_name(get_control_plane(), name):
             raise HTTPException(status_code=409, detail="Organization name already exists")

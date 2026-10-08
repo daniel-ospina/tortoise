@@ -5,29 +5,35 @@ suspended_at``/``flagged_at`` + ``api_keys`` INSERT trigger (the only seam
 that sees BOTH dashboard mints and the signup ``provision_org`` RPC).
 
 Rules (env-overridable thresholds):
-- R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 suspend
-- R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
+- R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 REVIEW ALERT
+- R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 REVIEW ALERT
+                     (stage 2 asks a human to decide; it does NOT suspend —
+                      #5425 owner ruling: rate-limits, then talk to them)
 - R3  reads:        > 100 / 5min per-key OR per-org -> ops alert (Telegram-only, #3639)
 - R4  geo:          first unseen CF-IPCountry per org -> ops alert (Telegram-only)
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
                      notify ops only (Telegram; never suspends)
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
-fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
-suspends only when (a) the rule's flag is a full window old, AND (b) the
-rule has at least one event between the flag and the current window's start
-— evidence the breach actually persisted across the boundary. Episodes END
-on a clean evaluation (window back under threshold → flag_clear event) or on
-un-suspend (the RPC clears all episodes) — so a burst after a quiet period
-or after recovery is a NEW episode: it re-flags and can never suspend on its
-first evaluation. Rules are independent: an R1 flag never escalates a first
-R2 breach.
+fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2 raises
+the operator review alert only when (a) the rule's flag is a full window old,
+AND (b) the rule has at least one event between the flag and the current
+window's start — evidence the breach actually persisted across the boundary.
+Episodes END on a clean evaluation (window back under threshold → flag_clear
+event) or on un-suspend (the RPC clears all episodes) — so a burst after a
+quiet period or after recovery is a NEW episode: it re-flags and can never
+escalate on its first evaluation. Rules are independent: an R1 flag never
+escalates a first R2 breach.
 
 Suspension signal set (scoping delta 14): the process-wide set is a
 CACHE-INVALIDATION SIGNAL, never a rejection authority — membership forces a
 fresh resolution; the durable ``teams.suspended_at`` is the sole ground for
 403/-32006; entries clear when a fresh resolution returns NULL (un-suspend
-self-heals on the next request).
+self-heals on the next request). ⚠️ **#5425: this mechanism is currently
+INERT in production** — the automatic suspension that used to populate it is
+deleted, so nothing calls ``mark_suspended`` and membership is never true.
+What enforces a suspension is the durable read alone. See the delta-14 note
+above ``_SUSPENDED_SIGNAL`` for the full statement.
 
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
@@ -775,7 +781,8 @@ class AbuseEngine:
 
         Keyed by stage as well as ``(org, rule)``: the two-stage machine is
         SUPPOSED to emit a stage-1 flag alert and, a window later, a stage-2
-        suspend alert — sharing one key would swallow the escalation. Each
+        review alert (#5425 — the escalation is a human decision, not a
+        suspension) — sharing one key would swallow the escalation. Each
         entry stores its OWN expiry, so pruning never evicts a long-window
         (R2, 24h) claim by a short-window (R1, 1h) caller's clock.
         """
