@@ -242,8 +242,51 @@ def test_no_fixed_port_service_mapping_anywhere(wf_path):
     for mapping in ("- 6379:6379", "- 16379:6379"):
         assert mapping not in text, (
             f"{wf_path.name}: the fixed host-port mapping {mapping!r} is the "
-            "#6673 collision; the port must be assigned by Docker (-p 0:6379)"
+            "#6673 collision; the port must be Docker-assigned and "
+            "loopback-bound (-p 127.0.0.1:0:6379)"
         )
+
+
+def test_published_falkordb_compose_ports_bind_loopback():
+    """#7637: a compose-published FalkorDB must bind 127.0.0.1, never 0.0.0.0.
+
+    The CI provisioner's `-p 0:6379` was the reported site (fixed in
+    `provision.sh`, pinned by
+    `test_provision_script_assigns_and_reads_back_an_ephemeral_port` below).
+    Compose files are the other place a host port is published, and a bare
+    `"16379:6379"` binds 0.0.0.0 — an unauthenticated FalkorDB on the LAN of
+    every lane/dev machine. Globs are enumerated rather than `rglob`-ed: the
+    repo root carries `.worktrees/` checkouts whose compose files this change
+    does not own.
+    """
+    globs = (
+        "docker-compose*.yml", "docker-compose*.yaml",
+        "compose*.yml", "compose*.yaml",
+        "apps/*/docker-compose*.yml", "apps/*/docker-compose*.yaml",
+        "integrations/*/*/docker-compose*.yml",
+        "integrations/*/*/docker-compose*.yaml",
+    )
+    compose_files = sorted({p for g in globs for p in ROOT.glob(g) if p.is_file()})
+    assert compose_files, f"no compose file matched {globs} — the guard is vacuous"
+
+    checked = 0
+    for path in compose_files:
+        doc = yaml.safe_load(path.read_text()) or {}
+        for service, svc in (doc.get("services") or {}).items():
+            if "falkordb" not in str((svc or {}).get("image", "")).lower():
+                continue
+            for entry in (svc.get("ports") or []):
+                checked += 1
+                assert str(entry).startswith("127.0.0.1:"), (
+                    f"{path.relative_to(ROOT)}: service {service!r} publishes "
+                    f"FalkorDB port {str(entry)!r} without a `127.0.0.1` host "
+                    "IP — Docker binds 0.0.0.0 and the DB is LAN-reachable "
+                    "(#7637)"
+                )
+    assert checked, (
+        "no compose file publishes a FalkorDB port — the guard no longer "
+        "covers the services it exists for"
+    )
 
 
 def test_compute_docker_uri_expands_the_provisioned_port():
@@ -264,7 +307,21 @@ def test_compute_docker_uri_expands_the_provisioned_port():
 
 def test_provision_script_assigns_and_reads_back_an_ephemeral_port():
     script = (ACTION_DIR / "falkordb-provision" / "provision.sh").read_text()
-    assert "-p 0:6379" in script, "the host port must be Docker-assigned"
+    # The host port must be Docker-assigned (#6673) AND loopback-bound (#7637).
+    # A bare `-p 0:6379` — the pre-#7637 form — leaves the host address unset,
+    # which Docker resolves to 0.0.0.0, exposing this unauthenticated (legacy
+    # service: passwordless) test DB on the LAN of every lane/dev machine.
+    # Read the docker publish ARGUMENTS, not the prose: a whole-file substring
+    # scan would also match the explanatory comment that NAMES the bad form.
+    publishes = [
+        ln.strip()[len("-p "):].rstrip("\\").strip()
+        for ln in script.splitlines()
+        if ln.strip().startswith("-p ")
+    ]
+    assert publishes == ["127.0.0.1:0:6379"], (
+        "the provisioner's docker publish must be the loopback-bound, "
+        f"Docker-assigned form; got {publishes!r}"
+    )
     assert "docker port " in script, "the assigned port must be read back"
     assert "TORTOISE_TEST_DOCKER_PORT=" in script
     assert "TORTOISE_TEST_LEGACY_PORT=" in script

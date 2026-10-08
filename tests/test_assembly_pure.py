@@ -1054,18 +1054,32 @@ def test_resolver_docker_fts_window_survives_retracted_crowd(
     ``force_sparse_tfidf`` pins the FTS-owned ranking (#3095/#3223): with the
     vector leg live the hybrid re-orders the crowd, and this fixture is about
     the leg's WINDOW, not the leg mix.
+
+    The live Object's name is chosen so its derived id sorts AFTER every
+    retracted variant's (asserted below, not trusted): the FTS leg ties these
+    rows, so under the #3019 ``id ASC`` tie-break the window order IS the id
+    order — with a name that sorts early the live row lands inside the window
+    and the crowd no longer fills it.
     """
     proj = _docker_sdk._get_proj()
     qid = "q4061r2"
+    from tortoise.sdk import _entity_name_id
+
+    live_name = "widget variant zz"
+    variant_ids = [_entity_name_id("Object", f"widget variant {i}")
+                   for i in range(10)]
+    assert _entity_name_id("Object", live_name) > max(variant_ids), (
+        "the fixture's premise: the live Object must sort BEHIND the crowd "
+        "under the id tie-break, or it sits inside the window")
     for i in range(10):
         name = f"widget variant {i}"
         _docker_sdk.create_entity("object", name, objectKind="core:other",
                                   lme_question_id=qid, is_episodic=True)
         proj.g.query("MATCH (o:Object {name:$n}) SET o.status='retracted'",
                      params={"n": name})
-    # the lone LIVE Object, created LAST so the opaque FTS order puts it
-    # behind the retracted crowd (the defect's precondition, asserted below)
-    _docker_sdk.create_entity("object", "widget", objectKind="core:other",
+    # the lone LIVE Object, named so the deterministic id order puts it beyond
+    # the retracted crowd (the defect's precondition, asserted below)
+    _docker_sdk.create_entity("object", live_name, objectKind="core:other",
                               lme_question_id=qid, is_episodic=True)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -1081,7 +1095,7 @@ def test_resolver_docker_fts_window_survives_retracted_crowd(
                        for h in raw), [h.get("content") for h in raw]
 
     got = port.fts_objects("widget", 8)
-    assert [r["name"] for r in got] == ["widget"]
+    assert [r["name"] for r in got] == [live_name]
 
 
 @_docker_only

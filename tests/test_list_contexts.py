@@ -29,7 +29,7 @@ def _docker_falkor_reachable(port: int | None = None) -> bool:
     provisioned service flips the guard red (fail-closed, D-4).
 
     #6673: the service is published on an EPHEMERAL host port (docker
-    `-p 0:6379`), read from tests/_live_utils.py — not the 6379 literal.
+    `-p 127.0.0.1:0:6379`), read from tests/_live_utils.py — not the 6379 literal.
     """
     return _live_utils.tcp_reachable(port or _live_utils.docker_port())
 
