@@ -2536,7 +2536,8 @@ def active_membership_org_ids(cp, user_id: str) -> list[str]:
     return [row.get("org_id") for row in rows if row.get("org_id")]
 
 
-def provision_org(cp, **params: object) -> None:
+def provision_org(cp, *, prior_org_ids: list[str] | None = None,
+                  **params: object) -> None:
     """Call the atomic provision_org SECURITY DEFINER RPC (migration 0010).
 
     One transaction: orgs + org_memberships + api_keys (idempotent
@@ -2554,6 +2555,21 @@ def provision_org(cp, **params: object) -> None:
     uses keyless; a session-key mint writes the api_keys row later. Raises
     RuntimeError on failure (fail-closed): a failed provision surfaces as a
     500, and the caller cleans up any data-plane graph it created first.
+
+    ``prior_org_ids`` (#7678) is NOT part of the RPC body: it is the
+    creator's active memberships a caller already read, handed to the
+    post-RPC onboarding init so it does not re-issue the same control-plane
+    read on the same request. ``None`` keeps the legacy behaviour. Keyword-
+    only on purpose — it can never be smuggled into ``params`` and passed to
+    the RPC. ``_ensure_onboarding_node_after_provision`` filters out the
+    just-provisioned ``org_id``; the RPC inserts exactly one new active owner
+    membership for ``org_id``, so the list is identical to the post-RPC read
+    IT WOULD HAVE MADE in the absence of a concurrent membership mutation. A
+    caller that supplies it therefore accepts that window (the create-org lane
+    holds ``_org_create_lock`` across the read and the RPC, which serialises
+    the invite-accept lane; it does NOT serialise the account-deletion cascade
+    or owner-initiated member removal). Only the derived fork/compact choice
+    is affected, never the provision itself.
     """
     cp.rpc("provision_team", params)
 
@@ -2586,7 +2602,8 @@ def provision_org(cp, **params: object) -> None:
     # PRIOR memberships; the mirror reads jsonb onboarding_complete
     # one-directionally, never clobbers).
     if org_id:
-        _ensure_onboarding_node_after_provision(cp, org_id, params)
+        _ensure_onboarding_node_after_provision(cp, org_id, params,
+                                                prior_org_ids=prior_org_ids)
 
 
 # ── Agent signup tokens + keyless recovery (#1709, 20260814000001) ─────────
@@ -2622,11 +2639,20 @@ def provision_org_with_token(cp, **params: object) -> None:
 
 
 def _ensure_onboarding_node_after_provision(cp, org_id: str,
-                                            params: dict) -> None:
+                                            params: dict,
+                                            *,
+                                            prior_org_ids: list[str] | None = None) -> None:
     """Best-effort OnboardingState node init after an atomic provision.
     Never blocks provisioning (a graph failure self-heals on the next FLOW
     write via the create-on-write seam); the mirror read is one-directional
-    (jsonb onboarding_complete → status 'complete', never clobber)."""
+    (jsonb onboarding_complete → status 'complete', never clobber).
+
+    ``prior_org_ids`` (#7678): when a caller already read the creator's active
+    memberships (the create-org lane does, before this worker runs), pass them
+    here and the duplicate ``active_membership_org_ids`` control-plane read is
+    skipped. ``None`` keeps the legacy read for callers that have no such
+    value (register/signup/onboarding).
+    """
     try:
         from tortoise import hosted_api as _ha
         from tortoise.onboarding import state as _os
@@ -2638,10 +2664,10 @@ def _ensure_onboarding_node_after_provision(cp, org_id: str,
         except Exception:
             mirror = None
         creator = params.get("p_user_id") or None
-        prior_ids: list[str] = []
-        if creator:
-            prior_ids = [tid for tid in active_membership_org_ids(cp, creator)
-                         if tid != org_id]
+        if prior_org_ids is None:
+            prior_org_ids = (active_membership_org_ids(cp, creator)
+                             if creator else [])
+        prior_ids = [tid for tid in prior_org_ids if tid != org_id]
         prior_fork = None
         if prior_ids:
             try:
