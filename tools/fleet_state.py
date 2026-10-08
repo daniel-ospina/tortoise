@@ -1339,6 +1339,44 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def conflict_map(state: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Contested PR -> claimant lanes, tolerating a pre-``conflict_claimants`` cache.
+
+    A state file written by an older build carries ``conflicts`` but not
+    ``conflict_claimants``. Degrading to "claimants unknown" is honest; reporting
+    the PR as UNOWNED is the exact #7750 false negative — so the PR numbers are
+    preserved and the reader is told the detail is stale.
+    """
+    have = state.get("conflict_claimants")
+    if isinstance(have, dict) and have:
+        return {str(k): list(v) for k, v in have.items()}
+    return {str(n): [] for n in (state.get("conflicts") or [])}
+
+
+def lane_live_map(state: Mapping[str, Any]) -> dict[str, bool | None]:
+    """lane label -> True (live pi) / False (dead) / None (liveness unmeasured)."""
+    out: dict[str, bool | None] = {}
+    for lane_ in state.get("lanes") or []:
+        try:
+            label = lane_["identity"]["lane"]
+            if not (lane_.get("liveness", {}) or {}).get("liveness_measured"):
+                out[label] = None
+            else:
+                s = lane_.get("session", {}) or {}
+                out[label] = bool(s.get("pi_pid") and s.get("pid_alive"))
+        except Exception:
+            continue
+    return out
+
+
+def _live_tag(live: bool | None) -> str:
+    if live is True:
+        return " (live)"
+    if live is False:
+        return " (DEAD)"
+    return ""
+
+
 def cmd_who(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
     key = str(args.number)
@@ -1354,14 +1392,20 @@ def cmd_who(args: argparse.Namespace) -> int:
                     print(f"  - {lane}: {why}")
             return 0
     # A contested PR is NOT "nobody holds it": two lanes asserted it. Name them.
-    who = state.get("conflict_claimants", {}).get(key)
-    if who:
+    cmap = conflict_map(state)
+    if key in cmap:
+        who = cmap[key]
+        live = lane_live_map(state)
         out = {"number": args.number, "kind": "PR", "conflict": True,
                "lanes": who, "evidence": {}}
         if args.json:
             print(json.dumps(out, indent=2))
         else:
-            print(f"#{args.number} is CONTESTED — claimed by: {', '.join(who)}")
+            if who:
+                print(f"#{args.number} is CONTESTED — claimed by: "
+                      + ", ".join(f"{lbl}{_live_tag(live.get(lbl))}" for lbl in who))
+            else:
+                print(f"#{args.number} is CONTESTED — claimants unknown (stale fleet-state; re-run build)")
             print("  a reused workspace can inherit the previous lane's worktree; "
                   "resolve the worktree before assigning")
         return 0
@@ -1374,16 +1418,22 @@ def cmd_who(args: argparse.Namespace) -> int:
 
 def cmd_conflicts(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
-    claimants = state.get("conflict_claimants", {})
+    cmap = conflict_map(state)
     if args.json:
-        print(json.dumps(claimants, indent=2))
+        print(json.dumps(cmap, indent=2))
         return 0
-    if not claimants:
+    if not cmap:
         print("no ownership conflicts")
         return 0
-    for num, who in sorted(claimants.items(), key=lambda kv: int(kv[0])):
-        print(f"  PR {num}: {', '.join(who)}")
+    live = lane_live_map(state)
+    for num, who in sorted(cmap.items(), key=lambda kv: int(kv[0])):
+        if who:
+            print(f"  PR {num}: " + ", ".join(f"{lbl}{_live_tag(live.get(lbl))}" for lbl in who))
+        else:
+            print(f"  PR {num}: claimants unknown (stale fleet-state; re-run build)")
     return 0
+
+
 def _find_lane(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
     n = needle.lower().strip()
     for lane_ in state["lanes"]:

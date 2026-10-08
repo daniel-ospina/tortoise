@@ -257,29 +257,65 @@ def test_orphan_report_never_calls_a_conflicted_pr_unclaimed() -> None:
     assert orphans == []
 
 
-def test_resolve_conflicts_pins_the_call_site_wiring() -> None:
-    """The conflict pass MUST run before orphan detection and must feed it.
+def test_resolve_conflicts_claims_a_contested_pr_for_nobody() -> None:
+    """A conflicted PR is claimed for nobody AND is never reported as an orphan.
 
-    This exercises ``resolve_conflicts`` — the single place the two passes are
-    wired — so a refactor that drops the ``over_claimed`` kwarg or moves the
-    conflict pass below ``orphan_report`` fails HERE (a unit test on
-    ``orphan_report`` alone would stay green). This is the exact #7750 symptom:
-    a contested PR printed as "no lane claims it".
+    This pins ``resolve_conflicts``. The CALLER (``build_state``) is pinned
+    separately by ``test_build_state_pins_the_conflict_wiring_at_the_caller`` — a
+    helper test alone left the caller free to drop the guard (review cycle 2).
+
+    The guard makes the two passes ORDER-INDEPENDENT: ``orphan_report`` is told
+    ``over_claimed`` whether the prune runs before or after it (verified by
+    mutation — reordering alone does NOT fail this test), so no ordering
+    assertion is made here; what is asserted is the OUTCOME.
     """
     def lane(label: str, prs: list[int]) -> dict:
         return {"identity": {"lane": label}, "claim": {"prs": list(prs)}}
 
+    # The first claimant is DEAD: if the PR were ever handed to orphan_report
+    # as an ordinary PR it would surface as "owner lane A has no live pi". The
+    # contest must suppress that.
     lanes = [lane("A", [7, 8]), lane("B", [7])]
-    owner_of_pr: dict[int, str | None] = {7: "B", 8: "A"}
+    owner_of_pr: dict[int, str | None] = {7: "A", 8: "A"}
     conflicts, claimants, orphans = fs.resolve_conflicts(
         lanes, [{"number": 7, "headRefName": "b7", "title": "t7"}],
-        owner_of_pr, {"A": True, "B": True})
+        owner_of_pr, {"A": False, "B": True})
     assert conflicts == [7]
     assert claimants == {7: ["A", "B"]}
     assert orphans == []                       # 7 is contested, not ownerless
     assert 7 not in owner_of_pr                # claimed for nobody
     assert all(7 not in l_["claim"]["prs"] for l_ in lanes)
     assert 8 in lanes[0]["claim"]["prs"]       # an uncontested PR is untouched
+
+
+def test_build_state_pins_the_conflict_wiring_at_the_caller(monkeypatch) -> None:
+    """Pin the CALLER, not just the extracted helper (the review's P2).
+
+    Re-inlining the conflict pass in ``build_state`` without ``over_claimed``
+    reproduces #7750 while every other test stays green. This drives the real
+    ``build_state`` with two lanes whose worktree branches both name PR 700.
+    """
+    monkeypatch.setattr(fs, "load_registry", lambda: [("A", "WS-A", ""), ("B", "WS-B", "")])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: {
+        "WS-A": {"title": "A", "cwd": "/tmp/wA"},
+        "WS-B": {"title": "B", "cwd": "/tmp/wB"},
+    })
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {
+        "/tmp/wA": {"branch": "refs/heads/fix/700-a"},
+        "/tmp/wB": {"branch": "refs/heads/fix/700-a"},
+    })
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: [
+        {"number": 700, "title": "contested", "headRefName": "fix/700-a",
+         "headRefOid": "", "url": "u"}])
+    monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: [])
+    st = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
+    assert st["conflicts"] == [700], "two lanes' branches both name PR 700"
+    assert st["conflict_claimants"] == {"700": ["A", "B"]}
+    assert not [o for o in st["orphans"] if o.get("number") == 700]
 
 
 def test_who_names_the_claimants_instead_of_reporting_nobody(
@@ -291,7 +327,8 @@ def test_who_names_the_claimants_instead_of_reporting_nobody(
     the one PR two lanes claim (the reviewer's P2 gap).
     """
     fake = {"index": {"prs": {}, "issues": {}},
-            "conflict_claimants": {"7761": ["L-a", "L-b"]}}
+            "conflict_claimants": {"7761": ["L-a", "L-b"]},
+            "lanes": []}
     monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
     args = argparse.Namespace(number=7761, json=False)
     rc = fs.cmd_who(args)
@@ -300,6 +337,41 @@ def test_who_names_the_claimants_instead_of_reporting_nobody(
     assert "L-a" in out and "L-b" in out
     assert "CONTESTED" in out
     assert "no lane holds it" not in out
+
+
+def test_who_reports_a_conflict_from_an_older_cache_without_lying(
+    monkeypatch, capsys) -> None:
+    """A pre-``conflict_claimants`` cache must not resurrect #7750 (finding 4).
+
+    The old state has ``conflicts`` but no claimants. Saying "claimants unknown"
+    is honest; saying "no lane holds it" is the exact false negative we removed.
+    """
+    fake = {"index": {"prs": {}, "issues": {}}, "conflicts": [7761], "lanes": []}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    rc = fs.cmd_who(argparse.Namespace(number=7761, json=False))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CONTESTED" in out and "stale" in out
+    assert "no lane holds it" not in out
+
+
+def test_cmd_conflicts_lists_claimants_and_the_empty_case(monkeypatch, capsys) -> None:
+    """`conflicts` names the claimants; an uncontested fleet says so (finding 6)."""
+    fake = {"conflicts": [7], "conflict_claimants": {"7": ["A", "B"]},
+            "lanes": [
+                {"identity": {"lane": "A"}, "liveness": {"liveness_measured": True},
+                 "session": {"pi_pid": 1, "pid_alive": True}},
+                {"identity": {"lane": "B"}, "liveness": {"liveness_measured": True},
+                 "session": {"pi_pid": 2, "pid_alive": False}},
+            ]}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_conflicts(argparse.Namespace(json=False)) == 0
+    out = capsys.readouterr().out
+    assert "PR 7" in out and "A (live)" in out and "B (DEAD)" in out
+
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: {"conflicts": [], "lanes": []})
+    assert fs.cmd_conflicts(argparse.Namespace(json=False)) == 0
+    assert "no ownership conflicts" in capsys.readouterr().out
 
 
 def test_who_still_reports_truly_unowned_as_not_found(monkeypatch, capsys) -> None:
