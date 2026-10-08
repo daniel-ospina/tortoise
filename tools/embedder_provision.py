@@ -334,10 +334,14 @@ def main(argv: list[str] | None = None) -> int:
 #     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5
 #     22:31:35.37  Loading weights:   0%| ...          <- 5m36s of SILENCE
 #     22:31:37.13  embedding model: cached, no download needed
-# NOTE (#6937 P2-3): the line above is a VERBATIM CI log quote — what the runner
-# actually printed — so it keeps the `python3` form CI ran. Rewriting it to
-# `uv run python` would make the receipt of record describe a command that never
-# ran. The sweep is excluded from this block for that reason.
+#     22:32:14.79  ##[error] ... has timed out after 6 minutes.
+#
+# #6937 P2-3: the `Run python3` line above is a VERBATIM CI log quote — what
+# the runner actually PRINTED — so it keeps the form CI ran. Rewriting it to a
+# uv-run spelling would make this receipt describe a command the runner never
+# printed, a provenance defect rather than a doc fix. The sweep is deliberately
+# excluded from the log block above for exactly that reason; the exemption is
+# held in `_DELIBERATE_BARE_FORM` in tests/test_entry_point_python_guard.py.
 #
 # So ~5m36s is spent BEFORE the marker — the torch/sentence_transformers import
 # plus the model load, emitting nothing — and ~38s after it, of which ~22s is

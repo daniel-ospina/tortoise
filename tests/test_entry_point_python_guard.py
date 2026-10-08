@@ -509,24 +509,42 @@ def test_every_corpus_file_is_tracked():
 #:
 #: Review round 1 widened this from `python3 ` to also catch the absolute-path
 #: (`/usr/bin/python3 `) and `./`-prefixed spellings, which the guard refuses
-#: just as hard.
+#: just as hard. Review round 2 added the ELIDED form (`python3 ...`): a USAGE
+#: block that elides the path still teaches the refused invocation, and it is
+#: exactly how `graph-scripts/2146_falkordb_graph_cleanup.py` kept one after its
+#: siblings were swept. The elided branch has no path, so no carve-out can
+#: exempt it — which is correct, because a reader substitutes a real path.
 _BARE_INVOCATION = re.compile(
-    r"(?<![\w./])(?:/usr/bin/)?python3\s+(?:\./)?(tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)"
+    r"(?<![\w./])(?:/usr/bin/)?python3\s+"
+    r"(?:(?:\./)?(tools|graph-scripts)/([A-Za-z0-9_./-]+\.py)|\.\.\.)"
 )
 _CARVE_OUTS = frozenset(UNGUARDABLE) | frozenset(RUNTIME_39)
 
 #: Text-bearing files a reader copies an invocation FROM.
 _DOC_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".yml", ".yaml"})
 
-#: Review round 1: a shell line inside a CI JOB runs on the RUNNER's interpreter
-#: (every workflow here pins 3.12 via setup-python), so a bare `python3` there is
-#: CORRECT and must not be flagged — flagging it would be the over-reach this
-#: seam exists to avoid. What a workflow file exposes to a HUMAN is its comments
-#: and its `::error::`/`::warning::` ANNOTATIONS: text a reader copies onto their
-#: own machine, where the guard does bite.
-#: `.github/workflows/mergify-guard-recut.yml` carried exactly one such
-#: instruction and it named the refused form.
-_HUMAN_TEXT_IN_YAML = re.compile(r"(^\s*#)|(::(?:error|warning|notice)::)")
+#: Review round 1: a shell line inside a CI JOB that EXECUTES a tool runs on the
+#: RUNNER's interpreter (every workflow here pins 3.12 via setup-python), so a
+#: bare `python3` there is CORRECT and must not be flagged — flagging it would be
+#: the over-reach this seam exists to avoid.
+#:
+#: What a workflow file exposes to a HUMAN is its comments, its
+#: `::error::`/`::warning::` ANNOTATIONS, and an ECHO whose argument IS the
+#: command text — because printed text is read (and, in
+#: `.github/workflows/finding-provenance.yml`, POSTED as a GitHub comment for a
+#: finding author to copy) rather than executed.
+#:
+#: The echo arm is deliberately narrow: it requires the quoted argument to START
+#: with the invocation. `echo '$ python3 tools/x.py'` is human text and is
+#: flagged; `echo x | python3 tools/x.py` and `printf '%s' "$V" | python3
+#: tools/x.py` are PIPELINES that execute on the runner and are not — round 2
+#: found the echo case, then found this arm's first draft over-matching those two
+#: real statements in `python-ci.yml`.
+_HUMAN_TEXT_IN_YAML = re.compile(
+    r"(^\s*#)"
+    r"|(::(?:error|warning|notice)::)"
+    r"|(\b(?:echo|printf)\b[^\n]*['\"]\s*\$?\s*(?:/usr/bin/)?python3\b)"
+)
 
 #: Lines where the bare form is DELIBERATELY correct because the text RECORDS or
 #: DESCRIBES what a machine did, rather than instructing a reader to run it:
@@ -538,11 +556,19 @@ _HUMAN_TEXT_IN_YAML = re.compile(r"(^\s*#)|(::(?:error|warning|notice)::)")
 #:   * a comment stating what a CI job runs (`python-ci.yml` really does invoke
 #:     `python3 tools/mergify_config_guard.py --static` on the runner's 3.12).
 #:
-#: Rewriting one FALSIFIES evidence provenance, which is strictly worse than the
-#: doc/guard contradiction this test exists to prevent. Review round 1 caught the
-#: sweep doing exactly that to three sites. Keyed by (path, stripped line) rather
-#: than by line NUMBER, so an edit above cannot silently slide an exemption onto
-#: a different line: change the text and the entry stops matching, re-flagging it.
+#: THE BOUNDARY (review round 2): a captured machine transcript or log is a
+#: RECORD and keeps the form that ran. A *reproduction instruction* with expected
+#: output — a docs command block, a plan doc's smoke step — is an INSTRUCTION and
+#: takes the guarded form, because its purpose is that a reader re-runs it. That
+#: is why `docs/plans/2026-09-26-5042-…:208` and
+#: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
+#: four entries below do not.
+#:
+#: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
+#: the doc/guard contradiction this test exists to prevent. Keyed by
+#: (path, stripped line) rather than by line NUMBER, so an edit above cannot
+#: silently slide an exemption onto a different line: change the text and the
+#: entry stops matching, re-flagging it.
 _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
     {
         (
@@ -615,7 +641,11 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
                 if in_workflow and not _HUMAN_TEXT_IN_YAML.search(line):
                     continue
                 for match in _BARE_INVOCATION.finditer(line):
-                    target = f"{match.group(1)}/{match.group(2)}"
+                    tool, rel = match.group(1), match.group(2)
+                    if tool is None:  # the elided `python3 ...` form
+                        offenders.append(f"{where}:{lineno}: {line.strip()[:90]}")
+                        continue
+                    target = f"{tool}/{rel}"
                     if target in _CARVE_OUTS:
                         continue
                     if (where, line.strip()) in _DELIBERATE_BARE_FORM:

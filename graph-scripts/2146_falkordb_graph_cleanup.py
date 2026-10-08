@@ -30,7 +30,7 @@ it via a GH Actions workflow or `gh secret` consumers), plus this repo's venv
 Usage:
   uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json            # dry-run: list
   uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json --execute   # GRAPH.DELETE
-  FALKORDB_CLOUD_URI=redis://:<pw>@<host>:<port> python3 ...   # URI via env (or TORTOISE_DB_URI directly)
+  FALKORDB_CLOUD_URI=redis://:<pw>@<host>:<port> uv run python graph-scripts/2146_falkordb_graph_cleanup.py   # URI via env (or TORTOISE_DB_URI directly)
 
 Rollback note: GRAPH.DELETE is irreversible and there is no backup of these
 free-tier test graphs (backup_enabled=false). The manifest is the only record
@@ -73,7 +73,7 @@ def _get_db():
         from tortoise.sdk import TortoiseSDK
     except ImportError:
         raise OpError(
-            "tortoise SDK not importable — run via `uv run python3 ...` in the "
+            "tortoise SDK not importable — run via `uv run python ...` in the "
             "repo (falkordb client is a dependency)") from None
     sdk = TortoiseSDK(namespace="registry")  # graph list/delete are DB-wide
     proj = sdk._get_proj()
