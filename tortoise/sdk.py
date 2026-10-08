@@ -15789,9 +15789,9 @@ class TortoiseSDK:
         #
         # `normalize_source_url` is PURE (no model call, no graph access, never
         # raises, documented idempotent), so this adds no query and no failure
-        # mode. A url-less source keys on its NODE id instead, so
-        # unknown-identity sources stay DISTINCT; folding those together would
-        # introduce the opposite error.
+        # mode. A source with NEITHER `canonicalUrl` nor `url` keys on a UNIQUE
+        # per-row token instead, so unknown-identity sources stay DISTINCT;
+        # folding those together would introduce the opposite error.
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
         _identity_slot: dict[tuple[str, str], int] = {}
