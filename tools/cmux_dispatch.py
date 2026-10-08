@@ -131,6 +131,55 @@ EXIT CODES
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
+
+A transport failure (exit 3) is NOT a consumption failure (exit 1), and the two
+stay distinguishable. But a failure to REACH cmux — a non-zero rc on any
+`list-workspaces` read or on the text `send`, a transport error raised at any
+gate, or a spawn/exec `OSError` (converted at the source in `Cmux.run`, so a
+non-executable `--cmux` fails like a missing binary or a timeout) — and an
+`unknown-workspace` (exit 2), the DOCUMENTED post-cutover loss mode, no longer
+DROPS the notice: the payload is appended to the orchestrator inbox and the
+result/CLI reports which channel carried it (`channel: inbox`). If the inbox
+fallback ALSO fails, the result carries both diagnostics (`channel: none`) and
+says explicitly that the notice is not recorded anywhere (#4842).
+
+The fallback fires ONLY where the notice would otherwise vanish — an unreachable
+transport, or a workspace that is not listed. It does NOT fire on the ordinary
+`sent-but-not-consumed` / refused-`send_enter` outcome, nor on the PRE-SEND
+`never-became-ready` refusal (a blocked or unreadable-blind pane, where nothing
+was ever written): those are negative-pinned, and in the ordinary consumption
+failure the bytes did reach a live transport, so an entry there would be a
+duplicate rather than a rescue. Those outcomes deliberately do NOT append.
+
+That justification is NOT true of every exclusion, and the exception is named
+here so it is not re-derived: the RECOVERY-branch `never-became-ready` (the
+boot-block prompt ATE the first send and the re-send was refused rather than
+written blind) loses the notice outright, and the recovery re-send does not
+inspect its own rc either, so a refused retry also rides the no-append path.
+That is a LOSS, is deliberate here, and is a scoped follow-up on the issue —
+it is why the line above reads "do NOT append" rather than "cannot lose".
+
+Honest limits, stated so they are not read as durability guarantees:
+
+  * the append is a buffered `write`, NOT `fsync`'d — it returns before the bytes
+    reach stable storage, so a machine crash inside that window can still lose
+    it. (A send FAILURE is covered; a machine CRASH is not.)
+  * a transport death DURING CONFIRMATION cannot be told apart from "the pane got
+    it", so the inbox can carry a notice the pane also carries: a DUPLICATE
+    rather than a loss — and that holds only while the append itself succeeds;
+    if it fails too, `channel: none` records that nothing is recorded anywhere.
+  * the RECOVERY-branch `never-became-ready` is a real LOSS, not a duplicate: the
+    first send was eaten by the boot-block prompt, the re-send was refused, and
+    its rc is not inspected, so nothing is recorded anywhere. Deliberate and
+    scoped as a follow-up on the issue; it is excluded from the "never lost"
+    claim above ON PURPOSE.
+
+The `[YYYY-MM-DD HH:MM:SS TZ] [LABEL] <one line>` prefix is the convention
+`notify-orchestrator.sh` emits on its FIRST line (`printf '[%s] [%s] %s\n'`,
+2026-09-16), but that script does NOT flatten a multi-line message and other
+writers use different shapes: measured 2026-10-08 against the live inbox, 6,963
+of 7,441 lines do not match `^\\[ts\\] \\[label\\]`. This tool emits the flattened
+one-line prefix anyway — line-orientation is what keeps a line readable by eye.
 """
 
 from __future__ import annotations
@@ -154,6 +203,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -257,6 +307,63 @@ TRUNCATION_ELLIPSIS = "..."
 #: capped here and floored at 4 — so a cut SHORT message on a narrow pane still
 #: matches, while a long message is identified by its first `PENDING_MIN_CHARS`.
 PENDING_MIN_CHARS = 16
+
+
+#: The durable fallback channel (#4842). When cmux cannot be reached — or the
+#: workspace is not in the list (the documented post-cutover loss mode) — the
+#: notice must not vanish: it is appended to the orchestrator inbox, the surface
+#: the orchestrator already treats as intake truth.
+#:
+#: `notify-orchestrator.sh` writes the `[YYYY-MM-DD HH:MM:SS TZ] [LABEL] <msg>`
+#: prefix on its FIRST line (`printf '[%s] [%s] %s\n'`, since 2026-09-16, "Durable
+#: record first — never lose the signal to a failed send"), but it does NOT
+#: flatten a multi-line message and other writers use other shapes: measured
+#: 2026-10-08 against the live inbox, 6,963 of 7,441 lines do not match
+#: `^\[ts\] \[label\]`. This tool emits the flattened `[ts] [label] <one line>`
+#: form because a line read by eye must stay one line — it does NOT claim every
+#: line in the file shares that shape.
+#:
+#: The append is a buffered `write`, not `fsync`'d: durable against a send
+#: failure, not against a machine crash inside the write window.
+INBOX_ENV = "CMUX_DISPATCH_INBOX"
+DEFAULT_INBOX = "~/.pi/agent/state/orchestrator-inbox.log"
+INBOX_FALLBACK_LABEL = "cmux-dispatch"
+
+
+def orchestrator_inbox_path() -> Path:
+    """The inbox the durable fallback appends to (env-overridable for tests)."""
+    return Path(os.environ.get(INBOX_ENV) or DEFAULT_INBOX).expanduser()
+
+
+def inbox_record(label: str, text: str) -> str:
+    """One flattened `[ts] [label] <one line>` inbox record.
+
+    BOTH `label` and `text` are flattened, because either can carry an embedded
+    newline and the inbox is line-oriented: an unflattened `--label` such as
+    `"B7]\\n[1999-01-01 00:00:00 XX] [INJECTED"` would otherwise forge a second,
+    attacker-shaped record line. The same one-line invariant the watcher
+    documents for `cmux send` (newlines arrive as Enters) applies here.
+    """
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    lane = " ".join((label or "").split()) or INBOX_FALLBACK_LABEL
+    return f"[{stamp}] [{lane}] {' '.join(text.split())}"
+
+
+def append_to_inbox(label: str, text: str) -> Path:
+    """Append the notice to the durable inbox and return the path written.
+
+    Raises on failure — the CALLER must report both diagnostics rather than let
+    the notice disappear (a swallowed exception here is exactly the silent-loss
+    bug #4842 exists to close). The failure is not always an `OSError`:
+    `Path.expanduser()` raises `RuntimeError` on an unexpandable home and
+    `handle.write` raises `UnicodeEncodeError` for a lone surrogate, so callers
+    catch broadly and treat the exception as a diagnostic.
+    """
+    path = orchestrator_inbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(inbox_record(label, text) + "\n")
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -772,6 +879,19 @@ class Cmux:
             # credentials or confidential content) into the caller's log. The
             # tool otherwise logs only byte counts and a 40-char fingerprint.
             return CmuxResult(124, "", self._describe(argv), argv)
+        except OSError as exc:
+            # A SPAWN/EXEC failure — `PermissionError` for a non-executable
+            # `--cmux`, or any other `OSError` from starting the process. It is a
+            # TRANSPORT failure exactly like the two above: left to propagate it
+            # sails past every `except CmuxTransportError` and every durable
+            # fallback, and the notice is recorded NOWHERE (the silent loss #4842
+            # exists to close). Returned as a non-zero rc (POSIX 126, "found but
+            # not executable") so it rides the SAME conversion every other read
+            # and transport fault uses. `FileNotFoundError` is caught above — it
+            # is an `OSError` subclass, so this handler must stay after it.
+            # Like the timeout branch, the error text names only the binary (the
+            # exec failure is on the executable, never the `--` payload).
+            return CmuxResult(126, "", f"cmux could not be spawned: {exc}", argv)
         return CmuxResult(proc.returncode, proc.stdout or "", proc.stderr or "", argv)
 
     @staticmethod
@@ -831,6 +951,12 @@ class DispatchResult:
     recoveries: list[str] = field(default_factory=list)
     fingerprint: str = ""
     reason: str = ""
+    #: Which channel carried the bytes — the question a transport failure makes
+    #: ambiguous (#4842). `transport` = the text send reached cmux, `inbox` = the
+    #: durable orchestrator-inbox fallback, `none` = NEITHER (the notice is not
+    #: recorded anywhere), `""` = nothing was transmitted (usage/readiness refusal).
+    #: Orthogonal to `status`, which carries whether the notification CONSUMED.
+    channel: str = ""
 
     def as_json(self) -> dict:
         return {
@@ -841,6 +967,7 @@ class DispatchResult:
             "recoveries": self.recoveries,
             "fingerprint": self.fingerprint,
             "reason": self.reason,
+            "channel": self.channel,
         }
 
 
@@ -861,6 +988,102 @@ class Dispatcher:
 
     def log(self, message: str) -> None:
         self._log(message)
+
+    def _deliver_via_inbox(self, tag: str, text: str, label: str) -> tuple[str, str]:
+        """Append the notice to the durable inbox; return `(channel, note)`.
+
+        NEVER raises. When the fallback itself fails, that failure is a
+        DIAGNOSTIC the caller must carry, not an exception: a crash here would
+        lose the notice a second time and hand the caller an exit 1 that no
+        transport failure ever produces. The catch is deliberately broad —
+        `Path.expanduser()` raises `RuntimeError` on an unexpandable home and a
+        lone surrogate in the payload raises `UnicodeEncodeError`, NEITHER an
+        `OSError` — so both diagnostics always reach the result.
+        """
+        try:
+            path = append_to_inbox(label, text)
+        except Exception as exc:  # broad by design: report, never crash
+            self.log(f"{tag}durable inbox fallback failed: {exc}")
+            return (
+                "none",
+                f" — durable inbox fallback FAILED ({exc}): the notice is not "
+                f"recorded anywhere",
+            )
+        self.log(f"{tag}notice appended to the durable inbox: {path}")
+        return "inbox", f" — delivered via the durable inbox (channel: inbox): {path}"
+
+    def _fallback_failure(
+        self,
+        tag: str,
+        status: str,
+        fp: str,
+        detail: str,
+        text: str,
+        label: str,
+        attempts: int = 0,
+        recoveries: list[str] | None = None,
+        reason: str = "",
+    ) -> DispatchResult:
+        """A failure result that still DELIVERS the notice via the inbox (#4842).
+
+        Before this, a bail returned its exit code and DROPPED the payload: the
+        caller learned the dispatch failed and the orchestrator never learned a
+        lane had finished — the exact failure the notifier exists to eliminate,
+        and one that fires under the congestion that makes "which lane finished"
+        matter most (measured 2026-09-23: `cmux unreachable: cmux timed out` at
+        load 95-113), and again after the 2026-09-24 workspace cutover, when
+        every lane's notice aimed at the retired id landed as `unknown-workspace`
+        (`notify-orchestrator.sh` records it: live delivery was failing for EVERY
+        lane). The fallback appends the notice to the orchestrator inbox.
+
+        The STATUS/exit is preserved, not collapsed to success: `transport-error`
+        stays exit 3 and `unknown-workspace` stays exit 2, so the failure stays
+        distinguishable from `sent-but-not-consumed` (a CONSUMPTION failure,
+        exit 1) — the whole reason this tool exists. If BOTH channels fail, the
+        detail carries both diagnostics, `channel` is `none`, and the detail says
+        the notice is not recorded anywhere.
+
+        ⚠️ TRADE-OFF, deliberate: a transport failure DURING CONFIRMATION means the
+        bytes may already have landed, so the inbox can carry a notice the pane
+        also carries — a DUPLICATE. That direction is chosen on purpose: a
+        duplicate notice is recoverable and obvious, a LOST one is neither, and
+        the transport cannot tell us which happened.
+        """
+        channel, note = self._deliver_via_inbox(tag, text, label)
+        return DispatchResult(
+            False,
+            status,
+            detail + note,
+            attempts=attempts,
+            recoveries=recoveries or [],
+            fingerprint=fp,
+            reason=reason,
+            channel=channel,
+        )
+
+    def _transport_failure(
+        self,
+        tag: str,
+        fp: str,
+        detail: str,
+        text: str,
+        label: str,
+        attempts: int = 0,
+        recoveries: list[str] | None = None,
+        reason: str = "",
+    ) -> DispatchResult:
+        """A transport failure (exit 3) routed through the durable inbox fallback."""
+        return self._fallback_failure(
+            tag,
+            "transport-error",
+            fp,
+            detail,
+            text,
+            label,
+            attempts=attempts,
+            recoveries=recoveries,
+            reason=reason,
+        )
 
     # -- reads --------------------------------------------------------------- #
 
@@ -1019,16 +1242,23 @@ class Dispatcher:
         try:
             before = self.wait_for_workspace(workspace, appear_timeout)
         except CmuxTransportError as exc:
-            return DispatchResult(
-                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            return self._transport_failure(
+                tag, fp, f"{tag}cmux unreachable: {exc}", text, label
             )
         if before is None:
-            return DispatchResult(
-                False,
+            # The 2026-09-24 cutover's documented loss mode: every lane-completion
+            # notice aimed at the retired workspace id landed here and was
+            # recorded NOWHERE (notify-orchestrator.sh: "live delivery was failing
+            # for every lane"). Same durable fallback, but the status/exit stay
+            # `unknown-workspace`/2 so the diagnosis is not erased.
+            return self._fallback_failure(
+                tag,
                 "unknown-workspace",
+                fp,
                 f"{tag}{workspace} not found in `cmux list-workspaces --json` "
                 f"after {appear_timeout:g}s",
-                fingerprint=fp,
+                text,
+                label,
             )
 
         # --- gate: never send into a boot-blocked prompt -------------------- #
@@ -1038,8 +1268,8 @@ class Dispatcher:
                 workspace, ready_timeout, surface
             )
         except CmuxTransportError as exc:
-            return DispatchResult(
-                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            return self._transport_failure(
+                tag, fp, f"{tag}cmux unreachable: {exc}", text, label
             )
         if blocked_now:
             return DispatchResult(
@@ -1092,12 +1322,13 @@ class Dispatcher:
         self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
         text_result = self.cmux.send_text(workspace, text, surface)
         if text_result.rc != 0:
-            return DispatchResult(
-                False,
-                "transport-error",
+            return self._transport_failure(
+                tag,
+                fp,
                 f"{tag}cmux send (text) rc={text_result.rc}: "
                 f"{text_result.err.strip() or 'no stderr'}",
-                fingerprint=fp,
+                text,
+                label,
             )
         enter_result = self.cmux.send_enter(workspace, surface)
         if enter_result.rc != 0:
@@ -1108,10 +1339,13 @@ class Dispatcher:
                 f"(rc={enter_result.rc}) — the message may sit unsent",
                 attempts=1,
                 fingerprint=fp,
+                channel="transport",
             )
 
         # --- confirm the ARTIFACT, then recover ----------------------------- #
-        result = DispatchResult(False, "sent-but-not-consumed", "", fingerprint=fp)
+        result = DispatchResult(
+            False, "sent-but-not-consumed", "", fingerprint=fp, channel="transport"
+        )
         # The grace window is at least a full consume budget: a submission that is
         # real but slow to appear (cmux writes it at the turn boundary, and under
         # load reads time out) must not be mistaken for a lost one, because
@@ -1124,9 +1358,19 @@ class Dispatcher:
                     workspace, before, fp, consume_timeout
                 )
             except CmuxTransportError as exc:
-                result.status = "transport-error"
-                result.detail = f"{tag}cmux unreachable while confirming: {exc}"
-                return result
+                return self._transport_failure(
+                    tag,
+                    fp,
+                    f"{tag}cmux unreachable while confirming: {exc}",
+                    text,
+                    label,
+                    # Carry forward what THIS send already learned — the transport
+                    # died mid-confirmation, so the attempt count and the
+                    # recoveries tried are evidence, not noise.
+                    attempts=result.attempts,
+                    recoveries=result.recoveries,
+                    reason=result.reason,
+                )
             result.reason = reason
             if consumed:
                 result.ok = True
@@ -1169,9 +1413,22 @@ class Dispatcher:
                 # Do not ADD bytes until the artifact has had a grace window to
                 # catch up — re-sending a message that did in fact land would
                 # DUPLICATE it in the lane.
-                late_consumed, late_reason, _ = self.wait_consumed(
-                    workspace, before, fp, grace
-                )
+                try:
+                    late_consumed, late_reason, _ = self.wait_consumed(
+                        workspace, before, fp, grace
+                    )
+                except CmuxTransportError as exc:
+                    return self._transport_failure(
+                        tag,
+                        fp,
+                        f"{tag}cmux unreachable in the pre-recovery grace window: "
+                        f"{exc}",
+                        text,
+                        label,
+                        attempts=result.attempts,
+                        recoveries=result.recoveries,
+                        reason=result.reason,
+                    )
                 if late_consumed:
                     result.ok = True
                     result.status = "consumed"
@@ -1194,11 +1451,29 @@ class Dispatcher:
                 # writing into a pane whose state we cannot read, would recreate
                 # the very corruption this tool prevents.
                 dismissal = self.cmux.send_enter(workspace, surface)
-                recovery_ready, recovery_blocked, recovery_screen = (
-                    self.wait_until_safe_to_send(
-                        workspace, RECOVERY_READY_TIMEOUT, surface
+                try:
+                    recovery_ready, recovery_blocked, recovery_screen = (
+                        self.wait_until_safe_to_send(
+                            workspace, RECOVERY_READY_TIMEOUT, surface
+                        )
                     )
-                )
+                except CmuxTransportError as exc:
+                    # The RECOVERY-site gate, wrapped exactly like its sibling at
+                    # the first gate. The text was eaten, so an un-wrapped raise
+                    # here is the notice recorded NOWHERE — the loss this whole
+                    # fallback exists to prevent. Carry the evidence this send
+                    # already gathered (attempt/recoveries/reason).
+                    return self._transport_failure(
+                        tag,
+                        fp,
+                        f"{tag}cmux unreachable in the boot-block recovery gate: "
+                        f"{exc}",
+                        text,
+                        label,
+                        attempts=result.attempts,
+                        recoveries=result.recoveries,
+                        reason=result.reason,
+                    )
                 if recovery_blocked or (not recovery_ready and recovery_screen is None):
                     result.ok = False
                     result.status = "never-became-ready"
