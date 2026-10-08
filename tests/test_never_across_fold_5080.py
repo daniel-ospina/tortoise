@@ -1651,13 +1651,14 @@ class TestDistinguishingDifference:
 
         The mirror puts the state in the final clause and IS refused, so the
         guard is clause-ORDER dependent today.  Closing it means bounding the
-        complement at a clause boundary — the clause-boundary machinery PR
-        #5320 (which closed #5139) built for the connectives, applied to the
-        predicate read rather than to a polarity member.  The residual itself
-        is a SYNTAX one, so it stays on #7524; #5325 owns the connective-SLOT
-        swaps, which is a different shape (its own body enumerates them, and
-        this clause-boundary read is not among them).  The refused mirror is
-        asserted beside the pin, so the pin cannot go vacuous.
+        complement at a clause boundary — which the pair-read connective-SLOT
+        machinery PR #5320 added for #5139 does NOT do (that pass reads slot
+        occupancy and never touches `_state_predicate`), so it would have to be
+        extended rather than reused.  The residual itself is a SYNTAX one, so
+        it stays on #7524; #5325 owns the connective-SLOT swaps, a different
+        shape (its own body enumerates them, and this clause-boundary read is
+        not among them).  The refused mirror is asserted beside the pin, so the
+        pin cannot go vacuous.
         """
         assert not v2.fold_allowed("the build passed and the flag is off",
                                    "the build passed and the flag")
