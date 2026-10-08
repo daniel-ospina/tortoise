@@ -801,7 +801,23 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # ADD instead of writing a line the locator cannot re-read (#6092
             # review, F1). Quoting the key is not the fix: it would change the
             # key's identity against `entries`/`resolved`, which is F2's class.
-            if not _DURATION_LINE_RE.match(line):
+            # Validate by PARSING, not by regex (#6092 review round 2). A key
+            # that regex-matches can still be a YAML indicator, alias, tag or
+            # flow token — `*a_test.py`, `&a_test.py`, `!a_test.py`, `[x].py`,
+            # an unbalanced quote — and writing one makes the re-locate below
+            # raise a raw yaml error, which escapes as exit 1 instead of the
+            # documented refusal. Requiring the parse to hand back THIS key
+            # also makes this row's check an identity check, not a syntax one.
+            import yaml
+            try:
+                parsed_key = _duration_line_key(line)
+            except yaml.YAMLError as exc:
+                raise DurationsBridgeError(
+                    f"cannot render manifest key {key!r} as a `durations:` row — "
+                    f"it is not parseable as a YAML mapping key "
+                    f"({type(exc).__name__})"
+                ) from exc
+            if parsed_key != key or not _DURATION_LINE_RE.match(line):
                 raise DurationsBridgeError(
                     f"cannot render manifest key {key!r} as a `durations:` row — "
                     f"a key with whitespace or a colon is valid YAML but not "
@@ -829,7 +845,14 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # refuses an unlocatable row and a duplicate parsed key, and the count must
     # equal the input keys plus the appended ones — so a render either satisfies
     # the invariant or raises here instead of persisting a poisoned map.
-    _, located = _locate_durations_block(text.split("\n"))
+    import yaml
+    try:
+        _, located = _locate_durations_block(text.split("\n"))
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"render produced a `durations:` block PyYAML cannot read back "
+            f"({type(exc).__name__}) — refusing to write it"
+        ) from exc
     expected = len(entries) + len(new_keys)
     if len(located) != expected:
         raise DurationsBridgeError(

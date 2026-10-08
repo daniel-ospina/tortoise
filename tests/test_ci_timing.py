@@ -2360,3 +2360,24 @@ def test_the_pooled_branch_does_not_double_count_a_normalised_duplicate() -> Non
     sel = {"full": True, "test_files": "ALL", "slow_run": False}
     assert ci_timing.selected_weight_s(
         sel, {"tests/a.py": 100}, full_pool={"tests/a", "tests/a.py"}) == 100.0
+
+
+@pytest.mark.parametrize("key", [
+    "*a_test.py", "&a_test.py", "!a_test.py", "[x].py", "'unbal.py", "@x.py",
+])
+def test_durations_bridge_refuses_an_append_key_that_is_not_a_plain_yaml_scalar(key: str) -> None:
+    """A classified-but-untimed key that is a YAML indicator/alias/tag/flow
+    token must be the documented refusal, not a raw yaml error escaping as
+    exit 1 (#6092 review round 2).
+
+    `_DURATION_LINE_RE` matches these (no whitespace, no colon), so the
+    round-1 regex guard let the row be written; the post-condition then
+    re-located it, `_duration_line_key` called `yaml.safe_load`, and the raise
+    was a `ScannerError`/`ConstructorError`/`ParserError` — which
+    `refresh_durations`'s `except DurationsBridgeError` does not catch, so the
+    command died with a traceback instead of the documented exit 2. The key is
+    quoted in `surfaces:` so it is genuinely classified and reaches the ADD.
+    """
+    manifest = f'surfaces:\n  core:\n    - "{key}"\ndurations:\n  keep.py: 1.0\n'
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not parseable as a YAML mapping key"):
+        ci_timing.render_refreshed_manifest(manifest, {key: 2.0}, "T")
