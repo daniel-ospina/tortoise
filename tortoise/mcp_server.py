@@ -1290,6 +1290,11 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # refusing it here made it writable through `tortoise_update_entity`
     # (measured: accepted, journalled, and surviving `rebuild_all`).
     "__runId",
+    # #5196 round 5: the PARAMETER spelling of the same token. The MCP tool
+    # splats caller `props` into `create_source(**props)`, where this key binds
+    # the parameter that writes `s.__runId` — closing only the property name left
+    # this door open (measured: a forged token landed on a node).
+    "_merge_run_id",
     # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
     # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
     # `embedding` ITSELF is deliberately NOT here — `create_point` has a

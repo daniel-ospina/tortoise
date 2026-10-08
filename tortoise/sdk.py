@@ -2660,9 +2660,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # MCP set alone left the OPEN document passthrough writable
     # (`_upsert_document` passes no `allow_keys`, #228), and it was measured:
     # `create_document(__runId="DOC_FORGED")` persisted the forged token.
-    if "__runId" in props:
+    if "__runId" in props or "_merge_run_id" in props:
         raise ValueError(
-            "'__runId' is a server-managed field and cannot be set via props."
+            "'__runId'/'_merge_run_id' is a server-managed field and cannot be "
+            "set via props."
         )
     if "contains_session" in props:
         raise ValueError(
@@ -10791,18 +10792,21 @@ class TortoiseSDK:
                     "message": f"ingest: {section}[{index}] {_rsk} is "
                                f"server-managed and cannot be set on bundle items",
                 })
-        # #5196 round 4, P1: `__runId` is the same shape as `_server_id` above —
-        # a server-minted key that the bundle route could still set, because
-        # `entities` items are splatted into `create_document(**item)` and the
-        # document writer is the #228 open passthrough. Measured before this:
-        # a bundle entity carrying `__runId` landed `BUNDLE_FORGED` on a node.
-        # Rejecting it HERE makes the refusal a Phase-1 abort (zero mutation).
-        if "__runId" in item:
-            violations.append({
-                "section": section, "index": index,
-                "message": f"ingest: {section}[{index}] __runId is "
-                           f"server-managed and cannot be set on bundle items",
-            })
+        # #5196 round 4/5, P1/P2: `__runId` is the NODE property and
+        # `_merge_run_id` the PARAMETER that writes it — one token with two
+        # spellings, so both are refused here. Checked on EVERY section (not only
+        # the ones whose writer is a passthrough) and on the top-level key AND the
+        # nested `props={...}` spelling, which the sibling `_check_gated_status`
+        # also flattens: without the flatten the nested form reached Phase 2 and
+        # aborted AFTER an earlier section had already committed (measured).
+        _nested_props = item.get("props") if isinstance(item.get("props"), dict) else {}
+        for _rk in ("__runId", "_merge_run_id"):
+            if _rk in item or _rk in _nested_props:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_rk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
         # is read from the :Source by `resolve_source_versions` and carried in
         # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
@@ -24601,6 +24605,22 @@ class TortoiseSDK:
                     f"{_k!r} is a server-managed field and cannot be set via "
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
+                )
+        # #5196 round 5, P1: the token has TWO spellings, and this is the second.
+        # `_merge_run_id` is the PARAMETER whose `run_clause` writes `s.__runId`,
+        # so closing the property name alone left the same node property settable
+        # through `props={...}` (the MCP `props` convention and the bundle splat
+        # both land here). Measured before this: `create_source(...,
+        # props={"_merge_run_id": "P"})` wrote `__runId == "P"` on the node.
+        # NOTE the EXPLICIT `_merge_run_id=` keyword stays available: it is the
+        # internal index-merge route (`_index_source_merge`), which is the only
+        # legitimate writer and does not arrive through `props`.
+        for _rk in ("__runId", "_merge_run_id"):
+            if _rk in props:
+                raise ValueError(
+                    f"{_rk!r} is a server-managed field and cannot be set via "
+                    f"props — the merge-run token is minted by the server "
+                    f"(#5196)."
                 )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`

@@ -1171,6 +1171,30 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
                                 "__runId": "BUNDLE_FORGED"}]})
     assert any("__runId" in v["message"] for v in exc.value.violations), (
         exc.value.violations)
+    # #5196 round 5: the PARAMETER spelling of the same token, through the props
+    # route. Measured before this: `props={"_merge_run_id": ...}` wrote the
+    # forged token onto the node.
+    with pytest.raises(ValueError, match="server-managed"):
+        s.create_source(RAW_URL + "?kw", "document", contentHash="h1",
+                        props={"_merge_run_id": "KW_FORGED"})
+
+    # ...and the NESTED spelling inside a bundle item must be a Phase-1 abort.
+    # Before the flatten it reached Phase 2 and aborted AFTER an earlier section
+    # had already committed, so the source below WOULD have persisted.
+    with pytest.raises(BundleValidationError) as exc2:
+        s.ingest({"sources": [{"url": RAW_URL + "?nested",
+                               "sourceKind": "document"}],
+                  "entities": [{"type": "document", "name": "ie-nested-5196",
+                                "documentKind": "note",
+                                "props": {"__runId": "PARTIAL_NESTED"}}]})
+    assert any("__runId" in v["message"] for v in exc2.value.violations), (
+        exc2.value.violations)
+    committed = s._get_proj().g.query(
+        "MATCH (n:Source {url:$u}) RETURN count(n)",
+        params={"u": RAW_URL + "?nested"}).result_set[0][0]
+    assert committed == 0, (
+        "the bundle aborted in Phase 2 — an earlier section was already committed")
+
     forged = s._get_proj().g.query(
         "MATCH (n:Source) WHERE n.__runId IN ['DOC_FORGED','BUNDLE_FORGED'] "
         "RETURN count(n)").result_set[0][0]
