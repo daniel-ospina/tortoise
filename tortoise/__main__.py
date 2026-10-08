@@ -2233,9 +2233,16 @@ def _cmd_org_keys_create(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code == 402:
-            return _cmd_fail(json_mode, "limit_reached",
-                             "API key limit reached (max 3 for free tier). Revoke an existing key first.",
-                             http_code=402)
+            # #5425: the CLI replaces the server's `detail` with its own prose,
+            # so the contact path the server now sends never reaches the user —
+            # this string is a customer-facing limit surface in its own right.
+            from tortoise.quota import with_limit_contact
+            return _cmd_fail(
+                json_mode, "limit_reached",
+                with_limit_contact(
+                    "API key limit reached (max 3 for free tier). "
+                    "Revoke an existing key first."),
+                http_code=402)
         if e.code == 429:
             return _cmd_fail(json_mode, "rate_limited",
                              "Too many keys created recently — try again in 60s.", http_code=429)

@@ -1540,9 +1540,12 @@ def invitation_accept(cp, token: str, user_id: str,
     # org via the email link. Non-consuming (before the single-use PATCH).
     if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
+        from tortoise.quota import with_limit_contact
         raise InvitationError(
-            "You already have a free team — this team requires a paid plan "
-            "to join", status=402)
+            with_limit_contact(
+                "You already have a free team — this team "
+                "requires a paid plan to join"),
+            status=402)
     from tortoise.pricing import tier_limits
     tier = org.get("tier") or "free"
     lim = tier_limits(tier)
@@ -1557,8 +1560,9 @@ def invitation_accept(cp, token: str, user_id: str,
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
+            from tortoise.quota import with_limit_contact
             raise InvitationError(
-                "Member limit reached", status=402)
+                with_limit_contact("Member limit reached"), status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) then verify.
     accept_body: dict = {"status": "accepted", "accepted_at": now.isoformat()}
@@ -4339,8 +4343,9 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
+            from tortoise.quota import with_limit_contact
             raise InvitationError(
-                "Member limit reached", status=402)
+                with_limit_contact("Member limit reached"), status=402)
 
     # #1877 free-org entitlement (join side): the target org has no
     # active paid subscription AND the invitee already holds a free org →
@@ -4348,9 +4353,12 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     from tortoise.supabase_control import _BILLING_ACTIVE_STATUSES
     if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
+        from tortoise.quota import with_limit_contact
         raise InvitationError(
-            "You already have a free team — this team requires a paid plan "
-            "to join", status=402)
+            with_limit_contact(
+                "You already have a free team — this team "
+                "requires a paid plan to join"),
+            status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) — the PATCH's
     # OWN matched-row count is the authoritative claim (P2-1 cross-lane

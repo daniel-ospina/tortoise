@@ -5,56 +5,72 @@ suspended_at``/``flagged_at`` + ``api_keys`` INSERT trigger (the only seam
 that sees BOTH dashboard mints and the signup ``provision_org`` RPC).
 
 Rules (env-overridable thresholds):
-- R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 suspend
-- R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
+- R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 REVIEW ALERT
+- R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 REVIEW ALERT
+                     (stage 2 asks a human to decide; it does NOT suspend —
+                      #5425 owner ruling: rate-limits, then talk to them)
 - R3  reads:        > 100 / 5min per-key OR per-org -> ops alert (Telegram-only, #3639)
 - R4  geo:          first unseen CF-IPCountry per org -> ops alert (Telegram-only)
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
                      notify ops only (Telegram; never suspends)
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
-fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
-suspends only when (a) the rule's flag is a full window old, AND (b) the
-rule has at least one event between the flag and the current window's start
-— evidence the breach actually persisted across the boundary. Episodes END
-on a clean evaluation (window back under threshold → flag_clear event) or on
-un-suspend (the RPC clears all episodes) — so a burst after a quiet period
-or after recovery is a NEW episode: it re-flags and can never suspend on its
-first evaluation. Rules are independent: an R1 flag never escalates a first
-R2 breach.
+fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2 raises
+the operator review alert only when (a) the rule's flag is a full window old,
+AND (b) the rule has at least one event between the flag and the current
+window's start — evidence the breach actually persisted across the boundary.
+Episodes END on a clean evaluation (window back under threshold → flag_clear
+event) or on un-suspend (the RPC clears all episodes) — so a burst after a
+quiet period or after recovery is a NEW episode: it re-flags and can never
+escalate on its first evaluation. Rules are independent: an R1 flag never
+escalates a first R2 breach.
 
 Suspension signal set (scoping delta 14): the process-wide set is a
 CACHE-INVALIDATION SIGNAL, never a rejection authority — membership forces a
 fresh resolution; the durable ``teams.suspended_at`` is the sole ground for
 403/-32006; entries clear when a fresh resolution returns NULL (un-suspend
-self-heals on the next request).
+self-heals on the next request). ⚠️ **#5425: this mechanism is currently
+INERT in production** — the automatic suspension that used to populate it is
+deleted, so nothing calls ``mark_suspended`` and membership is never true.
+What enforces a suspension is the durable read alone. See the delta-14 note
+above ``_SUSPENDED_SIGNAL`` for the full statement.
 
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
 write path. Kill-switch: ``TORTOISE_ABUSE_DISABLED=1``.
 
-The failure handling is NOT uniform (#4872): the six swallow sites on the
+The failure handling is NOT uniform (#4872): the five swallow sites on the
 enforcement DECISION/ACTION path (``window_sum``, ``clean_window_episode_end``,
-``latest_flag_at``, ``rule_event_between``, ``suspend_org``, ``flag_org``) report
+``latest_flag_at``, ``rule_event_between``, ``flag_org``) report
 to the OPERATOR — an ERROR record plus a platform-scoped operator incident,
-because a failed evaluation or a failed suspension is otherwise
-indistinguishable from "the engine decided not to enforce". The remaining
+because a failed evaluation is otherwise indistinguishable from "the engine
+decided not to enforce". The remaining
 telemetry / notification / durability swallows stay debug-only;
-``DECISION_FAULT_LANES`` declares the boundary and why.
+``DECISION_FAULT_LANES`` declares the boundary and why. (#5425 deleted the
+``suspend_org`` lane with the suspension it guarded: the map has FIVE keys, and
+the only remaining enforcement ACTION lane is ``flag_org``.)
 
-Notification volume (#3631): an R1/R2 flag or suspend alert is emitted ONLY
+Notification volume (#3631): an R1/R2 flag or breach alert is emitted ONLY
 after the corresponding store write persists — a store read/write failure
 REDUCES notification volume, never increases it (the 2026-09-14 storm was a
 swallowed ``flag_org`` write failure that notified on every evaluation, 401
 alerts in 3h). The ALERT is also bounded to once per ``(org, rule)`` per
 STAGE per staging window in-process, so neither a read that raises nor one that
 returns a stale ``None`` (replica lag) can re-notify per evaluation (the stage
-distinction is what lets the stage-2 suspend alert still escalate a stage-1
+distinction is what lets the stage-2 breach alert still escalate a stage-1
 flag alert). The claim is released when the engine observes the episode end (a
 clean window), so a genuinely NEW episode alerts again. The durable store
 remains authoritative for staging; the in-process map bounds ONE process, so
 the honest ceiling across replicas is ``N replicas × 1`` per window — a global
 cap needs shared state (Redis/DB) and is deliberately out of scope here.
+
+The persist-before-notify rule does NOT apply to the stage-2 breach alert the
+way it did to the flag alert: #5425 deleted the suspend WRITE that used to gate
+it, so what bounds the breach alert is ``_claim_notify`` alone (once per
+``(org, rule, stage)`` per window, in-process). Its durable trace — the
+``review_needed`` event row — is written best-effort INSIDE ``_notify``, after
+the decision, and a failure there is debug-only. Stated because the old
+sentence claimed a guarantee its artifact no longer provides.
 (The notify-only rules R3/R4/R8 have no flag to persist.)
 """
 from __future__ import annotations
@@ -76,12 +92,19 @@ EVENT_FLAG = "flag"
 EVENT_FLAG_CLEAR = "flag_clear"  # episode end (clean eval or un-suspend)
 EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
+#: #5425 owner ruling (2026-10-08): a PERSISTENT breach raises a human-review
+#: alert. It is deliberately NOT ``EVENT_SUSPEND`` — the engine no longer
+#: suspends, so recording a suspend event (or alerting "auto-suspended") would
+#: record something that did not happen, which is the exact class this ruling
+#: deleted (#4872).
+EVENT_REVIEW = "review_needed"
 EVENT_READ_VELOCITY = "read_velocity"
 EVENT_SIGNUP_VELOCITY = "signup_velocity"
 EVENT_RECOVERY_VELOCITY = "recovery_velocity"
 
-ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY,
-               EVENT_SIGNUP_VELOCITY, EVENT_RECOVERY_VELOCITY)
+ALERT_TYPES = (EVENT_FLAG, EVENT_REVIEW, EVENT_SUSPEND, EVENT_AUTH_IP,
+               EVENT_READ_VELOCITY, EVENT_SIGNUP_VELOCITY,
+               EVENT_RECOVERY_VELOCITY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -210,13 +233,15 @@ def suspended_message() -> str:
 #: path (#4872): swallow site -> ``(incident kind, fallback)``. ``fallback`` is
 #: what the handler DID when the store call failed, i.e. the enforcement
 #: CONSEQUENCE — and it is NOT recoverable from the lane name, which is why the
-#: incident carries it. TWO lanes fail TOWARD a suspension and the rest away
-#: from one: ``rule_event_between`` (``continuity_true``) and
-#: ``clean_window_episode_end`` — the latter because a failed guard read OR
-#: clear write leaves the flag episode ARMED, so the stale anchor survives and a
-#: later over-threshold evaluation can still reach ``suspend_org``. The
-#: away-from-suspension lanes are ``window_sum``, ``latest_flag_at`` (``reflag``)
-#: and the two enforcement ACTION lanes. This map is the single source of truth
+#: incident carries it. After #5425 no lane suspends: the terminal action is an
+#: operator REVIEW ALERT, so "toward/away from suspension" is read as "toward/
+#: away from the escalation". TWO lanes fail TOWARD it — ``rule_event_between``
+#: (``continuity_true``) and ``clean_window_episode_end`` — the latter because a
+#: failed guard read OR clear write leaves the flag episode ARMED, so the stale
+#: anchor survives and a later over-threshold evaluation still escalates to the
+#: review alert. The away-from-it lanes are ``window_sum``, ``latest_flag_at``
+#: (``reflag``) and the one enforcement ACTION lane, ``flag_org``. This map is
+#: the single source of truth
 #: for both values, so the token and the code cannot drift as a pair, and it is
 #: pinned against the source by ``tests/test_abuse.py``: every ``except`` handler
 #: inside ``_evaluate``/``_flag`` must call ``report_abuse_decision_fault`` (an
@@ -241,7 +266,6 @@ DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
     "clean_window_episode_end": ("ABUSE_DECISION_FAULT", "return_none"),
     "latest_flag_at": ("ABUSE_DECISION_FAULT", "reflag"),
     "rule_event_between": ("ABUSE_DECISION_FAULT", "continuity_true"),
-    "suspend_org": ("ABUSE_ENFORCEMENT_FAULT", "return_breach"),
     "flag_org": ("ABUSE_ENFORCEMENT_FAULT", "return_flag"),
 }
 
@@ -284,11 +308,14 @@ def report_abuse_decision_fault(lane: str, org_id: str,
     us (the request is served and the decision path keeps its documented
     fallback) and announced to the OPERATOR — never silently, and never to the
     user. Without this, a broken enforcement path is indistinguishable from
-    "the engine decided not to enforce": ``_evaluate`` returns ``"breach"`` on
-    a failed suspend, exactly as it does while still inside the staging window,
-    and the exception that would name the cause (``supabase_control.rpc``
+    "the engine decided not to enforce": ``_evaluate`` returns ``"breach"``
+    when a store call fails, exactly as it does while still inside the staging
+    window — the same value for "could not evaluate" and "evaluated, still
+    staging" — and the exception that would name the cause (``supabase_control.rpc``
     carries the PostgREST ``message``) is what the old ``logger.debug`` threw
-    away.
+    away. (#5425 removed the ``suspend_org`` lane and with it the sharpest
+    example — a failed suspend that silently skipped the enforcement — but the
+    ambiguity is a property of the return vocabulary, not of that one lane.)
 
     The alert is PLATFORM-SCOPED (one shared substrate cause, one incident) and
     the local ERROR record is the durable diagnosis, carrying the resolved
@@ -320,6 +347,27 @@ def report_abuse_decision_fault(lane: str, org_id: str,
 
 
 # ── Suspended signal set (delta 14) ─────────────────────────────────────────
+#
+# ⚠️ #5425 (2026-10-08): the ENGINE no longer has a caller for
+# `mark_suspended`. It used to be marked as a side effect of the automatic
+# stage-2 suspension, which the owner ruling DELETED — so in production this
+# set is now populated by nothing, `is_suspended_signal()` is always False,
+# and the consumers that used membership as a cache-invalidation fast path
+# (`hosted_api` org deletion, `mcp_auth` membership + self-heal) are inert.
+#
+# The contract they back — "membership forces a FRESH resolution" — is
+# therefore VACUOUS as written. That is stated here rather than deleted,
+# because retiring a security-adjacent fast path is a SEPARATE decision from
+# retiring the automatic suspension; do not read the delta-14 line above as
+# describing a live mechanism.
+#
+# What actually enforces a suspension now is the DURABLE
+# `organizations.suspended_at` read (the 403) — unaffected by #5425: an
+# out-of-band `abuse_suspend` RPC still takes effect, at the cost of up to the
+# MCP membership-cache TTL (≤ 60 s) of staleness in THIS process.
+# `mark_suspended` is retained as the seam an operator-initiated suspension
+# would use to signal this process; nothing in-repo calls it, and it cannot
+# signal a foreign process.
 _SUSPENDED_SIGNAL: set[str] = set()
 _SIGNAL_LOCK = threading.Lock()
 
@@ -497,7 +545,7 @@ class MemoryAbuseStore:
         self.flags.pop(org_id, None)
         self._append(org_id, EVENT_UNSUSPEND, created_at=now)
         # end every flag episode — a recovered org starts clean, so its
-        # first post-recovery burst re-flags instead of auto-suspending
+        # first post-recovery burst re-flags instead of escalating to review
         for rule in (EVENT_POINT_CREATE, EVENT_KEY_CREATE):
             self._append(org_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
         self._durable(org_id, "suspended_at", None)
@@ -689,9 +737,54 @@ class SupabaseAbuseStore:
 def _alert_dict(row: dict) -> dict:
     etype = row.get("event_type")
     details = row.get("details") or {}
+    # A human LABEL per type. The dashboard renders "<label> — <message>" in the
+    # session-authed Security-alerts list, and it previously rendered the raw
+    # `event_type` there — so the customer read "recovery_velocity — Unusual
+    # account-recovery…", "flag — …", i.e. our internal enum leaked as the
+    # heading even after round 6 fixed the message half (round 7). The label is
+    # part of the response, so a client that wants the machine token still has
+    # `type`.
+    labels = {
+        EVENT_FLAG: "Suspicious activity",
+        EVENT_REVIEW: "Activity under review",
+        EVENT_SUSPEND: "Organization suspended",
+        EVENT_AUTH_IP: "New location",
+        EVENT_READ_VELOCITY: "Unusual API activity",
+        EVENT_SIGNUP_VELOCITY: "Unusual signup activity",
+        EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity",
+    }
     messages = {
-        EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
-        EVENT_SUSPEND: "Organization auto-suspended due to unusual activity",
+        # No `details['rule']` token here either: `point_create` / `key_create`
+        # are internal rule names, and the EVENT_REVIEW comment below states the
+        # rule travels on the operator path only. The customer is told what
+        # happened, not which rule fired.
+        EVENT_FLAG: "Suspicious activity flagged on this team",
+        # #5425: this dict is CUSTOMER-FACING. Its one consumer is the
+        # session-authed, membership-gated ``GET /v1/team/alerts``, rendered
+        # verbatim in the dashboard's "Security alerts" list — so the message
+        # must read as something an org member can act on, NOT as an operator
+        # instruction. The operator wording ("review and reach out", the rule,
+        # the issue id) travels separately on the notify/incident path.
+        #
+        # Round 6: the promise "and will be in touch" was removed. Delivery of
+        # the operator signal is BEST-EFFORT — the durable dashboard row is
+        # written first, but the ops notification depends on channel config and
+        # the tracked ops incident is sweep-gated (#4778). A customer-facing
+        # string must not promise a human follow-up the plumbing cannot
+        # guarantee; it now states what IS true (nothing was disabled) and
+        # leaves the route where the customer can reach us.
+        EVENT_REVIEW: ("Unusually high activity on this team. Nothing has been "
+                       "disabled, and our team is reviewing it. If you need a "
+                       "higher limit, contact support@premiselabs.co."),
+        EVENT_SUSPEND: "Organization suspended by an operator",
+        # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
+        # really returned by `recent_alerts`, so without a message here the
+        # customer's Security-alerts list rendered the bare TOKEN —
+        # "recovery_velocity — recovery_velocity". Pre-existing, but in the two
+        # lists this change edits, and the same class it exists to remove
+        # (customer-facing prose nobody reviewed as prose). Now pinned by
+        # test_every_alert_type_has_a_customer_message.
+        EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity detected",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
@@ -699,6 +792,9 @@ def _alert_dict(row: dict) -> dict:
     at = row.get("created_at")
     return {
         "type": etype,
+        # Fall back to the token only for a type outside ALERT_TYPES (which
+        # `recent_alerts` filters out, so unreachable from this seam).
+        "label": labels.get(etype, etype),
         "at": at.isoformat() if isinstance(at, datetime) else at,
         "message": messages.get(etype, etype),
     }
@@ -724,7 +820,8 @@ class AbuseEngine:
 
         Keyed by stage as well as ``(org, rule)``: the two-stage machine is
         SUPPOSED to emit a stage-1 flag alert and, a window later, a stage-2
-        suspend alert — sharing one key would swallow the escalation. Each
+        review alert (#5425 — the escalation is a human decision, not a
+        suspension) — sharing one key would swallow the escalation. Each
         entry stores its OWN expiry, so pruning never evicts a long-window
         (R2, 24h) claim by a short-window (R1, 1h) caller's clock.
         """
@@ -786,7 +883,11 @@ class AbuseEngine:
                             self.point_threshold(), self.point_window_s(), now)
         r2 = self._evaluate(org_id, EVENT_KEY_CREATE,
                             self.key_threshold(), self.key_window_s(), now)
-        return "suspend" if "suspend" in (r1, r2) else (r1 or r2)
+        # #5425: neither branch can return "suspend" any more — the engine has
+        # no suspension to report. The old `"suspend" if "suspend" in (r1, r2)`
+        # collapse was the residue of the deleted path (#4872) and is deleted
+        # with it rather than left advertising a state that cannot occur.
+        return r1 or r2
 
     def evaluate_key_creates(self, org_id: str,
                              now: datetime | None = None) -> str | None:
@@ -822,7 +923,7 @@ class AbuseEngine:
                 # FAILED — a store failure must reduce alert volume, never
                 # increase it, so the claim is left to expire on its own.
                 self._release_notify(org_id, rule, EVENT_FLAG)
-                self._release_notify(org_id, rule, EVENT_SUSPEND)
+                self._release_notify(org_id, rule, EVENT_REVIEW)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
@@ -853,15 +954,32 @@ class AbuseEngine:
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
             return self._flag(org_id, rule, details, now, window_s)
-        try:
-            self.store.suspend_org(org_id, details, now=now)
-        except Exception as e:
-            report_abuse_decision_fault("suspend_org", org_id, rule, e)
-            return "breach"
-        mark_suspended(org_id)
-        if self._claim_notify(org_id, rule, EVENT_SUSPEND, now, window_s):
-            self._notify("abuse_suspended", org_id, details)
-        return "suspend"
+        # #5425 owner ruling (2026-10-08): rate-limit, don't suspend —
+        # "we should just have rate-limits and if they want more they need to
+        # speak with us". A persistent breach now raises an OPERATOR ALERT and
+        # NOTHING ELSE: a human decides (raise the ceiling, or reach out).
+        #
+        # What actually bounds a persistent abuser now — stated so the next
+        # reader does not assume a velocity cap exists: the CUMULATIVE tier
+        # quota (``quota.enforce_org_limit``: points/graphs/keys/sessions/users/
+        # documents — a 402 at the tier ceiling) plus the per-key REQUEST rate
+        # (``RateLimitMiddleware``, 100/min) and the platform-wide in-flight
+        # capture cap (429). There is NO per-window point-rate cap, so an org
+        # can consume its whole tier quota in one burst — the quota TOTAL is
+        # the stop, not a rate. Widening that is a separate product decision.
+        #
+        # The automatic ``suspend_org`` call is DELETED, not repaired. #4872's
+        # collapsed-failure defect (a failed suspend returning "breach", the
+        # same value as "still staging") only existed while the suspend was
+        # meant to fire; polishing that branch would be polishing something we
+        # have decided not to have. ``store.suspend_org`` itself SURVIVES for an
+        # out-of-band operator suspension — but note it is now called by NOTHING
+        # in this repo, so an operator suspension reaches the customer solely
+        # through the durable ``suspended_at`` read (the 403), not through this
+        # engine and not through ``mark_suspended`` (see the delta-14 note).
+        if self._claim_notify(org_id, rule, EVENT_REVIEW, now, window_s):
+            self._notify("abuse_review_needed", org_id, details)
+        return "breach"
 
     def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
               window_s: int) -> str:
@@ -894,6 +1012,25 @@ class AbuseEngine:
         return "flag"
 
     def _notify(self, kind: str, org_id: str, details: dict) -> None:
+        # #5425: the review alert is the operator's PRIMARY signal that a
+        # persistent breach needs a human decision. Its row write is
+        # BEST-EFFORT (debug-swallowed, per the DELIBERATELY EXCLUDED note on
+        # `_notify` in DECISION_FAULT_LANES): if this write fails AND no chat
+        # channel is configured, the stage-2 marker is lost — so the stage-1
+        # `flag` rows in the same abuse list are the BACKSTOP, and no operator
+        # instruction may treat this row as guaranteed. (Reviewer C, round 6:
+        # the earlier wording here and in the runbook asserted durability the
+        # swallow does not provide.)
+        # PERSISTENT breach needs a human decision — the engine no longer
+        # suspends, so nothing else marks the account. Give it a dashboard row
+        # as well as a chat notification: an escalation that reaches only the
+        # chat channel is invisible to whoever is reading the abuse list.
+        # Best-effort, like every other event-record leg.
+        if kind == "abuse_review_needed":
+            try:
+                self.store.record_event(org_id, EVENT_REVIEW, details=details)
+            except Exception:
+                logger.debug("abuse review event record failed (%s)", org_id)
         try:
             from tortoise.notify import notify_abuse
             notify_abuse(kind,
