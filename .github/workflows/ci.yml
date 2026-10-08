@@ -717,8 +717,16 @@ jobs:
           # the checkout step above), so the base resolves. If it does not, the
           # three-dot diff fails HERE and the REQUIRED check goes red instead of
           # skipping both lint steps and reporting green.
+          #
+          # #7534: the `:(exclude)**/node_modules/**` pathspec removes VENDORED
+          # markdown from the population. A re-install rewrites those files, so a
+          # finding there cannot be fixed by hand, and the baseline generator
+          # (`_population`) and the cli2 config `ignores` apply the SAME glob. The
+          # differ's `Linting: N` == changed-set count check makes a mismatch
+          # fail CLOSED, so the three must agree.
           git diff --no-renames --diff-filter ACMR -z --name-only \
-            "${BASE_SHA}...HEAD" -- '*.md' > "$RUNNER_TEMP/pr-md.raw.nul"
+            "${BASE_SHA}...HEAD" -- '*.md' ':(exclude)**/node_modules/**' \
+            > "$RUNNER_TEMP/pr-md.raw.nul"
           # `./`-prefix every entry so no path can be read as an OPTION by
           # xargs (argument injection) and lychee's --files-from never treats
           # it as a `#` comment. The prefix loop is `read -d ''` rather than
@@ -903,8 +911,13 @@ jobs:
           # old) .md path does not exist on disk, and lychee hard-errors on a
           # nonexistent input — so the filter keeps the list to files that are
           # actually there to lint (main commit 1673f65c5 deleted two docs).
+          # #7534: vendored `node_modules` markdown is excluded here too, matching
+          # `_population` and the cli2 config's `ignores` (a re-install rewrites
+          # it, so it cannot be fixed by hand). The differ requires
+          # `Linting: N` == this count, so a mismatch fails closed.
           git diff --no-renames --diff-filter ACMR -z --name-only HEAD^ HEAD \
-            -- '*.md' > "$RUNNER_TEMP/changed-md.raw.nul"
+            -- '*.md' ':(exclude)**/node_modules/**' \
+            > "$RUNNER_TEMP/changed-md.raw.nul"
           # `./`-prefix every entry so no path can be read as an OPTION by
           # xargs (argument injection) and lychee's --files-from never treats
           # it as a `#` comment. NUL-delimited is exact for markdownlint; the

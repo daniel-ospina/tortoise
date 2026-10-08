@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -845,6 +845,35 @@ def _by_name(name: str) -> dict:
     raise AssertionError(f"no docs-job step named {name!r} (#7435)")
 
 
+def test_vendored_markdown_is_excluded_from_the_population_everywhere():
+    """Vendored markdown is not ours, and cannot be fixed by hand (#7534).
+
+    A vendored re-install REWRITES `website/apps/dashboard/node_modules/**`, so a
+    finding there is unreproducible the moment the dependency is bumped — the
+    baseline's own `end_state` note records this. It is removed from the lint
+    POPULATION (not suppressed finding-by-finding), and the SAME glob must be
+    applied in all THREE places the population is defined: the baseline generator
+    (`_population`), the cli2 config, and the `docs` job's changed-set diffs. A
+    mismatch is fail-CLOSED at runtime (the differ requires `Linting: N` == the
+    changed-set count), so this pins the agreement instead of letting it decay
+    into a red required check.
+    """
+    assert dlb.VENDORED_MARKDOWN == ("node_modules",)
+    population = dlb._population(ROOT, None)
+    assert population, "the population must not be empty"
+    leaked = [p for p in population if "node_modules" in PurePosixPath(p).parts]
+    assert leaked == [], f"vendored markdown leaked into the population: {leaked[:3]}"
+    config_text = (ROOT / ".markdownlint-cli2.jsonc").read_text(encoding="utf-8")
+    assert '"**/node_modules/**"' in config_text, (
+        "the cli2 config must ignore the same vendored glob the population filter drops"
+    )
+    for name in (
+        "Get changed markdown files",
+        "Get changed markdown files (main health)",
+    ):
+        assert ":(exclude)**/node_modules/**" in _by_name(name)["run"], name
+
+
 @pytest.mark.parametrize(
     ("name", "gate"),
     [
@@ -1605,7 +1634,7 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     # number: slack above the observed range is an amnesty window, so it is
     # bounded at 160 and any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 11238, "lychee": 160}
+    ceilings = {"markdownlint": 9688, "lychee": 50}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1643,14 +1672,14 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "ba58e90af5357ad7f83eb6c4004b84b0860ce4408dbbb1b7977c704c766d5469"
+        "2eae1464767c6eeb9d103393ea36d134d42db77242221483ee537a613ce5a830"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
-        "568e42acb1a73bc4ff3b68a1cecf58b4233d9f8f3ebd68279f7c3e59cece8493"
+        "dd6c71c15e276c0a524731d97ca05638e0759e0a2e4820e1ec1362dd2b9d8714"
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
     assert hashlib.sha256(
         json.dumps(baseline["linter_config"], sort_keys=True).encode("utf-8")
-    ).hexdigest() == "6f63d7c4437ca88c69184fcde2d53d38beb649c64eadd21edad0b02887cce658", (
+    ).hexdigest() == "530d55e6a390f4ff76191f50a21ca4d4c8646ac593cd0bd24fb7931ca4979717", (
         "the pinned linter-policy map changed — turning a rule off in any "
         ".markdownlint* config (or adding one, or adding a [tool.lychee] section) "
         "suppresses the very findings the required `docs` check exists to catch, so "

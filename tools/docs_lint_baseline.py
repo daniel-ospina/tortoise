@@ -178,7 +178,7 @@ import tempfile
 import tomllib
 from collections import Counter
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 # Pinned to match `.github/workflows/ci.yml` — the snapshot must be produced by
@@ -283,6 +283,17 @@ _NO_LYCHEE_SECTION = hashlib.sha256(b"<no lychee section>").hexdigest()
 
 BASELINE_SCHEMA = 1
 DEFAULT_BASELINE = "config/docs-lint-baseline.json"
+
+# Vendored markdown is NOT OURS: a vendored re-install REWRITES it, so a finding
+# there cannot be fixed by hand-editing the `.md` (the snapshot's own `end_state`
+# note records this), and a baselined entry for one is unreproducible the moment
+# the dependency is bumped. The tree is therefore removed from the lint
+# POPULATION — a population fix, never a per-finding suppression — and the SAME
+# glob is applied by `.markdownlint-cli2.jsonc` `ignores` and by the `docs` job's
+# changed-set diffs, so the generator, the job and the differ describe one
+# population. Measured #7534: 1,422 of the 11,238 baseline findings lived in 41
+# tracked files under `website/apps/dashboard/node_modules`.
+VENDORED_MARKDOWN = ("node_modules",)
 
 # `:<line>` and `:<line>:<column>` are both emitted (cli2 omits the column when
 # it is 1). `.+?` is non-greedy so a path containing a colon still anchors on the
@@ -995,6 +1006,14 @@ def _population(repo_root: Path, files_from: Path | None) -> list[str]:
         if proc.returncode != 0:
             raise FailClosed(f"git ls-files failed: {proc.stderr.decode(errors='replace')}")
         listed = [p for p in proc.stdout.decode().split("\0") if p]
+    # Drop vendored trees BEFORE `normalize_path`: see `VENDORED_MARKDOWN`. The
+    # filter is applied on BOTH branches so a `--files-from` caller (tests, a
+    # future CI caller) gets the same population as the default `git ls-files`.
+    listed = [
+        p
+        for p in listed
+        if not any(part in VENDORED_MARKDOWN for part in PurePosixPath(p).parts)
+    ]
     # Returned BARE (repo-relative, no `./`). The `./` prefix a linter needs is
     # added at the invocation site (`_run_markdownlint` / `_run_lychee`), because
     # a filename is data and one starting with `-` must never be read as an
