@@ -49,6 +49,14 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import quota as _quota  # #5425 LIMIT_CONTACT (leaf; no cycle)
+
+#: #5425: the contact path every over-limit refusal carries. Defined in the LEAF
+#: module `quota` (which by contract must not import this one) so the shared
+#: quota gate and the REST surfaces read the SAME string. It MUST be bound
+#: before `_key_limit_refusal`'s default argument, which is evaluated at def
+#: time — hence its place here and not beside its callers.
+_LIMIT_CONTACT = _quota.LIMIT_CONTACT
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import (
     _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -5915,7 +5923,9 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
-def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
+def _key_limit_refusal(
+        message: str = ("Key limit reached — revoke an existing key"
+                        + _LIMIT_CONTACT)) -> dict:
     """Build the structured 402 `detail` for an api_keys refusal (#4614).
 
     Called at raise sites that supply no count — the mint/rotate
@@ -6125,12 +6135,6 @@ def _suspended_detail() -> dict:
             "appeal_url": appeal_url()}
 
 
-#: #5425 owner ruling (2026-10-08): "if they want more they need to speak with
-#: us". The route for a customer who needs a ceiling raised is a CONVERSATION,
-#: so the contact path belongs on every limit surface — appended from ONE
-#: constant rather than restated per message, because N restatements of a
-#: user-facing string is the drift class already fixed once in #1611.
-_LIMIT_CONTACT = " Need more? Contact support@premiselabs.co."
 
 
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
@@ -12140,10 +12144,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (count_org_usage(..., "points") — non-episodic Points PLUS
                 # Object + Subject, NULL `is_episodic` counted as non-episodic;
                 # a `NOT n.is_episodic` count drops those NULLs and undercounts
-                # by thousands). `message` is byte-identical to the old prose.
+                # by thousands). `message` is byte-identical to the old prose
+                # PLUS the #5425 contact suffix — the suffix is what makes the
+                # human route reachable from the refusal, so it is part of the
+                # contract now, not an ornament.
                 detail=quota_refusal_payload(QuotaExceededError(
                     f"Team points limit reached: {count} in use + {est} estimated "
-                    f"for this capture exceeds {max_points}. Upgrade your plan.",
+                    f"for this capture exceeds {max_points}. Upgrade your plan."
+                    + _LIMIT_CONTACT,
                     resource="points", used=count, limit=max_points,
                     estimate=est,
                 )),
@@ -16199,7 +16207,7 @@ async def _graph_quota_gate(org: dict) -> None:
             status_code=409,
             headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
             detail=("Graph limit reached. Upgrade your plan to create more "
-                    "graphs."),
+                    "graphs." + _LIMIT_CONTACT),
         )
 
 
@@ -16215,7 +16223,7 @@ async def _provision_preflight(org: dict) -> None:
         raise HTTPException(
             status_code=402,
             detail="Custom graphs require the Builder plan. Upgrade to create "
-                   "multiple graphs.",
+                   "multiple graphs." + _LIMIT_CONTACT,
             headers={"X-Upgrade-CTA": "pro"},
         )
 
@@ -16288,7 +16296,7 @@ def _provision_graph(org: dict, name: str,
                     status_code=409,
                     headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
                     detail=("Graph limit reached. Upgrade your plan to create "
-                            "more graphs."),
+                            "more graphs." + _LIMIT_CONTACT),
                 )
 
         # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
@@ -18214,7 +18222,8 @@ async def accept_invite(body: dict, request: Request,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail="You already have a free team — this team requires a paid plan"
+                       " to join" + _LIMIT_CONTACT)
 
     # #1965: per-org lock around the capacity pre-check + consume. The
     # capacity pre-check runs INSIDE the lock BEFORE the accepted_at write
@@ -18675,7 +18684,8 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail="You already have a free team — this team requires a paid plan"
+                       " to join" + _LIMIT_CONTACT)
     async with _invite_org_lock(org_id):
         _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -19209,7 +19219,8 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
         if org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail="You already have a free team — this team requires a paid plan"
+                       " to join" + _LIMIT_CONTACT)
 
     # #1965: same per-org lock + capacity pre-check as the TOKEN accept
     # branch — the max_users pre-check runs INSIDE the lock BEFORE the
@@ -29999,7 +30010,8 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Builder feature — upgrade to enable hourly backups",
+            detail="Backups are a Builder feature — upgrade to enable hourly backups"
+                   + _LIMIT_CONTACT,
         )
 
 
@@ -32077,7 +32089,8 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
     if not tier or tier in ("free", "anon"):
         raise HTTPException(
             status_code=400,
-            detail="A paid plan is required to purchase a new organization")
+            detail="A paid plan is required to purchase a new organization"
+                   + _LIMIT_CONTACT)
     if is_supabase_enabled():
         if org_by_name(get_control_plane(), name):
             raise HTTPException(status_code=409, detail="Organization name already exists")

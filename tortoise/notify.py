@@ -109,7 +109,8 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
     That is why repeated failures must not be filed by the caller — pass a
     SUBJECT that identifies the outage, not the individual send.
 
-    Mirrors the ``abuse_suspended`` call site below (same
+    Mirrors the abuse-incident call site below (``abuse_suspended`` /
+    ``abuse_review_needed`` — same
     ``_backup_config_safe`` → ``_alert_store_from`` → ``open_incident`` path),
     factored out because more than one send leg now needs it. The hosted_api
     import is function-level for the reason stated at that call site: hosted_api

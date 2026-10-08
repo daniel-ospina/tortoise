@@ -16,6 +16,7 @@ from tortoise.quota import (
     quota_refusal_payload,
     resolve_org_limits,
 )
+from tortoise.quota import LIMIT_CONTACT  # noqa: E402  #5425 shared contact path
 
 # graph-scripts/ is a hyphenated (namespace) dir — import the #947 backfill
 # one-shot via path insert (AGENTS.md sibling-import convention).
@@ -98,8 +99,12 @@ class TestEnforceTeamLimit:
         assert payload["code"] == QUOTA_REFUSAL_CODE
         assert payload["resource"] == "points"
         assert payload["used"] == 1 and payload["limit"] == 1
-        assert payload["message"] == "Team points limit reached (1). " \
-            "Upgrade your plan to increase it."
+        # #5425: the shared gate is the surface MOST customers hit, so it names
+        # the human route too ("if they want more they need to speak with us").
+        assert payload["message"] == (
+            "Team points limit reached (1). Upgrade your plan to increase it."
+            + LIMIT_CONTACT)
+        assert "support@premiselabs.co" in payload["message"]
         sdk.close()
 
     def test_below_limit_passes(self, tmp_path):

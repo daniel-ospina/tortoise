@@ -355,8 +355,17 @@ def test_abuse_review_needed_files_a_tracked_incident(monkeypatch):
     assert any("review" in p.lower() for p in pushed), pushed
 
 
-def test_operator_suspend_still_files_its_own_incident(monkeypatch):
-    """The operator path is UNCHANGED by #5425 — only the automatic one is gone."""
+def test_operator_suspend_notification_leg_is_still_wired(monkeypatch):
+    """``abuse_suspended`` still reaches the ops sink under its OWN kind.
+
+    Scope note (a reviewer caught the earlier framing as false assurance):
+    this covers the NOTIFICATION LEG only. #5425 removed the engine's call to
+    ``store.suspend_org``, and nothing in this repo calls it since, so an
+    operator suspension happens out-of-band (a ``service_role`` RPC write to
+    ``organizations.suspended_at``) and is enforced by that durable read alone.
+    Nothing in-repo therefore raises this notification automatically; the test
+    pins that the leg remains correct for whoever does.
+    """
     filed, _pushed = _install_alert_store(monkeypatch)
     notify.notify_abuse("abuse_suspended", {"org_id": "team_123"},
                         {"rule": "point_create", "count": 501})

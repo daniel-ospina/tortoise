@@ -189,6 +189,17 @@ _RESOURCE_LIMIT_KEYS = {
 QUOTA_REFUSAL_CODE = "quota_exceeded"
 
 
+#: #5425 owner ruling (2026-10-08): "we should just have rate-limits and if they
+#: want more they need to speak with us". The route for a customer at a ceiling
+#: is a CONVERSATION, so every refusal that tells them about a limit must also
+#: tell them they can talk to us. It lives HERE, in the leaf module both the REST
+#: layer and the quota gate import, because `quota` is a leaf by contract
+#: (``quota must not import hosted_api``) — while the constant living in
+#: ``hosted_api`` is precisely why the shared gate below was missed (#5425
+#: review round 1). ONE constant, so the surfaces cannot drift apart (#1611).
+LIMIT_CONTACT = " Need more? Contact support@premiselabs.co."
+
+
 class RefusalPayload(dict):
     """The structured 402 ``detail`` — a dict that STRINGIFIES to its message.
 
@@ -803,7 +814,7 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         if count >= limit:
             raise QuotaExceededError(
                 f"Team documents limit reached ({limit}). Upgrade your plan "
-                f"to increase it.",
+                f"to increase it." + LIMIT_CONTACT,
                 resource="documents", used=count, limit=limit,
             )
         return
@@ -831,7 +842,8 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     used = count - slot_credit
     if used >= limit:
         raise QuotaExceededError(
-            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it.",
+            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase"
+            f" it." + LIMIT_CONTACT,
             resource=resource, used=used, limit=limit,
         )
 
