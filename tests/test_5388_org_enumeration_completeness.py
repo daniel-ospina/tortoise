@@ -339,21 +339,42 @@ class TestEndOfWalkSignals:
             f"got {len(got)} of {n} in {cp.calls} page(s)"
         )
 
-    def test_a_later_page_total_cannot_replace_the_fleet_total(
+    def test_a_later_page_remainder_is_never_adopted_as_the_fleet_total(
             self, monkeypatch):
-        """A cursor-filtered total counts the REMAINING rows, not the fleet.
+        """A remainder reported on page 2+ must not become the fleet count.
 
-        Accepting it satisfies `seen >= total` almost immediately and stops
-        the walk with rows unfetched while reporting COMPLETE.
+        The fleet count is only meaningful from the page that ASKED for it
+        (page 1, the ``count_exact`` page). This is the residual case the sticky
+        guard has to cover beyond the shortfall test: page 1 states NOTHING (a
+        server that refuses ``count=exact``), and a later page volunteers the
+        cursor-filtered REMAINING count. Adopting it makes `seen >= total`
+        satisfiable while rows are still unserved — and on the page-cap exit
+        that means COMPLETE=True with orgs missing, which prunes them.
+
+        Without this test the guard could be `total is None` ("first non-None
+        total") and the suite would still pass — a mutation found exactly that.
+
+        The discriminating shape is a server that NEVER returns an empty page,
+        so the exit is the local page cap and `exhausted` is False. Only then
+        can an adopted remainder turn an unconfirmable walk into COMPLETE.
         """
-        n = 1500
+        # More rows than the page cap can walk (100 pages x 1000 rows).
+        from tortoise import hosted_api as _ha
+        n = (_ha._ORG_ENUMERATION_MAX_PAGES
+             * _ha._ORG_ENUMERATION_MAX_ROWS + 500)
         ids = [f"o{i:06d}" for i in range(n)]
-        cp = self._Server(ids, cap=500, stated="remaining")
-        got = _run(monkeypatch, cp, require_complete=True)
-        assert got is not None
-        assert {r["org_id"] for r in got} == set(ids), (
-            f"a later page's total must never replace the fleet count, got "
-            f"{len(got)} of {n} in {cp.calls} page(s)"
+
+        class RemainderCP(self._Server):
+            def query_with_total(self, table, **kw):
+                page, remainder = super().query_with_total(table, **kw)
+                # Page 1: no total at all (a server refusing count=exact).
+                # Page 2+: the cursor-filtered REMAINING count only.
+                return page, (None if self.calls == 1 else remainder)
+
+        cp = RemainderCP(ids, stated="remaining")
+        assert _run(monkeypatch, cp, require_complete=True) is None, (
+            "a walk that hit its page cap cannot be reported COMPLETE just "
+            "because a later page volunteered the remaining count"
         )
 
     def test_a_later_page_total_cannot_mask_a_shortfall(self, monkeypatch):

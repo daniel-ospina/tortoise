@@ -984,8 +984,8 @@ mcp_http_app = create_http_app(
 #: boundary. The Supabase branch walks pages and takes the total from
 #: ``Content-Range`` (``Prefer: count=exact``), so a complete 1000-org fleet is
 #: no longer rejected and a genuinely truncated one is still caught. Residual:
-#: a server that states NO total leaves completeness to "the last page came
-#: back short", and a local page-cap exit is NOT proof — that case still fails
+#: a server that states NO total is complete only when the walk reaches an
+#: EMPTY page, and a local page-cap exit is NOT proof — that case still fails
 #: closed for ``require_complete``.
 _ORG_ENUMERATION_MAX_ROWS = 1000
 
@@ -1063,6 +1063,11 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     # exact class #5388 exists to prevent, so the cursor is the
                     # last id we SAW, which no concurrent write can move.
                     page_filters.append(("id", "gt", last_id))
+                # Capture BEFORE the call, from the PRE-call cursor. Computed
+                # afterwards it is always False, because the page we just read
+                # advanced `last_id` (round 4's own first attempt had it there,
+                # and the baseline promptly went red).
+                asked_for_count = last_id is None
                 page, page_total = cp.query_with_total(
                     "organizations", select=["id", "name"],
                     filters=page_filters,
@@ -1077,13 +1082,14 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 seen_ids.update(r["id"] for r in page)
                 if page:
                     last_id = page[-1]["id"]
-                if page_total is not None and total is None:
-                    # Sticky FIRST total only. The fleet count is the one asked
-                    # for under the fleet-wide filter (``count_exact`` on page
-                    # 1). A later page is cursor-filtered too, so its
-                    # ``Content-Range`` total counts the REMAINING rows —
-                    # accepting it would let the count be satisfied almost
-                    # immediately and stop the walk mid-fleet.
+                # The fleet count is only meaningful from the page that ASKED
+                # for it — page 1, the ``count_exact`` page. Any later page is
+                # cursor-filtered, so its ``Content-Range`` total counts the
+                # REMAINING rows, not the fleet. "The first non-None total" is
+                # NOT the same rule: if page 1 states nothing and a later page
+                # states a remainder, adopting that number makes the
+                # completeness check satisfiable while rows are still unserved.
+                if asked_for_count and page_total is not None:
                     total = page_total
                 if not page:
                     # THE sound end-of-walk signal: the server returned no more
@@ -1494,7 +1500,7 @@ async def _refresh_cost_allocation() -> None:
         if rows is None:
             # The walk could NOT confirm the whole fleet (#5388): either the
             # server stated a total the walk never reached, or it stated no
-            # total and never returned a short page. The fleet is UNKNOWN, so
+            # total and no page ever came back EMPTY. The fleet is UNKNOWN, so
             # publish an unavailable snapshot and leave the metric at
             # last-known-good rather than pruning orgs on a partial list.
             refresh_and_publish([])

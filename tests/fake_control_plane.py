@@ -1436,7 +1436,6 @@ class FakeControlPlane:
                          method: str = "GET", json_body: dict | None = None,
                          order: str | None = None, limit: int | None = None,
                          timeout: object | None = None,
-                         offset: int | None = None,
                          count_exact: bool = False) -> tuple[list[dict], int | None]:
         """#5388: the total-aware shape of :meth:`query`.
 
@@ -1444,9 +1443,6 @@ class FakeControlPlane:
         ``total=None`` — "the server did not state a count" — which is the
         honest double, NOT ``len(rows)`` (that would assert the page is always
         the whole result set and hide exactly the bug #5388 is about).
-        ``offset`` is applied locally because the fake materialises the rows;
-        leaving it unimplemented let the double silently mis-serve an
-        offset-paged caller while its docstring promised otherwise (round 3).
 
         A test that needs a KNOWN total must override this method (see
         ``tests/test_5388_org_enumeration_completeness.py``), which is the only
@@ -1470,8 +1466,6 @@ class FakeControlPlane:
                               limit=None, timeout=timeout)
         if last is not None:
             rows_all = [r for r in rows_all if r.get("id") and r["id"] > last]
-        if offset:
-            rows_all = rows_all[offset:]
         page = rows_all[:limit] if limit is not None else rows_all
         return page, None
 

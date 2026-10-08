@@ -407,7 +407,6 @@ class SupabaseControlPlane:
                          method: str = "GET", json_body: dict | None = None,
                          order: str | None = None, limit: int | None = None,
                          timeout: httpx.Timeout | float | None = None,
-                         offset: int | None = None,
                          count_exact: bool = False,
                          ) -> tuple[list[dict], int | None]:
         """Run one PostgREST call and return ``(rows, total)``.
@@ -492,11 +491,6 @@ class SupabaseControlPlane:
             params["order"] = order
         if limit is not None:
             params["limit"] = str(limit)
-        if offset is not None:
-            # PostgREST `offset`: pairs with `limit` for a stable walk. Callers
-            # MUST also pass an `order`, or page boundaries are not stable and
-            # rows are skipped or repeated.
-            params["offset"] = str(offset)
 
         headers = {
             "apikey": self._key,
