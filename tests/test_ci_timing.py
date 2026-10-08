@@ -668,6 +668,20 @@ durations:
 """
 
 
+# Separates the two states the bridge used to conflate: `test_pending.py` is
+# CLASSIFIED (a `core` surface member) with no `durations:` entry, `test_timed.py`
+# has both. A collector weight for either must resolve; only a file in NEITHER
+# block (e.g. `test_stranger.py`) is refused.
+BRIDGE_MANIFEST_PENDING = """\
+surfaces:
+  core:
+    - test_timed.py
+    - test_pending.py
+durations:
+  test_timed.py: 3.0
+"""
+
+
 def _bridge_manifest(tmp_path: Path, text: str = BRIDGE_MANIFEST) -> Path:
     path = tmp_path / "ci-surfaces.yml"
     path.write_text(text)
@@ -696,7 +710,7 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert "# the #3395 authority comment" in text
     # the machine-readable capture age is written
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
-    assert stats == {"sampled_keys": 2, "manifest_keys": 3,
+    assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
                      "carried_forward": 1, "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
@@ -722,8 +736,9 @@ def test_refresh_durations_zero_key_projection_is_unknown(tmp_path: Path) -> Non
 def test_refresh_durations_rejects_a_collector_key_absent_from_the_manifest(
     tmp_path: Path,
 ) -> None:
-    # ONE-WAY key agreement: a collector key not already in the manifest is a
-    # refusal (register the test file first), never an invented row.
+    # The refusal that must SURVIVE: `test_brand_new.py` is registered in neither
+    # the `surfaces:` block nor the `durations:` map, so the refresh has nothing
+    # to agree with. Registering the file is the fix, never an invented row.
     path = _bridge_manifest(tmp_path)
     before = path.read_text()
     assert ci_timing.refresh_durations(
@@ -741,6 +756,97 @@ def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None
     before = path.read_text()
     assert ci_timing.refresh_durations(path, _bridge_weights(test_gamma=9.0), "T") == 2
     assert path.read_text() == before
+
+
+def test_refresh_durations_adds_a_classified_file_that_has_no_duration_yet(
+    tmp_path: Path,
+) -> None:
+    """REGRESSION — the exact production failure.
+
+    The `measure` job's Task 4b bridge died on
+
+        collector key 'test_mergify_config_guard.py' is not classified in the
+        manifest — register the test file before refreshing the durations map
+
+    for a file that WAS classified (a `surfaces:` member) and merely had no
+    `durations:` entry yet. The bridge refused, the dependent `refresh` job was
+    skipped by `needs` + `success()`, and the map stayed hand-maintained. A
+    classified-but-untimed basename must resolve, and the refresh must ADD its
+    measured entry.
+    """
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_pending.py": 7.34}, "T")
+    assert stats["added_keys"] == 1
+    assert "  test_pending.py: 7.3" in new_text
+    manifest = yaml.safe_load(new_text)
+    assert manifest["durations"]["test_pending.py"] == 7.3
+    # merge, not replace: the entry that already existed is carried forward
+    assert manifest["durations"]["test_timed.py"] == 3.0
+    # the rendered file passes the manifest-side duration gate, so the ADD does
+    # not trade one refusal for another
+    assert ci_timing.validate_refreshed_manifest(new_text) == []
+
+
+def test_refresh_durations_writes_the_added_entry_to_disk(tmp_path: Path) -> None:
+    """Case 2 through the real entry point, not just the renderer: the write
+    path returns 0 and the new key is in the file afterwards."""
+    path = _bridge_manifest(tmp_path, BRIDGE_MANIFEST_PENDING)
+    assert ci_timing.refresh_durations(path, {"test_pending.py": 7.34}, "T") == 0
+    assert yaml.safe_load(path.read_text())["durations"]["test_pending.py"] == 7.3
+
+
+def test_refresh_durations_refuses_an_ambiguity_that_spans_the_two_sets(
+    tmp_path: Path,
+) -> None:
+    """Case 4, the shape that resolving against ONE set would have let through.
+
+    The basename has one `durations:` candidate (`sub/test_dup.py`) and one
+    classified-only candidate (`test_dup.py`). Resolving against the durations
+    map alone sees a single candidate and silently picks the wrong path; the
+    union sees two and refuses, so widening the domain did not loosen the
+    never-a-guess rule.
+    """
+    text = "surfaces:\n  core:\n    - test_dup.py\ndurations:\n  sub/test_dup.py: 1.0\n"
+    path = _bridge_manifest(tmp_path, text)
+    before = path.read_text()
+    with pytest.raises(ci_timing.DurationsBridgeError, match="multiple manifest keys"):
+        ci_timing.render_refreshed_manifest(before, {"test_dup.py": 2.0}, "T")
+    assert ci_timing.refresh_durations(path, {"test_dup.py": 2.0}, "T") == 2
+    assert path.read_text() == before
+
+
+def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
+    """END-TO-END on the manifest of record: a real fast-pool file the manifest
+    classifies but has not timed is ADDED, and the result still passes the FULL
+    `--integrity` gate (not only the duration subset).
+
+    The file is DERIVED at run time rather than named, so this survives it
+    getting a duration — the failure mode that made `test_mergify_config_guard.py`
+    a valid but short-lived instance of the bug. It skips only when the manifest
+    times every fast-pool file, at which point there is nothing to add.
+    """
+    import ci_selection as cs
+
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    parsed = ci_timing._manifest_of(before)
+    pending = sorted(set(cs.fast_pool(parsed)) - set(parsed["durations"]))
+    if not pending:
+        pytest.skip("manifest times every fast-pool file — no pending file to add")
+    target = pending[0]
+    # A real stamp: `integrity_problems` treats a PRESENT-but-unparseable
+    # `durations_captured_at` as red, and this test asserts the full gate is green.
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        before, {target: 4.34}, "2026-10-07T00:00:00Z")
+    assert stats["added_keys"] == 1
+    assert f"  {target}: 4.3" in new_text
+    _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
+    _, entries_after = ci_timing._locate_durations_block(new_text.split("\n"))
+    # nothing dropped and exactly the pending key invented
+    assert set(entries_after) == set(entries_before) | {target}
+    assert yaml.safe_load(new_text)["durations"][target] == 4.3
+    assert ci_timing.validate_refreshed_manifest(new_text) == []
+    assert ci_timing.integrity_problems(new_text) == []
 
 
 def test_refresh_durations_dry_run_does_not_write(tmp_path: Path) -> None:

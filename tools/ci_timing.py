@@ -449,9 +449,14 @@ def parse_log(path: Path) -> dict:
 # `manifest_path.write_text` sites, and a safe_dump would strip the
 # hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
 #
-#   * a collector key not already classified in the manifest is refused (exit
-#     2) — the bridge never invents a key, so a new test file is registered
-#     first;
+#   * a collector key the manifest classifies in NEITHER its `surfaces:` block
+#     nor its `durations:` map is refused (exit 2) — the bridge never invents a
+#     key. A key the manifest DOES classify but has not yet timed is ADDED: the
+#     refusal is about REGISTRATION, never about having been timed (see
+#     `_resolve_to_manifest_keys`). Resolving against the `durations:` keys alone
+#     was the bootstrap trap #4364 names — a new test file could only be timed by
+#     a map it had to already appear in — and it made this step, the map's only
+#     writer, refuse a registered-but-untimed file (#6092);
 #   * a ZERO-key projection is UNKNOWN (exit 2), never a silent no-op that
 #     writes nothing and reports success;
 #   * un-sampled manifest keys are CARRIED FORWARD (merge, not replace), so
@@ -516,23 +521,86 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
     return key_line, entries
 
 
+def _classified_test_keys(manifest_text: str) -> set[str]:
+    """Every test file the manifest CLASSIFIES: the `surfaces:` members plus
+    every `durations:` key.
+
+    This is the resolution domain :func:`_resolve_to_manifest_keys` needs. It is
+    deliberately NOT the `durations:` map alone: a file the manifest classifies
+    but has not yet timed is exactly the file a refresh exists to measure, and
+    resolving against the map alone made that state indistinguishable from a file
+    registered nowhere (#4364's bootstrap trap).
+
+    The `durations:` half is carried explicitly so a map key that is not a
+    surface member still resolves in place, byte-for-byte as it did before the
+    `surfaces:` half existed — the union can only ADD candidates to a basename,
+    and an added candidate can only turn a resolution into a refusal, never into
+    a different key.
+
+    `tier1` and `on_demand` are deliberately not unioned in: measured against
+    this repo's manifest every `tier1` member is already a surface member and the
+    sole `on_demand` file is already a `durations:` key, so they add no candidate
+    today; and an `on_demand` file runs only under `evals-on-demand.yml`, so a
+    python-ci collector log cannot carry one. If a future manifest registers a
+    file under `tier1` ALONE, this union would refuse it — extend the union HERE,
+    not at the call site.
+
+    PyYAML is imported here rather than at module scope: this is reached only
+    through `render_refreshed_manifest`, whose one production caller is the
+    `--refresh-durations` path the module docstring already requires PyYAML for.
+    """
+    import yaml
+
+    raw = yaml.safe_load(manifest_text)
+    if not isinstance(raw, dict):
+        return set()
+    keys: set[str] = set()
+    surfaces = raw.get("surfaces")
+    if isinstance(surfaces, dict):
+        for members in surfaces.values():
+            if isinstance(members, (list, tuple)):
+                keys.update(m for m in members if isinstance(m, str))
+    durations = raw.get("durations")
+    if isinstance(durations, dict):
+        keys.update(k for k in durations if isinstance(k, str))
+    return keys
+
+
 def _resolve_to_manifest_keys(weights: dict[str, float],
-                              manifest_keys: set[str]) -> dict[str, float]:
+                              classified_keys: set[str]) -> dict[str, float]:
     """Map the collector's basenames onto manifest keys, fail-closed.
 
     The collector keys on the file's basename; the manifest keys on the file's
-    tests/-relative path. An unresolvable key (not classified) or an ambiguous
-    one (two manifest keys sharing a basename) is a refusal, never a guess.
+    tests/-relative path. `classified_keys` is the manifest's FULL test-file
+    classification — `_classified_test_keys` supplies it — never the `durations:`
+    keys alone.
+
+    The rule, in full:
+
+    * exactly ONE candidate key → resolve to it. It does not matter whether that
+      key already has a `durations:` entry (an in-place update) or is classified
+      with none (an ADD — the measured entry the refresh exists to produce);
+    * ZERO candidates → refusal. The file is registered in neither block, so the
+      refresh has nothing to agree with: this is the #2876 manifest-drift class,
+      and registering the file is the fix, not widening the bridge;
+    * TWO OR MORE candidates — whether both are `durations:` keys, both are
+      classified-only, or one is each — refusal. The basename alone cannot say
+      which path the measurement belongs to, and resolving against only one of
+      the two sets was how this rule could be silently bypassed.
+
+    "Exactly one" and "two or more" are exhaustive over the candidate list, so
+    those two refusals are the only ones and neither is a guess.
     """
     by_basename: dict[str, list[str]] = {}
-    for key in manifest_keys:
+    for key in sorted(classified_keys):
         by_basename.setdefault(Path(key).name, []).append(key)
     resolved: dict[str, float] = {}
     for basename, seconds in weights.items():
         candidates = by_basename.get(basename, [])
         if not candidates:
             raise DurationsBridgeError(
-                f"collector key {basename!r} is not classified in the manifest — "
+                f"collector key {basename!r} is classified in neither the "
+                f"manifest's `surfaces:` block nor its `durations:` map — "
                 f"register the test file before refreshing the durations map"
             )
         if len(candidates) > 1:
@@ -562,7 +630,12 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
 
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                               captured_at: str) -> tuple[str, dict]:
-    """Return (new manifest text, stats). Pure: callers own the write."""
+    """Return (new manifest text, stats). Pure: callers own the write.
+
+    A weight whose basename resolves to a key the manifest CLASSIFIES but has not
+    timed yet is ADDED as a new `durations:` row; every other row is carried
+    forward and the `durations_captured_at` stamp is rewritten.
+    """
     lines = manifest_text.split("\n")
     _, entries = _locate_durations_block(lines)
     if not entries:
@@ -571,8 +644,14 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         raise DurationsBridgeError(
             "collector produced ZERO measured file durations — UNKNOWN, never 0"
         )
-    resolved = _resolve_to_manifest_keys(weights, set(entries))
+    # Resolve against what the manifest CLASSIFIES (surfaces + durations), not
+    # against the durations map alone — a classified file with no duration yet is
+    # added below instead of refusing the whole refresh (#4364).
+    resolved = _resolve_to_manifest_keys(
+        weights, _classified_test_keys(manifest_text))
     for key in sorted(resolved):
+        if key not in entries:
+            continue
         seconds = resolved[key]
         index = entries[key]
         match = _DURATION_LINE_RE.match(lines[index])
@@ -586,11 +665,32 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             f"{match.group('indent')}{key}: "
             f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
         )
+    # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
+    # append it to the block in the same `  key: value` shape the existing rows
+    # use (indent 2, one decimal, no trailing comment). APPENDED, not inserted
+    # mid-block: the block is not sorted (it grew in sweep batches), and the
+    # renderer is text-preserving, so no existing line moves to make room for a
+    # new one. A measured key carries no `# unmeasured` marker by construction.
+    new_keys = sorted(key for key in resolved if key not in entries)
+    if new_keys:
+        last = _DURATION_LINE_RE.match(lines[max(entries.values())])
+        assert last is not None  # located by the same regex
+        indent = last.group("indent")
+        insert_at = max(entries.values()) + 1
+        lines[insert_at:insert_at] = [
+            f"{indent}{key}: "
+            f"{max(float(resolved[key]), DURATIONS_VALUE_FLOOR_S):.1f}"
+            for key in new_keys
+        ]
     _set_captured_at(lines, captured_at)
     stats = {
         "sampled_keys": len(resolved),
         "manifest_keys": len(entries),
-        "carried_forward": len(entries) - len(resolved),
+        # Resolved keys that had no `durations:` line and were therefore added,
+        # and the existing entries the merge left untouched. `manifest_keys`
+        # stays the INPUT map's size; `added_keys` is what it grew by.
+        "added_keys": len(new_keys),
+        "carried_forward": len(entries) - (len(resolved) - len(new_keys)),
         "captured_at": captured_at,
     }
     return "\n".join(lines), stats
@@ -764,10 +864,12 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         return 1
     if dry_run:
         print(f"dry-run: {stats['sampled_keys']} sampled, "
+              f"{stats['added_keys']} added, "
               f"{stats['carried_forward']} carried forward — no write")
         return 0
     manifest_path.write_text(new_text)
     print(f"refreshed {manifest_path}: {stats['sampled_keys']} sampled, "
+          f"{stats['added_keys']} added, "
           f"{stats['carried_forward']} carried forward "
           f"(captured_at {captured_at})")
     return 0
