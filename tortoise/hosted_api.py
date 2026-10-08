@@ -15831,7 +15831,13 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     not guess when the user is not currently ON that org."""
     return {
         "code": "one_free_org_limit",
-        "message": "You can only have one free organization",
+        # #5425: a customer at a ceiling is told they can talk to us — this is
+        # the free-org ceiling, the sibling of the paid-plan refusal that
+        # already carries the route. Kept as a builder (the dashboard's dialog
+        # is driven by `code`), so the derived guard has to resolve a
+        # detail-BUILDER to see it: a `HTTPException(detail=_builder(...))`
+        # argument subtree holds no string literal of its own.
+        "message": with_limit_contact("You can only have one free organization"),
         "org_id": org_id,
     }
 

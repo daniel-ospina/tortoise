@@ -10929,7 +10929,11 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
                "tortoise/sdk.py", "tortoise/__main__.py")
     LIMIT_WORDS = ("limit", "quota", "upgrade", " cap ", "cap ", "plan ",
-                   "tier", "maximum", " max ", "allowance", "ceiling")
+                   "tier", "maximum", " max ", "allowance", "ceiling",
+                   # round 5: a ceiling worded as a COUNT. "You can only have
+                   # one free organization" is a limit with none of the words
+                   # above — the property is ABOUT A CEILING, not the noun.
+                   "only have")
 
     #: Reasons a message does NOT need the contact path. Each names a CATEGORY,
     #: so an exemption is a deliberate act rather than a silent pass: a
@@ -10979,6 +10983,29 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                 names.add(pinned)
         return names
 
+    def _detail_builders(self, trees):
+        """Module-level functions that RETURN a detail dict, name → [value nodes].
+
+        Round 5: a raise site written ``HTTPException(detail=_some_builder(...))``
+        has no string literal in its own argument subtree, so a rule that only
+        reads literals skipped it entirely — ``_one_free_org_detail`` (a
+        customer-facing free-org ceiling) escaped the universe that way. Resolve
+        the callee instead: any module-level function whose ``return`` is a dict
+        literal carrying a ``message`` key contributes that value.
+        """
+        out = {}
+        for tree in trees.values():
+            for node in tree.body if isinstance(tree, ast.Module) else []:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                vals = [v for ret in ast.walk(node)
+                        if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Dict)
+                        for k, v in zip(ret.value.keys, ret.value.values, strict=True)
+                        if isinstance(k, ast.Constant) and k.value == "message"]
+                if vals:
+                    out.setdefault(node.name, []).extend(vals)
+        return out
+
     def _refusal_messages(self):
         """Yield (module, line, construct, text, compliant) per refusal."""
         root = pathlib.Path(__file__).resolve().parent.parent
@@ -10988,6 +11015,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
             if path.exists():
                 trees[rel] = ast.parse(path.read_text(encoding="utf-8"))
         refusal_classes = self._refusal_class_names(trees)
+        detail_builders = self._detail_builders(trees)
         for rel in self.MODULES:
             path = root / rel
             if not path.exists():       # a module move must not silently skip
@@ -11003,6 +11031,12 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                     if name == "HTTPException":
                         pairs = [("HTTPException", kw.value)
                                  for kw in node.keywords if kw.arg == "detail"]
+                        # round 5: a detail BUILDER holds no literal of its own.
+                        for _c, val in list(pairs):
+                            if isinstance(val, ast.Call) and isinstance(val.func, ast.Name) \
+                                    and val.func.id in detail_builders:
+                                pairs += [(f"detail {val.func.id}", v)
+                                          for v in detail_builders[val.func.id]]
                     elif name in _REFUSAL_MESSAGE_ARG:
                         idx = _REFUSAL_MESSAGE_ARG[name]
                         if len(node.args) > idx:
@@ -11054,6 +11088,11 @@ class TestOverLimitSurfacesOfferTheHumanPath:
             "SUBCLASS (CohortCostCapExceeded is a QuotaExceededError) raising "
             "a customer-facing limit message is then invisible, which is "
             "exactly the round-4 finding")
+        assert "detail _one_free_org_detail" in constructs, (
+            "the detail-BUILDER form is not being resolved — a raise site "
+            "written HTTPException(detail=_builder(...)) has no literal in its "
+            "argument subtree, so the free-org ceiling escapes the universe "
+            "(the round-5 finding)")
 
     def test_the_punctuation_join_is_a_seam_not_a_hand_append(self):
         """Every append goes through the seam, and the seam is TERMINAL.

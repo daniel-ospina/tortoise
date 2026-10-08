@@ -5257,8 +5257,8 @@ function claimIntentInFlight() {
           // gate's.
           // (Named by symbol, never by line number: a citation into this file
           // is a claim that re-stales on the next edit above it.)
-          ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
-          : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
+          ? withLimitContact('You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.')
+          : withLimitContact('You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.'))
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -5520,7 +5520,10 @@ function claimIntentInFlight() {
           // OR API-key cap (the create mints the graph's first key; a full
           // key table rolls the graph back with a 409). The detail is
           // authoritative (plan §6.2 contract).
-          setError({ message: b.detail || 'Graph limit reached — delete a graph or upgrade.', status: res.status })
+          // #5425: the server's detail carries the contact route; the FALLBACK
+          // literal did not, so a 409 without a detail left the customer with
+          // no way to talk to us.
+          setError({ message: b.detail || withLimitContact('Graph limit reached — delete a graph or upgrade.'), status: res.status })
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)

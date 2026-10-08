@@ -11,6 +11,10 @@ created: 2026-08-11
 
 # Scoping 308 — Hosted: Abuse Prevention — Alternative Approaches
 
+> ⛔ **SUPERSEDED IN PART (2026-10-08, #5425) — read this before designing to anything below.**\
+> **The automatic stage-2 account suspension described throughout this document was DELETED, not tuned.** An owner ruling on #5425 — *"we should just have rate-limits and if they want more they need to speak with us"* — retired it: exceeding a volume threshold now raises an **operator review alert** (`abuse_review_needed`; a tracked ops incident + dashboard row + Telegram) and **never suspends the org**. `AbuseEngine._evaluate` returns `"breach"` and calls neither `store.suspend_org` nor `mark_suspended`; no in-repo production code writes `teams.suspended_at` any more.\
+> **What SURVIVES and is still accurate below:** the event log and telemetry (migration 0015, the `abuse_events` trigger), the volume signals, the flag stage, the `403 SUSPENDED` contract and `suspended_at` read path (now reached only by an **out-of-band operator** suspension, or directly via the RPC), the appeal/unsuspend operations, and the notification plumbing — which now also carries the customer-visible contact path every over-limit refusal appends via `quota.with_limit_contact`.\
+> **Why this document is kept:** it is the **divergence-phase record** (the three evaluated architectures), and migration 0015 names it as the design contract for the schema that still exists. Its stage-2 sections are history; the live operational posture is `docs/ops/registry-backup-dr.md`.\
 > Divergence-phase output for issue #308 (branch `feat/308-abuse-prevention`). Three genuinely distinct architectures, evaluated against the confirmed problem. **No winner is selected here** — this document feeds the convergence decision.
 >
 > All line numbers verified against the working tree (2026-02) at time of writing.
@@ -21,11 +25,11 @@ The hosted platform lacks durable, surface-complete abuse telemetry and enforcem
 
 | # | Rule | Response |
 |---|---|---|
-| R1 | >500 Points created in <1h (team) | flag → **AUTO-SUSPEND** |
-| R2 | >10 API key creations in 24h (team) | flag → **AUTO-SUSPEND** |
+| R1 | >500 Points created in <1h (team) | flag → **operator review** — the automatic suspension was deleted (#5425) |
+| R2 | >10 API key creations in 24h (team) | flag → **operator review** — the automatic suspension was deleted (#5425) |
 | R3 | >100 reads in <5min from a single API key | notify Owner |
 | R4 | New-IP/geolocation access | notify Owner |
-| R5 | Auto-suspend → API returns `403 SUSPENDED` + appeal link (REST **and** MCP) | — |
+| R5 | Auto-suspend → API returns `403 SUSPENDED` + appeal link (REST **and** MCP) | the 403 contract is unchanged, but since #5425 only an operator suspension reaches it |
 | R6 | CAPTCHA (Turnstile) on signup + server-side verification on mint endpoints | fail-open only when secret unset |
 | R7 | Dashboard: suspicious-activity alert + one-click key revocation | — |
 
@@ -98,7 +102,7 @@ Recording is best-effort fire-and-forget (never gates the write); **evaluation i
 **Two-stage response** (identical semantics across approaches):
 
 1. **Stage 1 — flag (1st breach):** no enforcement change; row marked `flagged`; owner email + dashboard banner ("suspicious activity detected") + ops alert (deduped via `alert_store`). A single spike (bulk import script, test harness) stops here.
-2. **Stage 2 — auto-suspend (2nd consecutive window still over threshold):** `abuse_suspend` RPC sets `teams.suspended_at`; owner + ops notified with appeal link; subsequent auth is rejected.
+2. **Stage 2 — auto-suspend (2nd consecutive window still over threshold):** ~~`abuse_suspend` RPC sets `teams.suspended_at`; owner + ops notified with appeal link; subsequent auth is rejected.~~ **DELETED by #5425.** The second consecutive over-threshold window now claims an `abuse_review_needed` operator alert and nothing else — the org keeps working while a human decides. See the banner at the top of this document.
 3. **Appeal:** email link / 403 link → operator runs `abuse_unsuspend` → `suspended_at = NULL` → immediate recovery. Audit trail: the events that triggered the flag remain queryable.
 
 **Enforcement (R5):** `teams.suspended_at` read by `resolve_api_key` (one round-trip, already fetched) → `get_current_org` raises `HTTPException(403, detail={"code": "SUSPENDED", "appeal_url": ...})`; `TeamResolutionMiddleware` returns `-32006` with `data.appeal_url` and **pops the token's 60s cache entry** so suspension applies immediately even for cached MCP sessions. `session_key` mint checks `suspended_at` → re-mint impossible while suspended. Registry mode: `SET t.suspended_at` on the Team node (billing.py `SET t.subscription_status` precedent) + `get_current_org` registry path reads the prop.

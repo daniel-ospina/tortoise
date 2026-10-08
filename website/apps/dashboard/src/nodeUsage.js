@@ -87,10 +87,14 @@ export function nodeNudge(team, hasUpgrade = true) {
   const at = u.level === 'at_limit'
   if (free) {
     const base = at ? "You've reached your node limit." : "You're close to your node limit."
-    return hasUpgrade ? `${base} Upgrade to keep writing.` : base
+    return at
+      ? withLimitContact(hasUpgrade ? `${base} Upgrade to keep writing.` : base)
+      : (hasUpgrade ? `${base} Upgrade to keep writing.` : base)
   }
   const base = at ? "You've reached your node allowance." : "You're near your node allowance."
-  return hasUpgrade ? `${base} Upgrade for a higher allowance.` : base
+  return at
+    ? withLimitContact(hasUpgrade ? `${base} Upgrade for a higher allowance.` : base)
+    : (hasUpgrade ? `${base} Upgrade for a higher allowance.` : base)
 }
 
 // The next plan above `tier` that this deployment can actually check out — a

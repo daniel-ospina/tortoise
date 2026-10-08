@@ -12,8 +12,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LIMIT_CONTACT, withLimitContact } from './limitContact.js'
-import { upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
-import { nodeUsageText } from './nodeUsage.js'
+import { upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
+import { nodeUsageText, nodeNudge } from './nodeUsage.js'
 
 const ADDRESS = 'support@premiselabs.co'
 
@@ -48,9 +48,27 @@ test('#5425: every dashboard limit notice carries the human route', () => {
       "You're over your plan's limit of 2 API keys", { max_api_keys: 2 }, false),
     // A 0-cap plan states the blocked condition rather than "0 / 0 (100%)".
     'node caption': nodeUsageText({ used: 0, max: 0, pct: 0 }),
+    // Round 5: these three were un-routed while their siblings carried the
+    // route — the test enumerated only the first three, so it passed while its
+    // own name ("every dashboard limit notice") was false.
+    'node nudge at the cap': nodeNudge({ tier: 'free', nodes_used: 100, max_nodes: 100 }),
+    'node nudge at the cap, paid': nodeNudge({ tier: 'pro', nodes_used: 100, max_nodes: 100 }),
+    'connect-step at-cap note': existingKeyNoteFrom(
+      { max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }]),
+    'paste-rejection at-cap clause': capRevokeFirstClause(
+      { max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }]),
   }
   for (const [name, msg] of Object.entries(notices)) {
     assert.ok(msg && msg.includes(ADDRESS), `${name} must offer the human route: ${msg}`)
     assert.match(msg, /\.\s+Need more\?/, `${name} must be well-formed prose: ${msg}`)
   }
+})
+
+test('#5425: a NOT-at-ceiling notice is left alone', () => {
+  // The seam is for CUSTOMER CEILINGS. A nudge that is merely "close to" a
+  // limit must not acquire a support address: the route is for someone who was
+  // refused, not someone being warned (and who may still upgrade themselves).
+  assert.doesNotMatch(nodeNudge({ tier: 'free', nodes_used: 95, max_nodes: 100 }), /support@/)
+  assert.doesNotMatch(existingKeyNoteFrom({ max_api_keys: 2 }, [{ id: 'a' }]), /support@/)
+  assert.equal(capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }]), '')
 })

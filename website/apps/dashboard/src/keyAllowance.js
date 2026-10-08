@@ -170,7 +170,8 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   const rotate = "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key."
   if (a && a.exhausted) {
-    return `${rotate} Creating a new key needs a free slot, and your plan's ${a.limit} are all in use — revoke one or upgrade first.`
+    return withLimitContact(
+      `${rotate} Creating a new key needs a free slot, and your plan's ${a.limit} are all in use — revoke one or upgrade first.`)
   }
   return `${rotate} Creating a new key here spends another of your plan's key slots.`
 }
@@ -186,5 +187,8 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
 export function capRevokeFirstClause(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   if (!a || !a.exhausted) return ''
-  return " You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one."
+  // #5425: appended to four paste rejections, so it goes through the seam
+  // (which rstrips and terminates) rather than starting with a bare space.
+  return withLimitContact(
+    "You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one.")
 }
