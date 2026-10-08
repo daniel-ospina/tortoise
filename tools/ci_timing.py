@@ -23,9 +23,12 @@ Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYA
 (the manifest-side checks load the refreshed text through `yaml.safe_load`) —
 `ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
 does — outside that pin the import is unguarded, so a missing/broken PyYAML
-surfaces as an `ImportError` traceback with exit 1, which is a DEPENDENCY
-failure, not the exit-1 manifest-gate meaning below. Deterministic output
-(sorted, stable JSON) so the refresh job's no-diff check works.
+surfaces as rc=2 (UNKNOWN), with the import error named on stderr —
+`ModuleNotFoundError` for a missing PyYAML, `ImportError` for a broken one — and
+the process boundary is total, so it is no longer distinguishable by exit code
+from any other UNKNOWN failure: the exception type is what identifies it.
+Deterministic output (sorted, stable JSON) so the refresh job's no-diff check
+works.
 """
 from __future__ import annotations
 
@@ -66,9 +69,29 @@ subjects.team: epistemic-team
 # --- GitHub API (via `gh` CLI, pre-installed + authed on runners) ----------
 
 def gh_api(repo: str, url: str) -> dict:
-    """Call `gh api <url>` and parse JSON. Raises on non-zero exit."""
+    """Call `gh api <url>` and parse a JSON **mapping**.
+
+    A non-zero exit raises `CalledProcessError`; a body that is not a JSON
+    mapping raises `DurationsBridgeError`. Both are fetch failures — the
+    callers decide whether one is fatal — so a caller tests "did the fetch
+    fail", not which way (#6092 review round 7).
+    """
     proc = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
-    return json.loads(proc.stdout)
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, RecursionError) as exc:
+        # ValueError, not just JSONDecodeError: the decoder also raises a plain
+        # ValueError for an integer past the int-string digit limit. A
+        # pathologically nested document raises RecursionError. Both are "this
+        # body is not a usable JSON mapping" (#6092 review round 8).
+        raise DurationsBridgeError(
+            f"gh api {url} returned a body that is not usable JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise DurationsBridgeError(
+            f"gh api {url} returned {type(data).__name__}, not a mapping"
+        )
+    return data
 
 
 def fetch_run(repo: str, run_id: str) -> dict:
@@ -80,8 +103,22 @@ def fetch_jobs(repo: str, run_id: str) -> list[dict]:
     page = 1
     while True:
         data = gh_api(repo, f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&page={page}")
-        jobs.extend(data.get("jobs", []))
-        if len(jobs) >= data.get("total_count", 0) or not data.get("jobs"):
+        page_jobs = data.get("jobs")
+        # `gh_api` validates the ENVELOPE is a mapping; the values it hands back
+        # are still whatever the API said. `{"jobs": null}` raised TypeError and
+        # `{"jobs": "x"}` an AttributeError in the caller (#6092 review round 8).
+        if not isinstance(page_jobs, list):
+            raise DurationsBridgeError(
+                f"gh api returned a non-list `jobs` ({type(page_jobs).__name__}) "
+                f"for run {run_id} page {page}"
+            )
+        jobs.extend(j for j in page_jobs if isinstance(j, dict))
+        total = data.get("total_count")
+        if not isinstance(total, int):
+            raise DurationsBridgeError(
+                f"gh api returned a non-integer `total_count` ({type(total).__name__})"
+            )
+        if len(jobs) >= total or not page_jobs:
             break
         page += 1
     return jobs
@@ -121,13 +158,24 @@ def pick_run(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str | None:
     """
     try:
         data = gh_api(repo, pick_run_query(repo, per_page))
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, DurationsBridgeError) as exc:
         # Behaviour parity with the old inline shell: an API failure is not fatal
         # (measurement-only workflow) — warn and let the step report "none found".
+        #
+        # This catches DurationsBridgeError too, and not merely for symmetry:
+        # ci-timing.yml runs this under `bash -e`, so an uncaught refusal would
+        # redden the weekly measurement job instead of reporting no candidate.
+        # A malformed body is the same class of event as a non-zero exit here —
+        # the fetch failed (#6092 review round 8).
         print(f"::warning::gh api run-list failed: {exc}", file=sys.stderr)
         return None
-    for run in data.get("workflow_runs", []):
-        if run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
+    workflow_runs = data.get("workflow_runs")
+    if not isinstance(workflow_runs, list):
+        print(f"::warning::gh api run-list returned a non-list `workflow_runs` "
+              f"({type(workflow_runs).__name__})", file=sys.stderr)
+        return None
+    for run in workflow_runs:
+        if isinstance(run, dict) and run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
             return str(run["id"])
     return None
 
@@ -358,9 +406,30 @@ R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
 
+def _tests_relative_path(node_path: str) -> str:
+    """A pytest nodeid's file path as a tests/-relative key.
+
+    The durations block prints rootdir-relative nodeids (`tests/sub/x.py::t`),
+    while the manifest keys on the tests/-relative path (`sub/x.py`). Stripping
+    the `tests/` prefix makes the two comparable. A path without that prefix
+    (a log written from a different rootdir) is returned unchanged, so it fails
+    resolution loudly instead of being silently rewritten.
+    """
+    path = node_path.replace("\\", "/")
+    return path[len("tests/"):] if path.startswith("tests/") else path
+
+
 def parse_log(path: Path) -> dict:
-    """Extract durations block, summary counts, per-test outcomes, watchdog flag."""
+    """Extract durations block, summary counts, per-test outcomes, watchdog flag.
+
+    `files` is keyed by basename — the shape the artifact renders. `file_paths`
+    is the same aggregation keyed by the tests/-relative PATH, which is what
+    the durations bridge resolves against: collapsing to basenames is what let
+    a subdir file's measurement be attached to a top-level key (#6092 review,
+    F3).
+    """
     files: dict[str, dict] = {}
+    file_paths: dict[str, dict] = {}
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
     killed = False
@@ -369,8 +438,8 @@ def parse_log(path: Path) -> dict:
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError as exc:
-        return {"files": {}, "counts": counts, "outcomes": {}, "killed": False,
-                "error": f"unreadable: {exc}"}
+        return {"files": {}, "file_paths": {}, "counts": counts, "outcomes": {},
+                "killed": False, "error": f"unreadable: {exc}"}
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
@@ -416,11 +485,20 @@ def parse_log(path: Path) -> dict:
                 m = DURATION_RE.match(line)
                 if m:
                     ms = float(m.group(1)) * 1000
-                    fname = m.group(3).split("::")[0].split("/")[-1]
-                    entry = files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0})
-                    entry["tests"] += 1
-                    entry["total_ms"] += ms
-                    entry["max_ms"] = max(entry["max_ms"], ms)
+                    node_path = m.group(3).split("::")[0]
+                    fname = node_path.split("/")[-1]
+                    # Two accumulators over the same durations: the basename
+                    # one feeds the rendered artifact, the path one feeds the
+                    # bridge's resolution.
+                    for target in (
+                        files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                        file_paths.setdefault(
+                            _tests_relative_path(node_path),
+                            {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                    ):
+                        target["tests"] += 1
+                        target["total_ms"] += ms
+                        target["max_ms"] = max(target["max_ms"], ms)
         m = V_PROGRESS_RE.match(line)
         if m:
             outcomes[m.group(1)] = m.group(2)
@@ -433,8 +511,8 @@ def parse_log(path: Path) -> dict:
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
-    return {"files": files, "counts": counts, "outcomes": outcomes, "killed": killed,
-            "error": error}
+    return {"files": files, "file_paths": file_paths, "counts": counts,
+            "outcomes": outcomes, "killed": killed, "error": error}
 
 
 # --- durations bridge (#5215 Task 4b / T-B): collector → the map the ---------
@@ -449,9 +527,18 @@ def parse_log(path: Path) -> dict:
 # `manifest_path.write_text` sites, and a safe_dump would strip the
 # hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
 #
-#   * a collector key not already classified in the manifest is refused (exit
-#     2) — the bridge never invents a key, so a new test file is registered
-#     first;
+#   * a measured file the manifest registers NOWHERE — not in `surfaces:`, not a
+#     `durations:` key, not a member of a python-ci leg list (`slow_files`,
+#     `carve_out`, `tier1`) — is refused (exit 2): the bridge never invents a
+#     key. A file the manifest DOES register but has not yet timed is ADDED: the
+#     refusal is about REGISTRATION, never about having been timed (see
+#     `_resolve_to_manifest_keys`). Resolution is by tests-relative PATH, and a
+#     basename only diagnoses a refusal, so a subdir twin can never receive
+#     another file's measurement (#6092 review, F3). Resolving against the
+#     `durations:` keys alone was the bootstrap trap #4364 names — a new test
+#     file could only be timed by a map it had to already appear in — and it
+#     made this step, the map's only writer, refuse a registered-but-untimed
+#     file (#6092);
 #   * a ZERO-key projection is UNKNOWN (exit 2), never a silent no-op that
 #     writes nothing and reports success;
 #   * un-sampled manifest keys are CARRIED FORWARD (merge, not replace), so
@@ -469,7 +556,10 @@ DURATIONS_CAPTURED_AT = "durations_captured_at"
 DURATIONS_VALUE_FLOOR_S = 0.1
 
 # `  <tests-relative key>: <seconds>[  # comment]` — the map's one line shape.
-# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`).
+# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`). The key
+# class `[^\s:]+` is why a key with whitespace or a colon is REFUSED on the ADD
+# path rather than written: the line would be valid YAML but unlocatable, and
+# the next refresh would refuse the whole block (#6092 review, F1).
 _DURATION_LINE_RE = re.compile(
     r"^(?P<indent>\s{2})(?P<key>[^\s:]+):[ \t]+"
     r"(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<tail>[ \t]*(?:#.*)?)$"
@@ -483,21 +573,57 @@ class DurationsBridgeError(Exception):
 def collector_file_weights(logs_dir: Path) -> dict[str, float]:
     """Per-file seconds from the collector's OWN parser, taking the LARGER
     value across the sampled jobs (the leg that CARRIES the file spends that
-    time). Basenames, exactly as `parse_log` emits them; the manifest key is
-    resolved by :func:`_resolve_to_manifest_keys`.
+    time).
+
+    Keyed by the tests/-relative PATH (`sub/test_x.py`), not the basename: two
+    files that share a basename in different directories are distinct
+    measurements, and collapsing them to one key was how a subdir file's time
+    could be attached to a top-level file (#6092 review, F3). `parse_log`
+    supplies both aggregations — the basename one for the artifact, this path
+    one for resolution.
     """
     weights: dict[str, float] = {}
     for log_path in sorted(Path(logs_dir).rglob("*.log")):
         parsed = parse_log(log_path)
-        for fname, entry in parsed["files"].items():
+        for path, entry in parsed["file_paths"].items():
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
-            if seconds > weights.get(fname, 0.0):
-                weights[fname] = seconds
+            if seconds > weights.get(path, 0.0):
+                weights[path] = seconds
     return weights
 
 
+def _duration_line_key(line: str) -> str:
+    """The effective YAML key a located `durations:` row defines.
+
+    `_DURATION_LINE_RE` captures the RAW key text, which for a quoted key
+    includes its quotes (`'test_a.py'`); the key the map actually carries is
+    what `yaml.safe_load` reads (`test_a.py`). Normalising through the parser
+    here keeps this map's key space identical to `resolved` and to
+    `yaml.safe_load(manifest)["durations"]`, so an existing quoted row is FOUND
+    and updated in place instead of being duplicated (#6092 review, F2).
+    """
+    import yaml
+
+    parsed = yaml.safe_load(line)
+    if not isinstance(parsed, dict) or len(parsed) != 1:
+        raise DurationsBridgeError(f"malformed durations line: {line!r}")
+    key = next(iter(parsed))
+    if not isinstance(key, str):
+        raise DurationsBridgeError(
+            f"durations key is not a string in {line!r} — the map keys test "
+            f"file paths, so a non-string key cannot name one")
+    return key
+
+
 def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int]]:
-    """(index of the top-level `durations:` line, {key: physical line index})."""
+    """(index of the top-level `durations:` line, {parsed key: line index}).
+
+    The keys are YAML-parsed (see :func:`_duration_line_key`), so a quoted row
+    is located under the same key the file carries. Two rows that parse to the
+    SAME key are refused: PyYAML silently last-wins on a duplicate, so allowing
+    one would let the renderer preserve a stale value behind a fresh one and
+    break the "one parsed key per located row" invariant.
+    """
     key_line = next((i for i, ln in enumerate(lines) if ln.startswith("durations:")), None)
     if key_line is None:
         return None, {}
@@ -508,7 +634,13 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
             continue
         match = _DURATION_LINE_RE.match(ln)
         if match:
-            entries[match.group("key")] = j
+            key = _duration_line_key(ln)
+            if key in entries:
+                raise DurationsBridgeError(
+                    f"duplicate `durations:` key {key!r} on lines "
+                    f"{entries[key] + 1} and {j + 1} — refusing a block PyYAML "
+                    f"would silently last-wins")
+            entries[key] = j
             continue
         if not ln[:1].isspace():
             break  # the next top-level key ends the block
@@ -516,31 +648,121 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
     return key_line, entries
 
 
-def _resolve_to_manifest_keys(weights: dict[str, float],
-                              manifest_keys: set[str]) -> dict[str, float]:
-    """Map the collector's basenames onto manifest keys, fail-closed.
+def _classified_test_keys(manifest_text: str) -> set[str]:
+    """Every test file the manifest CLASSIFIES: the `surfaces:` members, every
+    `durations:` key, and the members of the leg lists python-ci runs.
 
-    The collector keys on the file's basename; the manifest keys on the file's
-    tests/-relative path. An unresolvable key (not classified) or an ambiguous
-    one (two manifest keys sharing a basename) is a refusal, never a guess.
+    Those leg lists are `slow_files`/`carve_out`/`tier1`; `push_extra` is NOT
+    unioned (it is empty today, and only the push leg consumes it) — see the
+    deliberate exclusions below for the shape of that reasoning (#6092 review
+    round 12).
+
+    This is the resolution domain :func:`_resolve_to_manifest_keys` needs. It is
+    deliberately NOT the `durations:` map alone: a file the manifest classifies
+    but has not yet timed is exactly the file a refresh exists to measure, and
+    resolving against the map alone made that state indistinguishable from a file
+    registered nowhere (#4364's bootstrap trap).
+
+    It is also not the `surfaces:` members alone. A subdir test can be registered
+    ONLY under `slow_files`/`carve_out`/`tier1` and still pass `--integrity`,
+    because `ci_selection.integrity` classifies a subdir file by BASENAME fallback
+    against `surfaces:`. Such a file runs in a python-ci leg that uploads a
+    `pytest-log-*`, so its measurement must resolve to its OWN path. Unioning
+    those lists is what makes the exact-path resolution below possible for it;
+    without them it resolved by basename onto whatever surface member shared its
+    basename (#6092 review, F3).
+
+    `on_demand` is deliberately not unioned in: it runs only under
+    `evals-on-demand.yml`, so a python-ci collector log cannot carry one, and
+    treating a stray `on_demand` measurement as registered would hide the drift.
+    `uri_requiring` is not unioned either, because it is not a leg list: every
+    one of its members is an exact `surfaces:` member in this manifest, so
+    listing it would add no candidate. If a future manifest registers a file
+    under one of these lists ALONE, extend the union HERE, not at the call site.
+
+    PyYAML is imported here rather than at module scope: this is reached only
+    through `render_refreshed_manifest`, whose one production caller is the
+    `--refresh-durations` path the module docstring already requires PyYAML for.
+    """
+    import yaml
+
+    raw = yaml.safe_load(manifest_text)
+    if not isinstance(raw, dict):
+        return set()
+    keys: set[str] = set()
+    surfaces = raw.get("surfaces")
+    if isinstance(surfaces, dict):
+        for members in surfaces.values():
+            if isinstance(members, (list, tuple)):
+                keys.update(m for m in members if isinstance(m, str))
+    durations = raw.get("durations")
+    if isinstance(durations, dict):
+        keys.update(k for k in durations if isinstance(k, str))
+    for list_key in ("slow_files", "carve_out", "tier1"):
+        members = raw.get(list_key)
+        if isinstance(members, (list, tuple)):
+            keys.update(m for m in members if isinstance(m, str))
+    return keys
+
+
+def _resolve_to_manifest_keys(weights: dict[str, float],
+                              classified_keys: set[str]) -> dict[str, float]:
+    """Map the collector's tests-relative paths onto manifest keys, fail-closed.
+
+    `weights` is keyed by the file's tests/-relative PATH (`collector_file_weights`
+    supplies it), never by basename, and `classified_keys` is the manifest's full
+    test-file classification (`_classified_test_keys` supplies it) — never the
+    `durations:` keys alone.
+
+    The rule, in full:
+
+    * the measured path IS a classified key → resolve to it, unchanged. Exact
+      path identity is the only thing that SELECTS a key;
+    * the measured path is NOT classified and NO classified key shares its
+      basename → refusal. The file is registered nowhere: the #2876
+      manifest-drift class, and registering the file is the fix;
+    * the measured path is NOT classified and TWO OR MORE classified keys share
+      its basename → refusal (ambiguous, never a guess);
+    * the measured path is NOT classified and exactly ONE classified key shares
+      its basename → refusal, because the paths DIFFER. This is the case the old
+      basename-only rule got wrong: it attached the measurement to the twin. The
+      repo holds the shape today (`test_ship_test_onboarding.py` is classified;
+      `e2e/test_ship_test_onboarding.py` is not), and while python-ci does not
+      run the e2e leg today, the attachment would be wrong the moment it did.
+
+    A basename therefore never SELECTS a key here; it only distinguishes
+    "unregistered" from "ambiguous" from "a different file". Adding a candidate
+    to `classified_keys` can turn a refusal into an exact self-resolution, or an
+    unambiguous diagnosis into an ambiguous one — it can never attach a
+    measurement to a DIFFERENT path.
     """
     by_basename: dict[str, list[str]] = {}
-    for key in manifest_keys:
+    for key in sorted(classified_keys):
         by_basename.setdefault(Path(key).name, []).append(key)
     resolved: dict[str, float] = {}
-    for basename, seconds in weights.items():
+    for measured, seconds in weights.items():
+        if measured in classified_keys:
+            resolved[measured] = seconds
+            continue
+        basename = Path(measured).name
         candidates = by_basename.get(basename, [])
         if not candidates:
             raise DurationsBridgeError(
-                f"collector key {basename!r} is not classified in the manifest — "
-                f"register the test file before refreshing the durations map"
+                f"measured file {measured!r} is not a registered test file — it "
+                f"is absent from the manifest's `surfaces:`, `durations:`, "
+                f"`slow_files`, `carve_out`, and `tier1` — register it before "
+                f"refreshing the durations map"
             )
         if len(candidates) > 1:
             raise DurationsBridgeError(
-                f"collector key {basename!r} matches multiple manifest keys "
-                f"{sorted(candidates)} — refusing to guess"
+                f"measured file {measured!r} shares its basename with multiple "
+                f"manifest keys {sorted(candidates)} — refusing to guess"
             )
-        resolved[candidates[0]] = seconds
+        raise DurationsBridgeError(
+            f"measured file {measured!r} is not registered, and the only key "
+            f"with its basename is {candidates[0]!r} — a different path; "
+            f"refusing to attach the measurement to it"
+        )
     return resolved
 
 
@@ -548,7 +770,27 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
     """Set the machine-readable capture-age key. Its ABSENCE is UNKNOWN, so it
     is never inferred from the file's git commit date — any unrelated edit
     would reset that (cycle 7)."""
-    line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
+    # A stamp safe to embed in a double-quoted scalar keeps the line
+    # byte-stable — the text-preservation test pins that, and it is the path
+    # every real stamp takes. Anything else is rendered through the YAML
+    # writer instead of interpolated (#6092 review round 4): this is the only
+    # value the renderer persists without validating, and a stamp containing a
+    # quote produced a document that could not be parsed back, while the
+    # readback that follows the renderer runs outside its handlers — so the
+    # CLI died with a traceback (exit 1) instead of the documented refusal.
+    if re.search(r'[\x00-\x1f\x7f-\x9f"\\]', captured_at):
+        import yaml
+        rendered = yaml.safe_dump(
+            {DURATIONS_CAPTURED_AT: captured_at}, default_flow_style=False
+        ).strip()
+        if "\n" in rendered:
+            raise DurationsBridgeError(
+                f"cannot render the `{DURATIONS_CAPTURED_AT}` stamp as a single "
+                f"line: {captured_at!r}"
+            )
+        line = rendered
+    else:
+        line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
     for i, ln in enumerate(lines):
         if ln.startswith(f"{DURATIONS_CAPTURED_AT}:"):
             lines[i] = line
@@ -562,17 +804,51 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
 
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                               captured_at: str) -> tuple[str, dict]:
-    """Return (new manifest text, stats). Pure: callers own the write."""
+    """Return (new manifest text, stats). Pure: callers own the write.
+
+    A weight whose tests/-relative path resolves to a key the manifest
+    CLASSIFIES but has not timed yet is ADDED as a new `durations:` row; every
+    other row is updated in place and carried forward, and the
+    `durations_captured_at` stamp is rewritten.
+
+    POST-CONDITION: the returned text is one the locator reads back with
+    exactly one locatable row per parsed `durations:` key. A key that cannot be
+    rendered as a locatable row, or a render that would leave a key with two
+    rows, raises :class:`DurationsBridgeError` instead of writing it — see the
+    check at the end.
+    """
     lines = manifest_text.split("\n")
-    _, entries = _locate_durations_block(lines)
-    if not entries:
-        raise DurationsBridgeError("manifest has no top-level `durations:` key")
+    # Both reads below parse manifest text through PyYAML, and either can raise
+    # a raw yaml error on a manifest the line parser cannot handle — an alias
+    # or flow key in the `durations:` block, a merge key, a plainly invalid
+    # line. The process boundary below catches anything that gets past this, but
+    # only as a generic `2: <Type>` line — translating here is what preserves
+    # the specific `2 UNKNOWN (… unreadable manifest)` diagnosis the docstring
+    # promises (#6092 review round 3, reworded round 10: an untranslated raise
+    # did once escape as a traceback and exit 1, and no longer can).
+    import yaml
+    try:
+        _, entries = _locate_durations_block(lines)
+        if not entries:
+            raise DurationsBridgeError("manifest has no top-level `durations:` key")
+        classified_keys = _classified_test_keys(manifest_text)
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"the manifest is not readable as YAML "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
     if not weights:
         raise DurationsBridgeError(
             "collector produced ZERO measured file durations — UNKNOWN, never 0"
         )
-    resolved = _resolve_to_manifest_keys(weights, set(entries))
+    # Resolve against what the manifest CLASSIFIES (surfaces + durations + the
+    # python-ci leg lists), not against the durations map alone — a classified
+    # file with no duration yet is added below instead of refusing the whole
+    # refresh (#4364).
+    resolved = _resolve_to_manifest_keys(weights, classified_keys)
     for key in sorted(resolved):
+        if key not in entries:
+            continue
         seconds = resolved[key]
         index = entries[key]
         match = _DURATION_LINE_RE.match(lines[index])
@@ -582,18 +858,103 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # other trailing comment is preserved verbatim.
         if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
             tail = ""
+        # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
+        # quoted key (`'test_a.py'`) must stay quoted when its value is
+        # rewritten, or a key character that needs quoting would become an
+        # unparseable bare scalar. `entries` is keyed by the PARSED key, so
+        # this lookup finds the quoted row instead of missing it.
         lines[index] = (
-            f"{match.group('indent')}{key}: "
+            f"{match.group('indent')}{match.group('key')}: "
             f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
         )
+    # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
+    # append it to the block in the same `  key: value` shape the existing rows
+    # use (indent 2, one decimal, no trailing comment). APPENDED, not inserted
+    # mid-block: the block is not sorted (it grew in sweep batches), and the
+    # renderer is text-preserving, so no existing line moves to make room for a
+    # new one. A measured key carries no `# unmeasured` marker by construction.
+    new_keys = sorted(key for key in resolved if key not in entries)
+    if new_keys:
+        last = _DURATION_LINE_RE.match(lines[max(entries.values())])
+        assert last is not None  # located by the same regex
+        indent = last.group("indent")
+        insert_at = max(entries.values()) + 1
+        rendered: list[str] = []
+        for key in new_keys:
+            line = (f"{indent}{key}: "
+                    f"{max(float(resolved[key]), DURATIONS_VALUE_FLOOR_S):.1f}")
+            # A key with whitespace or a colon is a valid YAML key, so PyYAML
+            # accepts the row — but `_DURATION_LINE_RE` cannot locate it, so the
+            # NEXT refresh would refuse the block this one wrote. Refuse the
+            # ADD instead of writing a line the locator cannot re-read (#6092
+            # review, F1). Quoting the key is not the fix, and not because of
+            # identity — YAML quoting is transparent to key identity, which is
+            # exactly what F2 relies on. It is that `_DURATION_LINE_RE`'s
+            # `[^\s:]+` cannot span whitespace or a colon, so the row stays
+            # unlocatable whether or not the key is quoted (#6092 review round
+            # 12).
+            # Validate by PARSING, not by regex (#6092 review round 2). A key
+            # that regex-matches can still be a YAML indicator, alias, tag or
+            # flow token — `*a_test.py`, `&a_test.py`, `!a_test.py`, `[x].py`,
+            # an unbalanced quote — and writing one makes the re-locate below
+            # raise a raw yaml error. That handler maps it to the documented
+            # refusal (and the process boundary behind it would catch anything
+            # else as rc=2), so the consequence of skipping this check is a
+            # lost, misleading diagnosis rather than a traceback. Requiring the
+            # parse to hand back THIS key also makes this row's check an
+            # identity check, not a syntax one.
+            import yaml
+            try:
+                parsed_key = _duration_line_key(line)
+            except yaml.YAMLError as exc:
+                raise DurationsBridgeError(
+                    f"cannot render manifest key {key!r} as a `durations:` row — "
+                    f"it is not parseable as a YAML mapping key "
+                    f"({type(exc).__name__})"
+                ) from exc
+            if parsed_key != key or not _DURATION_LINE_RE.match(line):
+                raise DurationsBridgeError(
+                    f"cannot render manifest key {key!r} as a `durations:` row — "
+                    f"a key with whitespace or a colon is valid YAML but not "
+                    f"locatable by the line parser, so the next refresh could "
+                    f"not read the block back"
+                )
+            rendered.append(line)
+        lines[insert_at:insert_at] = rendered
     _set_captured_at(lines, captured_at)
     stats = {
         "sampled_keys": len(resolved),
         "manifest_keys": len(entries),
-        "carried_forward": len(entries) - len(resolved),
+        # Resolved keys that had no `durations:` line and were therefore added,
+        # and the existing entries the merge left untouched. `manifest_keys`
+        # stays the INPUT map's size; `added_keys` is what it grew by.
+        "added_keys": len(new_keys),
+        "carried_forward": len(entries) - (len(resolved) - len(new_keys)),
         "captured_at": captured_at,
     }
-    return "\n".join(lines), stats
+    text = "\n".join(lines)
+    # POST-CONDITION (#6092 review, F1/F2), checked on the TEXT we are about to
+    # hand back: re-locate it. F1 wrote `  a b.py: 2.0` — valid YAML, but
+    # unlocatable, so the next refresh refused the block this one produced; F2
+    # appended a second row for a quoted key that already existed. The locator
+    # refuses an unlocatable row and a duplicate parsed key, and the count must
+    # equal the input keys plus the appended ones — so a render either satisfies
+    # the invariant or raises here instead of persisting a poisoned map.
+    import yaml
+    try:
+        _, located = _locate_durations_block(text.split("\n"))
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"render produced a `durations:` block PyYAML cannot read back "
+            f"({type(exc).__name__}) — refusing to write it"
+        ) from exc
+    expected = len(entries) + len(new_keys)
+    if len(located) != expected:
+        raise DurationsBridgeError(
+            f"render produced {len(located)} locatable `durations:` rows for "
+            f"{expected} keys — refusing to write a block it cannot read back"
+        )
+    return text, stats
 
 
 def _manifest_of(manifest_text: str) -> dict:
@@ -604,7 +965,51 @@ def _manifest_of(manifest_text: str) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection as cs
 
-    return cs._normalize_surfaces(yaml.safe_load(manifest_text))
+    # A render whose stamp or block cannot be parsed back must be the
+    # documented refusal, not a traceback (#6092 reviews rounds 4-5). The
+    # callers must therefore MAP this to exit 2, which they do at the CLI
+    # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
+    try:
+        parsed = yaml.safe_load(manifest_text)
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            f"the manifest is not readable as YAML "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
+    # Valid YAML that is not a mapping parses cleanly and then fails inside
+    # `_normalize_surfaces` with an AttributeError, which no caller catches —
+    # an empty file, `null`, a scalar or a list all take that path (#6092
+    # review round 5). Refuse it here, where it is still this class.
+    if not isinstance(parsed, dict):
+        raise DurationsBridgeError(
+            f"the manifest is not a YAML mapping (got {type(parsed).__name__})"
+        )
+    # The shape guard must reach the block every consumer indexes, not stop at
+    # the document. `surfaces` is iterated as a mapping by the duration checks
+    # and by `ci_selection.fast_pool`, so a list, a scalar or an ABSENT
+    # `surfaces` still escaped with an AttributeError or KeyError AFTER passing
+    # the document-level check (#6092 review round 6). Refuse it here, where it
+    # is still this class.
+    surfaces = parsed.get("surfaces")
+    if not isinstance(surfaces, dict):
+        raise DurationsBridgeError(
+            f"the manifest's `surfaces:` block is not a YAML mapping "
+            f"(got {type(surfaces).__name__}) — every consumer indexes it as one"
+        )
+    # Same reasoning one level down: the leg lists are `set()`-ed and iterated by
+    # the full-selection branch and by `ci_selection`, so a scalar or an explicit
+    # null there raised a bare TypeError inside the selection code (#6092 review
+    # round 8). Absent is allowed — those keys are optional; an explicit null or a
+    # wrong type is refused, because both arrive downstream as `set(None)` /
+    # `set(5)`.
+    for key in ("slow_files", "carve_out", "tier1", "push_extra"):
+        if key in parsed and not isinstance(parsed[key], list):
+            value = parsed[key]
+            raise DurationsBridgeError(
+                f"the manifest's `{key}:` is not a list "
+                f"(got {type(value).__name__}) — it is iterated as one"
+            )
+    return cs._normalize_surfaces(parsed)
 
 
 def validate_refreshed_manifest(manifest_text: str) -> list[str]:
@@ -745,17 +1150,34 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         print(f"2: manifest not found: {manifest_path}", file=sys.stderr)
         return 2
     try:
+        manifest_text = manifest_path.read_text()
+    except OSError as exc:
+        # The `exists()` guard above only covers ABSENCE: a directory, a
+        # permission error or an unreadable volume still reached the process
+        # boundary as a traceback while this function's docstring promises the
+        # documented refusal (#6092 review round 6).
+        print(f"2: manifest not readable: {exc}", file=sys.stderr)
+        return 2
+    try:
         new_text, stats = render_refreshed_manifest(
-            manifest_path.read_text(), weights, captured_at)
+            manifest_text, weights, captured_at)
+        # The readback runs AFTER the renderer returns, so it needs the same
+        # mapping as the render itself: `_manifest_of` raises
+        # DurationsBridgeError for a document it cannot parse back. This once
+        # escaped as a traceback with rc=1; the total boundary added later
+        # catches it as rc=2, so what placing it HERE still buys is the
+        # specific `2 UNKNOWN (unreadable manifest)` phrasing this function's
+        # docstring promises rather than a generic `2: DurationsBridgeError:`
+        # line (#6092 reviews rounds 5 and 11).
+        issues = validate_refreshed_manifest(new_text)
+        if not issues and _is_the_repo_manifest(manifest_path):
+            # The repo's own manifest is held to the WHOLE `--integrity` gate —
+            # most importantly its halves-duration balance, which the per-key
+            # duration checks cannot see (#3395).
+            issues = integrity_problems(new_text)
     except DurationsBridgeError as exc:
         print(f"2: {exc}", file=sys.stderr)
         return 2
-    issues = validate_refreshed_manifest(new_text)
-    if not issues and _is_the_repo_manifest(manifest_path):
-        # The repo's own manifest is held to the WHOLE `--integrity` gate —
-        # most importantly its halves-duration balance, which the per-key
-        # duration checks cannot see (#3395).
-        issues = integrity_problems(new_text)
     if issues:
         print("1: refusing to write — the refreshed manifest would fail the "
               "integrity gate:", file=sys.stderr)
@@ -764,10 +1186,23 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         return 1
     if dry_run:
         print(f"dry-run: {stats['sampled_keys']} sampled, "
+              f"{stats['added_keys']} added, "
               f"{stats['carried_forward']} carried forward — no write")
         return 0
-    manifest_path.write_text(new_text)
+    try:
+        manifest_path.write_text(new_text)
+    except OSError as exc:
+        # The read guard above covers reading; this covers writing. A read-only
+        # manifest, a read-only volume or a full disk raised a traceback with
+        # rc=1 — which is INDISTINGUISHABLE from the deliberate rc=1 below
+        # ("the refreshed manifest would fail the integrity gate"). Reporting an
+        # unobservable write as a gate failure is exactly the collision this
+        # bridge exists to avoid, so it takes the fail-closed 2 (#6092 review
+        # round 7).
+        print(f"2: manifest not writable: {exc}", file=sys.stderr)
+        return 2
     print(f"refreshed {manifest_path}: {stats['sampled_keys']} sampled, "
+          f"{stats['added_keys']} added, "
           f"{stats['carried_forward']} carried forward "
           f"(captured_at {captured_at})")
     return 0
@@ -776,13 +1211,43 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
 # --- history / flakes -------------------------------------------------------
 
 def load_history(json_path: Path) -> list[dict]:
+    """Prior samples from the tool's OWN artifact, or [] if it is unusable.
+
+    That file is committed to this repo, so it can be hand-edited, truncated by
+    a partial write, or mangled by a merge. Only `(OSError, JSONDecodeError)`
+    used to be handled, so valid JSON of the wrong SHAPE — `[]`, `null`, a
+    `"history"` that is not a list — escaped as AttributeError/TypeError, and a
+    row missing `counts` as a KeyError from the renderer (#6092 review round 8).
+    A history seed is a nice-to-have: an unusable one degrades to no history
+    rather than failing the measurement.
+
+    "Unusable" covers VALUES, not just shape (#6092 review round 9): a row whose
+    `counts` lacks a key, whose `steps_max_job_ms` is not a number, or whose
+    `failed_tests` is not a list of strings is dropped here, because it would
+    otherwise fail the measurement downstream — the very outcome the sentence
+    above rules out.
+    """
     if not json_path.exists():
         return []
     try:
         data = json.loads(json_path.read_text())
-        return data.get("history", [])
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers JSONDecodeError plus the decoder's other parse
+        # failures (e.g. an integer past the int-string digit limit);
+        # RecursionError covers a pathologically nested document.
         return []
+    if not isinstance(data, dict):
+        return []
+    history = data.get("history")
+    if not isinstance(history, list):
+        return []
+    return [row for row in history
+            if isinstance(row, dict)
+            and isinstance(row.get("counts"), dict)
+            and all(isinstance(row["counts"].get(k), int) for k in COUNT_KEYS)
+            and isinstance(row.get("steps_max_job_ms", 0), (int, float))
+            and isinstance(row.get("failed_tests", []), list)
+            and all(isinstance(n, str) for n in row.get("failed_tests", []))]
 
 
 def candidate_flakes(history: list[dict]) -> list[dict]:
@@ -873,8 +1338,14 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         "",
     ]
     if flakes:
-        lines.append("| Test | Failed (run) | Passed again (sample) |",
-                     "|---|---|---|")
+        # This call had the closing paren in the wrong place — `append(table,
+        # separator)` — so the markdown renderer raised TypeError the moment
+        # `candidate_flakes` returned anything. The flake table has therefore
+        # never rendered; the path is only reachable once two consecutive
+        # committed samples exist, which is why it survived (#6092 review round
+        # 8, found because the round-8 history tests reach it).
+        lines.append("| Test | Failed (run) | Passed again (sample) |")
+        lines.append("|---|---|---|")
         for f in flakes:
             lines.append(f"| `{f['test']}` | `{f['run_id']}` | {f['passed_at']} |")
     else:
@@ -888,9 +1359,16 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     ]
     for row in history:
         c = row["counts"]
-        lines.append(f"| {row['sample_time']} | {row.get('run_id') or '-'} | {row.get('conclusion') or '-'} "
+        # `.get` with a default, not indexing: these rows are read back from
+        # this tool's OWN committed artifact, which is committed to the repo and
+        # can therefore be hand-edited or mangled by a merge. Defence only —
+        # `steps_max_job_ms` and the history table landed in the same commit
+        # (75dc43f09), so no tool-written sample has ever lacked the key (#6092
+        # review round 9).
+        lines.append(f"| {row.get('sample_time') or '-'} | {row.get('run_id') or '-'} "
+                     f"| {row.get('conclusion') or '-'} "
                      f"| {c['passed']} | {c['failed']} | {c['error']} | {c['skipped']} "
-                     f"| {row['steps_max_job_ms'] / 1000:.0f} |")
+                     f"| {(row.get('steps_max_job_ms') or 0) / 1000:.0f} |")
     if not history:
         lines.append("| _no history yet_ | | | | | | | |")
     lines.append("")
@@ -915,7 +1393,16 @@ def paid_vs_selected_cli(args) -> int:
     # `load_manifest()` does for every other consumer. Feeding the raw YAML
     # straight to `fast_pool` would iterate a scalar surface
     # character-by-character and raise on a None one.
-    manifest = _manifest_of(Path(args.manifest).read_text())
+    try:
+        manifest = _manifest_of(Path(args.manifest).read_text())
+    except (DurationsBridgeError, OSError) as exc:
+        # `_manifest_of` refuses a document it cannot read as a YAML mapping,
+        # and the read itself can fail with an OSError (a directory, a
+        # permission error, an absent path). This entry point must report both
+        # as the documented exit 2 rather than dying with a traceback (#6092
+        # reviews rounds 5-6).
+        print(f"2: {exc}", file=sys.stderr)
+        return 2
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
     # On a full selection the denominator is the set of files the gate actually
@@ -936,9 +1423,17 @@ def paid_vs_selected_cli(args) -> int:
         full_pool |= set(manifest.get("push_extra") or [])
         full_pool |= (set(manifest.get("slow_files") or [])
                       - ci_selection.carve_out_files(manifest))
-    run = fetch_run(args.repo, args.run_id)
+    try:
+        run = fetch_run(args.repo, args.run_id)
+        jobs = fetch_jobs(args.repo, args.run_id)
+    except subprocess.CalledProcessError as exc:
+        # The default artifact path downgrades the identical fetch failure to a
+        # warning, so the two entry points disagreed about whether it is fatal;
+        # this one died with a traceback (#6092 review round 6).
+        print(f"2: gh api failed for run {args.run_id}: {exc}", file=sys.stderr)
+        return 2
     result = paid_vs_selected(
-        fetch_jobs(args.repo, args.run_id), selection,
+        jobs, selection,
         durations_map(manifest), run.get("created_at"), full_pool=full_pool)
     result["event"] = args.event
     result["full"] = bool(selection.get("full"))
@@ -996,7 +1491,14 @@ def main() -> int:
 
     run_id = args.run_id.strip()
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # A path that is an existing file, has a file in its parent chain, sits
+        # under an unwritable parent, or is a symlink loop all escaped as a
+        # traceback with rc=1 (#6092 review round 7).
+        print(f"2: artifact directory not usable: {exc}", file=sys.stderr)
+        return 2
     json_path = out_dir / "ci-timing.json"
 
     run: dict = {}
@@ -1005,7 +1507,11 @@ def main() -> int:
         try:
             run = fetch_run(args.repo, run_id)
             steps = steps_by_job(fetch_jobs(args.repo, run_id))
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, DurationsBridgeError) as exc:
+            # This path deliberately downgrades a failed fetch to a warning; a
+            # body that is not a JSON mapping is the same kind of failure, so
+            # it must not abort a path that tolerates the rc!=0 form (#6092
+            # review round 7).
             print(f"::warning::gh api failed for run {run_id}: {exc}", file=sys.stderr)
 
     files: dict[str, dict] = {}
@@ -1068,8 +1574,17 @@ def main() -> int:
     }
 
     md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes)
-    (out_dir / "ci-timing.md").write_text(md)
-    (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    try:
+        (out_dir / "ci-timing.md").write_text(md)
+        (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        # The directory was creatable but the write is not — a full disk, an
+        # unwritable target, or a pre-existing DIRECTORY sitting where an
+        # artifact file should go (a pre-existing regular FILE does not raise
+        # here; it is silently overwritten) — same refusal shape as the mkdir
+        # above (#6092 reviews rounds 7 and 12).
+        print(f"2: artifact not writable: {exc}", file=sys.stderr)
+        return 2
 
     print(f"wrote {out_dir / 'ci-timing.md'} + {out_dir / 'ci-timing.json'}")
     print(f"sampled run {run_id or '(none)'}: {total_counts['passed']} passed, "
@@ -1079,4 +1594,24 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # The boundary is TOTAL. Eight review rounds each found the next input that
+    # escaped as a traceback with rc=1: an unreadable manifest, a non-mapping
+    # body, an unusable --out-dir, a malformed leg list, a corrupt history
+    # artifact, and finally documents built to defeat the parser. The class has
+    # no natural bottom — "never traceback on any input" is an obligation over
+    # an unbounded input space — so every round of translating one more call
+    # site found the next one.
+    #
+    # The contract is therefore enforced where it is TOTAL rather than where
+    # somebody remembered to apply it: any exception reaching this point is
+    # reported as the module's documented 2 (UNKNOWN — I could not do the job),
+    # with its type named so it stays diagnosable. The specific translations
+    # above still run first and give the useful message; this is what makes the
+    # promise hold for the inputs nobody thought of.
+    #
+    # `BaseException` is deliberately NOT caught: an interrupt is not a refusal.
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"2: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(2)

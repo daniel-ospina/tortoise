@@ -21,14 +21,15 @@ Real gates are:
 If none of those apply: **keep going.** The user can interrupt if they disagree.
 
 **Invalid reasons to stop:** Any question whose answer is trivially "yes" e.g.:
-- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?"
-- "On to the next step?" "Does that look right?" "Everything OK so far?"
-- Any handoff where the user has nothing to decide
+- "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?" (waste of user time; you should continue)
+- "On to the next step?" "Does that look right?" "Everything OK so far?" (unless P0 consequence risk — that is a real gate, so stop — otherwise double-check and continue)
+- Any handoff where the user has nothing to decide (no reason to stop)
 - Another issue fixes this (then fix that issue)
-
+- context is almost exhausted (context auto-compacts)
 
 **Auto-file rule:** When you encounter a bug, workflow gap, missed edge case, or improvement opportunity → check if the root cause and/or symptoms are already covered by another issue and if yes add to it, or otherwise file a new GitHub issue. Never ask "should I file an issue?" — just file it if in doubt.
 Also, when you encounter a **pre-existing bug** (not introduced by your current work).
+
 ---
 
 ## ⛔ HARD RULE: Process Discipline
@@ -145,7 +146,6 @@ Use Pi's `task` tool for all sub-agent work. Sub-agents have isolated context �
 - When decomposing work (epic or multi-issue batch), explicitly map what can run in parallel.
 - While waiting for a human gate (UX approval, design review) → dispatch sub-agents for other independent work
 
-
 ## Data Access Transparency
 
 Announce with a brief FYI **before** accessing:
@@ -161,7 +161,6 @@ Format: `📡 [source] — [what] — [why]`
 Does **not** apply to: routine project file reads, git operations, local shell commands, context7 doc lookups.
 
 ---
-
 
 ## Editing Rules
 
@@ -233,7 +232,6 @@ When writing or updating any doc in `docs/`, auto-populate entity metadata from 
 - `MEMORY.md` must stay under 150 lines.
 - `MEMORY.md` = raw coding gotchas only (things that bite mid-code). Not an implementation log, not a docs index.
 - Format: `[category]: [what broke] → [root cause] → [the fix]`
-
 
 ## Repo-Specific Conventions — Tortoise
 
@@ -321,7 +319,6 @@ uv run python tools/collision_preflight.py <N> --repo .
 # another repo — the tool RESOLVES the target, it never infers it from the cwd):
 uv run python tools/collision_preflight.py <N> --repo owner/name
 ```
-
 
 **Consequence of skipping:** a parallel agent duplicates work already in flight — two overlapping
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed
