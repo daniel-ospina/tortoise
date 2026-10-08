@@ -2704,10 +2704,13 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("squash-merged", out)
 
     def test_remote_twin_of_a_terminal_local_branch_is_not_demoted(self):
-        # #7693. The remote twin of a branch this run PROVED terminal is the same
-        # immutable commit — but only once the remote itself confirms the sha,
-        # because `refs/remotes/…` is a fetch cache. `origin` here is a REAL bare
-        # repo holding the branch at that sha, so the confirmation succeeds.
+        # #7693. The remote twin of a branch this run PROVED terminal sits at the
+        # same immutable commit. A now-REMOVED demotion used to clear it, and only
+        # after confirming the sha against the remote itself; that confirmation is
+        # GONE with the demotion (see the removal block in `run_preflight`), so the
+        # ref BLOCKS even though `origin` here is a real bare repo holding that sha.
+        # Kept as the reverse-pin: this is the case a re-added demotion would clear
+        # first.
         ref = f"fix/{ISSUE}-landed"
         bare = self.tmp / "bare.git"
         _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
@@ -2793,8 +2796,6 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
-        # ...and it must NOT have been demoted on the cached sha.
-        self.assertNotIn("SAME COMMIT", out)
 
     def test_remote_ref_in_a_namespace_two_remotes_share_blocks(self):
         # #7693 P1. `refs/remotes/origin/X` need not cache ORIGIN's branch: with
@@ -2917,7 +2918,8 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "remote", "set-url", "origin", str(bare))
         _git(self.repo, "config", "remote.origin.fetch",
              "+refs/pull/*/head:refs/remotes/origin/pr/*")
-        # A terminal local twin, so the ref below has a witness to match against.
+        # A terminal local twin, kept only to preserve the demotion-era fixture:
+        # nothing matches a witness against the remote any more.
         _git(self.repo, "branch", "-q", f"fix/{ISSUE}-prsource")
         terminal_sha = self._git_out("rev-parse", f"refs/heads/fix/{ISSUE}-prsource")
         _git(self.repo, "push", "-q", "origin",
