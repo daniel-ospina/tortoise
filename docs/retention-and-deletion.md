@@ -49,6 +49,7 @@ The horizon is **path-dependent**, and the difference matters:
 | **User-account** deletion — the account's own backup copies | **not actively erased** — they **age out on the ≈28-day cycle** (**owner ruling 2B**, 2026-09-30; no account-backup purge exists) | `tortoise/backup_config.py` `retention_hourly/daily/weekly`; the age-out prune is `prune_backups` (`tortoise/hosted_backup.py:2952`) |
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
+| **Session recording** — the recording itself | **no expiry** — retained until deleted by a member of the organization (**owner ruling 2026-10-08**); a snapshot taken before the deletion retains it until it ages out on the ≈28-day cycle, so deletion is complete in the live service immediately and in backups within four weeks | `tortoise/hosted_api.py` `delete_session` |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
 
 > **Restore window ≠ retention window.** R1 forbids retaining user **content**
@@ -265,7 +266,7 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 **Different axis — exempt, not gated:** `docs/event-catalog.md` (the 30-day
 `TORTOISE_EVENT_RETENTION_DAYS` operational event log, not a deletion promise).
 
-## Public wording — §6 approved (2026-09-18); account deletion applied (2026-09-30); DPA §11 pending
+## Public wording — §6 approved (2026-09-18); account deletion applied (2026-09-30); session-recording retention (OWNER RULING 2026-10-08, #2535); DPA §11 pending
 
 > **Privacy §6 is OWNER-APPROVED.** The owner ruled (2026-09-18): *"Delete =
 > gone from your view immediately · restorable for 7 days · no copy remains
@@ -305,6 +306,39 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 > immediately and revokes its API keys. It stays restorable from the
 > organization's "Trash" for 7 days. After that it is permanently erased,
 > together with its backup copies.
+
+**Session recordings (OWNER RULING 2026-10-08, applied):**
+
+The owner ruled: *"We keep session recording until the user deletes them. We're a
+memory product, it's like asking Google Drive how long they keep files."* There is
+no retention window and no automatic expiry — persistence is the delivered
+behaviour of a memory product, not an incidental retention choice. The applied
+text is:
+
+> **Session recordings.** When an organization has session recording enabled,
+> agent sessions recorded on a member's own machine are retained **until they are
+> deleted** — there is no retention window and no automatic expiry. … Deletion is
+> performed by the organization's members: any member of the organization can
+> view the organization's recorded sessions and delete them. … Turning recording
+> off stops new captures; it does not delete sessions already recorded. A member
+> who leaves an organization loses access when their membership ends, and
+> sessions they contributed before leaving remain part of that organization's
+> stored memory until deleted.
+
+**Stated, not implied.** GDPR Art. 5(1)(e) storage limitation requires personal
+data be kept no longer than necessary for the purpose, so the retention is tied to
+a disclosed purpose (§2) and a stated legal basis (§4) rather than asserted
+barely. Silence would not be a defence.
+
+**Authorization, measured — not assumed.** The policy originally described a
+member-scoped / admin-scoped deletion split. That split is **not shipped**: session
+list, detail and delete are organisation-member authorised with **no owner check
+and no role gate** (`delete_session` → `get_current_org_session_ungated` +
+`_require_scope`, which returns early for session auth), so **any active member can
+delete any session in the organization**. The published text therefore states the
+shipped model, and describes the scoped split as a planned refinement. A policy
+describing an access-control boundary that does not exist is a security-review
+finding, not a stylistic one.
 
 **The original Backups bullet — SUPERSEDED 2026-09-30, NOT applied:**
 
@@ -355,7 +389,10 @@ now describes the behaviour the product actually ships.
 > deletion paths differ in how their own backup copies end: a deleted memory
 > graph's own backups are erased when its 7-day window ends, while deleting an
 > account does not actively purge its copies in our backups — those age out on
-> the same four-week cycle.
+> the same four-week cycle. A deleted session recording is likewise not actively
+> purged from snapshots taken before its deletion; those copies age out on the
+> same four-week cycle, so deletion of a recording is complete in the live
+> service immediately and in backups within four weeks.
 
 The 1B warning ("Deleting your personal account will also delete any teams for
 which you're the only owner", confirm/cancel) is deliberately **not** in the
@@ -370,7 +407,9 @@ belongs in the product, not in the policy.
 > the four-week cycle described in §6. §6 covers how a deleted memory graph and
 > a deleted account are erased, and the
 > [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)
-> is the single source of truth for these windows.
+> is the single source of truth for these windows. **Session recordings are not
+> governed by the 7-day restore window:** they are retained until deleted, as
+> described in §6.
 
 **DPA §11 — the aligned one-number form (pending confirmation; unchanged by 2B):**
 
