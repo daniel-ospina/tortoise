@@ -31,7 +31,7 @@ namespace there would auto-create `registry_control_plane`, the graph the #669
 flip deliberately deleted.
 
 Usage:
-    python3 graph-scripts/clear_max_sessions_4010.py [--dry-run] [--yes] [--uri URI]
+    uv run python graph-scripts/clear_max_sessions_4010.py [--dry-run] [--yes] [--uri URI]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:6379/tortoise).
 Test safety: the guard runs on the graph the sweep ACTUALLY writes (the

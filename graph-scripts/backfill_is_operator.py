@@ -26,7 +26,7 @@ best-effort. Safe to re-run.
 
 Usage:
     TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \
-        python3 graph-scripts/backfill_is_operator.py [--dry-run] [--yes]
+        uv run python graph-scripts/backfill_is_operator.py [--dry-run] [--yes]
 
 Test safety: always verify graph name before running. For tests, use
 test-prefixed graphs (tortoise_test_*) and pass --yes to skip confirmation.

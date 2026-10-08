@@ -200,7 +200,7 @@ on the caller's OWN artifacts is reported as yours and cannot block. Inferring
 
 Usage
 -----
-    python3 tools/collision_preflight.py <issue-number>
+    uv run python tools/collision_preflight.py <issue-number>
         [--repo OWNER/NAME | --repo PATH]
         [--self-branch REF] [--self-worktree PATH]
         [--gh PATH] [--git PATH]

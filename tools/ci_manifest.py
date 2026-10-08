@@ -45,7 +45,7 @@ call site.
 
 CLI::
 
-    python3 tools/ci_manifest.py [--manifest config/ci-surfaces.yml]
+    uv run python tools/ci_manifest.py [--manifest config/ci-surfaces.yml]
 
 The exit code is the verdict, so this is runnable as a bare command: there is
 one thing to validate and one verdict, and a `check` verb for it would be
@@ -131,7 +131,7 @@ def _ci_selection():
     not create a second copy under a different name — two copies would split
     module state under pytest and let ``check`` validate against a different
     manifest constant than the caller's. The RUNNING module is probed FIRST:
-    ``python3 tools/ci_selection.py --integrity`` executes that file as
+    ``uv run python tools/ci_selection.py --integrity`` executes that file as
     ``__main__``, which is under neither ``tools.ci_selection`` nor
     ``ci_selection``, so a name-only lookup imported a SECOND copy of the same
     file and the "must not be a second copy" invariant was not true on the

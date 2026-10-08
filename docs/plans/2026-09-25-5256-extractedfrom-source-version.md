@@ -236,7 +236,7 @@ Every test names the input that makes it FAIL.
 - Files: the new suite; `test_pointsuperseded_rebuild.py`; `test_consistency_divergence_5011.py`;
   `test_ingest_conformance.py`; `test_ingest_bundle.py`; `test_provenance_extractedfrom_3263.py`;
   `test_source_version_references_5199.py`.
-- `python3 tools/surface_manifest.py check` (a CI command, not a pytest — see test plan note).
+- `uv run python tools/surface_manifest.py check` (a CI command, not a pytest — see test plan note).
 - **Mutation-verify every guard** (flip → named test RED → restore):
   1. `resolve_source_versions`' `''`/absent skip → test 2 (**this**, not the CASE, is the
      discriminating guard; the `_anchor_on_create` CASE is defence-in-depth in series);

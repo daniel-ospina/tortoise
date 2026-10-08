@@ -12,16 +12,16 @@ points at:
 
 Usage:
     # local embedded graph (default)
-    python3 graph-scripts/audit_beta_gate.py
+    uv run python graph-scripts/audit_beta_gate.py
 
     # snapshot copy (avoid single-writer contention, #942)
-    TORTOISE_DB_PATH=/tmp/snapshot.db python3 graph-scripts/audit_beta_gate.py
+    TORTOISE_DB_PATH=/tmp/snapshot.db uv run python graph-scripts/audit_beta_gate.py
 
     # hosted team graph via FalkorDB connection string
-    TORTOISE_DB_URI='rediss://...' python3 graph-scripts/audit_beta_gate.py --namespace team_<id>
+    TORTOISE_DB_URI='rediss://...' uv run python graph-scripts/audit_beta_gate.py --namespace team_<id>
 
     # machine-readable output (for CI / cohort gate)
-    python3 graph-scripts/audit_beta_gate.py --json
+    uv run python graph-scripts/audit_beta_gate.py --json
 
 Exit codes: 0 = clean gate (no P1), 1 = P1 findings (gate FAIL), 2 = error.
 """

@@ -46,13 +46,13 @@ Design contract
 Usage::
 
     # dry run against the canonical embedded store (default)
-    python3 tools/purge_test_residue.py
+    uv run python tools/purge_test_residue.py
 
     # dry run against a specific file
-    python3 tools/purge_test_residue.py --db /tmp/copy/tortoise.db
+    uv run python tools/purge_test_residue.py --db /tmp/copy/tortoise.db
 
     # actually delete
-    python3 tools/purge_test_residue.py --apply
+    uv run python tools/purge_test_residue.py --apply
 """
 from __future__ import annotations
 

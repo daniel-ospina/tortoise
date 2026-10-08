@@ -772,7 +772,9 @@ def test_clause_viii_a_stale_verified_at_self_heals(tmp_path: Path) -> None:
     assert code == 0, detail
     assert "AUTO-REFRESHED" in detail
     # Attributable: the message names the exact command that persists the refresh.
-    assert "python3 tools/mergify_config_guard.py --recut" in detail
+    # #6937: the tool is guarded (>=3.12), so it names the `uv run python` form —
+    # the bare `python3` form its own guard refuses.
+    assert "uv run python tools/mergify_config_guard.py --recut" in detail
 
 
 def test_stale_record_cannot_red_the_required_job(tmp_path: Path) -> None:
@@ -812,7 +814,7 @@ def test_stale_refresh_failure_is_attributed_to_staleness(
     assert code == 1, detail
     assert "STALENESS" in detail
     assert "GuardUnreadable" in detail and "simulated refresh read failure" in detail
-    assert "python3 tools/mergify_config_guard.py --recut" in detail
+    assert "uv run python tools/mergify_config_guard.py --recut" in detail
 
 
 def test_stale_refresh_digest_instability_is_fail_closed(
@@ -832,7 +834,7 @@ def test_stale_refresh_digest_instability_is_fail_closed(
     code, detail = mcg._clause_viii_a(root, mcg._load_record(root))
     assert code == 1, detail
     assert "not stable across two reads" in detail
-    assert "python3 tools/mergify_config_guard.py --recut" in detail
+    assert "uv run python tools/mergify_config_guard.py --recut" in detail
 
 
 def test_stale_record_with_divergence_still_blocks(tmp_path: Path) -> None:
@@ -869,7 +871,7 @@ def test_staleness_query_is_non_gating(tmp_path: Path) -> None:
     code, lines = mcg.run_staleness(stale)
     assert code == 1, lines
     assert "STALE" in lines[0]
-    assert "python3 tools/mergify_config_guard.py --recut" in lines[0]
+    assert "uv run python tools/mergify_config_guard.py --recut" in lines[0]
 
     fresh = make_tree(tmp_path / "fresh", merge_config())
     assert mcg.run_staleness(fresh)[0] == 0

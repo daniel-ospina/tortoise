@@ -53,9 +53,9 @@ tooling; the EP snapshot/restore script is a later-phase prerequisite.
 
 Usage:
   TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise \
-    python3 graph-scripts/baseline_scan.py
-  python3 graph-scripts/baseline_scan.py --path /tmp/fresh-graph.db
-  python3 graph-scripts/baseline_scan.py --output baseline-report.json
+    uv run python graph-scripts/baseline_scan.py
+  uv run python graph-scripts/baseline_scan.py --path /tmp/fresh-graph.db
+  uv run python graph-scripts/baseline_scan.py --output baseline-report.json
 
 Exit codes: 0 = scan completed (report may contain findings — scan never
 fails on findings; it fails only on unreachable/misconfigured target, exit 1).

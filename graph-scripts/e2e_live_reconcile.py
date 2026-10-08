@@ -54,10 +54,10 @@ Exit codes: 0 = clean (every count <= threshold) | 1 = bleed detected
 Usage:
   # weekly CI (workflow): token from the secret; --json prints one JSON line to
   # stdout (human output moves to stderr) for the auto-file step's payload.
-  SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/e2e_live_reconcile.py --json
+  SUPABASE_ACCESS_TOKEN=... uv run python graph-scripts/e2e_live_reconcile.py --json
   # operator / fault-injection runs: human output; 0-tolerant threshold opt-in
-  SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/e2e_live_reconcile.py
-  SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/e2e_live_reconcile.py --threshold 2
+  SUPABASE_ACCESS_TOKEN=... uv run python graph-scripts/e2e_live_reconcile.py
+  SUPABASE_ACCESS_TOKEN=... uv run python graph-scripts/e2e_live_reconcile.py --threshold 2
 """
 
 from __future__ import annotations

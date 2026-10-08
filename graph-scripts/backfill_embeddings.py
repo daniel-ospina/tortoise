@@ -31,7 +31,7 @@ Multi-tenant: --all-tenants queries the registry graph for team IDs and
 iterates org_{org_id} graphs. Per-tenant backfill, one team at a time.
 
 Usage:
-    python3 graph-scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
+    uv run python graph-scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
         [--uri URI] [--all-tenants] [--limit N] [--batch-size N]
         [--force-re-embed] [--repair-embeddings]
 

@@ -21,7 +21,7 @@ then EP belief propagation computes per-option confidence.
 
 Run:
   cd "$(dirname "$0")/.."
-  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/decide_licensing.py
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise uv run python graph-scripts/decide_licensing.py
 """
 import sys
 

@@ -82,7 +82,7 @@ jobs:
               exit 1
               ;;
             3)
-              echo "::error::the gate record's gate_digest DISAGREES with HEAD — the gate DEFINITION changed. The automatic re-cut is refused: it would rewrite the record's digest with HEAD's and launder a real, unreviewed gate change as a timestamp-only refresh. A human must review the gate diff and re-cut deliberately with 'python3 tools/mergify_config_guard.py --recut'."
+              echo "::error::the gate record's gate_digest DISAGREES with HEAD — the gate DEFINITION changed. The automatic re-cut is refused: it would rewrite the record's digest with HEAD's and launder a real, unreviewed gate change as a timestamp-only refresh. A human must review the gate diff and re-cut deliberately with 'uv run python tools/mergify_config_guard.py --recut'."
               exit 1
               ;;
             *)
