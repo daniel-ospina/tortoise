@@ -15695,6 +15695,15 @@ class TortoiseSDK:
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
             never folds negative pseudo-counts (double-count guard).
+          - Independence model (#5543): the per-point source set is COLLAPSED BY
+            S0a IDENTITY (`:Source.canonicalUrl`, falling back to
+            `normalize_source_url(url)`), so one document reached through several
+            `:Source` nodes contributes ONE source. A source with no identity at
+            all stays DISTINCT (there is no key to collapse on, and folding
+            unknowns would weaken evidence). RESIDUAL, stated not closed: a
+            session `:Source` and the documents it `references` have different
+            identities by design and still count twice — see the INDEPENDENCE
+            MODEL note on `source_credibility.aggregate_prior`.
           - Baseline provenance (2x2 mapping): author-set/system-default
             baselines (baseline_source = 'set-by-author' / 'system-default', or
             legacy baseline_set=true with no token) are NEVER recomputed;
@@ -15715,10 +15724,15 @@ class TortoiseSDK:
         import os  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.source_credibility import (
+            _parse_timestamp,  # ONE parser for this package — never duplicate it
             aggregate_prior,
             assessment_factor,
+            pc_base,
             resolve_tier,
         )
+        # #5543: the S0a identity key. The write path already applies this
+        # decision; the belief path below is the one that had not called it.
+        from tortoise.source_identity import normalize_source_url
 
         if recency_decay is None:
             recency_decay = float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95"))
@@ -15766,21 +15780,98 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
             "RETURN n.id, s.url, s.credibilityTier, s.sourceKind, "
-            "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at",
+            "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at, "
+            "s.canonicalUrl",
             params={},
         ).result_set
 
-        # Collect per-point source evidence
+        # Collect per-point source evidence, COLLAPSED BY SOURCE IDENTITY (#5543).
+        #
+        # `aggregate_prior` assumes its `groups` are INDEPENDENT observations, and
+        # this loop is the only place that assumption is created. Keying on the
+        # `:Source` NODE made the model "how many distinct nodes point at me" — a
+        # statement about our database, not about the evidence. Two `:Source`
+        # nodes for ONE document (a session `:Source` and a document inside it, a
+        # re-registered duplicate, two spellings of one URL) each contributed a
+        # term to `log2(N_t+1) * sum(base_pc * factor) / N_t` AND each raised N,
+        # so the second channel was invisible to `aggregate_prior`.
+        #
+        # The identity policy is ALREADY RECORDED — `source_identity.py` (S0a),
+        # per `EXTRACTOR-V4-ARCHITECTURE.md` §4.2 / `STORAGE-ARCHITECTURE.md`
+        # §9.4: "The registration key is the canonicalised URL." The WRITE path
+        # applies it; this BELIEF path had simply never called it. Applying it
+        # here is not a new policy — it is that same policy on the path that had
+        # missed it. (This is why the correlation guard, not a documented
+        # decision that storage identity IS the proxy: the latter would
+        # contradict the recorded S0a decision the write path already enforces.)
+        #
+        # `normalize_source_url` is PURE (no model call, no graph access, never
+        # raises, documented idempotent), so this adds no query and no failure
+        # mode. A source with NEITHER `canonicalUrl` nor `url` keys on a UNIQUE
+        # per-row token instead, so unknown-identity sources stay DISTINCT;
+        # folding those together would introduce the opposite error.
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
-        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at in rows:  # noqa: B007
+        _identity_slot: dict[tuple[str, str], int] = {}
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl in rows:  # noqa: B007
             tier = resolve_tier(ctier, skind)
             if tier is None:
                 continue  # neutral source — no inheritance contribution
-            point_sources[pid].append({
-                "url": url, "tier": tier, "sourceDate": sdate,
-                "ingestedAt": ingested,
-            })
+            # Identity = the ALREADY-MATERIALISED S0a key. `:Source` carries
+            # `canonicalUrl` (written by the write path), which is precisely the
+            # "registration key" `source_identity.py` records;
+            # `normalize_source_url` is the pure fallback for a node predating
+            # that property. `id` is NOT usable as the key: it is not the S0a
+            # identity (it is the url on create, and is absent entirely on
+            # stub-minted sources — `_upsert_source` sets it, `_mint_source_stub`
+            # does not), so keying on it would split one document again. A source
+            # with no identity at all gets a UNIQUE per-row token: unknown
+            # identity must stay DISTINCT, because folding unknowns together
+            # would weaken evidence — a new error, opposite in direction to this
+            # bug.
+            ident = canonurl or normalize_source_url(url) if (canonurl or url) else None
+            if ident is None:
+                ident = f"\x00row:{pid}:{len(point_sources[pid])}"
+            # Read the assessment factor HERE, per row, BEFORE collapsing.
+            # `assess_source` keys it on the RESOLVED stored url, and two nodes
+            # of one canonical identity can resolve to different urls — so
+            # re-looking it up after the merge off the surviving url would make
+            # the prior depend on row ORDER (the traversal has no ORDER BY).
+            # Keeping the MAX matches the "strongest" rule used for tier and
+            # dates: collapsing must never weaken the evidence it merges.
+            fac = factor_by_source.get(url, 1.0)
+            slot = _identity_slot.get((pid, ident))
+            if slot is None:
+                _identity_slot[(pid, ident)] = len(point_sources[pid])
+                point_sources[pid].append({
+                    "url": url, "tier": tier, "sourceDate": sdate,
+                    "ingestedAt": ingested, "factor": fac,
+                })
+                continue
+            # One document seen twice: keep the STRONGER tier, the BEST clock and
+            # the STRONGEST assessment, so collapsing can never weaken the
+            # evidence it merges. The clock matters because `aggregate_prior`
+            # reads each group's `decay_t` off
+            # `_parse_timestamp(sourceDate) or _parse_timestamp(ingestedAt)` —
+            # i.e. `sourceDate` SHADOWS `ingestedAt`. Maxing the two fields
+            # INDEPENDENTLY would therefore lose the newest clock whenever the
+            # survivor carries an older `sourceDate` and a member has only a
+            # newer `ingestedAt`: the collapsed row would decay as of the older
+            # date, LOWER than the most recent member — the very weakening this
+            # merge exists to prevent. So compare the EFFECTIVE clock and copy
+            # BOTH fields from the winner, so the winner's clock is the one
+            # `aggregate_prior` actually reads.
+            kept = point_sources[pid][slot]
+            if pc_base(tier) > pc_base(kept["tier"]):
+                kept["tier"] = tier
+            if fac > kept["factor"]:
+                kept["factor"] = fac  # strongest assessment wins, not first-seen
+            cand_eff = _parse_timestamp(sdate) or _parse_timestamp(ingested)
+            kept_eff = _parse_timestamp(kept["sourceDate"]) or _parse_timestamp(
+                kept["ingestedAt"]
+            )
+            if cand_eff is not None and (kept_eff is None or cand_eff > kept_eff):
+                kept["sourceDate"], kept["ingestedAt"] = sdate, ingested
 
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
@@ -15861,8 +15952,7 @@ class TortoiseSDK:
             # Per-source assessment factor (clamped [0.1, 2.0]); factor = 1.0
             # when no assessments — exact tier priors preserved.
             groups = [
-                (src["tier"], src["sourceDate"], src["ingestedAt"],
-                 factor_by_source.get(src["url"], 1.0))
+                (src["tier"], src["sourceDate"], src["ingestedAt"], src["factor"])
                 for src in sources
             ]
             alpha, beta = aggregate_prior(
