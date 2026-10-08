@@ -105,9 +105,14 @@ def test_rejection_does_not_depend_on_breaker_state(monkeypatch, runner, args):
     """The refusal must hold with the circuit breaker OPEN.
 
     This is the property the entry placement exists for. With the breaker
-    forced open, a guard placed beside the label derivation is never reached —
-    the leg short-circuits to ``[]`` first — so this test fails for that
-    placement and passes only for an entry guard.
+    forced open, a guard placed BELOW the breaker check is never reached — the
+    leg short-circuits to ``[]`` first — so this test fails for that placement.
+
+    Scope of the assertion: for ``run_fts_query`` and ``run_vector_query`` the
+    label derivation sits below the breaker, so "below the breaker" and "beside
+    the label" coincide. ``run_structural_query`` derives its label ABOVE its
+    breaker check, so for that leg this pins only that the guard precedes the
+    breaker — not that it is the first statement.
     """
     monkeypatch.setattr(search_engine, "_breaker_allow", lambda _name: False)
 
