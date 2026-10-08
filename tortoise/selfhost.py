@@ -57,13 +57,20 @@ TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 # #2988: wall bound for /health/ready's probe. A black-holed DB must be
 # REPORTED (503) rather than waited out — it is a safety net, not the mechanism.
 # NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
-# below wraps ``sdk._get_proj()``, which has NO inner bound of its own (only the
-# FalkorDB client's socket timeouts), so the outer bound cannot be kept above an
-# inner deadline it can rely on — it is the only deadline there is, and the
-# worker it abandons is freed by the pool's own timeout rather than by an inner
-# one (see the pool comment below). ``hosted_api._READY_PROBE_TIMEOUT_S`` was
-# superseded by the hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT``
+# below wraps ``sdk._get_proj()``, whose DB leg is bounded by
+# ``_ready_probe_inner_bound_s()`` (#3320) — a DERIVED allowance that fires
+# before this bound, so the pool worker returns by itself rather than waiting
+# for the client's socket timeout. That allowance is the inner deadline this
+# outer bound sits above; see the constants below. ``hosted_api._READY_PROBE_TIMEOUT_S``
+# was superseded by the hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT``
 # bounds; this constant is the self-host path's own independent backstop.
+#
+# The effective readiness budget is therefore _READY_PROBE_TIMEOUT_S minus
+# _READY_PROBE_INNER_MARGIN_S (6.0 - 0.5 = 5.5s at the defaults). A cold start
+# that would have landed in the 5.5-6.0s window now reports not-ready. That is a
+# deliberate, bounded trade — NOT an accident of the arithmetic — and it is
+# taken because the alternative is a parked pool worker answering 503 to the
+# NEXT, healthy request.
 _READY_PROBE_TIMEOUT_S = 6.0
 
 #: #3320: how long the readiness probe's DB leg may run BEFORE the outer bound
@@ -74,22 +81,44 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #: rule). A probe parked in a socket read therefore keeps holding its pool
 #: worker until the CLIENT gives up, and the client's read timeout (10s by
 #: default) is ABOVE the outer bound (6.0s) — so the outer bound always loses
-#: that race. Two timed-out requests parked the whole readiness pool, which is
-#: what let a third request queue and report a FALSE 503 for a healthy DB.
+#: that race. Timed-out requests therefore parked readiness workers, and a
+#: later request was served by a free worker or, once they were exhausted,
+#: queued and reported a FALSE 503 for a healthy DB. (The original measurement
+#: — "two timed-out requests parked the whole pool" — was taken against the
+#: pre-#3287 width-2 pool; at today's width of 8 it takes eight, which is a
+#: difference of degree, not of kind, and is why the pool's width is not the
+#: fix.)
 #:
-#: THE ALLOWANCE IS DERIVED, NOT INVENTED: it comes from the same source the
-#: MCP health tool's cold-start budget uses (``monitoring.probe_setup_timeout``,
-#: operator-settable through ``TORTOISE_PROBE_SETUP_TIMEOUT``), so the two
-#: cannot drift apart the way two hand-written numbers would. It is then
-#: CLAMPED strictly below the outer bound — a value above the outer bound is
-#: not a bound at all — and floored above the client's CONNECT timeout (2.0s
-#: by default), so an ordinary connect is never aborted before it starts.
-#: At the shipped defaults this is 5.5s: 6.0 (outer) > 5.5 (inner) > 2.0
-#: (connect). The ordering is the contract, and it is asserted by
+#: THE ALLOWANCE IS DERIVED, then CLAMPED. It comes from the same source the MCP
+#: health tool's cold-start budget uses (``monitoring.probe_setup_timeout``,
+#: operator-settable through ``TORTOISE_PROBE_SETUP_TIMEOUT``) rather than being
+#: a second hand-written number — but the clamp SEVERS that derivation above the
+#: ceiling, so the two CAN and DO diverge: the knob defaults to 20 and ranges
+#: far higher, while this allowance is pinned at 5.5 whenever the knob is at or
+#: above 5.5. Stated precisely, the relationship is: RAISING the knob does not
+#: raise this allowance (the ceiling holds it), while LOWERING it below the
+#: ceiling tightens the leg.
+#:
+#: The result is CAPPED at ``outer - margin`` (applied LAST, so the cap wins:
+#: a value above the outer bound is not a bound at all) and otherwise FLOORED at
+#: 2.5s. At the shipped defaults: 6.0 (outer) > 5.5 (inner) > 2.5 (floor).
+#: The ordering holds whenever ``outer - margin`` is at or above the floor; if
+#: the outer bound is set BELOW 3.0 — which only the tests do, pinning 0.2 and
+#: 1.2 — the floor cannot be honoured and the bound tightens to just under the
+#: outer bound, which is the direction that keeps the invariant.
+#:
+#: The floor is a heuristic, not a guarantee: it sits above the HOST connect
+#: default (2.0s, ``projection._DB_CONNECT_TIMEOUT_DEFAULT``) so an ordinary
+#: connect is not aborted before it starts, but the EMBEDDED UDS lane does not
+#: pass ``socket_connect_timeout`` and keeps redis-py's own 5s default, which is
+#: ABOVE this floor — so on that lane an unusually slow connect can be aborted.
+#: The ordering is asserted by
 #: ``test_ready_probe_inner_bound_is_strictly_below_the_outer_bound``.
 #:
 #: NOT clamped upward, deliberately: a cold start that needs longer than the
-#: outer bound is reported not-ready, which is this deploy gate's contract.
+#: INNER allowance is reported not-ready, which is this deploy gate's contract.
+#: Note that this narrows the effective budget from 6.0s to 5.5s — see the note
+#: on ``_READY_PROBE_TIMEOUT_S``, where that trade is recorded as a decision.
 #: #3143/#3243's cold-start allowance governs the on-demand MCP tool, whose
 #: budget is not shared with this endpoint.
 _READY_PROBE_INNER_MARGIN_S = 0.5
@@ -150,42 +179,42 @@ def _ready_probe_inner_bound_s() -> float:
 #     ("a submission never fails, it just waits") applied to its replacement.
 #
 # /health/ready -> ``_READY_PROBE_WORKER``. Its probe is ``sdk._get_proj()``
-# called DIRECTLY — the engine's real path, deliberately not ``probe_db`` — and
-# that has NO inner bound: it is bounded only by the FalkorDB client's own
-# socket timeouts (5s connect / 10s read on the host lane; the embedded lane's
-# read timeout is the operator-configurable one added for #3350). Concurrent
-# readiness probes can therefore park every worker of this pool until their
-# sockets give up. It is structurally impossible for that to take /health down
-# now: /health does not touch a pool at all (it reads the coordinator's
-# in-memory snapshot), so the separation the two-pool split used to buy is now
-# categorical. Exercised by
+# called DIRECTLY — the engine's real path, deliberately not ``probe_db`` — with
+# its DB leg bounded by ``_run_bounded`` (#3320, below): the leg gets a DERIVED
+# allowance that always fires before the outer bound, so a black-holed DB
+# releases the worker instead of parking it for the client's socket timeout.
+# Two things remain true and are NOT fixed by that: the client's own socket
+# thread inside the abandoned leg lives until ITS timeout, and the UNDERLYING
+# connect/read defaults are the FalkorDB client's (2.0s connect on the host lane
+# — ``projection._DB_CONNECT_TIMEOUT_DEFAULT``; the embedded UDS lane does not
+# pass ``socket_connect_timeout`` and keeps redis-py's own 5s). Exercised by
 # test_liveness_answers_while_readiness_workers_are_parked.
 #
-# Because its workers really do park, this pool must NOT be NARROWER than the
-# executor it replaced. The point of the change is isolation from UNRELATED
-# work, not smallness: a 2-worker pool narrows the cushion from the default
-# executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box), and a 3rd
-# concurrent readiness request would then queue, spend its whole
+# Because its workers can still park for the length of that allowance, this pool
+# must NOT be NARROWER than the executor it replaced. The point of the change is
+# isolation from UNRELATED work, not smallness: a 2-worker pool narrows the
+# cushion from the default executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted
+# box), and a 3rd concurrent readiness request would then queue, spend its whole
 # ``_READY_PROBE_TIMEOUT_S`` waiting, and report a FALSE 503 for a healthy DB —
 # the same symptom this change exists to remove, reached through readiness
 # fan-in instead of through unrelated load. Width is pinned by
 # test_ready_probe_lane_is_named_and_sized and exercised by
 # test_readiness_fan_in_does_not_produce_a_false_503.
 #
-# Residual (pre-existing #2988, NOT introduced here): the client read timeout
-# (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a genuinely
-# black-holed DB the OUTER bound wins the race and leaves the readiness worker
-# parked until its socket times out. That is NOT merely a latency cost — it is
-# what makes the fan-in above possible, because a parked worker cannot serve the
-# next request — and it needs an inner bound on ``_get_proj`` so the worker
-# frees itself (the hosted twin keeps the outer strictly above the inner for
-# exactly this reason). **FIXED in #3320**: ``_run_bounded`` gives the DB leg
-# its own allowance strictly below the outer bound, so the POOL WORKER returns
-# by itself and the fan-in above cannot be produced by parked workers. The
-# client's own socket thread is abandoned (the repo's established pattern for
-# an overrun phase — it cannot be cancelled, only abandoned); the point is that
-# the scarce, REUSED resource — the readiness pool — is released, rather than
-# held for the client's timeout.
+# CLOSED in #3320 (was: pre-existing #2988 residual, NOT introduced here). The
+# client read timeout (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a
+# genuinely black-holed DB the OUTER bound used to win the race and leave the
+# readiness worker parked until its socket timed out — which is what made the
+# fan-in above possible, since a parked worker cannot serve the next request.
+# ``_run_bounded`` now gives the DB leg its own allowance strictly below the
+# outer bound, so the POOL WORKER returns by itself. The client's own socket
+# thread is abandoned (the repo's established pattern for an overrun phase — it
+# cannot be cancelled, only abandoned), and the leg runs on its OWN bounded
+# daemon pool, so abandoned legs are bounded in NUMBER rather than in lifetime.
+# What is promised is exactly that: the scarce, REUSED readiness worker is
+# released, and the number of parked legs cannot grow with load. A parked leg
+# still exists until its socket gives up — the bound is on the pool, not on the
+# client's socket.
 #
 # Why not ``asyncio.to_thread``: it ALWAYS uses the shared default executor —
 # there is no way to pass a pool, which is the whole defect. Why not a bare

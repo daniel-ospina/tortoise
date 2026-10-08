@@ -1368,12 +1368,21 @@ def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, mon
 
     A value above the outer bound is not a bound at all (the outer would win the
     race and park the worker), and a value below the client's connect timeout
-    would abort an ordinary connect before it starts.
+    would abort an ordinary connect before it starts (host lane, 2.0s; the
+    embedded UDS lane keeps redis-py's own 5s default and is NOT covered by the
+    floor).
+
+    ``outer`` is read from the MODULE ATTRIBUTE, not the source literal: the
+    literal is always the shipped 6.0, so a bound checked against it cannot see
+    how the floor behaves at any OTHER outer bound — which is exactly the hole
+    that let the floor defeat the cap.
     """
-    outer = _module_literal("_READY_PROBE_TIMEOUT_S")
+    outer = selfhost._READY_PROBE_TIMEOUT_S
     floor = _module_literal("_READY_PROBE_INNER_FLOOR_S")
+    margin = _module_literal("_READY_PROBE_INNER_MARGIN_S")
     inner = selfhost._ready_probe_inner_bound_s()
     assert floor < inner < outer, (floor, inner, outer)
+    assert inner == outer - margin, (inner, outer, margin)
 
     # The operator knob TIGHTENS this leg, and can never push it through the
     # outer bound — that is what makes the ordering unconditional rather than a
@@ -1386,6 +1395,16 @@ def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, mon
     assert selfhost._ready_probe_inner_bound_s() < outer, (
         "a raised cold-start allowance must clamp BELOW the outer bound — "
         "otherwise the outer bound wins the race and the worker parks again")
+
+    # The FLOOR must never DEFEAT THE CAP. With the outer bound below
+    # ``floor + margin``, evaluating the floor last returns the floor — which is
+    # ABOVE the outer bound, i.e. not a bound at all, and the worker parks
+    # exactly as it did before #3320. Two tests in this file pin the outer bound
+    # below 3.0, so this is a reachable state, not a hypothetical one.
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 1.2)
+    assert selfhost._ready_probe_inner_bound_s() < 1.2, (
+        "the floor defeated the cap: the inner bound is at or above the outer "
+        "bound, so the outer wins the race and the pool worker parks again")
 
 
 def test_run_bounded_returns_the_caller_when_the_leg_overruns(selfhost):
