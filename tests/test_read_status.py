@@ -729,13 +729,24 @@ def _per_test_timeout_s() -> float:
     import re
     from pathlib import Path
 
-    wf = Path(".github/workflows/python-ci.yml").read_text()
-    logical = re.sub(r"\\\n\s*", " ", wf).splitlines()
-    code = [re.split(r"(?:^|\s)#", ln, maxsplit=1)[0] for ln in logical]
-    vals = [float(v) for ln in code if "pytest" in ln
-            for v in re.findall(r"--timeout=(\d+(?:\.\d+)?)\b", ln)]
-    assert vals, ("the workflow's per-test --timeout moved or was renamed; no "
-                  "pytest invocation in python-ci.yml carries one")
+    root = Path(__file__).resolve().parent.parent
+    vals: list[float] = []
+    # EVERY workflow, not just python-ci.yml: conftest.py is shared, so another
+    # lane's timer can be the one that pre-empts this budget.
+    for path in sorted((root / ".github/workflows").glob("*.yml")):
+        logical = re.sub(r"\\\n\s*", " ", path.read_text()).splitlines()
+        code = [re.split(r"(?:^|\s)#", ln, maxsplit=1)[0] for ln in logical]
+        for ln in code:
+            if "pytest" not in ln:
+                continue
+            # both spellings of the same timer: `--timeout=N` / `--timeout N`,
+            # and pytest's ini-equivalent `-o timeout=N`.
+            vals.extend(float(v) for v in re.findall(
+                r"--timeout[=\s]+(\d+(?:\.\d+)?)\b", ln))
+            vals.extend(float(v) for v in re.findall(
+                r"-o\s+timeout[=\s]+(\d+(?:\.\d+)?)\b", ln))
+    assert vals, ("no pytest invocation in .github/workflows carries a per-test "
+                  "--timeout; it moved or was renamed")
     return min(vals)
 
 
@@ -783,7 +794,8 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
 
     from tortoise.embeddings import EmbeddingModel
 
-    tree = ast.parse(Path("tortoise/hosted_api.py").read_text())
+    tree = ast.parse((Path(__file__).resolve().parent.parent
+                      / "tortoise/hosted_api.py").read_text())
     hosted = [
         float(kw.value.value)
         for node in ast.walk(tree)
@@ -798,7 +810,10 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
         and not isinstance(kw.value.value, bool)
     ]
     assert hosted, "the hosted pre-warm's load budget moved or was renamed"
-    assert max(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
-        f"this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s but the hosted "
-        f"pre-warm waits only {max(hosted)}s for the same cold import"
+    # MIN, not max: the invariant is that this lane does not out-budget the
+    # pre-warm. Taking the max would let a second, more patient call site mask
+    # the real pre-warm being lowered — the drift this guard exists to catch.
+    assert min(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
+        f"this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s but a hosted "
+        f"pre-warm waits only {min(hosted)}s for the same cold import"
     )
