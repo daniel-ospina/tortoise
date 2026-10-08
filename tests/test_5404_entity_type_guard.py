@@ -23,10 +23,11 @@ import pytest
 from tortoise import search_engine
 from tortoise.security import VALID_ENTITY_TYPES
 
-# ``capitalize()`` turns this into ``Point` match (n) detach delete n //``: the
-# backtick closes the label and everything after it becomes query text. This is
-# the case the issue is about — capitalize() only touches the first character.
-INJECTION = "Point` MATCH (n) DETACH DELETE n //"
+# A label-shaped payload. ``)`` closes the node pattern, so everything after it
+# becomes a new clause (``//`` comments out the remainder) — the one payload
+# measured to reach query structure on this path. Note ``capitalize()`` only
+# touches the first character, so the value survives into the label text.
+INJECTION = "point) DETACH DELETE n //"
 
 # The capitalized/whitespace forms the guard rejects BY DESIGN — the same
 # contract tests/test_security.py:96 pins on the validator itself — plus the

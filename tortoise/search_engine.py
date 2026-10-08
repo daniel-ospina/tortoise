@@ -925,7 +925,7 @@ def run_fts_query(
     # caller-facing entity_type stays "document".
     # point→Point, event→Event, subject→Subject
     # NOTE: this leg keeps its own derivation rather than entity_label() —
-    # the operator→Point exception is #5407's scope (see security.py).
+    # migrating all three legs onto that mapping is #5407's scope.
     label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.

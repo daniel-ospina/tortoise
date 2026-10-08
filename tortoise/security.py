@@ -154,9 +154,7 @@ def validate_entity_type(entity_type: str) -> str:
 # #5407: ``run_fts_query`` does NOT route through this mapping — it has its own
 # operator branch (``MATCH (n:Point) WHERE n.is_operator = true``) and emits the
 # same ``Point`` label, so there is no label divergence for ``operator`` today.
-# That leg keeps its own derivation until #5407 migrates all three query legs
-# onto this mapping; DO NOT "unify" it here, because doing so changes FTS
-# behaviour under this issue's scope.
+# Migrating all three query legs onto this mapping is #5407's scope.
 ENTITY_TYPE_LABELS: dict[str, str] = {
     "point": "Point",
     "event": "Event",
