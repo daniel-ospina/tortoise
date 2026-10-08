@@ -12470,7 +12470,19 @@ class TortoiseSDK:
                         "RETURN count(r)",
                         params={"f": src, "t": dsts[0]},
                     ).result_set
-                    ok = proj.create_edge(src, dsts[0], rel)
+                    try:
+                        ok = proj.create_edge(src, dsts[0], rel)
+                    except ValueError as e:
+                        # A target-contract refusal (#5206: `aboutDocument` to a
+                        # non-document Source) must reach the caller as this
+                        # contract's own Phase2Error, not as a projection
+                        # primitive's ValueError. NB the bundle is NOT rolled
+                        # back: Phase 2 has already written its points and
+                        # sources — the same pre-existing behaviour as the
+                        # `endpoints not found` branch below.
+                        raise Phase2Error(
+                            f"ingest: connections[{i}] could not create "
+                            f"{rel!r} edge — {e}", batch_id=batch_id) from e
                     if not ok:
                         raise Phase2Error(
                             f"ingest: connections[{i}] could not create "

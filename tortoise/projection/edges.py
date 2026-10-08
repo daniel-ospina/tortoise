@@ -243,6 +243,27 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSource', 'aboutAction',
 })
 
+
+def about_document_target_reason(label: str | None,
+                                document_kind) -> str | None:
+    """Why `label`/`document_kind` cannot be an ``aboutDocument`` target, or
+    ``None`` when it can.
+
+    ``aboutDocument``'s target is a DOCUMENT — a ``:Source`` carrying
+    ``documentKind`` (ONTOLOGY §4.4); a provenance/session/connector Source is
+    an ``aboutSource`` target. Live auto-detect refused the rest, and so did the
+    replay resolver, but the live producer (``create_edge``) did not — an edge
+    created through it was built, transferred at supersede and then dropped by
+    ``rebuild_all``, ending on NEITHER node (#5206). ``create_edge`` now
+    applies this predicate; it is a named helper so the rule is greppable and
+    has one definition.
+    """
+    if label == "Source" and document_kind is not None:
+        return None
+    if label == "Source":
+        return "a :Source without documentKind"
+    return f"a {label or 'unknown'}-labelled node, not a :Source"
+
 # `references` targets whose node is BUILT FROM the source's content, and therefore
 # carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
 # the operative record is `STORAGE-ARCHITECTURE.md` §9.6). The anchor is set at LINK
@@ -1001,18 +1022,17 @@ class _EdgeHandlers:
         # NEITHER node. Refusing here is what makes live and replay agree.
         if predicate == 'aboutDocument':
             for t in targets:
-                props = t.get('properties') or {}
-                if t['label'] != 'Source' or props.get('documentKind') is None:
-                    why = ("(Source without documentKind)"
-                           if t['label'] == 'Source'
-                           else f"(label {t['label']}, not :Source)")
+                why = about_document_target_reason(
+                    t['label'], (t.get('properties') or {}).get('documentKind'))
+                if why is not None:
                     raise ValueError(
                         f"aboutDocument target {target_id!r} is not a "
-                        f"document-bearing :Source {why} — `aboutDocument` "
-                        "targets a DOCUMENT (ontology §4.4); for a provenance/"
-                        "session/connector Source use `aboutSource`. A live edge "
-                        "on a non-document Source cannot survive `rebuild_all` "
-                        "(#5206), so accepting it loses it silently.")
+                        f"document-bearing :Source — it is {why}. "
+                        "`aboutDocument` targets a DOCUMENT (ontology §4.4); "
+                        "for a provenance/session/connector Source use "
+                        "`aboutSource`. A live edge on a non-document Source "
+                        "cannot survive `rebuild_all` (#5206), so accepting "
+                        "it loses it silently.")
         # #390: mirror create_owned_by's circular-DAG guard for ownedBy — the
         # generic create_edge path must not bypass it. The new edge is
         # source -[:ownedBy]-> target; a cycle would close iff target already

@@ -2361,8 +2361,8 @@ def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_pro
 
     This pins the INVARIANT — live accepts iff replay resolves — rather than
     either side alone, so re-opening the asymmetry from EITHER end reds it
-    (guard the producer away -> the refusal assert fails; drop the replay guard
-    -> the ``replay_says is None`` assert fails).
+    (remove the producer guard -> the refusal assert fails; drop the replay
+    guard -> the ``resolve_structural_target(...) is None`` assert fails).
     """
     from tortoise.projection.edges import resolve_structural_target
 
@@ -2405,6 +2405,105 @@ def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_pro
     msg2 = str(ei2.value)
     assert "not a document-bearing :Source" in msg2, msg2
     assert "without documentKind" not in msg2, msg2
+
+
+def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
+    """#5206: the `aboutDocument` target contract — a `:Source` carrying
+    `documentKind` — must hold on the live producer, and a violation reached
+    through `sdk.ingest` must arrive as the ingest contract's OWN error.
+
+    The producer (`create_edge`) accepted ANY resolved target while the replay
+    resolver refused a non-document one, so an edge built live was transferred
+    at supersede and then dropped by `rebuild_all` — ending on NEITHER node.
+    The write leg now refuses it. That refusal is a projection primitive's
+    `ValueError`, which is not what `ingest` promises its callers, so the
+    ingest leg converts it to `Phase2Error` (with the bundle's batch_id).
+
+    A duplicate of this predicate in the ingest Phase-1 validator is the
+    tempting-but-wrong place to enforce it — that leg does not own endpoint
+    semantics — so the legitimate document shapes it would have refused are
+    pinned below.
+
+    NOT asserted here: bundle atomicity. Phase 2 has already written the
+    bundle's points and sources when the connection write fails — this call
+    site's pre-existing behaviour (the `endpoints not found` branch does the
+    same), and the reason the error must at least be contract-shaped.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.exceptions import Phase2Error
+    from tortoise.projection.edges import resolve_structural_target
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_5206_ingest_")
+    sdk = TortoiseSDK(db_path=os.path.join(d, "tortoise.db"),
+                      event_log_path=os.path.join(d, "events.jsonl"))
+    try:
+        # ── 1. The write leg refuses, and replay agrees with it. ──
+        g = sdk._get_proj().g
+        g.query("MERGE (s:Source {id:'5206-prov', "
+                "url:'https://x/5206-prov', sourceKind:'github'})")
+        g.query("MERGE (p:Point {id:'5206-p', pointKind:'statement'})")
+        assert resolve_structural_target(
+            g, "Source", "https://x/5206-prov", "aboutDocument") is None, \
+            "replay resolved a provenance Source as an aboutDocument target"
+        with pytest.raises(ValueError) as ei:
+            sdk.create_edge("aboutDocument", "5206-p", "5206-prov")
+        assert "aboutSource" in str(ei.value), ei.value
+
+        # ── 2. Through ingest, that refusal is a Phase2Error. ──
+        with pytest.raises(Phase2Error) as ei2:
+            sdk.ingest({
+                "points": [{"kind": "statement", "content": "claim A",
+                            "ref": "pa"}],
+                "sources": [{"url": "https://x/5206-prov-ingest",
+                             "sourceKind": "github", "ref": "src1"}],
+                "connections": [{"from": "pa", "to": "src1",
+                                 "relation": "aboutDocument"}],
+            })
+        msg = str(ei2.value)
+        assert "aboutDocument" in msg and "aboutSource" in msg, msg
+
+        # ── 3. Every legitimate document shape must still ingest. ──
+        # (a) the CANONICAL document: a `sources` item with sourceKind=
+        #     'document' + documentKind (tests/fixtures/
+        #     document_source_gold.jsonl, case `doc-with-genre`).
+        a = sdk.ingest({
+            "sources": [{"url": "https://x/5206-doc-a",
+                         "sourceKind": "document", "documentKind": "brief",
+                         "ref": "d1"}],
+            "points": [{"kind": "statement", "content": "claim B",
+                        "ref": "pb"}],
+            "connections": [{"from": "pb", "to": "d1",
+                             "relation": "aboutDocument"}],
+        })
+        assert a["created"]["connections"] == 1, a
+
+        # (b) the same, with the genre in nested `props` — an explicitly
+        #     supported ingest shape (`_coerce_props` flattens it at write time).
+        b = sdk.ingest({
+            "sources": [{"url": "https://x/5206-doc-b",
+                         "sourceKind": "document",
+                         "props": {"documentKind": "brief"}, "ref": "d2"}],
+            "points": [{"kind": "statement", "content": "claim C",
+                        "ref": "pc"}],
+            "connections": [{"from": "pc", "to": "d2",
+                             "relation": "aboutDocument"}],
+        })
+        assert b["created"]["connections"] == 1, b
+
+        # (c) a document declared as an `entities` item of type 'document'.
+        c = sdk.ingest({
+            "entities": [{"type": "document", "name": "Doc 5206",
+                          "documentKind": "report", "ref": "d3"}],
+            "points": [{"kind": "statement", "content": "claim D",
+                        "ref": "pd"}],
+            "connections": [{"from": "pd", "to": "d3",
+                             "relation": "aboutDocument"}],
+        })
+        assert c["created"]["connections"] == 1, c
+    finally:
+        sdk.close()
 
 
 def test_5026_b6_retired_fields_cannot_reenter(live_proj):
