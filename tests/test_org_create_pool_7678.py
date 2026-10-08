@@ -326,3 +326,51 @@ def test_create_org_still_refuses_when_a_deletion_row_is_present(monkeypatch):
     with pytest.raises(ha.HTTPException) as excinfo:
         asyncio.run(ha.create_org({"name": "Acme"}, {"user_id": _USER}))
     assert excinfo.value.status_code == 403
+
+
+def test_the_owned_org_REPLAY_also_rides_the_org_pool(monkeypatch):
+    """#7677: the REPLAY is a control-plane read too, so it belongs on the org pool.
+
+    The fresh-path pin above never reaches ``owned_org_replay`` — its op sequence
+    ends at ``provision_org`` — so a replay added later could ride the shared
+    ``auth`` pool while every sibling call rode ``org``, silently undoing #7686's
+    isolation on exactly the retry path that exists BECAUSE auth contention
+    crosses the transport bound (#4816). That is not hypothetical: it is what the
+    #7677 replay call did until this test drove the duplicate path.
+    """
+    import tortoise.hosted_api as ha
+    import tortoise.supabase_control as sc
+
+    fake = FakeControlPlane({"organizations": [], "org_memberships": []})
+    fake.seed("organizations", [{
+        "id": "existing", "name": "Acme", "created_at": "2020-01-01T00:00:00Z",
+        "deleted_at": None, "subscription_status": "active",
+    }])
+    fake.seed("org_memberships", [{
+        "id": "m1", "org_id": "existing", "user_id": _USER,
+        "role": "owner", "status": "active",
+        "created_at": "2020-01-01T00:00:00Z",
+    }])
+    monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+
+    seen: list[tuple[str, str]] = []
+    real_offload = ha._cp_offload
+
+    async def _record(fn, *, op, pool="auth", **kwargs):
+        seen.append((op, pool))
+        return await real_offload(fn, op=op, pool=pool, **kwargs)
+
+    monkeypatch.setattr(ha, "_cp_offload", _record)
+
+    out = asyncio.run(
+        ha._create_org_supabase_lane(fake, "Acme", {"user_id": _USER}))
+
+    ops = [op for op, _pool in seen]
+    assert "owned_org_replay" in ops, (
+        f"the duplicate path did not reach the replay, so this test does not "
+        f"cover it: {seen}")
+    assert all(pool == "org" for _op, pool in seen), (
+        f"a control-plane call on the org-create lane did not ride the org pool "
+        f"(#7686/#4816): {seen}")
+    assert out.get("org_id") == "existing", out

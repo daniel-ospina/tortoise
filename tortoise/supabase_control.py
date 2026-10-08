@@ -2934,18 +2934,21 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     """#7677: the idempotent-create REPLAY of an existing org, or None.
 
     The transport wait bound abandons but never cancels the create handler
-    (``WaitBoundMiddleware._track_wait_bound_request``), so an abandoned
+    (``WaitBoundMiddleware.__call__``, the branch that converts the transport
+    timeout into the refusal; ``_track_wait_bound_request`` only REGISTERS the
+    already-abandoned task so its exception can be retrieved), so an abandoned
     ``POST /v1/organizations`` can still commit the orgs row + the owner
     membership. The refusal the caller receives advertises a retry, and that
     retry re-enters ``create_org`` where ``org_by_name`` now finds the row the
     FIRST attempt created — a 409 for the caller's own organization.
 
-    This resolves the advertised retry ONLY on the observation that the
-    abandoned FIRST attempt has ALREADY COMMITTED — which is the case a
-    retry that observes the collision is in by definition. It refuses nothing
-    that should still refuse: it returns the create response ONLY when the
-    existing org is unambiguously the caller's own org, and every other
-    duplicate is still a 409. The safe rule, established from the data:
+    This resolves the advertised retry on ACTIVE OWNERSHIP of an org with that
+    name. It does NOT — and cannot — observe WHICH attempt committed the row:
+    a caller deliberately re-creating a name they already own gets the same
+    replay. That is the intended rule, and it is stated positively below. It
+    refuses nothing that should still refuse: it returns the create response
+    ONLY when the existing org is unambiguously the caller's own org, and every
+    other duplicate is still a 409. The safe rule, established from the data:
 
     - the caller must be an ACTIVE **owner** of the org (``role='owner'``,
       ``status='active'``). An active member/admin of someone else's org owns
@@ -2966,11 +2969,15 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     resolved only once the abandoned first attempt has COMMITTED. While it is
     still running, ``org_by_name`` returns None, so the retry proceeds as a
     fresh create and mints a new ``org_id`` (materialising an orphan
-    ``org_<id>`` graph) before losing the name race. On today's single-process
-    topology the per-user in-process ``_org_create_lock`` makes the retry queue
-    behind the abandoned handler and then reach this replay, so that window is
-    not reachable here; it becomes reachable wherever more than one process or
-    instance serves the caller, and the two stores then diverge:
+    ``org_<id>`` graph) before losing the name race. The per-user in-process
+    ``_org_create_lock`` narrows this but does NOT close it: it serialises the
+    two HANDLERS, while an offload worker abandoned by its OWN bound
+    (``_await_future`` cancels the await, not the running thread — CPython
+    #87185) can outlive the handler that held the lock, which is the very path
+    this module's offload bound introduces. The narrower true statement is that
+    the window is not reachable while the offload worker completes within its
+    bound; it becomes reachable wherever more than one process or instance
+    serves the caller, and the two stores then diverge:
 
     - Supabase: ``uq_teams_name`` (migration 0011) is NON-PARTIAL, so the race
       becomes the 0011 unique violation → the same 409.
