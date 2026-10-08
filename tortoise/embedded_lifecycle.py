@@ -1443,8 +1443,30 @@ def register_embedded_client(client) -> None:
         pass  # unweakrefable client — teardown just skips it
 
 
-def close_embedded_clients() -> int:
+def embedded_clients_snapshot() -> set:
+    """Snapshot the live embedded clients of THIS process.
+
+    The weakset above is process-global; a caller that owns only the clients
+    it opens (``mcp_server.main()``) needs to
+    distinguish "already here when I started" from "mine". A co-tenant
+    (e.g. a session-scoped ``shared_proj`` in an in-process pytest run) IS
+    live here, and closing it tears down a server the caller never owned.
+    Take this before opening anything, pass it to ``close_embedded_clients``
+    as ``exclude``.
+    """
+    return set(_embedded_clients)
+
+
+def close_embedded_clients(*, exclude: set | None = None) -> int:
     """Close every live embedded client this process opened (issue #2203).
+
+    ``exclude`` — a set from :func:`embedded_clients_snapshot` — leaves the
+    clients in it running. Pass it whenever the caller owns only the clients
+    IT opened: the default (``None``) is the process-owning / terminating-
+    signal path, where closing everything is correct. Without it, an
+    in-process caller shuts down a co-tenant's server and rmtree's its socket
+    dir, so the co-tenant's later tests die on
+    ``redis.socket: No such file or directory`` (#7728).
 
     Routes each client through the SAME idempotent seams normal teardown
     uses (redislite last-client semantics: the final close shuts the server
@@ -1461,6 +1483,8 @@ def close_embedded_clients() -> int:
     """
     closed = 0
     for client in list(_embedded_clients):
+        if exclude is not None and client in exclude:
+            continue  # co-tenant: not ours to close
         # The registry holds the guarded ``tortoise.FalkorDB`` wrapper; the
         # #1371 fast-close probe reads ``dbdir``/``socket_file`` off the
         # INNER redislite client (the wrapper has neither — it only owns

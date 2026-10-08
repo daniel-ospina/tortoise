@@ -1702,6 +1702,28 @@ CONTROL_PLANE_GRAPH_BACKLOG = 128
 #: class). The ordering is pinned by a test against the RESOLVED value.
 CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S = 10.0
 
+#: #7678: a FIFTH pool, for the ORG-CREATE lane (``POST /v1/organizations``).
+#: Creating an organization is one request that issues SEVERAL SEQUENTIAL
+#: control-plane reads (the 429/409/402 gates), one inline membership read and
+#: the provision write. On the shared ``auth`` pool every one of those waits
+#: behind the same authentication resolutions the pool exists to serve, so the
+#: request's wall clock is the SUM of the per-call queue waits — which is how a
+#: ~9.5 s pass crosses the 10 s transport bound under load (#4816). A pool of
+#: its OWN keeps the create-org gates off auth capacity, the same isolation
+#: argument that split out ``telemetry`` (#3498 review P1), ``oauth`` (#3669)
+#: and ``graph`` (#3773).
+#:
+#: Sized at 4, not 8: the lane is per-user rate-limited (3 creations/hour), so
+#: the binding constraint is a single request's SEQUENTIAL submissions, not a
+#: wide fan-in of concurrent creates. Four workers absorb a burst of concurrent
+#: creates without the parked threads a larger pool would carry on the 2-vCPU
+#: production machine. The bounded backlog is generous because a refused
+#: submission fails the user's create closed — the lane should degrade at its
+#: own 10 s bound, never at admission.
+CONTROL_PLANE_ORG_WORKER_NAME = "tortoise-org"
+CONTROL_PLANE_ORG_WORKERS = 4
+CONTROL_PLANE_ORG_BACKLOG = 128
+
 
 def graph_offload_timeout_s() -> float:
     """#3773: the DATA-PLANE graph lane's wait bound, resolved at CALL time.
@@ -1821,7 +1843,9 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     DATA-PLANE pool for the write handlers' graph helpers, kept off auth
-    capacity for the same isolation reason. The graph pool's callables SET
+    capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
+    org-create lane's SEQUENTIAL gate reads off auth capacity so a create-org
+    request is not the sum of its queue waits behind authentication work. The graph pool's callables SET
     ContextVars (the #2600 actor bind), so it must be reached ONLY through the
     hosted ``_graph_offload`` wrapper, which runs them under a copy of the
     caller's context — a bare ``run_control_plane_call(..., pool="graph")``
@@ -1833,6 +1857,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     off the auth-critical capacity, so a typo must fail closed, not silently
     revert the split.
     """
+    if pool == "org":
+        return daemon_worker(CONTROL_PLANE_ORG_WORKER_NAME,
+                             workers=CONTROL_PLANE_ORG_WORKERS,
+                             max_backlog=CONTROL_PLANE_ORG_BACKLOG)
     if pool == "graph":
         return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
                              workers=CONTROL_PLANE_GRAPH_WORKERS,
@@ -1959,8 +1987,9 @@ async def run_control_plane_call(fn, *, op: str,
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
     auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
-    client-resolution lane, or ``"graph"`` (#3773) for the DATA-PLANE graph
-    helpers — a separate pool for the same isolation reason.
+    client-resolution lane, ``"graph"`` (#3773) for the DATA-PLANE graph
+    helpers — a separate pool for the same isolation reason — or ``"org"``
+    (#7678) for the org-create lane's sequential gate reads and provision write.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

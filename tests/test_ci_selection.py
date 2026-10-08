@@ -221,8 +221,10 @@ def _tracked_files(root: Path) -> list[str]:
     checkouts under `.worktrees/` (measured: ~720k files / ~23s walked, vs ~2.4k
     files / ~0.9s tracked). A dead entry could then look alive locally while
     failing in CI — a false negative in exactly the environment a developer runs
-    in. `node_modules` is NOT excluded either: parts of it are tracked here, so
-    excluding it would diverge from git in the other direction.
+    in. `node_modules` is NOT excluded either. (#3768: nothing under `node_modules`
+    is tracked any more, but the exclusion predicate is about the PATH PATTERN,
+    not about what the tree currently contains — excluding by path would still
+    diverge from git whenever any node_modules did appear.)
     """
     try:
         proc = subprocess.run(
