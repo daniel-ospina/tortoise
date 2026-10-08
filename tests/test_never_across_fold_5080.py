@@ -2286,7 +2286,14 @@ class TestFailClosed:
 
 
 class TestResidualPinsHaveLiveTrackers:
-    """A residual pin must name a tracker, and the tracker must be declared open.
+    """A residual PIN must name a tracker, and the tracker must be declared open.
+
+    A pin is a test that declares itself one in its own docstring —
+    ``Documented residual, pinned ...`` — which is the convention this file
+    already used before the guard existed.  Whether such a test also carries the
+    ``*_is_a_known_limit`` name is checked, not assumed: the mark and the name
+    must agree, so a pin cannot escape by being renamed out of the convention
+    and a new residual cannot escape by being added without the mark.
 
     Both halves were missing over this file, and each was measured:
 
@@ -2301,33 +2308,64 @@ class TestResidualPinsHaveLiveTrackers:
     "live" is the state recorded in ``RESIDUAL_TRACKERS``: that table is the
     single place a closure is recorded, and a closure recorded there — or a pin
     re-pointed at anything the table does not declare open — reddens this class.
+
+    Scope, stated so the guard does not overclaim: this holds the tests that
+    declare themselves pins.  A test that pins a residual WITHOUT saying so —
+    including the FAIL-CLOSED ones (a wrong keep is noise; the pair is refused,
+    not folded) — is not reached, and no name-based scan could reach it without
+    inventing a registry.
     """
 
     @staticmethod
-    def _pin_trackers() -> dict[str, list[int]]:
+    def _pin_marked() -> dict[str, list[int]]:
         """{pin test name: tracker numbers named on its first docstring line}.
 
-        The convention the guard enforces: a ``*_is_a_known_limit`` pin names
-        its tracker as ``#<issue>`` on the FIRST line of its docstring.  Later
-        lines are free prose — they carry historical references (#5139, PR
-        #5320) that are provenance, not the live tracker — so only the first
-        line is read.
+        The convention the guard enforces: a pin says ``Documented residual,
+        pinned ...`` on the FIRST line of its docstring and names its tracker
+        there as ``#<issue>``.  Later lines are free prose — they carry
+        historical references (#5139, PR #5320) that are provenance, not the
+        live tracker — so only the first line is read.  Both function shapes
+        are walked: an ``async def`` mark is a pin too.
         """
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
         pins: dict[str, list[int]] = {}
         for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) \
-                    or not node.name.endswith("_is_a_known_limit"):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             lines = (ast.get_docstring(node) or "").splitlines()
             first = lines[0] if lines else ""
+            if not re.match(r"\s*Documented residual, pinned\b", first):
+                continue
             pins[node.name] = [int(n) for n in re.findall(r"#(\d+)", first)]
         return pins
 
+    @staticmethod
+    def _pin_named() -> set[str]:
+        """The tests whose NAME declares them a residual pin."""
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        return {node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.endswith("_is_a_known_limit")}
+
+    def test_the_pin_mark_and_the_pin_name_agree(self):
+        """A pin declares itself twice — in its name and in its docstring.
+
+        Neither half can be used alone: the NAME alone misses a residual added
+        without it and a mark whose name was changed (the accountability
+        silently removed), and the MARK alone misses a test named like a pin
+        whose docstring lost the declaration.  Requiring the two sets to be
+        equal closes both, and an empty pair is caught by the next test.
+        """
+        marked, named = set(self._pin_marked()), self._pin_named()
+        assert marked == named, (
+            f"a pin must BOTH end `_is_a_known_limit` AND say `Documented "
+            f"residual, pinned` on its first docstring line; named only: "
+            f"{sorted(named - marked)}; marked only: {sorted(marked - named)}")
+
     def test_every_residual_pin_names_a_declared_open_tracker(self):
-        pins = self._pin_trackers()
-        assert pins, ("no *_is_a_known_limit pin found — the naming convention "
-                      "changed and this guard is now vacuous")
+        pins = self._pin_marked()
+        assert pins, ("no `Documented residual, pinned` test found — the pin "
+                      "convention changed and this guard is now vacuous")
         for name, refs in sorted(pins.items()):
             assert len(refs) == 1, (
                 f"{name} must name exactly ONE tracker as #<issue> on the "
@@ -2345,7 +2383,7 @@ class TestResidualPinsHaveLiveTrackers:
                 f"no lamp behind it; re-point the pin at a live tracker")
 
     def test_no_declared_tracker_is_orphaned(self):
-        referenced = {n for refs in self._pin_trackers().values() for n in refs}
+        referenced = {n for refs in self._pin_marked().values() for n in refs}
         orphans = sorted(set(RESIDUAL_TRACKERS) - referenced)
         assert not orphans, (
             f"RESIDUAL_TRACKERS declares {orphans} with no pin referencing "
