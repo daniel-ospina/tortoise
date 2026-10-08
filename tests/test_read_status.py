@@ -704,7 +704,10 @@ class TestHostedSearchRoute:
 # 900/150 = 6) killed three shards at the watchdog and reddened `python-ci-gate`.
 
 _MEASURED_COLD_LOAD_S = 50.5  # this box, loadavg 172 / 10 CPUs, 2026-10-08
-_SHARD_WATCHDOG_S = 15 * 60.0
+# The shard ALSO runs pytest's per-test `--timeout=300` (python-ci.yml). The
+# embedder budget must fire BEFORE that one, or the load is abandoned by the test
+# harness at the same instant the embedder would have reported it.
+_PER_TEST_TIMEOUT_S = 300.0
 
 
 def test_the_test_lane_budgets_the_cold_embedder_load_between_two_bounds():
@@ -712,36 +715,49 @@ def test_the_test_lane_budgets_the_cold_embedder_load_between_two_bounds():
 
     TOO SMALL re-opens #6960: the load is abandoned, the in-flight work is
     thrown away, and the shard pays it again until the watchdog kills it.
-    TOO LARGE is the same kill by another route — a single failed attempt would
-    consume the shard's whole budget and leave nothing for the tests.
+    TOO LARGE and this budget never fires first — pytest's per-test timeout takes
+    the test instead, which is the same abandonment one layer up.
     """
     from tortoise.embeddings import EmbeddingModel
 
     budget = EmbeddingModel._LOAD_TIMEOUT_S
     assert budget > _MEASURED_COLD_LOAD_S * 2, (
-        f"a {budget}s budget leaves less than 2x margin over the measured "
-        f"{_MEASURED_COLD_LOAD_S}s cold load, which is what got loads abandoned "
-        f"on contended runners (#6960)"
+        f"a {budget}s budget leaves under 2x margin over the measured "
+        f"{_MEASURED_COLD_LOAD_S}s cold load — the margin that got loads "
+        f"abandoned on contended runners (#6960)"
     )
-    assert budget < _SHARD_WATCHDOG_S / 2, (
-        f"a {budget}s budget is more than half the {_SHARD_WATCHDOG_S}s shard "
-        f"watchdog, so one failed attempt would eat the shard (#6960)"
+    assert budget < _PER_TEST_TIMEOUT_S, (
+        f"a {budget}s budget does not fire before the per-test "
+        f"--timeout={_PER_TEST_TIMEOUT_S}s, so pytest-timeout abandons the test "
+        f"at the same instant the embedder would have reported the load (#6960)"
     )
 
 
-def test_the_test_lane_budget_is_what_the_hosted_prewarm_already_uses():
-    """It is not a new number: the hosted pre-warm passes the same value for the
-    same reason (a cold torch import on a small machine), so the two lanes agree
-    instead of drifting."""
-    import re
+def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
+    """One-way on purpose. Both lanes run the same cold torch import, so this lane
+    must not be MORE patient than the hosted pre-warm — but the hosted value may
+    legitimately grow (its own comment calls 300 a small-machine number), and an
+    equality assertion would then be unsatisfiable against the per-test bound
+    above. The hosted value is read from the AST, not by substring: a comment
+    quoting the call must not be able to satisfy a budget guard."""
+    import ast
     from pathlib import Path
 
     from tortoise.embeddings import EmbeddingModel
 
-    src = Path("tortoise/hosted_api.py").read_text()
-    hosted = re.findall(r"EmbeddingModel\.get\(load_timeout=([0-9.]+)\)", src)
+    tree = ast.parse(Path("tortoise/hosted_api.py").read_text())
+    hosted = [
+        float(kw.value.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+        for kw in node.keywords
+        if kw.arg == "load_timeout"
+        and isinstance(kw.value, ast.Constant)
+        and isinstance(kw.value.value, float)
+    ]
     assert hosted, "the hosted pre-warm's load budget moved or was renamed"
-    assert float(hosted[0]) == EmbeddingModel._LOAD_TIMEOUT_S, (
-        f"hosted pre-warm uses {hosted[0]}s but this lane now uses "
-        f"{EmbeddingModel._LOAD_TIMEOUT_S}s — the same operation drifting apart"
+    assert max(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
+        f"this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s but the hosted "
+        f"pre-warm waits only {max(hosted)}s for the same cold import"
     )
