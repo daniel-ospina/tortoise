@@ -2962,17 +2962,33 @@ def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
     ``name``, which the caller already holds) or None (→ the caller's 409).
     The caller has already resolved ``org_id`` from ``org_by_name``.
 
-    DECLARED RESIDUAL (not closed here, recorded on #7677): while the abandoned
-    first attempt is STILL RUNNING and has not yet committed, ``org_by_name``
-    returns None, so the retry proceeds as a fresh create, mints a new
-    ``org_id`` (materialising an orphan ``org_<id>`` graph) and only then loses
-    the name race to the 0011 unique violation — the same 409. On the current
-    single-process topology the per-user in-process ``_org_create_lock`` makes
-    the retry queue behind the abandoned handler and then reach this replay, so
-    that window is not reachable; it IS reachable where more than one process
-    or instance serves the caller (the registry lane's own documented
-    multi-process selfhost shape). Closing it needs a client-supplied
-    idempotency key or a cross-process interlock, not a name lookup.
+    DECLARED RESIDUAL (not closed here, recorded on #7677): the retry is
+    resolved only once the abandoned first attempt has COMMITTED. While it is
+    still running, ``org_by_name`` returns None, so the retry proceeds as a
+    fresh create and mints a new ``org_id`` (materialising an orphan
+    ``org_<id>`` graph) before losing the name race. On today's single-process
+    topology the per-user in-process ``_org_create_lock`` makes the retry queue
+    behind the abandoned handler and then reach this replay, so that window is
+    not reachable here; it becomes reachable wherever more than one process or
+    instance serves the caller, and the two stores then diverge:
+
+    - Supabase: ``uq_teams_name`` (migration 0011) is NON-PARTIAL, so the race
+      becomes the 0011 unique violation → the same 409.
+    - registry (the lane whose own docstring declares multi-process selfhost):
+      there is no unique index, so two processes can both pass their dup-name
+      check and mint two same-named Teams — a second org, #1954's documented
+      multi-process gap, which is worse than the 409 this fix removes.
+
+    Closing it needs a client-supplied idempotency key or a cross-process
+    interlock, not a name lookup. (Separately, the org-create rate limit is
+    checked BEFORE this replay, so a rate-limited caller gets the honest,
+    retryable 429 and reaches the replay once the window passes — pinned by
+    ``test_rate_limited_retry_still_429_before_the_replay``.)
+
+    The MCP surface (``mcp_server.tortoise_org_create``) has the same
+    bounded-abandon vs non-idempotent-create shape; it is stdio-only, declares
+    ``idempotentHint=false`` and is out of this change's scope — recorded on
+    #7677 as a bounded sibling.
     """
     row = org_by_id(cp, org_id)
     if row is None:
