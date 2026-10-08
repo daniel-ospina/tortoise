@@ -1,4 +1,4 @@
-"""drift-guard — the branch-drift gate defects it must not have (#4174, #4396, #7455).
+"""drift-guard — the branch-drift gate defects it must not have (#4174, #4396, #7455, #4764).
 
 #4174 — a never-fetched branch must not pass the drift gate on a STALE ref.
     "defect(process): a branch that never fetched merges a STALE ref — the tree
@@ -38,6 +38,20 @@
     exists to catch (measured: PR #4020 closed 210 commits behind at a
     threshold of 20, and `gh pr checks 4020` reported `drift-guard pass`). When
     HEAD IS that merge ref, the gate must measure `HEAD^2` instead.
+
+#4764 — distance is REPORTED, never gated.
+    The `behind > max` arm was a proxy for "the green we measured does not
+    describe the tree that would land", and it refused branches that were only
+    behind: measured 2026-10-07, open PRs sat blocked at 24 and 21 commits
+    behind with no failing code check, while a stale base is made current by the
+    merge rail before it judges the tree. The exit code is now driven by the
+    revert arm alone — the measurement that names a real defect — and the
+    distance is annotated `(over N — advisory, not a refusal)`. The tests below
+    pin BOTH halves: a distance over the number is green, and a clean two-sided
+    edit is still red. The one case the count covered and the revert arm does
+    not — a stale base whose merge breaks the build without reverting content —
+    is caught by re-running CI on the refreshed tree, which is what the rail
+    does before evaluating it.
 
 Every fixture is a self-contained local git repo pair (bare remote + one or
 more clones) using filesystem paths — no network, no DB. The tool under test
@@ -668,21 +682,21 @@ def test_two_sided_clean_edit_is_a_silent_revert(tmp_path: Path) -> None:
     assert "SILENTLY REVERTING" in _out(_run(repo))
 
 
-def test_threshold_arm_fires_when_behind_beyond_max(tmp_path: Path) -> None:
-    """UNCHANGED ARM: BEHIND > max still fires, and reports no revert (#7455).
+def test_threshold_arm_reports_distance_without_failing(tmp_path: Path) -> None:
+    """DISTANCE IS ADVISORY: BEHIND > max is reported and does NOT fail (#4764).
 
     `_build(behind=30)` carries 1 own commit and empty main commits, so this is
-    not the ancestor shape and it cannot be a revert — the red is the threshold
-    arm alone. It passes on the old predicate too (the threshold arm is the
-    part of the tool the fix must NOT touch), so it is a no-regression control.
+    not the ancestor shape and it cannot be a revert — distance is the only
+    thing this fixture measures, which is exactly what #4764 made advisory. The
+    control for the arm that still reddens the gate is the revert tests above.
     """
     repo = _build(tmp_path, behind=30, merge_ref=False)
     payload, p = _payload(repo)
-    assert p.returncode == 1, payload
+    assert p.returncode == 0, payload
     assert payload["behind"] == 30, payload
     assert payload["reverts"] == [], payload
     text = _out(_run(repo))
-    assert "30 behind" in text and "> 20 max" in text, text
+    assert "30 behind" in text and "over 20 — advisory, not a refusal" in text, text
     assert "SILENTLY REVERTING" not in text, text
 
 
@@ -691,12 +705,17 @@ def test_threshold_arm_fires_when_behind_beyond_max(tmp_path: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_merge_ref_sees_pr_drift(tmp_path: Path) -> None:
-    """Merge ref 30 behind > 20 → gate FAILS (old code reported 0, green)."""
+    """Merge ref 30 behind → the report names the PR's TRUE drift (#4396).
+
+    The old code read `HEAD..base`, which is ~0 on a merge ref, and reported
+    `0 behind` — green however stale the PR was. The drift is advisory since
+    #4764, so what this pins is the MEASUREMENT, not the exit code.
+    """
     repo = _build(tmp_path, behind=30)
     _assert_merge_ref_shape(repo)
     p = _run(repo, github_ref=_PR_MERGE_REF)
-    assert p.returncode == 1, (
-        f"merge ref drifted 30 (>20) must FAIL; got rc={p.returncode}\n{_out(p)}")
+    assert p.returncode == 0, (
+        f"distance is advisory since #4764; got rc={p.returncode}\n{_out(p)}")
     assert "30 behind origin/main" in _out(p)
     assert "via HEAD^2, the PR head" in _out(p)
 
@@ -705,7 +724,7 @@ def test_merge_ref_json_names_what_it_measured(tmp_path: Path) -> None:
     """`ahead`/`behind` are both read from HEAD^2, and the report says so."""
     repo = _build(tmp_path, behind=30)
     report, p = _payload(repo, github_ref=_PR_MERGE_REF)
-    assert p.returncode == 1, _out(p)
+    assert p.returncode == 0, _out(p)
     assert report["measured"] == "HEAD^2"
     assert report["behind"] == 30
     # The PR's own 1 commit — not the merge commit, which is not PR work.
@@ -772,10 +791,11 @@ def test_pr_ref_but_single_parent_head_falls_back_to_head(tmp_path: Path) -> Non
     _git_ok(repo, "update-ref", f"refs/remotes/{_PR_MERGE_REF.removeprefix('refs/')}",
             "HEAD")
     report, p = _payload(repo, github_ref=_PR_MERGE_REF)
-    assert p.returncode == 1, (
+    assert p.returncode != 2, (
         f"single-parent HEAD must report drift, not crash; rc={p.returncode}\n{_out(p)}")
     assert "measured" not in report
-    assert report["behind"] == 30
+    assert report["behind"] == 30, "the real drift must still be measured"
+    assert p.returncode == 0, _out(p)
 
 
 def test_identical_merge_shape_off_the_pr_path_measures_head(tmp_path: Path) -> None:
@@ -836,7 +856,7 @@ def test_non_merge_branch_measures_head_unchanged(tmp_path: Path) -> None:
     repo = _build(tmp_path, behind=30, merge_ref=False)
     assert _git_ok(repo, "rev-parse", "--abbrev-ref", "HEAD") == "pr"
     report, p = _payload(repo)
-    assert p.returncode == 1, _out(p)
+    assert p.returncode == 0, _out(p)
     assert "measured" not in report
     assert report["branch"] == "pr"
     assert report["behind"] == 30
@@ -847,9 +867,9 @@ def test_non_merge_text_output_has_no_merge_marker(tmp_path: Path) -> None:
     """The human line gains no merge marker on the branch path."""
     repo = _build(tmp_path, behind=30, merge_ref=False)
     p = _run(repo)
-    assert p.returncode == 1, _out(p)
+    assert p.returncode == 0, _out(p)
     out = _out(p)
     # (The base label itself carries main's #4174 `(measured ...)` suffix; the
     # #4396 change is the absence of its own `via HEAD^2` marker here.)
-    assert out.startswith("FAIL pr: 30 behind origin/main "), out
+    assert out.startswith("OK  pr: 30 behind origin/main "), out
     assert "HEAD^2" not in out

@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""drift-guard — long-lived branch drift + silent-revert gate (#1531, #4174).
+"""drift-guard — silent-revert gate, reporting base distance (#1531, #4174, #4764).
 
-Fails when the current branch has drifted from origin/main: commits present
-on main but missing from the branch (the #1531 threshold arm), OR — #4174,
-corrected by #7455 — when a merge of the branch into main would not keep
-main's content for a path main moved since the merge base AND the merge is
-conflict-free. The second arm is the conflict-free revert: because git
-surfaces a textual conflict of its own, the clean case — where the merge
-result's blob for the path is not main's — is what a conflict check cannot
-see, so the arm reports the affected paths and line counts.
+Fails when a merge of the branch into main would not keep main's content for a
+path main moved since the merge base AND the merge is conflict-free (#4174,
+corrected by #7455). That arm is the conflict-free revert: because git surfaces
+a textual conflict of its own, the clean case — where the merge result's blob
+for the path is not main's — is what a conflict check cannot see, so the arm
+reports the affected paths and line counts.
+
+It also REPORTS, but no longer fails on, how far behind origin/main the branch
+is (#1531's threshold arm, relaxed by #4764). The count was a PROXY for "the
+green we measured does not describe the tree that would land", and it reddened
+branches that were merely behind — measured 2026-10-07: open PRs blocked on
+distance alone (24 and 21 commits) with no failing code check, while a base that
+is merely old is made current by the merge rail before it evaluates the tree.
+The one thing the count cannot replace — a stale base whose merge breaks the
+build WITHOUT reverting content — is caught where it is measurable: the
+refreshed head re-runs CI on the tree that lands. The revert arm below is
+unchanged and remains the failure mode (#4764).
 
 WHY THE FETCH IS NOT OPTIONAL (#4174). A worktree that never fetched holds a
 STALE `origin/main`. Every read against it is self-consistent — the branch
@@ -50,15 +59,15 @@ remote-state gate, not a file-content scan. It runs on CI for every PR and
 on demand via workflow_dispatch; local runs use the same code path.
 
 Usage:
-    python3 tools/drift-guard.py                 # origin/main, max-behind 20
+    python3 tools/drift-guard.py                 # origin/main
     python3 tools/drift-guard.py --base origin/main --max-behind 20
-    DRIFT_MAX_BEHIND=10 python3 tools/drift-guard.py   # env override
+    DRIFT_MAX_BEHIND=10 python3 tools/drift-guard.py   # annotate past 10
     python3 tools/drift-guard.py --json          # machine-readable output
     python3 tools/drift-guard.py --head <ref>    # measure a ref other than HEAD
 
 Exit codes:
-    0  no drift and no silent revert — gate green
-    1  drift beyond threshold OR a silent revert — gate red
+    0  no silent revert — gate green (base distance is reported, never gating)
+    1  a silent revert — gate red
     2  environment error (not a git repo / base not a remote-tracking ref /
        base unreachable / fetch failed — freshness unprovable / the
        silent-revert arm could not be MEASURED — an unreadable merge base or
@@ -84,6 +93,9 @@ import subprocess
 from pathlib import Path
 
 DEFAULT_MAX_BEHIND = 20
+# ADVISORY since #4764: the distance is reported against this number and never
+# fails the gate. The count measured stale MEASUREMENT, not a defect, and the
+# merge rail makes a stale base current before it judges the tree.
 # Display help for a long revert list; the JSON always carries every path.
 MAX_REPORTED_PATHS = 50
 
@@ -356,7 +368,8 @@ def main() -> int:
                          "PR HEAD, never the synthetic merge ref, which contains "
                          "the base by construction")
     ap.add_argument("--max-behind", type=int, default=None,
-                    help="fail when behind by more than N commits "  # noqa: UP031
+                    help="report — do NOT fail — when behind by more than N "  # noqa: UP031
+                         "commits; distance is advisory since #4764 "
                          "(default: %d)" % DEFAULT_MAX_BEHIND)
     ap.add_argument("--json", action="store_true",
                     help="machine-readable output")
@@ -498,8 +511,10 @@ def main() -> int:
                         [f"ERROR {msg}"], 2)
     revert_lines = sum(r["added"] + r["deleted"] for r in reverts)
 
+    # Distance is REPORTED, not gated (#4764): only a silent revert reddens the
+    # gate. `drifted` survives as the advisory annotation's predicate.
     drifted = behind_n > max_behind
-    status = "drift" if (drifted or reverts) else "ok"
+    status = "drift" if reverts else "ok"
     # What was MEASURED, not what was asked for. `args.base` DWIM-resolves
     # ahead of refs/remotes/, so under the shadow this PR guards against the
     # two spellings name different commits — a verdict about one of them must
@@ -531,20 +546,23 @@ def main() -> int:
              if measured_head != args.head else "")
 
     if status == "ok":
+        # The parenthetical is a REPORT, never a pass/fail: `(<= N)` still means
+        # "within the advisory number", and the "over N" form names a distance
+        # the gate deliberately does not refuse (#4764).
+        distance = (f"{behind_n} behind {base_label}{where} "
+                    + (f"(over {max_behind} — advisory, not a refusal)"
+                       if drifted else f"(<= {max_behind})"))
         return emit(
             report,
-            [f"OK  {branch}: {behind_n} behind {base_label}{where} "
-             f"(<= {max_behind}), {ahead_n} ahead (base {freshness}) — gate green"],
+            [f"OK  {branch}: {distance}, "
+             f"{ahead_n} ahead (base {freshness}) — gate green"],
             0,
         )
 
     lines: list[str] = []
-    if drifted:
-        lines.append(
-            f"FAIL {branch}: {behind_n} behind {base_label}{where} "
-            f"(> {max_behind} max) — branch drifted; fetch and reconcile onto "
-            f"{args.base} before this lands (epic #1509 P3: every "
-            f"real-backend E2E gates on 'worktree == origin/main')")
+    # No distance-only FAIL can reach here: `status` is revert-driven since
+    # #4764, so a red gate always has at least one revert to report. A distance
+    # line that can never fail must not read like one.
     if reverts:
         lines.append(
             f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) where "
