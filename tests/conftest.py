@@ -121,6 +121,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._tmpdir_hygiene import (  # noqa: E402
     install_scan_guard,
     install_session_tmpdir,
+    install_tolerant_tempdir_cleanup,
     sweep_stale_session_roots,
 )
 
@@ -132,6 +133,12 @@ install_session_tmpdir()
 # session.
 sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_scan_guard()
+# #7735: `TemporaryDirectory.__exit__` cleans up with `ignore_errors=False`, so a
+# directory a live embedded server still holds raises ENOTEMPTY out of teardown
+# and reddens a shard whose tests all passed. Same invariant as this module's own
+# teardown ("teardown must not convert a green suite red"), so it is fixed once
+# here for all 279 call sites rather than per test file.
+install_tolerant_tempdir_cleanup()
 
 # #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.
 #

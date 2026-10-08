@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -850,3 +851,54 @@ def uninstall_scan_guard() -> None:
     os.listdir = _ORIGINALS["listdir"]  # type: ignore[assignment]
     os.walk = _ORIGINALS["walk"]  # type: ignore[assignment]
     _GUARD_INSTALLED = False
+
+
+def install_tolerant_tempdir_cleanup() -> None:
+    """Make ``tempfile.TemporaryDirectory`` cleanup obey the suite's own rule.
+
+    WHY (measured, #7735). ``TemporaryDirectory.__exit__`` calls
+    ``cleanup()``, which calls ``shutil.rmtree(..., ignore_errors=False)``. A
+    directory that is still held by an embedded server which deliberately
+    OUTLIVES the suite — the live-redis case this module already handles for the
+    session root (#4069/#3752) — cannot be removed atomically: ``rmtree`` empties
+    it and the server re-creates an entry before ``os.rmdir``, which then raises
+
+        OSError: [Errno 39] Directory not empty
+
+    That exception escapes ``__exit__``, so pytest reports it as a test ERROR
+    and the shard goes red even though every test in it PASSED — observed as
+    ``2054 passed, 15 skipped, 1 error``, on three consecutive runs of the same
+    commit with a different nodeid each time (the error follows whichever test
+    is tearing down, not the test's subject).
+
+    That is the same failure of the same invariant this module already states
+    for its own teardown — "teardown must not convert a green suite red" — and
+    it is the same class as #4069, which this module answers for the session
+    root by leaving the directory to the reaper.
+
+    STRUCTURAL, NOT PER-FILE. The suite has 279 ``TemporaryDirectory`` call
+    sites; patching them one at a time would be a band-aid on a shared lifecycle
+    bug, and the next test written would reintroduce it. ``ignore_cleanup_errors``
+    is the stdlib's own supported lever for exactly this case, so the default is
+    applied once, here, next to the other tempdir policy.
+
+    NOT A LEAK-HIDER. Leak DETECTION is untouched: this module still tracks every
+    directory a test creates and reports what it leaves behind, and
+    ``tests/test_tmpdir_hygiene_4096.py::test_no_pytest_fixture_leaks_a_temp_tree``
+    still fails on a leaked tree. Cleanup of a directory a live server owns is
+    not the detector — it is an incidental crash on the way out.
+    """
+    original_init = tempfile.TemporaryDirectory.__init__
+    if getattr(original_init, "_tortoise_tolerant_cleanup", False):
+        return  # idempotent: a second pytest.main() must not double-wrap
+
+    @functools.wraps(original_init)
+    def _init(self, *args, **kwargs):
+        # Only default it: an explicit argument still wins, including the
+        # positional form (suffix, prefix, dir, ignore_cleanup_errors).
+        if len(args) < 4:
+            kwargs.setdefault("ignore_cleanup_errors", True)
+        return original_init(self, *args, **kwargs)
+
+    _init._tortoise_tolerant_cleanup = True
+    tempfile.TemporaryDirectory.__init__ = _init
