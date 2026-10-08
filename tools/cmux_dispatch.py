@@ -117,16 +117,18 @@ position-based guess.
 
 NO FOOTER, NO SEND (#7158)
 --------------------------
-Readiness is a POSITIVE signal, not the absence of a known failure: a pane must
-present pi's footer (status bar) before the tool writes into it. The earlier
-revision treated "readable, no boot marker, but no footer either" as a slow boot
-and sent anyway ("confirmation will decide") — but confirmation runs AFTER the
-bytes are written, and `cmux send` into a bare login shell EXECUTES the text as a
-command. A dead lane's pane is exactly that state, so the fail-open turned a
-heartbeat misclassification into executed bytes. The gate now fails CLOSED: no
-footer within the readiness budget means no send, on the initial attempt AND on
-the dismiss-and-resend recovery. A genuinely slow boot is raised via
-`--ready-timeout`; a refusal is recoverable, an executed brief is not.
+Readiness is a POSITIVE signal about the LIVE pane, not the absence of a known
+failure: pi's footer (status bar) must be the LAST thing drawn before the tool
+writes. Two dead-pane shapes otherwise pass a "is a bar present anywhere" test
+— one with no footer at all, and one whose previous pi session left its footer
+in the scrollback above a freshly printed shell prompt — and in both the bytes
+go to a bare login shell, which EXECUTES them. The earlier revision treated the
+no-footer shape as a slow boot and sent anyway ("confirmation will decide"); but
+confirmation runs AFTER the bytes are written, so it cannot un-execute a command.
+The gate now fails CLOSED — footer-present-and-last within the readiness budget,
+on the initial attempt AND on the dismiss-and-resend recovery. A genuinely slow
+boot is raised via `--ready-timeout`; a refusal is recoverable, an executed brief
+is not.
 
 USAGE
 -----
@@ -337,9 +339,34 @@ def boot_blocked(screen: str | None) -> bool:
     return _last_status_bar_end(screen) < marker_at
 
 
+def footer_is_last(screen: str | None) -> bool:
+    """True when pi's footer (status bar) is on the LAST non-empty line.
+
+    A status bar ANYWHERE is not evidence that the CURRENT process owns stdin.
+    pi renders inline, so a pane whose pi exited retains the dead session's
+    footer in the scrollback while the shell prints its prompt BELOW it — the
+    same ordering trap `boot_blocked` documents for the boot-block marker, in
+    the case where no marker is present to catch it. Requiring the footer to be
+    the last thing drawn makes readiness a statement about the live pane rather
+    than a leftover frame (#7158).
+
+    Trailing BLANK lines are ignored: `cmux read-screen` pads the capture, and
+    the footer is the last line WITH CONTENT when it came from the live TUI.
+    """
+    for line in reversed((screen or "").splitlines()):
+        if line.strip():
+            return bool(READY_RE.search(line))
+    return False
+
+
 def screen_ready(screen: str | None) -> bool:
-    """True when pi's TUI owns stdin: a status bar drawn after any prompt."""
-    return status_bar_present(screen) and not boot_blocked(screen)
+    """True when pi's LIVE TUI owns stdin.
+
+    Three ordered requirements: a footer is present, it is the LAST non-empty
+    line (so a stale footer left above a shell prompt is NOT ready, #7158), and
+    no boot-block marker follows it.
+    """
+    return footer_is_last(screen) and not boot_blocked(screen)
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -932,9 +959,10 @@ class Dispatcher:
         Returns `(ready, blocked_now, last_screen)`.
 
         `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
-        is PROVABLY not accepting input, so the caller must refuse. If the prompt
-        was seen earlier but is gone now, the caller may proceed best-effort —
-        confirmation and recovery still gate success.
+        is PROVABLY not accepting input, so the caller must refuse. `ready=False`
+        means no pi footer was drawn by the deadline; the caller must ALSO refuse
+        — there is no "best-effort proceed" (removed in #7158): a readable pane
+        with no live pi is a bare shell, and bytes written there are executed.
         """
         deadline = self.now() + timeout
         screen: str | None = ""

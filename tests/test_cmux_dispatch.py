@@ -198,6 +198,18 @@ Last login: Wed Oct  8 20:58:11 on ttys004
 danielospina@Daniels-MacBook-Pro 7158-bare-shell % 
 """
 
+#: A DEAD pane whose PREVIOUS pi session left its footer in the scrollback while
+#: the shell printed its prompt BELOW it. There is no boot-block marker, so
+#: `boot_blocked` is silent — a "is a bar present anywhere" readiness test declares
+#: this pane ready and writes the brief into the shell (#7158, the shape the
+#: no-footer fixture misses). Ordering is the discriminator: the footer must be
+#: the LAST thing drawn.
+SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT = """\
+[tortoise-capture] Captured session abc (2 turns)
+\u21b34.0k \u21b3151 R17k CH81.2% $0.001 3.0%/700k (auto)                    (deepseek) deepseek-flash \u2022 high
+danielospina@Daniels-MacBook-Pro 7158-stale-footer % 
+"""
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1480,6 +1492,32 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.status, "never-became-ready")
         self.assertEqual(fake.submitted, [])
         self.assertEqual(fake.sent_log, [], "no bytes may reach a bare shell")
+
+    def test_STALE_footer_above_a_LIVE_SHELL_PROMPT_is_not_ready(self):
+        """#7158, the shape a "bar present anywhere" test misses: a DEAD pane keeps
+        the previous pi session's footer in the scrollback while the shell prompt
+        prints BELOW it. No boot marker, so `boot_blocked` is silent; readiness
+        must require the footer to be the LAST thing drawn."""
+        stale = SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT
+        self.assertTrue(cd.status_bar_present(stale), "the stale bar IS present")
+        self.assertFalse(cd.boot_blocked(stale), "no boot marker catches it")
+        self.assertFalse(cd.footer_is_last(stale))
+        self.assertFalse(cd.screen_ready(stale))
+
+    def test_a_pane_with_a_STALE_footer_above_a_shell_prompt_is_REFUSED(self):
+        """The no-footer refusal alone does not cover the stale-footer shape: the
+        pane LOOKS ready (a footer is on screen) while a shell prompt below it
+        would execute the bytes. The dispatch must be refused with zero writes."""
+
+        class StaleFooterCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, SCREEN_STALE_FOOTER_ABOVE_SHELL_PROMPT)
+
+        fake = StaleFooterCmux()
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [], "no bytes may reach the shell prompt")
 
     def test_recovery_refuses_to_re_send_into_a_pane_that_never_drew_the_footer(self):
         """#7158 on the RECOVERY path: after a boot-block dismissal the pane
