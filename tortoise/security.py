@@ -151,11 +151,12 @@ def validate_entity_type(entity_type: str) -> str:
 #   * ``operator`` → ``:Point`` (#172). Operators are Points with
 #     ``is_operator=true``, consistent with ``run_structural_query``.
 #
-# ⚠️ KNOWN DIVERGENCE (#5407): ``run_fts_query`` (search_engine.py:755) does
-# NOT apply the ``operator → Point`` exception — it emits ``Operator`` for
-# ``entity_type="operator"``. That leg keeps its own derivation until #5407
-# migrates all three query legs onto this mapping; DO NOT "unify" it here,
-# because doing so changes FTS behaviour under this issue's scope.
+# #5407: ``run_fts_query`` does NOT route through this mapping — it has its own
+# operator branch (``MATCH (n:Point) WHERE n.is_operator = true``) and emits the
+# same ``Point`` label, so there is no label divergence for ``operator`` today.
+# That leg keeps its own derivation until #5407 migrates all three query legs
+# onto this mapping; DO NOT "unify" it here, because doing so changes FTS
+# behaviour under this issue's scope.
 ENTITY_TYPE_LABELS: dict[str, str] = {
     "point": "Point",
     "event": "Event",

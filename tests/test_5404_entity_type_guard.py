@@ -76,14 +76,12 @@ def test_run_vector_query_rejects_invalid_entity_type_with_no_query_vec(bad):
 
 @pytest.mark.parametrize("runner,args", LEGS)
 def test_guard_runs_at_entry_before_any_graph_use(monkeypatch, runner, args):
-    """The guard is reached before the graph — so it cannot be skipped.
+    """The guard runs before any graph use.
 
     Both the guard and any graph use append to one ordered list, and the guard
     must be first. The graph stub raises on first use, but the runners catch
     driver exceptions by design (the degradation chain returns []), so the
-    ordering is what is asserted — not an escaping exception. If the guard had
-    been left below an early return (a breaker short-circuit, an empty-scope
-    branch), ``order`` would start with ``"graph"`` or be empty.
+    ordering is what is asserted — not an escaping exception.
     """
     order: list[str] = []
 
