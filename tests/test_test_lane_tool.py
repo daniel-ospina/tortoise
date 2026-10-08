@@ -720,8 +720,8 @@ def test_repo_root_falls_back_when_git_cannot_be_executed(monkeypatch, capsys):
 # ── start(): the port handed to the caller must be the PUBLISHED one ───────
 
 def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatch):
-    """`-p 0:6379` lets Docker choose the port, so echoing the requested value
-    would print a URI pointing at nothing."""
+    """The published host port is ephemeral and authoritative, so echoing the
+    requested value would print a URI pointing at nothing."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))

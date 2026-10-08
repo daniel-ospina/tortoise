@@ -41,7 +41,7 @@ def _docker_reachable(host: str | None = None,
     """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     #6673: the port used to be the 6379 literal. It is now the ephemeral host
-    port the workflow's provision step assigned (docker `-p 0:6379`), so two
+    port the workflow's provision step assigned (docker `-p 127.0.0.1:0:6379`), so two
     services jobs on the same host cannot collide. `host=None` resolves through
     `_live_utils.service_host()`, so a `TORTOISE_TEST_DOCKER_HOST`
     override reaches the probe exactly as it reaches the clients. The host is
