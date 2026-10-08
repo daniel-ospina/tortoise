@@ -1152,10 +1152,12 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
             manifest_text, weights, captured_at)
         # The readback runs AFTER the renderer returns, so it needs the same
         # mapping as the render itself: `_manifest_of` raises
-        # DurationsBridgeError for a document it cannot parse back, and
-        # without this it escaped the CLI as a traceback with rc=1 instead of
-        # the documented `2 UNKNOWN (unreadable manifest)` (#6092 review
-        # round 5).
+        # DurationsBridgeError for a document it cannot parse back. This once
+        # escaped as a traceback with rc=1; the total boundary added later
+        # catches it as rc=2, so what placing it HERE still buys is the
+        # specific `2 UNKNOWN (unreadable manifest)` phrasing this function's
+        # docstring promises rather than a generic `2: DurationsBridgeError:`
+        # line (#6092 reviews rounds 5 and 11).
         issues = validate_refreshed_manifest(new_text)
         if not issues and _is_the_repo_manifest(manifest_path):
             # The repo's own manifest is held to the WHOLE `--integrity` gate —
