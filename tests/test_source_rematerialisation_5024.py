@@ -704,23 +704,30 @@ def test_a_same_hash_retitle_is_repeat_safe(src):
 def test_a_writer_dropped_key_recheck_is_repeat_safe(src):
     """P1-B — a key the writer cannot persist is not a change.
 
-    `content` is retired (`_DOC_RETIRED_KEYS`) and a `dict` extra is not
-    persistable (`_persist_extra_props`'s own predicate), so neither reaches
-    the node. The old no-op test re-derived the persistence rule instead of
-    reusing it and appended a record on every re-check (`1 -> 2 -> 3 -> 4`)
-    while the node never gained the key.
+    A `dict` extra is not persistable (`_persist_extra_props`'s own predicate),
+    so it never reaches the node. The old no-op test re-derived the persistence
+    rule instead of reusing it and appended a record on every re-check
+    (`1 -> 2 -> 3 -> 4`) while the node never gained the key.
+
+    #3998 (D30): `content` was the original second exemplar (a `_DOC_RETIRED_KEYS`
+    entry the writer drops). It is no longer a *dropped* key on the live write
+    path — the SDK payload guard refuses it outright, before the writer's drop
+    predicate is consulted — so it is pinned as a refusal here rather than
+    silently dropped from the test. The P1-B subject is carried by `meta`, which
+    no guard intercepts and which the writer's own predicate still drops.
     """
     events, sdk = src
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     n = len(_records(events))
-    for _ in range(3):
+    with pytest.raises(ValueError, match="raw payload"):
         sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
                           content="body")
+    for _ in range(3):
         sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
                           meta={"a": 1})
     assert len(_records(events)) == n, (
-        f"a re-check carrying a writer-dropped key appended "
-        f"{len(_records(events)) - n} record(s) (P1-B)")
+        f"a re-check carrying a writer-dropped key (or a refused raw-payload "
+        f"key) appended {len(_records(events)) - n} record(s) (P1-B)")
     live = _props(sdk, _URL)
     assert "content" not in live and "meta" not in live, (
         "the writer is supposed to drop `content`/non-persistable extras")
