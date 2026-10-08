@@ -1458,6 +1458,84 @@ def _expect_check_refusal(sdk, events, shape):
     assert any(shape in e for e in r["non_folded_events"]), r["non_folded_events"]
 
 
+class TestNameMergeCarrierKeying:
+    """#5285 review round 6: the carrier index must be keyed on the GRAPH's MERGE
+    key, not on the fold's display name. Two FALSE REFUSALS that the state-op
+    guard introduced are pinned here — one for a `title`-only registration
+    (whose empty `name` creates no graph node), one for a falsy
+    `state["name"]` rename (which `SET n += $s` still applies)."""
+
+    def test_a_title_only_registration_does_not_evict_a_live_carrier(
+            self, env, tmp_path):
+        """FAILS IF: the carrier index is keyed on the fold's DISPLAY name
+        (``payload["name"] or payload["title"]``) rather than the graph's
+        MERGE key — review round 6, P1, a FALSE REFUSAL that guard introduced.
+
+        ``_upsert_object`` MERGEs on ``name`` ALONE and ``_writable_id`` skips
+        an EMPTY name (no node is created), so a registration whose ``name`` is
+        empty and whose ``title`` is set NEVER touches the graph's node. Keyed
+        on the display name, that record EVICTED the real carrier for the same
+        display name, and a state op on the LIVE id was then refused
+        ``state-op-miss`` while all three replay engines folded it.
+        REACHABLE: ``EventAPI.add_object(name="", title=T)`` validates
+        neither."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-t1", name="TITLE1",
+             status="live", event_id="e-t1-0")
+        _raw(events, type="ObjectRegistered", id="obj-5285-t2", name="",
+             title="TITLE1", status="live", event_id="e-t1-1")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-t1",
+             op="restatus", state={"status": "superseded"}, event_id="e-t1-2")
+        for engine in ("rebuild_all", "rebuild", "recover_from_log"):
+            proj = _replay_accept(engine, tmp_path, events, f"t1-{engine}")
+            proj.close()
+        # The DISPOSITION is the property under test: no engine may refuse this
+        # journal with a NON-FOLDED record. (The reference fold still reports a
+        # CONTENT divergence for the title-only record's phantom entry — the
+        # pre-existing fail-open review round 6 also names, in which a record
+        # with an empty MERGE key creates no graph node while the index still
+        # holds it. The `non-folded` class OUTRANKED that divergence before this
+        # fix, which is exactly why the false refusal masked it. It is not this
+        # change's defect and is not fixed here.) So assert the class, not
+        # `ok`, and pin that the state op really folded.
+        proj = _fresh(tmp_path, "t1-check")
+        try:
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            r = check_consistency(str(events / "events.jsonl"), proj)
+            rows = proj.g.query(
+                "MATCH (o:Object) RETURN o.id, o.name, o.status"
+            ).result_set
+        finally:
+            proj.close()
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["divergence"] != "non-folded", r["divergence"]
+        assert rows == [["obj-5285-t1", "TITLE1", "superseded"]], rows
+
+    def test_a_falsy_rename_does_not_evict_a_live_carrier(self, env, tmp_path):
+        """FAILS IF: a state op whose ``state`` carries a ``name`` key that is
+        NOT a usable non-empty str is ignored by the carrier bookkeeping —
+        review round 6, P2, a FALSE REFUSAL that guard introduced.
+
+        The graph runs ``SET n += $s``, so ANY ``name`` key rewrites the MERGE
+        key, and the node KEEPS its id. Leaving the index keyed on the OLD name
+        let a later registration of it evict the still-live id, and a state op
+        on that id was then refused ``state-op-miss`` while every replay engine
+        folded it."""
+        _sdk, events = env
+        _raw(events, type="ObjectRegistered", id="obj-5285-f1", name="FALSY1",
+             status="live", event_id="e-f1-0")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-f1",
+             op="restatus", state={"name": ""}, event_id="e-f1-1")
+        _raw(events, type="ObjectRegistered", id="obj-5285-f2", name="FALSY1",
+             status="live", event_id="e-f1-2")
+        _raw(events, type="EntityMutated", label="Object", id="obj-5285-f1",
+             op="restatus", state={"status": "superseded"}, event_id="e-f1-3")
+        for engine in ("rebuild_all", "rebuild", "recover_from_log"):
+            proj = _replay_accept(engine, tmp_path, events, f"f1-{engine}")
+            proj.close()
+        _assert_check_consistency_rebuilt_ok(tmp_path, events, "f1-check")
+
+
 class TestExistenceMapForwardReferences:
     """A record whose target the journal materializes LATER must be a no-op
     on every engine — the live write no-op'd it, and `rebuild_all`'s creation

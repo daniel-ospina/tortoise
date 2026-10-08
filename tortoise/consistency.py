@@ -1224,6 +1224,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # disagreement with the graph fold in the fail-CLOSED direction, the one
     # error this guard must never make.
     carriers_by_name: dict[tuple[str, str], set] = {}
+    # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
+    # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
+    # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
+    # display name below legitimately falls back to `title` for PARITY, but the
+    # carrier index must not: keying it on the display name let a title-only
+    # registration EVICT the live carrier of the real node, and the state-op
+    # guard then falsely refused `state-op-miss` a journal all three replay
+    # engines fold (review round 6, P1). An id with no merge key recorded here
+    # has no graph node this fold can model, so the guard stays fail-OPEN for it.
+    merge_key_by_id: dict[tuple[str, str], str] = {}
     # #5285 (DEFECT 2): ``name -> [keys]``, populated ONCE after the walk and
     # read by `_object_target`'s trailing sweep. Declared here so the closure
     # below resolves it at call time.
@@ -1324,22 +1334,30 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                       or default_status)
             if isinstance(status, str) and status and "status" not in rec:
                 rec["status"] = status
-            name = payload.get("name") or payload.get("title")
-            if isinstance(name, str) and name:
-                # #5285 (DEFECT 1): the graph MERGEs Object/Subject by name, so
-                # the LAST registration of a name OWNS its node id — the MERGE
+            # #5285 cycle-6 (P1): the MERGE key is `name` ALONE — `title` is a
+            # DISPLAY fallback the graph never merges on, and an empty name
+            # creates no node at all. The carrier index must use the merge key,
+            # never the display name.
+            _merge_key = payload.get("name")
+            _merge_key = (_merge_key if isinstance(_merge_key, str) and _merge_key
+                          else None)
+            if label in _NAME_MERGE_LABELS:
+                # The graph MERGEs Object/Subject by name, so the LAST
+                # registration of a merge key OWNS its node id — the MERGE
                 # re-ids the existing node, REMOVING the earlier id. Update the
-                # carriers AT THIS SEQ. A re-creation of the same id under a new
-                # name drops the id from its OLD name's set first.
-                if label in _NAME_MERGE_LABELS:
-                    _old = rec.get("name")
-                    if isinstance(_old, str) and _old and _old != name:
-                        _prev = carriers_by_name.get((label, _old))
-                        if _prev is not None:
-                            _prev.discard(eid)
-                    _live = carriers_by_name.setdefault((label, name), set())
+                # carriers AT THIS SEQ; a re-creation of the same id under a new
+                # key drops the id from its OLD key's set first.
+                _old = merge_key_by_id.pop((label, eid), None)
+                if _old is not None:
+                    _prev = carriers_by_name.get((label, _old))
+                    if _prev is not None:
+                        _prev.discard(eid)
+                if _merge_key is not None:
+                    merge_key_by_id[(label, eid)] = _merge_key
+                    _live = carriers_by_name.setdefault(
+                        (label, _merge_key), set())
                     if len(_live) > 1:
-                        # The name ALREADY has >1 live carrier (a rename
+                        # The key ALREADY has >1 live carrier (a rename
                         # collision). A MERGE re-ids exactly one of them and
                         # the journal does not say which, so keep them all —
                         # failing OPEN here is the only choice that cannot
@@ -1348,6 +1366,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     else:
                         _live.clear()
                         _live.add(eid)
+            name = payload.get("name") or payload.get("title")
+            if isinstance(name, str) and name:
                 rec["name"] = name
         elif t == "EntityMutated":
             label, eid, op = ev.get("label"), ev.get("id"), ev.get("op")
@@ -1427,12 +1447,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # become a false refusal. The guard fires only when the name IS
                 # indexed and this id is NOT among its live carriers (the
                 # collapsed-away case).
-                _carrier_name = rec.get("name")
+                # #5285 cycle-6 (P1): read the id's GRAPH merge key, never the
+                # display name — see `merge_key_by_id`. An id with no merge key
+                # has no node this fold models, so the guard stays fail-open.
+                _carrier_name = (merge_key_by_id.get((label, eid))
+                                 if label in _NAME_MERGE_LABELS else None)
                 _live_carriers = (
                     carriers_by_name.get((label, _carrier_name))
-                    if (label in _NAME_MERGE_LABELS
-                        and isinstance(_carrier_name, str) and _carrier_name)
-                    else None)
+                    if _carrier_name else None)
                 if _live_carriers is not None and eid not in _live_carriers:
                     record_non_folded(
                         SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
@@ -1451,20 +1473,34 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     # wins); see that loop.
                     last_status_seq[(label, eid)] = seq
                 newname = state.get("name")
-                if isinstance(newname, str) and newname:
-                    # #5285 (DEFECT 1): the graph's rename SETs `name` in place;
-                    # the node KEEPS its id, so `eid` joins the NEW name's live
-                    # carriers (and leaves the old name's). A rename onto a name
-                    # another id already carries does NOT MERGE — both nodes stay
-                    # live under one name — which is why the carrier value is a
-                    # SET, not a single id.
-                    if label in _NAME_MERGE_LABELS:
-                        _prev = carriers_by_name.get(
-                            (label, rec.get("name")))
+                if label in _NAME_MERGE_LABELS and "name" in state:
+                    # #5285 cycle-6 (P2): the graph runs `SET n += $s`, so ANY
+                    # `name` key in `state` rewrites the MERGE key — including a
+                    # falsy or non-string one. Acting only on a non-empty str
+                    # left the index keyed on a name the graph no longer had, and
+                    # a later registration of the OLD key then evicted a
+                    # still-live id: a false `state-op-miss` on a journal all
+                    # three replay engines fold (review round 6, P2). When the
+                    # new key is not a usable non-empty str the graph's node
+                    # identity is undefined for this fold, so the id is DROPPED
+                    # from the index — fail-OPEN, because an unmodelled shape
+                    # must not become a false refusal.
+                    _old = merge_key_by_id.pop((label, eid), None)
+                    if _old is not None:
+                        _prev = carriers_by_name.get((label, _old))
                         if _prev is not None:
                             _prev.discard(eid)
+                    if isinstance(newname, str) and newname:
+                        merge_key_by_id[(label, eid)] = newname
                         carriers_by_name.setdefault(
                             (label, newname), set()).add(eid)
+                if isinstance(newname, str) and newname:
+                    # The graph's rename SETs `name` in place; the node KEEPS
+                    # its id, so `eid` joins the NEW key's live carriers (and
+                    # leaves the old key's). A rename onto a key another id
+                    # already carries does NOT MERGE — both nodes stay live
+                    # under one name — which is why the carrier value is a SET,
+                    # not a single id.
                     rec["name"] = newname
         elif t == "ObjectSuperseded":
             # #5285 cycle-4 (FIX 1): defer EVERY supersede to the ONE trailing
