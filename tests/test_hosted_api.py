@@ -10869,6 +10869,13 @@ class TestBoundedMiddlewareStore:
 # CONVERSATION, so every refusal that tells a customer about a limit must also
 # tell them they can talk to us.
 #
+#: builder call -> the POSITION of its message argument. `_key_limit_refusal`
+#: takes it first; `_cmd_fail(json_mode, error, message)` takes it THIRD. The
+#: earlier `args[:1]` form examined `json_mode` for every `_cmd_fail` call,
+#: found no string, and skipped the CLI entirely — the guard passed while
+#: claiming to cover it.
+_REFUSAL_MESSAGE_ARG = {"_key_limit_refusal": 0, "_cmd_fail": 2}
+
 # ⚠️ The FIRST version of this guard enumerated three literal phrases in one
 # file and was therefore invariant to any surface worded or sited differently —
 # it passed on a tree that missed SIX real refusals (the shared quota gate, the
@@ -10898,7 +10905,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
     concatenations got that wrong.
     """
 
-    BUILDER_CALLS = ("_key_limit_refusal", "_cmd_fail")
+
     REFUSAL_ERRORS = ("QuotaExceededError", "QuotaCheckError", "InvitationError",
                       "ControlPlaneError")
     MODULES = ("tortoise/hosted_api.py", "tortoise/quota.py",
@@ -10941,8 +10948,10 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                     if name == "HTTPException":
                         pairs = [("HTTPException", kw.value)
                                  for kw in node.keywords if kw.arg == "detail"]
-                    elif name in self.BUILDER_CALLS:
-                        pairs = [(name, a) for a in node.args[:1]]
+                    elif name in _REFUSAL_MESSAGE_ARG:
+                        idx = _REFUSAL_MESSAGE_ARG[name]
+                        if len(node.args) > idx:
+                            pairs = [(name, node.args[idx])]
                 elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
                     fn = node.exc.func
                     name = fn.id if isinstance(fn, ast.Name) else ""
@@ -10979,6 +10988,9 @@ class TestOverLimitSurfacesOfferTheHumanPath:
             "no over-limit refusal carries the contact path — the guard is "
             "asserting over an empty set")
         constructs = {c for _r, _l, c, _t, _ok in found}
+        assert "_cmd_fail" in constructs, (
+            "the CLI branch is not being exercised — `_cmd_fail`'s message is "
+            "argument 2, and indexing it as argument 0 skips it silently")
         assert "raise InvitationError" in constructs, (
             "the raise-site form is not being seen — the member-limit refusal "
             "(the canonical 'more seats' case) would slip through")
@@ -10992,13 +11004,19 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         itself into a recursive call.
         """
         import tortoise.quota as q
+        # The leading space is LOAD-BEARING: without it the customer reads
+        # "...invite more.Need more? ..." — the malformed-prose class this seam
+        # exists to eliminate. The assertion must therefore be EXACT; the
+        # earlier form (a `x if c else x or True` conditional) could never fail.
+        assert q.LIMIT_CONTACT.startswith(" ")
         for msg in ("Member limit reached — upgrade to invite more",
                     "API key limit reached.",
                     "Want more?",
                     "Team at max users (2). Upgrade to add more."):
+            base = msg.rstrip()
+            term = "" if base[-1] in ".!?" else "."
             out = q.with_limit_contact(msg)
-            assert out.endswith(q.LIMIT_CONTACT)
-            assert ". Need more?" in (out if msg[-1] in ".!?" else out) or True
+            assert out == base + term + q.LIMIT_CONTACT, repr(out)
             assert ".." not in out and "! ." not in out and "? ." not in out
         # the seam terminates the sentence before appending
         assert q.with_limit_contact("a limit").startswith("a limit.")

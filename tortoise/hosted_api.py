@@ -49,8 +49,6 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
-from tortoise import quota as _quota  # #5425 (leaf module; no cycle)
-from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import (
     _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -124,6 +122,7 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
+from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode

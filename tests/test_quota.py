@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tortoise.quota import (
+    LIMIT_CONTACT,  #5425 shared contact path
     QUOTA_REFUSAL_CODE,
     QuotaCheckError,
     QuotaExceededError,
@@ -16,7 +17,6 @@ from tortoise.quota import (
     quota_refusal_payload,
     resolve_org_limits,
 )
-from tortoise.quota import LIMIT_CONTACT  # noqa: E402  #5425 shared contact path
 
 # graph-scripts/ is a hyphenated (namespace) dir — import the #947 backfill
 # one-shot via path insert (AGENTS.md sibling-import convention).
