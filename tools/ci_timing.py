@@ -23,10 +23,12 @@ Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYA
 (the manifest-side checks load the refreshed text through `yaml.safe_load`) —
 `ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
 does — outside that pin the import is unguarded, so a missing/broken PyYAML
-surfaces as rc=2 (UNKNOWN), with `ImportError` named on stderr; the process
-boundary is total, so it is no longer distinguishable by exit code from any
-other UNKNOWN failure — the exception type is what identifies it. Deterministic
-output (sorted, stable JSON) so the refresh job's no-diff check works.
+surfaces as rc=2 (UNKNOWN), with the import error named on stderr —
+`ModuleNotFoundError` for a missing PyYAML, `ImportError` for a broken one — and
+the process boundary is total, so it is no longer distinguishable by exit code
+from any other UNKNOWN failure: the exception type is what identifies it.
+Deterministic output (sorted, stable JSON) so the refresh job's no-diff check
+works.
 """
 from __future__ import annotations
 
@@ -648,7 +650,12 @@ def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int
 
 def _classified_test_keys(manifest_text: str) -> set[str]:
     """Every test file the manifest CLASSIFIES: the `surfaces:` members, every
-    `durations:` key, and the members of every list python-ci runs.
+    `durations:` key, and the members of the leg lists python-ci runs.
+
+    Those leg lists are `slow_files`/`carve_out`/`tier1`; `push_extra` is NOT
+    unioned (it is empty today, and only the push leg consumes it) — see the
+    deliberate exclusions below for the shape of that reasoning (#6092 review
+    round 12).
 
     This is the resolution domain :func:`_resolve_to_manifest_keys` needs. It is
     deliberately NOT the `durations:` map alone: a file the manifest classifies
@@ -880,8 +887,12 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # accepts the row — but `_DURATION_LINE_RE` cannot locate it, so the
             # NEXT refresh would refuse the block this one wrote. Refuse the
             # ADD instead of writing a line the locator cannot re-read (#6092
-            # review, F1). Quoting the key is not the fix: it would change the
-            # key's identity against `entries`/`resolved`, which is F2's class.
+            # review, F1). Quoting the key is not the fix, and not because of
+            # identity — YAML quoting is transparent to key identity, which is
+            # exactly what F2 relies on. It is that `_DURATION_LINE_RE`'s
+            # `[^\s:]+` cannot span whitespace or a colon, so the row stays
+            # unlocatable whether or not the key is quoted (#6092 review round
+            # 12).
             # Validate by PARSING, not by regex (#6092 review round 2). A key
             # that regex-matches can still be a YAML indicator, alias, tag or
             # flow token — `*a_test.py`, `&a_test.py`, `!a_test.py`, `[x].py`,
@@ -1567,9 +1578,11 @@ def main() -> int:
         (out_dir / "ci-timing.md").write_text(md)
         (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
-        # The directory was creatable but the write is not (a full disk, or a
-        # pre-existing file where an artifact should go) — same refusal shape
-        # as the mkdir above (#6092 review round 7).
+        # The directory was creatable but the write is not — a full disk, an
+        # unwritable target, or a pre-existing DIRECTORY sitting where an
+        # artifact file should go (a pre-existing regular FILE does not raise
+        # here; it is silently overwritten) — same refusal shape as the mkdir
+        # above (#6092 reviews rounds 7 and 12).
         print(f"2: artifact not writable: {exc}", file=sys.stderr)
         return 2
 
