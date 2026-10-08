@@ -2667,12 +2667,16 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
-        # #7693 narrowed the claim: the terminal tests still do not run on a
-        # remote ref's NAME, but an EXACT tip match against a local ref this run
-        # proved terminal now IS demoted. The load-bearing half is unchanged —
-        # the row still reports no merged COUNT for this namespace.
+        # #7693: the terminal tests still do not run on a remote ref's NAME — and
+        # now NOTHING clears a remote ref, because the demotion was REMOVED after
+        # eight review rounds found seven live false-CLEANs in it. This note is
+        # emitted on every run and sits next to a blocking HIT, so it must not
+        # claim a demotion; asserting on it is also what stops the stale sentence
+        # from being restored (the previous assertion here matched `#7693` and so
+        # passed against BOTH the demoting and the non-demoting tool — vacuous).
         self.assertIn("terminal tests are not applied to these refs by name", remote_row)
-        self.assertIn("#7693", remote_row)
+        self.assertIn("no remote ref is cleared as the terminal TWIN", remote_row)
+        self.assertNotIn("IS demoted", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
     def test_remote_tracking_ref_is_not_judged_terminal(self):
@@ -2699,11 +2703,14 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertNotIn("squash-merged", out)
 
-    def test_remote_twin_of_a_terminal_local_branch_is_demoted_when_live(self):
-        # #7693. The remote twin of a branch this run PROVED terminal is the same
-        # immutable commit — but only once the remote itself confirms the sha,
-        # because `refs/remotes/…` is a fetch cache. `origin` here is a REAL bare
-        # repo holding the branch at that sha, so the confirmation succeeds.
+    def test_remote_twin_of_a_terminal_local_branch_is_not_demoted(self):
+        # #7693. The remote twin of a branch this run PROVED terminal sits at the
+        # same immutable commit. A now-REMOVED demotion used to clear it, and only
+        # after confirming the sha against the remote itself; that confirmation is
+        # GONE with the demotion (see the removal block in `run_preflight`), so the
+        # ref BLOCKS even though `origin` here is a real bare repo holding that sha.
+        # Kept as the reverse-pin: this is the case a re-added demotion would clear
+        # first.
         ref = f"fix/{ISSUE}-landed"
         bare = self.tmp / "bare.git"
         _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
@@ -2718,19 +2725,25 @@ class CollisionPreflightTest(unittest.TestCase):
             "mergedAt": "2026-09-01T00:00:00Z",
         }])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        # The demotion must SAY why — a confirmed CURRENT tip, not the name.
-        self.assertIn("SAME COMMIT", out)
-        self.assertIn("CONFIRMED", out)
+        # ⛔ INVERTED: the #7693 remote-ref demotion was REMOVED after eight review
+        # rounds found seven live false-CLEANs in it (see the block in
+        # `run_preflight`). A terminal local twin does NOT demote its remote twin
+        # any more, even when the remote genuinely holds that tip — an over-block,
+        # taken over a gate that can silently let two lanes into one checkout. This
+        # test is kept as the REVERSE assertion so the demotion cannot be re-added
+        # without deliberately deleting it.
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
 
     def test_remote_twin_with_no_confirmable_live_tip_still_blocks(self):
-        # #7693, the fail-closed half — and the one that matters, because this is
-        # how a REUSED branch is caught. `refs/remotes/…` holds the last FETCH, so
-        # a branch reused since then carries the same stale sha as its local twin
-        # while the remote has moved. Here `origin` cannot be read at all, so the
-        # confirmation fails; the ref must keep blocking rather than be called
-        # merged on the cache alone.
+        # #7693. A remote ref that cannot be READ keeps blocking. This was the
+        # fail-closed half of a demotion that had a live-tip confirmation; the
+        # demotion is GONE (see the removal block in `run_preflight`), so the
+        # assertion now holds for a simpler reason — nothing clears a remote ref.
+        # Kept because it is the cheapest test that a remote ref still blocks, and
+        # it is what would fail if the demotion were re-added returning on an
+        # unreadable remote.
         ref = f"fix/{ISSUE}-unverifiable"
         _git(self.repo, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
         _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
@@ -2747,19 +2760,14 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
 
     def test_remote_twin_of_a_reused_branch_still_blocks(self):
-        # #7693, ⭐ THE test the safety property rests on — and the one whose
-        # ABSENCE round-1 review caught by MUTATION: replacing the `_live != _sha`
-        # half of the guard with `_live is None` restored the original false-CLEAN
-        # and left every other test in this file PASSING. A test that still passes
-        # with the condition removed pins nothing, so it must be this shape.
-        #
-        # The shape that REACHES the comparison is a REUSE, not a moved cache
-        # entry: the local twin and the CACHED remote ref both sit at the terminal
-        # sha S (nothing here fetches — that is the whole hazard), while the
-        # REMOTE has moved to T. Only a live read can tell those apart. (The
-        # previous version of this test set the CACHED ref to the moved sha, so
-        # `local_terminal_shas` missed first and control never reached the live
-        # read at all — measured: ZERO `ls-remote` calls.)
+        # #7693, the SHARPEST test in this file, and the reverse-pin for the
+        # removed demotion. It was written to kill the live false-CLEAN a REUSE
+        # produces — the local twin and the CACHED remote ref both sit at the
+        # terminal sha S (nothing here fetches; that is the whole hazard) while the
+        # REMOTE has moved to T, so only a live read could tell them apart. The
+        # live read is GONE, so this now asserts the simpler truth — a remote ref
+        # whose branch moved on must BLOCK — and it is the test that fails if
+        # anyone re-adds a demotion that reads the cache instead of the remote.
         ref = f"fix/{ISSUE}-reused"
         bare = self.tmp / "bare.git"
         _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
@@ -2788,8 +2796,6 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
-        # ...and it must NOT have been demoted on the cached sha.
-        self.assertNotIn("SAME COMMIT", out)
 
     def test_remote_ref_in_a_namespace_two_remotes_share_blocks(self):
         # #7693 P1. `refs/remotes/origin/X` need not cache ORIGIN's branch: with
@@ -2867,13 +2873,80 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
 
-    def test_remote_branch_deleted_after_merge_is_demoted(self):
-        # #7693 round 3's other half: this is the MODAL post-merge state, because
-        # GitHub auto-deletes head branches, and it is one of the issue's own
-        # worked examples (`docs/4495-carry-the-unit-ruling` is deleted on
-        # origin). `ls-remote` SUCCEEDS and lists nothing for that branch, which
-        # the old code collapsed into "unreadable" and blocked. It is not
-        # unreadable — it is a positive statement that no live holder exists.
+    def test_narrowed_refspec_leftover_ref_is_not_demoted(self):
+        # #7693 round 4 P1. A remote whose CURRENT refspec cannot write the ref is
+        # SKIPPED by the prefilter — but the ref can be a LEFTOVER from before the
+        # refspec was NARROWED (`git remote set-branches origin main`, the code's
+        # own non-glob trap) and still sits in a LIVE namespace, so the remote can
+        # hold it at a different sha. The first cut returned `False` without
+        # reading anything and printed "CONFIRMED as this remote branch's CURRENT
+        # tip" for a branch it never looked at (reproduced through the real CLI).
+        ref = f"fix/{ISSUE}-narrowed"
+        bare = self.tmp / "narrowed.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        # The remote holds it LIVE at a different sha ...
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/heads/{ref}")
+        # ... and the refspec is then narrowed so it no longer covers this branch,
+        # while the stale cache ref survives.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4251, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_refspec_sourced_outside_refs_heads_does_not_demote(self):
+        # #7693 round 4 P1. `ls-remote --heads` LISTS ONLY `refs/heads/*`, but a
+        # refspec's SOURCE need not live there: with
+        # `+refs/pull/*/head:refs/remotes/origin/pr/*` the live holder is
+        # `refs/pull/N/head`, which `--heads` never lists — so the forward map was
+        # applied to a FILTERED list, concluded "no holder", and demoted a live
+        # ref (reproduced through the real CLI).
+        ref = f"refs/remotes/origin/pr/{ISSUE}"
+        bare = self.tmp / "pullref.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/pull/*/head:refs/remotes/origin/pr/*")
+        # A terminal local twin, kept only to preserve the demotion-era fixture:
+        # nothing matches a witness against the remote any more.
+        _git(self.repo, "branch", "-q", f"fix/{ISSUE}-prsource")
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/fix/{ISSUE}-prsource")
+        _git(self.repo, "push", "-q", "origin",
+             f"{terminal_sha}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "update-ref", ref, terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4252, "title": "land it", "body": "", "state": "closed",
+            "headRefName": f"fix/{ISSUE}-prsource", "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_remote_branch_deleted_after_merge_still_blocks(self):
+        # #7693 round 6 — DELIBERATELY REVERTED, and inverted from the round-3
+        # version that expected a demotion. A branch deleted on the remote offers
+        # NO mapping, and "no advertised head maps onto this ref" cannot tell
+        # DELETED from LEFTOVER-UNDER-A-DIFFERENT-SOURCE. Round 6 reproduced a
+        # live false-CLEAN from exactly that conflation, so absence no longer
+        # demotes: a same-sha mapping is required. The deleted case therefore
+        # BLOCKS — the fail-closed annoyance the round-5 record named as the
+        # acceptable trade. Pinned so nobody re-adds the demotion without reading
+        # why it was removed.
         ref = f"fix/{ISSUE}-deleted"
         bare = self.tmp / "del.git"
         _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
@@ -2881,8 +2954,6 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "branch", "-q", ref)
         terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
         _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
-        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
-        # The branch is gone from the remote entirely.
         _git(self.repo, "push", "-q", "origin", f":refs/heads/{ref}")
         _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
         self.gh_fixtures(closed_prs=[{
@@ -2891,8 +2962,8 @@ class CollisionPreflightTest(unittest.TestCase):
             "mergedAt": "2026-09-01T00:00:00Z",
         }])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
 
     def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
         # C2-2. The absent-field contract is applied PER ELEMENT too. A field

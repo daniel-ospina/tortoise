@@ -1769,153 +1769,6 @@ def _fetch_cache_remote(
     return rest.split("/", 1)[0] or None
 
 
-def _refspec_dest_for(
-    refname: str, src_pattern: str, dest_pattern: str,
-) -> str | None:
-    """The local ref a remote `refname` is fetched TO by this refspec, else None.
-
-    ⛔ THE REFSPEC IS APPLIED FORWARD, NEVER INVERTED, AND THAT IS THE DESIGN
-    (#7693, round 3). Every earlier revision reconstructed the REMOTE and the
-    BRANCH **from the local ref name** — first deriving the remote from its
-    first path segment, then the branch from whatever was left — and each
-    reconstruction was wrong for some supported configuration:
-      * a NON-STANDARD refspec (`remote.fork.fetch=+refs/heads/*:refs/remotes/
-        origin/*` makes `refs/remotes/origin/x` cache FORK's branch);
-      * a SLASH-NAMED remote (`refs/remotes/foo/bar/x` caches `foo/bar`'s);
-      * a NARROW GLOB — `git remote set-branches origin 'fix/*'` writes
-        `+refs/heads/fix/*:refs/remotes/origin/fix/*`, so `refs/remotes/origin/
-        fix/3061-narrow` caches the branch `fix/3061-narrow` while the remainder
-        after the prefix reads `3061-narrow` — the live read then confirmed a
-        DIFFERENT branch that sat at the stale sha, and DEMOTED A LIVE ONE.
-    All three produced a measured `VERDICT: CLEAN (exit 0)` on a live branch.
-    Each fix was a better inversion; the inversion is the defect.
-
-    Mapping an advertised remote ref FORWARD is the operation git itself
-    performs, so it needs no inference and cannot disagree with git: with exactly
-    one `*` on each side the captured tail is substituted into the destination.
-    A pattern with no `*` is matched LITERALLY. Anything else — two `*`, a
-    mismatched shape — answers None, which the caller treats as UNVERIFIABLE and
-    therefore as blocking.
-    """
-    if src_pattern.count("*") == 1 and dest_pattern.count("*") == 1:
-        head, _sep, tail = src_pattern.partition("*")
-        if not refname.startswith(head) or not refname.endswith(tail):
-            return None
-        if len(refname) < len(head) + len(tail):
-            return None
-        captured = refname[len(head):len(refname) - len(tail)] if tail else refname[len(head):]
-        dhead, _sep2, dtail = dest_pattern.partition("*")
-        return dhead + captured + dtail
-    if "*" in src_pattern or "*" in dest_pattern:
-        return None
-    return dest_pattern if refname == src_pattern else None
-
-
-def _refspec_could_write(dest_pattern: str, ref: str) -> bool:
-    """Whether this DESTINATION pattern could ever name `ref` (a cheap prefilter)."""
-    if dest_pattern.count("*") == 1:
-        head, _sep, tail = dest_pattern.partition("*")
-        return (
-            ref.startswith(head) and ref.endswith(tail)
-            and len(ref) >= len(head) + len(tail)
-        )
-    return "*" not in dest_pattern and dest_pattern == ref
-
-
-def _remote_ref_has_a_live_holder(
-    git_bin: str, repo: str, timeout: float, ref: str, cached_sha: str,
-) -> bool | None:
-    """Whether a configured remote's refspec maps a DIFFERENT live sha onto `ref`.
-
-    ⛔ **False IS THE ONLY ANSWER THE CALLER MAY DEMOTE ON**, and it is returned
-    only after EVERY applicable remote was READ SUCCESSFULLY and none of their
-    advertised heads maps onto `ref` at a sha other than `cached_sha`. True means
-    a live holder exists; None means the question could not be answered — an
-    unreadable config, a remote that would not answer, a timeout, a refspec shape
-    this code does not model, or no configured fetch refspec at all. Since only a
-    proven False demotes, every other outcome fails CLOSED, and the polarity is
-    the reason this is safe rather than the enumeration of cases.
-
-    A branch DELETED on the remote therefore DEMOTES (no advertised head maps
-    onto the ref) instead of blocking forever. That is the modal post-merge state
-    — GitHub auto-deletes head branches — and it is one of #7693's own worked
-    examples (`docs/4495-carry-the-unit-ruling`), so the earlier "deleted reads as
-    unreadable" behaviour left the issue's motivating case unfixed.
-
-    `refs/remotes/<ns>/<b>` is written by whichever configured remote's refspec
-    targets it, so ALL remotes are considered, not one guessed from the name.
-    A remote whose refspec could never write `ref` is skipped without a read.
-    """
-    try:
-        rc, out, _err, timed_out = _run(
-            [git_bin, "config", "--get-regexp", r"^remote\..*\.fetch$"],
-            repo, timeout,
-        )
-    except Exception:  # pragma: no cover - _run raises only on programmer error
-        return None
-    # Exit 1 with no match is a SUCCESSFUL read of an empty configuration; a real
-    # error (128, 127) is a read failure. Both directions are pinned by tests.
-    if timed_out or rc not in (0, 1):
-        return None
-    by_remote: dict[str, list[tuple[str, str]]] = {}
-    for line in out.splitlines():
-        key, _sep, value = line.partition(" ")
-        # `remote.<name>.fetch` — <name> may itself contain dots, so slice the
-        # fixed prefix and suffix rather than splitting on ".".
-        if not (key.startswith("remote.") and key.endswith(".fetch")):
-            continue
-        name = key[len("remote."):-len(".fetch")]
-        if not name:
-            continue
-        spec = value.strip().lstrip("+")
-        # A NEGATIVE (`^`) refspec only REMOVES refs from the fetch, so ignoring
-        # it can only make this function see MORE mappings — it errs toward
-        # blocking, which is the safe direction. It is therefore dropped rather
-        # than treated as unmodelled.
-        if spec.startswith("^"):
-            continue
-        src, colon, dest = spec.partition(":")
-        if not colon or not src or not dest:
-            # An unmodelled refspec could HIDE a live holder, so it must not be
-            # silently skipped: it marks this remote UNVERIFIABLE.
-            by_remote.setdefault(name, []).append(("", ""))
-            continue
-        by_remote.setdefault(name, []).append((src.strip(), dest.strip()))
-    if not by_remote:
-        # No configured fetch refspec at all: nothing can be shown to map onto
-        # this ref, but nothing can be ruled out either. BLOCK, matching
-        # `_fetch_cache_remote`'s treatment of an empty namespace set.
-        return None
-    # ⛔ THE ONLY NETWORK CALLS ON A MANDATORY PRE-DISPATCH PATH, AND THEY ARE
-    # BOUNDED. `--timeout` limits a hang, and GIT_TERMINAL_PROMPT=0 makes a
-    # credential-prompting remote fail INSTANTLY instead of sitting at a prompt —
-    # which is the answer this function wants anyway (unreadable = block). `env`
-    # REPLACES the environment, so it is merged rather than set.
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-    for name, specs in by_remote.items():
-        if not specs or any(not s for s, _d in specs):
-            return None
-        if not any(_refspec_could_write(dest, ref) for _s, dest in specs):
-            continue
-        rc2, out2, _err2, timed2 = _run(
-            [git_bin, "ls-remote", "--heads", name], repo, timeout, env,
-        )
-        if timed2 or rc2 != 0:
-            return None
-        for line in out2.splitlines():
-            fields = line.split()
-            if len(fields) < 2:
-                continue
-            sha, remote_refname = fields[0], fields[1]
-            for src, dest in specs:
-                if (
-                    _refspec_dest_for(remote_refname, src, dest) == ref
-                    and sha != cached_sha
-                ):
-                    return True
-    return False
-
-
 def _worktree_liveness(
     path: str, locked: str | None = None, prunable: str | None = None,
 ) -> tuple[bool, str]:
@@ -4162,18 +4015,10 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
-    # #7693: sha -> (local ref, why) for LOCAL refs this run has PROVEN terminal.
-    # The local namespace is scanned first, so this is populated before the
-    # remote pass reads it. It exists because the terminal tests cannot run on a
-    # remote-tracking ref (`_branch_terminal_state` refuses to judge one) while
-    # the ref's NAME still matches the issue number and so still blocks — so a
-    # merged branch's remote twin refused every dispatch for good. What makes a
-    # demotion safe is NOT the local match alone: `refs/remotes/o/x` is a FETCH
-    # CACHE, so a branch reused since the last fetch carries the same stale sha
-    # as its local twin while the remote has moved. The remote pass therefore
-    # also requires `_live_remote_tip` to confirm the same sha against the
-    # remote itself, and blocks when it cannot.
-    local_terminal_shas: dict[str, tuple[str, str]] = {}
+    # The LOCAL pass used to record `sha -> (ref, why)` here so the REMOTE pass could
+    # demote a twin caching the same tip. That demotion is gone and the map with it —
+    # see the removal block below, on the `else`-less namespace loop. Dead state and
+    # stale prose both invite re-adding the demotion they described.
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -4227,10 +4072,6 @@ def run_preflight(
                         first_parent,
                     )
                     if _state is not None:
-                        if _sha:
-                            local_terminal_shas[_sha] = (
-                                _ref, f"branch is {_state}"
-                            )
                         continue
                     try:
                         _reason = _branch_terminal_state_from_prs(
@@ -4243,47 +4084,51 @@ def run_preflight(
                         continue
                     if _reason is not None:
                         targeted_terminal[_ref] = _reason
-                        if _sha:
-                            local_terminal_shas[_sha] = (_ref, _reason)
-            else:
-                # #7693: the remote twin of a branch this run proved terminal on
-                # the LOCAL surface. The demotion requires BOTH an EXACT tip
-                # match against a proven-terminal tip AND confirmation that this
-                # is still the remote's CURRENT tip: the cached sha is only the
-                # last fetch, so a branch reused since then would otherwise be
-                # called merged. Never a NAME match — that is the false-CLEAN
-                # direction the surface note warns about. A ref whose live tip
-                # cannot be read, or has moved, keeps blocking.
-                for _ref, _sha in refs:
-                    if _sha is None or not number_present(_ref, issue):
-                        continue
-                    if _is_generated_branch(_ref):
-                        continue
-                    _witness = local_terminal_shas.get(_sha)
-                    if _witness is None:
-                        continue
-                    # ⛔ THE QUESTION IS ASKED FORWARD, NOT RECONSTRUCTED. Three
-                    # revisions each rebuilt the remote and the branch FROM THE REF
-                    # NAME — its first path segment, then the remainder after a
-                    # prefix — and each was wrong for some supported refspec: a
-                    # non-standard one, a slash-named remote, and a narrow glob
-                    # (`set-branches origin 'fix/*'`). Every one produced a
-                    # measured false-CLEAN on a LIVE branch. Mapping the remote's
-                    # advertised heads FORWARD through its own refspec is the
-                    # operation git performs, so it cannot disagree with git.
-                    # Demote ONLY on a proven False (no live holder); True and None
-                    # both BLOCK, so the polarity is the safety, not the case list.
-                    if _remote_ref_has_a_live_holder(
-                        git_bin, cwd, timeout, _ref, _sha,
-                    ) is not False:
-                        continue
-                    _local_ref, _why = _witness
-                    targeted_terminal[_ref] = (
-                        f"its tip {_sha[:12]} is the SAME COMMIT as {_local_ref}, which "
-                        f"this run proved terminal ({_why}), and it is CONFIRMED as "
-                        "this remote branch's CURRENT tip — so this is the same "
-                        "immutable history and not a live holder"
-                    )
+            # ⛔ THE #7693 REMOTE-REF DEMOTION WAS HERE, AND IT WAS REMOVED AFTER EIGHT REVIEW
+            # ROUNDS. DO NOT RE-ADD IT WITHOUT READING THIS.
+            #
+            # The idea was simple: when this run proves a tip terminal on the LOCAL
+            # surface, a `refs/remotes/<r>/<b>` ref caching that same tip is the same
+            # immutable history and should not block forever. Seven rounds of fresh
+            # review found SEVEN live false-CLEANs against it — `VERDICT: CLEAN (exit
+            # 0)` while a lane was actively working the branch — and six of those
+            # seven were found INSIDE THE PREVIOUS ROUND'S FIX. In order:
+            #   1. keying on the remote-tracking ref's CACHED sha (a fetch cache this
+            #      tool never refreshes; a merged-then-REUSED branch keeps the stale sha);
+            #   2. deriving the REMOTE from the ref's first path segment (wrong for a
+            #      non-standard refspec and for a slash-named remote);
+            #   3. deriving the BRANCH from the prefix remainder (`set-branches origin
+            #      'fix/*'` makes the remainder `X` while the branch is `fix/X`);
+            #   4. a prefilter that demoted a remote it never READ, plus `ls-remote
+            #      --heads` being blind to a `refs/pull/*` SOURCE;
+            #   5. a SOURCE-narrowed spec passing the prefilter, being read, and still
+            #      demoting;
+            #   6. a PRIOR refspec — a ref cached by a former non-identity spec is mapped
+            #      by NOTHING after the config is corrected, so "no head maps onto this
+            #      ref" read as ABSENCE;
+            #   7. a same-sha DECOY — the positive-same-sha rule proves SOME branch the
+            #      current spec maps onto the ref sits at the cached sha, not that it is
+            #      what the ref caches, so a prior-spec leftover is re-explained by a
+            #      decoy and the true holder stays invisible.
+            #
+            # THE REASON ROUNDS 6-7 COULD NOT BE FIXED is the finding that matters:
+            # the question the demotion asks — "is there a live branch this ref might
+            # represent?" — is about HISTORY the configuration no longer contains.
+            # "No advertised head maps onto this ref" cannot distinguish a branch
+            # DELETED on the remote from a LEFTOVER cached by a prior, different
+            # refspec; they are the same observation. No amount of care recovers
+            # information that is not there.
+            #
+            # SO THE ANSWER IS THE ONE THAT NEEDS NO PROOF: the remote ref BLOCKS, as it
+            # did before #7694. That costs an OVER-BLOCK — a merged branch's remote twin
+            # keeps its issue un-dispatchable — which is an annoyance. A false CLEAN is
+            # not: it sends two lanes into one shared checkout, which is precisely what
+            # this tool exists to prevent. The preflight's other surfaces (local
+            # branches, worktrees, claims, the issue itself) still find real in-flight
+            # work.
+            #
+            # #7693 stays OPEN for the over-block. The evidence lives there and in
+            # PR #7718; a doc line would not have stopped the collision.
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
@@ -4295,10 +4140,12 @@ def run_preflight(
                 surface.note += (
                     "; terminal tests are not applied to these refs by name (a "
                     "remote-tracking ref is a local fetch cache, so judging it "
-                    "terminal on its NAME could call a reused live branch merged) — "
-                    "but a ref whose tip is an EXACT match for a local ref this run "
-                    "proved terminal, and whose LIVE tip is confirmed identical, IS "
-                    "demoted (#7693); a moved or unreadable live tip still blocks"
+                    "terminal on its NAME could call a reused live branch merged), "
+                    "and no remote ref is cleared as the terminal TWIN of a local "
+                    "branch — a local terminal twin does NOT clear its remote "
+                    "counterpart, which blocks by design (#7693, that demotion was "
+                    "removed after eight review rounds found seven live "
+                    "false-CLEANs in it)"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict
