@@ -648,6 +648,15 @@ def test_no_redirect_stems_registry_exact():
         # pin reding on the addition is the pin working as designed, so the
         # stem is DECLARED here rather than exempted.
         "test_4921_construct_lock",
+        # #4521: the module asserts the embedded engine's `vecf32($embedding)`
+        # write — under the docker redirect the write lands as a plain List and
+        # the dense leg's `vec.euclideanDistance` raises per row, so the whole
+        # Point leg aborts. It is `embedded_only` and joins the carve-out lane;
+        # the first two homes (config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS) were registered with the PR, and this pin
+        # reding on the addition is the pin working as designed — so the stem is
+        # DECLARED here rather than exempted (the #4921 shape).
+        "test_4521_revise_point_embedding",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
