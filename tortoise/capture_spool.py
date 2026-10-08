@@ -1272,7 +1272,12 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         return
     if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
             and meta.get("filed_lane") == meta.get("capture_lane")
-            and meta.get("filed_stamp") == meta.get("client_captured_at")):
+            # Compared against the SAME normalisation the payload uses: the wire
+            # carries `_finite_instant(...)`, so comparing the RAW disk value here
+            # can never match for a value the guards refuse — and since the drain
+            # never rewrites the meta, such an entry would re-POST its full
+            # transcript on EVERY drain, forever (#4714 amplification).
+            and meta.get("filed_stamp") == _finite_instant(meta.get("client_captured_at"))):
         # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
         # content was delivered — not that the LANE was. An entry filed
         # lane-less and then upgraded must be re-posted, or the lane is
@@ -1397,7 +1402,10 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         if (fresh is not None
                 and content_digest(fresh_turns) == posted_digest
                 and fresh.get("capture_lane") == posted_lane
-                and fresh.get("client_captured_at") == posted_stamp):
+                # Normalised on BOTH sides of the CAS, for the same reason as the
+                # skip clause above: `posted_stamp` is what the WIRE carried
+                # (normalised), so the raw disk value can never equal it.
+                and _finite_instant(fresh.get("client_captured_at")) == posted_stamp):
             fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
             # OMIT the key for a lane-less filing rather than writing `null`: the
             # TS leg's `readSpoolEntry` is a raw `JSON.parse`, so it would see

@@ -431,6 +431,67 @@ test("a non-finite instant is never written into the shared spool", () => {
   );
 });
 
+test("buildCapturePayload normalises a bad clock instead of forwarding it", () => {
+  // The drain forwards whatever is on disk, and the two legs SHARE the spool
+  // directory — so a meta the other leg (or a hand-edit) left with an
+  // unrecognised token would otherwise be posted verbatim, and the server's 422
+  // is classified PERMANENT, so `discardEntry` unlinks the only copy.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  assert.equal(
+    buildCapturePayload({
+      ...base,
+      clientCapturedAt: 1000,
+      clientCapturedAtSource: "wall_clock",
+    }).client_captured_at_source,
+    "unknown",
+    "an unrecognised clock was forwarded to the server",
+  );
+  // A non-finite instant must not be posted as an instant either — `JSON.stringify`
+  // would emit `null`, which the Python leg reads as an ABSENT stamp.
+  assert.ok(
+    !("client_captured_at" in buildCapturePayload({ ...base, clientCapturedAt: Number.NaN })),
+    "a NaN reached the wire",
+  );
+});
+
+test("a refused instant does not repost an already-filed entry", async () => {
+  // #3516 §B: `stampUpgrade` is judged against `finiteInstant`, the SAME
+  // authority the pair resolution uses. Judging it against a raw `!== undefined`
+  // makes a REFUSED value look like a new stamp: the dedup is bypassed AND the
+  // filing marker is dropped, so an already-filed, byte-identical entry is
+  // re-POSTed while no stamp is written at all.
+  const spool = tmpSpool();
+  const sid = "sess-refused-upgrade";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(
+    readSpoolEntry(spool, sid)?.filed_key,
+    "the first filing did not stamp a marker — the test cannot prove anything",
+  );
+
+  const res = writeSpoolEntry(spool, {
+    ...snapshot(sid, turns),
+    clientCapturedAt: Number.NaN,
+  });
+  assert.equal(res.written, false, "a refused instant was treated as a stamp upgrade");
+  assert.ok(
+    readSpoolEntry(spool, sid)?.filed_key,
+    "a refused instant dropped the filing marker",
+  );
+
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(server.posts(), 1, "an already-filed entry was re-POSTed");
+});
+
 test("sourceName is a basename only (never a full path)", () => {
   assert.equal(sourceName("/Users/x/.pi/agent/sessions/--p--/s.jsonl"), "s");
   assert.equal(sourceName(undefined), "pi");

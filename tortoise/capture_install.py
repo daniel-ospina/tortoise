@@ -376,8 +376,13 @@ def client_capture_floor_verdict(
             "no client_captured_at recorded — the floor cannot be evaluated")
     # A non-finite client instant is not a reading either: `inf` would PASS every
     # finite floor and `nan` would fail every one, both on a value that is not a
-    # clock. The writers refuse these; a direct caller must not slip past.
-    if not math.isfinite(client_captured_at):
+    # clock. The writers refuse these; a direct caller must not slip past — and
+    # must not crash either, because `math.isfinite(10**400)` RAISES.
+    try:
+        _client_is_finite = math.isfinite(client_captured_at)
+    except OverflowError:
+        _client_is_finite = False
+    if not _client_is_finite:
         return VERDICT_DISABLED, (
             f"client_captured_at {client_captured_at!r} is not a finite instant — "
             "the floor cannot be evaluated")

@@ -824,14 +824,61 @@ def test_a_refused_instant_does_not_repost_an_already_filed_entry(tmp_path):
 def test_floor_refuses_a_non_finite_client_instant():
     """`inf` would PASS every finite floor and `nan` would fail every one, both
     on a value that is not a clock. The writers refuse these; a direct caller of
-    the floor must not slip past.
+    the floor must not slip past — and must not CRASH either, because
+    `math.isfinite(10**400)` raises.
 
-    MUTATION THAT REDS THIS: drop the `math.isfinite(client_captured_at)` guard.
+    MUTATION THAT REDS THIS: drop the `math.isfinite` guard, or its
+    `OverflowError` arm.
     """
-    for value in (float("inf"), float("-inf"), float("nan")):
+    for value in (float("inf"), float("-inf"), float("nan"), 10 ** 400):
         verdict, reason = client_capture_floor_verdict(
             value, "cli_observed", INSTALL)
-        assert verdict == VERDICT_DISABLED, f"{value}: {verdict} / {reason}"
+        assert verdict == VERDICT_DISABLED, f"{value!r}: {verdict} / {reason}"
+
+
+def test_a_refused_stored_instant_does_not_repost_forever(tmp_path):
+    """The skip clause and the success CAS must compare the SAME normalisation
+    the payload POSTS. `filed_stamp` only ever holds a normalised value, so
+    comparing it against the RAW disk value can never match — and the drain never
+    rewrites the meta, so the entry would re-POST its full transcript on EVERY
+    drain, forever (#4714 amplification).
+
+    MUTATION THAT REDS THIS: compare `meta[\"client_captured_at\"]` raw in the
+    skip clause / CAS.
+    """
+    import json as _json
+
+    import tortoise.capture_spool as spool
+
+    posts: list[dict] = []
+
+    def _post(payload):
+        posts.append(dict(payload))
+        return spool.PostOutcome(ok=True, status=200)
+
+    for sid, bad in (("3516-repost-str", "1700000000.5"),
+                     ("3516-repost-huge", 10 ** 400)):
+        root = tmp_path / sid
+        turns = [{"role": "user", "content": "hi"}]
+        spool.write_spool_entry(root, spool.Snapshot(
+            session_id=sid, turns=turns, source="t", machine_id="m",
+            harness="pi", client_captured_at=INSTALL + 10.0,
+            client_captured_at_source="cli_observed"))
+
+        # Corrupt the stored instant the way a foreign or older writer could.
+        path = spool._meta_path(root, sid)
+        raw = _json.loads(path.read_text())
+        raw["client_captured_at"] = bad
+        path.write_text(_json.dumps(raw), encoding="utf-8")
+
+        before = len(posts)
+        for _ in range(3):
+            spool.flush_spool(root, _post, only_session_id=sid)
+        assert len(posts) - before == 1, (
+            f"{bad!r}: the entry re-POSTed {len(posts) - before} times — the "
+            "normalised value never matches the raw one, so it is never marked "
+            "filed")
+        assert spool.read_spool_meta(root, sid).get("filed_key")
 
 
 def test_floor_keeps_the_pass_for_a_small_positive_install_time():

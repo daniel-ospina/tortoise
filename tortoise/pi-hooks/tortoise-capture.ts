@@ -416,10 +416,20 @@ export function buildCapturePayload(args: {
     machine_id: args.machineId,
   };
   if (args.captureLane) payload.capture_lane = args.captureLane;
-  if (args.clientCapturedAt !== undefined) {
-    payload.client_captured_at = args.clientCapturedAt;
-    if (args.clientCapturedAtSource) {
-      payload.client_captured_at_source = args.clientCapturedAtSource;
+  // NORMALISED at the WIRE, not only at the writer. The drain forwards whatever
+  // is on disk, and the two legs share one directory — so a meta the OTHER leg
+  // (or a hand-edit) left with an unrecognised token would otherwise be posted
+  // verbatim, and the server's refusal is a 422, a 422 is classified PERMANENT,
+  // and `discardEntry` then unlinks the ONLY copy of the conversation.
+  const postedAt = finiteInstant(args.clientCapturedAt);
+  if (postedAt !== undefined) {
+    payload.client_captured_at = postedAt;
+    const src = args.clientCapturedAtSource;
+    if (src !== undefined && src !== null) {
+      payload.client_captured_at_source =
+        typeof src === "string" && CLIENT_CAPTURED_AT_SOURCES.has(src)
+          ? src
+          : "unknown";
     }
   }
   if (args.model) payload.model = args.model;
@@ -1361,7 +1371,12 @@ export async function flushSpool(
     // entry the other leg had already filed (#3516 §B).
     if (meta.filed_key && meta.filed_key === meta.capture_key &&
         (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined) &&
-        (meta.filed_stamp ?? undefined) === (meta.client_captured_at ?? undefined)) {
+        // Compared against the SAME normalisation the payload uses: the wire
+        // carries `finiteInstant(...)`, so comparing the RAW disk value can never
+        // match for a value the guards refuse — and the drain never rewrites the
+        // meta, so such an entry would re-POST its full transcript on EVERY
+        // drain, forever (#4714 amplification).
+        (meta.filed_stamp ?? undefined) === finiteInstant(meta.client_captured_at)) {
       summary.skipped += 1;
       continue;
     }
@@ -1454,7 +1469,10 @@ export async function flushSpool(
           onDisk &&
           contentDigest(onDiskTurns) === postedDigest &&
           onDisk.capture_lane === postedLane &&
-          onDisk.client_captured_at === postedStamp
+          // Normalised on BOTH sides of the CAS, for the same reason as the skip
+          // clause: `postedStamp` is what the WIRE carried, so the raw disk value
+          // can never equal it.
+          finiteInstant(onDisk.client_captured_at) === postedStamp
         ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
           onDisk.filed_lane = postedLane;
@@ -1487,7 +1505,7 @@ export async function flushSpool(
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
       if (pending.filed_key && pending.filed_key === pending.capture_key &&
           (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined) &&
-          (pending.filed_stamp ?? undefined) === (pending.client_captured_at ?? undefined)) {
+          (pending.filed_stamp ?? undefined) === finiteInstant(pending.client_captured_at)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the

@@ -1514,15 +1514,20 @@ class _EntityHandlers:
         # the two legs would disagree about the same session.
         _cap_at = ev.get("client_captured_at")
         if _cap_at is not None and _annotator_value_ok(_cap_at):
-            # #3516 §B: the instant and its clock are ONE PAIR, and the SOURCE
-            # clause is appended FIRST. See `sdk._write_session_and_turns`: SET
-            # items evaluate left to right, so `s.client_captured_at IS NULL`
-            # still reads the PRE-update value and the source is adopted exactly
-            # when the instant is. Appending them independently would let a
-            # replayed event hang a later event's clock on an earlier event's
-            # instant, which flips the floor from PASSED to DISABLED.
+            # #3516 §B: the instant and its clock are ONE PAIR. The `CASE` — not
+            # the clause order — is what makes it correct: MEASURED on FalkorDB,
+            # every `SET` right-hand side is evaluated against the row as it was
+            # at the START of the `SET` clause, so `s.client_captured_at` still
+            # reads the PRE-update value either way. Independent coalescing would
+            # let a replayed event hang a later event's clock on an earlier
+            # event's instant, flipping the floor from PASSED to DISABLED.
+            #
+            # The guard is TRUTHINESS, matching the sink it mirrors
+            # (`sdk._write_session_and_turns`) — `""`/`0`/`False` must be absent
+            # on replay exactly as they are live, or a rebuild disagrees with the
+            # thing it is rebuilding.
             _cap_src = ev.get("client_captured_at_source")
-            if _cap_src is not None and _annotator_value_ok(_cap_src):
+            if _cap_src and _annotator_value_ok(_cap_src):
                 sets.append(
                     "s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL "
                     "THEN $v_client_captured_at_source ELSE s.client_captured_at_source END")

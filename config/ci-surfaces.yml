@@ -3375,7 +3375,7 @@ durations:
   # entry exists because registering the file left the fast pool at 667/742
   # durations = 89.9%, one file below the DURATION_COVERAGE_MIN = 0.90 floor.
   test_capture_lane_3516.py: 15.0  # unmeasured on the docker lane
-  test_3516_client_captured_at.py: 12.0  # measured 2026-10-08 on the docker lane (24 tests, 4 with graph round-trips)
+  test_3516_client_captured_at.py: 12.0  # measured 2026-10-08 on the docker lane (32 tests, 4 with graph round-trips)
   test_session_import_desktop.py: 0.1
   test_session_indexer_ollama.py: 0.2
   test_session_login_helpers.py: 0.1

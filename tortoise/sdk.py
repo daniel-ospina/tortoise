@@ -2249,11 +2249,14 @@ def _write_session_and_turns(
         # (reproduced: PASSED -> DISABLED). This is the SINK every writer
         # converges on, so the pair has to hold here, not only in the spool.
         #
-        # ORDER IS LOAD-BEARING: the SOURCE clause is appended BEFORE the INSTANT
-        # clause. Cypher evaluates `SET` items left to right against the state the
-        # preceding items produced, so `s.client_captured_at IS NULL` still reads
-        # the PRE-update value — which is what adopts the source exactly when the
-        # instant is adopted, and never otherwise.
+        # ORDER IS DELIBERATE, but the CASE — not the order — is what makes this
+        # correct. MEASURED on FalkorDB: every `SET` right-hand side is evaluated
+        # against the row as it was at the START of the `SET` clause, so
+        # `s.client_captured_at` here still reads the PRE-update value no matter
+        # which clause comes first. The CASE is therefore what adopts the source
+        # exactly when the instant is adopted, and never otherwise. (Verified by
+        # mutation in round 3: reversing the two clauses leaves every test green,
+        # which is why the ordering is NOT claimed as load-bearing.)
         if client_captured_at_source:
             merge_sets.append(
                 "s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL "
