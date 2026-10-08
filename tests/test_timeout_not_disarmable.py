@@ -117,6 +117,26 @@ def test_relinquish_allows_an_in_process_alarm_and_restores_the_timer():
             _REAL_SETITIMER(signal.ITIMER_REAL, outer_timer[0], outer_timer[1])
 
 
+def test_a_failed_arm_does_not_leak_the_relinquish_counter(monkeypatch):
+    """#7655: if arming raises, the block must not leave the guard disabled.
+
+    `harness_safe_sigalrm` is what the refusal message tells authors to use; an
+    exception between the counter increment and the `try` (e.g. a negative or
+    computed `seconds`) would leak `_relinquished` and silently disable the
+    guard for the rest of the session.
+    """
+    from tests import _signal_hygiene as sh
+
+    before = sh._relinquished
+    with pytest.raises(OSError), harness_safe_sigalrm(
+        -1.0, lambda signum, frame: None
+    ):
+        pass  # pragma: no cover — the arm raises before the body
+    assert sh._relinquished == before, (
+        "a failed arm leaked the relinquish counter — the guard is now disabled"
+    )
+
+
 def test_the_reproducer_fails_fast_instead_of_stalling_the_run(tmp_path):
     """The issue's reproducer, run under the repo's guard, must fail fast.
 

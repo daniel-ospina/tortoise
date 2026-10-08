@@ -32,8 +32,18 @@ This module makes the takeover loud and immediate instead of silent:
 * ``--timeout-func-only`` runs are **not** covered: pytest-timeout arms its
   timer during the call phase, after this fixture's setup has already observed
   no timer.  Stated rather than silently assumed.
-* A call made through a **pre-bound** alias (``from signal import alarm``) or by
-  a **C extension** bypasses the Python-level guard; that is #7649's domain.
+* A call made through a **pre-bound** alias (``from signal import alarm``),
+  through ``_signal``, by a **C extension**, with SIGALRM **blocked**
+  (``pthread_sigmask``), while a sanctioned block is open in **another
+  thread**, or with a **spoofed** ``signal.getitimer``, bypasses the
+  Python-level wrapper.  A GIL-holding C call that makes SIGALRM undeliverable
+  is #7649's domain; the rest are stated residuals, not silent assumptions —
+  the guard stops the ordinary in-process `signal` call, it does not stop code
+  that deliberately reaches around the `signal` module.
+* The guard is deliberately **fail-closed**: it refuses *every* in-process
+  SIGALRM use while the harness owns the timer, including a correct
+  save/restore.  A library that arms SIGALRM must run in a subprocess or be
+  wrapped in :func:`harness_relinquish_sigalrm`.
 """
 
 from __future__ import annotations
@@ -168,9 +178,9 @@ def harness_safe_sigalrm(
     # Use the real primitives directly: the sanctioned helper is exactly the
     # place the guard must not refuse.
     _relinquished += 1
-    _REAL_SIGNAL(signal.SIGALRM, handler)
-    _REAL_SETITIMER(signal.ITIMER_REAL, seconds)
     try:
+        _REAL_SIGNAL(signal.SIGALRM, handler)
+        _REAL_SETITIMER(signal.ITIMER_REAL, seconds)
         yield
     finally:
         _relinquished -= 1
@@ -222,6 +232,11 @@ def harness_sigalrm_integrity(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     ``--timeout`` (there is none in ``pyproject.toml``; CI passes
     ``--timeout=300``) is unaffected.
     """
+    if _relinquished != 0:
+        raise AssertionError(
+            "#7655: a sanctioned SIGALRM block leaked (relinquish depth "
+            f"{_relinquished}) — the per-test guard would be silently disabled"
+        )
     if not _HAVE_SIGALRM or harness_alarm_remaining() <= 0:
         yield
         return
