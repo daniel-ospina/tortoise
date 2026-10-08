@@ -1170,31 +1170,30 @@ def test_retry_import_identity():
 
 
 def test_retryable_aborted_write_is_scoped_to_the_v6_rust_core():
-    """#7405 follow-up: pin WHICH engine's literals the predicate actually matches.
+    """#7405 follow-up: pin what the predicate's regex actually matches, so the
+    docstring above it cannot drift back into claiming coverage it lacks.
 
-    Measured 2026-10-08 by reading the shipped binaries (``MODULE LIST`` for the
-    module version, ``grep -a`` on ``/var/lib/falkordb/bin/falkordb.so`` for the
-    literals): all three clauses of ``_ABORTED_WRITE_RE`` are **v6 Rust-core**
-    literals. Three of the four engine images this repo actually runs are the C
-    core and contain none of them:
+    The claim under test is narrow and verifiable from the source:
 
-    ==========================================  ======  ===========  =========
-    image                                        module  v6 clauses  C message
-    ==========================================  ======  ===========  =========
-    ``falkordb/falkordb:6.0.1`` (the v6 lane)    60001         1 and 3          0
-    ``falkordb/falkordb:latest``                 42004         0 and 0          1
-    ``falkordb/falkordb:v4.22.0``                42004         0 and 0          1
-    ``falkordb-server:v4.20.4`` (self-host pin)  C core       0 and 0          1
-    ==========================================  ======  ===========  =========
+    * the three clauses of ``_ABORTED_WRITE_RE`` DO match; and
+    * the C core's ``Encountered different graph value when opened key <name>``
+      does NOT — so on that engine ``retryable_aborted_write`` is inert.
 
-    This test does not assert the gap is *desirable* — it asserts the gap is
-    *known*, so the docstring can never drift back into claiming the pinned
-    self-host engine is covered (which is what it said before this change).
+    Deliberately NO table of which images are covered. An earlier revision of
+    this docstring carried one and got three of its specifics wrong (a wrong
+    "sole carrier" image, a wrong module version, an image set that omitted the
+    CI provision default) — the same defect as the comment this change fixes.
+    The matrix is engine knowledge that goes stale; if you need it, MEASURE it
+    per image (``MODULE LIST`` for the version, ``grep -a`` on
+    ``/var/lib/falkordb/bin/falkordb.so`` for the literals).
 
-    ⛔ The C-core clause is deliberately NOT added here. A false positive
-    re-issues a bare, non-idempotent ``CREATE`` and mints a duplicate point —
-    the exact failure the predicate exists to prevent. Widening it needs the C
-    message's *did-not-land* property established from the engine source first.
+    ⛔ The C-core clause is deliberately NOT added to the regex here. A false
+    positive re-issues a bare, non-idempotent ``CREATE`` and mints a duplicate
+    point — the exact failure the predicate exists to prevent. Widening it needs
+    the C message's *did-not-land* property established from the engine source
+    first. So the second assertion below is a KNOWN GAP pinned on purpose: if it
+    ever starts failing, someone widened the clause and must have resolved that
+    hazard deliberately — remove the pin in the same change.
     """
     from redis.exceptions import ResponseError
 

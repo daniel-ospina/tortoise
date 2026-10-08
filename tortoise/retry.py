@@ -66,28 +66,29 @@ _MISCONF_RE = re.compile(r"MISCONF|Can't persist")
 #:     ``Encountered different graph value when opened key <name>`` for the same
 #:     race.
 #:
-#:     ⛔ THAT CORE MESSAGE IS **NOT** MATCHED BY ``_ABORTED_WRITE_RE``, so on the
-#:     C core :func:`retryable_aborted_write` returns False and this retry is
-#:     INERT. Measured 2026-10-08 by reading the shipped binaries
-#:     (``MODULE LIST`` for the version, ``grep -a`` on
-#:     ``/var/lib/falkordb/bin/falkordb.so`` for the literals): all three clauses
-#:     below are **v6 Rust-core** literals, present only in
-#:     ``falkordb/falkordb:6.0.1`` (module version 60001). Three of the four
-#:     engine images this repo actually runs are the C core and contain **none**
-#:     of them — ``falkordb/falkordb:latest`` (the image ``tools/test_lane.py``
-#:     mints), ``falkordb-server:v4.20.4`` (the self-host pin) and
-#:     ``falkordb/falkordb:v4.22.0`` (module version 42004) each score 0 on the
-#:     clauses and 1 on the C string.
+#:     ⛔ THAT CORE MESSAGE IS **NOT** MATCHED BY ``_ABORTED_WRITE_RE``, so on that
+#:     engine :func:`retryable_aborted_write` returns False and this retry is
+#:     INERT. The three clauses below are literals of the v6 core and are absent
+#:     from the C core's binary, so the coverage here is ENGINE-SCOPED and does
+#:     not reach every engine this repo runs.
+#:
+#:     Deliberately NO enumeration of which images are covered and which are
+#:     not. An earlier revision of this comment listed them and got three of the
+#:     specifics wrong (it named one image as the sole carrier of these literals
+#:     when another also carries them, mis-stated one image's module version, and
+#:     enumerated a set that omitted the CI provision default). That is the very
+#:     defect this comment was being fixed for — a claim of coverage that had not
+#:     been verified — so the enumeration is deleted rather than corrected. If you
+#:     need the matrix, MEASURE it (``MODULE LIST`` for the module version,
+#:     ``grep -a`` on ``/var/lib/falkordb/bin/falkordb.so`` for the literals, per
+#:     image); do not copy it from here.
 #:
 #:     ⛔ Do NOT "fix" the gap by adding the C literal to the regex on the
 #:     strength of this comment. A FALSE POSITIVE here re-issues a bare,
 #:     non-idempotent ``CREATE`` and mints a duplicate point — precisely the
 #:     failure :func:`retryable_aborted_write` exists to prevent. Widening the
 #:     clause requires establishing the C message's *did-not-land* property
-#:     from the engine source; note that in the binary its neighbours are
-#:     ``REPLICAOF`` / "Forced full resync" / "Replica diverged from master",
-#:     which raises the question of whether it is replication-scoped rather
-#:     than a general write abort.
+#:     from the engine source first.
 #: All three clauses are **retryable**, but ONLY on the write path — see
 #: :func:`retryable_aborted_write` for the layering, and
 #: :func:`retryable_transient` for why they are deliberately NOT in the
