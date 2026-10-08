@@ -314,7 +314,7 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
             # applied nor diverge prod — diff mode must not invent a violation
             # for it (prefix mode still reports non-conforming *.sql). Only a
             # prefix-bearing addition is evaluated below.
-            if ! printf '%s' "$(basename "$rest")" | grep -qE '^[0-9]+_'; then
+            if ! grep -qE '^[0-9]+_' <<<"$(basename "$rest")"; then
               continue
             fi
             ;;
@@ -337,8 +337,8 @@ $line"
         # exists to prevent. Fail closed on a non-conforming filename too: an
         # empty pattern would match an empty REMOTE_APPLIED line.
         if [ -n "$old_ver" ] \
-           && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver" \
-           && { [ -z "$new_ver" ] || ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$new_ver"; }; then
+           && ! grep -qxF "$old_ver" <<<"$REMOTE_APPLIED" \
+           && { [ -z "$new_ver" ] || ! grep -qxF "$new_ver" <<<"$REMOTE_APPLIED"; }; then
           # An added file at an UNAPPLIED version is simply a new migration:
           # there is no exception to announce, so drop it silently rather than
           # reporting it as one.
@@ -351,7 +351,7 @@ $line"
           # "renumber" landed nowhere. Neither is a renumber, so neither is
           # exempt. Only an R* line ever reaches here (A continues above).
           if [ "$new_ver" = "$old_ver" ] \
-             || ! printf '%s' "$new_base" | grep -qE '^[0-9]+_.*\.sql$'; then
+             || ! grep -qE '^[0-9]+_.*\.sql$' <<<"$new_base"; then
             KEEP="$KEEP
 $line"
             continue

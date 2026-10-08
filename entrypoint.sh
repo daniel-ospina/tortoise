@@ -246,7 +246,7 @@ fi
 # (#1349 T10, non-blocking).
 _IS_SERVER=0
 for _arg in "$@"; do
-    if echo "$_arg" | grep -q "uvicorn"; then
+    if grep -q "uvicorn" <<<"$_arg"; then
         _IS_SERVER=1
         break
     fi

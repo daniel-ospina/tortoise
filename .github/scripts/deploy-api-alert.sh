@@ -252,7 +252,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # filenames, version names), and a report containing ``` would close the
         # block early and render the rest as live markdown. (Round-5 review, P3-2.)
         fence='```'
-        while printf '%s' "$excerpt" | grep -qF -- "$fence"; do
+        while grep -qF -- "$fence" <<<"$excerpt"; do
           printf -v fence '%s`' "$fence"
         done
         echo "$fence"

@@ -37,6 +37,34 @@ check_version() {
 
 check_version
 
+# #841 — builtin-writer SIGPIPE false-negative guard (agent-infra's). `printf`/`echo`
+# piped into a quiet `grep` under `pipefail` can report "not found" for a match that IS
+# present (the writer takes SIGPIPE once grep exits early on a multiline payload),
+# silently turning a fail-closed check into a pass. Offline and fast.
+#
+# This is the DEPLOYMENT half of the gap recorded on tortoise#7588: the guard existed and
+# was wired in agent-infra, but was never invoked HERE — so the sites it covers shipped.
+# It does NOT close #7588: that issue's own sites (`printf | sed | head -n1` in
+# `.github/scripts/availability-liveness.sh`) are a different producer/consumer shape the
+# guard does not match. Refs, not Closes.
+#
+# Two things this wiring needs that agent-infra's own hook does not:
+#   · `--dirs` — the guard's default scan set is agent-infra's layout, and `scripts/`
+#     here IS the symlink back to agent-infra, so without the flag it scans the wrong
+#     tree and prints a clean run. That flag ships in agent-infra#1643; this hook
+#     therefore lands AFTER it (until then the guard exits 2 on an unknown argument).
+#   · a missing guard WARNS instead of skipping silently. A silent skip is the very
+#     failure this guard exists to catch (#6937 P2-3), and `scripts/` is a machine-local
+#     symlink that can dangle; the `sigpipe-guard` CI job runs it unconditionally.
+if [ -f scripts/check-no-sigpipe-grep.sh ]; then
+  bash scripts/check-no-sigpipe-grep.sh \
+    --dirs '.github/scripts .github/actions .husky tools .ci-checks client integrations tortoise supabase docs entrypoint.sh' || exit 1
+else
+  echo "[sigpipe-guard] scripts/check-no-sigpipe-grep.sh not found — NOT checked locally." >&2
+  echo "   Fix: set AGENT_INFRA_PATH and re-link scripts/. CI runs this guard regardless" >&2
+  echo "   (job: sigpipe-guard), so this warning is not a pass for the committed tree." >&2
+fi
+
 # Test-surface auto-registration (#1429) — new tests/test_*.py must be in
 # config/ci-surfaces.yml or they silently drop out of CI selection (the
 # #1262 drift trap, which recurred 4× in a week). Auto-register at COMMIT
@@ -92,7 +120,13 @@ if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
     printf '%s\n' "$DRY_RUN" >&2
     exit 1
   fi
-  if printf '%s\n' "$DRY_RUN" | grep -q "would register"; then
+  # POSIX sh: no here-string, so match with `case` on the captured value (the
+  # remedy the #841 guard documents for `.husky/` hooks). A pipeline into a
+  # quiet grep takes the ELSE branch under pipefail when the producer keeps
+  # writing — this hook's own failure mode, silently skipping the registration.
+  WOULD_REGISTER=0
+  case "$DRY_RUN" in *"would register"*) WOULD_REGISTER=1 ;; esac
+  if [ "$WOULD_REGISTER" -eq 1 ]; then
     # #6937 P2-3 (review round 1): the dry-run was only HALF the hole. The real
     # registration and its staging sat unguarded in this same block, so a
     # `--register` failure (or a failed `git add`) still let the commit through

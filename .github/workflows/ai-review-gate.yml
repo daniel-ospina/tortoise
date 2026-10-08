@@ -610,7 +610,12 @@ jobs:
           # is reported as the PR body (its canonical channel); such a line
           # is byte-identical signed text in either channel.
           marker_channel() { # <line>
-            if printf '%s\n' "$body" | grep -Fxq -- "$1"; then
+            # Here-string, not a pipeline: this step runs under `shell: bash` (which is
+            # `-eo pipefail`), and $body is an un-truncated REST-fetched PR body — a
+            # >64 KiB body makes `grep` exit at its first match and the writer take
+            # SIGPIPE, so the `if` takes the ELSE branch while the line IS present.
+            # The guard cannot see this: it selects shell FILES, and this is embedded YAML.
+            if grep -Fxq -- "$1" <<<"$body"; then
               printf 'PR body'
             else
               printf 'PR comment'

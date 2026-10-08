@@ -1299,6 +1299,45 @@ jobs:
       - name: Check entrypoint guards (env-reject + missing-cache FATAL)
         run: bash .ci-checks/check-entrypoint-guards.sh
 
+  sigpipe-guard:
+    # #841 — the agent-infra guard, wired where the bug actually ships. This is the
+    # DEPLOYMENT half of the gap recorded on tortoise#7588 (the guard existed and was
+    # wired in agent-infra but never invoked HERE), and it does NOT close #7588: that
+    # issue's own sites are a `printf | sed | head -n1` shape this guard does not match.
+    #
+    # NOT `needs: changes`-gated on purpose: the whole defect class is "a file a path
+    # filter decided is not shell", and two of the four sites that shipped this false
+    # negative were extensionless `.github/scripts/` entries a `*.sh` filter read as
+    # clean. It costs about a second, so it runs on every change.
+    #
+    # The guard lives in agent-infra, reached locally through the committed `scripts/`
+    # symlink — an absolute MACHINE-LOCAL path, so it dangles on a runner (see the
+    # workflow header). Agent-infra is public, so check it out alongside and run the
+    # SAME guard: a vendored copy would be a second source of truth free to drift from
+    # the one that owns the idiom (#863's "guard nobody runs").
+    #
+    # ORDERING: `--dirs` ships in agent-infra#1643. Until that lands and is tagged, this
+    # job is red (the guard exits 2 on an unknown argument) — land it first, then pin
+    # `ref:` to the tag here, matching how this file's other agent-infra jobs consume
+    # agent-infra at a semver pin rather than at whatever `main` happens to be.
+    #
+    # `--dirs` names THIS repo's layout — the guard's default set is agent-infra's and
+    # `scripts/` here points back at it. Shell embedded in workflow YAML is NOT scannable
+    # by a file-based guard and is fixed by hand (see ai-review-gate.yml's marker_channel).
+    # `website/` is excluded: it carries a node_modules tree. Its shell files are NOT
+    # covered anywhere else, so this exclusion is a known gap, not a claim of coverage.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: daniel-ospina/agent-infra
+          path: .agent-infra-guard
+      - name: SIGPIPE false-negative guard (#841)
+        run: |
+          bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
+            --dirs '.github/scripts .github/actions .husky tools .ci-checks client integrations tortoise supabase docs entrypoint.sh'
+
   license-surface:
     runs-on: ubuntu-latest
     steps:

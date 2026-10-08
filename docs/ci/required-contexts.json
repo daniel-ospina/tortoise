@@ -384,6 +384,12 @@
         "schema-drill"
       ]
     ],
+    "sigpipe-guard": [
+      [
+        "ci.yml",
+        "sigpipe-guard"
+      ]
+    ],
     "smoke": [
       [
         "publish-selfhost.yml",
@@ -479,7 +485,7 @@
       ]
     ]
   },
-  "gate_digest": "efdbed264d0c83981a3aac068c1a786dd82b1870dd8c7f39b9f5409d525ba2ea",
+  "gate_digest": "807e986d892bc979a0a75be04ecdf8d25950b22f404da64cbc8d7f7c09d6541b",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -503,5 +509,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-05T03:11:27Z"
+  "verified_at": "2026-10-08T22:45:43Z"
 }

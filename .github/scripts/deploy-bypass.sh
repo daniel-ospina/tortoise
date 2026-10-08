@@ -339,7 +339,7 @@ cmd_audit() {
     any=1
     if [ "$kind" = 'if' ]; then
       emit "- \`${key}\` (${label}) — **BYPASSED** (lane(s): ${lanes}) — the gate was SKIPPED, not passed"
-    elif printf '%s\n' "$bypassed" | grep -qxF "$key"; then
+    elif grep -qxF "$key" <<<"$bypassed"; then
       emit "- \`${key}\` (${label}) — **BYPASSED** (lane(s): ${lanes}) — the checker's exit-1 class was translated for this deploy"
     else
       emit "- \`${key}\` (${label}) — lane(s) ${lanes} armed but **NOT bypassed** — the checker applied no exit-1 bypass (it either returned no violations or did not run; the exit-2 class still blocks)"
