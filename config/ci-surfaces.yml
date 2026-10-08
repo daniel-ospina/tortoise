@@ -55,6 +55,7 @@ carve_shards: 3
 
 surfaces:
   api:
+  - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
   # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
