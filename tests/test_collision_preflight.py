@@ -2867,6 +2867,91 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
 
+    def test_no_configured_remote_does_not_demote_a_leftover_remote_ref(self):
+        # #7693 round 4, MUTATION (c): nothing pinned `if not by_remote: return
+        # None`. Pinned here at the FUNCTION CONTRACT, not end-to-end, because
+        # end-to-end it is MASKED — with no configured remote the namespace set is
+        # empty, so `_fetch_cache_remote` independently blocks the ref and the
+        # assertion would pass for that reason instead. (Measured: reverting this
+        # guard leaves an end-to-end variant green. A test that passes on the
+        # mutant pins nothing, which is exactly the trap round 4 was catching, so
+        # the contract is asserted directly.)
+        mod = _tool_module()
+        _git(self.repo, "remote", "remove", "origin")
+        _git(self.repo, "update-ref", "refs/remotes/somewhere/fix/1-x", "HEAD")
+        sha = self._git_out("rev-parse", "HEAD")
+        self.assertIsNone(
+            mod._remote_ref_has_a_live_holder(
+                "git", str(self.repo), 30.0,
+                "refs/remotes/somewhere/fix/1-x", sha,
+            ),
+            "no configured fetch refspec proves nothing about a live holder; "
+            "False here is a demotion with no evidence behind it",
+        )
+
+    def test_narrowed_refspec_leftover_ref_is_not_demoted(self):
+        # #7693 round 4 P1. A remote whose CURRENT refspec cannot write the ref is
+        # SKIPPED by the prefilter — but the ref can be a LEFTOVER from before the
+        # refspec was NARROWED (`git remote set-branches origin main`, the code's
+        # own non-glob trap) and still sits in a LIVE namespace, so the remote can
+        # hold it at a different sha. The first cut returned `False` without
+        # reading anything and printed "CONFIRMED as this remote branch's CURRENT
+        # tip" for a branch it never looked at (reproduced through the real CLI).
+        ref = f"fix/{ISSUE}-narrowed"
+        bare = self.tmp / "narrowed.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        # The remote holds it LIVE at a different sha ...
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/heads/{ref}")
+        # ... and the refspec is then narrowed so it no longer covers this branch,
+        # while the stale cache ref survives.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4251, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_refspec_sourced_outside_refs_heads_does_not_demote(self):
+        # #7693 round 4 P1. `ls-remote --heads` LISTS ONLY `refs/heads/*`, but a
+        # refspec's SOURCE need not live there: with
+        # `+refs/pull/*/head:refs/remotes/origin/pr/*` the live holder is
+        # `refs/pull/N/head`, which `--heads` never lists — so the forward map was
+        # applied to a FILTERED list, concluded "no holder", and demoted a live
+        # ref (reproduced through the real CLI).
+        ref = f"refs/remotes/origin/pr/{ISSUE}"
+        bare = self.tmp / "pullref.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/pull/*/head:refs/remotes/origin/pr/*")
+        # A terminal local twin, so the ref below has a witness to match against.
+        _git(self.repo, "branch", "-q", f"fix/{ISSUE}-prsource")
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/fix/{ISSUE}-prsource")
+        _git(self.repo, "push", "-q", "origin",
+             f"{terminal_sha}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "update-ref", ref, terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4252, "title": "land it", "body": "", "state": "closed",
+            "headRefName": f"fix/{ISSUE}-prsource", "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
     def test_remote_branch_deleted_after_merge_is_demoted(self):
         # #7693 round 3's other half: this is the MODAL post-merge state, because
         # GitHub auto-deletes head branches, and it is one of the issue's own

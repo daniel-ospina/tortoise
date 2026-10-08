@@ -1892,16 +1892,41 @@ def _remote_ref_has_a_live_holder(
     # which is the answer this function wants anyway (unreadable = block). `env`
     # REPLACES the environment, so it is merged rather than set.
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
+    # ⛔ `False` MUST MEAN "PROVEN ABSENT", NOT "NOT LOOKED AT". Round-4 review
+    # found the first cut returning False after SKIPPING every remote on the
+    # `_refspec_could_write` prefilter, and reproduced a live false-CLEAN through
+    # the real CLI: `refs/remotes/origin/X` can be a LEFTOVER from before the
+    # refspec was NARROWED (`git remote set-branches origin main` — the code's own
+    # "non-glob trap") and still sits in a live namespace, so a skip is not
+    # evidence of absence. `_read_any`/`_unproven` make completeness EXPLICIT: the
+    # function may return False only if it actually read at least one applicable
+    # remote and never skipped one.
+    _read_any = False
+    _unproven = False
     for name, specs in by_remote.items():
         if not specs or any(not s for s, _d in specs):
             return None
+        for _s, _d in specs:
+            # ⛔ `ls-remote --heads` LISTS ONLY `refs/heads/*`, BUT A REFSPEC'S
+            # SOURCE NEED NOT LIVE THERE. With `+refs/pull/*/head:refs/remotes/
+            # origin/pr/*` the live holder is `refs/pull/N/head`, which `--heads`
+            # never lists — so the forward map is applied to a FILTERED list and
+            # the function concluded "no holder" and demoted a live branch
+            # (round-4 review, reproduced through the CLI). A source outside
+            # `refs/heads/` therefore makes this remote UNVERIFIABLE.
+            if not _s.startswith("refs/heads/") or _s.count("*") > 1 or _d.count("*") > 1:
+                return None
         if not any(_refspec_could_write(dest, ref) for _s, dest in specs):
+            # This remote's CURRENT refspec could not write `ref`, but the ref may
+            # be a leftover from a WIDER refspec it used to have. NOT PROVEN.
+            _unproven = True
             continue
         rc2, out2, _err2, timed2 = _run(
             [git_bin, "ls-remote", "--heads", name], repo, timeout, env,
         )
         if timed2 or rc2 != 0:
             return None
+        _read_any = True
         for line in out2.splitlines():
             fields = line.split()
             if len(fields) < 2:
@@ -1913,6 +1938,8 @@ def _remote_ref_has_a_live_holder(
                     and sha != cached_sha
                 ):
                     return True
+    if _unproven or not _read_any:
+        return None
     return False
 
 
