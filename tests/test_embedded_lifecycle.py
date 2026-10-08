@@ -1289,6 +1289,50 @@ def test_release_owner_uses_the_captured_socket_after_teardown(tmp_path):
             raw.close()
 
 
+def test_close_embedded_clients_exclude_spares_a_co_tenant(monkeypatch):
+    """#7728: ``close_embedded_clients(exclude=...)`` leaves the snapshot running.
+
+    ``mcp_server.main()`` runs IN-PROCESS in tests. Its normal-return
+    teardown used to close every embedded client in the pytest process,
+    including the session-scoped ``shared_proj`` server — so a later test in
+    the same tier-2 embedded shard connected to a socket dir that had just
+    been rmtree'd (``redis.socket: No such file or directory``). The test
+    mirrors ``main()``: snapshot first, open the server's own client, then
+    close with the snapshot excluded. The seam is called here with a fake
+    registry, so no real server is touched. ``atexit_fast_close`` is stubbed
+    to force the normal-close path: the real one arms the process-global
+    #4214 atexit budget, and this file already warns that calling the seam
+    consumes it and breaks the fast-atexit tests that follow.
+    """
+    import weakref
+
+    from tortoise import embedded_lifecycle as el
+
+    monkeypatch.setattr(el, "atexit_fast_close", lambda *a, **k: False)
+
+    class _Client:
+        def __init__(self):
+            self.closed = False
+
+        def _t_close(self):
+            self.closed = True
+
+        def _t_release_owner(self):
+            pass
+
+    co_tenant = _Client()
+    monkeypatch.setattr(el, "_embedded_clients", weakref.WeakSet([co_tenant]))
+    before = el.embedded_clients_snapshot()  # what main() takes before _get_sdk()
+
+    owned = _Client()
+    el.register_embedded_client(owned)  # what the server's own client does
+
+    closed = el.close_embedded_clients(exclude=before)
+    assert closed == 1, "only the client opened after the snapshot is closed"
+    assert owned.closed, "a client NOT in the snapshot must still close"
+    assert not co_tenant.closed, "an excluded co-tenant must be left running"
+
+
 def test_owner_record_written_on_construction_removed_on_close(tmp_path):
     """A guarded construction records THIS process as the server's owner;
     close() releases it. A SIGKILL cannot run close(), which is exactly why

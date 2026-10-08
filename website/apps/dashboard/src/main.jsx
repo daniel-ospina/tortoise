@@ -7570,11 +7570,35 @@ function claimIntentInFlight() {
                           ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
-                      if (capNotice) {
+                      // #2940: keyed on `capNotice` ALONE this arm was skipped on
+                      // the reachable build-fork cap path — the 402 mint handler
+                      // sets the wizard's own `wizardDurableCapped` (see the
+                      // `doneCanMintFresh` gate) and never sets `capNotice` — so
+                      // the lede below rendered "Create an API key and call the
+                      // Tortoise SDK from your app." directly above the body's
+                      // role="alert" reporting that the plan's key limit was
+                      // reached.
+                      // `!harnessKey` guards BOTH halves, because neither signal
+                      // is cleared by a successful paste — `capNotice` is raised
+                      // by the Keys-tab create/rotate 402 as well, and
+                      // `wizardDurableCapped` by this step's own mint 402 — so an
+                      // unguarded arm told a user who had just pasted a key to
+                      // paste one. A key in hand ends the cap arm.
+                      // The role arm above has already run, so a member never
+                      // reaches this branch.
+                      if ((capNotice || wizardDurableCapped) && !harnessKey) {
                         return <p className="welcome-lede">{isBuildFork
                           ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
+                      // #2940 (review P2): with a key in hand AND `capNotice` set
+                      // (Keys-tab 402, re-entered through the header Setup
+                      // button) the body renders the cap notice and the paste row
+                      // and no chooser at all, so falling through would put
+                      // wizardStepSub's "Pick which harness to connect." over a
+                      // body that offers no pick. Suppress the lede; the body's
+                      // own cap notice carries the state.
+                      if (capNotice && harnessKey) return null
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
                     return <p className="welcome-lede">{headSub}</p>

@@ -164,6 +164,12 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #7678: the org-create lane's dedicated control-plane pool + the single
+  # membership read. Same dual registration as the offload guard above and for
+  # the same reason: the files it guards are tortoise/hosted_api.py,
+  # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
+  # `api` surface.
+  - test_org_create_pool_7678.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -1094,6 +1100,7 @@ surfaces:
   - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
