@@ -60,6 +60,20 @@ LEGS = [
 ]
 
 
+@pytest.mark.parametrize("bad", BAD_TYPES)
+def test_run_vector_query_rejects_invalid_entity_type_with_no_query_vec(bad):
+    """The leg's FIRST early return is ``if not query_vec: return []``.
+
+    The rejection tests above always pass a non-empty vector, so they never
+    reach it — a guard placed between that return and the breaker would keep
+    them green. Caught by mutation in review: moving the guard below
+    ``if not query_vec`` left the whole file passing while
+    ``run_vector_query(None, [], entity_type=INJECTION)`` returned ``[]``.
+    """
+    with pytest.raises(ValueError, match="Invalid entity_type"):
+        search_engine.run_vector_query(None, [], entity_type=bad)
+
+
 @pytest.mark.parametrize("runner,args", LEGS)
 def test_guard_runs_at_entry_before_any_graph_use(monkeypatch, runner, args):
     """The guard is reached before the graph — so it cannot be skipped.

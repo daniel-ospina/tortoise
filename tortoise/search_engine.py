@@ -1114,8 +1114,9 @@ def run_vector_query(
     """
     # #5404: entity_type is caller-controlled, and this leg interpolates its
     # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
-    # Guard at the ENTRY: the return branches below (breaker open, empty scope,
-    # no embeddings) all precede the label derivation.
+    # Guard at the ENTRY: the empty-query_vec return and the breaker
+    # short-circuit below both precede the label derivation, so a guard placed
+    # at the label would be skipped by either.
     validate_entity_type(entity_type)
 
     #: #4199 — the read's OWN scope carries no dense material. Resolved once
