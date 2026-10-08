@@ -52,6 +52,7 @@ Model: **`gpt-4o-2024-08-06`**, temperature 0, `max_tokens: 10`, forced **binary
 - **abstention** (`_abs` in `question_id` overrides all of the above) — *"answer yes if the model correctly identifies the question as unanswerable"* (may say info is incomplete, or that other info exists but the asked-for item doesn't).
 
 **What the judge penalizes in practice (implications for our 0.78 slice):**
+
 1. A reader that **hallucinates generic advice** on a preference/IE-preference question → judge sees no utilization of the user's stated fact → NO. (This matches your observed failure mode exactly.)
 2. A reader that **abstains ("I don't know") on an answerable IE/MR question** → NO (containment fails); abstention prompts only rescue `_abs` questions. (Matches your observed false-abstention mode.)
 3. MR answers that assemble only **part of** the required multi-session evidence → NO even if the included part is verbatim correct.
@@ -122,12 +123,14 @@ Independent mid-2026 aggregator snapshot (self-reported, not re-run): AutoMem 74
 `single-session-preference` (20%) ≪ `multi-session` (44%) ≈ `temporal-reasoning` (45%) ≪ `knowledge-update` (78%) ≈ `single-session-user` (81%) ≪ `single-session-assistant` (95%).
 
 **Why each hard category is hard for full-context reading:**
+
 - **Preference:** the gold preference is *revealed indirectly* and must be recalled from one turn among 115k tokens, then *applied* — the model that fails defaults to generic advice, which the rubric judge rejects (it checks "recalls and utilizes the user's personal information"). Open-ended judging also makes it the least reliable cell of judge meta-eval (0.90).
 - **Multi-session reasoning:** needs aggregation/comparison across 2–5 evidence sessions scattered in ~40 sessions; the judge demands the *complete* synthesized answer ("only a subset… answer no"), so a single missed evidence session fails the whole question.
 - **Temporal reasoning:** requires aligning explicit time mentions + session timestamps + `question_date`; full-context models lose the timestamp association and mis-order events (Zep's published example shows gpt-4o-mini ordering three events wrongly even with the full transcript).
 - **KU and single-session IE are "easier"** because evidence is 1–2 sessions, single-fact, and verbatim recoverable; assistant-uttered facts are easiest because the answer is stated in an assistant turn with little paraphrase noise.
 
 **Why RAG/memory systems underperform full-context (when they do) — and the one case they beat it:**
+
 1. **Full-context's loss is mostly assembly noise, not knowledge.** Paper: GPT-4o on evidence-only oracle = 87.0–92.4%, but with the same 500 questions inside 115k tokens = 60.6–64.0% (−27 to −31pp). This is the classic lost-in-the-middle / distractibility effect (paper cites Liu et al. 2024, Shi et al. 2023). So a memory system's ceiling is "approach oracle": feed only relevant, timestamp-ordered evidence.
 2. **Retrieval is necessary but not sufficient.** Paper E.5: with its best pipeline, ~90% of correct answers required correct retrieval, yet 40–50% of *errors* had correct retrieval and wrong generation (worse for weak readers). AutoMem's own run shows the same saturation at scale: **Recall@5 = 97% while QA accuracy is 74%** — additional recall cannot buy accuracy once retrieval is adequate. This is the direct structural explanation for your observation that "improving retrieval recall does not lift accuracy": in the hard tail, remaining headroom is in (a) evidence *completeness and ordering* for MR, and (b) reader-side synthesis/personalization — not in finding more evidence.
 3. **When a system beats full-context, the architecture change is evidence assembly, not retrieval.** Zep/Graphiti wins by converting 115k tokens into ~1.6k tokens of temporally-annotated, deduplicated, entity-linked facts (near-oracle density + time-awareness). The negative cell proves the mechanism: assistant-uttered verbatim facts are compressed away, so Zep *drops below* full-context on single-session-assistant (94.6→80.4). Systems that ingest verbatim turns (rounds as values, high top-k, e.g., the paper's own RAG and high-top-k harnesses) protect IE recall but pay in context noise on synthesis-heavy categories.

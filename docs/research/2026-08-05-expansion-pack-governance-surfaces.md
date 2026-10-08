@@ -57,6 +57,7 @@ domain best practice."
 ## External Findings
 
 ### Ontology constraint enforcement (KG world)
+
 - SHACL/OWL validation with **transactional rollback** is the mature pattern
   (Neo4j n10s: `validateTransaction` before commit; APOC triggers).
   Inference must be materialized before validation when relying on derived classes.
@@ -64,6 +65,7 @@ domain best practice."
   and enforce edge types."
 
 ### Agent guardrails (agent world)
+
 - Framework-level hooks (**BeforeToolCallEvent**) validate rules and cancel calls
   *before execution* — "rules that LLMs cannot bypass" require hooks in the execution
   path, not advisory instructions. [Medium — consistent across OpenAI Agents SDK,
@@ -72,17 +74,20 @@ domain best practice."
   checks simple/fast/separated by concern.
 
 ### Skills vs MCP vs subagents (surface selection)
+
 - Consensus framing: **Skills = procedural knowledge (how), MCP = capability/access
   (connections), Subagents = isolation**. Start with a skill; add MCP when a
   capability is needed. [High — multiple independent guides agree]
 
 ### Agent memory / graph schema lessons
+
 - "Agent memory is only as good as its schema": if the LLM invents structure,
   everything degrades to generic labels (`Topic`, `RELATES_TO`).
 - Rigid schemas break as domains evolve; too-loose schemas make graphs overly
   connected. Schema evolution + synchronization drift are recurring failure modes.
 
 ### Adversarial / over-constraint
+
 - **Format-Constraint Coupling in KG Construction** (arXiv 2605.21974): constraints
   applied rigidly can amplify errors — "extraction refusal," entity inflation.
 - KG-RAG industrial research: unenforced schema constraints cause constraint-blind
@@ -99,6 +104,7 @@ domain best practice."
 | 3 | **Governance app** | Human loop | Violations log + repair queue + override approval in dashboard |
 
 **Why not a single surface:**
+
 - MCP-tool-only → agents can skip tools; zero guarantee (guardrail literature).
 - Skill-only → probabilistic compliance; skills reduce but don't eliminate errors.
 - Enforcement-only → over-strict schemas cause extraction refusal / info loss

@@ -55,6 +55,7 @@ resolution explicitly).
 ## Phase 1 — problem-diverge (2 agents)
 
 ### Agent A — alternative framings
+
 - **F1 — band re-derivation**: the 300ms band is a pre-real-model artifact (#316, synthetic
   stand-in vectors; competitor-informed Neo4j ~340ms / Supermemory <300ms); every real-model
   measurement exceeds it INCLUDING the MiniLM control (2× faster per encode) → re-derive the
@@ -80,6 +81,7 @@ reproducible" = partially validated (provenance exists; pre/e2e8 artifacts never
 `blocked: true`); A11 "2GB VM context current" = **falsified** (fly.toml 4GB, #545).
 
 ### Agent B — devil's advocate challenge
+
 1. Plan T15/GATE (d) pin the **deployment-VM class**, not a "production-class benchmark box"; the
    plan explicitly separates the 16–32GB burn box from the deployment VM.
 2. The protocol **cannot run on the deployment surface** (5 verified constraints) — a "staging
@@ -202,6 +204,7 @@ as #1349's n-adaptive bar; acknowledged in the ADR record.
 ## Phase 4/5 — solution-diverge/converge
 
 ### Approaches
+
 - **A — Dedicated deployment-class benchmark box (pre-registered surface)**: throwaway
   2 shared vCPU / 4GB box (burstable cloud VM = closest class proxy, e.g. Hetzner CX22 / AWS
   t3.small / GCP e2-medium; cgroup-pinned Docker `--cpus=2 --memory=4g` on a larger host = most
@@ -225,6 +228,7 @@ as #1349's n-adaptive bar; acknowledged in the ADR record.
   + tenant load).
 
 ### Chosen: **A + optional C**. Rationale: A discharges the pre-registered obligation as written
+
 (the decision table is written for A); A is the only surface with a real control arm (B needs the
 probe seam in a deployable image; C physically cannot run a control); A maximizes reproducibility
 (CI-tested protocol + pinned FalkorDB + pins + sha manifest); the DB-host-split fallback is
@@ -232,6 +236,7 @@ pre-built into A (third surface — absolute numbers marked non-comparable, pair
 comparable). C costs ~nothing and converts two annex caveats into directional evidence.
 
 ### Rejected alternatives
+
 - B (above) — rejected on T11 risk + cost; better only for bit-exact Fly scheduler anchoring.
 - C as the verdict surface — rejected: no control arm, real corpus ≠ synthetic bench corpus
   (p95 non-comparable), production-load risk, violates the box contract; better only if the
@@ -248,6 +253,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
 ## Plan Draft (standard-proportional; NO hosted-image/entrypoint changes)
 
 ### Task 1 — Small tools (the only new code)
+
 - `benchmarks/encode_microbench.py`: 32 fixed texts (first 32 `query_mix.json` queries,
   deterministically ordered), batch_size=1, ≥3 discarded warmup encodes, ≥5 passes; per-model
   ms/encode mean/p50/p95 + bge/minilm ratio; `--model` via `embedder_probe` (HARD FAIL on load),
@@ -267,6 +273,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
   `Dockerfile.hosted` untouched.
 
 ### Task 2 — Box provisioning + pre-flight (manual ops)
+
 - Acquire the deployment-class box per human decision (burstable cloud VM preferred; cgroup-pinned
   Docker fallback; laptop+cgroup-pins last resort, non-class caveat). Python 3.12 + uv, Docker +
   compose, repo at a recorded sha, `uv sync --extra embeddings`, `docker compose up`
@@ -282,6 +289,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
   baseline); both models load offline under `--load-timeout 300`.
 
 ### Task 3 — Run campaign (manual ops)
+
 - Per model, ≥3 fresh-process repeats: `TORTOISE_DB_URI=… HF_HUB_OFFLINE=1 python -m
   benchmarks.run_report --model <m> --load-timeout 300 --samples 100 --corpus-size 1000 --seed 42
   --out benchmarks/reports/t15-<m>-rep<N>.json` — order pre-registered alternating (bge r1, minilm
@@ -296,6 +304,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
   throttle diff, peak RSS.
 
 ### Task 4 — Evidence + ADR-009 record (docs)
+
 - Copy reports + microbench + probe outputs to
   `docs/research/2026-08-17-1349-embedder-selection/evidence/` (`t15-*` prefix); write
   `t15-campaign.json` (box class + acquisition, pins, per-run stats, medians, spread, probe states,
@@ -317,6 +326,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
   PR through commit-workflow (docs-only + 2 small tools + tests — code-review gate applies).
 
 ### Task 5 — Decision application + follow-up filings
+
 - Apply decision table v6 row + overlay flags; execute the row action (rows 0/1 → atomic-24h
   NOT-CERTIFIED record; 2a/3 → MET + close; 2b → human-gated menu with accept-delta default +
   atomic record + tenant-claim revision; 4 → recorded auto-decision + claim revision; 5 → revert +
@@ -329,6 +339,7 @@ comparable). C costs ~nothing and converts two annex caveats into directional ev
 - **AC**: #1656 closed with the recorded row + disposition; follow-ups filed with evidence links.
 
 ### Verification plan (what proves the run valid before any verdict)
+
 `db_mode == docker-falkordb`; `embedding_model` == injected candidate hf_id (probe-truthful);
 corpus fingerprint + indexes fts/vector true; warmup proxy clean; failure fraction ≤ 0.30; spread
 within bounds; throttle diff recorded; peak RSS ≤ 4GB; fresh process per model, identical
@@ -336,6 +347,7 @@ seed/corpus/samples; `HF_HUB_OFFLINE=1` (cache isolation). Then `t15_verdict.py`
 mechanically; row + flags reviewed; sha-manifest matches committed artifacts.
 
 ### Acceptance criteria (issue O/I/T mapping)
+
 - **Objective**: T15 discharged — deployment-class E2E-8 re-validation recorded in ADR-009 with a
   #316 verdict + decision-table disposition; no hosted production code changed.
 - **Indicators**: (1) E2E-8 p95 for bge-small AND MiniLM control on the deployment-class box
@@ -347,8 +359,10 @@ mechanically; row + flags reviewed; sha-manifest matches committed artifacts.
 - **Bonus (pre-registered T15 leg)**: microbench ratio recorded.
 
 ### Runtime prerequisites (enumerated)
+
 Python 3.12 + uv; `uv sync --extra embeddings` (sentence-transformers >=3,<6 + sklearn); Docker +
 compose with `falkordb/falkordb-server:v4.16.7`; HF cache: bge-small `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`
+
 + all-MiniLM-L6-v2 `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` (~220MB total); ~5–8GB disk; no API
 keys (offline, local); `TORTOISE_DB_URI` exported; peak RSS ≤ 4GB pre-flight. **Wall-clock**: box
 ~2–4h total (provisioning 10–30min, deps+cache 15–30min, pre-flight+microbench dry-run 15min,
@@ -409,6 +423,7 @@ campaign 6 runs × 8–12min ≈ 1–1.5h, microbench 5min, evidence+ADR 1–2h)
    tools + tests code-reviewed) is the acceptable close for #1656.
 
 ## Rejected Alternatives (summary)
+
 - **Band re-derivation (F1)** — premature; decides the tenant contract on contended-hardware
   noise; needs #316 scoping revision; re-derivation remains a triggered decision OUTPUT.
 - **Relative-to-control criterion (F2)** — collapses the tenant contract + #317's absolute formula.
@@ -419,6 +434,7 @@ campaign 6 runs × 8–12min ≈ 1–1.5h, microbench 5min, evidence+ADR 1–2h)
   as the recorded no-box fallback.
 
 ## Review Cycle Log
+
 problem-verify: 5 cycles → clean (all P1s fixed into table v6; residuals P2/P3 incorporated).
 solution-verify: 1 cycle → clean (no P0/P1; 4 P2s + P3s incorporated).
 Second-model coherence (deepseek second-model gate): 1 cycle → 1 P1 (corpus pin) fixed; 6 P2s

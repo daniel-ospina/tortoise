@@ -79,6 +79,7 @@ sentiment/falsifiability signal worth tracking.
 ## Notes & Sources
 
 **Why it matters to Tortoise (mechanism read):**
+
 - **The "dreaming" step is a distillation step.** Its outputs (memories, Profile) are *derived*
   facts — so the **dated evidence is consolidated away**. This is the same shape as Mem0/Letta
   profiles, and the opposite of a validity-preserving design (Zep's `valid_at`/`invalid_at`,

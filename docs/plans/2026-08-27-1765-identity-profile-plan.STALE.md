@@ -124,6 +124,7 @@ P2:
 ```
 
 **New backend surface (hosted_api.py):**
+
 - `GET /v1/user/identity` — session-authed (`get_current_user`), hosted-only (`is_supabase_enabled`, 400 otherwise — claim precedent). Returns `{user_id, email, username, display_name, identities[], password_capable, credentials[], per_team[]}`.
 - `POST /v1/user/identity/link-intent` — `{provider ∈ {github, google}}`; re-auth freshness (`iat ≥ now − TORTOISE_IDENTITY_REAUTH_WINDOW`, default 3600s, matching GoTrue's recent-login window); rate-limited (claim limiter shape); returns signed intent `{jti, user_id, provider, exp}` (HMAC-SHA256, `TORTOISE_LINK_INTENT_SECRET`, `hmac.compare_digest` discipline per mcp_auth.py).
 - `POST /v1/user/identity/link-commit` — `{intent, provider}`; verify signature/expiry/replay (jti consumed in `link_intents`), admin-get user, find the identity row for `provider` created AFTER intent issuance (never accept a stale/pre-existing row), verify it belongs to the session user, verify provider-verified email (C2 — the claim path's `app_metadata.providers` invariant shape), adoption-signal check (new identity email matching another team's `teams.email` → surfaced on profile, never written, never blocked), audit `identity_link` via `_async_audit` (:813, `audit_events.detail`), return refreshed inventory.
@@ -131,12 +132,14 @@ P2:
 - `PATCH /v1/profile/username` — `{username}`; format validation (3–32 chars, `[a-z0-9_-]`, not an email); uniqueness pre-check (service-role scan of `raw_user_meta_data->>'username'`, excluding self); admin `PUT /auth/v1/admin/users/{id}` merge into `user_metadata`; 409 on collision; audit `profile_username_update`. Backstop: unique partial index on `auth.users ((raw_user_meta_data->>'username')) WHERE ... IS NOT NULL`.
 
 **New SQL (single migration `20260827000001_identity_profile.sql`):**
+
 - `public.link_intents (jti text PRIMARY KEY, user_id uuid NOT NULL, provider text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL, used_at timestamptz)`; RLS deny-all public roles; service_role only (audit_events precedent).
 - `identity_floor_lock(p_user_id uuid, p_identity_id text) RETURNS jsonb` — SECURITY DEFINER, service_role-only, `SET search_path=''`: `SELECT ... FROM auth.users WHERE id = p_user_id FOR UPDATE`; floor = `count(auth.identities WHERE user_id=...) + (encrypted_password IS NOT NULL) − 1`; returns `{floor_after, target_provider}`. (`FOR UPDATE` row lock is held by the CALLER's transaction across the GoTrue delete — documented contract.)
 - Username unique partial index (above).
 - NO changes to `uq_teams_email`, `claim_membership`, `provision_team`, or `teams.email` semantics (C1 demotion is the separate follow-up).
 
 **Frontend (main.jsx, router-less — tab state :273, nav :2641-2649, banner :2624-2634):**
+
 - New `profile` tab (nav addition + `setTab('profile')`), session-gated like billing (the `authMode !== 'session'` gates at :2206/:2226/:2873).
 - `identity.js` extracted pure module: `buildInventory(json)`, `waysIn(inventory)`, `showBanner(inventory, orgId)`, `displayName(inventory)` precedence (`username > display_name > email-prefix`, #1691 discipline) — node --test-able (sessionKey.js precedent #1708).
 - Banner: renders when `showBanner(...)` (ways_in ≤ 1 AND ≥ 1 method AND team not anon); CTA → `setTab('profile')`. Never shown for anon teams (full-page Protect :2137/:2235 already covers, C8) or keyless-anon cohort (#1716 out of scope; banner must not promise a fix).
@@ -145,12 +148,14 @@ P2:
 ## 5. Key flows
 
 ### 5.1 Banner computation (P1)
+
 1. Dashboard mount with session → `GET /v1/user/identity` (Bearer session token, :348 `api()` helper, `useSession`).
 2. Server: `_gotrue_admin_get_user(user_id)` (:3237) → identities; password-capable = `encrypted_password IS NOT NULL` (C4); credentials = `api_keys` where `created_by = user_id` across active memberships, `created_via ≠ bootstrap`-NULL rows attributed membership-wide, agent principals (`st_*`, `api`, NULL) excluded (C10, `mint_target_user_for_key` shape supabase_control.py:684); `per_team[]` = ways_in per membership.
 3. Client: `waysIn = identities.length + (password_capable ? 1 : 0)`; `showBanner = sessionMode && team && !team.anon && waysIn >= 1 && waysIn <= 1`.
 4. Render banner (:2624 pattern) with CTA → `setTab('profile')`. Recompute after every identity mutation (P2) by refetching the inventory.
 
 ### 5.2 Add OAuth (P2)
+
 1. Profile → "Add GitHub/Google" → capability check (click-time probe, §7): if a prior probe recorded `manual_linking_disabled` → hide affordance, fail-closed message.
 2. `POST /v1/user/identity/link-intent {provider}` → server re-auth freshness check (`iat` window) → 403 `REAUTH_REQUIRED` → client re-auth round (signInWithPassword) → retry.
 3. `supabase.auth.linkIdentity({provider})` → OAuth popup → GoTrue links (manual linking ON).
@@ -158,17 +163,20 @@ P2:
 5. Re-render profile + banner.
 
 ### 5.3 Add email+password (P2)
+
 1. Profile → "Add email+password" → client `supabase.auth.updateUser({password})` (never admin-create — C6; no `auth.users` INSERT → `handle_new_user` placeholder never fires).
 2. Post-impl verification: `signOut()` → `signInWithPassword({email: currentEmail, password})` → assert `user.id === original uid`.
 3. Success → `password_capable = true` in inventory; banner clears. Failure (or the account needs a NEW email identity) → **degrade to verified-identity linking only** (C2): OTP to the target email (`signInWithOtp({email, shouldCreateUser:false})` + verify) — never a second admin-create path.
 4. Audit `identity_link_password`; re-render.
 
 ### 5.4 Unlink (P2)
+
 1. Profile → "Remove X" → `POST /v1/user/identity/unlink {identity_id}`.
 2. Server: `identity_floor_lock` RPC → row lock + floor. `floor_after < 1` → 409 `LAST_METHOD` + guidance ("add another method first"). GoTrue reauth 422 → 403 `REAUTH_REQUIRED` → client re-auth round → retry.
 3. Forward `DELETE /auth/v1/user/identities/{id}` with the request's validated access token → post-state re-check in the same transaction → commit → audit `identity_unlink`.
 
 ### 5.5 Username (P1)
+
 1. Profile → username field → `PATCH /v1/profile/username {username}`.
 2. Server: format → uniqueness pre-check → admin update_user merge into `user_metadata` (single-writer = profile; #1691 wizard keeps writing `display_name` only, main.jsx:578-581 — untouched) → 409 on collision (pre-check OR the unique-index backstop, mapped to 409).
 3. Display precedence `username > display_name > email-prefix` via the shared `displayName()` helper everywhere usernames render (helper + test prevent a one-line #1691 resurrection).
@@ -178,6 +186,7 @@ P2:
 ### Phase 0 — Prerequisites & probes (no code)
 
 **Task 0.1: Falsification probes**
+
 - Create `docs/plans/1765-falsification-probes.md` + `graph-scripts/probes_1765.py` (or SQL against the control plane) implementing:
   - probe-1: dup team emails (email pairs mapping to ≥2 teams/users),
   - probe-2: claimed users with <2 identities (banner demand sizing),
@@ -188,6 +197,7 @@ P2:
 - **Gate:** demotion follow-up issue fires iff probe-1 ≥ 1 pair OR probe-4 ≥ 1 user; otherwise C2 invariant stands. Either way, P1/P2 proceed.
 
 **Task 0.2: Ops preflight**
+
 - Local: `supabase/config.toml:173` → `enable_manual_linking = true` (C17).
 - Hosted: runbook step — enable manual linking in Supabase Auth settings (or `GOTRUE_SECURITY_MANUAL_LINKING_ENABLED=true` selfhost); verify GitHub/Google providers + redirect URLs cover the dashboard origin; record result (feeds probe-3).
 - `.env.example`: add `TORTOISE_LINK_INTENT_SECRET`, `TORTOISE_IDENTITY_REAUTH_WINDOW` (default 3600), `TORTOISE_IDENTITY_RATE_LIMIT` (reuse claim limiter defaults).
@@ -195,18 +205,22 @@ P2:
 ### Phase 1 — Read-only inventory + banner + profile tab + username (ships alone)
 
 **Task 1.1: Inventory endpoint**
+
 - Files: Modify `tortoise/hosted_api.py` (new `GET /v1/user/identity` near the claim trio), Modify `tortoise/supabase_control.py` (service-role helpers: `identity_inventory_for_user`, `password_capable`, `credentials_by_creator`), Test `tests/test_user_identity_inventory.py` (FakeControlPlane + patched `_gotrue_admin_get_user`).
 - Steps: failing test (inventory shape, C10 exclusion, 401 without session, registry-mode 400) → implement → pass → commit.
 
 **Task 1.2: Banner predicate (pure JS)**
+
 - Files: Create `website/apps/dashboard/src/identity.js`, Test `website/apps/dashboard/src/identity.test.js` (node --test, sessionKey.test.js pattern).
 - Steps: failing test (`waysIn`, `showBanner` truth table incl. anon/keyless false positives) → implement → pass → commit.
 
 **Task 1.3: Banner UI + profile tab (read-only)**
+
 - Files: Modify `website/apps/dashboard/src/main.jsx` (nav :2641-2649 add Profile; banner :2624 area; inventory fetch at mount; session gates :2206/:2226 pattern; account-blob "Profile" entry), Modify `website/apps/dashboard/src/index.css` (profile section styles; reuse `.card`/`.banner` tokens).
 - Steps: e2e failing test first (below) → render → pass.
 
 **Task 1.4: Username**
+
 - Files: Modify `tortoise/hosted_api.py` (`PATCH /v1/profile/username`), Modify `tortoise/supabase_control.py` (uniqueness scan + admin update_user merge), Create `supabase/migrations/20260827000001_identity_profile.sql` (username unique index — Phase-1 slice), Test `tests/test_user_identity_inventory.py::TestUsername` + `supabase/tests/20260827000001_identity_profile.sql` (duplicate insert → unique violation), Modify `website/apps/dashboard/src/main.jsx` (username editor), Create `website/apps/dashboard/src/identity.js` `displayName()` + test.
 - Steps: SQL test → migration → endpoint test → endpoint → UI → commit.
 
@@ -215,22 +229,27 @@ P2:
 ### Phase 2 — Linking (gated by capability probe)
 
 **Task 2.1: link_intents table + identity_floor_lock RPC**
+
 - Files: Modify `supabase/migrations/20260827000001_identity_profile.sql`, Test `supabase/tests/20260827000001_identity_profile.sql` (floor math, LAST_METHOD, service_role-only enforcement, RLS deny).
 - Steps: failing SQL test → migration → pass → commit.
 
 **Task 2.2: link-intent + link-commit**
+
 - Files: Modify `tortoise/hosted_api.py`, Modify `tortoise/supabase_control.py` (intent sign/verify), Test `tests/test_user_identity_authority.py` (intent expiry/replay, session-rotation mid-intent, stale-identity-row rejection, provider-verified-email check, audit rows, teams.email invariant on link, adoption signal).
 - Steps: tests → endpoints → commit.
 
 **Task 2.3: Add-email+password**
+
 - Files: Modify `website/apps/dashboard/src/main.jsx` (profile flow: updateUser password → verification → degrade), Modify `tortoise/hosted_api.py` (audit + inventory refresh hook), Test `tests/test_user_identity_authority.py::test_add_password_no_placeholder_fires` (assert no `org_id=''` membership created), `tests/e2e/hosted/test_14_profile.py` (mocked GoTrue).
 - Steps: tests → implementation → commit.
 
 **Task 2.4: Unlink**
+
 - Files: Modify `tortoise/hosted_api.py`, Modify `tortoise/supabase_control.py` (GoTrue user-token DELETE forwarder — bounded), Test `tests/test_user_identity_authority.py` (LAST_METHOD, two-tab race via the FakeControlPlane threading-lock pattern, reauth 422 → REAUTH_REQUIRED, post-state re-check, audit).
 - Steps: tests → implementation → commit.
 
 **Task 2.5: Capability probe + UI wiring**
+
 - Files: Modify `website/apps/dashboard/src/main.jsx` (click-time probe: `linkIdentity` attempt → 422 `manual_linking_disabled` → session-persisted fail-closed state; add-method affordances + unlink buttons wired), Modify `website/apps/dashboard/src/identity.js` (+test).
 - Steps: node test → UI → commit.
 

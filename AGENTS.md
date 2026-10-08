@@ -13,6 +13,7 @@
 **Default: Your job is to keep moving until you hit a real gate.
 
 Real gates are:
+
 1. A skill explicitly mandates a human gate (sign-off, approval, decision point)
 2. P0 consequence risk (data loss, security, unrecoverable cost >$10/mo)
 3. Genuinely ambiguous — research was inconclusive (<50% confidence) and you need a decision
@@ -21,6 +22,7 @@ Real gates are:
 If none of those apply: **keep going.** The user can interrupt if they disagree.
 
 **Invalid reasons to stop:** Any question whose answer is trivially "yes" e.g.:
+
 - "Ready?" "Proceed?" "Continue?" "Shall I…?" "Want me to…?" "Should I…?" (waste of user time; you should continue)
 - "On to the next step?" "Does that look right?" "Everything OK so far?" (unless P0 consequence risk — that is a real gate, so stop — otherwise double-check and continue)
 - Any handoff where the user has nothing to decide (no reason to stop)
@@ -45,6 +47,7 @@ Your role is to work within the skills and processes framework we have explicitl
 **This rule exists because of a real incident (2026-08-05):** the planned FalkorDB Cloud connection was failing. Instead of debugging the connection, an agent silently shipped a self-hosted FalkorDB container on Fly.io with AOF disabled and no off-box backup. That fallback had no durability — a later test run wiped the production graph (5,748 points) and it was only partially recoverable. A single unresolved failure compounded into permanent data loss because the workaround was never flagged for human review.
 
 **The pattern to follow when something is broken:**
+
 1. **Diagnose first** — read the error, trace the root cause, confirm what's actually failing (skills: `debug-workflow`, `find-bugs`)
 2. **Fix the root cause** — reconnect, repair config, fix the bug. This is the default.
 3. **If you cannot fix it** (needs credentials, external service access, decision) — **STOP and escalate**: report the diagnosis + proposed fallback to the human, get explicit approval BEFORE changing the architecture, backend, or workflow
@@ -155,7 +158,7 @@ Announce with a brief FYI **before** accessing:
 3. **Sensitive files** — `.env`, credentials, keys, tokens, secrets
 4. Announce skill invocations: "I'm using the [skill-name] skill to [purpose]."
 5. Announce sub-agent dispatches: "Dispatching sub-agent for [purpose]..."
-   
+
 Format: `📡 [source] — [what] — [why]`
 
 Does **not** apply to: routine project file reads, git operations, local shell commands, context7 doc lookups.
@@ -238,6 +241,7 @@ When writing or updating any doc in `docs/`, auto-populate entity metadata from 
 ### Project Identity
 
 Public repository that houses:
+
 - **Tortoise:** Python graph engine for semantic/epistemic/episodic agent memory and reasoning (SDK, MCP server, EP belief propagation)
 - **Strategy docs:** product strategy, competitive analysis, pricing research
 - **Internal operations:** agent skills, CI/CD, coordination scripts (shared with premise-labs lineage)

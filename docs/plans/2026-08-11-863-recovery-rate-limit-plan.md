@@ -21,6 +21,7 @@ aboutObjects: signin-page, signup-page, welcome-page, hosted-api
 **Role:** implementer
 
 **Architecture:** Three layers, all in-repo:
+
 1. **Client (signin.html):** new "Forgot password?" request-link flow (`auth.resetPasswordForEmail`) + the #801 two-tier lockout machinery (1h email-tier / 60s per-IP tier, sessionStorage-persisted, countdown, early-return guard), with **tier-aware gating** (email tier disables only `#btn-recovery` — sign-in never sends email and must stay usable; short tier disables both). Sign-in 429s get the short tier.
 2. **Client (welcome.html):** reset-password landing — recovery links redirect to `origin + /welcome.html` (the same target the #801 signup confirmation flow already uses, so no new GoTrue redirect-allowlist entry is needed). `PASSWORD_RECOVERY` event (supabase-js v2) shows a `#reset-form`; `auth.updateUser({password})` completes the journey. Hash-snapshot fallback covers the documented case where the event is not emitted (supabase/auth#1948).
 3. **Client copy + API:** both pages' `AUTH_ERROR_MAP`/`humanizeAuthError` split the rate-limit mapping: `over_email_send_rate_limit` (+ "email rate limit" msg) → **"Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour."** (issue's exact proposal, acceptance (b) contract); `over_request_rate_limit(_ip)`/generic `rate_limit` → network-attribution copy. ⚠️ **Constants must be declared ABOVE the AUTH_ERROR_MAP literal** (TDZ hazard — the map is evaluated at script load; referencing a `const` declared later kills the whole inline script, the #527 regression class). ⚠️ **The email-bucket map entry must come FIRST with a pseudo-code** (`codes: ["over_email_send_rate_limit", "email_rate_limit"]`): the map loop's substring pass would otherwise match the network entry's bare "rate limit" against an "email rate limit exceeded" message (dead-code fallback → wrong copy). `tortoise/hosted_api.py` 429 pass-throughs carry the mechanism (`detail: {message, error_code}`) so the server-first signup path is tier-accurate too; the stale #801-era "per-IP bucket" docstrings are corrected to project-wide.
@@ -34,6 +35,7 @@ Third-party deps: **zero new**. supabase-js v2 (CDN, already loaded by all three
 The #801 plan (`docs/plans/2026-08-10-801-signup-rate-plan.md`) is the pattern ancestor: same lockout constants, same two-tier split, same sessionStorage key shape, same early-return guard, same monotonic-tier copy rule. This plan diverges only where the surface demands it (tier-aware button gating, page-scoped keys).
 
 **Copy decisions (controller, after scope-verify P3s):**
+
 - Email-tier copy is the issue's exact proposal, used verbatim on both surfaces (single constant `EMAIL_BUCKET_RATE_LIMIT_COPY`). A consumer-neutral variant ("Email sending is temporarily exhausted…") was considered and rejected: acceptance (b) quotes the issue's wording, the bucket is in practice exhausted by signups, and one constant keeps the static pins unambiguous.
 - Generic `rate_limit` code / bare "rate limit" message → network copy (conservative; the email bucket always surfaces as `over_email_send_rate_limit` or "email rate limit", which `isEmailBucketError` detects first). The email-bucket substring match is made reachable by the pseudo-code entry (above), not by the explicit fallback branch alone.
 - `NETWORK_RATE_LIMIT_COPY` = "Too many attempts from this network. Please wait about an hour and try again." (issue-verbatim) on BOTH pages — signup.html's static map entry **loses the `tortoise signup` CLI pointer** (it stays in the API's 429 `message` for API consumers; the server-429 client path shows tier copy only). Decided: one shared constant, no page-specific pointer variants.
@@ -57,6 +59,7 @@ Bug-pattern flags: (1) lockout copy must not decay with remaining time → monot
 ### Journey Test Map
 
 **Journey: User forgets password → resets it → signs in**
+
 1. Clicks "Forgot password?" on signin.html → recovery form appears → **Test:** e2e recovery-429 lockout test + static pin
 2. Submits email → reset link email → **Test:** e2e mocked 429 (no real email)
 3. Clicks link → lands welcome.html → reset panel shows → **Test:** e2e recovery-hash test
@@ -64,6 +67,7 @@ Bug-pattern flags: (1) lockout copy must not decay with remaining time → monot
 5. Signs in with new password → **Test:** existing sign-in path (static pin)
 
 **Failure modes:**
+
 - Recover 429 (email bucket) → email-tier copy + 1h lockout on `#btn-recovery`; sign-in stays usable → **Test:** e2e `test_recover_429_email_bucket_sets_1h_lockout`
 - Sign-in 429 (per-IP) → network copy + 60s lockout on both buttons → **Test:** e2e `test_signin_429_per_ip_short_tier`
 - Recovery link with expired/invalid session → reset form shows; updateUser error → "link expired — request a new one" → **Test:** e2e (mocked 401)
@@ -101,6 +105,7 @@ Bug-pattern flags: (1) lockout copy must not decay with remaining time → monot
 **Acceptance:** `/v1/signup/email` 429 responses carry `detail: {message, error_code}` with the correct mechanism code for both 429 sources; `tests/test_email_signup.py` asserts the codes; docstrings say project-wide.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (email_signup endpoint ~L1808-1860, `_supabase_admin_create_user` ~L1755, `_signup_email_confirm` ~L1743)
 - Test: `tests/test_email_signup.py` (~L167-215)
 
@@ -141,6 +146,7 @@ git commit -m "fix(863): mechanism-accurate 429 pass-through on /v1/signup/email
 **Acceptance:** `signup.html` maps `over_email_send_rate_limit` (+ "email rate limit" msg) to the email-bucket copy and per-IP codes to network copy; the server-429 branch (`outcome === "ratelimited"`) sets a lockout with the tier derived from the API's `error_code` (with string-detail hint-scan fallback); **no intermediate red state on the static suite** (existing pins stay green — see Task 5).
 
 **Files:**
+
 - Modify: `website/signup.html` (~L436-485 humanize, ~L498-580 lockout, ~L715-740 serverSignup, ~L805-815 429 branch)
 - Test: `tests/test_signup_form_safety.py` (pin update, in Task 5's file — see Task 5)
 
@@ -179,6 +185,7 @@ git commit -m "fix(863): mechanism-split 429 copy + tier-aware lockout on server
 **Acceptance:** signin.html has a "Forgot password?" link toggling `#recovery-form` (method=post action=/signin, #527 contract); `resetPasswordForEmail` guarded by the early-return lockout check AND a `recoveryInFlight` double-submit guard (two rapid clicks must not fire two emails against the shared bucket); email-tier lockout disables only `#btn-recovery`; short-tier disables `#btn-submit` and `#btn-recovery`; sign-in 429s set the short tier; keys are `tortoise_signin_rate_limited_until`/`_tier`; countdown + persistence + monotonic tier mirror signup.html; every handler's `finally` re-applies the tier gating (`setLoading(false); applyRateLimitLockout(); if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());` — without it, `setLoading` re-enables buttons mid-lockout).
 
 **Files:**
+
 - Modify: `website/signin.html` (form markup after `#email-form` ~L300; JS: copy split + lockout machinery + recovery handler ~L380-500)
 - Test: `tests/test_signup_form_safety.py` (new pins, Task 5)
 
@@ -214,6 +221,7 @@ git commit -m "fix(863): recovery request-link flow with two-tier lockout + mech
 **Acceptance:** welcome.html snapshots `type=recovery` from the hash before client init; a shared `recoveryMode` flag is set by BOTH triggers (hash snapshot AND `PASSWORD_RECOVERY` event — the event handler must also prevent provisioning, not just show the panel); recovery mode SHORT-CIRCUITS `waitForProvisioning()` (a valid recovery link establishes a real session → SIGNED_IN → without this, the provisioning pipeline would run the membership poll, mint a team and reveal an API key mid-password-reset — a real production side effect); the PASSWORD_RECOVERY listener is its own `onAuthStateChange` subscription (NOT inside `waitForSession`, which unsubscribes on settle); `updateUser({password})` success → "Password updated — sign in with your new password" + link to /signin.html; errors render in panel-local `#reset-error` (never the page-level showError/showSuccess); static pin added.
 
 **Files:**
+
 - Modify: `website/welcome.html` (markup + script)
 - Test: `tests/test_signup_form_safety.py` (new pins, Task 5)
 
@@ -249,6 +257,7 @@ git commit -m "fix(863): reset-password landing on recovery links (welcome.html)
 **Acceptance:** `tests/test_signup_form_safety.py` passes on the new code: both pages contain BOTH copy literals; signin has recovery+lockout pins; welcome has reset-panel pins; node --check gate green.
 
 **Files:**
+
 - Modify: `tests/test_signup_form_safety.py`
 - Test: `tests/test_signup_form_safety.py` itself
 
@@ -282,6 +291,7 @@ git commit -m "test(863): pins updated to mechanism-split 429 copy + recovery-fl
 **Acceptance:** `test_signup_form_safety_e2e.py` passes under `RUN_LEGAL_E2E=1`: updated email-bucket copy assertion; new recover-429 1h-tier test (incl. double-submit guard); new signin per-IP short-tier test; new recovery-hash reset-panel test (incl. provisioning short-circuit); new expired-link 401 test.
 
 **Files:**
+
 - Modify: `tests/e2e/test_signup_form_safety_e2e.py`
 - Test: same file (gated)
 
@@ -317,6 +327,7 @@ git commit -m "test(863): e2e assertions updated to mechanism-split copy + recov
 **Acceptance:** Full relevant test suite passes; scope comment + plan comment posted on #863; extra issues filed (email-change surface, server abuse posture); labels: scoping/planning removed, scoped/planned added (implementing stays through delivery).
 
 **Files:**
+
 - Create: this plan doc (done)
 - Test: full run
 

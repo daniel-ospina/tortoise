@@ -19,6 +19,7 @@ LLMs exhibit **extreme recency bias** in sequential tasks. They match a theoreti
 ### Graph-As-Memory Experimental Design ⚠️ single-source
 
 Standard pattern for KG memory experiments:
+
 1. Both arms process the same documents
 2. Control: within-context-window only (must summarize or lose state)
 3. Treatment: external memory tool (read-write, persist + retrieve)
@@ -28,6 +29,7 @@ Standard pattern for KG memory experiments:
 ### Graph Similarity Metrics ⚠️ medium (2 sources)
 
 For comparing agent graphs to reference graphs:
+
 - **Node overlap:** Jaccard on entity sets — simple, interpretable
 - **Edge overlap:** Jaccard on relationship pairs — captures structure
 - **Embedding similarity:** EmbPairSim — top-performing but complex

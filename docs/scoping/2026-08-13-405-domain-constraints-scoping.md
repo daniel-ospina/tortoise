@@ -27,6 +27,7 @@ ownedBy: epistemic-team
 **The commit path cannot enforce graph-global rules.** `commit_schema.validate_layer1(payload, vocab)` is pure payload-local schema conformance (caps, closed vocab, referential integrity, atomicity, MITIGATES shape) with **no graph state** — a useCase's JTBD parent may have been committed in an earlier payload. Per the research brief (three-gates principle: *"cheapest check at earliest gate with enough information"*; SHACL: definition separated from enforcement, warnings don't block unless mandatory, persist-and-flag is a valid state; mammoth-transaction caution → warn-only in commit path): **write-time enforcement splits** — payload-local rules at commit (Phase A warn; Phase B block only for a small deterministic set), graph-global rules where graph state exists (CLI + MCP).
 
 **What remains (the 3 bullets, confirmed against code):**
+
 1. Constraint-registration API on `domain_loader` — does not exist (kind adapter only: `known_kinds`/`register_kind`/`domain_kinds`).
 2. Write-time enforcement in commit path — `validate_payload_dict` (commit_schema.py:585) is the chokepoint but has **zero production call sites** (tests only; commit endpoint unmerged, slice-5 worktree) → greenfield wiring.
 3. `tortoise validate --domain <slug>` CLI — no `validate` subcommand in `__main__.py` (name free; `verify`/`check-consistency` are unrelated).
@@ -40,11 +41,13 @@ ownedBy: epistemic-team
 ## Verification Gates
 
 ### problem-verify (2 parallel verifiers, fresh context)
+
 - **Cycle 1:** First dispatch FAILED at infrastructure (sub-agent startup: API-key blocked, no verdict). Re-dispatched once with default model.
 - **Verdict: PASS (conditional)** — P1s: (a) `check_structure` is **in-repo** (sdk.py:1813), not external-hosted — root cause re-stated as definition-divergence (fixed); (b) enforcement vocabulary is **warn/retry/block** with existing resolver, not warn/error (fixed); (c) O/I write-time split must be an explicit user decision, not silent (→ Clarifications); (d) payload-local commit hook is thin but worth keeping (fixed scope). P2+: commit hook not deferrable (greenfield, slice-5 unmerged — kept); `warnings[]` channel needed (added); multi-domain attribution precondition (added); single-chain vs all-chains scope (added); check_structure covers more than chain steps (added).
 - **Controller tiebreaker:** verified both P1 factual claims directly in repo (sdk.py:1813; pack_registry.py:102,249) — confirmed.
 
 ### solution-verify (2 parallel verifiers, fresh context)
+
 - **Verdict: FAIL → controller tiebreaker re-converged.** P0/P1s (all fixed inline):
   - Generic manifest-driven chain-runner **cannot express the actual rules** — check_structure has 5 heterogeneous rule types (operator-anchored orphan, property-ref dangling ×3, status check); JTBD is outside the manifest chain; 3 of 5 consecutive chain pairs have **no declared edge mechanism** in the manifest (feature→userJourney, userJourney→workflow, workflow→requirement); leapfrog-as-defined false-positives on legitimate back-refs (`userJourney.covered_use_cases → useCase`). → **Generic runner shelved**; registration-only, issue-conformant shape selected; leapfrog lives inside the validator as a forward-only rule.
   - Phase B deterministic payload-local set near-empty; no production chain is `block` → Phase B wired + tested with synthetic block rule, documented inactive in prod; graph-wide orphan stays CLI/MCP.
@@ -55,6 +58,7 @@ ownedBy: epistemic-team
 - **P2/P3 incorporated:** wrapper-equivalence test, false-positive budget vs check_structure, perf budget, back-edge exclusion, idempotent re-commit stability, `--json` contract, hosted-mode out of scope, per-domain drift scoping.
 
 ### Coherence gate
+
 - `[QWEN-GATE] substitute reviewer used` — qwen3.8-max coherence review BLOCKED (time-critical streamlined mode, 3rd attempt). Substituted by the two solution-verify verifiers, which exercised cross-cutting coherence (idempotency, hosted mode, drift, performance, contract collisions). Residual coherence risk documented in Open Questions.
 
 ---
@@ -87,6 +91,7 @@ ownedBy: epistemic-team
 - **AC:** exit-code tests (0/1/2/3); `--json` output contract; unknown domain → exit 2; drift warning on missing validator; MCP tool registered; runs against live graph.
 
 ### Cross-cutting
+
 - JTBD canonical-chain decision gates rule behavior (see Clarifications).
 - Out of scope (documented): dev (`epicToCode`) / marketing (`campaignToChannel`) chain registrations (mechanism ready, registration deferred); hosted REST surface; generic declarative chain-runner (follow-up when manifest gains per-pair edge specs); rules DSL.
 

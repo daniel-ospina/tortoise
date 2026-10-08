@@ -84,16 +84,19 @@
 ## Tasks
 
 ### T1 — `packs/agent-ops/manifest.yaml` (new)
+
 Per D1. Validate: `PackRegistry(default_packs_dir()).load_all()` → 5 packs,
 `registry.errors` empty for agent-ops; `enforcement_for("rule") == "retry"`;
 `relation_is_extractable(groundedIn)` true; `domain_chain_spec("agent-ops")
 ["ruleLifecycle"]["enforcement"] == "warn"`.
 
 ### T2 — `tortoise/pack_state.py`
+
 `DEFAULT_STARTER_PACKS = ("dev", "marketing", "product-strategy", "pm", "agent-ops")`
 (comment updated). R8 convergence is automatic (idempotent additive MERGE).
 
 ### T3 — `tortoise/extractor_v2.py`
+
 - `PACK_NS` += `"agent-ops:"`.
 - `_PACK_TRIGGERS` += `"agent-ops:"` with LOW-NOISE triggers (plan-verify
   P2-2: avoid the bare "rule"/"rules" substrings that match "scheduled",
@@ -105,6 +108,7 @@ Per D1. Validate: `PackRegistry(default_packs_dir()).load_all()` → 5 packs,
   exists, incl. the S5-failure branch).
 
 ### T4 — `tortoise/commit_schema.py` (P0 fix)
+
 - `Vocab` gains `event_kinds: frozenset[str]`; `compile_vocab` compiles
   bare + `ns:kind` forms of each pack's `event_kinds` (union with the
   canonical `EVENT_KINDS`); `validate_layer1`'s event-kind check uses
@@ -113,6 +117,7 @@ Per D1. Validate: `PackRegistry(default_packs_dir()).load_all()` → 5 packs,
 - Keep the hardcoded `EVENT_KINDS` constant as the canonical-core base.
 
 ### T5 — Fixtures (new `tests/fixtures/expansion-epic/`)
+
 - `rules_with_why.txt` — a session where the agent states a rule WITH
   reasoning ("destructive actions require a verbal token acknowledgement
   because a prior incident of unacknowledged destructive action caused
@@ -122,10 +127,12 @@ Per D1. Validate: `PackRegistry(default_packs_dir()).load_all()` → 5 packs,
   `standard` (a "standard operating procedure" phrasing; #1934 consumer).
 
 ### T6 — `tests/test_agent_ops_pack.py` (new; core surface)
+
 Offline MockModel (existing precedent), docker lane. Helpers: fixture→EDU
 conversion, a 3-response MockModel (S1 story / S2 embed list / S4 same list
 no-op merge), commit via the test_commit_endpoint client pattern
 (patched TortoiseSDK init → temp DB).
+
 - `test_happy_path_mining_mints_rule_rationale_impl`: mock embed list =
   rule entity (agent-ops:rule) + ruleRevised event + rationale point with
   **pointKind "agent-ops:rationale"** (pre-repair; committed as statement)
@@ -148,7 +155,9 @@ no-op merge), commit via the test_commit_endpoint client pattern
   `enforcement_for("rule") == "retry"` (E2E-5 forward contract).
 
 ### T7 — `tests/test_agent_ops_supersede.py` (new; core surface)
+
 SDK-level (no HTTP):
+
 - `test_supersede_ep_cascade_retains_argument_tree`: rule point
   (statement) + rationale point (kind "rationale") + IMPL
   (direction="unidirectional") + baselines (rationale Beta(8,2), rule
@@ -163,6 +172,7 @@ SDK-level (no HTTP):
   does NOT include the new rule id (control).
 
 ### T8 — `tests/test_pack_state.py` (add upgrade-convergence)
+
 `test_old_4pack_tenant_converges_to_agent_ops_after_upgrade`:
 `monkeypatch.delenv("TORTOISE_STARTER_PACKS")`; ensure with the old 4-name
 starter → 4 installs; ensure with the new default → 5 installs incl.
@@ -171,10 +181,12 @@ agent-ops, no duplicates (idempotent MERGE). Plus assert
 agent-ops (the existing helper self-adapts — check it still passes).
 
 ### T9 — `config/ci-surfaces.yml`
+
 Register `test_agent_ops_pack.py` + `test_agent_ops_supersede.py` under
 `core:` (alphabetical). Run `uv run python tools/ci_selection.py --integrity`.
 
 ## Verification
+
 1. Docker lane: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`
    → run test_agent_ops_pack.py, test_agent_ops_supersede.py,
    test_pack_state.py, test_commit_schema.py, test_commit_endpoint.py,

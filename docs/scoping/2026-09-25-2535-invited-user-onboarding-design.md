@@ -244,6 +244,7 @@ join gates), #3913 (build-fork completion — not used here).
 **Related already-open issues:** #2427, #2446, #4628, #4637, #3729, #2366/#2307, #5254.
 
 **What could not be verified:**
+
 - **No test could be run: the local FalkorDB (OrbStack) is wedged** — DB-backed `pytest` fails with
   `redis.exceptions.TimeoutError` and `docker ps` hangs. All claims here are **static** (source
   read); the invite-link org-selection defect is reasoned from code, not reproduced in a browser.

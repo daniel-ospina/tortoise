@@ -5,6 +5,7 @@
 **Exit gate:** E2E-4 (minted-cannot-half), E2E-9, E2E-12 — both control-plane modes
 
 ## Scope (IN)
+
 1. **Mint** — extend the existing `POST /v1/team/keys` (create_api_key) to accept `{graph_id?, scopes?, name?}` and mint SCOPED keys (owner-class deleg NULL when session/owner-key caller; delegation stamping matrix D13). Graph-bound (graph_id set → tk_ + namespace-bound) or team-wide (graph_id absent → default graph).
 2. **List** — `GET /v1/team/keys` already returns keys; ADD `graph_id`/`delegation_depth`/`scopes`/`created_by_key_id` fields to the response rows (additive, both lanes) + optional `?graph_id=` filter (surface 12 API-side).
 3. **Shrink** — `PATCH /v1/team/keys/{key_id}` scope-shrink: subset the scopes allowlist (write→read); expand-attempt (superset) → 422. Must NOT collide with the existing `toggle_api_key_enabled` PATCH (that's enable/disable+rename on the same path — C3 co-locates: the existing PATCH handles `{enabled?, name?}`; C3's shrink handles `{scopes?}`; a body with scopes routes to shrink logic).
@@ -13,6 +14,7 @@
 6. **Delegation** — key-minted keys (caller is a key) stamped deleg=0 + created_by_key_id (D13 matrix); session-minted keys deleg NULL.
 
 ## Decisions
+
 - **D13 — mint delegation matrix (resolves the epic §5.4/J2 "keys:manage mints children" ambiguity for THIS codebase):**
   - **Session caller** (any member — D12 parity, no epic tightening) → minted key **deleg NULL** (owner class), scopes = requested ∩ full allowlist {graphs:read, graphs:write, graphs:create, graphs:delete, team:manage, keys:manage}; escalation scopes ALLOWED (owner mint).
   - **Legacy full-access key caller** (deleg NULL, scopes=[] — C1 legacy_full_access=True, the OWNER class) → minted key **deleg NULL** (owner class), any allowlisted scopes. Back-compat: C1/E2E-5 treats legacy keys as owners (legacy_full_access); an owner minting an owner key is normal J2 rotation — one-level-deep protects against a compromised SCOPED key, not the owner class (a compromised owner key can already do anything). No in-repo consumer key-mints via REST today (dashboard=session, CLI=SDK-direct), so this is behavior-preserving for the suite.
@@ -26,6 +28,7 @@
 - **D18 — E2E-12's create-without-delete** needs an owner-session minted scoped key with `graphs:create` only. C3's session mint path produces it; delete-graph's 403 for missing graphs:delete is ALREADY the C2 behavior (scope check in delete_graph) — C3 only asserts it end-to-end.
 
 ## Existing-surface map (verified on main a1188856)
+
 | Endpoint | Current | C3 delta |
 |---|---|---|
 | POST /v1/team/keys (create_api_key :4625) | tt_ owner mint, {name?}, deleg-NULL caller any-team-key, 402 key-cap via _check_team_limit, deleg-0 caller gate (C2) | body {graph_id?, scopes?, name?}; D13 matrix; scoped→tk_; scoped-mint cap → 409 _KeyCapExceeded; key-caller mint → deleg=0 child + created_by_key_id |
@@ -36,6 +39,7 @@
 | _check_team_limit(api_keys) 402 | legacy owner mint cap | UNCHANGED (D3 asymmetry — legacy 402, scoped 409; documented) |
 
 ## Tasks
+
 1. **Low-level mint refactor** `_mint_key` (registry + Supabase lanes): params {org_id, graph_id=None, scopes=None (already child-policy-filtered or full-allowlist per caller class), delegation_depth=None, caller_key_id=None, session_user_id=None, prefix auto (tk_ when scopes or graph_id, else tt_)}; max_api_keys pre-check → `_KeyCapExceeded`; hash-only; reveal-once; created_by = session_user_id or "api"; created_by_key_id + delegation_depth stamped when key-minted; analytics `api_key_created` + `_abuse_evaluate_keys` stay at the endpoint (not in the low-level writer — C2's provisioning endpoints fire them). `_mint_graph_key` becomes a thin wrapper passing graph_id + deleg=0 + child-policy-filtered scopes. Regression: C2's provisioning tests unchanged (envelope id == node id; plaintext verifies).
 2. **create_api_key extension** (D13): parse {graph_id?, scopes?, name?}; caller-class resolution (session vs key vs deleg); scope validation against the allowlist (invalid → 422); escalation-on-key-mint → 403; graph_id existence check → 404; mint via `_mint_key`; response unchanged for {} bodies, extended for scoped mints (returns {id, key, key_prefix, created_at, name, scopes, graph_id, delegation_depth}).
 3. **List enrichment** (D17): both lanes' row mapping + graph_id query filter.
@@ -44,6 +48,7 @@
 6. **Sweep** — ruff, py_compile, carve-out + docker-lane touched files, markers routing if a new test file lands in ROUTED_NAMESPACES.
 
 ## Risks
+
 | # | Risk | Mitigation |
 |---|---|---|
 | R1 | toggle PATCH semantic collision ({scopes} vs {enabled,name}) | Co-located single endpoint; body-key dispatch; existing toggle tests unchanged; new shrink tests target {scopes} only |

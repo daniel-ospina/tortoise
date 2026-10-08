@@ -62,6 +62,7 @@ Two systems, one profile. Per the skill's multi-product rule, each dimension use
 **Research system + OSS library.** Microsoft's own framing: a "modular graph-based Retrieval-Augmented Generation (RAG) system" ([repo description](https://github.com/microsoft/graphrag) — retrieved 2026-09-11) and a "research project." Ships as a Python package (`pip install graphrag`) + CLI (`graphrag index`, `graphrag query`).
 
 **Commercial surface:** no separate paid GraphRAG product. It is distributed through Azure:
+
 - **Microsoft Discovery** — GraphRAG and LazyGraphRAG "are now available through Microsoft Discovery" ([MSR project page](https://www.microsoft.com/en-us/research/project/graphrag/) — retrieved 2026-09-11); editor's note on the LazyGraphRAG blog also names **Azure Local** public preview (June 6, 2025 note).
 - **Azure AI Search** — GraphRAG 1.0's supported vector stores include LanceDB and Azure AI Search ([MSR blog, "Moving to GraphRAG 1.0"](https://www.microsoft.com/en-us/research/blog/moving-to-graphrag-1-0-streamlining-ergonomics-for-developers-and-users/) — retrieved 2026-09-11). GraphRAG local search depends on a vector store (e.g. Azure AI Search) to find seed entities ([discussion #905](https://github.com/microsoft/graphrag/discussions/905)).
 - **Azure-Samples/graphrag-accelerator** — "one-click deploy" sample, MIT, 2,408 stars — ⚠️ **archived**, last pushed 2025-05-27.
@@ -135,6 +136,7 @@ Two systems, one profile. Per the skill's multi-product rule, each dimension use
 **Revenue model:** indirect — Microsoft product surface (Azure/Microsoft Discovery). The library itself is free.
 
 **Cost signals (Microsoft's own numbers):**
+
 - **LazyGraphRAG blog** (MSR, 2024-11-25): "LazyGraphRAG data indexing costs are identical to vector RAG and **0.1% of the costs of full GraphRAG**"; a LazyGraphRAG config "shows comparable answer quality to GraphRAG Global Search for global queries, but **more than 700 times lower query cost**"; and "For **4% of the query cost** of GraphRAG global search, LazyGraphRAG significantly outperforms all competing methods." ([source](https://www.microsoft.com/en-us/research/blog/lazygraphrag-setting-a-new-standard-for-quality-and-cost/) — retrieved 2026-09-11)
   - Implication stated plainly by Microsoft: **full GraphRAG indexing ≈ 1,000× vector-RAG indexing cost.**
 - **Microsoft's own cost explainer:** "GraphRAG costs explained — what you need to know" ([Azure AI Foundry blog](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/graphrag-costs-explained-what-you-need-to-know/4207978) — retrieved 2026-09-11) frames cost benchmarking as the reason the accelerator exists.
@@ -208,6 +210,7 @@ Entities carry optional attribute columns (auto-discovered from `entity.attribut
 **Index build.** Chunk → LLM extracts entities + relationships (`Recog`); then an LLM **profiling** function (`Prof`) generates a text key-value pair per node and edge — "Each index key is a word or short phrase that enables efficient retrieval, while the corresponding value is a text paragraph summarizing relevant snippets." **Entities use their name as the sole index key; relations get multiple LLM-generated keys including global themes from connected entities.** Then `Dedupe` merges identical entities/relations across chunks.
 
 **Query-time selection:**
+
 1. **One keyword-extraction LLM call per query.** The `keywords_extraction` prompt returns both `high_level_keywords` (overarching concepts/themes) and `low_level_keywords` (specific entities/attributes). Code path: `hl_keywords, ll_keywords = await get_keywords_from_query(...)`.
 2. **Two vector recall surfaces:**
    - **Low-level** → low-level keywords matched against **entity** vectors/keyed profiles → matched entities + their attributes + **1-hop neighbors** (`N_v` neighbors of retrieved nodes, `N_e` neighbors of retrieved edges — the paper's `{v_i | v_i ∈ V ∧ (v_i ∈ N_v ∨ v_i ∈ N_e)}`).
@@ -223,16 +226,22 @@ Knowledge Graph Data (Entity):
 ```json
 {"entity_name": ..., ...}      ← one JSON object per line
 ```
+
 Knowledge Graph Data (Relationship):
+
 ```json
 {"src_id":..., "tgt_id":..., ...}   ← one JSON object per line
 ```
+
 Document Chunks (Each entry has a reference_id …):
+
 ```json
 {"reference_id":..., "content":..., "content_headings":...}
 ```
+
 Reference Document List:
 [n] <file_path>
+
 ```
 
 Records are emitted with `json.dumps(entity)` per line. Entities carry `entity_name`, `source_id` (contributing chunk ids), `created_at`; relations carry endpoints, keywords, weight/rank, and `source_id`. The answer prompt requires a `### References` section citing `[n] Document Title` (max 5).

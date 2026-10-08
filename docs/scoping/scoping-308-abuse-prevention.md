@@ -428,23 +428,27 @@ Follow-up (solution-verify P4): verify `TORTOISE_AUDIT_DSN` in `fly secrets list
 ## Phase 5.5 — solution-verify cycle log
 
 ### Cycle 1
+
 - Verifier A: P0=0, P1=3, P2=1, P3=4, P4=2. Verifier B: timed out (no output) → re-dispatch.
 - Controller action: FIXED all three P1s (design deltas 8–10 above) + P2 (delta 11) + P3 items (delta 12, Pages env mechanism corrected, wiring row added, stale line refs superseded by deltas, C-index claim noted); P4 DSN follow-up recorded.
 - Cycle 2: both verifiers re-dispatched against the corrected plan.
 
 ### Cycle 2
+
 - Verifier A (re-run): cycle-1 P1s confirmed fixed; NEW P1 (R1 bypass via `tortoise_ingest` bulk tool) + P2 (R3 write-set complement wrong — `ingest` wrapped but absent from `_QUOTA_GATED`) + P3 (R4 must run on cache-hit path too).
 - Verifier B (fresh): P1 (two-window staging semantics undefined — the load-bearing false-positive guarantee), P1 (delta 12/AC7 contradiction: revoke unreachable via API-key auth while suspended), P2 (cache-bust mechanism unspecified), P2 (sequential-rotation residual unstated), P3/P4 nits.
 - Controller action: FIXED — delta 8 (ingest weighting), delta 10 (every-request geo), delta 11 (explicit write set), delta 12 rewrite (revoke moot mid-suspension; banner from 403; alerts session-authed), delta 13 (staging semantics pinned), delta 14 (pre-cache suspended-set mechanism); AC1/AC3/AC7 rewritten; residuals + trigger test notes added.
 - Cycle 3: focused confirmation pass with both verifiers.
 
 ### Cycle 3
+
 - Verifier A: cycle-2 items 1–3 confirmed fixed; NEW P1 — R1 boundary by tool name misses other Point-creating tools (`checkpoint` unbounded items, `file_decision` N-per-call, `file_human_approval`, `diary_write`, REST `capture_session`).
 - Verifier B: cycle-2 items 1/2/4 confirmed fixed; NEW P1 — pre-cache suspended set without eviction contradicts AC8 (un-suspend could never restore access).
 - Controller action: FIXED — delta 8 rewritten (boundary = actual Point creation, weighted per seam, introspective membership test), delta 14 rewritten (set = cache-invalidation signal only; durable `suspended_at` is the sole authority; entry cleared on fresh resolution with NULL), AC1/AC8 updated.
 - Cycle 4: final confirmation pass.
 
 ### Cycle 4
+
 - Verifier A: NO ISSUES FOUND (delta 8 boundary fix verified against code; only a hypothetical P3 REST-introspection residual, incorporated as implementation note).
 - Verifier B: NO ISSUES FOUND (delta 14 signal semantics verified structurally sound; immediacy holds under the documented single-worker premise; multi-worker scale-out noted as documented future risk).
 - **GATE PASSED** — 4 cycles, P0 total: 0. All P1s fixed and re-verified.

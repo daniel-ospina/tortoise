@@ -1500,6 +1500,7 @@ is the internal seam the 17 tests already pinned; the surface is the agent-facin
    **re-run at the new head SHA**. A certificate is never inherited across a head change.
 2. **Declared mutation operator; statement deletion is REQUIRED.** `at_fixed_commit.mutation_operator` names
 the operator and its target (e.g. `statement-deletion:sdk.py:13239-13245`). `closes_issue()` (D9 conjunct
+
 11) accepts the mutation disjunct **only** when the operator starts with `statement-deletion:` **and** the
 target is the fix's **own population/edit branch** (never a test, never an unrelated helper). A
 rate-change-only disjunct still requires a declared `surface` (D23).
@@ -1554,6 +1555,7 @@ record (C18), and a wrong env lane settles `lane-red`; `tools/lane_contract.py` 
 vocabulary + child-env registry, read by all four consumers (M24); `"os.environ" not in code` still holds.
 
 **Files:**
+
 - Modify: `tools/testdb_canary_classify.py` (`classify()` at `:267`; gate at `:286–296`;
   **`main()` CLI + the `classify(...)` call at `:409`** — M6)
 - Modify: `tests/test_canary_classify.py` (16 call sites at `:82,92,108,124,146,160,175,188,199,214,222,239,250,262,273,284`)
@@ -1672,6 +1674,7 @@ it (M11/M12); a cross-writer test validates a docker record and an embedded reco
 required/forbidden subsets; `canary_dropped` never appears in an embedded record.
 
 **Files:**
+
 - Modify: `tools/testdb_canary_classify.py` (`_settle` at `:356`, `_write_atomic` at `:384`,
   `_load_prev_streak` at `:95–111` — M25)
 - Modify: `tests/test_canary_classify.py` (new tests)
@@ -1763,6 +1766,7 @@ file is a real `tests/` module and a member of a registered surface; the deliber
 stays `[]`.
 
 **Files:**
+
 - Modify: `config/ci-surfaces.yml` (new top-level key after `carve_out:` / before `durations:` at `:894`)
 - Modify: `tests/test_ci_selection.py`
 
@@ -1815,6 +1819,7 @@ closed set is `unexpected-bucket`; `exit_code()` implements 2→1→3→0 and it
 `uv run python tools/embedded_evidence.py run|red` (no `[project.scripts]`).
 
 **Files:**
+
 - Create: `tools/embedded_evidence.py`
 - Create: `tests/test_embedded_evidence.py`
 
@@ -2174,6 +2179,7 @@ namespaced streak path, the self-contained
 hermeticity computable (F24).
 **Acceptance:** the D9 truth table (green-only → false; + valid paired red → true; + `carve-out` red →
 false; + non-overlapping bands → false; + `unattributed` cause → false; + wrong file list → false;
+
 + `historical-attestation` role → false; **+ empty `runs[]` → false** (M3); **+ all-skipped junitxml → not
 green, false, exit 1** (M2); + `slow-run` advances the streak — M12; + wrong env lane → false (C18)); a
 **fail-closed pre-flight load ceiling** refuses above it; per-run load bands are recorded and the two halves
@@ -2239,6 +2245,7 @@ AOF dimension is asserted — a lane site with
 `auto-aof-rewrite` is a **test failure** (M9); (iv) a mutation flips one site and the tripwire fires;
 (v) no `xfail`/`skip`.
 **Files:**
+
 - Create: `tests/test_embedded_save_tripwire.py`
 - (registration in task 12)
 
@@ -2282,6 +2289,7 @@ are pinned (M10); the runner consumes `lane_contract.CHILD_LANE_VARS` (M24), who
 `tests/test_tripwire.py` — the **seventh** `tests/` path (C11).
 
 **Files:**
+
 - Modify: `config/ci-surfaces.yml` (`core:` add 2 names; `carve_out:` add 2 names)
 - Modify: `tests/_embedded.py` (`TEST_NO_REDIRECT_STEMS`)
 - Modify: `tests/test_markers.py` (the `expected` frozenset at `:411`)
@@ -2387,11 +2395,13 @@ PR body states the split and that #3827 is **not** closed.
 
 **Files:** none — this is an evidence run + the PR body (the Step-4 test is authored in Task 10).
 **Step 1 — the family RED run (recorded, ~2–5 min/run):**
+
 ```bash
 env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 \
   uv run python tools/embedded_evidence.py run --selection family --n 3 --ref 37d5ef00c \
   --record-out /tmp/3827-red-half.json
 ```
+
 (`--ref` pins the measured commit so the recorded `reproduce` string is self-contained — M28. No
 `--load-ceiling` is passed: the recorded default `DEFAULT_LOAD_CEILING = 60.0` admits this host’s 38–49
 regime as band `L-C`; M4.)
@@ -2728,6 +2738,7 @@ reopened. Full record: `~/.pi/agent/state/lane-reports/W0-3827-RESEARCH-VERDICT-
   post-review edit (D24/Task 16).
 
 **The three mandated plan changes, applied here:**
+
 1. **Per-item traceability matrix** — every declared class row carries a resolving test-ID or is a **named
    residual**; the residual list states **which classes** it counted (`zero-nodeid-manifest`,
    `mutation-disjunct`, `self-declared-ref-role`, `inconclusive-census`). The bare `covered=9` is replaced

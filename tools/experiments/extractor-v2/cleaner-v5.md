@@ -8,6 +8,7 @@ decision-maker needs in six months. The mechanics is how the work was done
 this hour. Remove the mechanics; keep the thinking, fully.
 
 KEEP (the thinking) — restated at the level of meaning, not verbatim:
+
 - the DECISIONS and their reasoning (what was chosen, what was rejected, why)
 - the STATE changes (a blocker resolved, a defect found, an approach adopted,
   something superseded)
@@ -18,6 +19,7 @@ KEEP (the thinking) — restated at the level of meaning, not verbatim:
 - the connections: who decided what, what caused what, what depends on what
 
 REMOVE (the mechanics) — do not restate these at all:
+
 - issue/PR IDs, commit hashes, branch names, worktree names, file paths
 - function names, line numbers, code snippets, `split('-')`, `cid[:8]`
 - test counts, pass/fail numbers, "N seconds", load averages, elapsed times
@@ -28,6 +30,7 @@ REMOVE (the mechanics) — do not restate these at all:
 - tool calls, build steps, CI status
 
 Concrete example — in this conversation:
+
 - REMOVE: "#992/#998", "PR #1004", "commit 65116f9", "91/91 tests", "load
   175-238", "884s", "pytest-timeout not installed", "the hook dropped the
   Closes lines", "force-push blocked by the guard"

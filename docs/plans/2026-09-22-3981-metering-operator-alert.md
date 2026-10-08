@@ -53,6 +53,7 @@ from the suite-wide `conftest.py`, so it is NOT dependency-free — the field is
 | 10 | `backup_config.load_alert_config` / `_analytics_alert_store` D5a docstrings | Docs (in-code) | Internal | Review | build chain + seam map name the new builder | stale chain reference (must be updated in this PR) |
 
 ### Bug Pattern Flags
+
 - **Race conditions** (surface 6): throttle/latch mutated from caller and pool threads → one
   `threading.Lock`; state written only by the attempt that owns the in-flight token; the admission
   reservation is taken and released under that same lock, so the shed decision is **atomic with**
@@ -139,6 +140,7 @@ is the single ungated builder and `_analytics_alert_store`/`cohort_cost._alert_s
 
 **Depends on:** —
 **Files:**
+
 - Create: `tortoise/operator_alert.py`
 - Modify: `tortoise/hosted_api.py` (add `_incident_alert_store`; make `_analytics_alert_store` delegate)
 - Modify: `tortoise/cohort_cost.py` (`_alert_store` delegates)
@@ -149,6 +151,7 @@ before every assertion on the fake — the dispatch is asynchronous; without the
 flaky under load**); `store is None` → no filing, no raise, stays throttled; store raising → no raise;
 `FILED`/`DEDUP` arm the long window, `SUPPRESSED`/failure the short one; in-flight latch self-heals
 after `_INFLIGHT_STALE_S`;
+
 - `test_a_stale_worker_cannot_own_the_state` (**the M4 target**): gate attempt #1 in an Event-blocked
   fake store; monkeypatch `_INFLIGHT_STALE_S` AND `_RETRY_WINDOW_S` small (aging only the latch leaves
   attempt #1's provisional `_ATTEMPT` entry throttling the key for the full default 60 s, so #2 would
@@ -582,6 +585,7 @@ def reset_operator_alert_state_for_tests() -> None:
 
 **Depends on:** Task 1
 **Files:**
+
 - Modify: `tortoise/metering.py` (`report_unmetered_increment`, ~:364-392)
 - Modify: `tortoise/hosted_api.py` — `_alert_unmetered` (`:4559-4578`) has an import-guard fallback that
   logs `"UNMETERED INCREMENT (#3981)…"` directly and returns when
@@ -639,6 +643,7 @@ message-free rule); the pre-spend gate raises nothing new.
 
 **Depends on:** Task 1
 **Files:**
+
 - Modify: `tortoise/cohort_cost.py` (add `UNENFORCEABLE_INCIDENT_KIND`, wire `report_unenforceable_cap`)
 - Test: `tests/test_cohort_cost_cap.py`
 
@@ -664,6 +669,7 @@ fixture reds (cross-test throttle leak + real store construction).
 **Depends on:** Task 1 (the fixture imports `tortoise.operator_alert`; a missing module would red the
 ENTIRE suite at fixture setup)
 **Files:**
+
 - Modify: `tests/conftest.py` (next to `_analytics_alert_isolation`, ~:1065)
 
 ```python
@@ -726,6 +732,7 @@ surface; the delete-object procedure is the minimal correct one and is what the 
 
 **Depends on:** —
 **Files:**
+
 - Modify: `docs/ops/registry-backup-dr.md` (§Alert taxonomy + triage, ~:445-465)
 
 ---
@@ -738,10 +745,12 @@ GitHub issue titled `[DR] UNMETERED_INCREMENT — <org>` + Telegram.
 
 **Depends on:** Tasks 2, 3
 **Files:**
+
 - Modify: `tests/test_metering_window_admission.py`
 - Modify: `tests/test_cohort_cost_cap.py`
 
 `tests/test_metering_window_admission.py`:
+
 - Make `_unmetered_lanes` robust **without** a logger-name filter (a name filter would blind it to
   `ask_lane`): keep the message predicate and skip records lacking a `lane=` token, so a future record
   containing the marker without a lane cannot `IndexError`.
@@ -760,6 +769,7 @@ GitHub issue titled `[DR] UNMETERED_INCREMENT — <org>` + Telegram.
   `_`-suffixed title (which AlertStore never renders).
 
 `tests/test_cohort_cost_cap.py`:
+
 - `incidents` fixture: patch `operator_alert.alert_store` → the real store (replacing the
   `_cc._alert_store` patch, since `_cc._alert_store` now delegates to it). One seam covers cap firing
   and the unenforceable alert.
@@ -791,6 +801,7 @@ GitHub issue titled `[DR] UNMETERED_INCREMENT — <org>` + Telegram.
 ### Task 7: file the extra issues (no code; each must produce a live issue number verified in Task 8)
 
 **Depends on:** —
+
 - **PRE-EXISTING BUG (file, do not fix here — #3820 D5a class):** `hosted_api.backups_rebaseline`
   (`~:25084`) does `_alert_store_from(_backup_config_safe())`; `_backup_config_safe()` returns `None`
   whenever `BACKUP_SWEEP_ENABLED` is off (the production default), and `_alert_store_from` dereferences

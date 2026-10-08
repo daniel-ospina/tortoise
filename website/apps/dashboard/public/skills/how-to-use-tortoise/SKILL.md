@@ -49,6 +49,7 @@ The write operations appear once in this skill (by operation name). Invoke them 
 ## Hard Gate
 
 **Any graph write** (create_point, create_operator, mitigate_operator, supersede_point, delete_point, annotate_point, invalidate_point) **MUST** go through this skill. Bypassing it risks:
+
 - EP weights nuked by batch-connected mitigations
 - Orphaned NAND edges with no cleanup
 - Superseded operators with active edges still propagating
@@ -155,6 +156,7 @@ A decision's criteria shouldn't float. They should trace back to who needs them 
 Each link is an IMPL connection. The specific pointKinds in the chain depend on the expansion packs loaded. Load the packs, check their registered kinds and relations, and wire the chain accordingly.
 
 The chain is auditable in both directions:
+
 - **Downward:** "which customer need does this criterion serve?" → traverse IMPL up
 - **Upward:** "which decisions does this requirement drive?" → traverse IMPL down
 
@@ -163,6 +165,7 @@ An agent auditing an ADR can walk the full chain: understand not just what was d
 ## Supersession
 
 When superseding a point:
+
 1. Create the new point with updated content
 2. Call `supersede_point(old_id, new_id)` — this cleans up edges (hosted: `tortoise_supersede`; self-hosted: `sdk.supersede_point`)
 3. Verify old point's edges are properly transferred
@@ -281,6 +284,7 @@ for pid, confidence in ranked:
 ## Link-Before-Create Rule
 
 Before creating a new evidence point, search whether it already exists:
+
 - Use `tortoise_search` with the evidence claim as query (self-hosted SDK: `sdk.tortoise_fts_query`)
 - Use `create_point` with `dedup=True` (idempotent — returns existing if content matches)
 - This prevents duplicate evidence points that fragment EP propagation
@@ -290,9 +294,11 @@ Before creating a new evidence point, search whether it already exists:
 These run against a local FalkorDB via the SDK — the self-hosted path. Hosted tenants run the identical pattern with the MCP tools (`tortoise_create_point` → `tortoise_create_operator` → `tortoise_compute_confidence`); the scripts are reference implementations of the flow, not a hosted requirement.
 
 ### `graph-scripts/file_pricing_decision.py`
+
 Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence. **⚠️ Superseded prices — this is a worked example of the flow, not our price list.** The decided tiers are **free $0 · solo $9 · pro $25 · team $149** in the tortoise repo's `product/pricing.json` (`owner_confirmed: 2026-08-07`).
 
 ### `graph-scripts/decide_licensing.py`
+
 Compares 3 license options (AGPLv3-dual, BSL+AGPL, SSPL) using 7 criteria and 20+ findings. Full pattern: criteria → options → findings → edges → compute_confidence → ranked output. Run as:
 
 ```bash
@@ -300,6 +306,7 @@ TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise uv run python graph-s
 ```
 
 ### `graph-scripts/decide.py`
+
 Generic decision comparison tool — accepts criteria/options/findings as structured input (`--input file.json|yaml` with the full decision definition, or `--options/--criteria/--findings/--edges` JSON on the CLI) and automates the create→wire→compute→rank pipeline. This is the self-host variant documented in the `tortoise-decide` skill; follow the pattern above if you're driving the SDK directly.
 
 ## Decision Comparison Checklist
@@ -350,6 +357,7 @@ Every search result includes an `ep` object with:
 | `contention` | Ratio of NAND to total — how disputed the claim is | 0.0–1.0 |
 
 **Interpreting confidence:**
+
 - 0.50 mean + low total evidence (total < 5) = **uncertainty** — not enough data yet
 - 0.50 mean + high total evidence (total > 10) + high contention (> 0.3) = **disagreement** — strong opposing views
 - 0.85 mean + high total evidence = **settled** — strong supporting evidence
@@ -460,7 +468,7 @@ sdk.expand_kind("WorkItem")  # returns ["dev:issue", "pm:task", ...]
 
 - [ ] Ran `list_pointkinds()` before creating new points — know what structural types exist
 - [ ] Ran `list_sources()` if the data has provenance — know where existing data came from
-- [ ] Used pack-registered kinds for new points (check `list_relations()` / `expand_kind()`) 
+- [ ] Used pack-registered kinds for new points (check `list_relations()` / `expand_kind()`)
 - [ ] For decision comparisons: collected option IDs in an anchors list for `compute_confidence(anchors=...)`
 
 ---
@@ -491,6 +499,7 @@ sdk.taxonomy()  # or tortoise_status() — returns point counts, pointKinds, gra
 ```
 
 Or via MCP:
+
 ```
 tortoise_summarize_structure  # returns {total, operators, gateN_*, gate_total}; zero total on an empty/wrong graph
 ```

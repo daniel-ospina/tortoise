@@ -158,6 +158,7 @@ consumer base with documented deprecation waiver (q4).
 ## Verification Gates
 
 ### problem-verify: 1 cycle, PASS (2 verifiers, NO P0/P1; P2s incorporated)
+
 - Verifier A: P0=0, P1=0, P2=4 (test blast radius un-inventoried; sourced-freeze tension unpinned;
   rescoped target not restated; framing-4 rejection on untagged assumption), P3=2, P4=1.
 - Verifier B: P0=0, P1=0, P2=2 (ingest.py un-gated EP surface omitted; sourced-freeze tension
@@ -169,6 +170,7 @@ consumer base with documented deprecation waiver (q4).
   migration to rejected alternatives; restructured Axis Research with per-framing provenance.
 
 ### solution-verify: 2 cycles, PASS (2 verifiers × 2 rounds; P1 fixed in round 2; max re-dispatch cap respected)
+
 - **Round 1:** A: P0=0, P1=1 (test fixture already calibrated — `credibility="medium"` → `baseline_set=true`;
   "invert assertion" alone would create a failing test), P3=1, P4=1. B: P0=0, P1=0, P3=3
   (retracted exclusion; AC scoping for untiered-sourced; stale `context=ctx` TypeError), P4=1.
@@ -320,6 +322,7 @@ graphs a deterministic, source-aware, idempotent migration path.
 
 No clarifying-questions pass run (streamlined mode; issue O/I/T unambiguous). Open questions for the
 human (recommendations applied per research-before-ask, evidence >80%):
+
 1. **Backfill prior** — neutral Beta(1,1) + `'legacy'` marker recommended (evidence: #7478's own
    omitted→neutral design; Kerman 2011; manufacturing-skepticism pitfall). The issue body's Beta(2,4)
    is stale.
@@ -371,6 +374,7 @@ not a gap in this issue's delivery.
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1 (PASS, no re-dispatch)
+
 - Verifier A: P0=0, P1=0, P2=4, P3=2, P4=1 — verified every code citation against working tree;
   confirmed T4=(1.1,1.0) correction and inheritance-freeze concern; flagged test blast radius,
   sourced-freeze tension, target not restated, untagged consumer-base assumption.
@@ -380,6 +384,7 @@ not a gap in this issue's delivery.
 - Controller: incorporated all P2s (see gate section). Gate passes.
 
 ### solution-verify: 2 cycles, PASS (2 verifiers × 2 rounds; P1 fixed in round 2; max re-dispatch used)
+
 - **Round 1:** Verifier A: P0=0, P1=1 (test fixture is already calibrated — `credibility="medium"` →
   `baseline_set=true`; "invert assertion" would create a failing test), P3=1, P4=1. Verifier B:
   P0=0, P1=0, P3=3 (retracted exclusion; AC scoping for untiered-sourced; stale `context=ctx`
@@ -397,7 +402,9 @@ not a gap in this issue's delivery.
   `untiered_sourced` bucket added; test-inventory counting method noted; Extras section added with
   filed issue numbers. Both verifiers confirmed the underlying fix content is correct → no third
   dispatch; documented per streamlined-mode escape hatch.
+
 ### [QWEN-GATE] coherence — substitute reviewer (qwen3.8-max 401-blocked → deepseek-v4-flash)
+
 P0=0, P1=0, P2=5 — coherence HOLDS. P2s incorporated: live-graph dry-run validation gate (plan
 step 2); #1156 scope widening comment; `validation/` dev-tooling inventory (plan step 4);
 sourced-self-calibration wording corrected in Confirmed Problem; `approve_points` opt-out rationale

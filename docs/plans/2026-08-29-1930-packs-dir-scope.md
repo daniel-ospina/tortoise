@@ -65,6 +65,7 @@ fallback) all converge on the same design.
 New `env_packs_dir()` helper resolves the TORTOISE_PACKS_DIR leg (set+valid →
 dir; set-but-missing/not-a-dir/empty → warn + None). `default_packs_dir()`
 prepends it. All 7 consumers honor the override automatically.
+
 - Files: pack_registry.py, domain_loader.py, tests.
 - Best fit if: we want the feature to work everywhere (list surface AND extraction
   prompts AND write gates) with one resolution rule.
@@ -75,11 +76,13 @@ prepends it. All 7 consumers honor the override automatically.
 `domain_loader._get_registry()`: when the env leg was active but `load_all()`
 yielded 0 healthy packs with non-empty `errors` → warn + re-resolve skipping
 env + reload. Mixed valid+malformed → R-16 isolation + warn, no fallback.
+
 - Best fit if: the "never silent empty" guarantee must hold for the daemon
   registry (`tortoise_packs_list`) even when manifests exist but are all broken.
 
 **S2 — Env handling only in `domain_loader._get_registry()` (literal issue
 wording).** `_get_registry` checks `os.environ["TORTOISE_PACKS_DIR"]` itself.
+
 - Rejected: splits the resolution primitive — extractor_v2/value_extractor/
   sdk/commit_schema/query_suggestions would load the DEFAULT catalog while the
   registry list shows the custom pack. Custom pack kinds never reach extraction.
@@ -88,6 +91,7 @@ wording).** `_get_registry` checks `os.environ["TORTOISE_PACKS_DIR"]` itself.
 
 **S3 — Health-check inside `default_packs_dir()` (load manifests in the path
 resolver).** The resolver validates manifests to decide fallback.
+
 - Rejected: loads/validates on a hot path (called per value-brief compile, per
   write-gate build); duplicates PackRegistry validation; circular (pack_registry
   internal consumers call `default_packs_dir()`); path resolution and manifest
@@ -101,6 +105,7 @@ daemon registry (the `tortoise_packs_list` surface the issue's indicators
 reference). S2 was rejected on split-brain grounds; S3 on layering/perf grounds.
 
 **Rejected-alternative notes (when each WOULD have been better):**
+
 - S2 would be better if the issue truly intended list-only semantics — it does
   not (extraction must mint custom kinds; epic WF-2 is one chain).
 - S3 would be better if manifests were cheap to validate and the resolver were

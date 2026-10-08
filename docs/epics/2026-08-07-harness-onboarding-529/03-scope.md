@@ -78,6 +78,7 @@ aboutObjects: tortoise
 > Written BEFORE user journeys, per epic-scope. Behavioral — no UI implementation details.
 
 ### E2E-1: Welcome page serves every harness's optimal paste path
+
 **Given:** A user has completed signup and their `tt_` key is displayed on the welcome page
 **When:** They select each harness tab in turn
 **Then:** Block A shows that harness's optimal config (Claude = CLI one-liner; Codex = CLI + env export; Cursor = `.cursor/mcp.json` JSON; Pi = `.mcp.json` JSON) with the user's key materialized in the literal-key forms (Claude CLI flag, Codex export) and env-var indirection shown with the key-export instruction in the file forms (Cursor, Pi)
@@ -85,6 +86,7 @@ aboutObjects: tortoise
 **And:** every variant prompt URL (`/onboarding/<harness>.md`) returns 200 with the variant content
 
 ### E2E-2: Claude Code variant → first memory
+
 **Given:** A user with Claude Code CLI and a `tt_` key
 **When:** They run the Block A command, then paste the Block B prompt into chat
 **Then:** Claude Code lists Tortoise tools and the agent starts the onboarding flow (trigger is behavioral — chat paste)
@@ -92,12 +94,14 @@ aboutObjects: tortoise
 **And:** if the flow doesn't start, the documented fallback line ("Start Tortoise onboarding") starts it
 
 ### E2E-3: Codex variant → first memory
+
 **Given:** A user with Codex CLI and a `tt_` key
 **When:** They export `TORTOISE_API_KEY`, run the Block A `codex mcp add` command, then paste the Block B prompt
 **Then:** `~/.codex/config.toml` gains the tortoise server entry (env-var name, not the secret)
 **And:** Codex lists Tortoise tools and the onboarding flow starts; a first Point is created
 
 ### E2E-4: Cursor variant → first memory (structural trigger)
+
 **Given:** A user with Cursor who created `.cursor/mcp.json` and `.cursor/rules/tortoise-onboarding.mdc` from the variant artifacts
 **When:** They open a chat session
 **Then:** the agent connects to Tortoise AND begins onboarding WITHOUT any chat paste (the alwaysApply rule injects the instruction)
@@ -105,6 +109,7 @@ aboutObjects: tortoise
 **And:** no literal `tt_` key is stored when the `${env:TORTOISE_API_KEY}` form is used
 
 ### E2E-5: Pi variant → first memory (structural trigger, fully automated)
+
 **Given:** A scratch directory containing the variant `.mcp.json` (with `${TORTOISE_API_KEY}`) and the AGENTS.md onboarding block, with `TORTOISE_API_KEY` exported
 **When:** a pi session starts in that directory
 **Then:** `mcp__tortoise__*` tools are discovered; `tortoise_health` returns OK
@@ -112,6 +117,7 @@ aboutObjects: tortoise
 **And:** this entire leg runs from CI/agent automation without a human
 
 ### E2E-6: Variants share the generalized core (no divergence)
+
 **Given:** All variant artifacts (headers + staged full prompts) and the canonical `AGENT_ONBOARDING.md`
 **When:** integrity checks run
 **Then:** every staged variant embeds the canonical body verbatim (byte-identical suffix)
@@ -119,12 +125,14 @@ aboutObjects: tortoise
 **And:** the welcome page's Block B content equals the deployed variant files
 
 ### E2E-7: ≤2 copy-paste actions per harness
+
 **Given:** The documented paste path for each variant
 **When:** counted from landing (welcome page) to first memory
 **Then:** Claude Code = 2 actions (CLI paste + prompt paste); Codex = 2 (CLI paste + prompt paste; env export documented as part of action 1); Cursor = 2 (two file pastes, both structural); Pi = 2 (two file pastes, both structural)
 **And:** no harness requires more than 2
 
 ### E2E-8: Copy events are attributable per harness
+
 **Given:** The welcome page with a valid displayed key
 **When:** the user copies a harness's config or prompt
 **Then:** an authenticated beacon PATCHes `/v1/onboarding/state` with `{harness, section}`

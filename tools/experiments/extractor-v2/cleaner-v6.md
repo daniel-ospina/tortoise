@@ -33,6 +33,7 @@ MECHANICS TOKENS — NEVER emit these verbatim (replace with their meaning):
 cid[:8], split('-'), line 357, ep.py, test_context_free_produces_consistent_ranking
 
 MEANING REPLACEMENTS (what the tokens mean, what to write instead):
+
 - issue/PR numbers → "the CI blocker" / "a concurrent PR" / "another session"
 - 91/91, 132 → "the fix was verified" (not the count)
 - load 175-238, 300s, 884s → "the environment was heavily loaded and stalled work"

@@ -38,7 +38,9 @@ create_point props passthrough (persisted verbatim, sdk.py:2461-2465).
 ## Verification Gates
 
 ### problem-verify: 1 cycle, clean | 0 issues remain
+
 ### solution-verify: 2 cycles, clean | 0 issues remain
+
 - Round-1 verifier P1s fixed (controller): created_by shape gate; strip-vs-
   reject split; E2E-5 lane pinning; ContextVar-at-emit; registry MCP lane
   actor; journaled-set bound. P2/P3/P4 incorporated (EXPLAIN query shape,
@@ -352,6 +354,7 @@ sessionless dedup-hit.
 ## Review Cycle Log
 
 ### solution-verify — Cycle 1
+
 - Verifier A: P0=0, P1=2 (created_by shape gate; strip-vs-reject), P2=2, P3=4
 - Verifier B: P0=0, P1=3 (E2E-5 dedup no-trace; authoredBy residual + strip-vs-
   reject; journaled-set bound), P2=2, P3=2, P4=1
@@ -363,6 +366,7 @@ sessionless dedup-hit.
   no-work note).
 
 ### solution-verify — Cycle 2 (fixes re-verified)
+
 - Verifier A: P0=0, P1=1 (apikey_verify composition — §2.1 seam), P2=2, P3=5
 - Verifier B: P0=0, P1=0, P2=2, P3=1, P4=1 (all four fixes materially sound)
 - Controller: Fixed P1-A1 (§2.1 normalization seam — raw created_by from

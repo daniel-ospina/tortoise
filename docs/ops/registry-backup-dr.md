@@ -82,6 +82,7 @@ false on every tier today). The driver cron (`registry-backup-cron.yml`,
 (``keep_daily``/``keep_weekly``) are RETENTION horizons, not cadence.
 
 **Achieved freshness is MEASURED, not assumed** (best-practice gap 6d):
+
 - per-team/per-graph tri-state archive-age vs `BACKUP_STALE_THRESHOLD_MIN` —
   watcher poll → `GET /v1/internal/backups/status` → `per_team` (+ heartbeat);
   the per-team census is gated by the SAME eligibility predicate the sweep
@@ -165,6 +166,7 @@ whole bucket — the sweep rewrites `ops/*` state/heartbeat objects in place),
 Age retention **3 days** (configurable 1..6, default 3).
 
 Why the window:
+
 - **Protection:** the lock blocks delete/overwrite within the window. The
   recovery-critical archives (hourly, RPO ≤2h) are ≤24h old — 3 days keeps the
   newest ~3 days of archives intact even against a key-holder who deletes
@@ -185,6 +187,7 @@ Why the window:
   4-week horizon) is **rejected** — it would break the erasure obligation.
 
 Mechanics that matter (Cloudflare docs, 2026):
+
 - R2 bucket locks are **NOT S3 Object Lock**. They are prefix-scoped rules
   (`{id, enabled, prefix, condition}` with Age `maxAgeSeconds` / `Indefinite` /
   a date), managed via the dashboard, Wrangler (`r2 bucket lock add|list`), or
@@ -307,6 +310,7 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > explicitly deferred on #4967; #4612 did **not** touch any bound.)
 
 ### Residuals (recorded with this decision)
+
 - A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
   blocked by the lock lingers ≤ the lock window (restore refuses it — the
   guards are fail-closed — and an incident is filed; bounded and visible).
@@ -317,12 +321,14 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
   not mirrored (reconstructible / drained); the one-time sync seeds them.
 
 ## Architecture
+
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.
 - **Direct R2 leg (app-down leg):** the driver computes the DEFAULT graph's freshness from R2 prefixes (aws CLI) — nested `backups/{org_id}/default/` + legacy flat (`backups/{org_id}/2…`, the pre-#2313 default dumps; a legacy-flat classification index #2370 excludes C5-era custom flats when present) — independent of `/status`. A fresh CUSTOM graph can never mask a stale default (#2375).
 - **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{subject}.json` — `_` when the incident is subject-less, delete-to-resolve), GH-search fallback, pending-push retries.
 
 ## R2 layout
+
 - `backups/{org_id}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` + `ledger.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). `ledger.json` (#5062) is the per-object ledger — `{key, bytes, sha256, written_at}` for the dump and manifest plus the store's own node/edge counts; the write path reads it back off the destination before the archive is accepted (coverage is the destination's answer, never the writer's counters). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`) ≈ **35 objects/pool** — keep ALL dumps younger than 24 h, then the NEWEST per UTC day within the 7-day horizon, then the newest per ISO week (4). #2373: day-bucket anchors — the pre-#2373 implementation kept one anchor per UTC HOUR-bucket (~172 objects/pool over the horizon); #2319's lock-window math uses the ~35 figure. Pre-#2313 team-level flat objects (`backups/{org_id}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
 - `ops/teams/{team}/state.json` — legacy transition-guard counts (mirror of the default graph's per-graph state; pre-#2313 consumers).
 - `ops/teams/{team}/graphs/{graph_id}/state.json` — per-graph transition-guard counts (#2313).
@@ -517,6 +523,7 @@ harness invokes it directly — a `$(bash script)` command substitution trips th
 agent worktree guard, #1484.)
 
 ## Control plane / dialect (#2823)
+
 Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, acl-reconcile, the watcher) resolves its TEAM LIST through **one dialect-aware seam** (`hosted_api._control_plane_source()`): the `SupabaseControlPlane` when `TORTOISE_CONTROL_PLANE=supabase`/Supabase creds are set, else the FalkorDB `registry_control_plane` graph. The dialect is recorded as `source` on every sweep result and in `ops/state.json`; the operator-facing read is `/status` → `last_sweep.source` (`last_run_source` carries the most recent run's dialect when a no-op run preserved an earlier real sweep's outcome fields; the raw run JSON rides the driver's `SWEEP_NO_COVERAGE` alert body).
 
 **A 0-team sweep on the wrong dialect used to be indistinguishable from an empty deployment** — it enumerated the graph the #669 flip deleted and reported a benign `no_teams` for 31 days (#2823). The seam now REFUSES a registry-dialect source in the Supabase lane (`enum_failed`, loud — `tortoise/backup_sweep.py:212`), and the driver files `SWEEP_NO_COVERAGE` for an enabled-but-0-backup sweep whose 0 is not corroborated by a **measured-empty** R2 pool — the pool holds ≥1 team prefix, or could not be listed at all. Lane vars: `TORTOISE_CONTROL_PLANE` / `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (`.env.example` §Control plane).
@@ -594,6 +601,7 @@ records the cliff after the provider's own refusal, and it is deliberately not a
 warning ahead of it.
 
 ## Alert taxonomy + triage
+
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
@@ -737,6 +745,7 @@ parses this table and scans the emitters — a documented kind with no writer fa
 the suite unless it appears in this section.
 
 ## Restore / drill
+
 - **Drill endpoint:** `POST /v1/internal/backups/drill` `{org_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
 - **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing `NEVER_BACKED_UP` / `SWEEP_NO_COVERAGE` alarm's job; `LIVENESS_NO_WORK` is a writer-less reserved name, see "Kinds with no writer"). Manual drills never file incidents (an operator is present).
 - **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
@@ -745,6 +754,7 @@ the suite unless it appears in this section.
 - **Mid-drill crash:** boot GC sweeps `_drill_*`/`registry_drill_*`/`*_restore_*`/`*_pre_restore_*` older than 6h.
 
 ## Operator actions
+
 - **Dead knob removed (#2317):** `BACKUP_SKIP_FRESH_MIN` / `BackupConfig.skip_fresh_min` (the registry-era "skip window") was parsed but never consumed and is DELETED — its original double-dispatch protection is now the sweep in-flight 202 guard + per-team locks + retention prune, and an all-skipped run would have surfaced a misleading "no_work" headline (#2372 truthfulness). Do not re-introduce it.
 - **Suppression:** write `ops/suppression.json` `{"KIND": {"until": "ISO"}}` to pause a kind.
 - **Re-baseline:** `POST /v1/internal/backups/re-baseline` `{org_id}` (+ optional `graph_id`, default `"default"`) after verifying a DATA_LOSS_CANDIDATE is a false positive. Custom-graph incidents resolve under `"{team}:{graph}"`; the default under the bare team.
@@ -759,6 +769,7 @@ even a GH-capable collaborator cannot decrypt registry backup archives
 because the key lives only on Fly, set by the operator out-of-band.
 
 **Setup (operator, once):**
+
 ```bash
 # Rotate/seed via the automation tool (recommended — generates + emits the
 # exact commands; NO plaintext in this runbook):
@@ -806,6 +817,7 @@ through a secret-store seam (`tortoise/secret_store.py`):
   value.
 
 **Rotating `REGISTRY_STREAM_KEY` (operator, automated — dual-key window):**
+
 ```bash
 # 1. Generate + stage (prints fingerprints; add --emit-commands for the
 #    secret values; --verify-dump proves an OLD archive still decrypts
@@ -850,6 +862,7 @@ post-overlap. Point the app at the store with `BACKUP_KEY_STORE=file` +
 `BACKUP_KEY_STORE_PATH`.
 
 **Verification (operator, post-setup):**
+
 ```bash
 # Trigger a drill against the oldest archive to confirm the key works:
 curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
@@ -859,12 +872,14 @@ curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 ```
 
 ## Known residuals (accepted)
+
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
 - **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
 
 ### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
+
 - **Watcher heartbeat is per-team only** — `ops/watcher-heartbeat.json` carries the per-team tri-state; the watcher's per-graph states live in the daemon's in-process last-status (not persisted). Per-graph SWEEP outcomes (totals, failures, consecutive-error streaks) surface on `GET /v1/internal/backups/status` → `last_sweep` (#2372). A daemon restart loses the in-process per-graph watch until the next poll.
 - **Legacy-flat mislabel under control-plane failure** — with the control plane down (or before a team's first legacy-flat classification index exists, ≤1 sweep after #2370 deploys), legacy flat archives on `GET /backups` fall back to the DEFAULT graph bucket even when they were C5-era custom dumps (#2370 index makes this the exception). Restore of a legacy flat custom archive is refused regardless (cross-graph guard).
 - **Tombstoned-graph archive pools are never pruned** — per-graph prune runs only for enumerated ACTIVE graphs and the team-wide drain skips nested keys, so a deleted graph's `backups/{org_id}/{gid}/` pool accumulates until #2304's purge decision lands (its research item 4 covers backup-artifact disposition; the mechanism is recorded here).

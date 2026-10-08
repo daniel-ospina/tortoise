@@ -15,7 +15,6 @@ aboutObjects: tortoise
 **Branch:** feat/2004-W8-onboarding (base: main @ d4b65da3 — W1/W2/W4/W5 merged)
 **Scope anchor:** issue #2004 body + epic docs/epics/2026-08-29-agent-driven-onboarding-1976/06-plan.md (WF-6, DM-5, I-7, DE2E-9) + 04-test-design.md surface 13.
 
-
 > ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
 
 ---
@@ -23,6 +22,7 @@ aboutObjects: tortoise
 ## 1. Objective (restated)
 
 Ship the pullable builder capability catalog:
+
 1. **Registry** — extend `tortoise/tool_registry.py` (R2-9: no new infra) with an indexers+extractors capability registry (`CAPABILITY_CATALOG`) and a read accessor.
 2. **Endpoint** — `GET /v1/capabilities` (epic I-7 contract: `200 {modules: [{name, kind: indexer|extractor, description}]}`), hosted in `hosted_api.py` (hand-written dual-auth route — the onboarding-state endpoint precedent).
 3. **Presented once on the build path** — dashboard replaces the W1 static placeholder SOURCE with the registry-backed catalog (fetched on first build-fork render); the `catalog-presented` step-edge write mechanism is UNCHANGED (W1/W5 own it — this W does not add a second mark or any W11 telemetry). Presentation is a nudge, never a billing gate (R2-7).

@@ -32,6 +32,7 @@ This plan freezes the **interfaces** so implementation tracks can proceed in par
 | Serializer path (spec left it UNSPECIFIED) | `tortoise/subgraph.py` (engine) + `tortoise/subgraph_render.py` (serializer) | Spec requires path + git sha in the manifest |
 
 **Ontology map (must be respected):**
+
 - Claims are `:Point` with `content`; **operator nodes are also `:Point`** (`is_operator:true`) and have **no `content`** — they must be traversed *through*, never rendered as claims.
 - `IMPL`/`NAND` edges run operator→**both** endpoints; `r.idx = 0` is the source, `idx > 0` the targets. A bare edge walk returns operator nodes — filter `other.is_operator = false`.
 - Supersession edge is **`CORRECTS`** (`(new)-[:CORRECTS]->(old)`), not a property.
@@ -102,6 +103,7 @@ EMPTY_CONTEXT_SENTINEL = "[no context retrieved]"
 **Fallbacks:** `session ?`, `turn ?`, `(date unknown)`. **Confidence:** `f"{c:.2f}"`, or `unmeasured` when no EP state.
 
 ### 1.3 Reader seam (Track D)
+
 `LLMReader.answer` calls `render_context` internally. Tracks B/C emit **text**, not hits. Add a pre-rendered-evidence path reusing `tortoise/reader.py:292 build_reader_user_message(evidence, question)`.
 
 ---
@@ -124,6 +126,7 @@ EMPTY_CONTEXT_SENTINEL = "[no context retrieved]"
 ## 3. Validation-before-benchmarking (mandatory)
 
 Per the standing directive: **small validation tests before any benchmark run.**
+
 1. Hermetic unit tests per module (no DB, no model) — Track A/B/D.
 2. Docker-lane integration test: real graph, small fixture, assert the rendered block matches a golden string.
 3. §10 stage-6 validation gate on `gpt4_4929293a` — **only after #3000 lands.**

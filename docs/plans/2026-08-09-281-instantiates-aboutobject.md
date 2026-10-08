@@ -45,6 +45,7 @@ Skipped — plan touches zero third-party deps (pure in-repo Python/Cypher chang
 **Acceptance:** `python3 -m pytest tests/test_ranking.py -q` runs the 17 existing tests without `fixture 'shared_embedded_db' not found` errors (NOTE: `--collect-only` does NOT resolve fixtures — collection succeeds even with the fixture missing; the error only surfaces at test execution, so verify with an actual run).
 
 **Files:**
+
 - Modify: `tests/conftest.py` (restore fixture — the exact session-scoped body that existed pre-33ce4db)
 
 **Step 1: Restore the fixture**
@@ -88,6 +89,7 @@ git commit -m "test: restore shared_embedded_db fixture removed in #641 (#281 pr
 **Acceptance:** `_fetch_event_signals` counts `aboutObject` edges (signal key `about_objects`); `graph_boost` reads `about_objects` (NOT `instantiates`); OPTIONAL MATCH degradation preserved (no aboutObject on old graphs → boost = 0.4·confidence, no error); docstrings at lines 12-23, 89, and 172 updated; `rg -n "INSTANTIATES" tortoise/ranking.py` → zero.
 
 **Files:**
+
 - Modify: `tortoise/ranking.py` (`_fetch_event_signals` 238-262, `graph_boost` 172-186, docstrings 12-23/89/172)
 - Test: `tests/test_ranking.py`
 
@@ -154,6 +156,7 @@ git commit -m "fix(ranking): session boost reads aboutObject edges per ONTOLOGY 
 **Acceptance:** `_connect_issue_objects` creates `(e:Event)-[:aboutObject]->(o:Object)` (never `INSTANTIATES`); Object carries `name`, `objectKind`, and for dict items `repo`, `issue_number`, `url`; running the same session twice creates exactly one Object + one edge; `connected` counts only `create_about_edge` returns of True; `rg -n "INSTANTIATES" tortoise/sdk.py tortoise/session_indexer.py` → zero hits.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py:4157-4179` (`_connect_issue_objects`)
 - Modify: `tortoise/session_indexer.py:555` (comment parity)
 - Test: `tests/test_sdk_group3.py`
@@ -231,6 +234,7 @@ Expected: **all four FAIL** pre-change. `test_connect_issue_objects_uses_about_o
 **Step 3: Implement**
 
 In `_connect_issue_objects`:
+
 - Build the Object MERGE to also set `o.repo=$repo, o.issue_number=$issue_number, o.url=$url` (defaults None for non-dict items).
 - Defensive cast: `try: issue_number = int(item.get("number")) if item.get("number") is not None else None except (TypeError, ValueError): issue_number = item.get("number")`.
 - Replace the raw `MERGE (e)-[:INSTANTIATES]->(o)` with `if self._get_proj().create_about_edge(event_id, oid, "aboutObject"): connected += 1` after the Object exists (create_about_edge resolves the Object by id and MERGEs the edge — idempotent; count only on True so resolution failure is not reported as success). When it returns False, log at debug level (`event_id` + `oid`) so a resolution failure is observable — the session_indexer.py:555 call site otherwise swallows it.
@@ -265,6 +269,7 @@ git commit -m "fix(sdk): Event→Object connections use aboutObject per ONTOLOGY
 **Acceptance:** `INSTANTIATES` absent from `tortoise/security.py`; `tests/test_security.py::test_known_rel_types_superset_of_inventory` passes; `rg -n "\-\[:INSTANTIATES" tortoise/` → zero hits.
 
 **Files:**
+
 - Modify: `tortoise/security.py:84`
 - Test: `tests/test_security.py`
 
@@ -291,6 +296,7 @@ git commit -m "fix(security): drop INSTANTIATES from KNOWN_REL_TYPES — removed
 **Acceptance:** script (a) enumerates target graphs (`db.list_graphs()` filtered to default, `*_tortoise`, `team_*`; or explicit `--graphs` list), (b) dry-run prints per-graph affected edge counts without writing, (c) live mode creates the matching `aboutObject` edge and detaches the old `INSTANTIATES` edge per pair, per graph, (d) per-graph try/except so one graph's failure leaves others untouched, (e) re-running reports zero remaining INSTANTIATES edges on every graph (idempotent).
 
 **Files:**
+
 - Create: `graph-scripts/migrate_instantiates_to_about.py`
 
 **Step 1: Write the script (no automated test — one-off data migration, verified by dry-run + counts)**
@@ -330,6 +336,7 @@ git commit -m "chore(graph-scripts): migrate INSTANTIATES→aboutObject edges (#
 **Acceptance:** full targeted suite green; edge-syntax sweep `rg -n "\-\[:INSTANTIATES" tortoise/ tests/` → **zero hits** (edge syntax only — raw-text `INSTANTIATES` is permitted in tests/ solely as the parameterized value `params={"t": "INSTANTIATES"}` in the Task 2 negative-assertion; the migration script's literal lives in `graph-scripts/`, outside both scopes); `docs/scoping-7769-graph-informed-ranking.md` updated (no INSTANTIATES references); ontology docs untouched (v3.2 already canonical).
 
 **Files:**
+
 - Modify: `docs/scoping-7769-graph-informed-ranking.md` (INSTANTIATES references → aboutObject)
 - Test: `tests/test_sdk_group3.py tests/test_ranking.py tests/test_security.py tests/test_projection.py tests/test_session_capture_e2e.py`
 
@@ -347,6 +354,7 @@ Expected: **zero hits** (edge-syntax only — a raw-text `rg INSTANTIATES` would
 **Step 3: Update stale scoping doc**
 
 Edit `docs/scoping-7769-graph-informed-ranking.md`: there are 11 INSTANTIATES mentions (verified: lines 7, 70-71, 86, 108, 120, 129, 134, 160, 165, 181) — sweep ALL of them deterministically:
+
 - Replace INSTANTIATES-count description with aboutObject-count ("Objects referenced") + 0.6·aboutObject weighting + OPTIONAL MATCH degradation note.
 - Line 165 (stale "GraphRanker should return 0.0 boost when no INSTANTIATES edges found") → correct to: degradation is 0.4·confidence on the is_event branch (Task 1), never 0.0.
 - Line 134 ("INSTANTIATES edges must exist — dependency on #7740") → INVERT: post-change `aboutObject` edges exist from session indexing; remove the dependency framing.

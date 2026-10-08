@@ -37,6 +37,7 @@ against `origin/main` @ `23942d2`). Full per-issue evidence: `/tmp/tortoise-audi
 ## Headline finding
 
 **The tracker is badly stale.** Of ~145 open issues:
+
 - **~50 are DONE** — shipped in main but never closed (incl. the entire ONTOLOGY v2.5
   epic #377 family, the entire feat(memory) #401–#415 family, the ontology-viz epic,
   Stripe billing #310, dashboard #300, backups #596, agent signup #663).
@@ -91,6 +92,7 @@ True blockers for P1 (get going) + P2 (saved & indexed):
 | 6 | **#320 close-out** session-index epic | Batch-run the 4,190-file index + I1/I6 verification, then close epic (proves P2 end-to-end) | ops run |
 
 Cheap wins to bundle into Wave 1:
+
 - **#812** — 2 missing SDK methods (`events_poll`, `retract_point`) → events MCP tools stop 500ing; lets #432 close. ~2 methods.
 - **#343** — 1-line crash fix (`_get_sdk()` catches ImportError only).
 

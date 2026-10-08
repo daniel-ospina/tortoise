@@ -66,6 +66,7 @@ nice-to-haves (be schema-compatible now, build later).
 - **Cost:** per-node stamp adds an index write on the hottest path + a property on every node + plumbing every write surface, for a query ("all memories by X") that is equally served by session→user (index seek + 1 hop). Write amplification is the only material graph cost of per-node stamping, and it is strictly additive.
 
 **Chosen model (SD-2):**
+
 1. **Actor is resolved SERVER-SIDE from the credential** (OAuth token row `user_id`, JWT `sub`, or key `created_by`) — never client-claimed (Supabase/Stripe/Shopify pattern; client-claimed user IDs are rejected as untrusted).
 2. **Session = the attribution anchor.** Captured sessions already group turns + extract points with provenance (`sourceSession`). Stamp the human on the session.
 3. **Event-level actor as the backstop for non-session writes** (direct REST/MCP `create_point` with no session): the graph's journaled event already exists — carry the server-resolved actor there, so no write dangles unattributed. If "memories by X" ever becomes a measured hot path, denormalize ONE indexed `owner` property later (backfill from session/event) — one-way easy migration; the reverse (2A → 2B) is a lossy rewrite.
@@ -230,6 +231,7 @@ future option, never built speculatively.
 > Behavioral. Written for the redirected scope (per-agent OAuth + attribution).
 
 ### E2E-1: Keyless first connect via OAuth authorize (happy path)
+
 **Given:** a solo self-fork user with an active account and an OAuth-capable
 harness (Claude Code or Cursor).
 **When:** they run the wizard connect step for that harness and complete the
@@ -239,12 +241,14 @@ one-time authorize.
 write; the session capture attributes the write to the human.
 
 ### E2E-2: No raw key path for OAuth-capable harnesses
+
 **Given:** E2E-1.
 **When:** configs/shell/env are inspected.
 **Then:** no raw key appears in harness config, shell profile, or process env;
 a fresh env without `TORTOISE_API_KEY` still reaches Tortoise.
 
 ### E2E-3: Server-side actor — session attributed to the human
+
 **Given:** a team member captures a session through an OAuth-authed harness.
 **When:** the session lands.
 **Then:** the Session node carries the server-resolved `actor_user_id` of that
@@ -256,8 +260,10 @@ attribution, never trusted (strip-and-ignore per §1.1 item 3).
 > there.
 
 ### E2E-4: No unattributed write (event backstop) — LANE MATRIX
+
 **Given:** a sessionless (no-capture) write arriving via any auth lane.
 **When:**
+
 - (a) a `create_point` via the **MCP tool** over `/mcp`, authenticated with an
   OAuth `oat_` token (the OAuth surface — `oat_` is accepted ONLY at `/mcp`,
   never REST `/v1/*`);
@@ -274,6 +280,7 @@ anonymous. (Lane matrix is explicit because the Supabase
 code paths with their own bug risk. If a lane cannot be exercised in CI,
 that gap is named in §1.1 item 7's integration tests rather than silently
 claimed by this E2E.)
+
 > **Contingency (recommended §7.2 resolution = stamp BOTH):** E2E-4's
 > "event carries the actor" assertions hold ONLY under the stamp-both
 > resolution. If the gate instead chooses session-only, the event-level
@@ -283,6 +290,7 @@ claimed by this E2E.)
 > surface (mirrors E2E-9's §7.4 ownership note).
 
 ### E2E-5: Dedup keeps attribution correct (two humans, same claim)
+
 **Given:** two team members each file the same claim content.
 **When:** the second filing dedups to the existing node
 (`pt_{content_hash}`).
@@ -291,6 +299,7 @@ sessions/events (no single-owner overwrite); the graph does not lose who
 filed it.
 
 ### E2E-6: Team member revocation
+
 **Given:** a member leaves the team / their OAuth token is revoked.
 **When:** a post-revocation write attempt occurs.
 **Then:** it is rejected (existing suspension/revocation machinery, #308);
@@ -298,12 +307,14 @@ previously attributed sessions/points are NOT lost or retroactively
 rewritten.
 
 ### E2E-7: Per-graph isolation via tk_ key (partition use case)
+
 **Given:** a solo user wants graph A for agent A and graph B for agent B.
 **When:** they mint two per-graph `tk_` keys.
 **Then:** agent A's key writes only to graph A; agent B's only to graph B
 (C5 routing); a cross-graph write from the wrong key is scoped/blocked.
 
 ### E2E-8: Attribute query — "show me memory filed by X"
+
 **Given:** a team graph with sessions/points from multiple members.
 **When:** a member filters list-sessions by a specific human (the §1.1
 item-2 actor-filter addition; §7.3 confirms this is the v1 audit read
@@ -317,6 +328,7 @@ Wall-clock timing is deliberately NOT used (flaky in CI); E2E-8 itself
 asserts only the functional exclusion behavior.
 
 ### E2E-9: Client OAuth for pi — first authorize + refresh (contingent on §7.4)
+
 **Given:** pi configured against hosted `/mcp/` with OAuth client support.
 **When (a):** the user runs pi's first-time connect and completes
 discovery→DCR→PKCE authorize.
@@ -333,6 +345,7 @@ silent raw-key fallback.
 > #4105 owning the client-internals assertions.
 
 ### E2E-10: Dashboard session shows the human (display-name resolution)
+
 **Given:** three sessions on the Memory-sources rows: (i) captured and
 attributed to member M (E2E-3); (ii) a legacy pre-epic session whose
 `actor_user_id` is null/missing; (iii) a session whose `actor_user_id` has
@@ -346,6 +359,7 @@ pre-existing-data disposition; (iii) fails soft to showing the raw id
 exercises the SAME data the graph stores (no second copy).
 
 ### E2E-11: Wizard fallback branch — key snippet for non-OAuth harnesses
+
 **Given:** a user on a harness where OAuth is unsupported (pi until #4105
 lands, or headless/CI on the hosted plane) reaches the wizard connect step.
 **When:** the wizard detects no OAuth capability for that harness.
@@ -364,6 +378,7 @@ branch survives the copy/routing change, per §1.1 item 6.)
 > Letta, LangMem, basic-memory).
 
 **Architecture — actor resolution (who the actor is):**
+
 - OAuth access-token row already stores `user_id` + `client_id` (oauth.py);
   resolution must return them (currently `_quota_fields` only).
 - Key lanes already store `created_by` (registry Cypher `RETURN k.created_by`)
@@ -374,6 +389,7 @@ branch survives the copy/routing change, per §1.1 item 6.)
   `auth.uid()` — server-side actor, client claims rejected.
 
 **Ontology/attribution — session vs per-node (2A vs 2B):**
+
 - Industry: no per-node author stamps on shared memory (Graphiti `group_id`
   partition; LangMem namespace; Letta server-validated header; basic-memory
   nullable entity audit columns). Mem0's per-record ids are the indexed
@@ -387,6 +403,7 @@ branch survives the copy/routing change, per §1.1 item 6.)
   must live on edges/events. (verified: `pt_{content_hash[:62]}` ids, sdk.py)
 
 **Client OAuth — the two gaps:**
+
 - pi mcp-client is static-headers-only with an in-code TODO (#4105); owned
   (agent-infra mirror). Adding OAuth to it is the difference between "pi
   forces key paste" and "pi is keyless."

@@ -29,40 +29,52 @@ aboutObjects: STORAGE-ARCHITECTURE.md, EXTRACTOR-V4-ARCHITECTURE.md, review reco
 ## A. P0 — blocking; the design does not hold as written
 
 ### A1 ⧉ The vector index has two mutually exclusive models — and 7 TB is unprovisionable
+
 `storage §12.1` vs `§12.2b` vs `§2` · *S1 P0, S2 P0 (found independently)*
+
 - §12.1: HNSW is **RAM-mandatory**, "does not follow the disk rule", "every vector is a tax on every query forever", **~7 TB** at 1,000 tenants.
 - §12.2b: the same index is **partitionable/evictable** ("working set becomes one tenant's index") and DiskANN's disk latency is affordable.
 - **Supabase's largest instance is 256 GB** — so §12.1's own number cannot be provisioned. §2/§12.2b contradict §12.1.
 - **Resolution required:** pgvector HNSW is an ordinary Postgres index — disk-backed, page-cached, with a **latency cliff** when cold. Pick that model, restate §12.1's figure as a **hot working set**, and delete §12.1's claim that §5's arithmetic is invalidated.
 
 ### A2 The truth/derived boundary test is false, and `Document` sits in both layers
+
 `storage §3` · *S2 P0*
+
 - The stated test ("append-only, never updated") is **false for two of four truth types**: `Source.updatedAt` is set ON MATCH by `_upsert_source`; `Source.reliability` is a **derived** query-time cache stored on the node; `Document.updatedAt` + `doc_status` transitions (`captured`→`extracted`, `ingest.py:183`, `hosted_api.py:10864`).
 - **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the doc places one class in **both** layers.
 - **Resolution:** use the test that *does* hold — **"is it carried by the journal / rebuildable from it?"** (`Source`/`Document`/`Event` are not in `_GRAPH_EVENT_TYPES` → primary; `Point`/`Object`/operators are journaled → derived). Then place `Document` explicitly and explain why a mutable cache on a primary row does not break the invariant.
 
 ### A3 ⧉ `#2453` ALREADY LANDED — the doc describes the pre-fix tree
+
 `extractor §7` · *E1 P0 · S2 P2 (independently)*
+
 - Doc claims operational values are **"DROPPED as a mechanics token"**. **False.** Commit **`4a690d0be`** (2026-09-07) extended `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) with an **OPERATIONAL-VALUE CARVE-OUT** — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too … carried VERBATIM"* — with exactly the examples the doc calls dropped (*"the p95 hit 4.2 seconds"*, *"a ten minute TTL"*). A `VALUE_FIDELITY_RULE` (`:230`) renders into the S2/S4 `{anti_routine}` slot; `_granularity_text()` (`:732-744`) appends it to S1.
 - **Resolution:** rewrite §7 against `4a690d0be`. What is *actually* missing is **mechanical enforcement** — `valueGate` still does not exist in code; the rule is prompt-only. Same fix in `storage §7`.
 
 ### A4 Circular dependency — VET consumes S3's lookup, but S3 runs after VET
+
 `extractor §4.2` + `D4` §9 vs `§4.2`/`§2.2` · *E1 P0*
 > ⚠️ **DISPOSITION WAS CLAIMED, NOT VERIFIED — RE-CHECKED 2026-09-24 AND STILL OPEN.** The extractor doc's §16.1 claimed *"all 6 P0s corrected in place"*. **A3 and A6 were; A1 was by the research pass; A4 was NOT.** **`MERGE-INTO-EXISTING` is still in S2.2 VET's output vocabulary**, so the circularity below **stands as recorded** and the VET/S3 ownership question is unresolved. *(A5 was resolved by the owner withdrawing the volume target — O2, §16.3 of the extractor doc.)*
+
 - D4 (narrowed): one neighbourhood lookup consumed by **the judgment**; where §4.2 (as §4.1b) quotes D4's reason as being about **discarding** → the judgment is **S2.2 VET**. But §4.2 puts **VET before S3**, and S3 owns the lookup.
 - Compounds: §4.2 (then §4.1b) declares **"S3 is the single authority on whether a candidate is new or existing"**, yet VET's output vocabulary includes **`MERGE-INTO-EXISTING`** — that judgement, made by a non-authority.
 - §4.2's constraint 3 ("the mechanical half of the gate needs NO graph") contradicts D4's granted neighbourhood outright.
 - **Resolution:** either hoist the lookup above VET (**and re-price it on pre-VET volume**), or re-scope D4 so VET consumes only within-batch context and **remove `MERGE-INTO-EXISTING`/`RENARRATE` from VET's vocabulary** (they belong to S3/S1).
 
 ### A5 The 10× target is unsupported, and the design cannot reproduce its own measurement
+
 `extractor §1`/`§4.0`/`§4.1`/`§6` · *E2 P0*
+
 - The doc **never states the target or any aggregate reduction**; they live outside it (`#4899`: "≈2.7 per session"; `#4917` §1.9: the ~10× = Jev's `save ≥ 0.5` **AND** `altitude = architecture`, from **n=28, 3 kept**).
 - **The measured basis is a PER-ITEM conjunction. The redesign moves abstraction to a PER-BATCH verdict** — *"level of abstraction … is a property of the batch, not of one candidate"*. **A batch verdict cannot be ANDed per item ⇒ the design cannot reproduce the 9.3× that justifies it.**
 - §4.0, §4.1 and §6 also give **three different question sets for S2.2**; the volume-producing questions (value gate, altitude) are missing from both canonical tables.
 - **Resolution:** decide per-item vs per-batch altitude; state S2.2's questions **once**; add a per-class reduction budget with the sample size behind every coefficient.
 
 ### A6 "An Object is a name, so it cannot be deformed" is falsified by the doc's own evidence
+
 `extractor §2.4.3` · *E2 P0*
+
 - §2.4.3 justifies excluding `Object`s from span-provenance: *"An `Object` is a **name**: it either matches the text or it does not."*
 - **Falsified by §1's own table:** `the timeout command` ← *"timeout is not on macOS"*; `the staging-only constraint` ← *"…staged only, no commit/push"*; `the lane ownership rule` ← *"Lane ownership: …"*. These names are **synthesised definite descriptions that do not appear in the source** — "command", "constraint", "rule" are **model-added**. §1 itself calls 62.3% of Objects *"definite descriptions … never entities"*, and §14 concedes a non-`the` Object can be a bare reference.
 - **Objects carry exactly the deformation risk the 4th layer exists to catch.** The scope justification is load-bearing and false.

@@ -83,6 +83,7 @@ If we don't do this: dogfooding T7 stays blocked, the swarm's agents can't get `
 ## Step 3 — Profit Growth Alignment
 
 **Causal chain:**
+
 ```
 Working dual-flow journey
   → hosted: signup → provision → welcome → dashboard → agent connected → first memory
@@ -108,6 +109,7 @@ Working dual-flow journey
 **Decision:** PROCEED
 
 **Alternatives considered:**
+
 1. Patch-only fix of #518/#519 — *rejected*: no designed journey, still leaks users at the welcome/dashboard boundary.
 2. Hosted-only scope — *rejected*: self-hosted is the OSS acquisition lever and stays in scope at lower depth.
 3. Fold into onboarding epic #235 — *rejected*: #235 is signal-gated; #518/#519 are P1 blockers *before* that signal.
@@ -118,6 +120,7 @@ Working dual-flow journey
 **Eisenhower placement:** Important + Urgent → **Do now**. Honest caveat: the *urgent* driver is internal (T7 dogfooding blocked) — external signups are unconfirmed, so urgency is real but bounded. The *important* driver is the hosted monetization path. The convenient-but-wrong move would be splitting the 2-3 day T7 hotfix into a separate track that ships without the journey design; instead the urgent slice is front-loaded *inside* the epic so both constraints are served.
 
 **Key assumptions:**
+
 - Supabase after_user_created hook → tenant-provision → /internal/provision is wired on the remote project (config.toml comment claims it; MUST verify live) — confidence: **medium**
 - The welcome page polling loop resolves a provisioned key within a reasonable window (<30s) — confidence: **medium** (unverified E2E)
 - Email/password signup can complete the hosted journey: signup.html assumes email confirmation is **disabled** on the remote Supabase project (no confirmation-branch handling in welcome.html poll). If enabled, that path breaks — MUST verify remote setting — confidence: **medium**

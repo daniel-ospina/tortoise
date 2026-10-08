@@ -52,6 +52,7 @@ During the Agent State Machine epic planning (Path C: tortoise-enriched + formal
 - **No organisation-design pack exists** in `packs/` (current: dev, marketing, product-strategy, project-management). New approval kinds go in core vocab (ONTOLOGY §5) or a new pack.
 
 ### Prior epistemic memory
+
 - Tortoise memory checkpoint: hosted API unavailable (no `TORTOISE_API_KEY`) — no prior claims retrieved. Graceful skip.
 
 ---
@@ -149,6 +150,7 @@ A human approval is recorded as **an Event (the occurrence — who approved what
 6. **#427 integration** — each of the 7 Tortoise Planning gates (customer profile, use cases, workflows, requirements, options, decisions, architecture) produces exactly this pattern: one `humanApproval` event + one decision Point + IMPL to that step's artifact claims. The graph accumulates the approval chain and can answer "what has the human approved, what does it unlock, and what would break if an earlier approval were revoked."
 
 ### What this deliberately does NOT introduce
+
 - ❌ No new operator type (APPROVED edge) — violates ontology §2; no semantic gain (RQ4).
 - ❌ No reuse of `decision`/`review` kinds — auto-mined / non-binding (RQ5).
 - ❌ No stored `approved` status on Objects — violates the derived-status principle (§2).

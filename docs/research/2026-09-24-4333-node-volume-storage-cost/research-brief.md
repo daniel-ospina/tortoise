@@ -39,6 +39,7 @@ The issue asks which of **three causes** is operating: **(a) writing the wrong t
 **What the deadline is not:** the issue's original trigger — *"a Free org's 10k cap in ~2 days"* — has since been **re-measured** (two live points on the same day: ~14,969 nodes added in one day against a cap raised by 15,000 in the same window). So the *rate* is real; the *cause* is what is unmeasured.
 
 **⚠️ Corrections the measurements force, recorded before any verdict:**
+
 - **"5.6 KB per quota node" is denominator-dependent.** 140 MB ÷ 25,000 capped nodes = 5.6 KB, but the numerator includes ~21,214 **quota-free** episodic turn Points plus Events, Sources, scaffolding and the whole index. **140 MB ÷ 51,012 labelled resident nodes ≈ 2.75 KB.** Both are true; they answer different questions. (`STORAGE-ARCHITECTURE.md` §13 already corrects this; the brief keeps both explicitly.)
 - **`GRAPH.MEMORY USAGE` is a sampling estimate** (`SAMPLES`, default 100) — the 141 MB is a good number, not an exact one.
 
@@ -131,6 +132,7 @@ Two independent measurements exist, both already recorded on the issue:
 ⚠️ **The issue body recorded this as *"~5,057 B (356 props + 4,701 vector)"* — that adds the base props twice.** The probe measured `props-only: 355.6 B/node` and `props+embedding: 4,700.9 B/node`, so the *embedded node's own total* is **≈ 4,701 B**, and the vector's marginal delta is `4,701 − 356 ≈` **4,345 B**. The corrected pair is used throughout.
 
 **⚠️ MEASUREMENT-COMPATIBILITY SPOTLIGHT — the 4,701 B figure and the doc's 1.50 KB stored / 2.05 KB resident figure are NOT the same quantity, and the two must not be interchanged.**
+
 - `4,701 B` is the **marginal `used_memory` delta of one embedded node** in a **fresh, small instance** — an allocation-level measurement that includes the node's own overhead, with **no vector index built**. It is a **floor for marginal growth**, not an amortised per-vector cost.
 - `STORAGE-ARCHITECTURE.md` §12.1 gives **1.50 KB stored** (the raw `vecf32` payload) and **2.05 KB resident** (payload + its share of HNSW).
 - **The check that settles it:** if 4,701 B/node were the resident cost, 33,580 embeddings would occupy **~158 MB — more than the whole 141 MB graph**, and `Point` attributes alone (≈20,900 embedded Points — **derived from the counts**, 33,580 total − 7,859 `:Object` − 4,798 `:Event` — × 4,701 B ≈ 98 MB) would exceed the measured **50 MB `Point` attribute** line in §3.5. **So the 4,701 B figure cannot be multiplied by the embedding count.** The graph-wide number must come from the measured estimate (§3.5), which is why the pricing table below uses denominators, not the probe.
@@ -252,30 +254,35 @@ The search surface exposes `content` from `n.subject`/`n.name`. All 16 sampled r
 ## 5. External findings (context for the cost model — not new ground)
 
 ### X1 — RAM-resident graph cost is a provisioning problem, and the field's answer is *eviction* **[HIGH — 3+ independent]**
+
 Multiple sources converge that memory-first graph systems tie cost to the dataset held in RAM, and that keeping graph topology + vector indexes resident for inactive tenants creates provisioning pressure. **Zep's own engineering blog states they evict idle graphs to object storage** to reduce memory spend.
 *Sources:* Zep engineering — *Why We Built a Graph Database Service for Agent Memory*; HydraDB *Multi-Tenant AI Agent Database*; Memgraph reviews (in-memory datasets must fit in RAM); Exasol in-memory failure-mode summary.
 
 **⇒ For us:** this is the external statement of §3.5's "no eviction on Cloud" fact. **The capability Zep describes is exactly the FalkorDB Enterprise-only offload** that §16.1 says is the strongest argument for self-hosting later — **deferred by D11, and not a proposal here.**
 
 ### X2 — Per-vector HNSW memory has a published formula, and ours matches it **[HIGH — 3+ independent]**
+
 The field's sizing formula is `1.1 × (4d + 8M)` bytes/vector — OpenSearch, AWS, and ScyllaDB all publish equivalent forms; Milvus shows graph overhead separate from raw vectors; the layer-0 `maxM0 = 2M` doubling is documented.
 *Sources:* OpenSearch docs (k-NN memory-optimized types); AWS Big Data Blog (k-NN at billion scale); ScyllaDB vector-search sizing; Milvus *Index Explained*; HNSW architecture write-ups.
 
 **⇒ For us:** with d = 384, M = 16 → **1,830 B ≈ 1.79 KB/vector** of HNSW overhead. **But our own measurement is BELOW that, so the formula is an upper bound here, not a confirmation:** 1,830 B × 33,580 = **61.4 MB (58.6 MiB)**, which exceeds the *entire* 45 MB `indices_sz_mb` — and that 45 MB also contains every fulltext index, not just HNSW. So the measured total **bounds our whole index at ≤1.34 KB/vector** (`45 × 10⁶ B ÷ 33,580 ≈ 1,340 B` — decimal MB, the same basis as §3.5 and the storage doc's 33,580 × 1,536 B ≈ 51.6 MB), below the formula's HNSW-only 1.79 KB. The layer-0 doubling and `M` in our engine's configuration are not pinned by this read, so the honest statement is: **the published formula predicts ≈1.79 KB/vector; our measured index total is ≤1.34 KB/vector across *all* indexes — the formula over-predicts for our configuration and must not be substituted for the measured number.** (Note the same non-identity: the storage doc's **2.05 KB resident** = 1.50 KB payload + **0.55 KB** HNSW share, itself far below the formula's 1.79 KB HNSW-only term — the three figures are not on one basis.)
 
 ### X3 — Quantization is a real lever, but *not on hosted FalkorDB* **[HIGH — 3+ independent]**
+
 Scalar (int8) quantization gives **~4× compression with <1 % recall@10 loss**; binary gives up to 32× at 30–40 % recall loss unless rescaled. **But this requires an engine that stores the vectors in a quantized form** — our vectors are `vecf32` inside FalkorDB.
 *Sources:* Qdrant scalar/binary quantization docs + TurboQuant article; HuggingFace *Binary and Scalar Embedding Quantization*; Featherstore quantization guide.
 
 **⇒ For us:** quantization is **not applicable today** — it becomes a lever only if V1 (`#4997`/§12.1c) moves the vectors to a store that supports it. **Recorded so it is not re-derived as an available optimisation.**
 
 ### X4 — The category charges for the *flow*, not the *stock* **[MEDIUM — 2 independent categories]**
+
 Surveyed agent-memory pricing meters **adds and retrievals** (Mem0: memory adds/retrievals) or **credits** (Zep: ~2 credits per 700 bytes of episode content) — **no surveyed product prices stored bytes**.
 *Sources:* Mem0 pricing; Zep pricing summaries (toolradar, maximem TCO table); Atlan agent-memory frameworks overview; Vectorize best-agent-memory-systems.
 
 **⇒ For us:** this corroborates the storage doc's finding that *"the category charges for the flow and gives away the stock"* — and it means **our fixed-subscription + growing-stock shape is the outlier, not the norm.** That is a *structural* observation for the owner, not a pricing proposal.
 
 ### X5 — ⚠️ ADVERSARIAL: vendor per-node figures are workload-benchmark noise, not a cost basis **[MEDIUM — 2 independent categories]**
+
 FalkorDB's published comparisons quote whole-instance RAM (100 MB vs 600 MB; 496 MB vs 2,668 MB) on **their own datasets** — there is **no published per-node memory figure** from any vendor, and the numbers vary by 1–2 orders of magnitude across their own benchmark pages (6 MB–17 MB in some tests, ~500 MB in others).
 *Sources:* FalkorDB vendor comparison pages and benchmark site; Atlan 2026 independent benchmark summary.
 
@@ -288,6 +295,7 @@ FalkorDB's published comparisons quote whole-instance RAM (100 MB vs 600 MB; 496
 **No item below changes a price or a cap.** Savings are stated as *bytes released*, and each names the surface it touches. **This list holds the two write-path levers (§6.1–§6.2) and nothing else.** Deployment and engine-hosting items are deliberately **not** ranked here — they are recorded and deferred as **§6.6 (per D11)**, so this section cannot be read as proposing a migration.
 
 ### 6.1 EMBED gate — stop embedding identifier-only text *(highest measured leverage on the dominant cost class)* **[MEDIUM]** ⚠️ emerging — the policy is decided; the saving is unmeasured
+
 - **What:** enforce the declared policy at a second point — *"a row earns a vector if its embedded text carries meaning that its identifiers do not"* (`STORAGE-ARCHITECTURE.md` §12.2a, **already DECIDED 2026-09-23**).
 - **Write path:** the embedding submission step (`sdk.py:2989` `create_point`; encode at `:3260-3267`) + the extractor's `EMBED` decision (the missing step G2 in the extractor doc).
 - **Expected saving:** the vector class is **≈ half the 141 MB graph** (§3.5). Removing the identifier-only subset shrinks the largest measured class; **the exact fraction is Stage-1 material, not yet measured** (§6.1a).
@@ -328,12 +336,14 @@ Per the owner's standing **small-sample-first** method, two candidate identifier
 **⚠️ Both `DROP?` rows are *file/line facts whose identifiers carry the meaning* — and a decision could turn on them.** That is precisely `#4899`'s known false-positive class (*"a bare `#\d{3,}` in a working note is discardable; a PR number a decision turned on is not"*). **Nothing is implemented until the owner has reviewed input and output rows, and the expected saving is therefore UNMEASURED.**
 
 ### 6.2 Write less of the *capped* class — the extractor's selection gate **[MEDIUM]** ⚠️ emerging — target, not a measurement
+
 - **What:** S2.2 VET + `DISCARD` ([#4899](https://github.com/daniel-ospina/tortoise/issues/4899)) on survivors, and the missing **S0a/S0b source dedup** (whole-narrative saves).
 - **Write path:** `extractor_v2.py`; `search_graph`/`resolve_entities`.
 - **Expected saving:** the storage doc's own honest figures — **~2× mechanical; ~10× is a target, not a measurement** (§6.1). **Not a cost estimate; do not quote it as one.**
 - **Contradiction check:** none; it is the in-flight extractor work (E1).
 
 ### 6.5 ⛔ Explicitly NOT levers on the current stack **[HIGH]**
+
 - **Quantization** — not applicable to `vecf32` on hosted FalkorDB (X3).
 - **Per-tenant index partitioning** — fails at ~2,100 tenants (lock exhaustion) and is unusable at 500; **withdrawn, not available** (`#12.1a`).
 - **Deriving/deleting `aboutObject`** — refused by the `OVERRIDES:` ruling; it also breaks two public surfaces.
@@ -341,6 +351,7 @@ Per the owner's standing **small-sample-first** method, two candidate identifier
 ### 6.6 Deferred — recorded, NOT proposed (per D11) **[HIGH for the record; no action here]**
 
 These two items sit **outside the ranked list above** because each is either an ops/deployment action or an engine-hosting change, and neither is a write-path lever. They are recorded so the picture is complete; **this brief proposes neither.**
+
 - **Densify — pack more graphs onto one instance** (ops/deployment; ≤ 75 % of instance RAM). *The only lever that lowers per-tenant cost without dropping anything.* Saving is proportional to achieved density and needs the FalkorDB tenancy model, **not measured here**. It is not an engine change, so D11 does not block it — but it is not a write-path optimisation either.
 - **The storage layer — the deferred lever is *self-hosting first*.** D11's named revisit trigger → price **self-hosted FalkorDB (SSPLv1, same engine, no rewrite)** before any engine change. The Postgres+pgvector direction is `#3998`/D30's, deferred. *Expected saving if ever taken:* removes the $73/GiB rent; gated on ops burden and the restore drill (`#3895`). ✅ **This is D11's own wording — recorded, not proposed.**
 

@@ -69,6 +69,7 @@ cross-subdomain session cookie — this change does not touch the session.
 ## Verification Gates
 
 ### problem-verify: 4 cycles, clean
+
 (2 problem-diverge → 2 problem-converge → 4 cycles of 2 problem-verifiers; both returned
 `GATE: PASS` at cycle 4. V2 wedged once on host load and was re-dispatched. Amendments across the
 cycles: sticky-return sanitisation; CDN specifier pin; verifier-home correction; write-path parity;
@@ -78,6 +79,7 @@ account; one specified terminal state; the latch + remove-from-every-store; the 
 derivation; and the `test_cross_subdomain_cookie_sync.py` refactor constraints.)
 
 ### solution-verify: 4 cycles, clean
+
 Cycle 1: 4 P1 (aux-chain cookie leg contradicted the router's headline claim; the version pin did
 not fire on a vendor-only PR; the ported contract was bounded only by a shape tripwire; `SIZE_CAP`
 had no agreement assertion) + 2 P2 + 4 P3. Cycle 2: 1 P1 (the refusal had no observable mechanism) +
@@ -104,10 +106,12 @@ static-check caveat). Per the adversarial-domain bound, the remaining A5 sub-cas
 ## Plan
 
 ### Chosen solution
+
 Authorization Code + PKCE on that one client, on the origin it already uses, with the `code_verifier`
 origin-scoped and the write path made honest.
 
 ### 1. Duplication adjudication (load-bearing — both convergers, independently)
+
 A key-routed, verifier-aware storage adapter **already ships in this repo**:
 `website/apps/blog-admin/src/lib/supabase.ts:157-189` (`authStorage`), tested by
 `website/apps/blog-admin/src/lib/supabase-auth-storage.test.ts:92-107`, which pins exactly the two
@@ -127,6 +131,7 @@ trigger is `_removeSession` from an invalid/expired stored session, reached via
 `_recoverAndRefresh`); the complement, with the aux chain below, cannot.
 
 **Mechanism:**
+
 1. a **fail-closed allowlist-of-one** in the cookie branch (`key !== COOKIE_NAME` → the aux chain
    and `return`); and
 2. an aux chain with **no cookie leg** (Step 4), so no non-session key reaches `document.cookie`
@@ -156,6 +161,7 @@ cookie's issuer/acceptor inventory (§2.1 legacy-cohort register, `:99-136`) and
 What is **unrecorded** is the **storage-adapter key-routing predicate**. Append the passage as
 **continuation sentences of the `- **OVERRIDES:**` bullet at `docs/auth-architecture.md:93-98`** —
 the claim unit is the bullet **plus its continuation lines**, so:
+
 - **no new list item at any indent** (`_ITEM_START` matches `-`/`*`/`+`/`N.` at any indent), **no
   blank line, no heading, no table row** — any of those splits the unit and the marker stops
   covering the new text (`_DISPOSITION` = `overrides`/`reject`/`superseded`/`deprecated`/`pre-bff`
@@ -178,6 +184,7 @@ the claim unit is the bullet **plus its continuation lines**, so:
   `unify-contract-keep-drivers`.
 
 ### 2. Rejected alternatives (with what each would be better for)
+
 | Alternative | Why rejected |
 |---|---|
 | **The issue body's prescription** (`detectSessionInUrl:false` + Pages Function at `/auth/callback`) | Targets a surface that does not exist (FastAPI host, no Pages Function); flow-breaking as written (`?code` unconsumed → null session → the #3485 silent sign-in). |
@@ -221,6 +228,7 @@ signatures** (`getItem(key) {`, `setItem(key, value) {`, `removeItem(key) {`) an
 (the extractor's brace matcher is not string-aware).
 
 **Step 3b — pre-flight capability guard (before the redirect), as landed.**
+
 ```js
 function pkceIncapable() {                       // null | "no-webcrypto" | "no-store"
   if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
@@ -247,6 +255,7 @@ function pkceIncapable() {                       // null | "no-webcrypto" | "no-
   return "no-store";
 }
 ```
+
 The guard is an early-failure optimisation: it must never *be* the invariant, because it probes a
 throwaway key with a payload sized for the verifier, and the writer's own choice can differ (a store
 whose accepted-size band sits between the probe and the real value). The invariant is enforced where
@@ -256,6 +265,7 @@ length, never the credential itself — reads the real value back, and only then
 chosen (invariant 13). What no probe can settle is whether the store will remove the REAL key: the
 credential must be written before its removability is observable, so a store that discriminates by
 key keeps the copy it accepted (residual R21). The landed writer (invariant 13):
+
 ```js
 const writeAux = (key, value) => {
   const v = String(value);
@@ -281,6 +291,7 @@ const writeAux = (key, value) => {
   return false;   // refuse — never fall through to the cookie jar
 };
 ```
+
 `removeAux` still scans EVERY aux store (it runs on paths where the guard never did, e.g. an
 invalid-session load), and `readAux` likewise (a verifier may live in either store). Residual R21: a
 store that discriminates by KEY (accepts/removes its own probe key but refuses the `sb-…` key) is
@@ -290,6 +301,7 @@ re-proving removal on the real key cannot help, because the credential must be w
 removal is observable, and the re-probe would leave the credential in two stores instead of one; no
 browser storage behaves that way, and a key-aware shim on the origin
 is already inside the declared out-of-scope "XSS on the origin" (#3559).
+
 ```js
 async function signInWithProvider(provider) {
   const incap = pkceIncapable();
@@ -300,6 +312,7 @@ async function signInWithProvider(provider) {
   if (error) showError(error.message);
 }
 ```
+
 Rationale (executed): with `crypto.subtle` absent (but `getRandomValues` present) the bundle
 silently downgrades to `code_challenge_method=plain` + `console.warn`, and `isLocal()`
 (`:1917-1922`) deliberately admits `http://10.*/192.168.*/172.16-31.*` origins; with the aux store
@@ -333,10 +346,12 @@ read-only**, at load, capturing whether it carried a transient and the `error_de
 mutate `window.location.search` before the library has attempted the code** (B1: `createClient()`
 captures `e.code` synchronously inside `_initialize`). In the `onAuthStateChange` callback
 (`:2212-2216`), on `INITIAL_SESSION` with **no session** and a transient present:
+
 ```js
 showSignin();                                   // #view-signin MUST become visible
 showError(boundedText(error_description) || "Sign-in failed — please start again.");
 ```
+
 then, and only then, `history.replaceState` to the sanitised URL. `boundedText(s)` is specified (not
 left as a name): strip `[\u0000-\u001F\u007F-\u009F\u2028\u2029]`, then truncate to **300 chars**
 (appending `…`). Co-assertion: the rendered `textContent` length is **at most 300 including** the
@@ -467,6 +482,7 @@ group to accept `:\s*(…)`** (backward-compatible: covers `name: (k, v) => {` a
 `name: function (k) {`) so there is **one** body extractor for both the JS-method and TS-arrow
 forms — do **not** fork a second extractor. Then a **per-method, polarity-normalised, exactly-one**
 static predicate assertion, **read path excluded**:
+
   - **oauth.py `setItem` / `removeItem`** (via the extended extractor), with a **brace-matching**
     locator (not `[^}]*return`):
     `assert re.findall(r"\bkey\s*(===|!==)\s*([A-Za-z_$][\w$]*)", body) == [("!==", "COOKIE_NAME")]`
@@ -505,6 +521,7 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
 `tests/test_ci_selection.py` to the affected-surface list.
 
 ### 4. Test invariants (all observable behaviour, executed against the real library)
+
 1. **Grant type actually used** — `signInWithProvider('github')` yields an authorize URL with
    `code_challenge` + `code_challenge_method=s256`; **paired negative control**
    (`flowType:'implicit'`) yields **no** `code_challenge`. *Secure-context only; the no-WebCrypto
@@ -623,6 +640,7 @@ of refusing → #6 with the `throw-remove` store; a fragment branch without the 
 store's one leaked probe entry then reads as a credential).
 
 ### Acceptance criteria
+
 1. The consent page's provider initiation produces a `code_challenge_method=s256` authorize URL and
    the token request is `grant_type=pkce` with a `code_verifier` (invariant 1, 2).
 2. The `code_verifier` never reaches `document.cookie`; the parent-domain session cookie's semantics
@@ -657,6 +675,7 @@ store's one leaked probe entry then reads as a credential).
 ---
 
 ## Clarifications
+
 none — no question qualified (research settled every decision; the contradiction test passed; the
 one genuinely ambiguous item — the surface to migrate — was settled by evidence, not a human
 choice).
@@ -666,7 +685,9 @@ choice).
 ## External Research (Phase 1.5 artifact)
 
 ### Axis Research
+
 No external tool was used, and the justified-skip trigger is recorded rather than assumed:
+
 - the governing rules are **primary texts** (RFC 10017 §7.2 / §6.3.2.1, RFC 7636), read directly;
 - the library under change is **vendored in-repo** and was **executed** under Node 22 (below), so
   no vendor-documentation lookup was needed;
@@ -675,6 +696,7 @@ No external tool was used, and the justified-skip trigger is recorded rather tha
 - there is **no SOTA/convergence claim** in this plan, so no competitor-precedent axis exists.
 
 ### Integration Docs
+
 | Dep | Version | Verified how |
 |---|---|---|
 | `@supabase/supabase-js` (CDN + vendored) | `2.112.2`, now pinned | **Executed** the vendored bundle under Node 22: default ⇒ no `code_challenge`; `flowType:'pkce'` ⇒ `s256` + three verifier keys (`${k}-code-verifier`, `${k}-flow-<id>-code-verifier`, `${k}-flows-code-verifier`); `${k}-user` never written here (`userStorage` null); `_exchangeCodeForSession` removes the verifier on **both** success and failure; on a **failed** exchange `_getSessionFromURL` throws **before** its own `code`-deletion + `replaceState` (URL residue — hence Step 5; **not** a confirmed loop); `signInWithPassword` writes **zero** verifier keys; with `crypto.subtle` absent (but `getRandomValues` present) the challenge method silently becomes `plain`; with the storage adapter swallowing a write, `signInWithOAuth` still navigates and the return performs **no** exchange (`fetches: []`, `INITIAL_SESSION` null). jsdelivr serves a byte-identical body + a prepended banner (292 bytes). |
@@ -687,6 +709,7 @@ No external tool was used, and the justified-skip trigger is recorded rather tha
 ---
 
 ## Rejected Alternatives
+
 See the table in `### 2. Rejected alternatives`. Every row states what the alternative would be
 better for.
 
@@ -729,6 +752,7 @@ No wiring gap is unresolved: every un-covered touch point is either **filed** as
 > What the review *changed* is in the code and in the invariant/A/R tables above.
 
 ### diff-time code review (commit-workflow Step 3, standard tier)
+
 Seven fresh-context reviewers were dispatched against the pushed head: guidance/comments, bug scan
 (two ordered passes), history+prior-PR comments, security, architecture, config/CI-wiring, and UX.
 Security returned `NO ISSUES FOUND`; config/CI-wiring returned `NO ISSUES FOUND` (and measured that
@@ -755,6 +779,7 @@ field. The parse is now an anchored regex. The fixed `sleep()` settle windows we
 condition polling after one flaky failure of inv 11 under host load (1/49 runs).
 
 ### diff-time code review ROUND 2 (re-review of the fix commit `8c7df476d`)
+
 A P1 in round 1 forces a fresh re-review. Two reviewers were dispatched against the fix commit — a
 bug scan (two ordered passes) and a fresh adversarial-coverage reviewer, the latter required because
 the doc declares an `### Adversarial Threat Surface`. Together they returned **5 findings, all P2,
@@ -776,6 +801,7 @@ as whitespace; and a store whose `getItem` lies is caught by `writeAux`'s verify
 four of the round-1 mutations independently against the fix commit and confirmed each kill.
 
 ### diff-time code review ROUND 3 (re-review of `6d89cba81`)
+
 Two fresh reviewers (bug scan two-pass + adversarial-coverage, the latter required by the declared
 threat surface). Result: **the declared surface is COVERED** (14 independent mutations, including
 three reverts of the round-2 fix, each reddening the named invariant) — and **two P2 findings, one of
@@ -789,6 +815,7 @@ the credential is written (a store that discriminates by KEY still receives it �
 | 17 | the coverage map cited **inv 10**, which does not exist (the free 10th numbering slot was never written; its content is covered by inv 3 + inv 6) | the A1/A5 rows now cite the tests that exist |
 
 ### diff-time code review ROUND 4 (re-review of `7d8b79a78`)
+
 One fresh reviewer, covering both the bug scan and admissibility (merge safety). It found **no runtime
 defect** in the writer change — no inverted condition, no off-by-one, no dropped-key regression
 (`writeAux`'s boolean has one caller and is discarded, and `readAux` scans both stores, so relocation
@@ -803,6 +830,7 @@ previous round's own fix note**:
 | 20 | **four** `inv 10` citations survived the round-3 fix (lines 135, 542, 603 — reached then — and 524, missed): the round-3 row below claims three were replaced, which was true only of the ones it listed | all four replaced with the tests that exist (`3, 4, 12`, and `3, 4, 12, 13` for the aux-store criterion) |
 
 ### diff-time code review ROUND 5 (re-review of `61e8ad2a7`)
+
 One fresh reviewer on the round-4 fix. It reproduced the P1 premise verbatim (the read-back mutation
 SURVIVES at `7d8b79a78` and DIES at `61e8ad2a7`), confirmed the new `silent-remove` scenario reaches the
 WRITER rather than the guard (the raw run shows `navs` non-empty with the credential relocated to
@@ -828,6 +856,7 @@ recurs; and a cookie jar that silently drops a write whose *encoded length is �
 cannot model one) is outside A1–A7. The adversarial reviewer's key-prefix divergence is now R21.
 
 ### diff-time code review ROUND 6 (re-review of `d687a9249`)
+
 Six fresh reviewers; two returned NO ISSUES FOUND. In-scope findings, all fixed: a provenance comment
 that contradicted itself; a surviving fragment-era claim; the A5 `catch` not cleaning the real key; an
 unpinned probe fix; doc drift (Step 2 / 3b / 7 / 10c); and a config duration row missing its
@@ -835,6 +864,7 @@ unpinned probe fix; doc drift (Step 2 / 3b / 7 / 10c); and a config duration row
 behaves identically, so it is not this diff's regression.
 
 ### diff-time code review ROUND 7 (re-review of `ca8049bdc`)
+
 Six fresh reviewers; three returned NO ISSUES FOUND. Nine in-scope findings, all fixed — including two
 gaps in round 6's own additions: the `exchangeFails` case was inert (no seeded verifier meant the token
 endpoint was never called) and inv 11 proved transients dropped but not that required params survive;
@@ -843,6 +873,7 @@ journey-phrase comments; and two doc errors introduced the round before (`A1–A
 `#3701` citation that appears nowhere). The blog-admin follow-up was filed as **#5735**.
 
 ### diff-time code review ROUND 8 (re-review of `118fa70fb`)
+
 Four fresh reviewers (correctness/logic, security, test-quality, doc-consistency). The security
 reviewer returned NO ISSUES FOUND. **Round 7's widened version negative was itself a P1 regression**:
 its unbounded `\d+(?:\.\d+){0,2}` arm also matched the allowed pinned form, so
@@ -856,6 +887,7 @@ scoping doc's 341-count verification row (whose command omits `tests/test_oauth_
 file. (The blog-admin follow-up mentioned above was filed in round 7, as **#5735**.)
 
 ### diff-time code review ROUND 9 (re-review of `f458c3edf`)
+
 Four fresh reviewers (correctness/logic, security, test-quality, doc-consistency). This round found
 that **round 8's real-key removal proof was net-negative rather than merely incomplete**: it cannot
 prevent the residual it appears to guard (the credential must be WRITTEN before its removability is
@@ -875,6 +907,7 @@ corruption, no secret leak) — is **not fixed here** (identical on `origin/main
 **#6001**.
 
 ### diff-time code review ROUND 10 (re-review of `a98886611`)
+
 Three fresh reviewers (correctness/logic, test-quality, doc-consistency). All findings were record- or
 comment-level, and all are fixed: round 9's fragment param-list test was itself too permissive — a
 bare "has an `=`" test treated `#/route/x?a=1` and `#settings?tab=x` as param lists and re-serialised
@@ -889,6 +922,7 @@ claimed the reverted guarantee and is renamed to the operation actually pinned; 
 wording, R21's tab-close bound and the `round-8 head` verification labels were all corrected.
 
 ### diff-time code review ROUND 11 (re-review of `5856ad4a5`)
+
 Three fresh reviewers (correctness/logic, test-quality, doc-consistency). No behaviour changed.
 Findings, all fixed in `c156d7571`: R3's tail, and the invariant-13 test docstring's stated reason for
 the revert, still contradicted the reverted real-key removal proof; the A2 coverage row still promised a Step 10(a)
@@ -904,6 +938,7 @@ cycle 4 `GATE: PASS` (both). Amendments A1–A8 + B1–B3 + C1–C7 recorded in
 `/tmp/3496-converge-rev{2,3,4,5}*.md`.
 
 **solution-verify** (4 cycles × 2 verifiers + 1 advisory duplication-architecture reviewer):
+
 | cycle | verifier-1 | verifier-2 | duplication-architecture (advisory) | controller action |
 |---|---|---|---|---|
 | 1 | ISSUES (1 P1) | ISSUES (1 P1) | ISSUES (3 P1 / 2 P2) | fixed all 4 P1 + 6 P2/P3 → rev 2 |
@@ -928,6 +963,7 @@ gate is a strictly stronger, artifact-level review of the same surfaces. This co
 recorded here rather than the gates being silently skipped.
 
 ### `### Adversarial Threat Surface` — coverage map (adversarial-domain acceptance)
+
 | class | adversarial input | required behaviour | pinned by |
 |---|---|---|---|
 | **A1** verifier exfiltration via store routing | a verifier key + an unknown aux key + a `-user` key | never in `document.cookie`; aux stores only | inv 3, 4, 12, 13 (inv 3 writes the non-verifier keys through the adapter and reads the cookie log by key identity) |
@@ -940,6 +976,7 @@ recorded here rather than the gates being silently skipped.
 
 **Explicitly OUT of scope (named, not silently dropped).** These are deferred with owners in the
 Wiring Check / Deferral ledger, and no claim is made that this change closes them:
+
 - RFC 10017 §7.2 **AS** clause + §6.3.2.1 AS-enforcement half; CDN SRI (**#3501**).
 - The JS-readable **session** token / §8.1 (**#3559**), and the session model itself (**#3524**).
 - CSRF on `POST /oauth/consent`; consent fixation; the D1-stale CAS/read-replication precondition;
@@ -958,6 +995,7 @@ Wiring Check / Deferral ledger, and no claim is made that this change closes the
 ---
 
 ## Complexity
+
 | Domain | Rating |
 |--------|--------|
 | Code | complex |
@@ -971,6 +1009,7 @@ Wiring Check / Deferral ledger, and no claim is made that this change closes the
 ---
 
 ## Deferral ledger
+
 - **#3501** — AS-side RFC 10017 §7.2 clause + §6.3.2.1 AS half; item 5 (SRI on the CDN script); the
   blog-admin/third-copy shared-declaration follow-up. Comment posted.
 - **#3524** — the session model (consent identity bridge; the four session-flow properties under
@@ -989,6 +1028,7 @@ Wiring Check / Deferral ledger, and no claim is made that this change closes the
   scan (the shared-declaration follow-up's evidence).
 
 ## Risks & residuals
+
 R1 GoTrue token-endpoint CORS refusal — hard external dependency; **escalate, never fall back to
 implicit**. R2 cross-context verifier loss (mobile/in-app hand-off) — lands on the terminal state.
 R3 **no aux store** (including the access-time-throw and quota classes the sized probe covers) **or no

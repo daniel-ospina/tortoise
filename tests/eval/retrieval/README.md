@@ -40,6 +40,7 @@ surface vocabulary mismatch — the case reranking #317 targets).
 ## Query sets
 
 `tests/eval/retrieval/queries/`:
+
 - `oracle_queries.json` — 100 oracle queries (53 from the #316 query mix +
   47 new). q052/q055/q056 are excluded (zero token overlap with the corpus
   → no oracle target; they stay #316 latency probes).

@@ -9,6 +9,7 @@
 **Team:** epistemic-team · **Issue:** #2185 · **Branch:** `feat/2185-longmem-usage-cost` · **TIER:** standard (Level: task).
 
 **Architecture (3 additive layers, from verified scope):**
+
 1. **Capture seam** — optional `usage_sink` callback (default None, inert) fired at each chat adapter's response-parse site (response-local data, per billed attempt, carrying the *serving* provider/model). Product touches: `tortoise/model_adapters.py` (OpenRouterModel/DeepSeekDirectModel/VeniceModel), `tortoise/models.py` (OpenAICompatModel — sink attribute only, NO mirrors; shared product class), `tools/longmem_eval/judge.py` (OfficialJudgeModel, eval-owned). Plus a ~3-line **context propagation fix** in `tortoise/extractor_v2.py::_call_once` (`contextvars.copy_context()` before `Thread.start()`; body under `ctx.run(...)`) — contextvars do NOT propagate to new threads in CPython (repo-verified quota.py ~739).
 2. **Harness collector** — new `tools/longmem_eval/usage.py`: run-level collector, qid-keyed buckets by `(stage, provider, model)`, a question-key ContextVar (set as FIRST statement of the per-question task body), registration walkers, drain helpers. Per-outcome conditional `llm_usage` envelope; durable checkpoint `usage_overhead` payload for failure/preflight spend (atomic with `_upsert_failure`, merged on resume, #1764 sweep).
 3. **Pricing + report** — new `tools/longmem_eval/costing.py` (versioned per-(provider,model) USD/1M map, documented sources, `estimated` flags, unpriced-lane policy) and conditional aggregation in `report.py`/`run.py` (raw stays in outcomes; cost computed at report time; never mutates nested dicts).
@@ -37,6 +38,7 @@
 ### Verification Plan (routed: code domain, standard → unit + targeted stubbed-integration; no UX/DB/e2e/content/config)
 
 Coverage required (from issue checklist + scope Am 11/14/17/27):
+
 - Usage round-trip via stubbed provider response (sink fired; envelope sums correct).
 - Mock runs: no `llm_usage`/cost keys; exact 258-pin holds with `llm_calls: 3` + no usage rows (emission = sink rows / overhead presence, widened per Am 21).
 - Aggregation: per-question × per-run totals == Σ raw usage × pricing map; dual wire-form keys; unpriced lane loud `priced: false`; `usage_present=false` lanes visible.
@@ -51,12 +53,14 @@ Coverage required (from issue checklist + scope Am 11/14/17/27):
 **Intent:** Give every real chat adapter a no-op-by-default `usage_sink` that fires at the response-parse point with response-local usage, so the harness can meter calls without re-implementing transports or touching measured request shapes.
 **Acceptance:** Sink attribute exists on OpenRouterModel/DeepSeekDirectModel (VeniceModel inherits), OpenAICompatModel; firing is unit-tested with a stub adapter; when unset, zero behavior change (all existing adapter/forwarding/extractor tests pass); `inspect.signature(model.complete)` and isinstance(fingerprint) code untouched.
 **Files:**
+
 - Modify: `tortoise/model_adapters.py` (OpenRouterModel.__init__/complete ~line 100-155; DeepSeekDirectModel.complete ~197-256; VeniceModel inherits)
 - Modify: `tortoise/models.py` (OpenAICompatModel ~29-90)
 - Modify: `tortoise/extractor_v2.py` (`_call_once` ~4140-4200 — ctx.run fix)
 - Test: `tests/test_longmem_usage_seam.py` (new) + existing green
 
 **Step 1:** Write failing tests in `tests/test_longmem_usage_seam.py`:
+
 - `test_openrouter_sink_fires_with_response_local_usage`: construct OpenRouterModel with a monkeypatched `_session` whose `.post()` returns a fake response (`r.json()` → `{"usage": {"prompt_tokens": 11, "completion_tokens": 7, "prompt_cache_hit_tokens": 5}, "choices": [...]}`); set `model.usage_sink = record`; call `complete(system=, user=)`; assert record got `(provider, model.id, usage_dict_incl_cache, True)` and content unchanged.
 - `test_sink_none_noop`: same without sink → no exception, mirrors still set (existing last_* convention).
 - `test_openai_compat_model_sink`: OpenAICompatModel with stubbed `urllib.request.urlopen` (monkeypatch) → sink fired with usage; no `last_*` attributes added (assert `not hasattr(model, "last_prompt_tokens")`).
@@ -71,6 +75,7 @@ Run: `uv run pytest tests/test_longmem_usage_seam.py -v` → expect FAIL (attrib
 **Intent:** Ensure the judge transport (eval-owned, must stay byte-verbatim for benchmark comparability) can fire usage, and reader/judge expose the model instance for harness registration.
 **Acceptance:** `OfficialJudgeModel` has `usage_sink` attr + fires with usage dict; `build_judge`/`build_reader` unchanged in behavior (sink None default); official judge call shape untouched (single user message, t=0, max_tokens=10, no response_format).
 **Files:**
+
 - Modify: `tools/longmem_eval/judge.py` (OfficialJudgeModel ~268-321)
 - Test: `tests/test_longmem_usage_seam.py` (extend)
 
@@ -84,6 +89,7 @@ Run: `uv run pytest tests/test_longmem_usage_seam.py -v` → expect FAIL (attrib
 **Intent:** Central run-level collector that buckets sink fires by (stage, provider, model) per question and provides the drain primitives used by run.py and report.py.
 **Acceptance:** `usage.py` exposes: `QuestionKey` ContextVar + `set_question_key(qid)/clear_question_key()`; module-level collector singleton with `reset()` (A2); `UsageCollector` (lock-guarded; `attach(model, *, stage, provider)` walking RoutingModel.primary/fallback, RotatingModel.providers, or single adapter — assigns `usage_sink` on walked members (A6), no-op only for mocks/non-adapter objects with no `complete()` path; `drain_question(qid)` → envelope or None; `drain_overhead()` → buckets for keyless rows; `qids_with_outcomes`/`move_failed_qid_to_overhead(qid)`; `reset()`); envelope schema `{stage: {provider: {model: {"prompt_tokens": int, "completion_tokens": int, "calls": int, "usage_present": bool}}}}` plus flat `total` convenience; JSON-safe values only.
 **Files:**
+
 - Create: `tools/longmem_eval/usage.py`
 - Test: `tests/test_longmem_usage.py` (new)
 
@@ -97,10 +103,12 @@ Run: `uv run pytest tests/test_longmem_usage_seam.py -v` → expect FAIL (attrib
 **Intent:** Connect the collector into the run: register sinks on reader/judge/extractor models, key every question, drain into outcomes/failure entries/checkpoint so no billed spend is dropped in-process or across resume.
 **Acceptance:** Real run outcomes carry conditional `llm_usage`; failure entries persist usage atomically; `usage_overhead` rides the checkpoint (write/merge/load + #1764 sweep); mock runs and retrieval-only runs produce none of the above; `--workers` 1 and >1 both correct (threaded test); preflight rows → overhead.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (registration after builds ~5081-5096; question key first-statement of per-question task body; drain at outcome construction ~3560-3610 incl. breaker-open dropped-outcome path ~3717-3738; `_upsert_failure` ~883 (atomic usage param); `_save_checkpoint`/`_write_checkpoint_locked`/`_merge_checkpoint`/`_load_checkpoint` (~1722-2140) for the `usage_overhead` payload + #1764 sweep; failure-entry construction ~819 for drain-to-overhead; collector init before `run_preflight` ~5123; pass `usage_overhead` to `outcomes_to_report` ~3929)
 - Test: `tests/test_longmem_usage.py` (extend) + `tests/test_longmem_runner.py` (new fixtures, no edits to existing assertions)
 
 **Step 1:** Failing tests (unit-level where possible; extract the run-loop bookkeeping into testable helpers where the function is too monolithic — keep helpers module-private in usage.py or run.py):
+
 - `test_outcome_drain_llm_usage`: after a question's ingest/reader/judge phases against a sink-equipped stub extractor model + stub reader/judge, the outcome dict carries the expected `llm_usage` envelope; breaker-open dropped outcome likewise; failed question (retryable → failure entry) → NO outcome but entry/overhead carries the usage.
 - `test_failure_entry_atomic_usage`: `_upsert_failure`-path helper persists entry + usage in one write (assert on written file).
 - `test_checkpoint_usage_overhead_roundtrip`: save with overhead → load → merged additively across two segments; pre-fix checkpoint (no key) loads fine (`.get`).
@@ -116,6 +124,7 @@ Run → FAIL.
 **Intent:** Convert raw token buckets to USD at report time with a documented, versioned pricing map that is honest about unverified prices and unpriced lanes.
 **Acceptance:** `costing.py` exposes `price_usage_envelope(envelope) -> (cost_usd, priced: bool, breakdown)`; map covers every reachable eval lane with documented source + date; out-of-map lane → `priced=False` loud marker (never crash/`estimated`/silent $0); cache-detail handling documented (cache-hit priced at reduced rate ONLY where verified; else prompt leg flagged `estimated`); reasoning tokens not double-added (completion_tokens covers them — methodology note).
 **Files:**
+
 - Create: `tools/longmem_eval/costing.py`
 - Test: `tests/test_longmem_costing.py` (new)
 
@@ -129,6 +138,7 @@ Run → FAIL.
 **Intent:** Surface per-question and per-run token/cost aggregates in the saved report, conditionally (mock reports byte-identical), with reproducible methodology and honest overhead/coverage semantics.
 **Acceptance:** Outcomes projection emits `llm_usage` only when present (conditional `rerank_pass` pattern, run.py ~4140); `report["usage"]` appears iff ≥1 outcome has usage OR overhead/preflight rows exist (Am 21) — exactly ONE new top-level key when emitting, none when not (A7); contains per-question aggregates keyed by qid, per-run totals, overhead section (Σ usage_overhead incl. preflight + dropped/breaker + failed spend — Am 20 reclassification), per-data-point cost over evidence-bearing outcomes (`evidence_written>0`) with coverage marker when 0<n_with_usage<n_outcomes; methodology records pricing-map snapshot (git sha + `verified_on`); pricing does NOT mutate outcome `llm_usage`; mock 258-pin + all existing report tests unchanged.
 **Files:**
+
 - Modify: `tools/longmem_eval/run.py` (projection allowlist conditional entry; forward `usage_overhead`/`usage` to outcomes_to_report ~4028/3929)
 - Modify: `tools/longmem_eval/report.py` (build_report aggregation ~682+; summary assembly; methodology)
 - Test: `tests/test_longmem_costing.py`/`tests/test_longmem_usage.py` extend; new report fixtures
@@ -143,6 +153,7 @@ Run → FAIL.
 **Intent:** Prove mock/no-call runs are byte-identical and all mandated failure-path/threaded/reconciliation behaviors hold.
 **Acceptance:** All scope verification items green: 258-pin; mock run report key set identical pre/post; `llm_calls ≥ usage rows` reconciliation test; failed-question → overhead fixture; breaker-open → overhead-section fixture; two-process resume fixture; #1764 sweep; preflight-only overhead; threaded daemon + workers=2 tests; usage_present=false lane visible; unpriced loud.
 **Files:**
+
 - Test: extend `tests/test_longmem_usage.py`, `tests/test_longmem_costing.py`, `tests/test_longmem_runner.py` fixtures
 
 **Step 1:** Add the tests (list in Acceptance) against current code → RED where behavior missing (fix gaps in Tasks 4/6 code as needed).
@@ -154,6 +165,7 @@ Run → FAIL.
 **Intent:** Prove no regression anywhere (product adapter tests especially) and document the new artifact surfaces + boundaries.
 **Acceptance:** `uv run pytest tests/ -q` green (or pre-existing failures unchanged — record baseline first); mock smoke run before/after produces identical report top-level shape; methodology/README notes updated (out-of-coverage producers full_context/spot-check; COGS forward-only; usage semantics notes).
 **Files:**
+
 - Modify: `tools/longmem_eval/README.md` (+ report schema notes)
 - Modify (if present): docs section listing longmemeval report fields
 
@@ -164,6 +176,7 @@ Run → FAIL.
 **Step 5:** VERIFY gate: re-run `tests/test_longmem_*.py` + product adapter tests; assemble proof for the #2185 checklist.
 
 ---
+
 ## Plan-Review Fold-In (cycle 1 — 2 independent verifiers, 0 P0; binding resolutions)
 
 The resolutions below are PART of the plan and override/refine the task text above where they differ.

@@ -35,10 +35,12 @@ question is **"mandatory"**, and it is about **correctness/feasibility**, not sp
 conflates them.
 
 **Alternative framings (How Might We):**
+
 - HMW make per-tenant cost independent of total vector count? → partition (index scope = tenant scope)
 - HMW keep the index out of RAM entirely? → DiskANN / S3 Vectors (availability-constrained on Supabase)
 
 **Assumptions mapped:**
+
 | # | Assumption | Tag |
 |---|---|---|
 | A1 | "The HNSW index is loaded into RAM" (mechanism) | **REFUTED** (see §1) |
@@ -71,6 +73,7 @@ it is cited for rests on **one** secondary article (The Next Platform, 2026-09-2
 but **verify when a second independent reading of pgvector's disk behaviour is available.**
 
 Evidence (3 independent categories):
+
 - **Official (pgvector README, FAQ, verbatim):** *"Do indexes need to fit into memory? **No**, but like other index
   types, you'll likely see better performance if they do."* — the same README's `maintenance_work_mem` note is about
   **build** time, not query time, and is separate.
@@ -115,9 +118,11 @@ Position A's error is to price the first, in units of the second, multiplied by 
 footprint_per_vector  ≈  1.1 × (4 × d + 8 × M)   bytes        [OpenSearch/Lucene HNSW estimator,
                             └ vector ┘   └ graph ┘              via The Next Platform 2026-09-22]
 ```
+
 At **d = 384, M = 16**: `1.1 × (1,536 + 128) = 1,830 B ≈ 1.79 KB`.
 
 **Cross-checks (measured):**
+
 | source | corpus | measured | vs formula |
 |---|---|---|---|
 | pgxn pgcontext harness | 1,000,000 × 384, pgvector 0.8.5, m=16 | index **1.91 GiB** → **2.05 KB/vec** | 1.12× |
@@ -135,6 +140,7 @@ lower bound.
 Measured ratio today: **33,580 embeddings / 25,000 nodes = 1.3432 embeddings per node.**
 
 **Reading 1 — 2.5M nodes is the PRODUCT target (2.5M nodes in total):**
+
 ```
 total embeddings  = 2,500,000 × 1.3432        ≈  3,358,000
 per-tenant share  = 3,358,000 ÷ 1,000         ≈      3,358
@@ -143,6 +149,7 @@ total index size  = 3,358,000 × 2.05 KB       ≈    6.9 GB   (disk)
 ```
 
 **Reading 2 — 2.5M nodes is ONE TENANT's target (1,000 × 2.5M = 2.5 billion nodes):**
+
 ```
 per-tenant embeddings = 2,500,000 × 1.3432            ≈  3,358,000
 per-tenant index      = 3,358,000 × 2.05 KB           ≈    6.9 GB   (disk)
@@ -151,6 +158,7 @@ total index size      = 3.358e9 × 2.05 KB             ≈    6.9 TB   (disk)
 ```
 
 **What each reading actually means — and where Position A goes wrong:**
+
 - **Reading 1 (2.5M total):** the entire product's vector index is **~7 GB of disk**, and the whole thing fits in a
   Supabase 2XL's `shared_buffers` at once. This is the reading §5's cost table assumes (*1,000 users = 1 TB*).
 - **Reading 2 (2.5M/tenant):** **6.9 TB of disk.** ⚠️ **The 7 TB figure is arithmetically SOUND here** — each tenant
@@ -161,6 +169,7 @@ total index size      = 3.358e9 × 2.05 KB             ≈    6.9 TB   (disk)
   index**, and it is the same assumption that would make any data structure expensive.
 
 ⚠️ **So the defect is not the multiplication — it is three other things, and they must be stated correctly:**
+
 1. **Classification.** 7 TB is a **disk** number. Position A calls it RAM. (7 TB of Supabase disk at
    **$0.125/GB/mo** — `STORAGE-ARCHITECTURE.md` §5 — ≈ **$875/mo**, inside that section's **$9/user × 1,000 =
    $9,000/mo** budget; the RAM version is prohibited by the platform.)
@@ -200,6 +209,7 @@ store.** Position A was the one exception claimed against that rule; it does not
 **Claim 2 [HIGH — of the *absence*; the magnitude below is ⚠️ emerging].** There is **no credible public measurement of
 pgvector HNSW p95/p99 on a genuinely non-resident index.** This is a *finding of absence*, verified by **reading two
 primary sources directly** (not by inference):
+
 - The benchmark harness that has a **"Cold-cache lane (100k corpus)"** lists it as **"Not yet measured."**
 - The SIGMOD study explicitly **removes** the case: *"[we] utilized the `pg_prewarm` extension to fully load both the
   table and the index into the database buffer cache before each experimental run. **The scope of this work focuses
@@ -280,6 +290,7 @@ traverses **only that tenant's index** — reading only that partition's pages.
   tenant-homogeneous, so `ef_search` explores a denser, more relevant neighbourhood).
 
 **⚠️ Two caveats that must be measured, not assumed:**
+
 1. **Pruning requires a constant the planner can use.** An **RLS predicate** (`auth.uid()`) is **not a plan-time
    constant**, so the planner cannot match a partition — the tenant must be passed as a **literal or a parameter**
    and the plan verified (`EXPLAIN` must show only one partition scanned). §4's "tenant-scoped rows via RLS" and
@@ -299,6 +310,7 @@ used (*"split ANN per `fact_type` to use partial HNSW indexes"*), and it caps pl
 ## 6. Genuinely disk-resident options, and Supabase availability
 
 **Claim 5 [HIGH].** **Supabase does not offer `pgvectorscale`.** Verified three ways:
+
 1. **Live fetch of Supabase's own extension list** — `vector`, `pg_partman`, `pg_prewarm`, `pg_cron`, `rum`, `pg_repack`,
    `index_advisor`, `pg_plan_filter`, … **no `vectorscale`/`pgvectorscale`.**
 2. **Two open Supabase feature requests for it** — discussions **#27474** (*"there does not seem to be a way to
@@ -426,6 +438,7 @@ the unstated scale flip*, not the multiplication (§2.3).
 7. **Fix the journal.** Put `embedding` in the journal payload (§7). Replay must reproduce, not re-derive.
 
 **Before committing, measure on our own stack (all four are cheap):**
+
 - **M1 — spill curve:** 3.36M synthetic 384-dim vectors on a Supabase instance, index > shared_buffers; p50/p95/p99
   and `pg_stat_statements` buffer-hit ratio as residency varies. **This is the number nobody has.**
 - **M2 — partition plan shape:** 1,000 partitions, `EXPLAIN (ANALYZE, BUFFERS)` proving one-partition prune, plus

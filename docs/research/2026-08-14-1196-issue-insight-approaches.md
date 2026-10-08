@@ -42,6 +42,7 @@ new `TortoiseSDK.issue_insight()` method + thin `_safe()`-gated handler. Returns
 
 **Architecture — where logic lives:** SDK method, ~40 lines, placed beside `session_context`
 (new "Issue Insight (#1196)" section):
+
 1. Semantic stage: `self.tortoise_fts_query(title + body, entity_type="point", limit=2)` —
    cross-session decisions, EP-tagged claims, "we already decided this" (the research-designated
    non-GitHub-natively-covered space; deliberately NOT re-running textual similar-issue dedup).
@@ -58,6 +59,7 @@ wrapper (mirrors `tortoise_session_context`). Registry entry carries
 endpoint for free (mirrors `/v1/context`); `hosted_api.py` route wrapper only resolves the team.
 
 **Files touched:**
+
 - `tortoise/sdk.py` — `issue_insight()` method (semantic + repo-stage + shaping + fail-closed branches)
 - `tortoise/mcp_server.py` — `tortoise_issue_insight()` handler (thin `_safe` wrapper)
 - `tortoise/tool_registry.py` — ToolDefinition; **tool count 85 → 86**
@@ -73,6 +75,7 @@ not copy). Empty-DB leg → `no_prior_knowledge`. Monkeypatched `_get_org_sdk` r
 error dict, no crash. Repo-with-zero-points leg → `repo_not_indexed`.
 
 **Risks:**
+
 - Tool bloat: 85 → 86 (research explicitly flagged tool count as a real cost; registry count
   test must move).
 - Free-text input is semantically fuzzy — garbage title → weak/decoy matches
@@ -112,6 +115,7 @@ tweak on the tool description). Internally identical query composition to Approa
 recall's dispatch.
 
 **Files touched:**
+
 - `tortoise/sdk.py` — `recall_issue()` method (mode branch; same internals as A's `issue_insight`)
 - `tortoise/mcp_server.py` — `_RECALL_MODES` tuple + one dispatch branch + description tweak
 - `tortoise/tool_registry.py` — **description-only** tweak on `tortoise_recall` (count stays 85)
@@ -124,6 +128,7 @@ through the handler → assert `mode == "issue"` and `len(data_points) >= 1`. Em
 `no_prior_knowledge`. Unrecognized-mode leg still returns the existing structured error.
 
 **Risks:**
+
 - **Invocation gap persists** — the confirmed problem is *invocation*; a mode buried inside an
   existing 15-param tool is harder for the creating agent to discover and reach for than a named
   tool. The skill step must spell out the exact call shape.
@@ -157,6 +162,7 @@ precedent: raw-Cypher REST ops) + optional `rest_spec`.
 **Architecture — where logic lives:** mcp_server-layer composition over existing primitives,
 in the handler itself (optionally factored into a `tortoise/insight.py` helper so hosted_api can
 mirror):
+
 1. Repo stage (primary): structural `sdk.query(kind="observation",
    filters={"source":"github","github_repo":repo})` → prior-issue count, open/closed mix,
    newest few. This is where **staleness is defined**: repo given + zero observation points for
@@ -168,6 +174,7 @@ mirror):
 3. Shape 2 data points: repo stats (structural, deterministic) + top semantic hit (EP-annotated).
 
 **Files touched:**
+
 - `tortoise/mcp_server.py` — `tortoise_issue_insight(repo, title=None, body=None, limit=2)`
   handler composing `sdk.query` + `tortoise_fts_query`; fail-closed branches in-handler
 - `tortoise/tool_registry.py` — ToolDefinition with `handler_override` (+ optional
@@ -183,6 +190,7 @@ from `owner/b`). Leg: `repo="owner/c"` (zero points, non-empty graph) → `repo_
 honest fail-closed. Empty DB → `no_prior_knowledge`. Failure path → error dict.
 
 **Risks:**
+
 - Repo-required input: if the skill omits `repo`, the tool degrades to `no_prior_knowledge`
   (safe but useless) — invocation must guarantee the scalar.
 - Repo-keyed structural path is issue-dedup-adjacent (GitHub-native territory) — mitigated by

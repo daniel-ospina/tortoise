@@ -73,6 +73,7 @@ Explicitly: "For Growth Teams," "For Enterprise AI," "For AI Product Teams."
 ## 6. Product & Features
 
 ### Self-Model API (early access)
+
 - 130 endpoints, OpenAPI Spec v1.0.0
 - Auth: X-API-Key header
 - Core: self-models CRUD, beliefs CRUD (with confidence 0–1 + observation counts), context assembly (`POST /external/context` → `ai_ready` format), observation contexts, analytics, recommendations, journey stages, agent chat
@@ -80,6 +81,7 @@ Explicitly: "For Growth Teams," "For Enterprise AI," "For AI Product Teams."
 - SDKs: ⚠️ None — cURL examples only in API playground
 
 ### Service offering
+
 - Codebase + data + AI audit
 - AI quality evaluation
 - P0 fixes to production
@@ -94,26 +96,31 @@ Explicitly: "For Growth Teams," "For Enterprise AI," "For AI Product Teams."
 Clarity's confidence model is built on the **Free Energy Principle / Active Inference** framework from neuroscience (Friston, Levin, Seth, Clark). Three intertwined mechanisms:
 
 **Precision-Weighted Bayesian Updating:**
+
 - Every belief has `confidence` (0.0–1.0) representing posterior precision — how strongly evidence supports the belief relative to uncertainty
 - Learning rate is precision-weighted: `Δbelief = precision × prediction_error`
 - High confidence = small updates from new evidence; low confidence = large updates
 - Confidence = inverse of posterior variance of the belief's generative distribution
 
 **Observation Count as Evidence Mass:**
+
 - Every belief tracks `observations` — discrete count of evidence pieces
 - Confidence climbs with consistent reinforcement: "Prefers concise" starts at 0.4 → climbs to 0.85 after 14 consistent observations
 - Functionally a Beta prior update — each observation is a "success" reinforcing the belief
 
 **Time-Decay on Staleness:**
+
 - Beliefs not reinforced within a window lose confidence: "No confirmation in 90 days → confidence drops from 0.8 → 0.6"
 - Discount factor on effective evidence count — stale observations count less
 
 **Contradiction Handling:**
+
 - New conflicting evidence → confidence drops (belief doesn't flip immediately): "Prefers concise (conf: 0.87) + asks for detail → conf drops to 0.5"
 - If contradictory pattern persists, belief content updates
 - System doesn't hold contradictory beliefs at high confidence
 
 **Key design patterns (relevant for epistemic graph):**
+
 - Confidence is **traceable** — every belief links to observations that formed it (provenance)
 - Beliefs are **user-inspectable and correctable** — manual correction recalibrates
 - **No raw PII** — tracks beliefs about preferences/constraints, not identity
