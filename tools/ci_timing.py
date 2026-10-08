@@ -725,7 +725,7 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
     # quote produced a document that could not be parsed back, while the
     # readback that follows the renderer runs outside its handlers — so the
     # CLI died with a traceback (exit 1) instead of the documented refusal.
-    if re.search(r'["\\\n\r]', captured_at):
+    if re.search(r'[\x00-\x1f\x7f-\x9f"\\]', captured_at):
         import yaml
         rendered = yaml.safe_dump(
             {DURATIONS_CAPTURED_AT: captured_at}, default_flow_style=False
@@ -904,9 +904,9 @@ def _manifest_of(manifest_text: str) -> dict:
     import ci_selection as cs
 
     # A render whose stamp or block cannot be parsed back must be the
-    # documented refusal, not a traceback: this is the readback the bridge's
-    # callers run AFTER the renderer, outside its own handlers (#6092 review
-    # round 4). Both callers map DurationsBridgeError to exit 2.
+    # documented refusal, not a traceback (#6092 reviews rounds 4-5). The
+    # callers must therefore MAP this to exit 2, which they do at the CLI
+    # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
     try:
         parsed = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
@@ -914,6 +914,14 @@ def _manifest_of(manifest_text: str) -> dict:
             f"the manifest is not readable as YAML "
             f"({type(exc).__name__}: {exc})"
         ) from exc
+    # Valid YAML that is not a mapping parses cleanly and then fails inside
+    # `_normalize_surfaces` with an AttributeError, which no caller catches —
+    # an empty file, `null`, a scalar or a list all take that path (#6092
+    # review round 5). Refuse it here, where it is still this class.
+    if not isinstance(parsed, dict):
+        raise DurationsBridgeError(
+            f"the manifest is not a YAML mapping (got {type(parsed).__name__})"
+        )
     return cs._normalize_surfaces(parsed)
 
 
@@ -1057,15 +1065,21 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
     try:
         new_text, stats = render_refreshed_manifest(
             manifest_path.read_text(), weights, captured_at)
+        # The readback runs AFTER the renderer returns, so it needs the same
+        # mapping as the render itself: `_manifest_of` raises
+        # DurationsBridgeError for a document it cannot parse back, and
+        # without this it escaped the CLI as a traceback with rc=1 instead of
+        # the documented `2 UNKNOWN (unreadable manifest)` (#6092 review
+        # round 5).
+        issues = validate_refreshed_manifest(new_text)
+        if not issues and _is_the_repo_manifest(manifest_path):
+            # The repo's own manifest is held to the WHOLE `--integrity` gate —
+            # most importantly its halves-duration balance, which the per-key
+            # duration checks cannot see (#3395).
+            issues = integrity_problems(new_text)
     except DurationsBridgeError as exc:
         print(f"2: {exc}", file=sys.stderr)
         return 2
-    issues = validate_refreshed_manifest(new_text)
-    if not issues and _is_the_repo_manifest(manifest_path):
-        # The repo's own manifest is held to the WHOLE `--integrity` gate —
-        # most importantly its halves-duration balance, which the per-key
-        # duration checks cannot see (#3395).
-        issues = integrity_problems(new_text)
     if issues:
         print("1: refusing to write — the refreshed manifest would fail the "
               "integrity gate:", file=sys.stderr)
@@ -1227,7 +1241,14 @@ def paid_vs_selected_cli(args) -> int:
     # `load_manifest()` does for every other consumer. Feeding the raw YAML
     # straight to `fast_pool` would iterate a scalar surface
     # character-by-character and raise on a None one.
-    manifest = _manifest_of(Path(args.manifest).read_text())
+    try:
+        manifest = _manifest_of(Path(args.manifest).read_text())
+    except DurationsBridgeError as exc:
+        # `_manifest_of` refuses a document it cannot read as a YAML mapping;
+        # this entry point must report that as the documented exit 2 rather
+        # than dying with a traceback (#6092 review round 5).
+        print(f"2: {exc}", file=sys.stderr)
+        return 2
     changed = [c.strip() for c in args.changed_files.split(",") if c.strip()]
     selection = ci_selection.select(changed, args.event, manifest)
     # On a full selection the denominator is the set of files the gate actually

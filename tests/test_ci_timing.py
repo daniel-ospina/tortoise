@@ -2435,10 +2435,50 @@ def test_a_multiline_captured_at_stamp_is_refused() -> None:
 
 
 def test_manifest_of_refuses_an_unreadable_manifest_as_the_documented_error() -> None:
-    """`_manifest_of` is the readback the bridge runs AFTER the renderer, outside
-    its handlers; both its callers map DurationsBridgeError to exit 2, so an
-    unreadable document must not escape as a raw yaml error (#6092 review
-    round 4). `--paid-vs-selected` reads its `--manifest` through here too.
+    """`_manifest_of` is the readback the bridge runs AFTER the renderer.
+
+    It raises `DurationsBridgeError`, which each CLI caller must MAP to exit 2
+    — the exception alone is not the contract, and asserting only the raise is
+    what let the escape stay unpinned through two rounds (#6092 review round
+    5). The CLI-level tests below pin the rc.
     """
     with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
         ci_timing._manifest_of("surfaces:\n  core: [\n")
+
+
+def test_manifest_of_refuses_valid_yaml_that_is_not_a_mapping() -> None:
+    """Valid YAML that is not a mapping parsed cleanly and then raised an
+    `AttributeError` inside `_normalize_surfaces`, which no caller caught
+    (#6092 review round 5)."""
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not a YAML mapping"):
+        ci_timing._manifest_of("")
+
+
+@pytest.mark.parametrize("content,label", [
+    ("surfaces:\n  core: [\n", "unparseable"),
+    ("", "empty"),
+    ("null\n", "null"),
+    ("just a scalar\n", "scalar"),
+    ("- a\n- b\n", "list"),
+])
+def test_cli_returns_2_for_an_unreadable_manifest(tmp_path, content: str, label: str) -> None:
+    """The documented contract is exit **2** for an unreadable manifest, not a
+    traceback and exit 1 (#6092 reviews rounds 4-5).
+
+    This is the assertion the round-4 fix was missing: it translated the
+    exception but left the CLI callers outside the handler, so the class was
+    reported closed while still escaping. `--paid-vs-selected` is exercised
+    because it is the entry point that reads `--manifest` directly.
+    """
+    assert label
+    manifest = tmp_path / "m.yml"
+    manifest.write_text(content)
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
+         "--repo", "o/r", "--paid-vs-selected", "--run-id", "1",
+         "--changed-files", "a.py", "--manifest", str(manifest)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
+    assert "Traceback" not in proc.stderr
+    assert proc.stderr.startswith("2:")
