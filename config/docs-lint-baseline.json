@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3302,
+      "markdownlint": 3300,
       "lychee": 52
     },
     "variance": "markdownlint findings are deterministic and occurrence-counted. The lychee half also checks REMOTE links, whose occurrence count varies between RUNS for reasons no author controls (rate limits, transient network, TLS, run population), so it is a SET of `(path, target)` keys, not a count \u2014 its pinned ceiling in tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size (a re-baseline above it must raise that row out loud) while the markdownlint one is exact. Regenerate with `update`; never hand-edit."
@@ -637,8 +637,6 @@
     "docs/epics/2026-09-10-2835-capability-registry/00-align.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "docs/epics/2026-09-10-2835-capability-registry/00-align.md|MD049|1905|Emphasis style [Expected: asterisk; Actual: underscore]",
     "docs/epics/2026-09-10-2835-capability-registry/00-align.md|MD049|1908|Emphasis style [Expected: asterisk; Actual: underscore]",
-    "docs/epics/2026-09-10-2835-capability-registry/identity-decision.md|MD018|1|No space after hash on atx style heading [Context: \"#2835 (epic) \u00b7 #2977 (parent o...\"]",
-    "docs/epics/2026-09-10-2835-capability-registry/identity-decision.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "docs/epics/2026-09-10-2835-capability-registry/research.md|MD001|1|Heading levels should only increment by one level at a time [Expected: h2; Actual: h3]",
     "docs/epics/2026-09-24-5088-d10-fold/01-test-design.md|MD036|1|Emphasis used instead of a heading [Context: \"Contract & data shape\"]",
     "docs/epics/2026-09-24-5088-d10-fold/01-test-design.md|MD036|1|Emphasis used instead of a heading [Context: \"Data integrity\"]",
