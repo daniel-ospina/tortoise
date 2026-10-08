@@ -1769,33 +1769,82 @@ def _fetch_cache_remote(
     return rest.split("/", 1)[0] or None
 
 
-def _remote_tracking_namespace_remotes(
-    git_bin: str, repo: str, timeout: float,
-) -> dict[str, set[str]] | None:
-    """`refs/remotes/…/` prefix -> the set of remote NAMES whose fetch lands there.
+def _refspec_dest_for(
+    refname: str, src_pattern: str, dest_pattern: str,
+) -> str | None:
+    """The local ref a remote `refname` is fetched TO by this refspec, else None.
 
-    ⛔ THE REFSPEC IS THE DISCRIMINATOR, NOT THE REF NAME (#6622), AND THAT RULE
-    HAS TO BE ENFORCED AT THE CALL SITE TOO. `refs/remotes/<ns>/<branch>` is
-    populated by whichever configured remote's fetch refspec targets `<ns>` —
-    NOT by the remote NAMED `<ns>`. Deriving the remote from the ref's first
-    path segment (the first cut of #7693) reimposed exactly the name inference
-    `_remote_tracking_namespaces` exists to forbid, in the one place where a
-    wrong answer DEMOTES A LIVE BRANCH. Measured false-CLEANs, both on a live
-    branch and both reporting the ref CONFIRMED:
-      * a slash-named remote — `refs/remotes/foo/bar/x` caches `foo/bar`'s
-        branch, but the query went to `foo`, which happened to hold that branch
-        name at the stale sha, and matched;
-      * a non-standard refspec — `remote.fork.fetch=+refs/heads/*:refs/remotes/
-        origin/*` makes `refs/remotes/origin/x` cache FORK's branch, but the
-        query went to `origin`.
+    ⛔ THE REFSPEC IS APPLIED FORWARD, NEVER INVERTED, AND THAT IS THE DESIGN
+    (#7693, round 3). Every earlier revision reconstructed the REMOTE and the
+    BRANCH **from the local ref name** — first deriving the remote from its
+    first path segment, then the branch from whatever was left — and each
+    reconstruction was wrong for some supported configuration:
+      * a NON-STANDARD refspec (`remote.fork.fetch=+refs/heads/*:refs/remotes/
+        origin/*` makes `refs/remotes/origin/x` cache FORK's branch);
+      * a SLASH-NAMED remote (`refs/remotes/foo/bar/x` caches `foo/bar`'s);
+      * a NARROW GLOB — `git remote set-branches origin 'fix/*'` writes
+        `+refs/heads/fix/*:refs/remotes/origin/fix/*`, so `refs/remotes/origin/
+        fix/3061-narrow` caches the branch `fix/3061-narrow` while the remainder
+        after the prefix reads `3061-narrow` — the live read then confirmed a
+        DIFFERENT branch that sat at the stale sha, and DEMOTED A LIVE ONE.
+    All three produced a measured `VERDICT: CLEAN (exit 0)` on a live branch.
+    Each fix was a better inversion; the inversion is the defect.
 
-    A prefix mapped to more than one remote is AMBIGUOUS, and ambiguity is not
-    resolved by guessing: the caller blocks. None (unreadable) leaves every ref
-    blocking, as everywhere else on this surface.
+    Mapping an advertised remote ref FORWARD is the operation git itself
+    performs, so it needs no inference and cannot disagree with git: with exactly
+    one `*` on each side the captured tail is substituted into the destination.
+    A pattern with no `*` is matched LITERALLY. Anything else — two `*`, a
+    mismatched shape — answers None, which the caller treats as UNVERIFIABLE and
+    therefore as blocking.
+    """
+    if src_pattern.count("*") == 1 and dest_pattern.count("*") == 1:
+        head, _sep, tail = src_pattern.partition("*")
+        if not refname.startswith(head) or not refname.endswith(tail):
+            return None
+        if len(refname) < len(head) + len(tail):
+            return None
+        captured = refname[len(head):len(refname) - len(tail)] if tail else refname[len(head):]
+        dhead, _sep2, dtail = dest_pattern.partition("*")
+        return dhead + captured + dtail
+    if "*" in src_pattern or "*" in dest_pattern:
+        return None
+    return dest_pattern if refname == src_pattern else None
 
-    The parse is `_refspec_namespace_prefix`'s — the SAME one
-    `_remote_tracking_namespaces` uses, deliberately, so the set and the map
-    cannot drift apart.
+
+def _refspec_could_write(dest_pattern: str, ref: str) -> bool:
+    """Whether this DESTINATION pattern could ever name `ref` (a cheap prefilter)."""
+    if dest_pattern.count("*") == 1:
+        head, _sep, tail = dest_pattern.partition("*")
+        return (
+            ref.startswith(head) and ref.endswith(tail)
+            and len(ref) >= len(head) + len(tail)
+        )
+    return "*" not in dest_pattern and dest_pattern == ref
+
+
+def _remote_ref_has_a_live_holder(
+    git_bin: str, repo: str, timeout: float, ref: str, cached_sha: str,
+) -> bool | None:
+    """Whether a configured remote's refspec maps a DIFFERENT live sha onto `ref`.
+
+    ⛔ **False IS THE ONLY ANSWER THE CALLER MAY DEMOTE ON**, and it is returned
+    only after EVERY applicable remote was READ SUCCESSFULLY and none of their
+    advertised heads maps onto `ref` at a sha other than `cached_sha`. True means
+    a live holder exists; None means the question could not be answered — an
+    unreadable config, a remote that would not answer, a timeout, a refspec shape
+    this code does not model, or no configured fetch refspec at all. Since only a
+    proven False demotes, every other outcome fails CLOSED, and the polarity is
+    the reason this is safe rather than the enumeration of cases.
+
+    A branch DELETED on the remote therefore DEMOTES (no advertised head maps
+    onto the ref) instead of blocking forever. That is the modal post-merge state
+    — GitHub auto-deletes head branches — and it is one of #7693's own worked
+    examples (`docs/4495-carry-the-unit-ruling`), so the earlier "deleted reads as
+    unreadable" behaviour left the issue's motivating case unfixed.
+
+    `refs/remotes/<ns>/<b>` is written by whichever configured remote's refspec
+    targets it, so ALL remotes are considered, not one guessed from the name.
+    A remote whose refspec could never write `ref` is skipped without a read.
     """
     try:
         rc, out, _err, timed_out = _run(
@@ -1804,11 +1853,11 @@ def _remote_tracking_namespace_remotes(
         )
     except Exception:  # pragma: no cover - _run raises only on programmer error
         return None
-    # Exit 1 with no match is a SUCCESSFUL read of an empty configuration (see
-    # `_remote_tracking_namespaces`); only other codes are a read failure.
+    # Exit 1 with no match is a SUCCESSFUL read of an empty configuration; a real
+    # error (128, 127) is a read failure. Both directions are pinned by tests.
     if timed_out or rc not in (0, 1):
         return None
-    prefix_to_remotes: dict[str, set[str]] = {}
+    by_remote: dict[str, list[tuple[str, str]]] = {}
     for line in out.splitlines():
         key, _sep, value = line.partition(" ")
         # `remote.<name>.fetch` — <name> may itself contain dots, so slice the
@@ -1818,63 +1867,53 @@ def _remote_tracking_namespace_remotes(
         name = key[len("remote."):-len(".fetch")]
         if not name:
             continue
-        _src, colon, dest = value.strip().partition(":")
-        if not colon:
+        spec = value.strip().lstrip("+")
+        # A NEGATIVE (`^`) refspec only REMOVES refs from the fetch, so ignoring
+        # it can only make this function see MORE mappings — it errs toward
+        # blocking, which is the safe direction. It is therefore dropped rather
+        # than treated as unmodelled.
+        if spec.startswith("^"):
             continue
-        prefix = _refspec_namespace_prefix(dest)
-        if prefix is not None:
-            prefix_to_remotes.setdefault(prefix, set()).add(name)
-    # The remote NAMES arm is ADDED, never substituted, for the same reason as in
-    # `_remote_tracking_namespaces`: a remote can be configured with no fetch
-    # refspec at all, and its namespace would otherwise never appear. It can only
-    # make MORE refs blocking, so it cannot open the hole this function closes.
-    try:
-        rc_remotes, out_remotes, _err2, timed_out2 = _run(
-            [git_bin, "remote"], repo, timeout,
+        src, colon, dest = spec.partition(":")
+        if not colon or not src or not dest:
+            # An unmodelled refspec could HIDE a live holder, so it must not be
+            # silently skipped: it marks this remote UNVERIFIABLE.
+            by_remote.setdefault(name, []).append(("", ""))
+            continue
+        by_remote.setdefault(name, []).append((src.strip(), dest.strip()))
+    if not by_remote:
+        # No configured fetch refspec at all: nothing can be shown to map onto
+        # this ref, but nothing can be ruled out either. BLOCK, matching
+        # `_fetch_cache_remote`'s treatment of an empty namespace set.
+        return None
+    # ⛔ THE ONLY NETWORK CALLS ON A MANDATORY PRE-DISPATCH PATH, AND THEY ARE
+    # BOUNDED. `--timeout` limits a hang, and GIT_TERMINAL_PROMPT=0 makes a
+    # credential-prompting remote fail INSTANTLY instead of sitting at a prompt —
+    # which is the answer this function wants anyway (unreadable = block). `env`
+    # REPLACES the environment, so it is merged rather than set.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
+    for name, specs in by_remote.items():
+        if not specs or any(not s for s, _d in specs):
+            return None
+        if not any(_refspec_could_write(dest, ref) for _s, dest in specs):
+            continue
+        rc2, out2, _err2, timed2 = _run(
+            [git_bin, "ls-remote", "--heads", name], repo, timeout, env,
         )
-    except Exception:  # pragma: no cover - _run raises only on programmer error
-        return None
-    if rc_remotes != 0 or timed_out2:
-        return None
-    for name in out_remotes.splitlines():
-        name = name.strip()
-        if name:
-            prefix_to_remotes.setdefault(f"refs/remotes/{name}/", set()).add(name)
-    return prefix_to_remotes
-
-
-def _tracking_ref_remote(
-    ref: str, prefix_to_remotes: dict[str, set[str]] | None,
-) -> tuple[str, str] | None:
-    """`(remote, branch)` for a `refs/remotes/…` ref, or None when UNKNOWABLE.
-
-    None — the BLOCKING answer — for a ref that is not remote-tracking, for a ref
-    inside no declared namespace, and for a namespace mapped to zero or SEVERAL
-    remotes. The LONGEST matching prefix wins, which is what makes a slash-named
-    remote land on itself: `refs/remotes/foo/` covers `foo` while
-    `refs/remotes/foo/bar/` covers `foo/bar`, and only the longer one owns a ref
-    beneath `refs/remotes/foo/bar/`.
-
-    The BRANCH is what remains after the owning prefix — NOT the segment after the
-    first slash. For `refs/remotes/foo/bar/x` the remote is `foo/bar` and the
-    branch is `x`; splitting on the first slash would yield remote `foo` and
-    branch `bar/x`, which is the exact wrong-remote query #7693's first cut made.
-    """
-    if not prefix_to_remotes or not ref.startswith("refs/remotes/"):
-        return None
-    best: str | None = None
-    for prefix in prefix_to_remotes:
-        if ref.startswith(prefix) and (best is None or len(prefix) > len(best)):
-            best = prefix
-    if best is None:
-        return None
-    owners = prefix_to_remotes[best]
-    if len(owners) != 1:
-        return None
-    branch = ref[len(best):]
-    if not branch:
-        return None
-    return next(iter(owners)), branch
+        if timed2 or rc2 != 0:
+            return None
+        for line in out2.splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            sha, remote_refname = fields[0], fields[1]
+            for src, dest in specs:
+                if (
+                    _refspec_dest_for(remote_refname, src, dest) == ref
+                    and sha != cached_sha
+                ):
+                    return True
+    return False
 
 
 def _worktree_liveness(
@@ -2010,53 +2049,6 @@ def _git_refs(
             continue
         refs.append((name, sha.strip()))
     return refs
-
-
-def _live_remote_tip(
-    git_bin: str, repo: str, timeout: float, remote: str, branch: str,
-) -> str | None:
-    """The LIVE tip of `refs/heads/<branch>` ON `<remote>`, or None.
-
-    ⛔ THE CACHED SHA IS NOT THE REMOTE'S SHA, AND NOTHING HERE FETCHES. A local
-    `refs/remotes/<remote>/<branch>` records the last FETCH, so a branch that was
-    squash-merged and then REUSED for new work still reads here as its old,
-    merged commit until somebody fetches — `_branch_terminal_state` says exactly
-    this in its own docstring. Judging terminality from the cache therefore calls
-    a LIVE branch merged, which is the false-CLEAN direction on a blocking
-    surface. A demotion that rests on the cache must confirm the tip against the
-    remote itself first, and this is that confirmation.
-
-    ⛔ THE CALLER RESOLVES `remote`, FROM THE REFSPEC, AND THIS FUNCTION MUST NOT
-    GUESS IT. Taking the ref and deriving the remote from its first path segment
-    is the name inference `_tracking_ref_remote` exists to replace — it queried
-    the wrong remote for a slash-named remote and for a non-standard refspec, and
-    both cases demoted a live branch. The signature is therefore (remote, branch)
-    and there is no ref-shaped entry point.
-
-    `git ls-remote` is a READ, not a fetch: it changes no local ref and cannot
-    itself cause a collision. None on ANY failure — an unreadable tip is not a
-    match, and the caller must keep the ref blocking (fail closed).
-    """
-    if not remote or not branch:
-        return None
-    # ⛔ THE ONLY NETWORK CALL ON A MANDATORY PRE-DISPATCH PATH. `--timeout` bounds
-    # a hang, but an SSH/HTTPS remote that wants credentials would sit at a prompt
-    # for the whole of it, per candidate. `GIT_TERMINAL_PROMPT=0` makes git FAIL
-    # INSTANTLY instead, which is the answer this function wants anyway (None =
-    # unreadable = keep blocking). `env` REPLACES the environment, so it is merged
-    # rather than set.
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-    rc, out, _err, _timed_out = _run(
-        [git_bin, "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
-        repo, timeout, env,
-    )
-    if rc != 0:
-        return None
-    for line in out.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[1] == f"refs/heads/{branch}":
-            return fields[0].strip() or None
-    return None
 
 
 def _first_parent_shas(
@@ -4170,14 +4162,6 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
-    # #7693: the refspec -> REMOTE map, read once for the same reason. The ref's
-    # first path segment is not the remote that owns it — `refs/remotes/<ns>/…`
-    # is populated by whichever remote's FETCH REFSPEC targets `<ns>` (#6622) —
-    # so the live-tip confirmation below resolves the remote from THIS map and
-    # blocks when the answer is absent or ambiguous.
-    remote_namespace_remotes = _remote_tracking_namespace_remotes(
-        git_bin, cwd, timeout,
-    )
     # #7693: sha -> (local ref, why) for LOCAL refs this run has PROVEN terminal.
     # The local namespace is scanned first, so this is populated before the
     # remote pass reads it. It exists because the terminal tests cannot run on a
@@ -4278,19 +4262,20 @@ def run_preflight(
                     _witness = local_terminal_shas.get(_sha)
                     if _witness is None:
                         continue
-                    # The remote must come from the REFSPEC map, never from the
-                    # ref's first path segment: a slash-named remote and a
-                    # non-standard refspec both made the name-derived query hit a
-                    # DIFFERENT remote that happened to hold the branch name at
-                    # the stale sha, demoting a live branch (measured).
-                    _tracked = _tracking_ref_remote(_ref, remote_namespace_remotes)
-                    if _tracked is None:
-                        # No declared namespace, or one owned by several remotes —
-                        # the live tip cannot be attributed. BLOCK.
-                        continue
-                    _live = _live_remote_tip(git_bin, cwd, timeout, *_tracked)
-                    if _live is None or _live != _sha:
-                        # Stale cache, moved branch, or unreadable — all BLOCK.
+                    # ⛔ THE QUESTION IS ASKED FORWARD, NOT RECONSTRUCTED. Three
+                    # revisions each rebuilt the remote and the branch FROM THE REF
+                    # NAME — its first path segment, then the remainder after a
+                    # prefix — and each was wrong for some supported refspec: a
+                    # non-standard one, a slash-named remote, and a narrow glob
+                    # (`set-branches origin 'fix/*'`). Every one produced a
+                    # measured false-CLEAN on a LIVE branch. Mapping the remote's
+                    # advertised heads FORWARD through its own refspec is the
+                    # operation git performs, so it cannot disagree with git.
+                    # Demote ONLY on a proven False (no live holder); True and None
+                    # both BLOCK, so the polarity is the safety, not the case list.
+                    if _remote_ref_has_a_live_holder(
+                        git_bin, cwd, timeout, _ref, _sha,
+                    ) is not False:
                         continue
                     _local_ref, _why = _witness
                     targeted_terminal[_ref] = (

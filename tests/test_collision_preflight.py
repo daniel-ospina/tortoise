@@ -2827,6 +2827,73 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
 
+    def test_narrow_glob_refspec_does_not_demote_a_live_branch(self):
+        # #7693 round 3, the defect that killed the "longest prefix" design.
+        # `git remote set-branches origin 'fix/*'` writes
+        # `+refs/heads/fix/*:refs/remotes/origin/fix/*`, so
+        # `refs/remotes/origin/fix/X` caches the branch `fix/X` — but the
+        # remainder after the prefix reads just `X`. Reconstructing the branch
+        # from the ref name therefore queried `refs/heads/X`, which sat at the
+        # stale sha, and DEMOTED a live branch (measured through the real CLI:
+        # `VERDICT: CLEAN (exit 0)` while `refs/heads/fix/X` was at T).
+        #
+        # The forward mapping has no such freedom: `fix/X` is substituted into
+        # the destination and lands on `refs/remotes/origin/fix/X` exactly.
+        ref = f"refs/remotes/origin/fix/{ISSUE}-narrow"
+        # A sibling that genuinely sits at the old sha — the thing the broken
+        # reconstruction latched onto.
+        _git(self.repo, "branch", "-q", f"{ISSUE}-narrow", "HEAD")
+        terminal_sha = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", "-q", f"fix/{ISSUE}-narrow", "HEAD")
+        bare = self.tmp / "narrow.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/fix/*:refs/remotes/origin/fix/*")
+        _git(self.repo, "push", "-q", "origin",
+             f"refs/heads/fix/{ISSUE}-narrow:refs/heads/fix/{ISSUE}-narrow")
+        # The branch this ref caches is REUSED and moves on; the sibling stays put.
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin",
+             f"{moved}:refs/heads/fix/{ISSUE}-narrow")
+        _git(self.repo, "update-ref", ref, terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4248, "title": "land it", "body": "", "state": "closed",
+            "headRefName": f"fix/{ISSUE}-narrow", "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_remote_branch_deleted_after_merge_is_demoted(self):
+        # #7693 round 3's other half: this is the MODAL post-merge state, because
+        # GitHub auto-deletes head branches, and it is one of the issue's own
+        # worked examples (`docs/4495-carry-the-unit-ruling` is deleted on
+        # origin). `ls-remote` SUCCEEDS and lists nothing for that branch, which
+        # the old code collapsed into "unreadable" and blocked. It is not
+        # unreadable — it is a positive statement that no live holder exists.
+        ref = f"fix/{ISSUE}-deleted"
+        bare = self.tmp / "del.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        # The branch is gone from the remote entirely.
+        _git(self.repo, "push", "-q", "origin", f":refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4249, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
     def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
         # C2-2. The absent-field contract is applied PER ELEMENT too. A field
         # that IS present and claims to close N must not lose N because the
