@@ -388,3 +388,31 @@ def test_snapshot_key_memory_identity_is_stamped_not_recycled():
         "the identity must be the stamped token, not a recyclable id()")
     assert fs.snapshot_key(_MemoryProj(), None) != key, (
         "a fresh in-memory store must not inherit the token")
+
+
+def test_snapshot_is_dropped_when_its_sdk_closes(tmp_path, monkeypatch):
+    """#7760 review: a closed SDK must not leave its snapshot in the store.
+
+    The store is now keyed per backend, so an entry whose projection is gone is
+    never read again — its key is never presented — and the lazy TTL can never
+    fire. Invalidate on close so a long-lived process does not accumulate one
+    corpus (up to MAX_CORPUS_POINTS plus cached vectors) per closed SDK.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    fs._store.clear()
+    sdk = TortoiseSDK(str(tmp_path / "close.db"))
+    try:
+        sdk.create_point("statement", "close invalidation probe")
+        key = fs.snapshot_key(sdk._get_proj(), None)
+        _no_match_query(sdk)  # builds + caches the snapshot
+        assert fs._store.get(key) is not None, (
+            "the snapshot must exist before close")
+        sdk.close()
+        assert fs._store.get(key) is None, (
+            "closing the SDK must drop its snapshot from the global store")
+    finally:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+        fs._store.clear()
