@@ -757,6 +757,14 @@ def _alert_dict(row: dict) -> dict:
                        "disabled, and our team is reviewing it. If you need a "
                        "higher limit, contact support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
+        # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
+        # really returned by `recent_alerts`, so without a message here the
+        # customer's Security-alerts list rendered the bare TOKEN —
+        # "recovery_velocity — recovery_velocity". Pre-existing, but in the two
+        # lists this change edits, and the same class it exists to remove
+        # (customer-facing prose nobody reviewed as prose). Now pinned by
+        # test_every_alert_type_has_a_customer_message.
+        EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity detected",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
@@ -981,7 +989,15 @@ class AbuseEngine:
         return "flag"
 
     def _notify(self, kind: str, org_id: str, details: dict) -> None:
-        # #5425: the review alert is the operator's ONLY signal that a
+        # #5425: the review alert is the operator's PRIMARY signal that a
+        # persistent breach needs a human decision. Its row write is
+        # BEST-EFFORT (debug-swallowed, per the DELIBERATELY EXCLUDED note on
+        # `_notify` in DECISION_FAULT_LANES): if this write fails AND no chat
+        # channel is configured, the stage-2 marker is lost — so the stage-1
+        # `flag` rows in the same abuse list are the BACKSTOP, and no operator
+        # instruction may treat this row as guaranteed. (Reviewer C, round 6:
+        # the earlier wording here and in the runbook asserted durability the
+        # swallow does not provide.)
         # PERSISTENT breach needs a human decision — the engine no longer
         # suspends, so nothing else marks the account. Give it a dashboard row
         # as well as a chat notification: an escalation that reaches only the

@@ -1739,3 +1739,38 @@ class TestThresholdAsymmetry:
         monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "-1")
         assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 100
 
+
+
+class TestEveryAlertTypeHasACustomerMessage:
+    """#5425 (reviewer C, round 6): ALERT_TYPES ⊆ _alert_dict's message map.
+
+    WHY THIS EXISTS — the failure it already caused: `recovery_velocity` was a
+    member of `ALERT_TYPES` (so it IS returned by `recent_alerts`) with no entry
+    in `_alert_dict`'s message map, so it fell through to
+    `messages.get(etype, etype)` and the customer's session-authed Security
+    alerts list rendered the bare TOKEN twice over — "recovery_velocity —
+    recovery_velocity". It survived six review rounds because nothing related
+    the two tuples; the two lists are edited together by exactly the kind of
+    change this PR is, which is what makes a silent member HERE a real
+    customer-visible defect rather than a tidy-up.
+    """
+
+    def test_every_alert_type_maps_to_a_customer_sentence(self):
+        from tortoise import abuse as ab
+
+        # Non-vacuity: the universe must be non-empty and must still contain the
+        # kinds whose wording this PR reasoned about.
+        assert len(ab.ALERT_TYPES) >= 5, ab.ALERT_TYPES
+        for expected in (ab.EVENT_FLAG, ab.EVENT_REVIEW, ab.EVENT_SUSPEND):
+            assert expected in ab.ALERT_TYPES, expected
+
+        rendered = {t: ab._alert_dict({"event_type": t, "details": {}})["message"]
+                    for t in ab.ALERT_TYPES}
+        # The defect signature: the message IS the token.
+        leaked = sorted(t for t, m in rendered.items() if m == t)
+        assert not leaked, (
+            "these alert types render their raw TOKEN to the customer in the "
+            f"Security alerts list (no _alert_dict message): {leaked}")
+        # …and a genuine sentence, not an empty string.
+        for t, m in rendered.items():
+            assert isinstance(m, str) and m.strip(), t

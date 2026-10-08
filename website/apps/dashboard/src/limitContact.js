@@ -18,7 +18,12 @@ export const LIMIT_CONTACT = ' Need more? Contact support@premiselabs.co.'
 /** Terminate `text` as a sentence and append the contact route. */
 export function withLimitContact(text) {
   const base = (text || '').replace(/\s+$/, '')
-  if (!base) return LIMIT_CONTACT.replace(/^ /, '')
+  // Degenerate input returns the constant VERBATIM, leading space included, so
+  // this seam is byte-identical to `tortoise.quota.with_limit_contact` for every
+  // input. They previously diverged here (JS trimmed, Python did not), which is
+  // exactly the drift a twin cannot afford: the parity is now pinned by
+  // limitContact.test.js reading the Python constant out of the source.
+  if (!base) return LIMIT_CONTACT
   const terminated = /[.!?]$/.test(base) ? base : `${base}.`
   return `${terminated}${LIMIT_CONTACT}`
 }

@@ -11,10 +11,14 @@
 // builders, so they fail if that regression returns.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { LIMIT_CONTACT, withLimitContact } from './limitContact.js'
 import { upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 import { nodeUsageText, nodeNudge } from './nodeUsage.js'
 
+const here = dirname(fileURLToPath(import.meta.url))
 const ADDRESS = 'support@premiselabs.co'
 
 test('#5425: the contact route names a real, reachable address', () => {
@@ -31,9 +35,25 @@ test('#5425: withLimitContact terminates the sentence and appends the route', ()
   assert.equal(withLimitContact('Really?'), `Really?${LIMIT_CONTACT}`)
   assert.equal(withLimitContact('Yes!'), `Yes!${LIMIT_CONTACT}`)
   assert.equal(withLimitContact('A thing   '), `A thing.${LIMIT_CONTACT}`)
-  // Degenerate input must not read " . Need more?".
-  assert.equal(withLimitContact(''), LIMIT_CONTACT.trimStart())
-  assert.equal(withLimitContact(null), LIMIT_CONTACT.trimStart())
+  // Degenerate input must not read " . Need more?", and it must return the
+  // constant VERBATIM (leading space included) — byte-identical to the Python
+  // seam. These two diverged here until round 6 (JS trimmed, Python did not).
+  assert.equal(withLimitContact(''), LIMIT_CONTACT)
+  assert.equal(withLimitContact(null), LIMIT_CONTACT)
+  assert.equal(withLimitContact(undefined), LIMIT_CONTACT)
+})
+
+test('#5425: the JS seam is byte-identical to the Python seam', () => {
+  // The sentence exists in two languages because the dashboard REPLACES the
+  // server's detail. Two hand-maintained copies drift — they already had, on
+  // the empty-input branch — so the shared value is pinned here by reading the
+  // Python constant out of the source rather than restating it.
+  const py = readFileSync(join(here, '..', '..', '..', '..', 'tortoise', 'quota.py'), 'utf8')
+  const m = py.match(/^LIMIT_CONTACT = ("(?:[^"\\]|\\.)*")$/m)
+  assert.ok(m, 'LIMIT_CONTACT must be a module-level literal in tortoise/quota.py')
+  const pythonConstant = JSON.parse(m[1])
+  assert.equal(LIMIT_CONTACT, pythonConstant,
+    'the Python and JS contact sentences have drifted apart')
 })
 
 test('#5425: every dashboard limit-notice BUILDER carries the human route', () => {
