@@ -2106,6 +2106,16 @@ def force_sparse_tfidf(monkeypatch):
     return None
 
 
+# ── #7655: keep pytest-timeout's per-test guard from being disarmed ────────
+# pytest-timeout's default `signal` method shares `ITIMER_REAL` with the code
+# under test, so an in-process `signal.alarm()` silently replaces the per-test
+# timeout (measured: a `sleep(60)` after `signal.alarm(600)` ran to a 15 s
+# outer bound instead of failing at `--timeout=3`). The autouse fixture below
+# refuses that takeover while the harness owns the timer, and
+# `tests._signal_hygiene.harness_safe_sigalrm` is the sanctioned way for a test
+# to use SIGALRM. Mechanism + regression pins: `tests/test_timeout_not_disarmable.py`.
+from tests._signal_hygiene import harness_sigalrm_integrity  # noqa: E402, F401
+
 # ── #4069: per-test temp-directory teardown ────────────────────────────────
 # `$TMPDIR` churned to 362,962 entries with nothing older than three days:
 # the suite's `tempfile.mkdtemp(prefix=...)` call sites create a directory

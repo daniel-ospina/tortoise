@@ -780,6 +780,11 @@ surfaces:
   - test_comove_dispatch_3627.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
+  # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
+  # `setitimer(ITIMER_REAL)` / `signal.signal(SIGALRM, …)` from silently
+  # disarming pytest-timeout's per-test guard. DB-free, no network — the
+  # default `core` surface is correct.
+  - test_timeout_not_disarmable.py
   - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
