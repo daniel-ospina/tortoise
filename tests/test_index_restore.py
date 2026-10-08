@@ -18,8 +18,10 @@ structural state. Restore
 drill: backup (corpus + events dir + db) → wipe → rebuild_all (line-tolerant)
 → re-index → the full Source count (provenance Sources + D10 document
 Sources), zero duplicate urls. Forward-only
-release commitment: the old binary + new journal = silent record loss
-(documented; the old logic skips unknown record types).
+release commitment: the old binary + new journal cannot be rolled back —
+and since #3585 the replay FAILS LOUDLY on an unknown record type (R8)
+instead of silently dropping it (see
+``test_t12_unknown_record_types_fail_closed_r8``).
 
 Harness conventions (§7): fresh embedded DB per test; graph assertions via
 raw Cypher; extract_metadata=False (no network).
@@ -36,6 +38,7 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.log import EventLog
+from tortoise.projection.nonfolded import NonFoldedEventsError
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -379,31 +382,60 @@ def test_t12_backfill_rebuild_wipe_semantics(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Forward-only release commitment: old-logic skip-unknown-type
+# Forward-only release commitment: an unknown record type is FAIL-CLOSED (R8)
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_t12_old_logic_skips_unknown_record_types(tmp_path):
-    """T12 cycle-23: the replay's pass-1b if/elif chain has NO else — an
-    unknown record type (a journal written by a NEWER binary) is SKIPPED,
-    never a crash. This is the forward-only release contract: the OLD binary
-    replaying a NEW journal skips the new record kinds (documented silent
-    record loss — the rollback hazard the forward-only commitment names)."""
+def test_t12_unknown_record_types_fail_closed_r8(tmp_path):
+    """T12 cycle-23, RETARGETED by #3585: an unknown record type (a journal
+    written by a NEWER binary) is no longer skipped — it is a NON-FOLDED
+    event, and R8 fails the run.
+
+    This replaces the pre-#3585 ``..._skips_unknown_record_types`` contract.
+    R8 (``docs/epics/2026-09-10-2835-capability-registry/identity-decision.md``
+    §R8, plus its "Stage 0 findings — the named, bounded non-folded
+    exemptions (#3585)" table) names **exactly three** exempt shapes and
+    states "**Everything else fails the run**" — ``unknown-event-type`` is
+    not among them. The old "pass-1b has NO else, so it is skipped" behaviour
+    IS the silent record loss R8 exists to make loud: ``recover_from_log``
+    used to report ``recovered: True`` over a projection it could not
+    complete.
+
+    The forward-only operator guidance is unchanged in substance — you still
+    cannot roll a binary back (``docs/quickstart-selfhosted.md`` §Upgrading)
+    — but the downgrade is now LOUD: the replay refuses instead of losing the
+    record silently, and the documented restore path stays the pre-release
+    backup.
+
+    The KNOWN kinds are still folded in the SAME run — the refusal is an
+    end-of-run assertion, not a parse-time abort — so the D10 Source count
+    still holds over the failed run."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
     try:
         sdk.index_directory(str(corpus), extract_metadata=False)
-        # append an UNKNOWN record type (a future binary's kind)
+        # append an UNKNOWN record type (a future binary's kind) → R8.
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "FutureRecordKind2027",
                                 "id": "future-1", "payload": {"x": 1}}) + "\n")
-        proj = sdk._get_proj()
-        counts = proj.rebuild_all(  # noqa: F841
-            str(events_dir), confirm_destructive=True)   # must NOT raise
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(
+                str(events_dir), confirm_destructive=True)
+        msg = str(ei.value)
+        assert "unknown-event-type" in msg, msg
+        assert "FutureRecordKind2027" in msg, msg
+        # The refusal belongs to the WHOLE run and the unknown record is its
+        # ONLY refused entry — so no other fold-miss shape fired, and the
+        # assertion is attributable to the future record alone.
+        assert [e.shape for e in ei.value.refused] == ["unknown-event-type"], [
+            (e.shape, str(e)) for e in ei.value.refused]
+        # The KNOWN kinds still folded in the same run. D10: the 3-file corpus
+        # yields 3 provenance Sources + 1 document Source. (No second rebuild:
+        # the count is asserted here off the failed run, which keeps this
+        # test's CI cost where it was — the D10 count is pinned three more
+        # times in this file, twice inside `test_s15_restore_drill_end_to_end`.)
         g = sdk._get_proj().g
-        # known kinds replayed; the unknown kind skipped silently. D10: the
-        # 3-file corpus yields 3 provenance Sources + 1 document Source.
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert _required_sweep(g) == 0
     finally:

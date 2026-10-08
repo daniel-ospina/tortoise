@@ -67,6 +67,7 @@ And the sting: **clangd's index key is `SymbolID` = truncated SHA1 of the USR** 
 The prior scan's single query on id-reuse returned nothing. Targeted rephrasing split the finding in two, and the split matters for confidence.
 
 **Non-reuse is the norm (High confidence — two independent normative sources, plus one corroborating default):**
+
 - **NIST SP 800-171 §3.5.5 (normative):** "**Prevent reuse of identifiers for a defined period.**"
 - **PLOS Biology 2017 ("Identifiers for the 21st century", normative):** identifiers must never be deleted or reassigned to another record.
 - **PostgreSQL `CREATE SEQUENCE` (corroborating, not normative):** `NO CYCLE` is the **default** — the fail-closed choice. `CYCLE` (reuse) must be opted into. This is an **overridable implementation default**: it is evidence that fail-closed is *conventional*, not that non-reuse is *required*.
@@ -90,7 +91,7 @@ The data-warehousing lineage offers an **analogy, not a fix** — and the canoni
 
 And the verification discipline — **Medium ⚠️ emerging**, practitioner-sourced. The naive form is the testable invariant that would have caught every bug found this week:
 
-```
+```text
 rebuild_from_zero().materialize() == live.materialize()
 ```
 
@@ -173,6 +174,20 @@ Refusing a fold is **not** a free win, and "it just degrades to not-yet-derived"
 - Refusing a **retraction** fold leaves the Object **`live`** — and because `retracted` is excluded from both recall and object search, a retracted entity whose retraction was refused will **leak into recall and object search**. That is the **opposite harm direction** from the one R8 was written for: instead of an entity buried silently, the entity is **not buried at all**.
 
 This is a **deliberate choice**, not a cost-free one. The harm classes: **a leak is visible and recoverable; a burial is silent and is data loss.** We take the leak. The consequence for implementation is that *what the projection does with the node state* must be **gated per failure shape, not applied blanket** — a blanket refusal would convert every unresolvable retraction into a leak, while other shapes are better left untouched. **That gating decides the node state (leak vs. leave untouched) and *never* whether the run is allowed to pass:** refusal and journaled-and-flagged are both **non-folded** outcomes, both enter the refused-event set R9 compares, and both **fail the run**. The flag is the **record** of the non-folded event — the audit trail naming its position, candidates, and shape — **not an exemption** from the assertion. Which shapes are refused (leak) and which are journaled-and-flagged (leave untouched) is a **Stage 0 design decision**, and it must be made explicitly rather than by default. If Stage 0 finds a shape that is genuinely exempt from the fail-the-run assertion, it must **name that shape explicitly here and bound the degraded guarantee in writing** — an unnamed exemption is a green pass over an unfolded event, which is exactly the anti-pattern R8 exists to prevent.
+
+---
+
+### Stage 0 findings — the named, bounded non-folded exemptions (#3585)
+
+R8 above requires that a shape genuinely exempt from the fail-the-run assertion be **named explicitly here**, with its degraded guarantee bounded in writing. Stage 0 (#3585, the fail-closed half of this lane) implemented the assertion and found exactly **three** such shapes. Each is recorded here because an exemption that lives only in code is indistinguishable from drift, and the next lane holding a vendor's page would tidy it away:
+
+| Shape | Why it is exempt | Degraded guarantee (the bound) | Recorded decision it rests on |
+|---|---|---|---|
+| `delete-miss` | "Already absent" **is** the delete's desired end state, so a delete matching 0 rows is legitimately idempotent (a retried delete, or an apply-based replay onto a graph that already holds the node). | Does **not** hide an unjournaled **creation**: `check_consistency`'s entity parity leg (`_compare_entities`) walks the journal's hard-deleted set and reports the surviving node as a `presence` divergence. | Plan `2026-09-22-unjournaled-mutation-class.md` §"Task 4" — **Policy** ("`op="delete"` matching 0 rows is legitimately idempotent … must not warn"); #4743's disposition. |
+| `point-superseded-no-new-id` | The graph fold treats a `PointSuperseded` with no `new_id` as a **documented no-op** (`_fold_point_superseded`), and the reference fold mirrors it — neither side changes state. | A CORRECTS edge the malformed record might have carried is absent on **both** sides: a bounded, symmetrical loss, not a live/replay divergence. The malformed record is still recorded and named. | Plan `2026-09-22-unjournaled-mutation-class.md` §"Task 4" warning policy (`_fold_point_superseded`'s no-op is the recorded behaviour); #4743's disposition. |
+| `supersede-target-deleted` | The `ObjectSuperseded` / `PointSuperseded` / `PointInvalidated` folds are **DEFERRED to a trailing sweep that runs after pass-1b**, so a target the journal hard-deleted (and that a `PointsMerged` merge hard-deleted) is legitimately absent by sweep time — `live` and `replay` both end with the node absent. | Granted only for a hard delete of the **SAME kind** (or the id-wide no-label fallback) that the fold **actually applied** — a same-kind re-creation anchor that suppressed the delete does not tag it. A foreign-kind delete sharing the id still refuses; a buried `status` still refuses; the entity-parity leg still compares a re-created node's status. | #4743's disposition (the deferred-sweep fold and its 0-row miss). |
+
+**Everything else fails the run.** A shape not listed in this table (or in `EXEMPT_SHAPES` in `tortoise/projection/nonfolded.py`) is fail-closed by default: a new fold-miss site that forgets to classify itself still fails, and the two classifiers — the graph replay engines and `check_consistency`'s reference fold — must yield the **same** disposition for the same journal, or `check_consistency` passes a journal `rebuild_all` refuses (the asymmetry #3585's re-review closed).
 
 ---
 
@@ -271,6 +286,7 @@ Therefore, for any revision in which legacy aliases are still resolvable, the **
 **Policy choices, not findings:** **R5** (mint a fresh id after deletion) is a **safe default** backed by the non-reuse norm — it is not a convergent finding, and it **closes the framework's open question** (Axon #3323) by choice rather than inheriting its answer. **R6** is **migration-scoped** (see R6 in detail); its Linux counter-argument is partly rejected, and it is not a permanent rule.
 
 **Explicit gaps — do not treat as settled:**
+
 - **Greg Young's primary writings and KurrentDB/EventStoreDB primary docs** were not retrieved (secondhand only). This is the canonical source for event-sourcing identity, it should be read before Stage 3 — and it is **why the R1, R3, R4, R7 bundle is one school, not a convergent finding**.
 - **Kimball's SCD primary chapter** — typology corroborated via secondary sources only. The canonical SCD2 mechanism (**new surrogate key per tracked change, continuity via the natural key**) is the *opposite* of a fix for a mutable natural key.
 - **ISBN/ISAN/ARK/DOI explicit non-reuse rules** — not retrieved; would strengthen R5.
@@ -284,6 +300,6 @@ Therefore, for any revision in which legacy aliases are still resolvable, the **
 
 ## Related
 
-#2835 (epic) · #2977 (parent of the retraction lane) · #3326 (the blocked PR) · #3573 (the two open P1 burials — Stage 0 makes them loud) · #3574 (`name[:200]` truncation — Stage 1) · #3377 (unjournaled rename — Stage 2) · #3389 (writer-side second carrier — fixed) · #3303 (connector reopen)
+\#2835 (epic) · #2977 (parent of the retraction lane) · #3326 (the blocked PR) · #3573 (the two open P1 burials — Stage 0 makes them loud) · #3574 (`name[:200]` truncation — Stage 1) · #3377 (unjournaled rename — Stage 2) · #3389 (writer-side second carrier — fixed) · #3303 (connector reopen)
 
 **Prior art:** `prior-art-scan.md` §C. **New primary sources this round:** Kythe `storage.proto` + `kythe-storage.txt`; `github/stack-graphs` `graph.rs` + arXiv 2211.01224; LSP 3.17 specification; Software Heritage `swh-model/persistent-identifiers` + `swhid.org/faq`; GitHub Blackbird engineering blog; NIST SP 800-171r2; PLOS Biology 2017 `10.1371/journal.pbio.2001414`; Linux `open_by_handle_at(2)` + `include/linux/exportfs.h`; PostgreSQL `CREATE SEQUENCE`; Fowler *Event Sourcing* + *Bitemporal History*; Microsoft CQRS Journey `Reference_03_ESIntroduction`; `eventsourcing` 9.1.4 docs.
