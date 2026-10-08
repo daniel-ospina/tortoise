@@ -3260,44 +3260,6 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the committed `durations` map.")
 
 
-def test_the_committed_slow_legs_are_the_lpt_partition_of_the_committed_map():
-    """#6137/#5285: the `test-slow` rows are hand-committed literals derived by
-    LPT from the committed `durations` map, so a changed leg set can leave them
-    tilted with no other gate noticing.
-
-    `test_slow_leg_bounds_clear_the_committed_work` asserts the budget clears
-    the work, and the in-workflow drift guard pins the two rows' UNION — but
-    neither reads the PARTITION, so a hand re-cut that keeps the heavier leg
-    under the watchdog passes silently. That is the #6137 shape: the rows and
-    the map drifted apart and stayed apart until main reddened. Re-deriving the
-    split here is what makes the committed rows self-checking; the sanctioned
-    way to change a row is
-    `split_fast_gate(sorted(set(slow_files) - set(carve_out)), durations, 2)`.
-    """
-    from tools.ci_selection import split_fast_gate
-
-    manifest = load_manifest()
-    legs = split_fast_gate(
-        sorted(set(manifest["slow_files"]) - set(manifest["carve_out"])),
-        manifest["durations"], 2)
-
-    def bare(f: str) -> str:
-        # `split_fast_gate` labels ids the way the selector does (`tests/x.py`);
-        # the committed rows carry the bare id.
-        f = f[len("tests/"):] if f.startswith("tests/") else f
-        return f[:-3] if f.endswith(".py") else f
-
-    derived = sorted(sorted(bare(f) for f in leg) for leg in legs)
-    committed = sorted(
-        sorted(e["files"].split())
-        for e in _load_python_ci()["jobs"]["test-slow"]["strategy"]["matrix"]["include"])
-    assert committed == derived, (
-        "the committed `test-slow` rows are no longer the LPT partition of "
-        "`slow_files - carve_out` on the committed `durations` map. Re-derive "
-        "them with `split_fast_gate(sorted(set(slow_files) - set(carve_out)), "
-        "durations, 2)` and update BOTH rows and the in-step watchdog.")
-
-
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.

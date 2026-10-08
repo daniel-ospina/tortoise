@@ -1482,15 +1482,15 @@ jobs:
     # measured from job start. So the cap must clear setup + pre-phase + the
     # watchdog, or the runner kills the step before pytest can print its counts
     # — exactly the loss the ORDER invariant exists to prevent.
-    # The cap is sized to leave the setup + collect-only window well inside the
-    # remainder: 60 - 40 = 20m, against the fast job's own ~7m setup figure
-    # (`test`, above) plus a ~2m collect for 62 files. That window is NOT
-    # derived: this job's pre-phase is the coverage-manifest --collect-only step
-    # and carries no step timeout of its own (the fast job's <=10m bound is
-    # #6142's last-failed run, which this job does not have), so 20m is a budget
-    # with margin rather than a measured bound. 45m — the value this PR first
-    # used, and 40m on main — left 5m for setup alone, so the watchdog could
-    # never fire;
+    # The cap must therefore clear the pre-phase on the path where the watchdog
+    # has to fire, and that path is bounded: the fast job's own ~7m setup figure
+    # (`test`, above) plus the coverage-manifest --collect-only step for this
+    # leg's 28 or 34 files. The `Embedding model REQUIRED` step later in the job
+    # is separately capped at 10m: a hang there FAILS the step and pytest never
+    # starts, so it does not open the watchdog window at all, and a slow but
+    # successful run contributes at most that same 10m to the pre-phase — the
+    # 20m remainder absorbs it. 45m — the value this PR first used, and 40m on
+    # main — left 5m for setup alone, so the watchdog could never fire;
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` compares the two
     # literals and cannot see the gap.
     timeout-minutes: 60
@@ -1566,8 +1566,8 @@ jobs:
         # continue-on-error was deliberately REMOVED — see the fast job's note.
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
-        # no error raised) that would otherwise stall the step for the full 90-min
-        # job cap; a timeout now FAILS the step, which is the honest outcome.
+        # no error raised) that would otherwise stall the step for this job's
+        # full 60m cap; a timeout now FAILS the step, which is the honest outcome.
         env:
           # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
           # cap so the dump lands before the runner's kill; above the `--attempts N
