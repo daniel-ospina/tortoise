@@ -1949,6 +1949,13 @@ def degradation_chain(
         against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
     """
+    # #5404: this is the public orchestration entry point, and the collection
+    # loop below swallows every strategy exception by design (a failed leg
+    # must DEGRADE, not crash the read). An unvalidated entity_type would
+    # therefore be swallowed into an empty result — the fail-open symptom this
+    # issue closes — so the guard belongs here, ahead of the workers.
+    validate_entity_type(entity_type)
+
     import concurrent.futures
 
     results: dict[str, list[tuple[str, float]]] = {}

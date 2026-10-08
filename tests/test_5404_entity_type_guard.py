@@ -52,14 +52,15 @@ def test_run_structural_query_rejects_invalid_entity_type(bad):
         search_engine.run_structural_query(None, None, entity_type=bad)
 
 
-@pytest.mark.parametrize(
-    "runner,args",
-    [
-        ("run_fts_query", ("q",)),
-        ("run_vector_query", ([0.1, 0.2],)),
-        ("run_structural_query", (None,)),
-    ],
-)
+#: (runner name, positional args) for each leg that must carry the guard.
+LEGS = [
+    ("run_fts_query", ("q",)),
+    ("run_vector_query", ([0.1, 0.2],)),
+    ("run_structural_query", (None,)),
+]
+
+
+@pytest.mark.parametrize("runner,args", LEGS)
 def test_guard_runs_at_entry_before_any_graph_use(monkeypatch, runner, args):
     """The guard is reached before the graph — so it cannot be skipped.
 
@@ -97,6 +98,40 @@ def test_every_valid_entity_type_passes_the_guard():
     ]
     for good in sorted(VALID_ENTITY_TYPES):
         assert search_engine.validate_entity_type(good) == good
+
+
+@pytest.mark.parametrize("runner,args", LEGS)
+def test_rejection_does_not_depend_on_breaker_state(monkeypatch, runner, args):
+    """The refusal must hold with the circuit breaker OPEN.
+
+    This is the property the entry placement exists for. With the breaker
+    forced open, a guard placed beside the label derivation is never reached —
+    the leg short-circuits to ``[]`` first — so this test fails for that
+    placement and passes only for an entry guard.
+    """
+    monkeypatch.setattr(search_engine, "_breaker_allow", lambda _name: False)
+
+    with pytest.raises(ValueError, match="Invalid entity_type"):
+        getattr(search_engine, runner)(None, *args, entity_type=INJECTION)
+
+
+def test_degradation_chain_rejects_invalid_entity_type():
+    """The public orchestrator must not swallow the rejection.
+
+    ``degradation_chain`` catches every strategy exception by design — a failed
+    leg must degrade, not crash the read. An unvalidated ``entity_type`` would
+    therefore be swallowed into an EMPTY result, which is the fail-open symptom
+    this issue closes, so the guard has to sit ahead of the workers.
+    """
+    with pytest.raises(ValueError, match="Invalid entity_type"):
+        search_engine.degradation_chain(
+            None,
+            "q",
+            None,
+            [0.1, 0.2],
+            {"fts": True, "vector": True, "structural": True},
+            entity_type=INJECTION,
+        )
 
 
 def test_sdk_fts_query_rejects_invalid_entity_type():

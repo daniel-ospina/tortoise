@@ -181,9 +181,12 @@ def entity_label(entity_type: str) -> str:
       unhashable input, silently changing the failure mode).
 
     ``entity_type`` is deliberately NOT validated here:
-    ``validate_entity_type`` is the enforcement point (and is currently inert —
-    see #5404); this function is a *translation*, so it must keep working for
-    the legacy inputs the runners accept today.
+    ``validate_entity_type`` is the enforcement point, called at the ENTRY of
+    each module-level runner (``run_fts_query``/``run_vector_query``/
+    ``run_structural_query``, #5404). This function is a *translation*, so it
+    keeps the historical derivation — including the unknown-``str`` fallback —
+    for a direct caller, but no public graph entry point can reach that
+    fallback with an unvalidated value.
     """
     if isinstance(entity_type, str):
         label = ENTITY_TYPE_LABELS.get(entity_type)
