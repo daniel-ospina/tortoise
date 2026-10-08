@@ -1028,7 +1028,7 @@ def _docker_falkor_reachable(port: int | None = None) -> bool:
     (fail-closed, epic #1647 D-4), not green-skip.
 
     #6673: the legacy service is published on an EPHEMERAL host port (docker
-    `-p 0:6379`), read from tests/_live_utils.py — not the 16379 literal.
+    `-p 127.0.0.1:0:6379`), read from tests/_live_utils.py — not the 16379 literal.
     """
     return _live_utils.tcp_reachable(port or _live_utils.legacy_port(), timeout=1.5)
 

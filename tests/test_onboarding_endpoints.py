@@ -670,8 +670,10 @@ def test_state_keys_registered_parametrized(client):
     the PATCH model — so a key added to the table without registering it
     anywhere fails here (the allowlist filter would otherwise silently drop it
     in production). The OPERATIONAL keys then round-trip through PATCH + GET;
-    the server-owned capture/install evidence keys are REFUSED there (403, no
-    write) instead — see ``_CAPTURE_SERVER_OWNED_KEYS`` and the branch below."""
+    the server-owned capture/install evidence keys are covered here for
+    REGISTRATION only and skipped for the round-trip — their refusal (403, no
+    write) is pinned with the value assertion this test never made, in
+    ``test_capture_verification_keys_not_client_writable`` below."""
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
         _CAPTURE_SERVER_OWNED_KEYS,
@@ -702,20 +704,16 @@ def test_state_keys_registered_parametrized(client):
         # scope keys take a small non-empty sample) AND read back via GET
         # (the node is provisioned, so this is a real persisted round-trip).
         #
-        # #3681: the capture/install EVIDENCE keys (receipts, per-harness
-        # last-errors, install probes) are SERVER-OWNED — registration still
-        # guarantees the key ROUND-TRIPS through the read path, but a client
-        # PATCH must be REFUSED (403) rather than accepted. Asserting the
-        # refusal here keeps the registration table honest about the key (it
-        # exists on both default dicts + the model) while pinning the
-        # server-owned write surface.
+        # #3681/#3552: the capture/install EVIDENCE keys (receipts, per-harness
+        # last-errors, install probes) are SERVER-OWNED. The registration
+        # assertions above still apply to them IN FULL — they must exist on
+        # both default dicts, the allowlist and the PATCH model — but the PATCH
+        # half of this test now covers CLIENT-WRITABLE keys only (#3552 Target:
+        # "the parametrized registration test covers client-writable keys
+        # only"). Their refusal is pinned — together with the value assertion
+        # this test never made — in
+        # ``test_capture_verification_keys_not_client_writable`` below.
         if state_key in _CAPTURE_SERVER_OWNED_KEYS:
-            r = client.patch("/v1/onboarding/state",
-                             json={patch_field: patch_value})
-            assert r.status_code == 403, (
-                f"server-owned key {state_key} was client-writable: {r.text}")
-            assert r.json()["detail"] == {
-                "message": "server_owned_key", "keys": [state_key]}, r.text
             continue
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
@@ -725,6 +723,138 @@ def test_state_keys_registered_parametrized(client):
         r = client.get("/v1/onboarding/state")
         assert r.json()["onboarding"][state_key] == patch_value, \
             f"{state_key} did not read back through GET"
+
+
+def test_capture_verification_keys_not_client_writable(client):
+    """#3552 Target — an authenticated client PATCH cannot green the capture
+    surface: every ``_CAPTURE_SERVER_OWNED_KEYS`` member is refused with 403
+    ``server_owned_key`` **and leaves the stored value UNCHANGED**.
+
+    Why the value half is the assertion that matters, and cannot be folded
+    into the registration test above: a 403 that still MUTATED the row would
+    satisfy any status-only check, and these are exactly the keys that make
+    the capture sentence's TENSE true in ``captureStatus.js`` — a
+    client-writable receipt fabricates a present-tense claim with nothing
+    filed. That is the #3671 false-claim class, one key further down (#3681).
+
+    The endpoint-accepts-writes control is deliberately NOT re-added here. A
+    refusal test is satisfiable by a route that simply never writes anything,
+    so it is only meaningful beside the writes that DO land — and those already
+    exist and pass: ``test_install_probe_round_trip`` (BELOW this test in the
+    file) proves ``POST /v1/sessions/install-probe`` still records
+    ``install_probe_{h}``, ``test_install_probe_unregistered_harness_422`` pins
+    the supported-harnesses-only asymmetry as DELIBERATE rather than a coverage
+    gap, and the ``POST /v1/sessions`` 2xx path is proven to record receipts in
+    ``tests/test_capture_session.py`` (truthy ``session_capture_receipt_claude``
+    assertions). The off-switch test in THIS file is deliberately NOT cited as
+    a positive control: it only asserts ``receipts_after_409 ==
+    receipts_after_on``, which passes empty-vs-empty.
+
+    What this test adds over the existing refusal coverage
+    (``test_onboarding_truth_surface.py::TestPatchRefusesFabricatedReceipt`` —
+    stronger on the CREDENTIAL axis, parametrized over the agent-key and
+    session-JWT lanes and asserting the state setter received NOTHING at all)
+    is the PERSISTED-VALUE assertion against a provisioned node, which a
+    monkeypatched setter call cannot make. The two are complements, not two
+    independent coverages.
+    """
+    from tortoise.hosted_api import (
+        _CAPTURE_SERVER_OWNED_KEYS,
+        _make_sdk,
+        _update_onboarding_state,
+    )
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    # Coverage guard: every DERIVED server-owned key must be exercised here.
+    # A harness added to _SESSION_HARNESS_VALUES mints new receipt/last-error
+    # members, and ``install_probe_*`` is derived from the registration table
+    # — so a key can become server-owned with no PATCH field to send it under,
+    # which would leave it silently untested (the exact hole the split closes).
+    uncovered = _CAPTURE_SERVER_OWNED_KEYS - set(_STATE_KEY_TABLE)
+    assert not uncovered, (
+        "server-owned key(s) with no PATCH field in _STATE_KEY_TABLE, so their "
+        f"refusal cannot be asserted: {sorted(uncovered)}")
+    # ...and the OTHER direction, which the guard above cannot see. Dropping a
+    # key from the DERIVATION makes it client-writable while leaving THIS test
+    # vacuously green (the loop iterates the derived set) and the registration
+    # test green too (a client-writable key simply round-trips, which is what
+    # it asserts). Three checks follow and their strengths DIFFER — measured,
+    # not assumed. Only the middle one is independent:
+    #   * the harness loop is NOT independent: _CAPTURE_SERVER_OWNED_KEYS is
+    #     computed FROM _SESSION_HARNESS_VALUES, so dropping a harness shrinks
+    #     the loop along with the mutation and it stays GREEN (reproduced). It
+    #     catches a hand-edited comprehension, not a vocabulary change;
+    #   * `_evidence` below IS independent, and it is the check that actually
+    #     closes this direction: it derives the receipt/last-error family from
+    #     _ALLOWED_STATE_KEYS — a DIFFERENT source from the
+    #     _SESSION_HARNESS_VALUES that production derives from — so an evidence
+    #     key registered without becoming server-owned is RED here (reproduced:
+    #     dropping "pi" reddens at _evidence while the loop stays green);
+    #   * `_probes` is a HAND-EDIT CANARY of the same class as the loop, NOT an
+    #     independence check: it is one of the union TERMS of
+    #     _CAPTURE_SERVER_OWNED_KEYS — character-identical over the same frozen
+    #     set — so it holds by construction and cannot fail on any
+    #     registration-driven change.
+    # A vocabulary change is also caught outside this file
+    # (test_cross_surface_harness_vocab_contract pins the exact 6-member set;
+    # two test_5051 harness-set assertions), so these are defence in depth
+    # rather than the primary guard.
+    from tortoise.hosted_api import (
+        _ALLOWED_STATE_KEYS,
+        _SESSION_HARNESS_VALUES,
+    )
+    assert "session_capture_receipt" in _CAPTURE_SERVER_OWNED_KEYS, (
+        "the bare (harness-less) receipt is server-owned — the legacy hooks' "
+        "member and the session-JWT lane's member")
+    for _h in _SESSION_HARNESS_VALUES:
+        assert f"session_capture_receipt_{_h}" in _CAPTURE_SERVER_OWNED_KEYS, (
+            f"receipt for harness {_h!r} is NOT server-owned — it became "
+            "client-writable, so a PATCH can fabricate a capture")
+        assert f"session_capture_last_error_{_h}" in _CAPTURE_SERVER_OWNED_KEYS, (
+            f"last-error for harness {_h!r} is NOT server-owned — it became "
+            "client-writable")
+    # Derive the same family from the REGISTRATION surface, which the loop
+    # above cannot do for itself (see the note): this is the INDEPENDENT check
+    # and what catches a receipt key registered for a harness the vocabulary
+    # does not name.
+    _evidence = {k for k in _ALLOWED_STATE_KEYS
+                 if k.startswith(("session_capture_receipt",
+                                  "session_capture_last_error"))}
+    assert _evidence <= _CAPTURE_SERVER_OWNED_KEYS, (
+        "registered capture-evidence keys that are NOT server-owned, so a "
+        f"PATCH can fabricate one: {sorted(_evidence - _CAPTURE_SERVER_OWNED_KEYS)}")
+    _probes = {k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")}
+    assert _probes <= _CAPTURE_SERVER_OWNED_KEYS, (
+        "install probes missing from the server-owned set, so a PATCH can "
+        f"claim an install that never happened: {sorted(_probes - _CAPTURE_SERVER_OWNED_KEYS)}")
+
+    # A value DISTINCT from the sample the table PATCHes, so "unchanged" is a
+    # real assertion rather than a comparison of two identical writes.
+    sentinel = "2020-01-01T00:00:00Z"
+    for state_key in sorted(_CAPTURE_SERVER_OWNED_KEYS):
+        patch_field, sample = _STATE_KEY_TABLE[state_key]
+        assert sample != sentinel, (
+            f"{state_key}: the sentinel must differ from the PATCHed sample, "
+            "or 'unchanged' proves nothing")
+        # The TRUSTED path writes it — this is what a client must not reach.
+        _update_onboarding_state(
+            "test-team-1", _echo=False, **{state_key: sentinel})
+        before = client.get("/v1/onboarding/state").json()["onboarding"]
+        assert before.get(state_key) == sentinel, (
+            f"{state_key}: the server-side write did not land "
+            f"({before.get(state_key)!r}) — the assertions below would be "
+            "vacuous against a value that was never there")
+        r = client.patch("/v1/onboarding/state", json={patch_field: sample})
+        assert r.status_code == 403, (
+            f"server-owned key {state_key} was client-writable: {r.text}")
+        assert r.json()["detail"] == {
+            "message": "server_owned_key", "keys": [state_key]}, r.text
+        after = client.get("/v1/onboarding/state").json()["onboarding"]
+        assert after.get(state_key) == sentinel, (
+            f"{state_key}: the refused PATCH still mutated the stored value "
+            f"({before.get(state_key)!r} -> {after.get(state_key)!r})")
 
 
 def test_issues_off_does_not_disconnect_github(client):

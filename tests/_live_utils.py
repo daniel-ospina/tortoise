@@ -24,8 +24,8 @@ LIVE_URI_SKIP_REASON = (
 # ── #6673: the docker-lane service ports are DYNAMIC (not 6379/16379) ──────
 #
 # The CI services lanes publish their falkordb containers with
-# `docker run -p 0:6379` and read the assigned host port back, instead of
-# the fixed `6379:6379` / `16379:6379` pair. WHY (#6673): every
+# `docker run -p 127.0.0.1:0:6379` and read the assigned host port back, instead
+# of the fixed `6379:6379` / `16379:6379` pair. WHY (#6673): every
 # self-hosted runner on this host shares ONE Docker daemon, so a fixed host
 # port is a single global namespace — when two services jobs overlapped, the
 # second container's `docker start` died with "Bind for 0.0.0.0:6379 failed:

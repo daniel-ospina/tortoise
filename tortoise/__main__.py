@@ -4220,6 +4220,8 @@ def _spool_transcript(args) -> dict:
     machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
     model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
 
+    import time as _time
+
     root = spool_dir()
     written = write_spool_entry(root, Snapshot(
         session_id=session_id,
@@ -4236,6 +4238,14 @@ def _spool_transcript(args) -> dict:
         # the store-sync half posts the same payload and the lane is the only
         # discriminator.
         capture_lane="hook",
+        # #3516 §B / #3515 piece 12: the CLI leg stamps its OWN observation
+        # instant — piece 12's row is "observed at hook fire time, recorded as
+        # 'cli_observed'". This is the floor's INPUT and it must not be the
+        # server's ingest stamp: the pre-existing spool drains AFTER an install,
+        # so an ingest-stamped row would read as freshly captured and the floor
+        # could only ever pass (piece 12's stated reason for the client clock).
+        client_captured_at=_time.time(),
+        client_captured_at_source="cli_observed",
     ))
     return {
         "rc": 0,
@@ -5492,6 +5502,34 @@ def _cmd_sessions_import(args) -> int:
     return 0
 
 
+def _session_fields(s: dict, fields: tuple[str, ...] | None = None) -> dict[str, str]:
+    """Render a session's FULL projection as label -> display value.
+
+    Driven by the shared declaration (#5498): a field the API serves cannot be
+    silently absent from the CLI, because this iterates the declaration
+    instead of holding a local copy of it. That local copy is exactly how
+    `session list` came to drop six of the nine fields it was meant to show.
+    """
+    from tortoise.session_projection import SESSION_LIST_FIELDS
+
+    if fields is None:
+        fields = SESSION_LIST_FIELDS
+
+    out: dict[str, str] = {}
+    for field in fields:
+        val = s.get(field)
+        if field in ("turn_points", "extracted_points"):
+            # the point LISTS render as their own section / a count
+            out[field] = str(len(val)) if isinstance(val, list) else "0"
+        elif val is None or val == "":
+            out[field] = "-"
+        elif field == "created_at" and isinstance(val, str):
+            out[field] = val[:19]
+        else:
+            out[field] = str(val)
+    return out
+
+
 def _cmd_session_list(api_key: str, api_url: str) -> int:
     """GET /v1/sessions — list all sessions."""
     import json as _json, sys as _sys  # noqa: E401, I001
@@ -5518,13 +5556,14 @@ def _cmd_session_list(api_key: str, api_url: str) -> int:
         print("No sessions found.")
         return 0
 
-    print(f"{'ID':<36} {'Turns':<6} {'Created'}")
-    print("-" * 60)
+    # #5498: every field of the shared projection, not the ID/Turns/Created
+    # subset this used to hardcode. Uniform `name value` lines keep the
+    # projection self-describing — a field the API serves is visible BY NAME,
+    # so a parity check can be exact rather than a substring guess.
     for s in sessions:
-        sid = s.get("id", s.get("session_id", "?"))
-        turns = s.get("turns", s.get("turn_count", "?"))
-        created = s.get("created_at", s.get("created", ""))[:19]
-        print(f"{sid:<36} {str(turns):<6} {created}")  # noqa: RUF010
+        for key, val in _session_fields(s).items():
+            print(f"{key:<17} {val}")
+        print()
     return 0
 
 
@@ -5550,12 +5589,25 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         return 1
 
-    print(f"Session: {session_id}")
-    print(f"Created: {data.get('created_at', data.get('created', '?'))}")
-    turns = data.get("turns", [])
-    print(f"Turns:   {len(turns)}")
+    # #5498: EVERY declared detail field, derived from the shared declaration —
+    # not a hand-picked handful that silently omits the rest. `turns` is the
+    # COUNT and the LIST is `turn_points`; reading the count as the list and
+    # calling len() on it raised
+    # `TypeError: object of type 'int' has no len()` on EVERY session.
+    #
+    # No separate `Session: <id>` header: `id` is the first named line below, so
+    # a header would be both redundant and a second, undeclared way to emit the
+    # id — leaving the rendered NAMES exactly the declared field set, which is
+    # what the parity test asserts in both directions.
+    from tortoise.session_projection import SESSION_DETAIL_FIELDS
+
+    fields = _session_fields(data, SESSION_DETAIL_FIELDS)
+    turn_points = data.get("turn_points") or []
+
+    for key in SESSION_DETAIL_FIELDS:
+        print(f"{key:<17} {fields[key]}")
     print()
-    for i, t in enumerate(turns):
+    for i, t in enumerate(turn_points):
         role = t.get("role", "?").upper()
         content = t.get("content", "")
         if len(content) > 200:
