@@ -63,6 +63,14 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 # delenv/patch it (`test_2952_degraded_read`).
 os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
 
+# #6960: the budget for the cold embedder load that the opt-out above makes
+# SYNCHRONOUS lives at the end of this import preamble — see the note beside
+# `from tests._embedded import shared_proj`. It must NOT be set here: importing
+# `tortoise.embeddings` runs `tortoise/__init__`, which reaches the embedded
+# reaper, and the reaper resolves its lock path from the temp dir AT IMPORT. Set
+# here it would run BEFORE `install_session_tmpdir()`, freezing `_LOCK_PATH` on
+# the machine-shared dir (#3752/#1658) and reddening test_reaper's scoping guard.
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old
@@ -124,6 +132,37 @@ install_session_tmpdir()
 # session.
 sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_scan_guard()
+
+# #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.
+#
+# The opt-out above (#7015) removes the warm-up that would have ABSORBED that
+# load, so the first `create_point` (`encode_for_store` -> `EmbeddingModel.get`)
+# pays it in-line. The product default (`_LOAD_TIMEOUT_S = 90.0`) is a REQUEST-path
+# trade: blocking longer is worse than degrading. A pytest process is the OPPOSITE
+# trade — it has a 15m shard watchdog and ~5m of real work — so abandoning a load
+# that would have finished is strictly worse than waiting for it.
+#
+# Measured 2026-10-08 (this box, loadavg 172 on 10 CPUs): a cold load is 50.5s
+# against that 90s budget, a 1.8x margin, while CI cold-loads one model in THREE
+# shards at once on a 4-vCPU runner. On run 37723572956 the timeout fired
+# repeatedly — a 90s block plus the 60s negative-cache gap is a 150s cycle and
+# 900/150 = 6 — so six abandoned loads consumed the whole watchdog and killed
+# test (c), test (f) and test (g) mid-line on the SAME test, reddening the
+# required `python-ci-gate` on main and with it every PR's entry gate.
+#
+# 270.0, not 300.0 and not 240.0. The shard ALSO runs pytest's per-test
+# `--timeout=300` (python-ci.yml), and the point is for THIS budget to fire FIRST,
+# so the load is reported as a load rather than abandoned by the test harness at
+# the same instant — 300 == 300 was the original defect. Within that ceiling the
+# budget goes as high as the headroom allows, because the failure it prevents is
+# ABANDONMENT: the worst cold load this incident OBSERVED was 204.64s (the
+# previously-hanging test passed at 133.55s and 204.64s once the budget covered
+# it), so 240 left only 1.17x over what we have actually seen. It stays at or
+# under the hosted pre-warm's 300.0 (`hosted_api.py`), so this lane never
+# out-budgets the lane that runs the same cold torch import.
+from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane  # noqa: E402
+
+_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0
 
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
