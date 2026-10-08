@@ -202,8 +202,17 @@ def test_run_vector_query_label_matches_the_legacy_derivation(recording_graph, e
     assert f"'{_legacy(et)}'" in _vec(recording_graph, et)
 
 
-def test_run_vector_query_unknown_str_uses_the_fallback(recording_graph):
-    assert "'Widget'" in _vec(recording_graph, "widget")
+def test_run_vector_query_rejects_unknown_str(recording_graph):
+    """#5404 supersedes #4997's runner-level fallback.
+
+    Before #5404 this runner accepted an unknown ``entity_type`` and the label
+    fell back to ``entity_type.capitalize()`` (``"widget"`` -> ``'Widget'``).
+    That fallback IS the hole #5404 closes: the value is caller-controlled and
+    the label it produced is query structure. ``entity_label`` keeps the
+    fallback for a direct caller; the RUNNERS no longer accept it.
+    """
+    with pytest.raises(ValueError, match="Invalid entity_type"):
+        _vec(recording_graph, "widget")
 
 
 def test_run_vector_query_emits_exactly_one_vector_call(recording_graph):

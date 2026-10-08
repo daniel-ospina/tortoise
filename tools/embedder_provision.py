@@ -336,6 +336,13 @@ def main(argv: list[str] | None = None) -> int:
 #     22:31:37.13  embedding model: cached, no download needed
 #     22:32:14.79  ##[error] ... has timed out after 6 minutes.
 #
+# #6937 P2-3: the `Run python3` line above is a VERBATIM CI log quote — what
+# the runner actually PRINTED — so it keeps the form CI ran. Rewriting it to a
+# uv-run spelling would make this receipt describe a command the runner never
+# printed, a provenance defect rather than a doc fix. The sweep is deliberately
+# excluded from the log block above for exactly that reason; the exemption is
+# held in `_DELIBERATE_BARE_FORM` in tests/test_entry_point_python_guard.py.
+#
 # So ~5m36s is spent BEFORE the marker — the torch/sentence_transformers import
 # plus the model load, emitting nothing — and ~38s after it, of which ~22s is
 # teardown. `os._exit` therefore buys 22s, which is enough to put this run at

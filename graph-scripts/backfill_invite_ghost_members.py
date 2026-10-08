@@ -19,7 +19,7 @@ Rows backing a still-pending, unexpired invite are KEPT (the legit
 Idempotent — re-running finds nothing. `--dry-run` reports without writing.
 
 Usage:
-    python3 graph-scripts/backfill_invite_ghost_members.py [--dry-run] [--yes] [--uri URI]
+    uv run python graph-scripts/backfill_invite_ghost_members.py [--dry-run] [--yes] [--uri URI]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:6379/tortoise).
 Test safety: the guard runs on the graph the sweep ACTUALLY writes (the

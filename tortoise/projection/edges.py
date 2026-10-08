@@ -243,6 +243,40 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSource', 'aboutAction',
 })
 
+
+def about_document_target_reason(label: str | None,
+                                 properties: dict | None) -> str | None:
+    """Why this node cannot be an ``aboutDocument`` target, or ``None`` when
+    it can.
+
+    ``aboutDocument``'s target is a DOCUMENT — a ``:Source`` carrying
+    ``documentKind`` and addressable by ``url`` (ONTOLOGY §4.4). The replay path
+    enforces all three, but in two places: the resolver matches
+    ``(:Source {url:$url}) WHERE documentKind IS NOT NULL``, and the supersede
+    descriptor is keyed by ``stub_key``, which emits nothing for an empty or
+    non-string key (the ``isinstance(x, str) and x`` rule ``_writable_id``
+    applies). Live auto-detect refused a non-document Source
+    and so did replay, but the live producer (``create_edge``) refused nothing —
+    an edge created through it was built, transferred at supersede and then
+    dropped by ``rebuild_all``, ending on NEITHER node (#5206). ``url`` is part
+    of the contract because the supersede descriptor is keyed on it
+    (``stub_key``), so a source with no usable ``url`` is lost the same way.
+    """
+    props = properties or {}
+    if label != "Source":
+        return f"a {label or 'unknown'}-labelled node, not a :Source"
+    if props.get("documentKind") is None:
+        return "a :Source without documentKind"
+    url = props.get("url")
+    if not (isinstance(url, str) and url):
+        # Parity with `stub_key` and `_writable_id`: an empty (or non-string)
+        # identity is not an identity — `stub_key` emits no DirectEdgeRepoint
+        # descriptor for it, so the edge is un-replayable and dies the same way.
+        return ("a :Source with no usable url — an aboutDocument target is "
+                "addressed by url, and an empty one emits no descriptor")
+    return None
+
+
 # `references` targets whose node is BUILT FROM the source's content, and therefore
 # carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
 # the operative record is `STORAGE-ARCHITECTURE.md` §9.6). The anchor is set at LINK
@@ -992,6 +1026,29 @@ class _EdgeHandlers:
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
         if not sources or not targets:
             return False
+        # D10 B1 (#5206): ``aboutDocument``'s target is a DOCUMENT-bearing
+        # :Source (ONTOLOGY v3.15 §4.4); a provenance/session/connector Source is
+        # an `aboutSource` target instead. The replay resolver enforces this
+        # (`resolve_structural_target`) but this live producer path did not, so a
+        # producer-created edge to a non-document Source was created live,
+        # transferred at supersede, then refused on `rebuild_all` — ending on
+        # NEITHER node. Refusing here makes live and replay agree on the
+        # TARGET KIND; it is not a durability guarantee — a document-bearing
+        # :Source that replay does not re-materialize is dropped regardless,
+        # which is the separate write-surface question tracked in #2296.
+        if predicate == 'aboutDocument':
+            for t in targets:
+                why = about_document_target_reason(
+                    t['label'], t.get('properties'))
+                if why is not None:
+                    raise ValueError(
+                        f"aboutDocument target {target_id!r} is not a "
+                        f"document-bearing :Source — it is {why}. "
+                        "`aboutDocument` targets a DOCUMENT (ontology §4.4); "
+                        "for a provenance/session/connector Source use "
+                        "`aboutSource`. A live edge on a non-document Source "
+                        "cannot survive `rebuild_all` (#5206), so accepting "
+                        "it loses it silently.")
         # #390: mirror create_owned_by's circular-DAG guard for ownedBy — the
         # generic create_edge path must not bypass it. The new edge is
         # source -[:ownedBy]-> target; a cycle would close iff target already

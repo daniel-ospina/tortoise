@@ -17,9 +17,9 @@ Contract (scope pin 14):
 - re-run no-op; wire stable across backfill/materialization/flip (DE2E-6).
 
 Usage:
-    python3 graph-scripts/backfill_onboarding_state.py            # DRY-RUN
-    python3 graph-scripts/backfill_onboarding_state.py --apply    # write nodes
-    python3 graph-scripts/backfill_onboarding_state.py --recompute [--apply]
+    uv run python graph-scripts/backfill_onboarding_state.py            # DRY-RUN
+    uv run python graph-scripts/backfill_onboarding_state.py --apply    # write nodes
+    uv run python graph-scripts/backfill_onboarding_state.py --recompute [--apply]
         # T7 recompute sweep: grandfathered branch first (zero agent edges +
         # legacy complete → status stays complete, never re-onboarded), then
         # fork-aware gate eval for edge-bearing orgs (monotonic).

@@ -8,9 +8,9 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 #1382 EP regression class for days.
 
 Usage:
-  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
+  uv run python tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
                               [--scope "<space-joined files>"] [--junitxml <path>] [--manifest-only]
-  python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
+  uv run python tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
 producer):

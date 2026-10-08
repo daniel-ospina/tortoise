@@ -70,7 +70,7 @@
         },
         {
           "label": "team={ max_api_keys: 1 },keys=[{ id: 'a' }]",
-          "text": "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key. Creating a new key needs a free slot, and your plan's 1 are all in use — revoke one or upgrade first.",
+          "text": "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key. Creating a new key needs a free slot, and your plan's 1 are all in use — revoke one or upgrade first. Need more? Contact support@premiselabs.co.",
           "tags": []
         }
       ]

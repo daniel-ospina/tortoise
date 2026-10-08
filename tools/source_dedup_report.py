@@ -16,13 +16,13 @@ its own ``extractedFrom`` chain (~6.6 derived rows/source, measured).
 Usage
 -----
     # against the graph in $TORTOISE_DB_URI (or the default embedded path)
-    python3 tools/source_dedup_report.py
+    uv run python tools/source_dedup_report.py
 
     # machine-readable
-    python3 tools/source_dedup_report.py --json
+    uv run python tools/source_dedup_report.py --json
 
     # adopt legacy nodes (set canonicalUrl + urlAliases) — idempotent, additive
-    python3 tools/source_dedup_report.py --backfill
+    uv run python tools/source_dedup_report.py --backfill
 
 Evidence discipline (methodology 1): the report prints a real sample of the
 duplicate groups it found, not just a total, so the claim can be checked.

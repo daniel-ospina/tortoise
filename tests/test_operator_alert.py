@@ -898,6 +898,7 @@ def test_kind_constants_match_the_runbook():
     kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
              cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
              oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND,
+             "abuse_review_needed",  # #5425: the escalation that replaced the suspend
              oa.PROVIDER_BILLING_EXHAUSTED_KIND)
     for kind in kinds:
         assert kind in rows, f"no runbook triage row for {kind}"

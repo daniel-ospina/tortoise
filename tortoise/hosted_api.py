@@ -122,6 +122,7 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
+from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
@@ -5919,7 +5920,8 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
-def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
+def _key_limit_refusal(
+        message: str = (with_limit_contact("Key limit reached — revoke an existing key"))) -> dict:
     """Build the structured 402 `detail` for an api_keys refusal (#4614).
 
     Called at raise sites that supply no count — the mint/rotate
@@ -6127,6 +6129,8 @@ def _suspended_detail() -> dict:
     from tortoise.abuse import appeal_url, suspended_message
     return {"code": "SUSPENDED", "message": suspended_message(),
             "appeal_url": appeal_url()}
+
+
 
 
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
@@ -10637,14 +10641,15 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
             # 409 is the C2 policy/concurrency class, NOT a quota refusal —
             # there is no quota category to carry, so the detail stays prose.
             raise HTTPException(
-                status_code=409, detail="API key limit reached.") from None
+                status_code=409,
+                detail=with_limit_contact("API key limit reached.")) from None
         # #4614: the 402 arm IS the api_keys quota (the legacy pre-check's race
         # backstop) — the same category `_check_org_limit` answers, so it
         # carries the same structured shape.
         raise HTTPException(
             status_code=402,
             detail=_key_limit_refusal(
-                "API key limit reached (legacy mint — upgrade or revoke)"),
+                with_limit_contact("API key limit reached (legacy mint — upgrade or revoke)")),
         ) from None
 
     kid = minted["id"]
@@ -10851,7 +10856,8 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     except _KeyCapExceeded:
         raise HTTPException(
             status_code=402,
-            detail=_key_limit_refusal("API key limit reached."),
+            detail=_key_limit_refusal(
+                with_limit_contact("API key limit reached.")),
         ) from None
 
     kid = minted["id"]
@@ -11496,6 +11502,15 @@ _SESSION_HARNESS_VALUES = frozenset({
 # returns m2/v2) — same word, different meaning; do not merge the two.
 _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 
+# #3516 §B / #3515 piece 12: the provenance of ``client_captured_at``. Closed
+# on purpose — the floor's verdict depends on WHICH clock a timestamp came
+# from, so an unrecognised source must fail the boundary 422 rather than be
+# stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
+# backfill/import lane admits a record with no client timestamp and records
+# this honestly, and the floor treats it as NOT passed.
+_SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
+    {"cli_observed", "file_mtime", "unknown"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11526,6 +11541,15 @@ class SessionRequest(BaseModel):
     # never erases a lane the server already stored. `None` is stored as ABSENT,
     # never as a fabricated lane. Invalid values fail the boundary 422.
     capture_lane: str | None = None
+    # #3516 §B / #3515 piece 12: the CLIENT-recorded capture instant (unix
+    # seconds) and the clock it came from. OPTIONAL for the same reason
+    # ``capture_lane`` is — a pre-installed hook, an SDK caller or a backfill
+    # producer that POSTs without it must never 422, and ``None`` is stored as
+    # ABSENT, never as a fabricated instant. It exists because the server's own
+    # ``capturedAt`` is the INGEST transaction time, so it can never witness
+    # what the floor is about (piece 12).
+    client_captured_at: float | None = None
+    client_captured_at_source: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11556,6 +11580,59 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid capture_lane {v!r} — must be one of "
                 f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
+        return v
+
+    # #3516 §B: an unrecognised source is refused at the boundary (same
+    # contract as harness/lane). A source the floor cannot interpret would be
+    # stored as a provenance no reader can act on — and the floor's whole
+    # falsifiability property is that 'unknown' is EXCLUDABLE, which requires
+    # the value set to be closed rather than free-form.
+    @field_validator("client_captured_at_source")
+    @classmethod
+    def _validate_client_captured_at_source(cls, v):
+        if v is not None and v not in _SESSION_CAPTURED_AT_SOURCE_VALUES:
+            raise ValueError(
+                f"invalid client_captured_at_source {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURED_AT_SOURCE_VALUES)}")
+        return v
+
+    # #3516 §B: reject a NON-FINITE instant at the boundary. Pydantic accepts
+    # inf/nan floats by default and `1e400` parses to `inf`, which the floor
+    # would then compare and PASS — a floor-pass on a value that is not a clock
+    # reading, exactly the falsifiability the closed source set exists to
+    # protect. It is also uninterpretable once stored (`json.dumps` emits
+    # non-standard `Infinity`, which a strict reader rejects).
+    @field_validator("client_captured_at", mode="before")
+    @classmethod
+    def _validate_client_captured_at(cls, v):
+        # `mode="before"` is load-bearing: an AFTER validator sees the value
+        # pydantic has ALREADY coerced, and by then `True` is the float `1.0`, so
+        # the bool guard below could never match.
+        # `bool` FIRST: it is an `int` subclass, so pydantic silently coerces
+        # `true` to `1.0` and the field stores a clock reading that is not one.
+        # The coercion is invisible, so the guard has to be explicit.
+        if isinstance(v, bool):
+            raise ValueError(
+                "client_captured_at must be a unix timestamp, got a bool — "
+                "`true` coerces to 1.0 and would be stored as a clock reading")
+        if v is not None:
+            try:
+                number = float(v)
+            except OverflowError:
+                # `float(10**400)` raises, and a 400-digit JSON integer is a
+                # legal body. A ValueError here is a legible 422; letting the
+                # OverflowError escape makes FastAPI answer 500 for an input the
+                # contract says is a client error.
+                raise ValueError(
+                    "client_captured_at is not representable as a unix "
+                    "timestamp") from None
+            except (TypeError, ValueError):
+                # Not numeric at all: leave it to pydantic to report.
+                return v
+            if not math.isfinite(number):
+                raise ValueError(
+                    f"client_captured_at must be a finite unix timestamp, got "
+                    f"{v!r} — an inf/nan instant is not a clock reading")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12133,10 +12210,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (count_org_usage(..., "points") — non-episodic Points PLUS
                 # Object + Subject, NULL `is_episodic` counted as non-episodic;
                 # a `NOT n.is_episodic` count drops those NULLs and undercounts
-                # by thousands). `message` is byte-identical to the old prose.
+                # by thousands). `message` is byte-identical to the old prose
+                # PLUS the #5425 contact suffix — the suffix is what makes the
+                # human route reachable from the refusal, so it is part of the
+                # contract now, not an ornament.
                 detail=quota_refusal_payload(QuotaExceededError(
-                    f"Team points limit reached: {count} in use + {est} estimated "
-                    f"for this capture exceeds {max_points}. Upgrade your plan.",
+                    with_limit_contact(f"Team points limit reached: {count} in use + {est} estimated " f"for this capture exceeds {max_points}. Upgrade your plan."),
                     resource="points", used=count, limit=max_points,
                     estimate=est,
                 )),
@@ -12346,6 +12425,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
         capture_lane=body.capture_lane,
+        client_captured_at=body.client_captured_at,
+        client_captured_at_source=body.client_captured_at_source,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
@@ -15856,7 +15937,13 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     not guess when the user is not currently ON that org."""
     return {
         "code": "one_free_org_limit",
-        "message": "You can only have one free organization",
+        # #5425: a customer at a ceiling is told they can talk to us — this is
+        # the free-org ceiling, the sibling of the paid-plan refusal that
+        # already carries the route. Kept as a builder (the dashboard's dialog
+        # is driven by `code`), so the derived guard has to resolve a
+        # detail-BUILDER to see it: a `HTTPException(detail=_builder(...))`
+        # argument subtree holds no string literal of its own.
+        "message": with_limit_contact("You can only have one free organization"),
         "org_id": org_id,
     }
 
@@ -16220,8 +16307,7 @@ async def _graph_quota_gate(org: dict) -> None:
         raise HTTPException(
             status_code=409,
             headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
-            detail=("Graph limit reached. Upgrade your plan to create more "
-                    "graphs."),
+            detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create more " "graphs.")),
         )
 
 
@@ -16236,8 +16322,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Builder plan. Upgrade to create "
-                   "multiple graphs.",
+            detail=with_limit_contact("Custom graphs require the Builder plan. Upgrade to create " "multiple graphs."),
             headers={"X-Upgrade-CTA": "pro"},
         )
 
@@ -16309,8 +16394,7 @@ def _provision_graph(org: dict, name: str,
                 raise HTTPException(
                     status_code=409,
                     headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
-                    detail=("Graph limit reached. Upgrade your plan to create "
-                            "more graphs."),
+                    detail=(with_limit_contact("Graph limit reached. Upgrade your plan to create " "more graphs.")),
                 )
 
         # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
@@ -16338,8 +16422,7 @@ def _provision_graph(org: dict, name: str,
         _rollback_graph(org["id"], graph)
         raise HTTPException(
             status_code=409,
-            detail="API key limit reached. Delete a key or upgrade your plan "
-                   "to create more graph keys.",
+            detail=with_limit_contact("API key limit reached. Delete a key or upgrade your plan " "to create more graph keys."),
         ) from None
     except HTTPException:
         raise
@@ -17839,7 +17922,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                    detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -17861,7 +17944,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Member limit reached — upgrade to invite more")
+                                            detail=with_limit_contact("Member limit reached — upgrade to invite more"))
                 inv = await _cp_offload(
                     lambda: invitation_mint(
                         get_control_plane(), org_id, email, role,
@@ -17920,7 +18003,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Builder or Team tier — upgrade to invite members")
+                                detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -17936,7 +18019,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Member limit reached — upgrade to invite more")
+                                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -18232,7 +18315,7 @@ async def accept_invite(body: dict, request: Request,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: per-org lock around the capacity pre-check + consume. The
     # capacity pre-check runs INSIDE the lock BEFORE the accepted_at write
@@ -18258,7 +18341,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -18692,7 +18775,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         if _org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
     async with _invite_org_lock(org_id):
         _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18707,7 +18790,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -19225,7 +19308,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
         if org_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
-                detail="You already have a free team — this team requires a paid plan to join")
+                detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
 
     # #1965: same per-org lock + capacity pre-check as the TOKEN accept
     # branch — the max_users pre-check runs INSIDE the lock BEFORE the
@@ -19246,7 +19329,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Member limit reached — upgrade to invite more")
+                    detail=with_limit_contact("Member limit reached — upgrade to invite more"))
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -30014,7 +30097,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Builder feature — upgrade to enable hourly backups",
+            detail=with_limit_contact("Backups are a Builder feature — upgrade to enable hourly backups"),
         )
 
 
@@ -32092,7 +32175,7 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
     if not tier or tier in ("free", "anon"):
         raise HTTPException(
             status_code=400,
-            detail="A paid plan is required to purchase a new organization")
+            detail=with_limit_contact("A paid plan is required to purchase a new organization"))
     if is_supabase_enabled():
         if org_by_name(get_control_plane(), name):
             raise HTTPException(status_code=409, detail="Organization name already exists")

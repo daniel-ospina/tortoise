@@ -166,8 +166,8 @@ wc -c docs/ci-timing.json            # 43
 shasum -a 256 docs/ci-timing.json
 
 # 2. Fallback — the collector's own eligible-run selection, then the step table
-python3 tools/ci_timing.py --repo daniel-ospina/tortoise --pick-run          # 36333730533
-python3 tools/ci_timing.py --repo daniel-ospina/tortoise \
+uv run python tools/ci_timing.py --repo daniel-ospina/tortoise --pick-run          # 36333730533
+uv run python tools/ci_timing.py --repo daniel-ospina/tortoise \
     --run-id 36333730533 --out-dir /tmp/m2-collector --logs-dir /tmp/m2-nologs
 
 # 3. Raw job logs (the sanctioned fallback read; 0 bytes ≠ empty)
@@ -521,7 +521,7 @@ the manifest — the committed map is **not** hand-edited (that would re-create 
 sweep; the scheduled `ci-timing.yml` refresh is the only producer):
 
 ```
-python3 tools/ci_timing.py --refresh-durations \
+uv run python tools/ci_timing.py --refresh-durations \
   --repo daniel-ospina/tortoise --run-id 36361388386 \
   --logs-dir /tmp/task4b-logs --manifest /tmp/ci-surfaces-mt4b.yml
 # → refreshed …: 30 sampled, 658 carried forward (captured_at 2026-09-28T12:00:00Z)
@@ -565,12 +565,12 @@ refreshed by the scheduled workflow, never by hand.
 ### Reproduction
 
 ```bash
-RUN=$(python3 tools/ci_timing.py --pick-run --repo daniel-ospina/tortoise)
+RUN=$(uv run python tools/ci_timing.py --pick-run --repo daniel-ospina/tortoise)
 gh run download "$RUN" -R daniel-ospina/tortoise -p 'pytest-log-*' -D /tmp/task4b-logs
 # observed shard metric (the instrument's own exit code)
 python3 tools/merge_throughput.py check shard-balance --max 3     # → 2 (one heavy leg red)
 # the bridge, against a scratch manifest (run twice, or omit --dry-run to write the scratch)
 cp config/ci-surfaces.yml /tmp/ci-surfaces-mt4b.yml
-python3 tools/ci_timing.py --refresh-durations --repo daniel-ospina/tortoise \
+uv run python tools/ci_timing.py --refresh-durations --repo daniel-ospina/tortoise \
   --run-id "$RUN" --logs-dir /tmp/task4b-logs --manifest /tmp/ci-surfaces-mt4b.yml
 ```

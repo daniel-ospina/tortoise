@@ -37,7 +37,7 @@ Input format (JSON):
 
 Run:
   cd "$(dirname "$0")/.."
-  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/decide.py --input docs/examples/my-decision.json
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise uv run python graph-scripts/decide.py --input docs/examples/my-decision.json
 """
 from __future__ import annotations
 

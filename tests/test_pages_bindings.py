@@ -1309,8 +1309,9 @@ def test_the_manifest_is_not_inside_the_pages_upload_root() -> None:
 # ---------------------------------------------------------------------------
 
 #: The entries under `website/` at the time of #3620 — the public surface, the
-#: internal paths that were leaking, and a committed `node_modules` tree (as
-#: `website/apps/dashboard/node_modules` really is).
+#: internal paths that were leaking, and a `node_modules` tree. (#3768: that
+#: tree is no longer tracked; the fixture below pins the EXCLUSION RULE, so it
+#: stays as-is regardless of what the live repo tracks.)
 #:
 #: #4171: the generated `admin/` tree is GONE from this project — the console
 #: moved to the app origin and is staged by the `deploy-dashboard` job into

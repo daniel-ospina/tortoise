@@ -81,6 +81,12 @@ surfaces:
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
   - test_capture_lane_3516.py
+  # #3516 §B: the client-timestamp floor's inputs (`client_captured_at` + its `_source`).
+  # DUAL-REGISTERED with `core` for the same reason as the lane entry above: the touched
+  # files span BOTH surfaces — `hosted_api.py` / `sdk.py` / `__main__.py` select `api`,
+  # while `capture_spool.py` / `capture_install.py` match no named surface and fall
+  # through to `core` — so a core-only PR must still run the floor's controls.
+  - test_3516_client_captured_at.py
   # #5199: DUAL-REGISTERED with `core` for the same reason as `test_boot_regressions.py`
   # BELOW in this list. `tortoise/hosted_api.py` is an exact-surface (`api`) match that REPLACES the
   # `core` fallback, but this file's structural guard pins the session→document call
@@ -1286,6 +1292,11 @@ surfaces:
   # `__main__.py` select `api`. Dual-registered for the same reason as the
   # `test_capture_spool.py` entry above — a core-only PR must still run it.
   - test_capture_lane_3516.py
+  # #3516 §B: the client-timestamp floor's inputs. The `core` arm is the load-bearing
+  # one: `capture_install.py` (the floor function) and `capture_spool.py` (the stamp's
+  # carry-forward) both select `core`, and a core-only PR that reverted either would
+  # otherwise run no guard at all.
+  - test_3516_client_captured_at.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
@@ -1661,6 +1672,14 @@ surfaces:
   # (the inventory read), which fall to the `core` fallback — same rationale as
   # test_4999_vector_mechanism.py above.
   - test_4997_vector_index_parity.py
+  # #5404: the entity_type -> Cypher-label guard must be ENFORCED, not merely
+  # declared — `tortoise/security.py::validate_entity_type` was inert while the
+  # legs interpolated a caller-controlled string into a Cypher LABEL. Pins the
+  # unpatterned engine module `tortoise/search_engine.py` (the three runners plus
+  # degradation_chain), which falls to the `core` fallback — same rationale as
+  # test_4997_vector_index_parity.py above. DB-free: the guard precedes all
+  # database work, which is what makes the entry placement observable.
+  - test_5404_entity_type_guard.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   # #4199: the dense leg's material is judged against the READ's own kind
@@ -3386,6 +3405,7 @@ durations:
   # entry exists because registering the file left the fast pool at 667/742
   # durations = 89.9%, one file below the DURATION_COVERAGE_MIN = 0.90 floor.
   test_capture_lane_3516.py: 15.0  # unmeasured on the docker lane
+  test_3516_client_captured_at.py: 12.0  # measured 2026-10-08 on the docker lane (36 tests, 4 with graph round-trips)
   test_session_import_desktop.py: 0.1
   test_session_indexer_ollama.py: 0.2
   test_session_login_helpers.py: 0.1

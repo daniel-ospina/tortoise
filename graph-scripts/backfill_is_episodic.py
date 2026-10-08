@@ -22,7 +22,7 @@ stamps:
 Idempotent — safe to re-run (only touches nodes with is_episodic IS NULL).
 
 Usage:
-    python3 graph-scripts/backfill_is_episodic.py [--dry-run] [--graph GRAPH] [--uri URI] [--yes]
+    uv run python graph-scripts/backfill_is_episodic.py [--dry-run] [--graph GRAPH] [--uri URI] [--yes]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
 Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).

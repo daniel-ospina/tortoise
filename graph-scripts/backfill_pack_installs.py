@@ -16,9 +16,9 @@ leave backfilled records invisible to the read surface (code-review conf 70,
 PR #1261) and the self-heal would mint a duplicate set.
 
 Usage:
-    python3 graph-scripts/backfill_pack_installs.py            # DRY-RUN (default)
-    python3 graph-scripts/backfill_pack_installs.py --apply    # write installs
-    python3 graph-scripts/backfill_pack_installs.py --apply --starter dev,marketing
+    uv run python graph-scripts/backfill_pack_installs.py            # DRY-RUN (default)
+    uv run python graph-scripts/backfill_pack_installs.py --apply    # write installs
+    uv run python graph-scripts/backfill_pack_installs.py --apply --starter dev,marketing
 
 Starter set: ``TORTOISE_STARTER_PACKS`` env when set, else the built-in
 default (dev,marketing,product-strategy,pm). Unknown names are skipped with

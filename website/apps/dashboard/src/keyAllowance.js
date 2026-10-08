@@ -33,6 +33,8 @@
 // `rows` is the RAW GET /v1/team/keys payload (bootstrap rows included — the
 // server still lists them), and `created_via` rides that payload in both
 // lanes, so the display filters bootstrap exactly as the gate does.
+import { withLimitContact } from './limitContact.js'
+
 export function usedKeySlots(rows, now = Date.now()) {
   return (rows || []).filter((k) => {
     // Server parity: the count treats a row as revoked when `revoked_at IS
@@ -129,7 +131,8 @@ export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
   // #4335: the "or upgrade" tail is only truthful when an upgrade path exists
   // (a configured higher tier, or one temporarily unavailable). Callers pass
   // hasUpgrade=false for the top tier / a deployment selling no higher tier.
-  return `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+  return withLimitContact(
+    `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
 }
 
 // #2229/#4355: rotate-path cap notice.
@@ -149,9 +152,11 @@ export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
 export function rotateCapNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {
-    return `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+    return withLimitContact(
+      `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
   }
-  return `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
+  return withLimitContact(
+    `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`)
 }
 
 // #4353/#4355: the connect step's existing-key note. #4353 made this
@@ -165,7 +170,8 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   const rotate = "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key."
   if (a && a.exhausted) {
-    return `${rotate} Creating a new key needs a free slot, and your plan's ${a.limit} are all in use — revoke one or upgrade first.`
+    return withLimitContact(
+      `${rotate} Creating a new key needs a free slot, and your plan's ${a.limit} are all in use — revoke one or upgrade first.`)
   }
   return `${rotate} Creating a new key here spends another of your plan's key slots.`
 }
@@ -181,5 +187,12 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
 export function capRevokeFirstClause(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   if (!a || !a.exhausted) return ''
-  return " You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one."
+  // #5425: routed through the seam, which rstrips its base and terminates it.
+  // The LEADING space is load-bearing and must be restored HERE, not at the call
+  // sites: all four concatenate this clause directly after a period-ended
+  // sentence (`'…create one here.' + capRevokeFirstClause(...)`), and the seam's
+  // rstrip would otherwise leave the customer reading "here.You are at…" — the
+  // exact malformed-prose class this seam exists to remove. Round 6 caught it.
+  return ' ' + withLimitContact(
+    "You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one.")
 }

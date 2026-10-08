@@ -2233,9 +2233,16 @@ def _cmd_org_keys_create(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code == 402:
-            return _cmd_fail(json_mode, "limit_reached",
-                             "API key limit reached (max 3 for free tier). Revoke an existing key first.",
-                             http_code=402)
+            # #5425: the CLI replaces the server's `detail` with its own prose,
+            # so the contact path the server now sends never reaches the user —
+            # this string is a customer-facing limit surface in its own right.
+            from tortoise.quota import with_limit_contact
+            return _cmd_fail(
+                json_mode, "limit_reached",
+                with_limit_contact(
+                    "API key limit reached (max 3 for free tier). "
+                    "Revoke an existing key first."),
+                http_code=402)
         if e.code == 429:
             return _cmd_fail(json_mode, "rate_limited",
                              "Too many keys created recently — try again in 60s.", http_code=429)
@@ -4220,6 +4227,8 @@ def _spool_transcript(args) -> dict:
     machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
     model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
 
+    import time as _time
+
     root = spool_dir()
     written = write_spool_entry(root, Snapshot(
         session_id=session_id,
@@ -4236,6 +4245,14 @@ def _spool_transcript(args) -> dict:
         # the store-sync half posts the same payload and the lane is the only
         # discriminator.
         capture_lane="hook",
+        # #3516 §B / #3515 piece 12: the CLI leg stamps its OWN observation
+        # instant — piece 12's row is "observed at hook fire time, recorded as
+        # 'cli_observed'". This is the floor's INPUT and it must not be the
+        # server's ingest stamp: the pre-existing spool drains AFTER an install,
+        # so an ingest-stamped row would read as freshly captured and the floor
+        # could only ever pass (piece 12's stated reason for the client clock).
+        client_captured_at=_time.time(),
+        client_captured_at_source="cli_observed",
     ))
     return {
         "rc": 0,

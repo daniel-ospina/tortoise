@@ -11,8 +11,10 @@ Covers:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
+import pathlib
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta, timezone
@@ -10858,3 +10860,309 @@ class TestBoundedMiddlewareStore:
             f"middleware iterated {yielded} keys on the tracked hot path "
             f"(store holds {len(mw._buckets)} keys) — a full reversed() scan "
             "must not pass; only the O(1) tail peek may yield one key")
+
+
+# ── #5425: every over-limit refusal offers the HUMAN path ──────────────────
+#
+# Owner ruling (2026-10-08): "we should just have rate-limits and if they want
+# more they need to speak with us". The route for a customer at a ceiling is a
+# CONVERSATION, so every refusal that tells a customer about a limit must also
+# tell them they can talk to us.
+#
+#: builder call -> the POSITION of its message argument. `_key_limit_refusal`
+#: takes it first; `_cmd_fail(json_mode, error, message)` takes it THIRD. The
+#: earlier `args[:1]` form examined `json_mode` for every `_cmd_fail` call,
+#: found no string, and skipped the CLI entirely — the guard passed while
+#: claiming to cover it.
+_REFUSAL_MESSAGE_ARG = {"_key_limit_refusal": 0, "_cmd_fail": 2}
+
+# ⚠️ The FIRST version of this guard enumerated three literal phrases in one
+# file and was therefore invariant to any surface worded or sited differently —
+# it passed on a tree that missed SIX real refusals (the shared quota gate, the
+# graph/custom-graph/backups/org-purchase/free-team-join ceilings), and a
+# reviewer then showed it could pass on a tree missing two MORE (the
+# `InvitationError` member-limit refusal and the CLI's hardcoded 402). It is now
+# DERIVED, and its boundary is stated rather than implied: it judges LITERAL
+# messages at the point a refusal is constructed. A `detail=str(exc)` passthrough
+# cannot be judged here — the raise site that built that exception is what this
+# covers, which is why the raise-site classes below are in the universe.
+
+
+class TestOverLimitSurfacesOfferTheHumanPath:
+    """Universe = a **construct** AND a **property**.
+
+    construct — how a refusal message is constructed:
+      * ``HTTPException(detail=<literal>)``,
+      * a refusal-builder call (``_key_limit_refusal`` / ``_cmd_fail``),
+      * ``raise <RefusalError>(<literal>, ...)`` — the raise-site form the
+        earlier version could not see at all (``InvitationError``,
+        ``ControlPlaneError``, ``QuotaExceededError``);
+    property — the message is ABOUT A LIMIT (a WORD SET, not phrases, so a
+      surface worded differently still lands in the universe).
+
+    Compliance is the SEAM (``with_limit_contact(...)``), not a mention of a
+    constant: the seam also terminates the sentence, and 15 of 22 hand-written
+    concatenations got that wrong.
+
+    BOUNDARY (round 4, P2 — a claim, not a hope). This guard reads PYTHON
+    source in ``MODULES``. It CANNOT see a ceiling rendered in the dashboard,
+    which was a real gap: ``website/apps/dashboard/src/{keyAllowance,nodeUsage,
+    main.jsx}`` build their own limit copy and DISCARD the server's ``detail``,
+    so every assertion here passed while a customer hitting a cap in the UI
+    was never told. That side is now covered by
+    ``website/apps/dashboard/src/limitContact.test.js`` — a name that says what
+    it is, because the omission here was silent for two rounds.
+    """
+
+
+    REFUSAL_ERRORS = ("QuotaExceededError", "QuotaCheckError", "InvitationError",
+                      "ControlPlaneError")
+    #: Refusal classes declared in MODULES itself. A raise site naming one of
+    #: these is in the universe even when the class is not literally in
+    #: REFUSAL_ERRORS — round 4 found ``CohortCostCapExceeded``
+    #: (:mod:`tortoise.cohort_cost`), a ``QuotaExceededError`` SUBCLASS, raising
+    #: a customer-facing limit message that a name-only rule could not see. The
+    #: relation is derived by walking the bases, and this tuple is asserted
+    #: non-vacuous below so a rename cannot silently empty it.
+    REFUSAL_SUBCLASSES = ("CohortCostCapExceeded",)
+    MODULES = ("tortoise/hosted_api.py", "tortoise/quota.py",
+               "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
+               "tortoise/sdk.py", "tortoise/__main__.py")
+    LIMIT_WORDS = ("limit", "quota", "upgrade", " cap ", "cap ", "plan ",
+                   "tier", "maximum", " max ", "allowance", "ceiling",
+                   # round 5: a ceiling worded as a COUNT. "You can only have
+                   # one free organization" is a limit with none of the words
+                   # above — the property is ABOUT A CEILING, not the noun.
+                   "only have")
+
+    #: Reasons a message does NOT need the contact path. Each names a CATEGORY,
+    #: so an exemption is a deliberate act rather than a silent pass: a
+    #: fail-closed SERVER fault is not a customer ceiling, a TECHNICAL cap's
+    #: remedy is a smaller input, and a THROTTLE already names its next step.
+    NO_CONTACT_NEEDED = (
+        "Quota check failed", "unknown quota resource", "team limits missing",
+        "quota count failed", "team limits max_points invalid",
+        "resolve_org_limits requires a org_id", "cohort is larger than the",
+        "cannot bound anything", "cannot be evaluated",
+        "an unscoped cap would apply", "Import artifact exceeds the size cap",
+        "Artifact exceeds the team graph size cap", "Session turn cap exceeded",
+        "Too many registration attempts", "Signup is rate-limited right now",
+        # the seam's own body: it IS the contact path (and must not recurse)
+        "Need more? Contact support@premiselabs.co.",
+    )
+
+    def _refusal_class_names(self, trees):
+        """Every class name in MODULES that IS or SUBCLASSES a refusal error.
+
+        Round 4: a raise site naming a refusal SUBCLASS was invisible to a rule
+        that compared against :attr:`REFUSAL_ERRORS` by name (``in``, not
+        ``issubclass``). Walk the declared bases across every module so
+        ``class CohortCostCapExceeded(QuotaExceededError)`` counts.
+        """
+        bases, all_names = {}, set()
+        for tree in trees.values():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    all_names.add(node.name)
+                    bases[node.name] = {
+                        b.id if isinstance(b, ast.Name) else
+                        (b.attr if isinstance(b, ast.Attribute) else "")
+                        for b in node.bases}
+        names = set(self.REFUSAL_ERRORS)
+        changed = True
+        while changed:          # transitive: a subclass of a subclass counts
+            changed = False
+            for cls, bs in bases.items():
+                if cls not in names and bs & names:
+                    names.add(cls)
+                    changed = True
+        # A name in REFUSAL_SUBCLASSES that is NOT declared anywhere is a
+        # pinned expectation going stale — surface it, never skip it.
+        for pinned in self.REFUSAL_SUBCLASSES:
+            if pinned not in all_names:
+                names.add(pinned)
+        return names
+
+    def _detail_builders(self, trees):
+        """Module-level functions that RETURN a detail dict, name → [value nodes].
+
+        Round 5: a raise site written ``HTTPException(detail=_some_builder(...))``
+        has no string literal in its own argument subtree, so a rule that only
+        reads literals skipped it entirely — ``_one_free_org_detail`` (a
+        customer-facing free-org ceiling) escaped the universe that way. Resolve
+        the callee instead: any module-level function whose ``return`` is a dict
+        literal carrying a ``message`` key contributes that value.
+        """
+        out = {}
+        for tree in trees.values():
+            for node in tree.body if isinstance(tree, ast.Module) else []:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                vals = [v for ret in ast.walk(node)
+                        if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Dict)
+                        for k, v in zip(ret.value.keys, ret.value.values, strict=True)
+                        if isinstance(k, ast.Constant) and k.value == "message"]
+                if vals:
+                    out.setdefault(node.name, []).extend(vals)
+        return out
+
+    def _refusal_messages(self):
+        """Yield (module, line, construct, text, compliant) per refusal."""
+        root = pathlib.Path(__file__).resolve().parent.parent
+        trees = {}
+        for rel in self.MODULES:
+            path = root / rel
+            if path.exists():
+                trees[rel] = ast.parse(path.read_text(encoding="utf-8"))
+        refusal_classes = self._refusal_class_names(trees)
+        detail_builders = self._detail_builders(trees)
+        for rel in self.MODULES:
+            path = root / rel
+            if not path.exists():       # a module move must not silently skip
+                yield rel, 0, "MISSING MODULE", rel, False
+                continue
+            src = path.read_text(encoding="utf-8")
+            for node in ast.walk(trees[rel]):
+                pairs = []
+                if isinstance(node, ast.Call):
+                    fn = node.func
+                    name = fn.id if isinstance(fn, ast.Name) else (
+                        fn.attr if isinstance(fn, ast.Attribute) else "")
+                    if name == "HTTPException":
+                        pairs = [("HTTPException", kw.value)
+                                 for kw in node.keywords if kw.arg == "detail"]
+                        # round 5: a detail BUILDER holds no literal of its own.
+                        for _c, val in list(pairs):
+                            if isinstance(val, ast.Call) and isinstance(val.func, ast.Name) \
+                                    and val.func.id in detail_builders:
+                                pairs += [(f"detail {val.func.id}", v)
+                                          for v in detail_builders[val.func.id]]
+                    elif name in _REFUSAL_MESSAGE_ARG:
+                        idx = _REFUSAL_MESSAGE_ARG[name]
+                        if len(node.args) > idx:
+                            pairs = [(name, node.args[idx])]
+                elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                    fn = node.exc.func
+                    name = fn.id if isinstance(fn, ast.Name) else ""
+                    if name in refusal_classes:
+                        pairs = [(f"raise {name}", a) for a in node.exc.args[:1]]
+                for construct, val in pairs:
+                    text = "".join(
+                        c.value for c in ast.walk(val)
+                        if isinstance(c, ast.Constant)
+                        and isinstance(c.value, str))
+                    if not text.strip():
+                        continue    # non-literal (e.g. str(exc)) — see class doc
+                    if not any(w in text.lower() for w in self.LIMIT_WORDS):
+                        continue    # not about a limit — outside the universe
+                    seg = ast.get_source_segment(src, val) or ""
+                    yield rel, node.lineno, construct, text, (
+                        "with_limit_contact" in seg)
+
+    def test_every_over_limit_refusal_offers_the_human_path(self):
+        missed = [f"{rel}:{line} [{c}] {t[:66]!r}"
+                  for rel, line, c, t, ok in self._refusal_messages()
+                  if not ok and not any(x in t for x in self.NO_CONTACT_NEEDED)]
+        assert missed == [], (
+            "an over-limit refusal does not tell the customer they can talk to "
+            "us (#5425): " + "; ".join(missed))
+
+    def test_the_guard_is_not_vacuous(self):
+        """A guard that cannot fail is not a guard (#4872's own lesson): the
+        derivation must FIND the surfaces it claims to check, across the real
+        raise-site forms, and some of them must be compliant."""
+        found = list(self._refusal_messages())
+        assert len(found) >= 12, f"the derivation found only {len(found)} refusals"
+        assert sum(1 for *_r, ok in found if ok) >= 8, (
+            "no over-limit refusal carries the contact path — the guard is "
+            "asserting over an empty set")
+        constructs = {c for _r, _l, c, _t, _ok in found}
+        assert "_cmd_fail" in constructs, (
+            "the CLI branch is not being exercised — `_cmd_fail`'s message is "
+            "argument 2, and indexing it as argument 0 skips it silently")
+        assert "raise InvitationError" in constructs, (
+            "the raise-site form is not being seen — the member-limit refusal "
+            "(the canonical 'more seats' case) would slip through")
+        assert "raise CohortCostCapExceeded" in constructs, (
+            "the raise-site rule is matching class NAMES only — a refusal "
+            "SUBCLASS (CohortCostCapExceeded is a QuotaExceededError) raising "
+            "a customer-facing limit message is then invisible, which is "
+            "exactly the round-4 finding")
+        assert "detail _one_free_org_detail" in constructs, (
+            "the detail-BUILDER form is not being resolved — a raise site "
+            "written HTTPException(detail=_builder(...)) has no literal in its "
+            "argument subtree, so the free-org ceiling escapes the universe "
+            "(the round-5 finding)")
+
+    def test_the_punctuation_join_is_a_seam_not_a_hand_append(self):
+        """Every append goes through the seam, and the seam is TERMINAL.
+
+        Two defects this pins, both observed: (a) hand-appending the fragment
+        produced malformed prose at 15 sites ('...invite more Need more? ...'),
+        and (b) the scripted rewrite that introduced the seam rewrote the seam
+        itself into a recursive call.
+        """
+        import tortoise.quota as q
+        # The leading space is LOAD-BEARING: without it the customer reads
+        # "...invite more.Need more? ..." — the malformed-prose class this seam
+        # exists to eliminate. The assertion must therefore be EXACT; the
+        # earlier form (a `x if c else x or True` conditional) could never fail.
+        assert q.LIMIT_CONTACT.startswith(" ")
+        for msg in ("Member limit reached — upgrade to invite more",
+                    "API key limit reached.",
+                    "Want more?",
+                    "Team at max users (2). Upgrade to add more."):
+            base = msg.rstrip()
+            term = "" if base[-1] in ".!?" else "."
+            out = q.with_limit_contact(msg)
+            assert out == base + term + q.LIMIT_CONTACT, repr(out)
+            assert ".." not in out and "! ." not in out and "? ." not in out
+        # the seam terminates the sentence before appending
+        assert q.with_limit_contact("a limit").startswith("a limit.")
+        assert q.with_limit_contact("a limit.").startswith("a limit.")
+        # No site may bypass the seam. The ONLY legal hand-append is the seam's
+        # own body — so count, rather than assert absence (the earlier form
+        # flagged the seam itself, which is a guard bug, not a product defect).
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for rel in self.MODULES:
+            src = (root / rel).read_text(encoding="utf-8")
+            by_hand = src.count("+ LIMIT_CONTACT") + src.count("+ _LIMIT_CONTACT")
+            expected = 1 if rel == "tortoise/quota.py" else 0
+            assert by_hand == expected, (
+                f"{rel} hand-appends the fragment {by_hand}x (expected "
+                f"{expected}: only the seam may, once)")
+
+    def test_the_seam_is_terminal_and_not_recursive(self):
+        import tortoise.quota as q
+        src = pathlib.Path(q.__file__).read_text(encoding="utf-8")
+        import ast as _ast
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, _ast.FunctionDef) and node.name == "with_limit_contact":
+                body = _ast.get_source_segment(src, node) or ""
+                # drop the SIGNATURE line first: it legitimately names the fn
+                after_sig = body.split("\n", 1)[1] if "\n" in body else ""
+                assert "with_limit_contact(" not in after_sig, (
+                    "the seam calls itself — infinite recursion")
+                break
+        else:
+            raise AssertionError("with_limit_contact is gone")
+
+    def test_the_shared_quota_gate_carries_it(self):
+        """The gate every resource refusal flows through (points/graphs/keys/
+        sessions/users/documents) — the surface the first pass missed."""
+        import tortoise.quota as q
+        err = q.QuotaExceededError(
+            "Team points limit reached (1). Upgrade your plan to increase it."
+            + q.LIMIT_CONTACT)
+        payload = q.quota_refusal_payload(err)
+        assert "support@premiselabs.co" in payload["message"]
+        # and the #4614 contract survives: the payload message IS the prose the
+        # raise site wrote, verbatim — so the append never moves into the builder
+        assert payload["message"] == str(err)
+
+    def test_key_limit_refusal_default_carries_it(self):
+        """The DEFAULT argument depends on the seam, and 4 call sites use it
+        with no argument at all — a regression there is invisible to a
+        source scan of the call sites, so pin the runtime default."""
+        import tortoise.hosted_api as ha
+        assert "support@premiselabs.co" in ha._key_limit_refusal()["message"]

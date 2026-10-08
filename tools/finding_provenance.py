@@ -75,20 +75,20 @@ Re-validation of a body that moves base after it was written (hole 2 in
 Usage
 -----
     # 1. Record provenance AT MEASUREMENT TIME (paste into the finding body):
-    python3 tools/finding_provenance.py --emit
+    uv run python tools/finding_provenance.py --emit
 
     # 2. Ask the cheap re-base question before reporting (#4290 ask 2):
-    python3 tools/finding_provenance.py --checkout
+    uv run python tools/finding_provenance.py --checkout
 
     # 3. Gate a finding — the reader's check:
-    python3 tools/finding_provenance.py --validate finding.md
-    python3 tools/finding_provenance.py --validate finding.md --fix 65b26f6c2
+    uv run python tools/finding_provenance.py --validate finding.md
+    uv run python tools/finding_provenance.py --validate finding.md --fix 65b26f6c2
     gh issue view 4009 --json body -q .body \\
-        | python3 tools/finding_provenance.py --validate -
+        | uv run python tools/finding_provenance.py --validate -
 
     # 4. Classify a COMMENT before gating it (#4732) — exit 0 only when the
     #    body claims to be a finding, so discussion comments are never gated:
-    python3 tools/finding_provenance.py --is-finding comment.md
+    uv run python tools/finding_provenance.py --is-finding comment.md
 
 Provenance line format (ONE line, machine-produced by ``--emit`` — do not
 hand-type the SHA)::
@@ -323,7 +323,7 @@ def _validate(root: Path, body: str, base_ref: str, fix: str | None,
         return fail(
             "UNKNOWN_PROVENANCE",
             "no parseable provenance line. Every finding must carry the tree "
-            "it was measured against — run `python3 tools/finding_provenance.py "
+            "it was measured against — run `uv run python tools/finding_provenance.py "
             "--emit` and paste its output into the finding body (format: "
             "`Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>`). Unknown "
             "provenance is not a pass (#4290).",

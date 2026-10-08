@@ -1657,13 +1657,17 @@ test('#4353: the wizard mint 402 copy offers revoke, never regenerate', () => {
   // (wizardKeyAffordance → wizardNoKeyAffordance → the paste disclosure), so
   // this pin is about the copy staying unchanged, not about that row being
   // unreachable. Named by symbol: a line citation here stales on the next edit.
+  // #5425: the arms now render through withLimitContact(...), so the route to
+  // support@premiselabs.co cannot be dropped from either one without failing
+  // here. Matched as a CALL, not a bare literal — a literal would mean the
+  // human route is gone.
   assert.match(cap402,
-    /\? 'You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'/,
-    'the build-fork arm is unchanged (it names only affordances its branch renders)')
+    /\? withLimitContact\('You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'\)/,
+    'the build-fork arm is unchanged (it names only affordances its branch renders) and carries the #5425 contact route')
   // non-build-fork arm: the achievable remedy.
   assert.match(cap402,
-    /: 'You\\'ve reached your plan\\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above\.'/,
-    'the non-build-fork arm names revoke (which frees a slot) and the paste escape')
+    /: withLimitContact\('You\\'ve reached your plan\\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above\.'\)/,
+    'the non-build-fork arm names revoke (which frees a slot) and the paste escape, and carries the #5425 contact route')
 })
 
 test('#4353: the connect step’s existing-key note is DERIVED, not an inline literal', () => {

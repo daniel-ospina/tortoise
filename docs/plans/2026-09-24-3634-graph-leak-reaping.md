@@ -97,7 +97,7 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 
 ## Acceptance Criteria
 
-> **⛔ Every task that creates a new test file must also register it.** `tests/test_ci_selection.py` fails on an unclassified test file. Run `python3 tools/ci_selection.py --register --surface core` (the canonical tool — do not hand-edit the list) and confirm `python3 tools/ci_selection.py --integrity` exits 0. Discovered during Task 1, which hit it with `tests/test_graph_name_ownership.py`; Tasks 3 and 5 create new files too.
+> **⛔ Every task that creates a new test file must also register it.** `tests/test_ci_selection.py` fails on an unclassified test file. Run `uv run python tools/ci_selection.py --register --surface core` (the canonical tool — do not hand-edit the list) and confirm `uv run python tools/ci_selection.py --integrity` exits 0. Discovered during Task 1, which hit it with `tests/test_graph_name_ownership.py`; Tasks 3 and 5 create new files too.
 
 1. One **declared** graph-name ownership contract in `tests/_embedded.py`. **Declared surface** = `tests/_embedded.py`, `tortoise/sdk.py`, `tortoise/projection/__init__.py`. Every **named** prefix constant on that surface is registered **by reference** (a test asserts the ties and fails on an unregistered constant). Anonymous prefix *literals* — and named constants in any file outside the three — are **out of the scanner's scope**; they stay governed by the DIVERGENCE comment at the declaration.
 2. A test-derived registry name carries the approved prefix, **prepending only when absent**; `tests/test_derived_names.py` stays green; `registry_tortoise` and `registry_control_plane` are **never** dropped (fail-closed regression test).

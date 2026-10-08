@@ -206,7 +206,7 @@ seam is covered); pagination shortfall → read failure; missing `total_count` �
 body → read failure; partial read → exit 2; CLI exit codes 0/1/2/3/4.
 
 **Step 4 smoke (recorded 2026-09-26; sha corrected 2026-09-26 review):**
-`python3 tools/ci_verdict.py --repo daniel-ospina/tortoise <full-40-hex-sha>` —
+`uv run python tools/ci_verdict.py --repo daniel-ospina/tortoise <full-40-hex-sha>` —
 `main@99a98ddc5a37304b80232ba61d1a0a70f4fcf026` → `red` (24 groups, 2 red — a real pre-existing
 `Post-merge validation / lint` base red); PR 5406 head → `red` (48 groups). A **short** sha
 (e.g. `99a98ddc5`) is refused with exit 2 (`_require_full_sha`) — the earlier record quoted the

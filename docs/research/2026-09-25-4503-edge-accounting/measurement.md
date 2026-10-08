@@ -169,7 +169,7 @@ isolated** `falkordb/falkordb:latest` container, staged writes, `redis-cli INFO 
 `used_memory` read between stages. No other tenant shares the instance. Reproduce with:
 
 ```
-python3 tools/edge_census.py probe --n 5000
+uv run python tools/edge_census.py probe --n 5000
 ```
 
 **Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped tool's receipt of record, verbatim (`python3 tools/edge_census.py probe --n 5000 --json`):
