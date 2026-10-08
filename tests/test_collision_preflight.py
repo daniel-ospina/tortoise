@@ -756,6 +756,79 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
+    def test_advisory_surface_cannot_refuse_a_number_that_is_the_issue(self):
+        """An ADVISORY surface must never be able to force exit 2 (#7009).
+
+        The advisory closed-PR sample's elements are whatever the payload
+        returned, and `_pr_terminal_state` accepts a NON-TERMINAL `state` — so an
+        UNSCOPED number==issue refusal raised `NotAWorkItem` from the ADVISORY
+        scan too: a surface with no authority to block stopped a dispatch with
+        exit 2, stderr only and no report at all.
+
+        `test_closed_pr_own_number_is_weak_not_blocking` structurally could not
+        catch it. It does put a number==issue PR on the advisory surface, but its
+        fixture omits `state`, which `gh_fixtures` normalizes to "closed" — i.e.
+        TERMINAL — so the guard's `terminal is None` clause was False and the
+        number clause never decided. This test is that same shape with the state
+        made non-terminal: the one value that reaches the guard, and therefore the
+        only shape that pins the scoping.
+
+        Measured 2026-10-07: it fails against the PRE-FIX tool (`origin/main`, exit
+        2, "is an OPEN PULL REQUEST") and passes here. It also passes against the
+        intermediate tool that scoped on `use_closing_field` instead of
+        `surface.authority` — those two are behaviourally identical at the
+        production call sites, so this test pins that SOME scope exists.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "body": "restored in #3061", "state": "OPEN",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        # The hit is still REPORTED — an advisory surface reports, it just cannot
+        # block — and the verdict stays CLEAN at exit 0.
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("PR number == issue (3061)", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The pre-fix symptom, pinned by its exact text: the refusal must not be
+        # reachable from the CLOSED sample.
+        self.assertNotIn("is an OPEN PULL REQUEST", out)
+
+    def test_blocking_surface_without_the_closing_field_reports_it_unread(self):
+        """A BLOCKING surface that never requested the closing field must not
+        claim the PR "names no closing issue".
+
+        The refusal guard keys on `surface.authority` (may this surface refuse?)
+        while the closing-reference read keys on `use_closing_field` (did the
+        CALLER request the field?). Those are different questions, and this is the
+        only shape where they diverge: authority BLOCKING with the field not
+        requested. `linked` stays empty but `unreadable` is True, so the message
+        says the field could not be read instead of asserting contents the tool
+        never looked at.
+
+        No production call site reaches this arm today — which is exactly why it
+        needs a test. A branch already shipped in this PR unpinned (the
+        `use_closing_field` scoping at `48ceaca5a`), and a defence that no test
+        exercises can be deleted without anything going red: mutation confirmed a
+        hard `raise` substituted for this arm left the whole suite green.
+        """
+        cp = _tool_module()
+        surface = cp.Surface("open PRs", authority=cp.AUTHORITY_BLOCKING)
+        pr = {
+            "number": 3061, "state": "open", "title": "fix(scanner): something",
+            "headRefName": "fix/3061-something", "body": "",
+        }
+        with self.assertRaises(cp.NotAWorkItem) as caught:
+            cp.scan_pr_surface(surface, [pr], 3061, cp.Identity(),
+                               use_closing_field=False)
+        message = str(caught.exception)
+        # The refusal still happens — the arm changes only what it CLAIMS.
+        self.assertIn("is an OPEN PULL REQUEST", message)
+        self.assertIn("closing-reference field could not be read", message)
+        # The present-and-empty wording belongs to a field that was READ.
+        self.assertNotIn("It names no closing issue", message)
+
     def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
         """An OPEN PR's number is not a work item — the run must refuse (#7009).
 
