@@ -41,6 +41,7 @@ the journal produces.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -54,13 +55,22 @@ from datetime import datetime, timezone
 from .cypher_guard import tolerates_altered_numbers
 from .exceptions import UnrepresentableNumberError
 from .projection import (
+    _CANONICAL_ENTITY_LABELS,
+    _ENTITY_ID_PROP,
+    _ENTITY_MUTATION_STATE_OPS,
+    _REFERENCE_FOLD_ENTITY_LABELS,
     _annotator_value_ok,
     _apply_one,
+    _creation_entity_id_from_record,
+    _journal_forward_reference,
     _load_prewipe_snapshot,
     _norm,
     _promotion_point_with_operator,
     _writable_id,
+    journal_first_materialization,
     journal_hard_delete_seqs,
+    journal_object_hard_deleted_ids,
+    journal_object_surviving_keys,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
@@ -69,6 +79,16 @@ from .projection.entities import (
     _is_persistable_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+)
+from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
+    SHAPE_OBJECT_SUPERSEDED_MISS,
+    SHAPE_POINT_INVALIDATED_MISS,
+    SHAPE_POINT_RETRACTED_MISS,
+    SHAPE_POINT_SUPERSEDED_MISS,
+    SHAPE_STATE_OP_MISS,
+    collect_non_folded,
+    record_non_folded,
+    refused_events,
 )
 
 logger = logging.getLogger(__name__)
@@ -864,6 +884,12 @@ def _fold_journal(events: list[dict]) -> dict:
     # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
     # list (the anchor boundary is an envelope property).
     anchors = journal_hard_delete_seqs(events)
+    # #3585 re-review: the same journal-wide existence map `fold` passes — an
+    # order-dependent refusal (a belief/annotator write, a terminalizer) is
+    # mirrored only when the target is NOT a forward reference. The ORDERED map
+    # (first materialization seq), not a creation-id set, is what lets a
+    # create→hard-delete→fold journal still refuse.
+    _first_materialized = journal_first_materialization(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         # Same normalisation the writer applies (`_apply_one`/`apply`): the
@@ -916,9 +942,58 @@ def _fold_journal(events: list[dict]) -> dict:
             if (anchors.get(pid, {}).get("Point") or -1) >= seq:
                 continue
             if t == "PointSuperseded" and not ev.get("new_id"):
+                # #3585: the NAMED exemption — the graph fold treats a
+                # new_id-less supersede as a documented no-op, so the
+                # reference fold mirrors it. Recorded, not fatal.
+                record_non_folded(
+                    "point-superseded-no-new-id", event_id=ev.get("event_id"),
+                    event_type=t, seq=seq,
+                    detail="reference fold: supersede with no new_id is a no-op",
+                )
                 continue
             entry = by_id.get(pid)
             if not isinstance(entry, dict):
+                # #3585 (R8): the reference fold could not resolve the
+                # terminalizer to a point — the journal claims a state change
+                # this fold cannot produce. Recording it is what makes the
+                # #5011 content comparison non-vacuous.
+                #
+                # #3585 review: a supersede/invalidate whose target the journal
+                # HARD-DELETED earlier is the GRAPH fold's named exemption too
+                # (the deferred sweep runs after the delete, so a 0-row match is
+                # legitimate). Refusing it here made `check_consistency` red on
+                # exactly the journal `rebuild_all` accepts — the two classifiers
+                # must agree, or the fail-closed set is not one set.
+                _del_seq = anchors.get(pid, {}).get("Point")
+                if (t in ("PointSuperseded", "PointInvalidated")
+                        and isinstance(_del_seq, int) and _del_seq < seq):
+                    record_non_folded(
+                        "supersede-target-deleted",
+                        event_id=ev.get("event_id"), event_type=t, seq=seq,
+                        id=pid,
+                        candidates=(ev.get("new_id"), ev.get("corrected_by")),
+                        detail=("reference fold: target hard-deleted earlier "
+                                "(graph fold's named exemption)"),
+                    )
+                    continue
+                # #3585 (P1-1): a terminalizer whose target the JOURNAL
+                # materializes only LATER is a forward reference — the live
+                # write no-op'd it and `rebuild_all`'s creation hoist skips
+                # it, so refusing it here reds a journal the graph reproduces
+                # exactly. The two named exemptions above are unaffected; the
+                # ORDERED map keeps a create→hard-delete→terminalizer journal
+                # (first <= seq) a genuine miss.
+                if _journal_forward_reference(
+                        _first_materialized, seq, "Point", pid):
+                    continue
+                record_non_folded(
+                    SHAPE_POINT_INVALIDATED_MISS if t == "PointInvalidated"
+                    else SHAPE_POINT_RETRACTED_MISS if t == "PointRetracted"
+                    else SHAPE_POINT_SUPERSEDED_MISS,
+                    event_id=ev.get("event_id"), event_type=t, seq=seq, id=pid,
+                    candidates=(ev.get("new_id"), ev.get("corrected_by")),
+                    detail="reference fold: terminalizer matched no point",
+                )
                 continue
             entry.update(_DECAY)
             if t == "PointRetracted":
@@ -946,7 +1021,9 @@ def _fold_journal(events: list[dict]) -> dict:
                 if ev.get("expired_at"):
                     entry["expiredAt"] = ev["expired_at"]
             continue
-        _apply_one(by_id, ev)
+        _apply_one(by_id, ev,
+                   journal_first_materialized=_first_materialized,
+                   journal_seq=seq)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
@@ -995,6 +1072,639 @@ def _fold_journal(events: list[dict]) -> dict:
     return by_id
 
 
+# ── #3585: entity parity — the invariant's non-Point leg ─────────────────
+#
+# `_fold_journal` above is POINT-only (it returns a `{id: point}` index), so
+# before #3585 the `rebuild == live` invariant was structurally blind to a
+# non-Point burial: shapes A and B of #3573 flip an OBJECT's `status`, and the
+# point-only check cannot see the Object at all. This leg closes that hole for
+# the fields a burial actually moves — entity PRESENCE and `status`.
+#
+# Deliberate bounds:
+#   * `Source` is excluded — its graph identity is ``url`` while the journal's
+#     delete/mutation records carry ``id`` (#4649's url-keyed no-op class), so
+#     a presence comparison there would be a false positive by construction.
+#   * Only `status` is compared, not `name` — `#3574`'s ``name[:200]``
+#     truncation is a known journal/graph asymmetry.
+#   * Object/Subject PRESENCE is resolved by NAME as well as id, because the
+#     graph MERGEs those labels by name (`_upsert_object`/`_upsert_subject`):
+#     two journal registrations of one name under different ids are ONE node
+#     carrying the LAST id, and an id-only key would report the older one
+#     `absent-from-graph` on a correctly-replayed graph.
+#   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
+#     status AMBIGUOUS: the fold's own resolution is heuristic, so those
+#     objects' STATUS leg is excluded from the comparison — PRESENCE is still
+#     compared — and the exclusion is REPORTED to the caller
+#     (`entity_parity_ambiguous*`), never silently absorbed. A name-only
+#     supersede with NO carrier at all is NOT ambiguity: it records a refused
+#     `object-superseded-miss`, matching the graph fold.
+#   * The comparison runs in ONE direction, journal→graph (`entity_parity_bounds`
+#     states it): a node the GRAPH holds with no journal record is not a
+#     divergence here, because several in-tree paths write the projection
+#     without journaling (e.g. `sdk`'s direct `proj.apply`).
+#   * ACCEPT/REFUSE parity is JOURNAL-WIDE; CONTENT parity is not, for one
+#     DEFERRED fold. `rebuild_all` folds an `ObjectSuperseded` in a trailing
+#     sweep, so a supersede the sweep resolves differently from a chronological
+#     inline fold — a FORWARD reference (its `ObjectRegistered` later in the
+#     journal), or a delete-then-recreate (the sweep folds the LAST
+#     incarnation) — is folded there. The apply-based engines (`rebuild`,
+#     `recover_from_log`, `backup.restore`) fold it inline, chronologically,
+#     and leave the final node `live`. All the engines therefore AGREE on
+#     accept/refuse, but `check_consistency` run against an apply-replayed
+#     graph reports `divergence="content"` for that one field where the same
+#     journal checked against a `rebuild_all` graph is `ok/None`. This is the
+#     SAME class as the deliberately-deferred
+#     `DirectEdgeCreated`/`DirectEdgeRepoint` folds (A10 #1048): a STATED
+#     bound, not a hidden caveat. Closing it means re-implementing the sweep's
+#     after-creations pass + #4743 state re-fold inside the apply engines —
+#     the larger change this lane declines in favour of one canonical sweep.
+#     The invariant this leg enforces is accept/refuse; the content bound is
+#     named here, in the `apply()` branch's STATED PARITY BOUND comment, and in
+#     the PR body.
+_ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
+    (label, _ENTITY_ID_PROP[label])
+    for label in ("Object", "Subject", "Event")
+)
+# (label, default status) per creation record. The ID PROP is NOT re-listed:
+# `_creation_entity_id` reads the writer's own `_CANONICAL_ENTITY_ID_PROPS`,
+# so a change there cannot silently desync this leg (the hand-copied second
+# list is what this file's doctrine forbids).
+_ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
+    "ObjectRegistered": ("Object", "live"),
+    "SubjectAdded": ("Subject", "live"),
+    # D10 (#5127) retired the `:Document` NODE label: `_upsert_document` MERGEs a
+    # document as a `:Source` keyed `url`, and `doc_status` was retired with it.
+    # `DocumentCreated` is deliberately absent here for the same reason `Source`
+    # is absent from `_ENTITY_PARITY` above — a url-keyed node compared against
+    # an id-keyed journal record is a false positive by construction (#4649).
+    "EventRecorded": ("Event", None),
+}
+#: The non-Point labels the entity reference fold models. ONE home: the
+#: projection's `_REFERENCE_FOLD_ENTITY_LABELS` is the same set the GRAPH fold
+#: reads to decide whether a state-op miss is recordable at all (the two
+#: classifiers must agree, #3585). The suite pins it equal to the labels of
+#: `_ENTITY_CREATION` above, so adding a row here cannot leave the two folds
+#: disagreeing silently.
+_ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
+#: Labels whose graph fold MERGEs the NODE by `name` (`_upsert_object` /
+#: `_upsert_subject`). A second registration of ONE name under a fresh id
+#: therefore COLLAPSES the node onto the LAST id, and a state op naming the
+#: collapsed-away id folds 0 rows there (`MATCH (n:$label {id:$rid})`). An
+#: id-keyed label (`Event`) never collapses, so it is absent. This is the
+#: DECLARATION for the state-op guard below, which is its only reader —
+#: `journal_object_surviving_keys` is deliberately Object-only (it models
+#: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
+#: neither can share this constant without changing what it means.
+_NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
+
+
+def _creation_entity_id(t: str, ev: dict) -> object:
+    """The id a creation record registers, resolved as the GRAPH fold does.
+
+    Delegates to the projection's ``_creation_entity_id_from_record`` — the
+    SAME reader ``journal_first_materialization`` uses — so the reference
+    fold's key and the existence map's key cannot drift (a shared key is what
+    makes the non-Point forward-reference gate agree with the graph fold).
+    """
+    return _creation_entity_id_from_record(t, ev)
+
+
+def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
+    """Reference fold for non-Point entities (#3585).
+
+    Returns ``(entities, deleted, ambiguous)``:
+      entities  — ``{(label, id): {"status": ...}}``
+      deleted   — ``{(label, id)}`` the journal hard-deletes
+      ambiguous — Object names a name-only supersede could not resolve
+    """
+    entities: dict = {}
+    deleted: set = set()
+    ambiguous: set = set()
+    # #3585 re-review (cycle 2, FIX B): `rebuild_all` DEFERS the
+    # `ObjectSuperseded` fold to a sweep AFTER every Object-creation event AND
+    # every delete, so a supersede that PRECEDES its own `ObjectRegistered` is
+    # legitimately foldable there. This reference fold therefore resolves EVERY
+    # supersede in ONE trailing sweep against the journal's END index.
+    #
+    # #3585 (P1-1): the whole-journal EXISTENCE map — the non-Point leg of
+    # `journal_first_materialization`. A state op whose entity the journal
+    # materializes only LATER is a forward reference: the live write no-op'd
+    # it and the graph fold skips it too, so it is neither folded nor recorded.
+    _first_materialized = journal_first_materialization(events)
+    #
+    # #5285 cycle-4 (FIX 1): there is exactly ONE resolution path. An earlier
+    # cut applied non-held supersedes INLINE at their own seq and re-evaluated
+    # only the held ones; an inline resolve is never re-examined, so a later
+    # delete+recreate left the reference fold at `superseded` while
+    # `rebuild_all`'s sweep folds the LAST incarnation (a false `content`
+    # divergence on a correct journal). Deferring EVERY supersede subsumes the
+    # forward-reference case and removes the second path that kept drifting.
+    surviving_ids, _surviving_names = journal_object_surviving_keys(events)
+    # Ids the journal HARD-DELETES anywhere — the named
+    # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries.
+    hard_deleted_objects = journal_object_hard_deleted_ids(events)
+    # EVERY `ObjectSuperseded`, in journal order, resolved by the ONE trailing
+    # sweep below — never applied inline.
+    supersede_events: list[tuple[int, dict]] = []
+    # The seq of the last `status`-writing state op per entity, so the
+    # trailing sweep honours `rebuild_all`'s #4743 ordering.
+    last_status_seq: dict = {}
+    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name-MERGE key, built
+    # as the walk proceeds. Since the graph MERGEs Object/Subject by NAME under
+    # the LAST registration's id, a state op folds there iff its id is a live
+    # carrier AT ITS OWN SEQ — the journal-END `surviving_ids` key set is the
+    # wrong question for an INLINE state op (an id that was the carrier early
+    # and collapsed away later genuinely folded at that earlier point). Keyed by
+    # ``(label, name)`` because Object and Subject MERGE in SEPARATE spaces, so
+    # a shared name must not alias one label's carrier onto the other. The value
+    # is a SET, not a single id: a RENAME `SET`s the name property in place, so
+    # two ids can legitimately share a name (a rename onto an existing name
+    # does NOT MERGE), and BOTH then MATCH by id. Collapsing them to one id
+    # produced a FALSE REFUSAL of a live id in exactly that shape — a
+    # disagreement with the graph fold in the fail-CLOSED direction, the one
+    # error this guard must never make.
+    carriers_by_name: dict[tuple[str, str], set] = {}
+    # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
+    # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
+    # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
+    # display name below legitimately falls back to `title` for PARITY, but the
+    # carrier index must not: keying it on the display name let a title-only
+    # registration EVICT the live carrier of the real node, and the state-op
+    # guard then falsely refused `state-op-miss` a journal all three replay
+    # engines fold (review round 6, P1). An id with no merge key recorded here
+    # has no graph node this fold can model, so the guard stays fail-OPEN for it.
+    merge_key_by_id: dict[tuple[str, str], str] = {}
+    # #5285 cycle-7: ids whose journal CREATION produced NO graph node at all,
+    # because `_writable_id` skips an empty / non-writable MERGE key. The graph's
+    # state-op fold is `MATCH (n:$label {id:$rid})`, so for these ids it is a
+    # 0-row miss and every replay engine refuses `state-op-miss`. "No merge key"
+    # is therefore DECIDABLE here (`rec` exists, so the journal DID create the
+    # id) and must not be treated as unmodelled: review round 7 found 12 journals
+    # the three replay engines refuse while this fold accepted them, in the
+    # fail-OPEN direction, on the previous head.
+    no_node_ids: set[tuple[str, str]] = set()
+    # #5285 (DEFECT 2): ``name -> [keys]``, populated ONCE after the walk and
+    # read by `_object_target`'s trailing sweep. Declared here so the closure
+    # below resolves it at call time.
+    object_keys_by_name: dict[str, list] = {}
+
+    def _object_target(oid, oname):
+        """``(target_key, ambiguous_here)`` against the CURRENT index.
+
+        ``ambiguous_here`` is LOCAL to THIS event: the >1-carrier carve-out
+        must not leak through the never-cleared ``ambiguous`` reporting set,
+        or every LATER zero-carrier supersede of a once-ambiguous name is
+        silently exempted — passing a journal `rebuild_all` refuses.
+
+        #5285 cycle-3: a `status != "superseded"` predicate here gated
+        # target EXISTENCE, not just the ambiguity decision. The graph
+        fold matches a name-only supersede on NAME and re-folds
+        UNCONDITIONALLY (`_fold_object_superseded`, `cas=False`), so a SINGLE
+        carrier is resolvable whether or not it is already terminal: a SECOND
+        name-only supersede of a once-superseded name is a 1-row fold there,
+        never a miss. Filtering terminal carriers out made the carrier list
+        empty, so the reference fold held the second supersede `pending` and
+        flushed it as `object-superseded-miss` — a false refusal of a journal
+        all three replay engines accept (and a `divergence="non-folded"` on a
+        correct graph). The predicate now gates only the >1-carrier ambiguity
+        decision: `EXISTENCE` is "any carrier at all", and one already-terminal
+        carrier resolves.
+        """
+        if (isinstance(oid, str) and ("Object", oid) in entities
+                and oid in surviving_ids):
+            # #5285 cycle-4 (FIX 2): the graph MERGEs Objects by NAME, so two
+            # ids sharing a name collapse into ONE node carrying the LAST id —
+            # `MATCH (o:Object {id:$oid})` then folds 0 rows for the
+            # collapsed-away id and every replay engine REFUSES
+            # (`object-superseded-miss`). A bare `entities` membership test
+            # recorded NO miss (the collapsed-away id is still in the
+            # reference index), so `check_consistency` passed a journal the
+            # graph refuses — the fail-open this lane exists to remove. An id
+            # is a live carrier only when it is the SURVIVING id for its name
+            # (the same journal-end key set the apply engines' refusal gate
+            # reads); otherwise fall through to the name branch / miss path.
+            return ("Object", oid), False
+        if isinstance(oname, str) and oname:
+            # #5285 (DEFECT 2): read the ONCE-built `name -> [keys]` index
+            # instead of rescanning ALL of `entities` on EVERY call. The scan
+            # was O(len(entities)) PER SUPERSEDE, so a journal of N name-only
+            # supersedes cost O(N^2) (measured: 4000 supersedes = 17.5s, 8000 =
+            # 61.7s) — a denial of service on this very health gate. The index
+            # preserves the scan's EXACT semantics: same membership, same
+            # `entities` insertion order, and it is built only after the walk,
+            # so nothing mutates underneath it.
+            carriers = object_keys_by_name.get(oname, [])
+            if len(carriers) == 1:
+                return carriers[0], False
+            if len(carriers) > 1:
+                # More than one carrier for one MERGE key is the ambiguity the
+                # status leg reports — but exactly ONE still-live carrier is
+                # the only one a supersede could still claim, so it resolves.
+                live = [k for k in carriers
+                        if entities[k].get("status") != "superseded"]
+                if len(live) == 1:
+                    return live[0], False
+                return None, True
+        return None, False
+
+    def _object_hard_deleted(oid) -> bool:
+        return isinstance(oid, str) and oid in hard_deleted_objects
+
+    def _record_supersede_miss(seq: int, ev: dict) -> None:
+        candidate = ev.get("name") if isinstance(ev.get("name"), str) \
+            and ev.get("name") else ev.get("id")
+        record_non_folded(
+            SHAPE_OBJECT_SUPERSEDED_MISS,
+            event_id=ev.get("event_id"), event_type="ObjectSuperseded",
+            seq=seq,
+            id=ev.get("id") if isinstance(ev.get("id"), str) else None,
+            candidates=(candidate,),
+            detail="reference fold: supersede matched no Object",
+        )
+
+    for seq, ev in enumerate(events):
+        t = ev.get("type")
+        if t in _ENTITY_CREATION:
+            label, default_status = _ENTITY_CREATION[t]
+            eid = _creation_entity_id(t, ev)
+            if not isinstance(eid, str) or not eid:
+                continue
+            # The nested EventRecorded shape carries its fields one level down;
+            # unwrap it the same way so status/name are read where the writer
+            # put them.
+            payload = ev
+            if t == "EventRecorded" and isinstance(ev.get("event"), dict):
+                payload = ev["event"]
+            rec = entities.setdefault((label, eid), {})
+            # A later creation RE-CREATES the incarnation: the id is live
+            # again, so an earlier journaled delete no longer owns it.
+            deleted.discard((label, eid))
+            status = (payload.get("status") or payload.get("eventStatus")
+                      or default_status)
+            if isinstance(status, str) and status and "status" not in rec:
+                rec["status"] = status
+            # #5285 cycle-6 (P1): the MERGE key is `name` ALONE — `title` is a
+            # DISPLAY fallback the graph never merges on, and an empty name
+            # creates no node at all. The carrier index must use the merge key,
+            # never the display name.
+            # #5285 cycle-8 (P2): the predicate is the GRAPH's own writability
+            # check, not "a non-empty str". `_writable_id` is what
+            # `_upsert_object` / `_upsert_subject` use, and it rejects a
+            # non-empty but NON-writable MERGE key (NUL / lone surrogate — the
+            # #7369 class). For such a name the graph writes NO node, so a state
+            # op on that id is a 0-row miss and must be refused; the previous
+            # `isinstance(str) and truthy` test agreed with the graph only for
+            # the EMPTY key, so that fold-leg accepted a `state-op-miss` the
+            # three replay engines refuse.
+            _merge_key = payload.get("name")
+            _merge_key = (_merge_key if _writable_id(_merge_key) else None)
+            if label in _NAME_MERGE_LABELS:
+                if _merge_key is not None:
+                    # The graph MERGEs Object/Subject by name, so the LAST
+                    # registration of a merge key OWNS its node id — the MERGE
+                    # re-ids the existing node, REMOVING the earlier id. Update
+                    # the carriers AT THIS SEQ; a re-creation of the same id
+                    # under a new key drops the id from its OLD key's set first.
+                    _old = merge_key_by_id.pop((label, eid), None)
+                    if _old is not None:
+                        _prev = carriers_by_name.get((label, _old))
+                        if _prev is not None:
+                            _prev.discard(eid)
+                    merge_key_by_id[(label, eid)] = _merge_key
+                    no_node_ids.discard((label, eid))
+                    _live = carriers_by_name.setdefault(
+                        (label, _merge_key), set())
+                    if len(_live) > 1:
+                        # The key ALREADY has >1 live carrier (a rename
+                        # collision). A MERGE re-ids exactly one of them and
+                        # the journal does not say which, so keep them all —
+                        # failing OPEN here is the only choice that cannot
+                        # refuse a node the graph still holds.
+                        _live.add(eid)
+                    else:
+                        _live.clear()
+                        _live.add(eid)
+                elif (label, eid) not in merge_key_by_id:
+                    # #5285 cycle-7: the graph writes NOTHING for this creation —
+                    # no node exists for the id, so a state op on it is refused
+                    # `state-op-miss` exactly as the graph's 0-row MATCH is.
+                    no_node_ids.add((label, eid))
+                # else: an UNUSABLE name on an id that ALREADY has a merge key is
+                # a graph NO-OP — `MERGE` on the unchanged key keeps the node and
+                # its id. The existing key and carriers are therefore PRESERVED;
+                # popping them hid the later collapse from the guard (review
+                # round 7, P1).
+            name = payload.get("name") or payload.get("title")
+            if isinstance(name, str) and name:
+                rec["name"] = name
+        elif t == "EntityMutated":
+            label, eid, op = ev.get("label"), ev.get("id"), ev.get("op")
+            if not isinstance(eid, str):
+                continue
+            if op == "delete":
+                if (isinstance(label, str)
+                        and label in _CANONICAL_ENTITY_LABELS):
+                    deleted.add((label, eid))
+                    entities.pop((label, eid), None)
+                else:
+                    # Legacy id-wide delete: `_delete_entity_by_id` scopes ONLY
+                    # a CANONICAL label and falls back to the id-wide delete
+                    # for a missing/unknown/non-canonical one — so a bare
+                    # `isinstance(label, str)` here marked the wrong kind and
+                    # reported a false `absent-from-graph`.
+                    for k in [k for k in entities if k[1] == eid]:
+                        deleted.add(k)
+                        entities.pop(k, None)
+                continue
+            if isinstance(label, str) and op in _ENTITY_MUTATION_STATE_OPS:
+                rec = entities.get((label, eid))
+                state = ev.get("state")
+                if rec is None or not isinstance(state, dict):
+                    # #3585 re-review: the graph fold records `state-op-miss`
+                    # (refused) when a state op resolves to no entity or
+                    # carries no applied map, so the reference fold must agree.
+                    # Only the labels this fold models are handled here —
+                    # `_apply_one` owns the Point case.
+                    # #3585 (P1-1): a WELL-FORMED state op whose entity the
+                    # journal materializes only LATER is a forward reference —
+                    # the live write no-op'd it and the graph fold skips it, so
+                    # neither side records it. The malformed-state case still
+                    # records in either order, exactly as `_fold_entity_mutation`
+                    # does (its forward gate sits AFTER the state guard).
+                    if (rec is None and isinstance(state, dict)
+                            and _journal_forward_reference(
+                                _first_materialized, seq, label, eid)):
+                        continue
+                    # `Source` is canonical to the graph fold but has no entry
+                    # in `_ENTITY_CREATION` (no `SourceCreated` shape), so this
+                    # fold cannot refuse a Source state-op miss. #3585 (P1-2)
+                    # resolved the asymmetry in THAT direction: the graph
+                    # fold's `_warn_entity_mutation_fold_miss` records the miss
+                    # only for a label in `_REFERENCE_FOLD_ENTITY_LABELS`, so
+                    # neither classifier refuses it (the warning is retained).
+                    # Adding a `Source` row here would need a `Source` entry in
+                    # the entity-parity comparison, which the parity leg still
+                    # does not model; the label stays out of BOTH folds.
+                    if label in _ENTITY_CREATION_LABELS:
+                        record_non_folded(
+                            SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                            event_type="EntityMutated", label=label, id=eid,
+                            op=op, seq=seq,
+                            detail=("reference fold: state op matched no "
+                                    "entity"),
+                        )
+                    continue
+                # #5285 (DEFECT 1): the graph fold MATCHes a state op by primary
+                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), but
+                # `_upsert_object`/`_upsert_subject` MERGE the NODE by NAME — so
+                # when ONE name is registered under two ids the node collapses
+                # onto the LAST id and a state op naming the collapsed-away id
+                # folds 0 rows there. `entities` still holds the collapsed-away
+                # id (the reference index is keyed by every id the journal ever
+                # saw), so the `rec is None` gate above does NOT catch it: this
+                # fold used to APPLY state the graph dropped, and
+                # `check_consistency` passed a journal all three replay engines
+                # refuse — the fail-open this lane exists to remove. Refuse with
+                # the SAME `state-op-miss` shape the malformed branch records.
+                # SEQ-AWARE by construction: `carriers_by_name` is the carrier
+                # SET at THIS point in the walk, so an id that WAS the sole
+                # carrier before a later same-name registration still folds here
+                # (a journal-END `surviving_ids` test would wrongly refuse it).
+                # A name the fold never indexed stays fail-OPEN, exactly as
+                # `_object_target` falls through — an unmodelled shape must not
+                # become a false refusal. The guard fires only when the name IS
+                # indexed and this id is NOT among its live carriers (the
+                # collapsed-away case).
+                # #5285 cycle-7 (P1): an id whose CREATION produced no graph node
+                # (an empty / non-writable merge key) is a 0-row miss there, so
+                # the reference fold must refuse it too. This check sits BEFORE
+                # the fold, so it covers the rename arm as well.
+                if (label in _NAME_MERGE_LABELS
+                        and (label, eid) in no_node_ids):
+                    record_non_folded(
+                        SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                        event_type="EntityMutated", label=label, id=eid,
+                        op=op, seq=seq,
+                        detail=("reference fold: state op matched no "
+                                "entity"),
+                    )
+                    continue
+                # #5285 cycle-6 (P1): read the id's GRAPH merge key, never the
+                # display name — see `merge_key_by_id`. An id with no merge key
+                # has no node this fold models, so the guard stays fail-open.
+                _carrier_name = (merge_key_by_id.get((label, eid))
+                                 if label in _NAME_MERGE_LABELS else None)
+                _live_carriers = (
+                    carriers_by_name.get((label, _carrier_name))
+                    if _carrier_name else None)
+                if _live_carriers is not None and eid not in _live_carriers:
+                    record_non_folded(
+                        SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                        event_type="EntityMutated", label=label, id=eid,
+                        op=op, seq=seq,
+                        detail=("reference fold: state op matched no "
+                                "entity"),
+                    )
+                    continue
+                status = state.get("status")
+                if isinstance(status, str) and status:
+                    rec["status"] = status
+                    # Remember WHERE a status write sits so the trailing
+                    # supersede sweep below honours `rebuild_all`'s #4743
+                    # un-clobber (a state op AFTER the deferred supersede
+                    # wins); see that loop.
+                    last_status_seq[(label, eid)] = seq
+                newname = state.get("name")
+                if label in _NAME_MERGE_LABELS and "name" in state:
+                    # #5285 cycle-6 (P2): the graph runs `SET n += $s`, so ANY
+                    # `name` key in `state` rewrites the MERGE key — including a
+                    # falsy or non-string one. Acting only on a non-empty str
+                    # left the index keyed on a name the graph no longer had, and
+                    # a later registration of the OLD key then evicted a
+                    # still-live id: a false `state-op-miss` on a journal all
+                    # three replay engines fold (review round 6, P2). When the
+                    # new key is not a usable non-empty str the graph's node
+                    # identity is undefined for this fold, so the id is DROPPED
+                    # from the index — fail-OPEN, because an unmodelled shape
+                    # must not become a false refusal.
+                    _old = merge_key_by_id.pop((label, eid), None)
+                    if _old is not None:
+                        _prev = carriers_by_name.get((label, _old))
+                        if _prev is not None:
+                            _prev.discard(eid)
+                    if isinstance(newname, str) and newname:
+                        merge_key_by_id[(label, eid)] = newname
+                        carriers_by_name.setdefault(
+                            (label, newname), set()).add(eid)
+                if isinstance(newname, str) and newname:
+                    # The graph's rename SETs `name` in place; the node KEEPS
+                    # its id, so `eid` joins the NEW key's live carriers (and
+                    # leaves the old key's). A rename onto a key another id
+                    # already carries does NOT MERGE — both nodes stay live
+                    # under one name — which is why the carrier value is a SET,
+                    # not a single id.
+                    rec["name"] = newname
+        elif t == "ObjectSuperseded":
+            # #5285 cycle-4 (FIX 1): defer EVERY supersede to the ONE trailing
+            # sweep — never apply it here. See the sweep below.
+            supersede_events.append((seq, ev))
+    # ── #5285 cycle-4 (FIX 1): the ONE trailing supersede sweep.
+    #
+    # EVERY `ObjectSuperseded` resolves here, against the journal's END index —
+    # exactly the query `rebuild_all`'s deferred sweep runs. Nothing is applied
+    # inline: an inline resolve happens at its own seq and is never
+    # re-evaluated, so `[Reg(x,X), Sup(id=x), Del(x), Reg(x,X)]` left the
+    # reference fold `superseded` (the resolve died with the deleted
+    # incarnation) while the sweep folds the LAST incarnation — a false
+    # `content` divergence on a correct journal. Resolving after the whole loop
+    # also subsumes the held-forward-reference case, so there is no second path
+    # to drift from.
+    #
+    # The `seq > last_status_seq` guard reproduces the sweep's ORDER, not just
+    # its membership: `rebuild_all` applies the deferred supersede LAST and
+    # then re-folds every state op the journal puts AFTER it (#4743), so a
+    # status write later than the supersede must win. Applying the supersede
+    # at the end unconditionally would clobber it and invent a divergence on a
+    # journal the graph folds correctly. A creation's default status is NOT
+    # such a write (it precedes the sweep), so it is deliberately not counted.
+    # #5285 (DEFECT 2): build the `name -> [keys]` index ONCE, against the
+    # FINAL `entities` state this sweep resolves against. Built here (not
+    # incrementally) so it mirrors the per-call scan it replaces exactly —
+    # including the `entities` insertion order the ambiguity branch relies on.
+    for _key, _rec in entities.items():
+        _nm = _rec.get("name")
+        if _key[0] == "Object" and isinstance(_nm, str) and _nm:
+            object_keys_by_name.setdefault(_nm, []).append(_key)
+    for seq, ev in supersede_events:
+        oid, oname = ev.get("id"), ev.get("name")
+        target, ambiguous_here = _object_target(oid, oname)
+        if target is not None:
+            if seq > last_status_seq.get(target, -1):
+                entities[target]["status"] = "superseded"
+        elif ambiguous_here:
+            # Genuine >1-carrier ambiguity: the fold's STATUS resolution is
+            # heuristic, so the status leg is excluded (and reported). The
+            # carve-out is LOCAL to THIS event — never the never-cleared
+            # `ambiguous` set consulted by later events, which would silently
+            # exempt every later zero-carrier supersede of a once-ambiguous
+            # name.
+            ambiguous.add(oname)
+        elif _object_hard_deleted(oid):
+            # Named exemption: the journal HARD-DELETED the target, so the
+            # deferred sweep's 0-row match is legitimate
+            # (`supersede-target-deleted`), never a miss.
+            pass
+        else:
+            # Genuinely unresolvable: an id no journaled registration leaves
+            # in place (and no usable name) matched nothing in the graph fold
+            # either, which records `object-superseded-miss` and fails — so
+            # the reference fold must refuse too, or `check_consistency`
+            # passes a journal `rebuild_all` refuses.
+            _record_supersede_miss(seq, ev)
+    return entities, deleted, ambiguous
+
+
+def _graph_entities(projection) -> tuple[dict, dict]:
+    """The graph's non-Point entities, indexed two ways.
+
+    Returns ``({(label, id): {"status": …}}, {(label, name): same-record})``.
+    The NAME index exists because `_upsert_object`/`_upsert_subject` MERGE on
+    name, so the id a journal record registered may not be the id the node
+    carries (#3585 review).
+    """
+    out: dict = {}
+    by_name: dict = {}
+    rows = projection.query(
+        "MATCH (n) WHERE n:Object OR n:Subject OR n:Event "
+        "RETURN labels(n), properties(n)"
+    ).result_set or []
+    id_prop = {label: prop for label, prop in _ENTITY_PARITY}
+    for row in rows:
+        if len(row) < 2:
+            continue
+        labels, props = row[0], row[1]
+        if not isinstance(props, dict) or not isinstance(labels, (list, tuple)):
+            continue
+        for label in labels:
+            prop = id_prop.get(label)
+            if not prop:
+                continue
+            eid = props.get(prop)
+            if isinstance(eid, str) and eid:
+                rec = {"status": props.get("status")}
+                out[(label, eid)] = rec
+                name = props.get("name")
+                if isinstance(name, str) and name:
+                    by_name[(label, name)] = rec
+    return out, by_name
+
+
+def _compare_entities(journal_entities, graph_entities, graph_names,
+                      deleted, ambiguous) -> tuple[list, int, list]:
+    """Field-aware non-Point comparison.
+
+    Returns ``(mismatches, count, excluded_ambiguous)``. The mismatch LIST is
+    capped at ``_MAX_DIVERGENT_POINTS`` (the Point leg's contract) while
+    ``count`` is the true number; ``excluded_ambiguous`` names the Objects whose
+    STATUS leg the ambiguity bound skipped, so the verdict states what it did
+    NOT compare. PRESENCE is still compared for those objects.
+    """
+    mismatches: list = []
+    count = 0
+    excluded_ambiguous: list = []
+    for key, rec in journal_entities.items():
+        label, eid = key
+        # #3585 re-review: the ambiguity bound applies to the STATUS leg only.
+        # Presence is decidable by name (the graph MERGEs Object/Subject by
+        # name), so excluding it too could hide a genuine burial — and a
+        # name-only supersede with NO carrier no longer marks ambiguity at all.
+        ambiguous_status = label == "Object" and rec.get("name") in ambiguous
+        if ambiguous_status:
+            excluded_ambiguous.append((label, eid, rec.get("name")))
+        g = graph_entities.get(key)
+        if g is None and label in ("Object", "Subject"):
+            # The graph MERGEs these labels by NAME, so a second registration
+            # of the same name under a fresh id is ONE node carrying the LAST
+            # id — resolve by name before declaring a burial (#3585 review).
+            g = graph_names.get((label, rec.get("name")))
+        if g is None:
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": eid, "label": label, "field": "presence",
+                    "expected": "registered-in-journal",
+                    "found": "absent-from-graph",
+                })
+            continue
+        # `status` is only a NODE PROPERTY for Object (Subject/Event store
+        # `subjectKind`/`eventStatus` respectively), so the status comparison
+        # is bounded to Object — the kind the #3573 shapes
+        # bury. Presence is compared for every kind.
+        if label != "Object" or ambiguous_status:
+            continue
+        jv = rec.get("status")
+        if jv is None:
+            continue
+        gv = g.get("status")
+        if gv != jv:
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": eid, "label": label, "field": "status",
+                    "expected": jv, "found": gv,
+                })
+    for key in deleted:
+        if key in graph_entities:
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": key[1], "label": key[0], "field": "presence",
+                    "expected": "hard-deleted-in-journal",
+                    "found": "present-in-graph",
+                })
+    return mismatches, count, excluded_ambiguous
+
+
 def check_consistency(log_path: str, projection, *,
                       record_state: bool = True) -> dict:
     """Fold the event log and compare the projection against `replay(journal)`.
@@ -1009,10 +1719,16 @@ def check_consistency(log_path: str, projection, *,
                                           baseline; a pure function of the graph)
       hash_match                        — graph == replay(journal), field-aware
       divergence                        — None | "content" | "lag" |
-                                          "unrecorded-mutation"
+                                          "unrecorded-mutation" | "non-folded"
       divergent_points                  — per-id field diagnosis (capped at
                                           `_MAX_DIVERGENT_POINTS`)
       divergent_point_count             — the true number of diverged ids
+      divergent_entities                — per-entity (label, id) diagnosis for
+                                          the non-Point leg (#3585)
+      divergent_entity_count            — non-Point divergences
+      non_folded_events                 — the R8 set, as strings (#3585)
+      non_folded_count / non_folded_refused_count
+                                        — size of the set / the failing subset
       watermark / journal_events / watermark_lag — the per-projection seq
       adopted                           — True on the FIRST healthy run against
                                           a pre-existing graph (never "diverged")
@@ -1038,7 +1754,19 @@ def check_consistency(log_path: str, projection, *,
 
     log = EventLog(log_path)
     events = log.read_all()
-    journal_by_id = _fold_journal(events)
+    # #3585 (R9): the reference fold runs inside the non-folded collector. A
+    # non-object the fold could not resolve makes BOTH sides of the content
+    # comparison equally incomplete, so the comparison alone would pass
+    # vacuously — the collected set is what makes that a failure.
+    with collect_non_folded() as _nf_entries:
+        journal_by_id = _fold_journal(events)
+        # #3585 review: the ENTITY reference fold belongs inside the collector
+        # too — a fold that cannot resolve an entity is the same class of event,
+        # and outside the block its `record_non_folded` calls would be no-ops.
+        journal_entities, entity_deleted, entity_ambiguous = (
+            _fold_journal_entities(events))
+    non_folded = list(_nf_entries)
+    non_folded_refused = refused_events(non_folded)
 
     # The COUNT is read from the graph directly, NOT from `len(graph_by_id)`.
     # `graph_by_id` is keyed by `n.id`, so two nodes sharing an id (or a node
@@ -1069,6 +1797,15 @@ def check_consistency(log_path: str, projection, *,
                                       projection)
     counts_ok = log_count == db_count
     hash_ok = not mismatches
+    # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
+    # Point-only, so an Object/Subject burial would be invisible; this compares
+    # the journal's entity reference against the graph's entity nodes.
+    graph_entities, graph_entity_names = _graph_entities(projection)
+    entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
+        _compare_entities(journal_entities, graph_entities,
+                          graph_entity_names, entity_deleted,
+                          entity_ambiguous))
+    entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical
     # graph still moves the baseline (and so cannot hide under `hash_match`).
@@ -1090,7 +1827,12 @@ def check_consistency(log_path: str, projection, *,
     unrecorded_mutation = graph_moved and not journal_moved
 
     divergence = None
-    if not counts_ok or not hash_ok or unrecorded_mutation:
+    if non_folded_refused:
+        # #3585 (R9): an event the reference fold could not resolve makes the
+        # content comparison vacuously incomplete on BOTH sides. This is the
+        # first-class failure R9 exists for — it outranks the content classes.
+        divergence = "non-folded"
+    elif not counts_ok or not hash_ok or unrecorded_mutation or not entities_ok:
         # Divergence, classified by WHICH side moved since the baseline. Each
         # cause names a different root cause:
         #   journal moved, graph did not → the projection is behind (a dropped
@@ -1142,6 +1884,12 @@ def check_consistency(log_path: str, projection, *,
                                "and this lane may not edit the rebuild path), "
                                "so confirm no unjournalled writer exists "
                                "before re-baselining"),
+        "non-folded": ("the journal contains event(s) the reference fold "
+                       "could not resolve to exactly one node, so both "
+                       "projections are equally incomplete (R8/#3585): fix "
+                       "the journal (a missing creation event, an out-of-order "
+                       "append, an unjournaled producer) — re-baselining would "
+                       "bake in the loss"),
     }.get(divergence)
 
     return {
@@ -1155,6 +1903,32 @@ def check_consistency(log_path: str, projection, *,
         "divergence": divergence,
         "divergent_points": mismatches,
         "divergent_point_count": divergent_count,
+        # ── #3585 non-Point leg + the non-folded set (R8/R9) ───────────
+        "divergent_entities": entity_mismatches,
+        "divergent_entity_count": entity_divergent_count,
+        # #3585 review: the bounds are REPORTED, not silent. `…ambiguous` names
+        # the Objects the ambiguity rule excluded (so `ok` states what it did
+        # not compare), and `…bounds` states the direction and the compared
+        # field set.
+        "entity_parity_ambiguous": [
+            {"label": lbl, "id": iid, "name": nm}
+            for lbl, iid, nm in entity_ambiguous_excluded],
+        "entity_parity_ambiguous_count": len(entity_ambiguous_excluded),
+        "entity_parity_bounds": {
+            "direction": "journal->graph",
+            "status_compared": ["Object"],
+            "name_keyed": ["Object", "Subject"],
+            "identity": {"Object": "name", "Subject": "name",
+                         "Event": "eventId"},
+        },
+        # #5285 (DEFECT 3): the COUNT (`non_folded_count` below) is
+        # authoritative; this list is a bounded SAMPLE. An unrecognised-type
+        # journal (the mixed-version case) would otherwise format O(n) strings
+        # into the verdict payload; the cap matches the sibling diagnostic
+        # lists (`_MAX_DIVERGENT_POINTS`).
+        "non_folded_events": [str(e) for e in non_folded[:_MAX_DIVERGENT_POINTS]],
+        "non_folded_count": len(non_folded),
+        "non_folded_refused_count": len(non_folded_refused),
         "watermark": watermark,
         "journal_events": len(events),
         "watermark_lag": watermark_lag,
@@ -1457,56 +2231,107 @@ def recover_from_log(events_dir: str, projection) -> dict:
     first_refusal = ""
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
-    # #3305: the Point lifecycle terminalizers are folded by the SHARED
-    # whole-journal plan, not by ``apply()``'s inline branch — that branch
-    # folds every terminalizer, while ``rebuild_all`` deliberately drops the
-    # pre-recreation ones and canonicalizes supersedes. Computing the plan
-    # here keeps this recovery engine on the same selection.
-    restamp_plan, _ = plan_point_restamp_folds(events)
-    # #3305: defer the terminalizers' CORRECTS edges — an endpoint created later
-    # in the journal cannot be merged chronologically (see
-    # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
-    # sweep resolves it, so the engines would disagree.
-    deferred_corrects: list[tuple[int, str, str]] = []
-    for seq, ev in enumerate(events):
-        if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
-            entity_link_events.append((seq, ev))
-            continue
-        try:
-            # Keyed on the PLAN, not the raw envelope type — the plan selects
-            # by the NORMALIZED type (``_norm`` splices a nested payload), so a
-            # raw-type guard would let a ``type``-in-``point`` terminalizer fall
-            # through to ``apply()``'s inline branch and its unshared selection
-            # (#325/#3722's raw-vs-normalized class).
-            if seq in restamp_plan:
-                edge = projection.apply_journal_point_restamp(
-                    ev, seq, restamp_plan)
-                if edge is not None:
-                    deferred_corrects.append(edge)
-            else:
-                projection.apply(ev)
-            applied += 1
-        except UnrepresentableNumberError as exc:
-            refused += 1
-            if not first_refusal:
-                first_refusal = str(exc)
-        except Exception:
-            torn += 1
-    if deferred_corrects:
-        try:
-            projection.fold_deferred_corrects_edges(
-                deferred_corrects, hard_delete_seqs)
-        except Exception:
-            logger.exception(
-                "recover_from_log: deferred CORRECTS fold failed; %d "
-                "edge(s) not replayed", len(deferred_corrects))
-    if entity_link_events:
-        try:
-            applied += projection.fold_deferred_entity_links(
-                entity_link_events, hard_delete_seqs)
-        except Exception:
-            torn += len(entity_link_events)
+    # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
+    # keys (`apply()` refuses an ObjectSuperseded whose target the journal
+    # never leaves in place, while a forward reference is NOT refused) plus the
+    # ids the journal hard-deletes (the named `supersede-target-deleted`
+    # exemption).
+    # Passed only to a projection whose ``apply()`` accepts them — the fake /
+    # injected backends used in tests take ``apply(ev)`` alone, and a kwarg
+    # they do not accept would be miscounted as a TORN record.
+    journal_object_surviving = journal_object_surviving_keys(events)
+    journal_object_deleted = journal_object_hard_deleted_ids(events)
+    # #3585 (P1-1): the whole-journal EXISTENCE map — a retract/state-op that
+    # PRECEDES its own creation is folded by `rebuild_all`'s hoist and no-op'd
+    # live, so this chronological engine must not refuse it. `journal_seq` is
+    # passed per record below (the map alone cannot decide the order).
+    first_materialized = journal_first_materialization(events)
+    apply_kwargs: dict = {}
+    _pass_seq = False
+    try:
+        _apply_params = inspect.signature(projection.apply).parameters
+    except (TypeError, ValueError):
+        _apply_params = {}
+    if "journal_object_surviving" in _apply_params:
+        apply_kwargs["journal_object_surviving"] = journal_object_surviving
+        apply_kwargs["journal_object_deleted"] = journal_object_deleted
+    if "journal_first_materialized" in _apply_params:
+        apply_kwargs["journal_first_materialized"] = first_materialized
+        _pass_seq = "journal_seq" in _apply_params
+    # #3585 (R8/R9): this apply-based engine folds inside the non-folded
+    # collector too. A refused event means the recovery REPLAYED an incomplete
+    # journal — reporting `recovered: True` there is the false PASS #3947's
+    # guard exists to prevent, so the run fails loudly (recovered=False, with
+    # the set named) and the caller refuses to open the DB.
+    with collect_non_folded() as _nf_entries:
+        # #3305: the Point lifecycle terminalizers are folded by the SHARED
+        # whole-journal plan, not by ``apply()``'s inline branch — that branch
+        # folds every terminalizer, while ``rebuild_all`` deliberately drops the
+        # pre-recreation ones and canonicalizes supersedes. Computing the plan
+        # here keeps this recovery engine on the same selection.
+        restamp_plan, _ = plan_point_restamp_folds(events)
+        # #3305: defer the terminalizers' CORRECTS edges — an endpoint created later
+        # in the journal cannot be merged chronologically (see
+        # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
+        # sweep resolves it, so the engines would disagree.
+        deferred_corrects: list[tuple[int, str, str]] = []
+        for seq, ev in enumerate(events):
+            if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                entity_link_events.append((seq, ev))
+                continue
+            try:
+                # Keyed on the PLAN, not the raw envelope type — the plan selects
+                # by the NORMALIZED type (``_norm`` splices a nested payload), so a
+                # raw-type guard would let a ``type``-in-``point`` terminalizer fall
+                # through to ``apply()``'s inline branch and its unshared selection
+                # (#325/#3722's raw-vs-normalized class).
+                if seq in restamp_plan:
+                    edge = projection.apply_journal_point_restamp(
+                        ev, seq, restamp_plan)
+                    if edge is not None:
+                        deferred_corrects.append(edge)
+                else:
+                    if _pass_seq:
+                        projection.apply(ev, journal_seq=seq, **apply_kwargs)
+                    else:
+                        projection.apply(ev, **apply_kwargs)
+                applied += 1
+            except UnrepresentableNumberError as exc:
+                refused += 1
+                if not first_refusal:
+                    first_refusal = str(exc)
+            except Exception:
+                torn += 1
+        if deferred_corrects:
+            try:
+                projection.fold_deferred_corrects_edges(
+                    deferred_corrects, hard_delete_seqs)
+            except Exception:
+                logger.exception(
+                    "recover_from_log: deferred CORRECTS fold failed; %d "
+                    "edge(s) not replayed", len(deferred_corrects))
+        if entity_link_events:
+            try:
+                applied += projection.fold_deferred_entity_links(
+                    entity_link_events, hard_delete_seqs)
+            except Exception:
+                torn += len(entity_link_events)
     after = _node_count()
+    nf_events = refused_events(_nf_entries)
+    if nf_events:
+        return {
+            "recovered": False, "log_points": len(events),
+            "db_points": after if after is not None else 0,
+            "reason": (
+                f"replay refused {len(nf_events)} journal event(s) it could not "
+                f"resolve to exactly one node (R8/#3585) — the rebuilt graph "
+                f"would be silently incomplete: "
+                + "; ".join(str(e) for e in nf_events[:5])),
+            # #5285 (DEFECT 3): a bounded SAMPLE; `reason` carries the true
+            # count, so the cap cannot make a large refusal look small.
+            "non_folded_events": [
+                str(e) for e in _nf_entries[:_MAX_DIVERGENT_POINTS]],
+        }
     ok = applied > 0 and after is not None and after > 0
     if refused:
         logger.warning(

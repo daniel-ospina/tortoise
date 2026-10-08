@@ -226,6 +226,24 @@ def aggregate_prior(
     (default 1.0; a per-source assessment factor can be folded in by the caller
     as an extra multiplier — see ``assessment_factor``).
 
+    INDEPENDENCE MODEL (stated, #5543). This function ASSUMES its ``groups`` are
+    independent observations; it cannot verify that, and it is not the place the
+    assumption is created — the CALLER decides what "a distinct source" means
+    when it builds ``groups``. The belief path that feeds this prior
+    (``TortoiseSDK._apply_source_inheritance``) therefore states its model there:
+    **the S0a identity** (`:Source.canonicalUrl`, per ``source_identity.py`` —
+    "the registration key is the canonicalised URL"), collapsing per point so one
+    document reached through several `:Source` nodes contributes once.
+
+    KNOWN RESIDUAL — a bound, not a claim of completeness. A session `:Source`
+    (`session:<id>`) and the documents that session `references` have DIFFERENT
+    S0a identities by design, so a claim extracted from both still counts the
+    same body of evidence twice. That mechanism is reachable today (Ontology
+    §3.4: `Source -> Source`) and is NOT closed by identity collapse; closing it
+    needs an explicit model of when two sources are one evidence body, which is a
+    design decision, not a canonicalisation. Do not read this guard as having
+    settled that case.
+
     Pinned formula (scoping resolution B, plan Task 1):
         pc_t = log2(N_t + 1) * decay_t * (sum_{i in t} base_pc(tier_i) * factor_i) / N_t
     where ``decay_t`` keys on the TIER's MOST-RECENT source (T0 exempt), and

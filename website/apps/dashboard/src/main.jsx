@@ -4018,10 +4018,40 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the organization! Your membership is active.')
+              // #5254: the accept body carries the INVITED org (`{org_id, role}`
+              // — hosted_api.accept_invite). Without selecting it here, the
+              // mount's #1912 / Round-8 first-healthy pin owns orgIdRef, so a
+              // user who is ALREADY a member of another org lands on that org
+              // — NOT the one the invite link just added them to, while the
+              // account-menu accept path (acceptPendingInvite) switched
+              // correctly. Read the org and mirror that path (`await
+              // loadTeams()` then `switchTeam(org_id)`, same order).
+              let invitedOrgId = ''
+              try {
+                const accepted = await inviteRes.json()
+                invitedOrgId = (accepted && accepted.org_id) || ''
+              } catch { /* unreadable body — fall back to the first-healthy pin */ }
               // #2538: propagate the accepted invite to wizard state so
               // loadTeams fires and the welcomeHasOrg chain triggers the
               // dashboard route guard (invited users skip onboarding).
-              await loadTeams().catch(() => {})
+              const acceptedTeams = await loadTeams().catch(() => null)
+              // Prefer the invited org only when it is PRESENT and NOT
+              // SUSPENDED — the #1912 rule is not weakened (a suspended
+              // membership never becomes the default). Skipped when the pin
+              // already landed on it (the single-membership invitee, which
+              // worked before this fix): switching then would only repeat the
+              // mount's own loads. When the roster read itself fails
+              // (`loadTeams` returns null — a transient fault, or a Round-12
+              // sign-out) the invited org cannot be checked at all, so nothing
+              // is selected and the mount's own pin stands: the fail-safe
+              // direction, since a switch to an unverifiable org could select
+              // a suspended one.
+              const invited = Array.isArray(acceptedTeams)
+                ? acceptedTeams.find((t) => t.org_id === invitedOrgId)
+                : null
+              if (invited && !invited.suspended_at && invitedOrgId !== orgIdRef.current) {
+                switchTeam(invitedOrgId)
+              }
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {

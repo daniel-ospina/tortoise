@@ -343,10 +343,18 @@ silent failure.
     # edge check: a recall on an indexed url must return its neighbor
     ```
 
-**Upgrading is forward-only** — there is no binary rollback: the old binary
-replaying a new journal silently drops the new record kinds (and reintroduces
-wipe-before-parse, turning one torn line into total loss). The restore path is
-a pre-release backup per the drill above.
+**Upgrading is forward-only** — there is no binary rollback, so a binary that
+predates #3585, replaying a journal written by a newer one, cannot fold the new
+record kinds: it warns that the type is unrecognized and skips it, and the
+rebuilt graph is silently incomplete. (It also reintroduces wipe-before-parse,
+turning one torn line into total loss.) Conversely, a binary carrying #3585 or
+later **fails the replay loudly** (R8) on the graph-backed rebuild and recover
+engines: the run names the first few of the REFUSED records together with their
+total count, and refuses — so you get a refusal rather than a silently incomplete
+graph. (Exempt records are unfolded too, but they are neither counted nor
+refused: see `EXEMPT_SHAPES`.) (The
+in-memory index opens no run boundary, so it warns only.) Either way the restore
+path is a pre-release backup per the drill above, not a downgrade.
 
 ## 8. Expansion packs (optional)
 

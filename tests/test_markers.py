@@ -80,6 +80,15 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #7677: the retry-idempotency tests drive REAL org creation through the
+    # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
+    # is the same construction the endpoint under test uses, and the behaviour
+    # being pinned (a same-owner retry resolving to the org the abandoned first
+    # attempt already committed, via ``org_by_name``) is the seed→resolution
+    # coupling itself. A test_* rename would exercise a DIFFERENT graph than the
+    # code resolves, which is the one thing these tests must not do. Same
+    # prod-coupled class as test_agent_signup / test_cohort_cost_cap.
+    "test_7677_create_org_retry_idempotent.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
     "test_cli_serve.py": {"registry": "prod-coupled"},

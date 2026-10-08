@@ -1752,7 +1752,7 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str, now: str | None = None) -> None:
+    def _retract(self, pid: str, now: str | None = None) -> int:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -1763,6 +1763,9 @@ class _EntityHandlers:
         DETACH DELETE. Points retracted before this change are irrecoverably
         lost (the content existed only in the projection, and the projection
         deleted it). Future retractions leave this tombstone.
+        Returns the number of Points matched (#3585): a 0-row retract is a
+        fold-miss the caller records as a non-folded event, since the
+        mutation is otherwise lost on replay.
 
         ``now`` (#5048, recorded from #4666) is the record's own ``ts`` — the
         instant the producer minted and wrote to the node. The fold must
@@ -1795,11 +1798,12 @@ class _EntityHandlers:
         params: dict = {"id": pid}
         if stamp:
             params["now"] = now
-        self.g.query(
+        r = self.g.query(
             f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}, "
-            f"{decay_clause('n')}",
+            f"{decay_clause('n')} RETURN count(n)",
             params=params,
         )
+        return (r.result_set[0][0] if r.result_set else 0) or 0
 
     def _fold_point_restamp(self, ev: dict, *,
                             skip_updated_at: bool = False,
