@@ -424,7 +424,7 @@ class SupabaseControlPlane:
         filtered set, so it is opt-in and only the completeness-critical callers
         should ask for it. A ``None`` total means "the fleet could not be
         confirmed", NEVER "complete" — callers must fail closed on it.
-        
+
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
         (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
         Raises RuntimeError on any failure.

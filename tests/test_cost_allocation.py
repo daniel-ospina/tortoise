@@ -1001,17 +1001,24 @@ class _FakeControlPlane:
         return self._rows
 
     def query_with_total(self, _table, **kw):
-        """#5388: total-aware shape, modelling a REAL store — the page for the
-        requested ``offset``, and a SHORT (empty) page once the rows run out.
+        """#5388: total-aware shape, modelling a REAL store under KEYSET paging.
 
-        It deliberately states no total, because the fake has no
-        ``Content-Range``: completeness then rests on the walk reaching a short
-        page, which is exactly the production fallback when a server does not
-        answer ``count=exact``.
+        The cursor is the `id > last` filter, not an offset — offset paging on a
+        moving window can serve a row twice and SKIP an original, yet still
+        satisfy a stated total. It deliberately states no total, because the
+        fake has no ``Content-Range``: completeness then rests on the walk
+        reaching a short page, which is the production fallback when a server
+        does not answer ``count=exact``.
         """
-        off = kw.get("offset") or 0
+        rows = self._rows
+        last = None
+        for col, op, val in (kw.get("filters") or []):
+            if col == "id" and op == "gt":
+                last = val
+        if last is not None:
+            rows = [r for r in rows if r["id"] > last]
         lim = kw.get("limit")
-        page = self._rows[off:off + lim] if lim is not None else self._rows[off:]
+        page = rows[:lim] if lim is not None else rows
         self.limit_seen = kw.get("limit")
         return page, self._state_total
 
@@ -1070,7 +1077,7 @@ def test_a_fleet_larger_than_the_cap_is_walked_to_completeness(monkeypatch):
     silently cut at the cap."""
     from tortoise import supabase_control as sc
 
-    big = [{"id": f"org_{i}", "name": None} for i in range(1500)]
+    big = [{"id": f"org_{i:06d}", "name": None} for i in range(1500)]
     cp = _FakeControlPlane(big, state_total=1500)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)

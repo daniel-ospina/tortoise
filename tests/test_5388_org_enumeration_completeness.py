@@ -62,11 +62,19 @@ class FakeControlPlane:
     def query_with_total(self, table, *, select=None, filters=None, method="GET",
                          json_body=None, order=None, limit=None, offset=None,
                          count_exact=False, **kw):
-        assert order == "id", "a stable order is required for page walking"
+        assert order == "id", (
+            "keyset paging is only sound if the cursor column is the sort key"
+        )
+        rows = self.rows
+        last = None
+        for col, op, val in (filters or []):
+            if col == "id" and op == "gt":
+                last = val
+        if last is not None:
+            rows = [r for r in rows if r["id"] > last]
         eff = min(limit or self.page_size, self.page_size)
-        off = offset or 0
-        page = self.rows[off:off + eff]
-        self.calls.append((off, self.state_total if count_exact else None))
+        page = rows[:eff]
+        self.calls.append((last, self.state_total if count_exact else None))
         return page, self.state_total
 
 
@@ -95,7 +103,7 @@ class TestEnumerationCompleteness:
         cp = FakeControlPlane(1500, state_total=1500)
         got = _run(monkeypatch, cp, require_complete=True)
         assert got is not None and len(got) == 1500
-        assert [c[0] for c in cp.calls][:2] == [0, MAX], cp.calls
+        assert [c[0] for c in cp.calls][:2] == [None, "org-00999"], cp.calls
 
     def test_truncated_server_count_fails_closed(self, monkeypatch):
         """The server says 1500 but only serves 1000: the fleet could NOT be
@@ -140,7 +148,8 @@ class TestEnumerationCompleteness:
         assert len(got) == 1500, (
             f"must walk past the server's per-request cap (got {len(got)})"
         )
-        assert [c[0] for c in cp.calls][:3] == [0, 500, 1000], cp.calls
+        assert [c[0] for c in cp.calls][:3] == [None, "org-00499", "org-00999"], \
+            cp.calls
 
     def test_count_exact_is_requested_once_not_per_page(self, monkeypatch):
         """The total is a property of the FILTER, so one exact count suffices —
@@ -149,6 +158,84 @@ class TestEnumerationCompleteness:
         _run(monkeypatch, cp, require_complete=True)
         asked = [c for c in cp.calls if c[1] is not None]
         assert len(asked) == 1, cp.calls
+
+
+class TestWindowShiftRace:
+    """#5388: a shifting page window must NEVER certify an incomplete fleet.
+
+    Offset pagination walks a MOVING window. A concurrent INSERT whose `id`
+    sorts before the cursor shifts every later page, so one row is served twice
+    and an ORIGINAL is skipped — yet the duplicate still counts toward the
+    stated total. The walk would then report complete and the cost refresh
+    would PRUNE the skipped org, which is the exact harm #5388 exists to
+    prevent. Keyset paging (`id > last`) is immune: the cursor is the last id
+    we actually SAW, which no concurrent write can move.
+    """
+
+    def test_a_shifted_window_cannot_skip_an_org(self, monkeypatch):
+        class ShiftingCP:
+            """Serves a stable set, but prepends a NEW row on the 2nd request
+            — which is what an offset cursor would trip over."""
+
+            def __init__(self, n):
+                self.base = [{"id": f"o{i:06d}", "name": None} for i in range(n)]
+                self.calls = 0
+                self.seen_cursors = []
+
+            def query_with_total(self, table, *, select=None, filters=None,
+                                 method="GET", json_body=None, order=None,
+                                 limit=None, offset=None, count_exact=False,
+                                 **kw):
+                self.calls += 1
+                last = None
+                for col, op, val in (filters or []):
+                    if col == "id" and op == "gt":
+                        last = val
+                self.seen_cursors.append(last)
+                view = list(self.base)
+                if self.calls >= 2:
+                    view = [{"id": "o000000a", "name": None}, *view]
+                if last is not None:
+                    view = [r for r in view if r["id"] > last]
+                return view[:limit], len(self.base)
+
+        n = MAX + 1000
+        cp = ShiftingCP(n)
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None, "the walk must still confirm a stable fleet"
+        ids = [r["org_id"] for r in got]
+        assert len(ids) == len(set(ids)) == n, (
+            f"every org exactly once: got {len(ids)} rows, {len(set(ids))} "
+            "distinct"
+        )
+        # The cursor must be the last SAW id, never a count.
+        assert cp.seen_cursors[0] is None and cp.seen_cursors[1] is not None
+
+    def test_a_duplicate_cannot_satisfy_the_stated_total(self, monkeypatch):
+        """Completeness counts DISTINCT ids: if the server repeats a row, the
+        count must not be reachable by duplication."""
+        class RepeatingCP:
+            """Always serves the same full page, and claims a LARGER total."""
+
+            def __init__(self, total):
+                self.page = [{"id": f"o{i:06d}", "name": None}
+                             for i in range(MAX)]
+                self.total = total
+
+            def query_with_total(self, table, **kw):
+                last = None
+                for col, op, val in (kw.get("filters") or []):
+                    if col == "id" and op == "gt":
+                        last = val
+                page = [r for r in self.page
+                        if last is None or r["id"] > last]
+                return page, self.total
+
+        # 2*MAX claimed, but only MAX distinct rows will ever be served.
+        cp = RepeatingCP(MAX * 2)
+        assert _run(monkeypatch, cp, require_complete=True) is None, (
+            "a total that no amount of walking satisfies must fail closed"
+        )
 
 
 def ha_pages() -> int:

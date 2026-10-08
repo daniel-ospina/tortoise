@@ -1451,19 +1451,24 @@ class FakeControlPlane:
         way to exercise the complete-vs-truncated decision.
         """
         _ = count_exact
-        # Fetch UNLIMITED and apply offset BEFORE limit. `query()` applies the
-        # limit itself, so slicing its result by offset afterwards under-serves
-        # every page after the first — and returns an EMPTY page when
-        # offset == limit, which is the exact "a truncated page looks like the
-        # end of the fleet" signature #5388 is about, reintroduced inside the
-        # double that is supposed to model the seam faithfully (and which 67
-        # test files share).
-        rows_all = self.query(table, select=select, filters=filters,
+        # #5388: KEYSET paging. The cursor is an `id > last` filter, not an
+        # offset — offset paging on a moving window can serve a row twice and
+        # skip an original while still satisfying a stated total. The cursor
+        # filter is stripped before delegating (the fake's `query` does not
+        # implement ordering/range semantics) and applied here.
+        last = None
+        rest = []
+        for f in (filters or []):
+            if len(f) == 3 and f[0] == "id" and f[1] == "gt":
+                last = f[2]
+            else:
+                rest.append(f)
+        rows_all = self.query(table, select=select, filters=rest or None,
                               method=method, json_body=json_body, order=order,
                               limit=None, timeout=timeout)
-        start = offset or 0
-        page = (rows_all[start:start + limit] if limit is not None
-                else rows_all[start:])
+        if last is not None:
+            rows_all = [r for r in rows_all if r.get("id") and r["id"] > last]
+        page = rows_all[:limit] if limit is not None else rows_all
         return page, None
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,

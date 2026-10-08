@@ -963,10 +963,10 @@ mcp_http_app = create_http_app(
 
 #: #4493: the explicit row bound for the Supabase org enumeration, set EQUAL to
 #: the project's PostgREST ``max_rows`` (``supabase/config.toml`` → ``[api]
-#: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
-#: reads ``Content-Range``, and PostgREST silently caps a row LIST at
-#: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
-#: no error.
+#: max_rows = 1000``). Pre-#5388, ``SupabaseControlPlane.query`` neither
+#: paginated nor read ``Content-Range``, and PostgREST silently caps a row LIST
+#: at ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list
+#: with no error.
 #:
 #: The two callers need opposite things from that signal, so completeness is
 #: EXPLICIT via ``require_complete`` rather than encoded as an empty list
@@ -1045,25 +1045,42 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # deployment whose ``max_rows`` was lower than the requested bound
             # (a short page, no signal).
             rows: list[dict] = []
+            seen_ids: set[str] = set()
             total: int | None = None
             short_page = True
-            offset = 0
+            last_id: str | None = None
             for _page in range(_ORG_ENUMERATION_MAX_PAGES):
+                page_filters: list[tuple[str, str, object]] = [
+                    ("deleted_at", "is", None),
+                ]
+                if last_id is not None:
+                    # KEYSET, not offset. `offset` paginates a MOVING window: a
+                    # concurrent INSERT whose id sorts before the cursor
+                    # shifts every later page, so one row is served twice and
+                    # an original is SKIPPED — yet the duplicate still counts
+                    # toward the total, so the walk would report COMPLETE and
+                    # the cost refresh would PRUNE the skipped org. That is the
+                    # exact class #5388 exists to prevent, so the cursor is the
+                    # last id we SAW, which no concurrent write can move.
+                    page_filters.append(("id", "gt", last_id))
                 page, page_total = cp.query_with_total(
                     "organizations", select=["id", "name"],
-                    filters=[("deleted_at", "is", None)],
-                    # A stable `order` is REQUIRED: without it page boundaries
-                    # are not stable and the walk skips or repeats rows.
-                    order="id", limit=_ORG_ENUMERATION_MAX_ROWS, offset=offset,
+                    filters=page_filters,
+                    # A stable `order` is REQUIRED: keyset paging is only sound
+                    # if the cursor column is the sort key.
+                    order="id", limit=_ORG_ENUMERATION_MAX_ROWS,
                     # The total is a property of the FILTER, not the page, so
                     # one exact count is enough — later pages reuse it.
-                    count_exact=(offset == 0),
+                    count_exact=(last_id is None),
                 )
                 rows.extend(page)
+                seen_ids.update(r["id"] for r in page)
+                if page:
+                    last_id = page[-1]["id"]
                 if page_total is not None:
                     total = page_total
                 short_page = len(page) < _ORG_ENUMERATION_MAX_ROWS
-                if total is not None and len(rows) >= total:
+                if total is not None and len(seen_ids) >= total:
                     break  # the server's count is satisfied
                 if not page:
                     break  # nothing left to walk
@@ -1076,14 +1093,16 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     # larger fleet. That is the case #5388 exists to fix, so
                     # keep walking until the stated total is met.
                     break
-                offset += len(page)
 
             parsed = [{"org_id": r["id"], "name": r.get("name")}
                       for r in rows]
             # Completeness: the server's count when it stated one, else the only
-            # remaining signal (a short page). A page-cap exit leaves this False,
-            # because exhausting a local bound is not the same as finishing.
-            complete = (len(rows) >= total if total is not None else short_page)
+            # remaining signal (a short page). Counted over DISTINCT ids — a
+            # duplicated row is not progress, and letting one satisfy the total
+            # is how a shifted window would certify an incomplete fleet. A
+            # page-cap exit leaves this False, because exhausting a local bound
+            # is not the same as finishing.
+            complete = (len(seen_ids) >= total if total is not None else short_page)
             if not complete:
                 _logger.warning(
                     "org enumeration is INCOMPLETE: %d row(s) walked, server "
