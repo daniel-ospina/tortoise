@@ -85,7 +85,9 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #: later request was served by a free worker or, once they were exhausted,
 #: queued and reported a FALSE 503 for a healthy DB. (The original measurement
 #: — "two timed-out requests parked the whole pool" — was taken against the
-#: pre-#3287 width-2 pool; at today's width of 8 it takes eight, which is a
+#: width-2 pool that #3287 first shipped (widened to 8 by 528301d6e); before
+#: #3287 the probe rode ``asyncio.to_thread`` and there was no dedicated pool at
+#: all. At today's width of 8 it takes eight, which is a
 #: difference of degree, not of kind, and is why the pool's width is not the
 #: fix.)
 #:
@@ -228,8 +230,11 @@ _READY_PROBE_WORKER = "selfhost-ready-probe"
 #: narrowing the pool is not.
 _READY_PROBE_WORKERS = 8
 
-#: The DB leg's OWN pool (#3320), sized to the readiness width: a readiness
-#: worker submits at most one leg at a time, so this can never queue.
+#: The DB leg's OWN pool (#3320), sized to the readiness width. NOTE a readiness
+#: worker holds at most one leg at a time only INSTANTANEOUSLY — legs outlive
+#: their allowance — so the pool CAN queue and, past ``MAX_BACKLOG``, refuse.
+#: See ``_run_bounded`` for the arithmetic. What is bounded EXACTLY here is the
+#: number of THREADS; outstanding legs (running + queued) are width + backlog.
 _DB_LEG_WORKER = "selfhost-ready-probe-db-leg"
 _DB_LEG_WORKERS = _READY_PROBE_WORKERS
 
@@ -250,10 +255,11 @@ def _probe_worker(name: str, workers: int):
 def _submit_probe(pool, fn):
     """Submit a health probe to a DEDICATED daemon pool, propagating contextvars.
 
-    ``pool`` is always the readiness lane above (resolved by ``_probe_worker``)
-    — never the loop's default executor (#3035). The liveness lane does not use
-    this seam at all any more: ``/health`` reads the coordinator's in-memory
-    snapshot (see ``_HEALTH_PROBE`` below).
+    ``pool`` is always a ``_probe_worker`` lane — the readiness lane, or the
+    DB-leg pool that ``_run_bounded`` owns (#3320) — never the loop's default
+    executor (#3035). The liveness lane does not use this seam at all any more:
+    ``/health`` reads the coordinator's in-memory snapshot (see ``_HEALTH_PROBE``
+    below).
     """
     ctx = contextvars.copy_context()
     return pool.submit(lambda: ctx.run(fn))
@@ -300,13 +306,12 @@ def _run_bounded(fn, allowance_s: float) -> None:
     ``_DB_LEG_WORKERS`` no matter how many legs hang, so abandoned legs cannot
     accumulate without bound the way a thread-per-probe would.
 
-    Contextvars are copied for the same reason ``_submit_probe`` copies them:
-    the SDK/projection layer reads them, and a pool thread does not inherit them
-    (cpython#78195).
+    Contextvars are copied by ``_submit_probe`` for the same reason it copies
+    them for the readiness lane: the SDK/projection layer reads them, and a pool
+    thread does not inherit them (cpython#78195).
     """
-    ctx = contextvars.copy_context()
     pool = _probe_worker(_DB_LEG_WORKER, _DB_LEG_WORKERS)
-    fut = pool.submit(lambda: ctx.run(fn))
+    fut = _submit_probe(pool, fn)
     # ``wait`` + ``result`` rather than ``result(timeout=…)`` alone: it separates
     # OUR timeout from a ``TimeoutError`` raised BY the leg, which would
     # otherwise be indistinguishable and reported as this bound firing.

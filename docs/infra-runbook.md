@@ -841,9 +841,10 @@ fly machine restart <id> -a tortoise-y4mjjq
   where the outer bound (6.0 s) lost that race and a parked worker made a later,
   healthy request queue and answer 503, is **closed**. Two things remain true and
   are not fixed by it: the abandoned leg's own socket thread lives until ITS
-  timeout — bounded in NUMBER by the leg pool's width (the pool queues, and past
-  its bounded backlog it refuses, which fails closed), but not in lifetime — and
-  the
+  timeout — bounded in NUMBER OF LIVE LEG THREADS by the pool's width (8);
+  outstanding legs (running + queued) are bounded by the width plus the pool's
+  ``MAX_BACKLOG``, and past that the pool refuses, which fails closed. Not
+  bounded in lifetime — a leg lives until its own socket gives up — and the
   0.5 s inner margin narrows the effective readiness budget from 6.0 s to 5.5 s,
   so a cold start landing in that window now reports not-ready by design. The
   HOSTED

@@ -1383,6 +1383,14 @@ def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, mon
     inner = selfhost._ready_probe_inner_bound_s()
     assert floor < inner < outer, (floor, inner, outer)
     assert inner == outer - margin, (inner, outer, margin)
+    # The floor's STATED REASON is that an ordinary connect must not be aborted
+    # before it starts (host lane). Nothing else pinned that, so lowering the
+    # floor below the connect cost would have kept every test green.
+    from tortoise import projection as _projection
+    assert inner > _projection._DB_CONNECT_TIMEOUT_DEFAULT, (
+        f"the inner allowance {inner} is at or below the host connect default "
+        f"{_projection._DB_CONNECT_TIMEOUT_DEFAULT} — an ordinary connect would "
+        f"be aborted before it starts")
 
     # The operator knob TIGHTENS this leg, and can never push it through the
     # outer bound — that is what makes the ordering unconditional rather than a
@@ -1584,18 +1592,19 @@ def test_a_readiness_probe_past_the_inner_bound_answers_503_PROMPTLY(
 def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
     """The DB leg must be on the bounded pool, not a raw thread (#3320).
 
-    THIS TEST PINS BOUNDEDNESS, and it exists because nothing else did. Measured
-    on d2d339a7e: replacing the pool submit with a raw ``threading.Thread`` left
-    every test in this file GREEN — the only thing the suite noticed was the
-    thread's NAME, so a one-word rename would have reintroduced the round-1
-    defect. An unbounded thread-per-leg makes live threads scale with
-    ``arrival_rate × socket_timeout`` on an endpoint that is deliberately
-    un-throttled and un-authenticated, i.e. strictly worse than the pool it
-    replaced. Asserting the POOL (not the name) is what makes that irreversible.
+    THAT THE LEG RAN, not just that the pool was resolved. An earlier version of
+    this test only asserted ``_probe_worker`` had been CALLED, and a reviewer
+    defeated it: keeping the call as a decoy while running ``fn`` on a raw
+    ``threading.Thread`` left the whole file GREEN (measured), as did widening
+    ``_DB_LEG_WORKERS`` to 64x the readiness width. So this asserts the two
+    things that mutation could not satisfy — the leg executes ON one of the
+    pool's own threads, and the width is not free-form — and the docstring no
+    longer claims more than that.
     """
     import tortoise.monitoring as mon
 
     seen: dict = {}
+    ran_on: list[str] = []
     real = selfhost._probe_worker
 
     def spy(name, workers):
@@ -1603,15 +1612,26 @@ def test_the_db_leg_runs_on_the_BOUNDED_daemon_pool(selfhost, monkeypatch):
         return real(name, workers)
 
     monkeypatch.setattr(selfhost, "_probe_worker", spy)
-    selfhost._run_bounded(lambda: None, 1.0)
+    selfhost._run_bounded(
+        lambda: ran_on.append(threading.current_thread().name), 1.0)
 
     assert seen.get("args") == (selfhost._DB_LEG_WORKER,
                                 selfhost._DB_LEG_WORKERS), (
-        "the DB leg did not resolve its own named pool — a raw thread (or an "
-        "arbitrary pool) would pass every other test in this file")
+        "the DB leg did not resolve its own named pool")
     pool = real(selfhost._DB_LEG_WORKER, selfhost._DB_LEG_WORKERS)
     assert isinstance(pool, mon._SingleSlotWorker), type(pool)
-    assert pool.workers == selfhost._DB_LEG_WORKERS, pool.workers
+    # EXECUTION identity, not resolution: a raw thread that merely WARMS this
+    # pool is the mutation this line exists to catch.
+    assert ran_on, "the leg never ran at all"
+    assert ran_on[0] in {t.name for t in pool._threads}, (
+        f"the leg ran on {ran_on[0]!r}, which is not one of the leg pool's own "
+        f"threads — a raw thread per leg reintroduces unbounded thread growth")
+    # Non-tautological: the width is compared to an INDEPENDENT constant, so a
+    # pool widened without limit cannot satisfy it.
+    assert selfhost._DB_LEG_WORKERS <= selfhost._READY_PROBE_WORKERS, (
+        f"the leg pool is wider than the readiness lane "
+        f"({selfhost._DB_LEG_WORKERS} > {selfhost._READY_PROBE_WORKERS}), which "
+        f"breaks the sizing argument in _run_bounded")
     assert all(t.daemon for t in pool._threads), (
         "leg threads must be daemons — a non-daemon leg eats the graceful-drain "
         "budget #2203 exists to protect")
