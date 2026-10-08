@@ -28,14 +28,24 @@ protection) and the legacy path runs unchanged.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
+import uuid
 
 logger = logging.getLogger(__name__)
 
 MAX_CORPUS_POINTS = 50_000
 SNAPSHOT_TTL_SECONDS = 60.0
+
+# Bound the process-global cache. With per-backend keys the store is no longer
+# bounded by the number of (graph_name, namespace) pairs a process holds, so a
+# long-lived process that opens many distinct embedded DBs (or :memory: stores)
+# would otherwise retain one corpus each (#7760 review). LRU: a fresh ``get``
+# bumps an entry, so a hot store survives — the hosted per-request-SDK pattern
+# must keep its one graph's snapshot across requests.
+MAX_SNAPSHOT_ENTRIES = 8
 
 # Holds ALL non-operator points (incl. terminal statuses + outdated flag);
 # the serve-time exclusion in search_snapshot mirrors self.query's two-mode
@@ -50,7 +60,12 @@ _SNAPSHOT_QUERY = (
 
 
 class FallbackSnapshotStore:
-    """Thread-safe snapshot store keyed by (graph_name, namespace)."""
+    """Thread-safe LRU snapshot store keyed by ``snapshot_key``.
+
+    Bounded by ``MAX_SNAPSHOT_ENTRIES`` — the per-backend key is not bounded by
+    the (graph_name, namespace) pair count the way the old key was (#7760
+    review).
+    """
 
     def __init__(self) -> None:
         self._store: dict[tuple, dict] = {}
@@ -77,11 +92,16 @@ class FallbackSnapshotStore:
                 )
                 del self._store[key]
                 return None
+            self._store.pop(key, None)  # LRU bump — keep a hot store
+            self._store[key] = snap
             return snap
 
     def put(self, key: tuple, snap: dict) -> None:
         with self._lock:
+            self._store.pop(key, None)  # re-insert so order is by recency
             self._store[key] = snap
+            while len(self._store) > MAX_SNAPSHOT_ENTRIES:
+                self._store.pop(next(iter(self._store)), None)
 
     def clear(self) -> None:
         with self._lock:
@@ -92,7 +112,36 @@ _store = FallbackSnapshotStore()
 
 
 def snapshot_key(proj, namespace: str | None) -> tuple:
-    return (getattr(proj, "graph_name", "tortoise"), namespace)
+    """Identity of the corpus a snapshot describes.
+
+    ``graph_name`` alone does NOT identify an embedded store: every embedded DB
+    defaults to ``'tortoise'``, so a store keyed on it alone served one DB's
+    snapshot to another — the leaked point in #7760 (a test's degraded search
+    returned a point written by a different test's SDK on a different file).
+    The embedded file's realpath is the second half of the identity — the same
+    reason #3049's ``_prewipe_graph_identity`` carries ``db_path``.
+
+    A server/URI graph carries no file, so its identity IS its graph name
+    (already the first element), matching #3049; a process holding two servers
+    that carry the SAME graph name is out of contract here and still shares a
+    slot (pre-existing, and unchanged by this key). ``:memory:`` is a fresh
+    server per projection with no file to key on, so a per-projection token is
+    stamped on first use. The token — never ``id(proj)`` — is the identity:
+    ``id()`` is recycled once the projection is collected, which would let a
+    later ``:memory:`` projection inherit a snapshot built before the first was
+    closed — the same cross-store disclosure this key exists to stop.
+    """
+    path = getattr(proj, "_path", None)
+    if path == ":memory:":
+        backend = getattr(proj, "_snapshot_store_id", None)
+        if backend is None:
+            backend = ("memory", uuid.uuid4().hex)
+            with contextlib.suppress(AttributeError, TypeError):
+                proj._snapshot_store_id = backend
+    else:
+        from tortoise.projection import _prewipe_db_path_identity
+        backend = _prewipe_db_path_identity(path)
+    return (getattr(proj, "graph_name", "tortoise"), backend, namespace)
 
 
 def build_snapshot(proj) -> dict | None:
