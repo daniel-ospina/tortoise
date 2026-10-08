@@ -4015,21 +4015,10 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
-    # #7693: sha -> (local ref, why) for LOCAL refs this run has PROVEN terminal.
-    # The local namespace is scanned first, so this is populated before the
-    # remote pass reads it. It exists because the terminal tests cannot run on a
-    # remote-tracking ref (`_branch_terminal_state` refuses to judge one) while
-    # the ref's NAME still matches the issue number and so still blocks — so a
-    # merged branch's remote twin refused every dispatch for good. What makes a
-    # demotion safe is NOT the local match alone: `refs/remotes/o/x` is a FETCH
-    # CACHE, so a branch reused since the last fetch carries the same stale sha
-    # as its local twin while the remote has moved. The remote pass therefore
-    # also requires `_live_remote_tip` to confirm the same sha against the
-    # remote itself, and blocks when it cannot.
     # The LOCAL pass used to record `sha -> (ref, why)` here so the REMOTE pass could
-    # demote a twin caching the same tip. That demotion is gone (see the block below),
-    # so the map has no reader and is not kept: dead state invites re-adding the
-    # demotion it fed.
+    # demote a twin caching the same tip. That demotion is gone and the map with it —
+    # see the removal block below, on the `else`-less namespace loop. Dead state and
+    # stale prose both invite re-adding the demotion they described.
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -4151,10 +4140,11 @@ def run_preflight(
                 surface.note += (
                     "; terminal tests are not applied to these refs by name (a "
                     "remote-tracking ref is a local fetch cache, so judging it "
-                    "terminal on its NAME could call a reused live branch merged) — "
-                    "but a ref whose tip is an EXACT match for a local ref this run "
-                    "proved terminal, and whose LIVE tip is confirmed identical, IS "
-                    "demoted (#7693); a moved or unreadable live tip still blocks"
+                    "terminal on its NAME could call a reused live branch merged), "
+                    "and NO remote ref is demoted here — a local terminal twin "
+                    "does NOT clear its remote counterpart, which blocks by design "
+                    "(#7693, the demotion was removed after eight review rounds "
+                    "found seven live false-CLEANs in it)"
                 )
                 if remote_namespaces is None:
                     # #6622: report the INABILITY rather than presenting a strict

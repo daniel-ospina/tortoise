@@ -2667,12 +2667,16 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
-        # #7693 narrowed the claim: the terminal tests still do not run on a
-        # remote ref's NAME, but an EXACT tip match against a local ref this run
-        # proved terminal now IS demoted. The load-bearing half is unchanged —
-        # the row still reports no merged COUNT for this namespace.
+        # #7693: the terminal tests still do not run on a remote ref's NAME — and
+        # now NOTHING clears a remote ref, because the demotion was REMOVED after
+        # eight review rounds found seven live false-CLEANs in it. This note is
+        # emitted on every run and sits next to a blocking HIT, so it must not
+        # claim a demotion; asserting on it is also what stops the stale sentence
+        # from being restored (the previous assertion here matched `#7693` and so
+        # passed against BOTH the demoting and the non-demoting tool — vacuous).
         self.assertIn("terminal tests are not applied to these refs by name", remote_row)
-        self.assertIn("#7693", remote_row)
+        self.assertIn("NO remote ref is demoted here", remote_row)
+        self.assertNotIn("IS demoted", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
     def test_remote_tracking_ref_is_not_judged_terminal(self):
