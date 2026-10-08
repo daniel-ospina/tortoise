@@ -966,26 +966,35 @@ mcp_http_app = create_http_app(
 #: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
 #: reads ``Content-Range``, and PostgREST silently caps a row LIST at
 #: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
-#: no error. Requesting ``limit`` equal to the cap is the smallest containment:
-#: a result that FILLS it is treated as possibly-truncated.
+#: no error.
 #:
 #: The two callers need opposite things from that signal, so completeness is
 #: EXPLICIT via ``require_complete`` rather than encoded as an empty list
 #: (#5388):
 #:   * ``_refresh_cost_allocation`` passes ``require_complete=True`` — a partial
-#:     fleet must never PRUNE orgs from the published metric, so a filled page
-#:     returns ``None`` and the refresh keeps last-known-good.
+#:     fleet must never PRUNE orgs from the published metric, so an
+#:     unconfirmable fleet returns ``None`` and the refresh keeps
+#:     last-known-good.
 #:   * ``_sweep_events`` uses the default — a partial page is still worth
 #:     sweeping, so it processes the rows it received. Returning ``[]`` here
 #:     (the previous shape) silently skipped fleet-wide event retention at
 #:     >=1000 orgs.
 #:
-#: RESIDUAL LIMITATION (#5388): a genuinely COMPLETE 1000-org fleet is
-#: indistinguishable from a truncated page, so the cost refresh treats it as
-#: unavailable (fail closed — freezing the metric is safer than pruning). The
-#: general fix reads ``Content-Range`` or paginates in ``supabase_control`` (or
-#: uses an ``array_agg`` RPC, the #3665 pattern).
+#: #5388 fix: completeness is read from the SERVER, not inferred from a page
+#: boundary. The Supabase branch walks pages and takes the total from
+#: ``Content-Range`` (``Prefer: count=exact``), so a complete 1000-org fleet is
+#: no longer rejected and a genuinely truncated one is still caught. Residual:
+#: a server that states NO total leaves completeness to "the last page came
+#: back short", and a local page-cap exit is NOT proof — that case still fails
+#: closed for ``require_complete``.
 _ORG_ENUMERATION_MAX_ROWS = 1000
+
+#: Page-walk bound for the enumeration (#5388). Guards against an endless walk
+#: when a server neither states a total nor returns short pages — a page cap is
+#: NOT proof of completeness, so hitting it leaves ``complete`` False and the
+#: fail-closed caller still refuses. 100 pages = 100k orgs, ~50x the fleet size
+#: the 1000-row cap was sized for.
+_ORG_ENUMERATION_MAX_PAGES = 100
 
 
 def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | None:
@@ -1006,16 +1015,18 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
     registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
 
-    #4493/#5388: the Supabase branch requests an explicit ``limit`` and cannot
-    distinguish a complete page from a server-truncated one (no
-    ``Content-Range`` read, no pagination). Completeness is therefore an
-    EXPLICIT contract, not encoded as emptiness:
+    #4493/#5388: completeness is a FIRST-CLASS property read from the SERVER,
+    not inferred from a page boundary. The Supabase branch walks pages ordered
+    by ``id`` and takes the row total from ``Content-Range`` (asking for
+    ``Prefer: count=exact`` on the first page), so "is this the whole fleet?" is
+    answered by the server rather than guessed. Completeness remains an EXPLICIT
+    contract, not encoded as emptiness:
 
     * ``require_complete=True`` (the cost-allocation caller) returns ``None``
-      when the page FILLS the limit — "the fleet could not be confirmed",
-      which the caller maps to its unavailable/last-known-good path.
-    * the default returns the rows received even when the page filled — the
-      best-effort retention sweep must process a partial page rather than
+      when the walk could not CONFIRM the whole fleet — which the caller maps to
+      its unavailable/last-known-good path.
+    * the default returns the rows received even when the walk was cut short —
+      the best-effort retention sweep must process a partial page rather than
       purge nothing for the whole fleet.
     """
     try:
@@ -1024,22 +1035,53 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "organizations", select=["id", "name"],
-                filters=[("deleted_at", "is", None)],
-                limit=_ORG_ENUMERATION_MAX_ROWS,
-            )
-            parsed = [{"org_id": r["id"], "name": r.get("name")} for r in rows]
-            if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
-                # A filled page may be truncated (#5388): PostgREST caps a row
-                # list silently. Fail CLOSED for a caller that needs the whole
-                # fleet; let a best-effort caller process what it got.
+            cp = get_control_plane()
+            # #5388: WALK the pages and take completeness from the SERVER's own
+            # row count (`Content-Range`, via ``count_exact``), instead of
+            # inferring it from a page boundary. The old shape asked for
+            # ``limit == max_rows`` and called a FULL page "possibly truncated",
+            # which was wrong in both directions: it rejected a genuinely
+            # complete 1000-org fleet, and it silently stopped working on a
+            # deployment whose ``max_rows`` was lower than the requested bound
+            # (a short page, no signal).
+            rows: list[dict] = []
+            total: int | None = None
+            short_page = True
+            offset = 0
+            for _page in range(_ORG_ENUMERATION_MAX_PAGES):
+                page, page_total = cp.query_with_total(
+                    "organizations", select=["id", "name"],
+                    filters=[("deleted_at", "is", None)],
+                    # A stable `order` is REQUIRED: without it page boundaries
+                    # are not stable and the walk skips or repeats rows.
+                    order="id", limit=_ORG_ENUMERATION_MAX_ROWS, offset=offset,
+                    # The total is a property of the FILTER, not the page, so
+                    # one exact count is enough — later pages reuse it.
+                    count_exact=(offset == 0),
+                )
+                rows.extend(page)
+                if page_total is not None:
+                    total = page_total
+                short_page = len(page) < _ORG_ENUMERATION_MAX_ROWS
+                if total is not None and len(rows) >= total:
+                    break  # the server's count is satisfied
+                if short_page or not page:
+                    break  # nothing further to walk
+                offset += len(page)
+
+            parsed = [{"org_id": r["id"], "name": r.get("name")}
+                      for r in rows]
+            # Completeness: the server's count when it stated one, else the only
+            # remaining signal (a short page). A page-cap exit leaves this False,
+            # because exhausting a local bound is not the same as finishing.
+            complete = (len(rows) >= total if total is not None else short_page)
+            if not complete:
                 _logger.warning(
-                    "org enumeration filled its explicit limit (%d rows) — a "
-                    "possibly-truncated page; require_complete=%s (fail-closed "
-                    "for the cost metric: a truncated page must never prune "
+                    "org enumeration is INCOMPLETE: %d row(s) walked, server "
+                    "total=%s, short_page=%s — require_complete=%s (fail-closed "
+                    "for the cost metric: an incomplete fleet must never prune "
                     "orgs)",
-                    _ORG_ENUMERATION_MAX_ROWS, require_complete)
+                    len(rows), total, short_page, require_complete)
                 if require_complete:
                     return None
             return parsed

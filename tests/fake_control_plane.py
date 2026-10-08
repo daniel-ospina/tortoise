@@ -1431,6 +1431,33 @@ class FakeControlPlane:
             raise fault["exc"]
         return result
 
+    def query_with_total(self, table: str, *, select: list[str] | None = None,
+                         filters: list[tuple[str, str, object]] | None = None,
+                         method: str = "GET", json_body: dict | None = None,
+                         order: str | None = None, limit: int | None = None,
+                         timeout: object | None = None,
+                         offset: int | None = None,
+                         count_exact: bool = False) -> tuple[list[dict], int | None]:
+        """#5388: the total-aware shape of :meth:`query`.
+
+        The fake has no PostgREST ``Content-Range`` header, so it reports
+        ``total=None`` — "the server did not state a count" — which is the
+        honest double, NOT ``len(rows)`` (that would assert the page is always
+        the whole result set and hide exactly the bug #5388 is about).
+        ``offset`` is applied locally because the fake materialises the rows.
+
+        A test that needs a KNOWN total must override this method (see
+        ``tests/test_5388_org_enumeration_completeness.py``), which is the only
+        way to exercise the complete-vs-truncated decision.
+        """
+        _ = count_exact
+        rows = self.query(table, select=select, filters=filters, method=method,
+                          json_body=json_body, order=order, limit=limit,
+                          timeout=timeout)
+        if offset:
+            rows = rows[offset:]
+        return rows, None
+
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,
                     method: str = "GET", json_body: dict | None = None,

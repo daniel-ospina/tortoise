@@ -234,6 +234,33 @@ def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
     return rendered
 
 
+def _content_range_total(raw: str | None) -> int | None:
+    """The server's TOTAL matching-row count from a PostgREST ``Content-Range``.
+
+    PostgREST answers ``Content-Range: <first>-<last>/<total>``. This is the
+    only signal that distinguishes a COMPLETE page from one silently truncated
+    at the deployment's ``max_rows`` cap (#5388): a row COUNT cannot, because a
+    truncated page and a short fleet look identical.
+
+    Returns ``None`` — never ``0`` — when the server did not state a number
+    (header absent, or a ``*`` total, which is what PostgREST sends unless
+    ``Prefer: count=exact`` was requested) or the value is unparseable. Callers
+    must treat ``None`` as "could not be confirmed" and fail closed; collapsing
+    it to ``0`` would report an empty fleet and PRUNE real orgs.
+    """
+    if not raw or "/" not in raw:
+        return None
+    total = raw.rsplit("/", 1)[1].strip()
+    if not total or total == "*":
+        return None
+    try:
+        return int(total)
+    except ValueError:
+        # A malformed/unknown total must NOT be mistaken for a count — the
+        # caller's fail-closed branch keys on None.
+        return None
+
+
 class SupabaseControlPlane:
     """PostgREST client for control-plane reads/writes (service role).
 
@@ -364,6 +391,40 @@ class SupabaseControlPlane:
               timeout: httpx.Timeout | float | None = None) -> list[dict]:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
+        Thin wrapper over :meth:`query_with_total` that DISCARDS the row total,
+        so every existing caller keeps its exact shape. Reach for
+        ``query_with_total`` when you need to know whether the page you got was
+        the WHOLE result set (#5388).
+        """
+        rows, _total = self.query_with_total(
+            table, select=select, filters=filters, method=method,
+            json_body=json_body, order=order, limit=limit, timeout=timeout,
+        )
+        return rows
+
+    def query_with_total(self, table: str, *, select: list[str] | None = None,
+                         filters: list[tuple[str, str, object]] | None = None,
+                         method: str = "GET", json_body: dict | None = None,
+                         order: str | None = None, limit: int | None = None,
+                         timeout: httpx.Timeout | float | None = None,
+                         offset: int | None = None,
+                         count_exact: bool = False,
+                         ) -> tuple[list[dict], int | None]:
+        """Run one PostgREST call and return ``(rows, total)``.
+
+        ``total`` is the SERVER's own count of matching rows, from the
+        ``Content-Range`` header — the only way to tell a COMPLETE page from one
+        PostgREST silently truncated at the deployment's ``max_rows`` cap
+        (#5388). It is ``None`` when the server did not state a number (no
+        ``Content-Range``, or a ``*`` total, which is what PostgREST returns
+        unless ``count_exact`` is requested).
+
+        ``count_exact=True`` sends ``Prefer: count=exact`` so the total is a
+        real count rather than ``*``; it costs the server a COUNT over the
+        filtered set, so it is opt-in and only the completeness-critical callers
+        should ask for it. A ``None`` total means "the fleet could not be
+        confirmed", NEVER "complete" — callers must fail closed on it.
+        
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
         (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
         Raises RuntimeError on any failure.
@@ -431,11 +492,22 @@ class SupabaseControlPlane:
             params["order"] = order
         if limit is not None:
             params["limit"] = str(limit)
+        if offset is not None:
+            # PostgREST `offset`: pairs with `limit` for a stable walk. Callers
+            # MUST also pass an `order`, or page boundaries are not stable and
+            # rows are skipped or repeated.
+            params["offset"] = str(offset)
 
         headers = {
             "apikey": self._key,
             "Authorization": f"Bearer {self._key}",
         }
+        if count_exact and method == "GET":
+            # PostgREST answers `Content-Range: <first>-<last>/<total>`; without
+            # count=exact the total half is `*`, which tells a caller nothing
+            # about whether the page was truncated. Opt-in because it costs the
+            # server a COUNT over the filtered set.
+            headers["Prefer"] = "count=exact"
         try:
             import httpx  # noqa: F401
             # NOTE: do NOT use `with self._http as client:` here — for a
@@ -489,15 +561,23 @@ class SupabaseControlPlane:
                 f"Supabase control-plane query failed ({table}): "
                 f"HTTP {resp.status_code}"
             )
+        # ``getattr`` because a response double (and any non-httpx transport) may
+        # not carry ``headers`` — an AttributeError here would be swallowed by
+        # the callers' best-effort ``except`` and silently degrade a COMPLETE
+        # enumeration to an empty one, i.e. a fail-OPEN hole exactly where this
+        # change is supposed to fail closed.
+        _hdrs = getattr(resp, "headers", None)
+        total = _content_range_total(
+            _hdrs.get("Content-Range") if hasattr(_hdrs, "get") else None)
         if not resp.content:
-            return []
+            return [], total
         try:
             data = resp.json()
         except Exception as e:
             raise RuntimeError(
                 f"Supabase control-plane bad response ({table}): {e}"
             ) from e
-        return data if isinstance(data, list) else [data]
+        return (data if isinstance(data, list) else [data]), total
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────

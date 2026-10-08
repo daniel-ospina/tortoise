@@ -987,13 +987,33 @@ def test_an_unconfirmed_empty_enumeration_fails_closed(monkeypatch):
 class _FakeControlPlane:
     """Supabase control-plane fake returning one fixed page for ``query``."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, state_total=None):
         self._rows = rows
         self.limit_seen = None
+        # What the server CLAIMS, independent of what it will serve. A total
+        # larger than the rows available is the genuinely-unconfirmable case
+        # (#5388); the default (None) means "no Content-Range", which leaves
+        # completeness to the walk reaching a short page.
+        self._state_total = state_total
 
     def query(self, _table, **kw):
         self.limit_seen = kw.get("limit")
         return self._rows
+
+    def query_with_total(self, _table, **kw):
+        """#5388: total-aware shape, modelling a REAL store — the page for the
+        requested ``offset``, and a SHORT (empty) page once the rows run out.
+
+        It deliberately states no total, because the fake has no
+        ``Content-Range``: completeness then rests on the walk reaching a short
+        page, which is exactly the production fallback when a server does not
+        answer ``count=exact``.
+        """
+        off = kw.get("offset") or 0
+        lim = kw.get("limit")
+        page = self._rows[off:off + lim] if lim is not None else self._rows[off:]
+        self.limit_seen = kw.get("limit")
+        return page, self._state_total
 
 
 def _cap_rows():
@@ -1010,17 +1030,53 @@ def test_truncated_supabase_org_enumeration_fails_closed_for_the_cost_caller(mon
     """#4493/#5388: ``query`` cannot distinguish a complete page from a
     truncated one, so a caller that needs the WHOLE fleet passes
     ``require_complete=True`` and gets ``None`` when the page FILLS the limit
-    (a partial fleet must never prune orgs from the published metric)."""
+    (a partial fleet must never prune orgs from the published metric).
+
+    #5388: the truncation is now expressed the way a real server expresses it —
+    a stated total LARGER than the rows it will serve — because "the page filled
+    the limit" is no longer the signal. The walk pages, sees the server's total
+    still unmet, and refuses."""
+    from tortoise import supabase_control as sc
+
+    cp = _FakeControlPlane(_cap_rows(), state_total=1500)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+
+    assert ha._iter_registered_orgs(require_complete=True) is None
+    assert cp.limit_seen == ha._ORG_ENUMERATION_MAX_ROWS, (
+        "the enumeration must request an explicit limit — an unbounded read "
+        "cannot be paged")
+
+
+def test_a_complete_1000_org_fleet_is_now_accepted(monkeypatch):
+    """THE #5388 fix: a genuinely complete 1000-org fleet must be ACCEPTED.
+
+    Pre-fix this returned ``None`` — a full page was treated as
+    possibly-truncated — so the cost refresh froze the metric forever on any
+    fleet that happened to sit exactly at the cap."""
     from tortoise import supabase_control as sc
 
     cp = _FakeControlPlane(_cap_rows())
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
 
-    assert ha._iter_registered_orgs(require_complete=True) is None
-    assert cp.limit_seen == ha._ORG_ENUMERATION_MAX_ROWS, (
-        "the enumeration must request an explicit limit — without one the "
-        "server's db-max-rows truncation is invisible")
+    rows = ha._iter_registered_orgs(require_complete=True)
+    assert rows is not None, "a complete 1000-org fleet must not be refused"
+    assert len(rows) == ha._ORG_ENUMERATION_MAX_ROWS
+
+
+def test_a_fleet_larger_than_the_cap_is_walked_to_completeness(monkeypatch):
+    """A fleet bigger than one page must be collected by PAGE WALKING, not
+    silently cut at the cap."""
+    from tortoise import supabase_control as sc
+
+    big = [{"id": f"org_{i}", "name": None} for i in range(1500)]
+    cp = _FakeControlPlane(big, state_total=1500)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+
+    rows = ha._iter_registered_orgs(require_complete=True)
+    assert rows is not None and len(rows) == 1500, len(rows or [])
 
 
 def test_a_filled_page_is_still_returned_to_a_best_effort_caller(monkeypatch):
@@ -1084,7 +1140,8 @@ def test_cost_refresh_at_the_enumeration_cap_keeps_last_known_good(monkeypatch):
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(
-        sc, "get_control_plane", lambda: _FakeControlPlane(_cap_rows()))
+        sc, "get_control_plane",
+        lambda: _FakeControlPlane(_cap_rows(), state_total=1500))
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
 
@@ -1094,7 +1151,6 @@ def test_cost_refresh_at_the_enumeration_cap_keeps_last_known_good(monkeypatch):
     assert before, "sanity: last-known-good must be non-empty"
 
     asyncio.run(ha._refresh_cost_allocation())
-
     assert ca.allocation_by_org() == before, (
         "an at-cap (possibly truncated) enumeration must leave the metric "
         "untouched — never prune orgs beyond the page")
@@ -1111,6 +1167,12 @@ def test_short_supabase_org_enumeration_is_returned(monkeypatch):
     class _FakeCP:
         def query(self, _table, **_kw):
             return [{"id": "org_a", "name": "A"}]
+
+        def query_with_total(self, _table, **kw):
+            # #5388: a short page with no stated total IS complete — we walked
+            # to the end. Reporting `len(rows)` as the total would assert the
+            # same thing for the wrong reason.
+            return self.query(_table, **kw), None
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: _FakeCP())
