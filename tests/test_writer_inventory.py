@@ -63,6 +63,20 @@ TEST_TEAM = {
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
+
+def _rpc_call(fake, name):
+    """The test's OWN provision RPC, selected by name — never by index.
+
+    Background boot-sweep RPCs (#4241's ``metering_repair_period_bounds``,
+    armed through ``run_on_daemon_worker``) share this fake and can land at ANY
+    index, before or after the request's own call. ``rpc_calls[0]`` would then
+    read the sweep and fail a test that never touched it. Selecting by name
+    also KEEPS the wrapper-fn pin: a switch to the other provision wrapper
+    matches nothing and raises, rather than silently passing.
+    """
+    return next(c for c in fake.rpc_calls if c[0] == name)
+
+
 class _RegistrySpy:
     """Spy over hosted_api._make_sdk: a registry-namespaced SDK may be built
     (mode-aware methods like graph_list short-circuit before touching the
@@ -568,14 +582,15 @@ class TestAgentSignup:
         # exactly one provision RPC call, identity path, wrapper fn.
         # Scoped to PROVISION calls: the boot-sweep runner also issues RPCs —
         # #4241's `metering_repair_period_bounds` — and it is offloaded to a
-        # thread, so it lands AFTER this request. Filtering keeps the pin (no
-        # double provision) without asserting that signup is the only RPC the
-        # whole app ever makes.
+        # thread, so it may land BEFORE or AFTER this request. Filtering keeps
+        # the pin (no double provision, and the exact wrapper fn) without
+        # asserting that signup is the only RPC the whole app ever makes.
         provision_calls = [c for c in fake.rpc_calls
                            if c[0] == "provision_team_with_token"]
         assert len(provision_calls) == 1
-        fn, p = provision_calls[0]
-        assert fn == "provision_team_with_token"
+        # The filter above pins the wrapper fn by construction: a switch to
+        # `provision_team` yields no match, so `len == 1` fails.
+        _fn, p = provision_calls[0]
         assert p["p_user_id"] is None
         assert p["p_identity"] == identity
         # key_prefix = api_key[:10] — registry-path parity (review P2,
@@ -669,7 +684,7 @@ class TestRegister:
         assert body["api_key"].startswith("tt_")
         assert body["org_id"] and body["graph_name"] == f"org_{body['org_id']}"
 
-        fn, p = fake.rpc_calls[0]
+        fn, p = _rpc_call(fake, "provision_team")
         assert fn == "provision_team"
         assert p["p_user_id"] is None
         assert p["p_identity"].startswith("reg-")  # deterministic per-email
@@ -720,7 +735,7 @@ class TestCreateTeam:
         assert body["tier"] == "free"
         assert body["graph_name"] == f"org_{body['org_id']}"  # #1903: stored name == data-plane namespace
 
-        fn, p = fake.rpc_calls[0]
+        fn, p = _rpc_call(fake, "provision_team")
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
@@ -749,7 +764,7 @@ class TestCreateTeam:
         body = r.json()
         assert "key" not in body  # the response never carries a key
         tid = body["org_id"]
-        fn, p = fake.rpc_calls[0]
+        fn, p = _rpc_call(fake, "provision_team")
         assert fn == "provision_team"
         # all-or-none key guard (migration 20260825214233): all-NULL =
         # keyless — no api_keys row, no max_api_keys slot consumed.
@@ -1227,7 +1242,7 @@ class TestOnboardingTeam:
         body = r.json()
         assert body["graph_name"] == f"org_{body['org_id']}"  # #1903: stored name == data-plane namespace
         assert "key" not in body  # #1716: the response never carries a key
-        fn, p = fake.rpc_calls[0]
+        fn, p = _rpc_call(fake, "provision_team")
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
@@ -1296,7 +1311,7 @@ class TestOnboardingTeam:
         r = tc.post("/v1/onboarding/team", json={"name": "keyowner"},
                     headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 200, r.text
-        fn, p = fake.rpc_calls[0]
+        fn, p = _rpc_call(fake, "provision_team")
         assert fn == "provision_team"
         assert p["p_user_id"] == "user-1"
         assert p["p_identity"] is None
