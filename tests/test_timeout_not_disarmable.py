@@ -190,3 +190,58 @@ def test_the_reproducer_fails_fast_instead_of_stalling_the_run(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, f"the disarm must fail the inner test:\n{out}"
     assert "#7655" in out, f"the guard's refusal was not reported:\n{out}"
+
+
+def test_a_normal_failure_is_not_an_internalerror(tmp_path):
+    """#7655: `pytest_timeout`'s own `cancel()` must stay exempt from the guard.
+
+    On a failing test, `pytest_timeout.cancel()` legitimately calls
+    `signal.setitimer(ITIMER_REAL, 0)` from inside the `pytest_timeout` module.
+    If that module exemption regresses, the refusal fires during teardown and
+    an ordinary failure turns into an `INTERNALERROR`, hiding the real failure —
+    and the reproducer pin above would not notice (it only asserts
+    `returncode != 0` and `"#7655" in out`, both of which an INTERNALERROR
+    satisfies). This pins the clean path: a plain `assert False` under the
+    guard reports `FAILED`, with its real message and no INTERNALERROR.
+    """
+    test_file = tmp_path / "test_ordinary_failure.py"
+    test_file.write_text(
+        textwrap.dedent(
+            """
+            def test_this_fails_normally():
+                assert False, "an ordinary assertion failure"
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file),
+        "-q",
+        "-p",
+        "tests._signal_hygiene",
+        "--timeout=5",
+        "--timeout-method=signal",
+        "-p",
+        "no:cacheprovider",
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(_REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    out = proc.stdout + proc.stderr
+    assert "INTERNALERROR" not in out, (
+        "an ordinary failure became an INTERNALERROR — the `pytest_timeout` "
+        f"exemption from the guard regressed:\n{out}"
+    )
+    assert "1 failed" in out, f"the ordinary failure was not reported:\n{out}"
+    assert "an ordinary assertion failure" in out, (
+        f"the real failure message was not surfaced to the reporter:\n{out}"
+    )
