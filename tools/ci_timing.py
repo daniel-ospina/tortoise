@@ -814,9 +814,11 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # Both reads below parse manifest text through PyYAML, and either can raise
     # a raw yaml error on a manifest the line parser cannot handle — an alias
     # or flow key in the `durations:` block, a merge key, a plainly invalid
-    # line. `refresh_durations` catches only `DurationsBridgeError`, so an
-    # untranslated raise escapes as a traceback and exit 1, contradicting the
-    # documented `2 UNKNOWN (… unreadable manifest)` (#6092 review round 3).
+    # line. The process boundary below catches anything that gets past this, but
+    # only as a generic `2: <Type>` line — translating here is what preserves
+    # the specific `2 UNKNOWN (… unreadable manifest)` diagnosis the docstring
+    # promises (#6092 review round 3, reworded round 10: an untranslated raise
+    # did once escape as a traceback and exit 1, and no longer can).
     import yaml
     try:
         _, entries = _locate_durations_block(lines)
@@ -884,9 +886,12 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # that regex-matches can still be a YAML indicator, alias, tag or
             # flow token — `*a_test.py`, `&a_test.py`, `!a_test.py`, `[x].py`,
             # an unbalanced quote — and writing one makes the re-locate below
-            # raise a raw yaml error, which escapes as exit 1 instead of the
-            # documented refusal. Requiring the parse to hand back THIS key
-            # also makes this row's check an identity check, not a syntax one.
+            # raise a raw yaml error. That handler maps it to the documented
+            # refusal (and the process boundary behind it would catch anything
+            # else as rc=2), so the consequence of skipping this check is a
+            # lost, misleading diagnosis rather than a traceback. Requiring the
+            # parse to hand back THIS key also makes this row's check an
+            # identity check, not a syntax one.
             import yaml
             try:
                 parsed_key = _duration_line_key(line)
